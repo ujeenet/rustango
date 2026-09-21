@@ -1,5 +1,4 @@
-//! Pluggable password validator chain — Django's
-//! `AUTH_PASSWORD_VALIDATORS = [...]` setting.
+//! Pluggable password validator chain.
 //!
 //! Put an ordered list of [`PasswordValidator`]s into a
 //! [`PasswordValidatorChain`] and call
@@ -29,7 +28,7 @@
 //! - [`UserAttributeSimilarityValidator`] — rejects a password that
 //!   contains, or is close to, one of the user's attributes.
 //! - [`CommonPasswordValidator`] — bundles a short top-100 list
-//!   (Django ships ~20k). Pass a longer one to `with_list(...)`.
+//!   Pass a longer one to `with_list(...)`.
 //!
 //! Write your own by implementing [`PasswordValidator`] (one method).
 //!
@@ -425,7 +424,7 @@ pub struct CommonPasswordValidator {
 impl Default for CommonPasswordValidator {
     fn default() -> Self {
         // Subset of the global top-100, matched case-insensitively.
-        // Django ships 20k; callers can swap in a longer list.
+        // Callers can swap in a longer list.
         let list = [
             "123456",
             "123456789",

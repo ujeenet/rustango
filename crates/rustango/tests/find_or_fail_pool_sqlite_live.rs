@@ -1,8 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::find_or_fail(pk, pool)` shortcut — Eloquent
-//! `Model::findOrFail()` / Django `objects.get(pk=)` (raising)
-//! parity.
+//! `Model::find_or_fail(pk, pool)` shortcut — fetch by primary key,
+//! erroring when the row is absent.
 
 use rustango::sql::{sqlx, Auto, ExecError, Pool};
 use rustango::Model;

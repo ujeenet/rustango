@@ -1,5 +1,4 @@
-//! Override [`Settings`] inside one test, like Django's
-//! `@override_settings`.
+//! Override [`Settings`] for the span of one test.
 //!
 //! [`with_overridden`](crate::test_settings::with_overridden) runs a
 //! future with a task-local overlay. Code

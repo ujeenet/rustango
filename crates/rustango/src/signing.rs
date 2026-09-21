@@ -1,8 +1,8 @@
-//! Django-shape value signer.
+//! Value signer.
 //!
-//! Mirrors `django.core.signing`: it signs string values and detects
-//! tampering on the way back. Used by password-reset URLs, email
-//! verification tokens, magic links and signed cookies.
+//! Signs string values and detects tampering on the way back. Used by
+//! password-reset URLs, email verification tokens, magic links and
+//! signed cookies.
 //!
 //! ```ignore
 //! use rustango::signing::{Signer, TimestampSigner};
@@ -59,8 +59,8 @@ pub enum SignError {
     BadTimestamp,
 }
 
-/// Value signer, like `django.core.signing.Signer`. Holds a secret
-/// and a salt, and signs or verifies with salted HMAC-SHA256.
+/// Value signer. Holds a secret and a salt, and signs or verifies
+/// with salted HMAC-SHA256.
 #[derive(Clone, Debug)]
 pub struct Signer {
     secret: Vec<u8>,
@@ -69,9 +69,12 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// Signer with the Django defaults: `sep = ':'` and
-    /// `salt = "django.core.signing.Signer"`. If one secret backs
-    /// several token types, add [`Signer::with_salt`].
+    /// Signer with the default separator `':'` and the default salt.
+    /// If one secret backs several token types, add
+    /// [`Signer::with_salt`].
+    ///
+    /// The default salt string is fixed wire format: changing it
+    /// invalidates every signature already issued.
     #[must_use]
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -135,7 +138,7 @@ impl Signer {
     }
 }
 
-/// Timestamped signer, like `django.core.signing.TimestampSigner`.
+/// Timestamped signer.
 /// It puts a base62 Unix timestamp between the value and the tag so
 /// `unsign` can expire old values.
 ///
@@ -148,8 +151,8 @@ pub struct TimestampSigner {
 }
 
 impl TimestampSigner {
-    /// Signer with the Django default salt
-    /// (`"django.core.signing.TimestampSigner"`).
+    /// Signer with the default timestamped salt. Like
+    /// [`Signer::new`], that salt is fixed wire format.
     #[must_use]
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -242,10 +245,7 @@ impl TimestampSigner {
     }
 }
 
-/// Django-parity
-/// [`django.core.signing.dumps(obj, key=None, salt='django.core.signing',
-/// serializer=JSONSerializer, compress=False)`](https://docs.djangoproject.com/en/6.0/topics/signing/#django.core.signing.dumps) —
-/// serialize `value` as JSON, encode it as URL-safe base64, then
+/// Serialize `value` as JSON, encode it as URL-safe base64, then
 /// sign it with a [TimestampSigner] built from `salt` and `secret`.
 ///
 /// Output is `"<base64 JSON>:<base62 ts>:<base64 tag>"` and needs no
@@ -284,10 +284,7 @@ pub fn dumps<T: serde::Serialize>(
     Ok(signer.sign(&payload))
 }
 
-/// Django-parity
-/// [`django.core.signing.loads(s, key=None, salt='django.core.signing',
-/// serializer=JSONSerializer, max_age=None)`](https://docs.djangoproject.com/en/6.0/topics/signing/#django.core.signing.loads) —
-/// the inverse of [`dumps`]: verify, base64-decode, deserialize.
+/// The inverse of [`dumps`]: verify, base64-decode, deserialize.
 ///
 /// `max_age` expires the token. `None` skips that check, so the
 /// token lives forever. Pass a duration for reset links and other
@@ -521,7 +518,7 @@ mod tests {
         );
     }
 
-    // -------- dumps / loads (Django parity) --------
+    // -------- dumps / loads --------
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
     struct ResetPayload {

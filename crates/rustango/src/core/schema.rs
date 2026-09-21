@@ -54,7 +54,7 @@ pub struct FieldSchema {
     /// Short caption shown under the admin form input, from
     /// `#[rustango(help_text = "...")]`. `None` means no caption.
     pub help_text: Option<&'static str>,
-    /// Django-shape `choices`: the allowed values for a string field.
+    /// `choices`: the allowed values for a string field.
     /// Set it with
     /// `#[rustango(choices = "draft:Draft, published:Published")]`.
     /// Each comma-separated pair is `value:label`; without a `:` the
@@ -62,17 +62,17 @@ pub struct FieldSchema {
     /// `<select>` and `validate_value` rejects anything not listed.
     /// Only meaningful for `FieldType::String`.
     pub choices: Option<&'static [(&'static str, &'static str)]>,
-    /// Django-shape `db_comment`: a database-side column comment from
+    /// `db_comment`: a database-side column comment from
     /// `#[rustango(db_comment = "...")]`. MySQL puts it inline on the
     /// column. Postgres emits a separate `COMMENT ON COLUMN` after
     /// the table. SQLite has no column comments and drops it.
     pub db_comment: Option<&'static str>,
-    /// Django-shape `verbose_name`: a readable label for admin
+    /// `verbose_name`: a readable label for admin
     /// headers and form labels, from
     /// `#[rustango(verbose_name = "Display title")]`. When `None`,
     /// fall back to [`Self::name`].
     pub verbose_name: Option<&'static str>,
-    /// Django-shape `editable`. `true`, the default, shows the field
+    /// `editable`. `true`, the default, shows the field
     /// in admin and form renderers. `false` drops it from the admin
     /// change form completely, though detail and list views still
     /// show the value. Set it with `#[rustango(editable = false)]`.
@@ -80,7 +80,7 @@ pub struct FieldSchema {
     /// This differs from the model-level `admin.readonly_fields`,
     /// which renders the input but disables it.
     pub editable: bool,
-    /// Django-shape `blank`. `true` lets the form layer accept an
+    /// `blank`. `true` lets the form layer accept an
     /// empty value even when the column is `NOT NULL`: the admin form
     /// drops the `required` attribute and form validators treat `""`
     /// as valid. Set it with `#[rustango(blank)]`.
@@ -89,7 +89,7 @@ pub struct FieldSchema {
     /// accepts NULL. A field can be `nullable = false, blank = true`
     /// to demand a value in the database but accept `""` from a form.
     pub blank: bool,
-    /// Django-shape `CITextField`. When `true`, the DDL writer emits
+    /// Case-insensitive text. When `true`, the DDL writer emits
     /// a case-insensitive column type: `CITEXT` on Postgres, which
     /// also emits `CREATE EXTENSION IF NOT EXISTS citext;`,
     /// `TEXT COLLATE NOCASE` on SQLite, and a
@@ -111,7 +111,7 @@ pub struct FieldSchema {
     /// Set it with `#[rustango(on_delete = "cascade" | "restrict" |
     /// "set_null" | "set_default" | "no_action")]`, case-insensitive.
     pub fk_on_delete: Option<OnDeleteAction>,
-    /// Django-shape `validators`: names of value checks to run on
+    /// `validators`: names of value checks to run on
     /// every INSERT and UPDATE through the typed query layer. Set
     /// them with `#[rustango(validators = "email,url")]`.
     ///
@@ -164,7 +164,7 @@ pub enum Relation {
     O2O { to: &'static str, on: &'static str },
 }
 
-/// Django-shape `ForeignKey(on_delete=...)`: the `ON DELETE` clause
+/// The `ON DELETE` clause
 /// on `ALTER TABLE … ADD FOREIGN KEY`. When
 /// [`FieldSchema::fk_on_delete`] is `None`, the migration writer
 /// leaves the clause off and the database default applies, which is
@@ -350,8 +350,7 @@ pub struct M2MRelation {
     ///
     /// Set `#[rustango(m2m(..., auto_create = false))]` when you
     /// declare the through table yourself with `#[derive(Model)]` and
-    /// extra columns. This matches Django's
-    /// `ManyToManyField(through=…)` with a custom through model.
+    /// extra columns on it.
     pub auto_create: bool,
 }
 
@@ -420,10 +419,10 @@ pub struct ModelSchema {
     /// Use it for "no two rows in group X may overlap in column Y",
     /// such as room bookings or calendar holds.
     pub exclusion_constraints: &'static [ExclusionConstraint],
-    /// Django-shape `Meta.default_permissions`: which CRUD codenames
+    /// `default_permissions`: which CRUD codenames
     /// (`"add"`, `"change"`, `"delete"`, `"view"`) are auto-created
     /// when [`Self::permissions`] is `true`. An empty slice means
-    /// **all four**, as in Django.
+    /// **all four**.
     ///
     /// Set `#[rustango(default_permissions = "view,change")]` to drop
     /// `add` and `delete` on a read-mostly model. See also
@@ -458,9 +457,8 @@ pub struct ModelSchema {
     /// descending.
     ///
     /// **It is not applied automatically.** Callers must chain
-    /// `QuerySet::with_default_order()`. This avoids the Django
-    /// `Meta.ordering` trap where even `.count()` and `.exists()` pay
-    /// for a sort.
+    /// `QuerySet::with_default_order()`. An always-on default order is
+    /// a trap: even `.count()` and `.exists()` would pay for a sort.
     pub default_order: &'static [(&'static str, bool)],
     /// `true` when a SQL **view**, not a table, backs the model. Set
     /// it with `#[rustango(view)]`. View-backed models stay out of the
@@ -468,17 +466,17 @@ pub struct ModelSchema {
     /// emit `CREATE TABLE` or `DROP TABLE` for them; the operator owns
     /// the view. Reads work as usual.
     pub is_view: bool,
-    /// Django-shape `Meta.verbose_name`: a readable singular label for
+    /// `verbose_name`: a readable singular label for
     /// the model, from `#[rustango(verbose_name = "blog post")]`. Used
     /// in admin headers, breadcrumbs and "Add <X>" buttons. When
     /// `None`, fall back to [`Self::name`].
     pub verbose_name: Option<&'static str>,
-    /// Django-shape `Meta.verbose_name_plural`: the plural of
+    /// `verbose_name_plural`: the plural of
     /// [`Self::verbose_name`], from
     /// `#[rustango(verbose_name_plural = "blog posts")]`. Used in
     /// admin list headings. When `None`, callers add an `s`.
     pub verbose_name_plural: Option<&'static str>,
-    /// Django-shape `Meta.managed`. `true`, the default, means
+    /// `managed`. `true`, the default, means
     /// rustango owns the table and migrations create, alter and drop
     /// it as the struct changes. `false` means the operator owns it:
     /// snapshots skip it, so migrations never touch it. Reads and
@@ -488,7 +486,7 @@ pub struct ModelSchema {
     /// another team, pipeline or legacy database that you want to
     /// query but not re-create.
     pub managed: bool,
-    /// Django-shape `Meta.db_table_comment`: free text attached to
+    /// `db_table_comment`: free text attached to
     /// the table, from `#[rustango(db_table_comment = "free text")]`.
     /// The migration writer emits it per dialect:
     ///
@@ -498,7 +496,7 @@ pub struct ModelSchema {
     ///
     /// Useful for ops tooling that reads the catalog comment.
     pub db_table_comment: Option<&'static str>,
-    /// Django-shape `Meta.default_related_name`: the accessor name a
+    /// `default_related_name`: the accessor name a
     /// reverse-relation manager uses when an FK or M2M field does not
     /// set `related_name`. Rustango does not generate reverse
     /// managers, so this is metadata only.
@@ -508,14 +506,14 @@ pub struct ModelSchema {
     /// macro checks it is a snake_case ASCII identifier, so it is
     /// safe to use as a Rust ident.
     pub default_related_name: Option<&'static str>,
-    /// Django-shape `Meta.base_manager_name`: the Manager subclass
+    /// `base_manager_name`: the manager type
     /// `<instance>.<relation>_set` would use. This is not
     /// `default_manager_name`, which is what `Model.objects` returns.
     ///
     /// Set it with `#[rustango(base_manager_name = "ManagerExt")]`.
     /// Metadata only, like `default_related_name`.
     pub base_manager_name: Option<&'static str>,
-    /// Django-shape `Meta.required_db_vendor`: the backend this model
+    /// `required_db_vendor`: the backend this model
     /// is meant to run on, from
     /// `#[rustango(required_db_vendor = "postgres|mysql|sqlite")]`.
     /// `manage check --deploy` warns when the active backend differs,
@@ -526,7 +524,7 @@ pub struct ModelSchema {
     /// `"postgres"`, `"mariadb"` becomes `"mysql"`, `"sqlite3"`
     /// becomes `"sqlite"`. `None` means any backend is fine.
     pub required_db_vendor: Option<&'static str>,
-    /// Django-shape `Meta.required_db_features`: capability tokens
+    /// `required_db_features`: capability tokens
     /// this model needs, such as `"json_extract"` or
     /// `"window_functions"`. Set them with
     /// `#[rustango(required_db_features = "tok1, tok2")]`.
@@ -535,13 +533,12 @@ pub struct ModelSchema {
     /// is `false`. It is finer-grained than `required_db_vendor` and
     /// works together with it. An empty slice needs nothing special.
     pub required_db_features: &'static [&'static str],
-    /// Django-shape `Meta.order_with_respect_to`: the FK field this
-    /// model's rows are ordered relative to. Django would add an
-    /// `_order` column and admin reordering UI; rustango stores the
-    /// name only. Set it with
+    /// `order_with_respect_to`: the FK field this model's rows are
+    /// ordered relative to. Metadata only — no `_order` column or
+    /// reordering UI is generated. Set it with
     /// `#[rustango(order_with_respect_to = "parent_fk")]`.
     pub order_with_respect_to: Option<&'static str>,
-    /// Django-shape `Meta.proxy`: `true` when this model reuses
+    /// `proxy`: `true` when this model reuses
     /// another struct's table. Set it with `#[rustango(proxy)]`.
     ///
     /// `makemigrations` then skips `CreateTable` for this entry,
@@ -551,7 +548,7 @@ pub struct ModelSchema {
     /// table-owning, so this is mostly metadata. For the same shape
     /// today, use the [`crate::inheritance`] extension-trait pattern.
     pub proxy: bool,
-    /// Django-shape `Meta.get_latest_by`: the field
+    /// `get_latest_by`: the field
     /// `QuerySet::latest_default()` and `earliest_default()` sort on
     /// when the caller names none. Stored as `(column, descending)`;
     /// the macro splits off a leading `-`.
@@ -560,7 +557,7 @@ pub struct ModelSchema {
     /// `#[rustango(get_latest_by = "-priority")]`. When `None`, those
     /// methods return an error pointing at this attribute.
     pub get_latest_by: Option<(&'static str, bool)>,
-    /// Django-shape `Meta.permissions`: extra permission codenames
+    /// `extra_permissions`: extra permission codenames
     /// registered after the default `add/change/delete/view` set.
     /// Each tuple is `(codename, display_name)`, so an app can
     /// declare its own buckets like `("approve", "Can approve
@@ -570,13 +567,13 @@ pub struct ModelSchema {
     /// `#[rustango(extra_permissions = "approve:Can approve, archive:Can archive")]`,
     /// the same `codename:label` shape as `choices`.
     pub extra_permissions: &'static [(&'static str, &'static str)],
-    /// Eloquent-shape **global scopes**: filters added to every
+    /// **Global scopes**: filters added to every
     /// [`crate::query::QuerySet`] for this model. Each entry pairs a
     /// name with a function that returns a
     /// [`crate::core::WhereExpr`] at query-build time.
     ///
     /// An empty slice adds nothing, so every queryset starts
-    /// unfiltered as in Django. Otherwise each queryset behaves like
+    /// unfiltered. Otherwise each queryset behaves like
     /// `qs.filter(<scope_expr>)` unless the caller chains
     /// [`crate::query::QuerySet::without_global_scope`] or
     /// [`crate::query::QuerySet::without_global_scopes`].
@@ -690,8 +687,8 @@ pub struct CheckConstraint {
     pub expr: &'static str,
 }
 
-/// One Postgres `EXCLUDE` constraint, Django's
-/// `ExclusionConstraint`. **PG only**: MySQL and SQLite have no
+/// One Postgres `EXCLUDE` constraint.
+/// **PG only**: MySQL and SQLite have no
 /// equivalent, so the migration writer skips it there and logs a
 /// `tracing::warn!`, and the rest of the migration still applies.
 ///
@@ -746,16 +743,14 @@ pub struct IndexSchema {
     /// Access method, which becomes the `USING <method>` clause.
     /// Defaults to [`IndexMethod::BTree`].
     pub method: IndexMethod,
-    /// Optional `WHERE <expr>` for a partial index, like Django's
-    /// `UniqueConstraint(condition=Q(...))`. `None` emits a plain
-    /// index.
+    /// Optional `WHERE <expr>` for a partial index — an index over
+    /// only the rows that match. `None` emits a plain index.
     ///
     /// PG and SQLite support partial indexes natively. **MySQL does
     /// not**: it accepts the SQL but ignores the filter, so the index
     /// also rejects duplicates outside the intended subset.
     pub where_clause: Option<&'static str>,
-    /// Covering-index columns, Django's
-    /// `Index(fields=..., include=[...])`. PG 11+ supports
+    /// Covering-index columns. PG 11+ supports
     /// `CREATE INDEX … (key_cols) INCLUDE (non_key_cols)`, where the
     /// non-key columns sit in the index leaf so an index-only scan
     /// can read them without touching the heap. Set it with
@@ -768,8 +763,7 @@ pub struct IndexSchema {
 }
 
 /// Index access method, the `USING <method>` in `CREATE INDEX`.
-/// Covers Django's `django.contrib.postgres.indexes` types plus the
-/// default B-tree.
+/// Covers the Postgres index types plus the default B-tree.
 ///
 /// ## Backend support
 /// - **Postgres**: all variants. `Bloom` needs `CREATE EXTENSION
@@ -847,7 +841,7 @@ impl IndexMethod {
     }
 }
 
-/// Per-model admin settings, in the shape of Django's ModelAdmin.
+/// Per-model admin settings.
 /// The `Model` derive fills it in from `#[rustango(admin(...))]`.
 ///
 /// Every field's default — an empty slice or zero — means "use the
@@ -883,52 +877,52 @@ pub struct AdminConfig {
     /// in order. An empty slice puts every visible field in one
     /// unnamed group.
     pub fieldsets: &'static [Fieldset],
-    /// Django-shape `list_display_links`: which [`Self::list_display`]
+    /// `list_display_links`: which [`Self::list_display`]
     /// columns link to the row's detail view. Each named cell is
     /// wrapped in an `<a href=…>`, so an operator can click the title
     /// directly. An empty slice leaves the trailing "View" column as
     /// the only link.
     pub list_display_links: &'static [&'static str],
-    /// Django-shape `search_help_text`: a short caption beside the
+    /// `search_help_text`: a short caption beside the
     /// list view's search box, such as `"by title and author"`, so
     /// operators know what the search matches. An empty string hides
     /// it.
     pub search_help_text: &'static str,
-    /// Django-shape `actions_on_top`, default `true`. Set `false` to
+    /// `actions_on_top`, default `true`. Set `false` to
     /// hide the action bar above the table.
     pub actions_on_top: bool,
-    /// Django-shape `actions_on_bottom`, default `false`. Set `true`
+    /// `actions_on_bottom`, default `false`. Set `true`
     /// to add a second action bar below the table, which helps on
     /// long list pages.
     pub actions_on_bottom: bool,
-    /// Django-shape `date_hierarchy`: a date or datetime field shown
+    /// `date_hierarchy`: a date or datetime field shown
     /// as a clickable year / month / day drill-down strip above the
     /// list table. An empty string hides the strip.
     pub date_hierarchy: &'static str,
-    /// Django-shape `prepopulated_fields`: `target ← source(s)` rules
+    /// `prepopulated_fields`: `target ← source(s)` rules
     /// for the change form's client-side slug JS. An empty slice
     /// fills nothing in.
     pub prepopulated_fields: &'static [PrepopulatedField],
-    /// Django-shape `raw_id_fields`: FK fields whose change-form
+    /// `raw_id_fields`: FK fields whose change-form
     /// widget gets a lookup link next to the input. The link opens
     /// the target model's list view, so the operator can find the PK
     /// without scrolling a `<select>` of every row. An empty slice
     /// adds no link.
     pub raw_id_fields: &'static [&'static str],
-    /// Django-shape `autocomplete_fields`: FK fields whose
+    /// `autocomplete_fields`: FK fields whose
     /// change-form widget becomes a typeahead. Typing fires
     /// `GET <admin>/<target>/__autocomplete?q=…`, which filters the
     /// target rows by display field and fills a `<datalist>`. An
     /// empty slice keeps the plain input.
     pub autocomplete_fields: &'static [&'static str],
-    /// Django-shape `list_select_related`: how the list view
-    /// auto-joins FK columns.
+    /// `list_select_related`: how the list view auto-joins FK
+    /// columns.
     ///
-    /// Rustango's default differs from Django's. Every visible FK is
-    /// LEFT JOINed, so the cell shows the target's display value with
-    /// no N+1 query. This setting tunes that per model.
+    /// By default every visible FK is LEFT JOINed, so the cell shows
+    /// the target's display value with no N+1 query. This setting
+    /// tunes that per model.
     pub list_select_related: ListSelectRelated,
-    /// Django-shape `formfield_overrides`: per-field widget overrides
+    /// `formfield_overrides`: per-field widget overrides
     /// for the change form, as `(field_name, widget_name)` pairs. An
     /// empty slice leaves every field on its `FieldType` default.
     ///
@@ -949,8 +943,7 @@ pub struct AdminConfig {
     pub formfield_overrides: &'static [(&'static str, &'static str)],
 }
 
-/// Django-shape `ModelAdmin.list_select_related`: the auto-JOIN
-/// policy for FK columns on the admin list view.
+/// The auto-JOIN policy for FK columns on the admin list view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListSelectRelated {
     /// The default: join every visible FK, so list cells show the
@@ -965,8 +958,8 @@ pub enum ListSelectRelated {
 
 /// One `prepopulated_fields` rule: `target ← source(s)`. The admin
 /// form adds JS that watches `input` events on each source field and
-/// rewrites the target from a slugified join of their values. Same
-/// shape as Django's `prepopulated_fields = {"slug": ("title",)}`.
+/// rewrites the target from a slugified join of their values — for
+/// example `slug` filled in from `title` as you type.
 #[derive(Debug, Clone, Copy)]
 pub struct PrepopulatedField {
     /// Field to fill in, such as `"slug"`.

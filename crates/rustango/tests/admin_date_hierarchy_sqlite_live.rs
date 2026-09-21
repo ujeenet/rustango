@@ -1,4 +1,4 @@
-//! Django-parity #355 — admin `date_hierarchy`.
+//! Issue #355 — admin `date_hierarchy`.
 //!
 //! Verifies the macro-emitted `date_hierarchy` attr, URL drill-down,
 //! and the GROUP BY bucket enumeration on SQLite.

@@ -113,7 +113,7 @@ fn check_named_validators(
             "iso_datetime" => v::validate_iso_datetime(value),
             "ipv4" => v::validate_ipv4_address(value),
             "ipv6" => v::validate_ipv6_address(value),
-            // Either IP family. `genericipaddress` is the Django spelling.
+            // Either IP family; `genericipaddress` is an accepted alias.
             "ip_address" | "genericipaddress" => v::validate_ip_address(value),
             // Shape only: non-empty, no NUL, no `..` segments. It does
             // not touch the disk.

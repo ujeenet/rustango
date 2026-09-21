@@ -1,4 +1,4 @@
-//! Django-shape per-view caching: a `@cache_page` analog plus
+//! Per-view caching: cache a whole successful response, plus
 //! `Cache-Control` and `Vary` header builders.
 //!
 //! ## What you get
@@ -577,8 +577,7 @@ impl CachedResponse {
 
 // ---------------------------------------------------------------- Cache-Control builder
 
-/// Builder for the `Cache-Control` response header. Covers the same
-/// directives as Django's `@cache_control`.
+/// Builder for the `Cache-Control` response header.
 ///
 /// ```ignore
 /// use rustango::cache_page::CacheControl;
@@ -726,8 +725,7 @@ where
 
 /// Add names to the existing `Vary` header, skipping ones already
 /// there. Use it from middleware that must extend, not replace, what
-/// the view set. Matches Django's
-/// [`patch_vary_headers`](https://docs.djangoproject.com/en/6.0/topics/cache/#using-vary-headers).
+/// the view set.
 ///
 /// A missing `Vary` is created. `Vary: *` is left alone, since it is
 /// already the strongest key.
@@ -824,7 +822,7 @@ mod tests {
         assert_eq!(v.to_str().unwrap(), "cookie, accept-language");
     }
 
-    // -------- patch_vary_headers (Django parity) --------
+    // -------- patch_vary_headers --------
 
     #[test]
     fn patch_vary_adds_to_empty_headers() {

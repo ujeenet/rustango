@@ -1,8 +1,8 @@
 //! Security headers middleware — HSTS, X-Frame-Options, X-Content-Type-Options,
 //! Referrer-Policy, Cross-Origin-Opener-Policy, and a Content-Security-Policy builder.
 //!
-//! Django adds these by default. Here you **must add the layer
-//! yourself**, but the presets cover the common cases.
+//! Nothing is added for you: you **must mount the layer yourself**.
+//! The presets cover the common cases.
 //!
 //! ## Quick start
 //!

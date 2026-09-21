@@ -167,7 +167,7 @@ pub enum QueryError {
 
     /// `.distinct_on(cols)` needs those columns at the head of
     /// `ORDER BY`. The order is what makes "first row per group"
-    /// deterministic. Django has the same rule.
+    /// deterministic.
     #[error(
         "`.distinct_on({distinct_on:?})` requires those columns at the head of `.order_by(...)`; \
          got order_by={order_by:?}"

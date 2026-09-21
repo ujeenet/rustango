@@ -1,9 +1,8 @@
 //! Base36 integer encoding: [`int_to_base36`] / [`base36_to_int`].
 //!
-//! Django uses base36 in password-reset URLs
-//! (`/reset/<uidb36>/<token>/`) to write the user PK as a short,
-//! URL-safe string. The alphabet is `[0-9a-z]`, so `100000000`
-//! becomes `1njchs`.
+//! Used in password-reset URLs (`/reset/<uidb36>/<token>/`) to write
+//! the user PK as a short, URL-safe string. The alphabet is
+//! `[0-9a-z]`, so `100000000` becomes `1njchs`.
 //!
 //! ```ignore
 //! use rustango::base36::{int_to_base36, base36_to_int};
@@ -20,7 +19,7 @@
 //!
 //! // Reject negative-shaped or out-of-alphabet input.
 //! assert!(base36_to_int("-1").is_err());
-//! assert!(base36_to_int("FOO").is_err()); // uppercase rejected (Django shape)
+//! assert!(base36_to_int("FOO").is_err()); // uppercase rejected
 //! ```
 //!
 //! Only non-negative integers encode. Decoding accepts lowercase
@@ -49,7 +48,6 @@ pub enum Base36Error {
 }
 
 /// Encode a non-negative integer as a lowercase base36 string.
-/// Output matches Django's `int_to_base36(n)`.
 ///
 /// ```ignore
 /// use rustango::base36::int_to_base36;
@@ -76,8 +74,7 @@ pub fn int_to_base36(mut n: u64) -> String {
 }
 
 /// Decode a base36 string into a `u64`. Only `[0-9a-z]` is allowed.
-/// Uppercase, whitespace and a leading `-` are all rejected, like
-/// Django's `base36_to_int(s)`.
+/// Uppercase, whitespace and a leading `-` are all rejected.
 ///
 /// # Errors
 /// * [`Base36Error::Empty`] — empty string.
@@ -130,7 +127,7 @@ mod tests {
 
     #[test]
     fn encode_large_canonical_values() {
-        // Django docstring example.
+        // Boundary values around a digit rollover.
         assert_eq!(int_to_base36(1295), "zz");
         assert_eq!(int_to_base36(1296), "100");
         // 36^6 = 2_176_782_336

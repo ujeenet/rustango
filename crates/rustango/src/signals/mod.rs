@@ -1,5 +1,5 @@
-//! Model signals in Django's shape: `pre_save`, `post_save`,
-//! `pre_delete`, `post_delete`.
+//! Model signals — hooks that run around a row write: `pre_save`,
+//! `post_save`, `pre_delete`, `post_delete`.
 //!
 //! Receivers are registered globally per model type. When a signal is
 //! sent, they run one after another.

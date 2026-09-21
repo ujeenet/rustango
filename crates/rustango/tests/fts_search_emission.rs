@@ -93,7 +93,7 @@ fn search_rejects_on_sqlite_with_op_not_supported() {
     }
 }
 
-// ---------- Django-shape lookup parser ----------
+// ---------- string-lookup parser ----------
 
 #[test]
 fn search_lookup_via_filter_string_parser() {

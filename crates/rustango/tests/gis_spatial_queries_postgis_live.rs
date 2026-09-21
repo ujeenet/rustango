@@ -1,7 +1,8 @@
 #![cfg(feature = "postgres")]
-//! Live Postgres + PostGIS test for the spatial query layer — issue #58
-//! (GeoDjango queries/functions), the follow-up to the #443 geometry
-//! type. Requires a PostGIS-enabled Postgres (the `postgis_live` CI job);
+//! Live Postgres + PostGIS test for the spatial query layer — issue
+//! #58 (spatial queries and functions), the follow-up to the #443
+//! geometry type. Requires a PostGIS-enabled Postgres (the
+//! `postgis_live` CI job);
 //! skips when `DATABASE_URL` is unset or `postgis` isn't installed.
 //!
 //! Exercises the ergonomic `QuerySet` helpers end-to-end against a real

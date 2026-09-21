@@ -6,7 +6,7 @@
 //!      `ROW_NUMBER() OVER (PARTITION BY cols ORDER BY <order>) AS __rn`
 //!      subquery wrapper on MySQL / SQLite with outer `WHERE __rn = 1`.
 //!   3. `.distinct_on` requires the keys at the head of `.order_by(...)`
-//!      (Django parity — without the order, "first row per group" is
+//!      (without the order, "first row per group" is
 //!      non-deterministic).
 
 use rustango::query::QuerySet;

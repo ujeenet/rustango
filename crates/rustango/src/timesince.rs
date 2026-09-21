@@ -1,4 +1,4 @@
-//! Human-readable durations, like `django.utils.timesince`.
+//! Human-readable durations: "4 days, 6 hours".
 //!
 //! [`timesince`] gives the time from a past moment up to now, as a
 //! string such as `"4 days, 6 hours"`. [`timeuntil`] does the same
@@ -36,7 +36,7 @@ const MINUTE: i64 = 60;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
 const WEEK: i64 = 7 * DAY;
-// Flat 30- and 365-day buckets, the same as Django's CHUNKS table.
+// Flat 30- and 365-day buckets: no calendar maths.
 const MONTH: i64 = 30 * DAY;
 const YEAR: i64 = 365 * DAY;
 

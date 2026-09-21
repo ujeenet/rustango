@@ -1,8 +1,13 @@
-//! Django-parity #406 — `LocaleMiddleware` end-to-end through a real
+//! Issue #406 — `LocaleMiddleware` end-to-end through a real
 //! axum router. Verifies the tower layer injects `ActiveLocale` into
 //! request extensions and respects cookie / Accept-Language fallback
 //! order, plus the documented `Router::nest("/<lang>", ...)` pattern
-//! for per-URL-prefix locales (#424 parity by composition).
+//! for per-URL-prefix locales (#424, by composition).
+//!
+//! The cookie name in these requests is the middleware's
+//! `DEFAULT_COOKIE`. It is wire format — deployed clients already
+//! send it — so it is spelled out verbatim and must not be renamed
+//! here.
 
 #![cfg(feature = "sqlite")]
 
@@ -92,8 +97,7 @@ async fn unknown_cookie_value_falls_back_to_accept_language() {
 }
 
 /// URL-prefix locale (`/en/foo` / `/fr/foo`) — the documented
-/// composition pattern with `Router::nest`. This is the axum-shape
-/// answer to Django's `i18n_patterns()` / issue #424.
+/// composition pattern with `Router::nest`. Issue #424.
 #[tokio::test]
 async fn router_nest_per_locale_pattern() {
     fn locale_router(lang: &'static str) -> Router {

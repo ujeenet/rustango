@@ -392,8 +392,8 @@ impl<DB: Database> Builder<DB> {
     }
 
     /// Apply every migration discoverable from `project_root` to the
-    /// registry + every active tenant. The Django-shape one-call setup
-    /// for multi-app projects:
+    /// registry + every active tenant. One call sets up a multi-app
+    /// project:
     ///
     /// 1. Write the packaged tenancy bootstrap migrations
     ///    (`0001_rustango_registry_initial`, `0001_rustango_tenant_initial`)

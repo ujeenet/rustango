@@ -98,7 +98,7 @@ pub fn create_table_sql_with_dialect(dialect: &dyn Dialect, model: &ModelSchema)
         }
     }
     s.push(')');
-    // Django-shape `Meta.db_table_comment` — MySQL spells it as an
+    // `db_table_comment` — MySQL spells it as an
     // inline trailer (`) COMMENT='...'`); PG + SQLite emit nothing
     // inline (PG runs a post-hoc `COMMENT ON TABLE`, SQLite is a
     // no-op). See `table_comment_statements_with_dialect`.

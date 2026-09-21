@@ -538,7 +538,7 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
     }
 }
 
-/// Reconcile a branched migration history, like Django's
+/// Reconcile a branched migration history. Backs
 /// `makemigrations --merge`.
 ///
 /// A *leaf* is a migration no other migration names as its `prev`. A

@@ -1,5 +1,5 @@
-//! Per-row permission hooks for the admin, like Django's
-//! `ModelAdmin.has_{add,change,delete,view}_permission`.
+//! Per-row permission hooks for the admin: one hook per
+//! (model, add/change/delete/view) pair.
 //!
 //! The admin already gates routes by permission codename and by the
 //! `Builder::read_only` allowlist. This module adds a per-row layer:

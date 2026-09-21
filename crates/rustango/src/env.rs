@@ -1,5 +1,4 @@
-//! Typed readers for environment variables, in the shape of
-//! django-environ or pydantic-settings.
+//! Typed readers for environment variables.
 //!
 //! Each reader parses `std::env::var` into the type you ask for and
 //! returns a `Result`, so a missing or bad value fails at startup

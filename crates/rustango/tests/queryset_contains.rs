@@ -1,4 +1,4 @@
-//! Django-parity #330 — `QuerySet.contains(obj)` + sibling
+//! Issue #330 — `QuerySet.contains(obj)` + sibling
 //! `.exists()` predicate. Verifies the boolean predicates work on
 //! filtered + unfiltered querysets against a real SQLite pool.
 

@@ -1,4 +1,4 @@
-//! Shared test fixtures, like Django's `setUpTestData`.
+//! Shared test fixtures, built once per test binary.
 //!
 //! Build a fixture once and reuse it across the tests in a file. The
 //! [`setup_test_data!`] and [`setup_test_data_async!`] macros wrap a

@@ -1,5 +1,4 @@
-//! A `Set-Cookie` builder shaped like Django's
-//! `HttpResponse.set_cookie`, plus a parser for a `Cookie:` header.
+//! A `Set-Cookie` builder, plus a parser for a `Cookie:` header.
 //!
 //! [`Cookie::build`](crate::cookies::Cookie::build) gives the header
 //! value as a `String`;
@@ -23,7 +22,7 @@
 //!     .build();
 //! // -> "session=abc123; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=3600"
 //!
-//! // Delete a cookie (Django's `response.delete_cookie(key)`).
+//! // Delete a cookie.
 //! let header = Cookie::deletion("session", "/").build();
 //! // -> "session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
 //! ```
@@ -32,8 +31,8 @@
 //!
 //! The `cookie` crate, which axum-extra and tower-cookies use, is
 //! the fuller choice, with parsing and signed or private cookies.
-//! This module covers only the `Set-Cookie` side that Django code
-//! maps onto most often, and its output is a plain string, so it
+//! This module covers only the `Set-Cookie` side, and its output is
+//! a plain string, so it
 //! composes with whatever crate you use elsewhere.
 //!
 //! Names are not checked against the RFC 6265 token rules. Pass a
@@ -91,8 +90,8 @@ impl Cookie {
     /// `HttpOnly`, `Secure` or `SameSite`**. Chain the methods you
     /// need; a session cookie needs all three flags.
     ///
-    /// Django defaults to `Path=/`. This builder does not, so set
-    /// `.path("/")` yourself when you want it.
+    /// There is no default `Path`, so set `.path("/")` yourself when
+    /// you want the cookie sent for the whole site.
     #[must_use]
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
@@ -108,8 +107,7 @@ impl Cookie {
         }
     }
 
-    /// A builder that deletes the cookie, like Django's
-    /// `response.delete_cookie`. It sets an empty value with
+    /// A builder that deletes the cookie. It sets an empty value with
     /// `Max-Age=0` and an epoch `Expires`, so the browser drops it.
     ///
     /// `path` must be the path the cookie was set with, and a cookie
@@ -195,7 +193,7 @@ impl Cookie {
     }
 
     /// Render the `Set-Cookie` header value. Attributes come out in
-    /// Django's order: `<name>=<value>; Path; Domain; Max-Age;
+    /// a fixed order: `<name>=<value>; Path; Domain; Max-Age;
     /// Expires; HttpOnly; Secure; SameSite`.
     #[must_use]
     pub fn build(&self) -> String {
@@ -248,8 +246,7 @@ impl Cookie {
     }
 }
 
-/// [`django.utils.http.parse_cookie`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.parse_cookie) —
-/// parse a `Cookie:` header value into a name → value map.
+/// Parse a `Cookie:` header value into a name → value map.
 ///
 /// It splits on `;`, then on the first `=` in each chunk, and trims
 /// spaces. A value wrapped in double quotes loses them, per RFC 6265
@@ -284,7 +281,7 @@ pub fn parse_cookie_header(header: &str) -> std::collections::HashMap<String, St
             continue;
         }
         let Some((key, val)) = chunk.split_once('=') else {
-            // No `=`: skip it and keep decoding, as Django does.
+            // No `=`: skip the pair and keep decoding the rest.
             continue;
         };
         let key = key.trim();
@@ -395,7 +392,7 @@ mod tests {
     // -------- attribute ordering --------
 
     #[test]
-    fn full_attribute_set_renders_in_django_order() {
+    fn full_attribute_set_renders_in_canonical_order() {
         let s = Cookie::new("session", "abc")
             .path("/")
             .domain("example.com")

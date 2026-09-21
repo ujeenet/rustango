@@ -1,7 +1,7 @@
-//! Django parity — `Meta.order_with_respect_to = "parent_fk"` names
-//! the FK field this model's instances are ordered relative to.
-//! Django auto-generates a `_order` integer column + admin
-//! reordering UI when set.
+//! `Meta.order_with_respect_to = "parent_fk"` names the FK field
+//! this model's instances are ordered relative to — children keep a
+//! manual order within each parent, backed by an `_order` integer
+//! column.
 //!
 //! rustango spells the attribute as
 //! `#[rustango(order_with_respect_to = "...")]` on the model

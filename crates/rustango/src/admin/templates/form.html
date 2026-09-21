@@ -24,9 +24,9 @@
         <th><label for="{{ row.label }}">{{ row.label }}{{ row.extra | safe }}</label></th>
         <td>
           {{ row.input | safe }}
-          {# Django-shape help text rendered as a muted caption under
-             the input. `None` (no `#[rustango(help_text = "…")]`) is
-             falsy in Tera so nothing renders. #}
+          {# Help text as a muted caption under the input. `None` (no
+             `#[rustango(help_text = "…")]`) is falsy in Tera so
+             nothing renders. #}
           {% if row.help_text %}<p class="help-text">{{ row.help_text }}</p>{% endif %}
         </td>
       </tr>
@@ -99,10 +99,10 @@
 <script id="prepopulated-config" type="application/json">{{ prepopulated_fields | json_encode | safe }}</script>
 <script>
 (function() {
-  // #356 — Django-shape `prepopulated_fields`. Lowercase + ascii-fold
-  // + strip non-[a-z0-9] + collapse-into-`-` is the conservative
-  // shape; Django ships fuller Unicode transliteration via the
-  // `URLify` admin JS, which apps that need it can replace in-place.
+  // Backs `prepopulated_fields`: fill one field from others as you
+  // type. Lowercase + ascii-fold + strip non-[a-z0-9] + collapse into
+  // `-` is deliberately conservative; an app that needs full Unicode
+  // transliteration can replace this script in-place.
   function slugify(s) {
     return String(s)
       .toLowerCase()
@@ -115,8 +115,8 @@
   cfg.forEach(function(entry) {
     var target = document.querySelector('[name="' + entry.target + '"]');
     if (!target) return;
-    // Stop syncing once the user manually edits the target — Django's
-    // semantic. We track this via a data flag on the target itself.
+    // Stop syncing once the user edits the target by hand. We track
+    // this with a data flag on the target itself.
     target.addEventListener('input', function() {
       target.dataset.userEdited = '1';
     });

@@ -207,8 +207,7 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
 
 /// Gzip raw bytes at zlib's default level (6).
 ///
-/// Matches `django.utils.text.compress_string`. Takes bytes, not `&str`,
-/// so binary payloads work too.
+/// Takes bytes, not `&str`, so binary payloads work too.
 ///
 /// # Errors
 /// Returns `std::io::Error` if the encoder fails, in practice only when

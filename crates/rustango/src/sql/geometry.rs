@@ -1,5 +1,4 @@
-//! `Point` — PostGIS `geometry(Point, SRID)` column wrapper (GeoDjango
-//! `gis.geos` geometry types, issue #443).
+//! `Point` — PostGIS `geometry(Point, SRID)` column wrapper (issue #443).
 //!
 //! Declare a `geometry(Point, …)` column on a model and round-trip it as
 //! a Rust `Point`:
@@ -27,7 +26,7 @@
 //! below are total), so the `sqlite,tenancy` litmus build keeps passing.
 //!
 //! Spatial *queries* (`ST_Distance` / `ST_DWithin` / `ST_Contains` …)
-//! are the separate GeoDjango query layer (issue #58); this issue (#443)
+//! are a separate spatial query layer (issue #58); this issue (#443)
 //! is the geometry *type* + storage + DDL.
 //!
 //! ## Why a newtype rather than a bare `(f64, f64)`
@@ -38,7 +37,7 @@
 //! backends (a real PostGIS EWKB codec on PG, erroring stubs elsewhere).
 
 /// The default spatial reference identifier — WGS 84 (GPS lat/long),
-/// PostGIS's most common SRID and GeoDjango's default.
+/// PostGIS's most common SRID.
 pub const SRID_WGS84: u32 = 4326;
 
 /// A 2-D point in a PostGIS `geometry(Point, SRID)` column — see the

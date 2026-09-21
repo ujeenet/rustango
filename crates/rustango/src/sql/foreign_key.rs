@@ -145,8 +145,7 @@ impl<T, K: serde::Serialize> serde::Serialize for ForeignKey<T, K> {
 /// produces an `Unloaded` reference (#1454).
 ///
 /// Together the two make a foreign-key column round-trip through JSON
-/// as its key, which is what a REST client sends and what DRF's
-/// `PrimaryKeyRelatedField` does.
+/// as its key, which is what a REST client sends.
 ///
 /// Without this, `#[derive(Serializer)]` could not carry a foreign-key
 /// column **at all**: a serializer field must match its model field's

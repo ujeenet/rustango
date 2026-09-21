@@ -180,8 +180,7 @@ pub enum Expr {
     /// `EXISTS`, `IN (SELECT …)` and scalar subqueries can all read
     /// the outer row.
     ///
-    /// Build it with [`crate::core::subquery::outer_ref`], which reads
-    /// like Django's `OuterRef('col')`.
+    /// Build it with [`crate::core::subquery::outer_ref`].
     OuterRef(&'static str),
     /// Column qualified by an explicit table alias —
     /// `"<alias>"."<column>"`. Needed in JOIN `ON` predicates, where
@@ -610,7 +609,7 @@ expr_from_primitive! {
 
 // ---------- F() public sugar ----------
 
-/// Django-shape `F("col")` builder. It becomes an [`Expr::Column`]
+/// Column-reference builder. `F("col")` becomes an [`Expr::Column`]
 /// anywhere `impl Into<Expr>` is accepted. The point is to mark at a
 /// glance that an argument is a column, not a string value:
 ///
@@ -622,7 +621,7 @@ expr_from_primitive! {
 /// The operators are overloaded, so `F(_) <op> rhs` gives an
 /// [`Expr::BinOp`] with no `.into()` at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(non_camel_case_types)] // Django's `F(...)` is the established name.
+#[allow(non_camel_case_types)] // A bare `F` reads as a call at the use site.
 pub struct F(pub &'static str);
 
 impl F {

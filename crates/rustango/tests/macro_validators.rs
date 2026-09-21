@@ -1,5 +1,5 @@
 //! `#[rustango(validators = "...")]` model-side validators
-//! (Django-parity #447).
+//! (#447).
 //!
 //! Covers:
 //! - macro threads comma-separated names onto `FieldSchema::validators`

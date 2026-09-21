@@ -1,4 +1,4 @@
-//! Table-driven HTTP redirects — `django.contrib.redirects`.
+//! Table-driven HTTP redirects for retired URLs.
 //!
 //! Build a [`RedirectMap`] (by hand or from a CSV) and mount
 //! [`redirects_middleware`] on your axum router. A matching request gets
@@ -27,7 +27,7 @@
 //! Matching is exact on the request path, trailing slash included.
 //! `/old` and `/old/` are separate entries; add both if you need both.
 //! The query string is ignored when matching but kept on the redirect:
-//! `/old?ref=ad → /new?ref=ad`. Django behaves the same way.
+//! `/old?ref=ad → /new?ref=ad`.
 //!
 //! Destinations go into `Location` as written, so build the map only
 //! from values you control. A user-supplied destination is an open
@@ -35,9 +35,10 @@
 //!
 //! ## Why not 404-fallthrough?
 //!
-//! Django fires a redirect only after no view matches. This middleware
-//! runs before routing, which is the same thing when the old URLs no
-//! longer exist on the site. If a redirect would shadow a live route,
+//! A 404-fallthrough would fire a redirect only after no route
+//! matches. This middleware runs before routing, which is the same
+//! thing when the old URLs no longer exist on the site. If a
+//! redirect would shadow a live route,
 //! pick a path that does not collide.
 //!
 //! [`RedirectMap`]: crate::redirects::RedirectMap

@@ -137,7 +137,7 @@ pub struct Activity {
 }
 
 /// Chapter 2 §2.18b — composite UNIQUE constraint via the
-/// Django-shape `unique_together` container attr. Emits
+/// `unique_together` container attr. Emits
 /// `CREATE UNIQUE INDEX <table>_<col>_<col>_uq ON <table> (...)` so
 /// the DB rejects duplicate `(org_id, user_id)` pairs even though
 /// neither column on its own is unique.

@@ -1,6 +1,5 @@
 //! Tri-dialect emission tests for `funcs::json_array_length` —
-//! issue #826 (Eloquent `whereJsonLength` / Django `JSONField`
-//! length-lookup parity).
+//! issue #826 (filter on the length of a JSON array column).
 
 use rustango::core::funcs::json_array_length;
 use rustango::core::{Expr, Op, SelectQuery, SqlValue, WhereExpr, F};

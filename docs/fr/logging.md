@@ -2,7 +2,7 @@
 
 Les journaux sont la façon dont une application en cours d'exécution raconte ce
 qu'elle a fait. **Rustango** s'appuie sur [`tracing`](https://docs.rs/tracing) —
-la même forme que le réglage `LOGGING` de Django ou les canaux de Laravel, mais
+la même forme qu'une configuration de journalisation classique, mais
 structurée : un événement porte des champs nommés (`status=500`, `tenant=acme`)
 plutôt qu'une phrase déjà formatée, si bien qu'un agrégateur de logs peut
 filtrer dessus.

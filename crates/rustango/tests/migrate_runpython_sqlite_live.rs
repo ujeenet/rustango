@@ -1,4 +1,5 @@
-//! Django-parity #347 — `RunPython`-shape data migration callbacks.
+//! Issue #347 — data-migration callbacks: a migration step that runs
+//! registered Rust code instead of SQL.
 //!
 //! Verifies:
 //!   * a registered callback fires during `migrate`

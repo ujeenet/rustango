@@ -1,8 +1,8 @@
-//! **rustango** — a Django-shaped, batteries-included web framework for Rust.
+//! **rustango** — a batteries-included web framework for Rust.
 //!
 //! It is built on one derive macro and one connection type, and ships a typed
 //! ORM with auto-migrations, an auto-generated admin, multi-tenancy, auth
-//! (sessions / JWT / OAuth2-OIDC / HMAC / passkeys), DRF-style serializers and
+//! (sessions / JWT / OAuth2-OIDC / HMAC / passkeys), serializers and
 //! viewsets, signals, caching, media, email, background jobs, scheduled tasks,
 //! OpenAPI 3.1, and the usual production middleware.
 //!
@@ -51,7 +51,7 @@
 //! // URL scheme (postgres://…, mysql://…, sqlite://…).
 //! let pool = Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 //!
-//! // Django-shape queries, compiled to your dialect.
+//! // Chained queries, compiled to your dialect.
 //! let recent: Vec<Post> = Post::objects()
 //!     .filter("published", true)
 //!     .order_by_desc("id")
@@ -88,7 +88,7 @@
 //! | `batteries` | The default bundle minus the backend (see [Install](#install)). |
 //! | `admin` | Auto-generated admin UI + session auth. |
 //! | `tenancy` | Multi-tenant resolver, per-tenant pools, operator console. |
-//! | `serializer` | DRF-style serializers + `#[derive(ViewSet)]` REST endpoints. |
+//! | `serializer` | Serializers + `#[derive(ViewSet)]` REST endpoints. |
 //! | `jwt` / `oauth2` | Token auth; social / OIDC login. |
 //! | `jobs` / `jobs-postgres` | Background jobs (in-memory / durable). |
 //! | `cache` / `cache-redis` | Cache layer; Redis backend. |
@@ -382,9 +382,9 @@ macro_rules! __impl_sqlite_load_related {
 }
 
 pub mod audit;
-/// ContentType framework (Django-shape) — a runtime handle for "any
-/// registered model". Used by permissions, generic foreign keys, soft-FK
-/// prefetch and audit-history admin panels.
+/// ContentType framework — a runtime handle for "any registered model".
+/// Used by permissions, generic foreign keys, soft-FK prefetch and
+/// audit-history admin panels.
 pub mod contenttypes;
 pub mod core;
 /// Named multi-database registry + `QuerySet::using(alias)`.
@@ -413,7 +413,7 @@ pub mod config;
 #[cfg(feature = "forms")]
 pub mod forms;
 
-/// DRF-style serializer layer — `#[derive(Serializer)]` + [`serializer::ModelSerializer`].
+/// Serializer layer — `#[derive(Serializer)]` + [`serializer::ModelSerializer`].
 /// Typed JSON output from model instances with field control and validation.
 #[cfg(feature = "serializer")]
 pub mod serializer;
@@ -423,19 +423,19 @@ pub mod serializer;
 #[cfg(feature = "cache")]
 pub mod cache;
 
-/// Fragment caching — Django's `{% cache %}` template tag.
+/// Fragment caching — cache one rendered piece of a page.
 /// [`cache_fragment::cached_render`] checks the cache before it calls your
 /// compute closure. It is a handler-side helper rather than a Tera block
 /// tag, because Tera has no block-tag extension API.
 #[cfg(feature = "cache")]
 pub mod cache_fragment;
 
-/// Per-view caching tower layer + `Cache-Control` / `Vary` header builders.
-/// Django's `@cache_page` / `@cache_control` / `@vary_on_*` analogs.
+/// Per-view caching tower layer + `Cache-Control` / `Vary` header
+/// builders. Caches a whole successful response and serves it again.
 #[cfg(feature = "cache-page")]
 pub mod cache_page;
 
-/// Django-shape model signals — [`signals::connect_post_save`] etc.
+/// Model lifecycle signals — [`signals::connect_post_save`] etc.
 /// Receivers register globally per model type and run sequentially.
 #[cfg(feature = "signals")]
 pub mod signals;
@@ -523,8 +523,7 @@ pub mod casts;
 /// `row_to_json` binary arms) can use it without the crypto deps.
 pub(crate) mod hex;
 
-/// URL / IRI / URI helpers — `django.utils.encoding` +
-/// `django.utils.http` parity: `url_encode`, `uri_to_iri`, `iri_to_uri`,
+/// URL / IRI / URI helpers — `url_encode`, `uri_to_iri`, `iri_to_uri`,
 /// `escape_uri_path`, `filepath_to_uri`, `urlsafe_base64_encode` /
 /// `_decode` and friends. Pure `std`, so it is always compiled.
 pub mod url_codec;
@@ -593,8 +592,8 @@ pub mod storage;
 #[cfg(feature = "admin")]
 pub mod test_client;
 
-/// Live HTTP server for tests — Django's `LiveServerTestCase`. Binds an
-/// `axum::Router` to a random localhost port on a background task. Use it
+/// Live HTTP server for tests. Binds an `axum::Router` to a random
+/// localhost port on a background task. Use it
 /// when in-process [`test_client::TestClient`] routing is not enough, for
 /// example with Selenium, websockets, or code that reads the host header.
 #[cfg(feature = "admin")]
@@ -681,14 +680,13 @@ pub mod request_id;
 #[cfg(feature = "admin")]
 pub mod ip_filter;
 
-/// Host-header allowlist middleware — Django `ALLOWED_HOSTS` parity.
-/// See [`host_validation::AllowedHostsLayer`].
+/// Host-header allowlist middleware — refuses a request whose `Host` is
+/// not on the list. See [`host_validation::AllowedHostsLayer`].
 #[cfg(feature = "admin")]
 pub mod host_validation;
 
-/// HTTP → HTTPS redirect middleware — Django `SECURE_SSL_REDIRECT`
-/// + `SECURE_REDIRECT_EXEMPT` + `SECURE_PROXY_SSL_HEADER` parity.
-/// See [`ssl_redirect::SslRedirectLayer`].
+/// HTTP → HTTPS redirect middleware, with exempt path prefixes and a
+/// trusted proxy header. See [`ssl_redirect::SslRedirectLayer`].
 #[cfg(feature = "admin")]
 pub mod ssl_redirect;
 
@@ -727,8 +725,8 @@ pub mod idempotency;
 #[cfg(feature = "admin")]
 pub mod maintenance;
 
-/// Trailing-slash redirect middleware — canonicalize URL paths
-/// (Django `APPEND_SLASH` / Rails `trailing_slash` shape).
+/// Trailing-slash redirect middleware — canonicalize URL paths so
+/// `/posts` and `/posts/` do not split your traffic.
 /// See [`trailing_slash::TrailingSlashLayer`].
 #[cfg(feature = "admin")]
 pub mod trailing_slash;
@@ -934,7 +932,7 @@ pub mod tenancy;
 #[cfg(feature = "tenancy")]
 pub mod extractors;
 
-/// DRF-style ModelViewSet — five REST endpoints for any [`Model`] table in
+/// ModelViewSet — five REST endpoints for any [`Model`] table in
 /// about five lines. Runs on all three backends, including the
 /// `.serializer()` render extension. See [`viewset::ViewSet`].
 ///
@@ -950,7 +948,7 @@ pub mod viewset;
 /// apart.
 pub mod list_params;
 
-/// Generic class-based views for HTML templates (Django-shape) —
+/// Generic class-based views for HTML templates —
 /// `ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView` over
 /// `#[derive(Model)]` schemas, rendered with Tera. The HTML sibling of
 /// [`viewset`]. Runs on all three backends. See [`template_views`] for
@@ -958,112 +956,111 @@ pub mod list_params;
 #[cfg(feature = "template_views")]
 pub mod template_views;
 
-/// Django-shape DEBUG template-error overlay — see [`template_debug`].
+/// DEBUG template-error overlay — see [`template_debug`].
 #[cfg(feature = "_tera")]
 pub mod template_debug;
 
-/// Django-shape template context processors — see
+/// Sitewide template context processors — see
 /// [`template_context_processors`].
 #[cfg(feature = "_tera")]
 pub mod template_context_processors;
 
-/// Django-shape custom template filters and functions — see
+/// Custom template filters and functions — see
 /// [`template_extensions`].
 #[cfg(feature = "_tera")]
 pub mod template_extensions;
 
-/// Django-shape view shortcuts — `get_object_or_404` / `get_list_or_404`
+/// Handler shortcuts — `get_object_or_404` / `get_list_or_404`
 /// / `render` / `redirect`. See [`shortcuts`].
 #[cfg(feature = "template_views")]
 pub mod shortcuts;
 
-/// Django `humanize` template filters — `intcomma`, `intword`,
+/// Human-readable template filters — `intcomma`, `intword`,
 /// `naturalsize`, `ordinal`, `apnumber`, `naturaltime`, `naturalday`.
 /// See [`humanize`].
 #[cfg(feature = "template_views")]
 pub mod humanize;
 
-/// Django-shape number formatter — `numberformat::format(value,
+/// Number formatter — `numberformat::format(value,
 /// decimal_sep, decimal_pos, grouping, thousand_sep)`. Thousands
 /// grouping, per-locale separators, optional fixed decimal width.
 pub mod numberformat;
 
-/// `django.utils.timesince` parity — [`timesince`](timesince::timesince) /
-/// [`timeuntil`](timesince::timeuntil), with Django's `depth` control
+/// Elapsed-time wording — [`timesince`](timesince::timesince) /
+/// [`timeuntil`](timesince::timeuntil), with a `depth` control
 /// ("4 days, 6 hours"). The Tera filter wrappers live in [`humanize`].
 pub mod timesince;
 
-/// Django `defaultfilters` template filters — `pluralize`,
+/// Everyday template filters — `pluralize`,
 /// `truncatewords`, `linebreaks`, `default_if_none`. See
 /// [`default_filters`].
 #[cfg(feature = "template_views")]
 pub mod default_filters;
 
-/// Django-shape standalone validators — `validate_email`,
+/// Standalone validators — `validate_email`,
 /// `validate_url`, `validate_slug`, `validate_min_length` /
 /// `validate_max_length`, `validate_min_value` / `validate_max_value`.
 /// See [`validators`].
 pub mod validators;
 
-/// Custom Manager / QuerySet-extension pattern — Django's
-/// `PublishedManager(Manager)` / `QuerySet.as_manager()` written as a
-/// Rust extension trait. See [`manager`] for worked examples.
+/// Custom Manager / QuerySet-extension pattern — give a model its own
+/// named queries (`Post::published()`) with a Rust extension trait.
+/// See [`manager`] for worked examples.
 pub mod manager;
 
-/// Model-inheritance patterns — Django's `Meta.abstract`, multi-table and
-/// proxy shapes in Rust. See [`inheritance`] for worked mappings.
+/// Model-inheritance patterns — how to share fields between models:
+/// abstract bases, multi-table and proxy shapes. See [`inheritance`].
 pub mod inheritance;
 
-/// Composite-primary-key patterns — Django 5.2's `CompositePrimaryKey`
-/// mapped to an `Auto<i64>` surrogate plus `unique_together`. See
-/// [`composite_pk`].
+/// Composite-primary-key patterns — a multi-column key expressed as an
+/// `Auto<i64>` surrogate plus `unique_together`. See [`composite_pk`].
 pub mod composite_pk;
 
-/// Named URL reversal — Django's `reverse(name, params)` and
-/// `get_absolute_url()`. Pair with [`register_url!`].
+/// Named URL reversal — build a URL from a route name and its params,
+/// instead of formatting paths by hand. Pair with [`register_url!`].
 pub mod urls;
 
-/// Django-shape random-string helpers — `get_random_string`,
+/// Random-string helpers — `get_random_string`,
 /// `get_random_token_urlsafe`. CSPRNG-backed, so they suit session IDs,
 /// reset tokens and verification codes.
 #[cfg(feature = "_rand")]
 pub mod random;
 
-/// Django-shape base36 integer encoding — used in password reset
+/// Base36 integer encoding — used in password reset
 /// URLs and other URL-friendly opaque IDs. `int_to_base36(n)` +
 /// `base36_to_int(s)` round-trip.
 pub mod base36;
 
-/// Django-shape base62 integer encoding — the `[0-9A-Za-z]` alphabet, for
+/// Base62 integer encoding — the `[0-9A-Za-z]` alphabet, for
 /// short URL IDs. Like base36 but case-sensitive, so 6 bits per character.
 pub mod base62;
 
-/// Django-shape lorem ipsum generators — placeholder text for demos, test
+/// Lorem ipsum generators — placeholder text for demos, test
 /// fixtures and template scaffolds. `lorem::words(n)`,
 /// `lorem::paragraphs(n)`, `lorem::sentence()`.
 #[cfg(feature = "_rand")]
 pub mod lorem;
 
-/// Django-shape HTTP date parser and formatter — reads RFC 1123, RFC 850
+/// HTTP date parser and formatter — reads RFC 1123, RFC 850
 /// and asctime forms per RFC 7231; writes IMF-fixdate.
 /// `http_date::http_date(secs)` + `parse_http_date(s)`.
 pub mod http_date;
 
-/// Django-shape ISO 8601 date / time / datetime / duration parsers —
+/// ISO 8601 date / time / datetime / duration parsers —
 /// `dateparse::{parse_date, parse_time, parse_datetime, parse_duration}`.
 pub mod dateparse;
 
-/// Django-shape date format-character expander — turns a template format
+/// Date format-character expander — turns a template format
 /// string such as `{{ obj|date:"Y-m-d H:i" }}` into the matching output.
 pub mod dateformat;
 
-/// Django `django.utils.dates` parity — month / weekday name
-/// lookups: `month_full(m)`, `month_abbr(m)`, `month_ap(m)`,
+/// Month / weekday name lookups —
+/// `month_full(m)`, `month_abbr(m)`, `month_ap(m)`,
 /// `weekday_full(d)`, `weekday_abbr(d)`. English-only by design
 /// (i18n is a separate concern).
 pub mod dates;
 
-/// Django-shape value signer — `signing::Signer::sign(value)` and
+/// Value signer — `signing::Signer::sign(value)` and
 /// `signing::TimestampSigner` with a TTL. Use it for signed payloads such
 /// as password reset tokens, magic links and signed cookies.
 #[cfg(any(
@@ -1074,24 +1071,24 @@ pub mod dates;
 ))]
 pub mod signing;
 
-/// Django-shape `Set-Cookie` builder — `Cookie::new(name, value)
+/// `Set-Cookie` builder — `Cookie::new(name, value)
 /// .path("/").max_age(secs).http_only().secure().same_site(...).build()`
 /// returns an axum-ready `HeaderValue`. Use it instead of writing cookie
 /// strings by hand.
 pub mod cookies;
 
-/// Django's `@require_http_methods` / `@require_GET` / `@require_POST` /
-/// `@require_safe` as tower middleware. A method that is not allowed gets
+/// Per-route HTTP method allowlists as tower middleware — `require_GET`,
+/// `require_POST`, `require_safe`. A method that is not allowed gets
 /// `405 Method Not Allowed` with an `Allow:` header listing the rest.
 #[cfg(feature = "_axum")]
 pub mod http_methods;
 
-/// Django messages framework — `messages.success/info/warning/error/debug`
-/// flash storage in a signed cookie.
+/// Flash messages — `messages.success/info/warning/error/debug`
+/// stored in a signed cookie until the next page renders them.
 #[cfg(feature = "_signing")]
 pub mod messages;
 
-/// Django-shape access decorators — `login_required` middleware and
+/// Access gates — `login_required` middleware and
 /// `?next=` round-trip helpers.
 #[cfg(feature = "_axum")]
 pub mod auth_decorators;
@@ -1133,26 +1130,26 @@ pub mod shutdown;
 #[cfg(any(feature = "admin", feature = "tenancy"))]
 pub mod manage_interactive;
 
-/// XML sitemap rendering — `django.contrib.sitemaps`. Write a `Sitemap`
+/// XML sitemap rendering. Write a `Sitemap`
 /// impl (or pass a `Vec<SitemapEntry>`) and call
 /// [`sitemaps::render_sitemap`]. For large sites,
 /// [`sitemaps::render_sitemap_index`] points crawlers at child sitemaps.
 pub mod sitemaps;
 
-/// RSS 2.0 and Atom 1.0 feed rendering — `django.contrib.syndication`.
+/// RSS 2.0 and Atom 1.0 feed rendering.
 /// Build a [`syndication::Feed`] with channel metadata and
 /// [`syndication::FeedItem`]s, then call [`syndication::render_rss`] or
 /// [`syndication::render_atom`].
 pub mod syndication;
 
-/// Table-driven HTTP redirects — `django.contrib.redirects`. Build a
+/// Table-driven HTTP redirects. Build a
 /// [`redirects::RedirectMap`] in code or from a CSV and mount
 /// [`redirects::redirects_middleware`]. A matching request returns
 /// 301/302 with the canonical URL in `Location`, query string kept.
 #[cfg(feature = "_axum")]
 pub mod redirects;
 
-/// Static "flat pages" — `django.contrib.flatpages`. Build a
+/// Static "flat pages" — about, terms, privacy. Build a
 /// [`flatpages::FlatPageMap`] (path → [`flatpages::FlatPage`]) and mount
 /// [`flatpages::flatpages_middleware`]. A matching request serves the page
 /// body as `text/html`, or a content-type you choose. Tera wrapping is up
@@ -1160,37 +1157,37 @@ pub mod redirects;
 #[cfg(feature = "_axum")]
 pub mod flatpages;
 
-/// Django-shape test assertion helpers — `assert_contains` /
+/// Test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` over axum
 /// responses. The `query_counter` submodule is ORM instrumentation that
 /// `sql::executor` bumps on every query, so the module is always compiled
 /// and the response assertions carry their own `_axum` gate.
 pub mod test_assertions;
 
-/// Tag-based test filtering — Django's `@tag('slow')` plus
+/// Tag-based test filtering — label a test and run a subset with
 /// `manage test --tag fast --exclude-tag slow`. Put `tags!("slow")` at the
 /// top of a `#[test]` body and it skips itself when
 /// `RUSTANGO_TEST_TAGS` / `RUSTANGO_TEST_EXCLUDE_TAGS` filter it out.
 pub mod test_filter;
 
-/// Class-level test fixtures — Django's `setUpTestData(cls)`. The
-/// [`setup_test_data!`] / [`setup_test_data_async!`] macros build the
-/// fixture once per test binary.
+/// Shared test fixtures — the [`setup_test_data!`] /
+/// [`setup_test_data_async!`] macros build the fixture once per test
+/// binary instead of once per test.
 pub mod test_data;
 
-/// Django-shape test factories — `factory_boy` parity. A
-/// [`test_factory::Sequence`] counter plus the [`test_factory::Factory`]
-/// trait with `build_batch`.
+/// Test factories — build model instances for tests without repeating
+/// struct literals. A [`test_factory::Sequence`] counter plus the
+/// [`test_factory::Factory`] trait with `build_batch`.
 pub mod test_factory;
 
-/// Test-only Settings overlay — Django's `@override_settings`. Installs a
+/// Test-only Settings overlay — installs a
 /// per-task [`config::Settings`] overlay, so tests change configuration
 /// without touching process-global state. [`test_settings::current`] reads
 /// the overlay first and falls back to the real settings.
 #[cfg(feature = "config")]
 pub mod test_settings;
 
-/// Test-time DB isolation — Django's `TestCase` transaction wrapping.
+/// Test-time DB isolation.
 /// [`test_db::with_rollback`] runs an async closure in a transaction that
 /// always rolls back, so one test's writes never reach the next.
 pub mod test_db;
@@ -1199,7 +1196,7 @@ pub mod test_db;
 /// `DATABASE_URL`.
 pub mod dbshell;
 
-/// Django-style runserver. [`server::Builder`] owns the boilerplate a
+/// The development server. [`server::Builder`] owns the boilerplate a
 /// tenancy app would otherwise rewrite: DB pool, resolver chain, host
 /// dispatch, operator console, bind and serve.
 ///
@@ -1215,7 +1212,7 @@ pub mod server;
 #[cfg(feature = "manage")]
 pub mod manage;
 
-/// `#[rustango::main]` — the Django-shape `runserver` entrypoint. Wraps
+/// `#[rustango::main]` — the application entrypoint. Wraps
 /// `#[tokio::main]` and boots `tracing-subscriber` from `RUST_LOG`,
 /// falling back to `info,sqlx=warn`.
 #[cfg(feature = "runtime")]
@@ -1300,7 +1297,7 @@ pub use sql::Auto;
 /// with [`migrate::migrate_embedded`].
 pub use rustango_macros::embed_migrations;
 
-/// `Q!()` — Django-shape filter syntax compile-time-resolved against
+/// `Q!()` — compact filter syntax compile-time-resolved against
 /// typed columns. Each invocation expands to the equivalent typed-column
 /// method call, so field-name typos fail the build. See
 /// [`rustango_macros::Q`] for the supported lookup suffixes.

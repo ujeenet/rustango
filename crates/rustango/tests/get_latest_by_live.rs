@@ -1,4 +1,4 @@
-//! Django parity — `Meta.get_latest_by` lets `QuerySet::latest()` /
+//! `Meta.get_latest_by` lets `QuerySet::latest()` /
 //! `earliest()` be called without an explicit field arg. rustango wires
 //! `#[rustango(get_latest_by = "<col>")]` onto `ModelSchema::get_latest_by`;
 //! the new `QuerySet::latest_default(pool)` /

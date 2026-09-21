@@ -473,7 +473,7 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
-    /// POSIX regex match, for Django's `__regex` and `__iregex`.
+    /// POSIX regex match, for the `__regex` and `__iregex` lookups.
     ///
     /// The default is Postgres' `~`, `!~`, `~*` and `!~*`. MySQL and
     /// SQLite use `REGEXP` and `NOT REGEXP`; neither has a
@@ -498,8 +498,8 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
-    /// Trigram similarity, for Django's `__trigram_similar` and
-    /// `__trigram_word_similar`. Writes `<col> % <p>`, or
+    /// Trigram similarity, for the `__trigram_similar` and
+    /// `__trigram_word_similar` lookups. Writes `<col> % <p>`, or
     /// `<col> %> <p>` when `word`. Needs the `pg_trgm` extension.
     ///
     /// # Errors
@@ -518,7 +518,7 @@ pub trait Dialect: Send + Sync {
         Ok(())
     }
 
-    /// Full-text search, for Django's `__search` lookup. Writes
+    /// Full-text search, for the `__search` lookup. Writes
     /// `to_tsvector(<col>) @@ plainto_tsquery(<p>)`, so the database
     /// picks the config from `default_text_search_config`.
     ///

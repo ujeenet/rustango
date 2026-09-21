@@ -523,7 +523,7 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
 }
 
 /// Emit `FOR UPDATE [NO KEY] [OF t1, t2] [SKIP LOCKED | NOWAIT]` for
-/// Django's `select_for_update(...)`.
+/// `select_for_update(...)`.
 ///
 /// Postgres supports all of it. MySQL 8.0.1+ has everything but
 /// `NO KEY`, which falls back to the stricter plain `FOR UPDATE`.
@@ -2024,7 +2024,7 @@ fn write_function(
             }
             if b.d.name() == "sqlite" {
                 // strftime has no quarter token, so derive it from
-                // the month, as Django does.
+                // the month.
                 write_extract_quarter_sqlite(b, &args[0])
             } else {
                 write_extract_int(b, kind, args)
@@ -2893,7 +2893,7 @@ fn write_ts_concat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), Sq
 
 /// The quarter on SQLite. `strftime` has no quarter token, so derive
 /// it from the month: `((month + 2) / 3)` gives 1 for January to
-/// March, 2 for April to June, and so on. Django does the same.
+/// March, 2 for April to June, and so on.
 fn write_extract_quarter_sqlite(b: &mut Sql<'_>, expr: &crate::core::Expr) -> Result<(), SqlError> {
     b.sql.push_str("((CAST(strftime('%m', ");
     write_expr(b, expr, None)?;
@@ -3672,7 +3672,7 @@ fn write_child(
 }
 
 /// Emit a [`WhereExpr::Xor`] node, which is true when an odd number
-/// of its operands are true, like Django's `Q(a) ^ Q(b)`. Only MySQL
+/// of its operands are true — what `Q(a) ^ Q(b)` builds. Only MySQL
 /// has a logical XOR, so the writer rewrites it in portable SQL:
 ///
 /// * 0 children: [`SqlError::EmptyXorBranch`]. A predicate that can

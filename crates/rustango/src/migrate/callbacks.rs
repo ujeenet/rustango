@@ -1,5 +1,5 @@
 //! Named Rust callbacks run during a migration's apply or unapply
-//! walk. This is rustango's answer to Django's `RunPython`.
+//! walk, for data changes that DDL alone cannot express.
 //!
 //! Migration files are JSON, so they cannot hold function pointers.
 //! Register the callback at startup with

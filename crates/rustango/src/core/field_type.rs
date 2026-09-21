@@ -22,32 +22,32 @@ pub enum FieldType {
     Date,
     Uuid,
     Json,
-    /// Exact fixed-point decimal, like Django's `DecimalField`.
+    /// Exact fixed-point decimal.
     /// Postgres `NUMERIC`, MySQL `DECIMAL(38, 10)`, SQLite `NUMERIC`.
     /// Rust type: `rust_decimal::Decimal`. Use it for money and other
     /// data where `f64` rounding would be wrong.
     Decimal,
-    /// Binary blob, like Django's `BinaryField`. Postgres `BYTEA`,
+    /// Binary blob. Postgres `BYTEA`,
     /// MySQL `LONGBLOB`, SQLite `BLOB`. Rust type: `Vec<u8>`. There is
     /// no length cap; add a CHECK constraint if you need one.
     Binary,
-    /// Time of day with no date, like Django's `TimeField`. Postgres
+    /// Time of day with no date. Postgres
     /// `TIME`, MySQL `TIME(6)`, SQLite `TIME` (text, `HH:MM:SS`). Rust
     /// type: `chrono::NaiveTime`.
     Time,
-    /// Postgres array, like Django's `ArrayField`. Rust type:
+    /// Postgres array. Rust type:
     /// [`crate::sql::Array<T>`]. The element kind picks the column type
     /// (`text[]` / `integer[]` / `bigint[]`). **Postgres only**: MySQL
     /// and SQLite have no array type, so the DDL falls back to `TEXT`
     /// and the bind and decode paths fail there.
     Array(ArrayElem),
-    /// Postgres range, like Django's `RangeField` family. Rust type:
+    /// Postgres range. Rust type:
     /// [`crate::sql::Range<T>`]. The element kind picks the column type
     /// (`int4range` / `int8range` / `numrange` / `daterange` /
     /// `tstzrange`). **Postgres only**, like [`Self::Array`].
     Range(RangeElem),
-    /// Postgres `hstore`, like Django's `HStoreField`: a flat
-    /// string-to-string map. Rust type: [`crate::sql::HStore`].
+    /// Postgres `hstore`: a flat string-to-string map.
+    /// Rust type: [`crate::sql::HStore`].
     /// **Postgres only**, like [`Self::Array`] / [`Self::Range`].
     /// Needs the `hstore` extension.
     HStore,
@@ -68,16 +68,14 @@ pub enum FieldType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RangeElem {
     /// `int4range` — element `i32` ([`crate::sql::Range<i32>`]).
-    /// Django `IntegerRangeField`.
     Int,
     /// `int8range` — element `i64` ([`crate::sql::Range<i64>`]).
-    /// Django `BigIntegerRangeField`.
     BigInt,
-    /// `numrange` — element `rust_decimal::Decimal`. Django `DecimalRangeField`.
+    /// `numrange` — element `rust_decimal::Decimal`.
     Numeric,
-    /// `daterange` — element `chrono::NaiveDate`. Django `DateRangeField`.
+    /// `daterange` — element `chrono::NaiveDate`.
     Date,
-    /// `tstzrange` — element `chrono::DateTime<Utc>`. Django `DateTimeRangeField`.
+    /// `tstzrange` — element `chrono::DateTime<Utc>`.
     DateTime,
 }
 
@@ -101,13 +99,10 @@ impl RangeElem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArrayElem {
     /// `text[]` — element type `String` ([`crate::sql::Array<String>`]).
-    /// Django `ArrayField(CharField/TextField)`.
     Text,
     /// `integer[]` — element type `i32` ([`crate::sql::Array<i32>`]).
-    /// Django `ArrayField(IntegerField)`.
     Int,
     /// `bigint[]` — element type `i64` ([`crate::sql::Array<i64>`]).
-    /// Django `ArrayField(BigIntegerField)`.
     BigInt,
 }
 

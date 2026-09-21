@@ -1,5 +1,5 @@
-//! Admin inlines: Django's `TabularInline` and `StackedInline` shape
-//! for editing a model's children inside the parent's page.
+//! Admin inlines: edit a model's children inside the parent's page,
+//! in either a tabular or a stacked layout.
 //!
 //! The detail page shows child rows read-only, one panel per inline,
 //! each row linking to its own admin page. The edit page renders the
@@ -52,7 +52,7 @@ use crate::sql::{select_rows_as_json, ExecError, Pool};
 
 // ============================================================ InlineKind
 
-/// Render variant, matching Django's two inline shapes.
+/// Render variant — the two inline layouts.
 ///
 /// * [`InlineKind::Tabular`]: one `<table>` row per child. Compact,
 ///   good for short rows.
@@ -60,16 +60,15 @@ use crate::sql::{select_rows_as_json, ExecError, Pool};
 ///   on its own line. Good for long or multi-line rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InlineKind {
-    /// Table-row layout, like `TabularInline`.
+    /// Table-row layout: one row per child.
     Tabular,
-    /// Block layout, like `StackedInline`.
+    /// Block layout: one labelled block per child.
     Stacked,
 }
 
 // ============================================================ InlineAdmin
 
-/// One inline-admin registration, collected by inventory. The fields
-/// mirror Django's `InlineModelAdmin` knobs.
+/// One inline-admin registration, collected by inventory.
 pub struct InlineAdmin {
     /// Parent model's SQL table. Must equal [`ModelSchema::table`].
     pub parent_table: &'static str,
@@ -118,7 +117,7 @@ pub fn for_parent_table(parent_table: &str) -> Vec<&'static InlineAdmin> {
 /// match the `ModelSchema::table` of two `#[derive(Model)]` types
 /// already in the registry.
 ///
-/// All optional keys can be omitted — the defaults mirror Django:
+/// All optional keys can be omitted. The defaults are
 /// `kind = InlineKind::Tabular`, `label = ""` (falls back to child
 /// model name), `fields = &[]` (every scalar except the FK column),
 /// `extra = 0`, `max_num = None`, `readonly_fields = &[]`.
@@ -166,8 +165,7 @@ macro_rules! register_admin_inline {
 
 /// One **generic** inline-admin registration. Mirrors [`InlineAdmin`]
 /// but keys the relation on a `(ct_column, pk_column)` pair instead
-/// of a single FK column — Django's `GenericTabularInline` /
-/// `GenericStackedInline` shape.
+/// of a single FK column, for a generic foreign key.
 ///
 /// The child table carries the GFK; the inline appears on the
 /// **parent**'s admin detail page and lists every child row whose
@@ -587,8 +585,8 @@ fn find_model_by_table(table: &str) -> Option<&'static ModelSchema> {
 }
 
 /// Resolve the field list for an inline. Empty `fields` slice falls
-/// back to every scalar field except the FK column (Django default —
-/// the FK is implicit, no need to repeat it on every row).
+/// back to every scalar field except the FK column: the FK is
+/// implicit, so there is no need to repeat it on every row.
 fn resolve_render_fields(
     child_model: &'static ModelSchema,
     inline: &InlineAdmin,
@@ -636,7 +634,7 @@ fn stringify_pk(value: &serde_json::Value) -> String {
 /// One editable inline panel for the `form.html` template. Mirrors
 /// [`InlinePanel`] but each cell carries pre-rendered `<input>`
 /// HTML instead of a static value, plus the FormSet management-form
-/// fields and Django's `<prefix>-N-<field>` naming.
+/// fields and the `<prefix>-N-<field>` naming.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InlineFormPanel {
     /// Panel header text.
@@ -656,7 +654,7 @@ pub struct InlineFormPanel {
     /// Existing-rows count. Drives `<prefix>-INITIAL_FORMS`.
     pub initial_forms: usize,
     /// `<prefix>-MAX_NUM_FORMS` value; `None` renders as empty
-    /// (Django's "no cap" sentinel).
+    /// (the "no cap" sentinel).
     pub max_num: Option<usize>,
     /// Column headers, in render order. Padded with a final
     /// `"Delete"` column when at least one existing row is present
@@ -829,7 +827,7 @@ pub async fn render_form_for_parent(
 }
 
 /// Wrap `super::render::render_input` so the generated `name=` /
-/// `id=` attributes are prefix-mangled into Django's FormSet
+/// `id=` attributes are prefix-mangled into the FormSet
 /// `<prefix>-<idx>-<field>` shape. We accomplish this with a
 /// `str::replace` on the rendered HTML — `render_input` always emits
 /// `name="<field>"` and `id="<field>"`, so the substitution is

@@ -1,4 +1,4 @@
-//! Admin URL routing — Django's `urls.py` shape.
+//! Admin URL routing: every admin screen's path in one place.
 //!
 //! `router(pool)` and `Builder` build the axum [`Router`] that maps each
 //! HTTP path to a handler in [`super::views`]. Mounted via
@@ -610,7 +610,7 @@ impl Builder {
                 &audit_cleanup_path,
                 post(super::audit::audit_cleanup_submit),
             )
-            // In-admin model reference, like Django's admindocs.
+            // In-admin model reference: every registered model.
             .route("/__docs", get(super::docs::docs_view))
             .route(
                 "/{table}",
@@ -627,10 +627,9 @@ impl Builder {
             .route("/{table}/{pk}/delete", post(views::delete_submit))
             .with_state(state.clone());
 
-        // Per-model custom views, like Django's
-        // `ModelAdmin.get_urls()`. Each inventory entry is checked
-        // against the built-in routes, then mounted on the same
-        // protected router.
+        // Extra routes a model registers for itself. Each inventory
+        // entry is checked against the built-in routes, then mounted
+        // on the same protected router.
         let protected = mount_custom_views(protected, state.clone());
 
         // With session auth on, `/login` and `/logout` mount before

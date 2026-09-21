@@ -1,4 +1,4 @@
-//! Named URL reversal, in the shape of Django's `reverse()`.
+//! Named URL reversal — build a URL from a route name and its params.
 //!
 //! Give a route a stable name with the [`register_url!`] macro, then
 //! build the URL again with [`reverse`]:
@@ -43,7 +43,7 @@
 //!
 //! ## Namespaced names
 //!
-//! Django's `reverse("app:detail")` form works as a naming convention.
+//! A `"app:detail"` form works as a naming convention.
 //! Register a colon-separated name and look it up like any other:
 //!
 //! ```ignore
@@ -190,9 +190,7 @@ pub fn reverse_owned(name: &str, params: &HashMap<String, String>) -> Result<Str
     substitute(name, route.pattern, &borrowed)
 }
 
-/// Django-parity [`url_has_allowed_host_and_scheme(url, allowed_hosts,
-/// require_https=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.url_has_allowed_host_and_scheme) —
-/// returns `true` only when `url` is safe to redirect to, such as the
+/// Returns `true` only when `url` is safe to redirect to, such as the
 /// `?next=/path` value on a login or logout view. It blocks the open
 /// redirect where attacker input reaches a `Location:` header.
 ///
@@ -246,8 +244,8 @@ pub fn url_has_allowed_host_and_scheme(
     if trimmed.is_empty() {
         return false;
     }
-    // Rule 2: any control character. Django strips them before
-    // parsing; rejecting instead also flags a tampered URL.
+    // Rule 2: any control character. Rejecting, rather than
+    // stripping, also flags a tampered URL.
     if trimmed.chars().any(|c| c.is_control()) {
         return false;
     }
@@ -380,9 +378,7 @@ pub fn is_relative_url(url: &str) -> bool {
     !is_absolute_url(url)
 }
 
-/// Django-parity
-/// [`django.utils.http.escape_leading_slashes(url)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.escape_leading_slashes) —
-/// escape leading slashes and backslashes so a protocol-relative URL
+/// Escape leading slashes and backslashes so a protocol-relative URL
 /// cannot become an open redirect.
 ///
 /// A browser reads `Location: //evil.com` as "go to evil.com", since
@@ -453,8 +449,8 @@ fn substitute(
                 detail: format!("unclosed placeholder starting at `{{{placeholder}`"),
             });
         }
-        // Drop a type annotation like `{int:id}`, so patterns copied
-        // from Django routes work as written.
+        // Drop a type annotation like `{int:id}`, so a pattern
+        // copied from a router works as written.
         let key = placeholder.split(':').next_back().unwrap_or(&placeholder);
         let value = params.get(key).ok_or_else(|| ReverseError::MissingParam {
             name: name.to_owned(),
@@ -621,8 +617,8 @@ mod tests {
 
 // ============================================================== Tera tag
 
-/// Add the `url(...)` Tera function, Django's `{% url %}` in Tera
-/// form. Call it once at app setup.
+/// Add the `url(...)` Tera function, so templates can build URLs from
+/// route names. Call it once at app setup.
 ///
 /// Tera has no custom `{% tag %}` syntax, only function calls, so the
 /// tag becomes a function with keyword arguments:
@@ -631,7 +627,7 @@ mod tests {
 /// <a href="{{ url(name='post-detail', id=42) }}">View post</a>
 /// ```
 ///
-/// For Django's `{% url 'foo' as my_url %}`, use Tera's `{% set %}`:
+/// To capture the URL in a variable, use Tera's `{% set %}`:
 ///
 /// ```jinja
 /// {% set my_url = url(name='post-detail', id=42) %}
@@ -750,8 +746,7 @@ mod tera_tests {
 
     #[test]
     fn url_tag_set_capture_works_via_tera_set() {
-        // Django's `{% url 'foo' as bar %}`, written with Tera's
-        // `{% set %}`.
+        // Capturing the URL in a variable, with Tera's `{% set %}`.
         let tera = setup();
         let src = "{% set u = url(name='__test_tag_post', id=7) %}<a href='{{ u }}'>x</a>";
         assert_eq!(render(&tera, src), "<a href='/posts/7'>x</a>");
@@ -828,9 +823,8 @@ mod tera_tests {
 
 // ============================================================== querystring filter
 
-/// Add the `querystring` Tera filter, Django's `{% querystring %}` in
-/// Tera form. It takes the current query string and returns it with
-/// your overrides applied.
+/// Add the `querystring` Tera filter. It takes the current query
+/// string and returns it with your overrides applied.
 ///
 /// Use it for pagination and filter links, where you want the same
 /// URL with `page=3` instead of `page=2`:
@@ -841,7 +835,7 @@ mod tera_tests {
 /// <!--                                       ↑ → "?q=hello&page=2&sort=asc" -->
 /// ```
 ///
-/// It follows Django's [`{% querystring %}`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#querystring):
+/// The rules are:
 ///
 /// - An override replaces the key if it is there, or appends it. One
 ///   value per key.
@@ -884,8 +878,8 @@ fn querystring_filter(
                 )));
             }
         };
-        // Django's `QueryDict.__setitem__`: replace an existing key
-        // in place, keep its position, and collapse duplicates into
+        // Replace an existing key in place, keep its position, and
+        // collapse duplicates into
         // one. A new key goes at the end.
         let mut found = false;
         let mut i = 0;
@@ -941,7 +935,7 @@ fn querystring_filter(
 ///     parse_query_pairs("q=hello%20world"),
 ///     vec![("q".to_owned(), "hello world".to_owned())]
 /// );
-/// // Multi-value: same key appears twice — both pairs kept (Django shape).
+/// // Multi-value: the same key appears twice — both pairs are kept.
 /// assert_eq!(
 ///     parse_query_pairs("tag=a&tag=b"),
 ///     vec![("tag".to_owned(), "a".to_owned()),
@@ -1136,7 +1130,7 @@ mod querystring_tests {
         assert_eq!(pairs[0].1, "hello world");
     }
 
-    // ---------- url_has_allowed_host_and_scheme (Django parity) ----------
+    // ---------- url_has_allowed_host_and_scheme ----------
 
     #[test]
     fn safe_url_accepts_relative_paths() {
@@ -1337,7 +1331,7 @@ mod querystring_tests {
         ));
     }
 
-    // ---------- parse_query_pairs / parse_query_pairs_grouped (Django parity) ----------
+    // ---------- parse_query_pairs / parse_query_pairs_grouped ----------
 
     #[test]
     fn parse_qs_basic() {
@@ -1457,7 +1451,7 @@ mod querystring_tests {
         assert!(!is_absolute_url("not_a_scheme:value"));
     }
 
-    // ---------- escape_leading_slashes (Django parity) ----------
+    // ---------- escape_leading_slashes ----------
 
     #[test]
     fn escape_leading_slashes_passes_through_safe_urls() {

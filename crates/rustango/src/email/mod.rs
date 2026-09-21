@@ -74,15 +74,14 @@ pub struct Email {
     pub body: String,
     pub html_body: Option<String>,
     pub headers: Vec<(String, String)>,
-    /// Django-parity attachments — file blobs attached to the
+    /// Attachments — file blobs attached to the
     /// outgoing message. Populated via [`Email::attach`] /
     /// [`Email::attach_text`].
     #[serde(default)]
     pub attachments: Vec<Attachment>,
 }
 
-/// Django-parity `EmailMessage.attach(filename, content, mimetype)` —
-/// one attached blob. `mimetype` is the MIME type lettre stamps on
+/// One attached blob. `mimetype` is the MIME type lettre stamps on
 /// the SinglePart; when `None` we default to `application/octet-stream`
 /// (RFC-9110 recommendation for opaque blobs).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -169,8 +168,7 @@ impl Email {
         self
     }
 
-    /// Django-parity `EmailMessage.attach(filename, content, mimetype)` —
-    /// attach a binary blob. `mimetype = None` means
+    /// Attach a binary blob. `mimetype = None` means
     /// `application/octet-stream`. Backends serialize the attachment
     /// according to their capabilities:
     ///
@@ -195,7 +193,7 @@ impl Email {
         self
     }
 
-    /// Django-parity convenience — attach a UTF-8 text blob with
+    /// Convenience — attach a UTF-8 text blob with
     /// `text/plain` MIME. Equivalent to `attach(filename, content,
     /// Some("text/plain"))` but spares the caller the `Some(_)`.
     #[must_use]
@@ -206,9 +204,9 @@ impl Email {
 
     /// Validate the minimum required fields: at least one recipient +
     /// non-empty subject, and reject `\\r` / `\\n` in single-line header
-    /// fields (Django-shape `BadHeaderError` — defends against email
-    /// header injection attacks where attacker-controlled subject or
-    /// from-address forges extra `To:` / `Bcc:` lines).
+    /// fields. That defends against header-injection attacks, where
+    /// an attacker-controlled subject or from-address forges extra
+    /// `To:` / `Bcc:` lines.
     pub fn validate(&self) -> Result<(), MailError> {
         if self.to.is_empty() && self.cc.is_empty() && self.bcc.is_empty() {
             return Err(MailError::InvalidMessage("no recipients".into()));
@@ -239,17 +237,9 @@ impl Email {
         Ok(())
     }
 
-    /// Django-parity `EmailMessage.send(connection=None)` — send this
-    /// message via the supplied mailer. Direct translation of the
-    /// Django method most users reach for first:
-    ///
-    /// ```python
-    /// # Django
-    /// EmailMessage(subject='hi', body='...', to=['a@b.com']).send()
-    /// ```
+    /// Send this message via the supplied mailer.
     ///
     /// ```ignore
-    /// // rustango
     /// Email::new()
     ///     .subject("hi")
     ///     .body("...")
@@ -266,8 +256,8 @@ impl Email {
     }
 }
 
-/// Django-parity `email.utils.formataddr((name, address))` — format an
-/// RFC 5322 address with display name. Returns `"Display Name <email@example.com>"`
+/// Format an RFC 5322 address with a display name. Returns
+/// `"Display Name <email@example.com>"`
 /// when `name` is provided, or just `address` when `name` is `None`
 /// or empty.
 ///
@@ -305,8 +295,7 @@ pub fn formataddr(name: Option<&str>, address: &str) -> String {
     }
 }
 
-/// Django-parity inverse of [`formataddr`] — Python's
-/// `email.utils.parseaddr(address)`. Splits a `"Display Name
+/// The inverse of [`formataddr`]. Splits a `"Display Name
 /// <user@example.com>"` style header value into `(name, address)`.
 ///
 /// Returns `(name, address)` as owned `String`s. When the input
@@ -394,15 +383,13 @@ pub enum MailError {
 }
 
 /// Reject `\r` / `\n` in single-line header fields. Returns
-/// [`MailError::BadHeader`] (Django parity — Django raises
-/// `BadHeaderError` from `EmailMessage.__init__` when the same
-/// pattern is detected). Defends against email header injection
+/// [`MailError::BadHeader`]. Defends against header-injection
 /// attacks where attacker input lands in `Subject:` / `From:` /
 /// `To:` and forges extra envelope headers via embedded newlines.
 fn check_no_crlf(field: &str, value: &str) -> Result<(), MailError> {
     if value.contains('\n') || value.contains('\r') {
         return Err(MailError::BadHeader(format!(
-            "newline in {field} (Django BadHeaderError — possible header injection)"
+            "newline in {field} — possible header injection"
         )));
     }
     Ok(())
@@ -523,8 +510,7 @@ impl Mailer for InMemoryMailer {
 /// timestamped `.eml` file in a configured directory instead of
 /// sending it.
 ///
-/// Mirrors Django's `django.core.mail.backends.filebased.EmailBackend`
-/// (issue #417). Useful when you want to inspect rendered email
+/// Useful when you want to inspect rendered email
 /// content (password-reset links, signup confirmations) during
 /// development without wiring an SMTP relay or piping stdout into a
 /// log file.
@@ -557,10 +543,9 @@ impl FileMailer {
 
 /// Serialize an `Email` to RFC-822-ish text. Headers first, blank
 /// line, then body. HTML alternative (when present) is appended as a
-/// `--- HTML alternative ---` block — this matches the human-readable
-/// shape Django's file backend uses for dev inspection. We are NOT
-/// producing a fully-spec-compliant multipart MIME message; this is a
-/// debugging dump format.
+/// `--- HTML alternative ---` block, which reads well during dev
+/// inspection. This is NOT a spec-compliant multipart MIME message;
+/// it is a debugging dump format.
 fn serialize_eml(email: &Email) -> String {
     let mut out = String::with_capacity(256 + email.body.len());
     if let Some(f) = &email.from {
@@ -671,23 +656,10 @@ impl Mailer for NullMailer {
 /// let mailer: rustango::email::BoxedMailer =
 ///     rustango::email::from_settings(&cfg.mail);
 /// ```
-/// Django-shape `send_mail(subject, message, from_email, recipient_list)` —
-/// fire-and-forget single-message helper. Returns `Ok(())` on
+/// Fire-and-forget single-message helper. Returns `Ok(())` on
 /// success.
 ///
-/// Direct translation of the most common Django mail call:
-///
-/// ```python
-/// # Django
-/// send_mail('Subject here',
-///           'Here is the message.',
-///           'from@example.com',
-///           ['to@example.com'],
-///           fail_silently=False)
-/// ```
-///
 /// ```ignore
-/// // rustango
 /// rustango::email::send_mail(
 ///     &*mailer,
 ///     "Subject here",
@@ -698,8 +670,7 @@ impl Mailer for NullMailer {
 /// ```
 ///
 /// `from_email = None` lets the mailer fall through to its own
-/// configured default (matching Django's `DEFAULT_FROM_EMAIL`
-/// fallback). `recipient_list` must be non-empty — the mailer's
+/// configured default. `recipient_list` must be non-empty — the mailer's
 /// `Email::validate()` surfaces a `MailError::InvalidMessage` otherwise.
 ///
 /// # Errors
@@ -721,10 +692,9 @@ pub async fn send_mail(
     mailer.send(&email).await
 }
 
-/// Django-shape `send_mass_mail(datatuple)` — bulk-send a batch of
-/// messages. `datatuple` in Django is `[(subject, message, from, [to,
-/// ...]), ...]`; rustango takes a slice of pre-built `Email`s, which
-/// is the more idiomatic Rust shape and avoids per-tuple boilerplate.
+/// Bulk-send a batch of messages. Takes a slice of pre-built
+/// `Email`s, so each one carries its own subject, sender and
+/// recipients.
 ///
 /// Sequential by default — backends with native pipelining (lettre's
 /// SMTP transport over a kept-open connection) get the same call shape
@@ -733,7 +703,7 @@ pub async fn send_mail(
 ///
 /// Returns `Ok(count)` where `count` is the number of successfully
 /// sent messages. Per-message errors short-circuit on the first
-/// failure, matching Django's `fail_silently=False` default.
+/// failure — errors are not swallowed.
 ///
 /// # Errors
 /// Forwarded from the mailer's `send` call on the first failing message.
@@ -746,14 +716,12 @@ pub async fn send_many(mailer: &dyn Mailer, emails: &[Email]) -> Result<usize, M
     Ok(sent)
 }
 
-/// Django-shape `mail_admins(subject, message)` — sends to the
-/// addresses configured in `MailSettings.admins`. Returns Ok(0) when
-/// the list is empty (a no-op without warning, matching Django's
-/// "no ADMINS → silent skip" behavior). Issue #416.
+/// Send to the addresses configured in `MailSettings.admins`.
+/// Returns Ok(0) when the list is empty — a silent no-op, so an
+/// unconfigured deployment does not error on every alert.
 ///
-/// `subject` is prefixed with `"[admin] "` to match Django's default
-/// `EMAIL_SUBJECT_PREFIX`. Override the subject yourself if you need
-/// a different prefix.
+/// `subject` is prefixed with `"[admin] "`. Set
+/// `email_subject_prefix` to brand it differently.
 ///
 /// `from` falls back to `MailSettings.from_address`; if neither is
 /// set the mailer's `Email::validate()` will surface a
@@ -780,9 +748,8 @@ pub async fn mail_admins(
     .await
 }
 
-/// Django-shape `mail_managers(subject, message)` — sends to the
-/// addresses configured in `MailSettings.managers`. Same shape as
-/// [`mail_admins`]; subject is prefixed with `"[manager] "`. Issue #416.
+/// Send to the addresses configured in `MailSettings.managers`. Same
+/// shape as [`mail_admins`]; subject is prefixed with `"[manager] "`.
 #[cfg(feature = "config")]
 pub async fn mail_managers(
     mailer: &dyn Mailer,
@@ -802,9 +769,8 @@ pub async fn mail_managers(
 }
 
 /// Pick the `From:` address for a server-generated mail
-/// (`mail_admins`, `mail_managers`, error notifications). Django
-/// `SERVER_EMAIL` parity — falls back to `DEFAULT_FROM_EMAIL`
-/// (`from_address`) when unset.
+/// (`mail_admins`, `mail_managers`, error notifications). Falls back
+/// to `from_address` when unset.
 #[cfg(feature = "config")]
 fn server_from_address(s: &crate::config::MailSettings) -> Option<&str> {
     s.server_email.as_deref().or(s.from_address.as_deref())
@@ -822,10 +788,9 @@ async fn send_to_list(
     if list.is_empty() {
         return Ok(0);
     }
-    // Django `EMAIL_SUBJECT_PREFIX` parity — when set, it wins over
-    // the historical `[admin] ` / `[manager] ` fallback so projects
-    // can brand server mail with `"[Acme] "` (note the trailing
-    // space matches Django's convention).
+    // `email_subject_prefix`, when set, wins over the `[admin] ` /
+    // `[manager] ` fallback, so projects can brand server mail with
+    // `"[Acme] "` — include the trailing space.
     let prefix = s.email_subject_prefix.as_deref().unwrap_or(fallback_prefix);
     let mut email = Email::new()
         .subject(format!("{prefix}{subject}"))

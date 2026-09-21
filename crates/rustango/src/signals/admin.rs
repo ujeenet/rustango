@@ -1,5 +1,5 @@
-//! Admin-only save and delete signals, like Django's
-//! `ModelAdmin.save_model()` and `ModelAdmin.delete_model()`.
+//! Save and delete signals that fire only for writes made through
+//! the bundled admin.
 //!
 //! The signals in [`crate::signals`] cover every ORM write anywhere.
 //! These ones come only from the bundled admin's create, update and
@@ -53,8 +53,7 @@ pub struct AdminSaveContext {
     /// for a create with a server-assigned key; `admin_post_save`
     /// then carries the real one.
     pub pk: String,
-    /// `true` for an edit, `false` for a create. Same as Django's
-    /// `change` argument.
+    /// `true` for an edit, `false` for a create.
     pub change: bool,
 }
 

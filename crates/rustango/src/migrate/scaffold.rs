@@ -1,4 +1,4 @@
-//! Project scaffolder: rustango's answer to Django's `startapp`.
+//! Project scaffolder: lay out a new app module from a template.
 //!
 //! [`startapp`] writes an app module into a project's `src/` tree:
 //!
@@ -6,7 +6,7 @@
 //! src/<app>/
 //!   mod.rs       — re-exports models / views / urls
 //!   models.rs    — #[derive(Model)] structs (admin-visible automatically)
-//!   views.rs     — request handlers (Django-style "views")
+//!   views.rs     — request handlers ("views")
 //!   urls.rs      — Router builder mapping paths → views
 //! ```
 //!
@@ -333,7 +333,7 @@ fn validate_app_name(name: &str) -> Result<(), MigrateError> {
 
 fn render_mod_template(app_name: &str) -> String {
     format!(
-        "//! `{app_name}` — Django-shape app module.\n\
+        "//! `{app_name}` — app module.\n\
          //!\n\
          //! Add `mod {app_name};` (or `pub mod {app_name};`) to your\n\
          //! `src/main.rs` / `src/lib.rs` so these submodules are\n\
@@ -433,7 +433,7 @@ fn pascal_case(name: &str) -> String {
 /// The project root already serves `GET /` and `GET /healthz`, so a
 /// new app starts with no real routes. Adding them here would panic
 /// on a duplicate route when the scaffolder merges the app's router.
-const VIEWS_TEMPLATE: &str = "//! App views — request handlers (Django-style \"views\").
+const VIEWS_TEMPLATE: &str = "//! App views — request handlers (\"views\").
 //!
 //! Each handler is a stateless async fn; `urls.rs` mounts them
 //! under their HTTP paths. For pure-CRUD admin needs you don't

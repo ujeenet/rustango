@@ -11,8 +11,8 @@
 //! Two defects in one. The restriction was undocumented — `docs/viewsets.md`
 //! and the method's own doc comment said "a stable,
 //! monotonically-ordered column (typically `id`)", which a `TIMESTAMPTZ`
-//! is, and which is the canonical cursor in the DRF API this is shaped
-//! after. And a configuration error surfaced as a server error, once per
+//! is, and which is the canonical cursor for a REST list endpoint.
+//! And a configuration error surfaced as a server error, once per
 //! request, forever: the ViewSet built, the process started, health
 //! checks passed, and the endpoint was dead.
 //!

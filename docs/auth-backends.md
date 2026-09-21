@@ -3,9 +3,10 @@
 An **auth backend** answers one question: *given an incoming request, who is the
 user?* **Rustango** lets you stack several — HTTP Basic, API key, JWT — into a
 chain that the auth middleware tries in order, so one app can accept humans and
-machines on the same routes. This is Django's `AUTHENTICATION_BACKENDS` idea,
-wired to axum. Pair it with `require_auth` / `require_perm` to gate routes and
-the `CurrentUser` extractor to read the result.
+machines on the same routes. You pick which backends to register and in what
+order, and the chain is wired to axum. Pair it with `require_auth` /
+`require_perm` to gate routes and the `CurrentUser` extractor to read the
+result.
 
 [![Auth backends in Rustango: a request flows through a chain of backends (ModelBackend, ApiKeyBackend, JwtBackend); the first to recognise the credential wins and injects CurrentUser, then require_perm checks a codename](img/auth-backends.png)](img/auth-backends.png)
 
@@ -230,7 +231,7 @@ permission tables are created by `ensure_tables_pool`).
 Separately, `rustango::auth_backends` (note: crate root, **not** `tenancy`) is a
 small **framework-agnostic** registry — a `Credentials` → `Principal` chain with
 its own `AuthBackend` trait. It has no HTTP/axum glue; use it when you want
-Django-style backend pluggability inside your own auth code:
+pluggable auth backends inside your own auth code:
 
 ```rust
 use rustango::auth_backends::{AuthBackendChain, Credentials, RemoteUserBackend};

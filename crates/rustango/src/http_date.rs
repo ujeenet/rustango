@@ -1,7 +1,6 @@
-//! Django-shape HTTP date parser + formatter.
+//! HTTP date parser and formatter.
 //!
-//! Same as `django.utils.http.{http_date, parse_http_date}`. Use it
-//! for `Last-Modified`, `If-Modified-Since`, `Expires`, `Date` and
+//! Use it for `Last-Modified`, `If-Modified-Since`, `Expires`, `Date` and
 //! other HTTP date headers.
 //!
 //! RFC 7231 §7.1.1.1 says a server must send IMF-fixdate but must
@@ -26,7 +25,7 @@
 //! ```
 
 /// Format Unix seconds as an IMF-fixdate header, like
-/// `"Sun, 06 Nov 1994 08:49:37 GMT"`. Django's `http_date()`.
+/// `"Sun, 06 Nov 1994 08:49:37 GMT"`.
 ///
 /// The output is always GMT, as RFC 7231 requires, so convert a local
 /// time before calling.
@@ -42,10 +41,10 @@ pub fn http_date(secs: u64) -> String {
 }
 
 /// Parse any of the three HTTP date shapes from RFC 7231 §7.1.1.1
-/// into Unix seconds. Django's `parse_http_date()`.
+/// into Unix seconds.
 ///
 /// Returns `None` for empty input, for a shape we do not recognise,
-/// and for dates before 1970. Django raises instead.
+/// and for dates before 1970.
 ///
 /// A two-digit RFC 850 year follows chrono's split: `00..=68` is
 /// 2000-2068 and `69..=99` is 1969-1999.
@@ -112,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn format_canonical_django_example() {
+    fn format_canonical_rfc_example() {
         // 784111777 = Sun, 06 Nov 1994 08:49:37 GMT (RFC 7231 example).
         assert_eq!(http_date(784_111_777), "Sun, 06 Nov 1994 08:49:37 GMT");
     }
@@ -201,7 +200,7 @@ mod tests {
 
     #[test]
     fn parse_pre_1970_is_none() {
-        // Django raises on pre-1970 dates; we return None.
+        // Pre-1970 dates are not representable here; return None.
         assert_eq!(parse_http_date("Mon, 01 Jan 1900 00:00:00 GMT"), None);
     }
 

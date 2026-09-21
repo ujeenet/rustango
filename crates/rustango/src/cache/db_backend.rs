@@ -1,5 +1,5 @@
-//! A [`Cache`] backend that stores one row per key, like Django's
-//! `DatabaseCache`. The table is `cache_key`, `value` and `expires`,
+//! A [`Cache`] backend that stores one row per key in the database.
+//! The table is `cache_key`, `value` and `expires`,
 //! with the same layout on PG, MySQL and SQLite. Expired rows are
 //! removed on read; there is no background reaper.
 //!
@@ -35,8 +35,8 @@
 //! The cache table does not follow the app's data. You can drop it,
 //! recreate it, or keep it in another database.
 //! [`DatabaseCache::ensure_table`] runs the right
-//! `CREATE TABLE IF NOT EXISTS` at boot, like Django's
-//! `createcachetable`.
+//! `CREATE TABLE IF NOT EXISTS` at boot; `manage createcachetable`
+//! does the same from the CLI.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

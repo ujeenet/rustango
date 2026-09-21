@@ -8,8 +8,8 @@
 //! file for another backend and **172 have no MySQL or PG counterpart at
 //! all** — not because those features are SQLite-only, but because
 //! writing the second and third copy by hand costs more than it returns.
-//! The `django6_*` files already solved this for eight features; nothing
-//! generalized it.
+//! The `orm_*` scenario files already solved this for eight features;
+//! nothing generalized it.
 //!
 //! Those two numbers are checked by `docs_live_suite_counts`, because
 //! the first draft of this comment said 30 and 167 against a tree that

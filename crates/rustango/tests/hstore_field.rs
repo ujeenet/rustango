@@ -1,5 +1,5 @@
-//! Unit coverage for `HStore` PostgreSQL hstore columns — Django
-//! `HStoreField` (#342). No database required: asserts the derived
+//! Unit coverage for `HStore` PostgreSQL hstore columns
+//! (#342). No database required: asserts the derived
 //! schema's `FieldType::HStore` mapping, the per-dialect column-type
 //! emission (`hstore` on PG; degraded `TEXT` on MySQL / SQLite), and the
 //! `Into<SqlValue>` lowering.

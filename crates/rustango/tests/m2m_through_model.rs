@@ -1,4 +1,4 @@
-//! Django-parity #324 — `ManyToManyField(through=<custom model>)`.
+//! Issue #324 — a many-to-many routed through a custom junction model.
 //!
 //! When `auto_create = false`, the migration writer skips emitting a
 //! `CREATE TABLE` for the junction so the operator can declare their

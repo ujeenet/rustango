@@ -1,13 +1,12 @@
-//! `GET <admin_prefix>/__docs`: an in-admin model reference, like
-//! Django's `admindocs`.
+//! `GET <admin_prefix>/__docs`: an in-admin model reference page.
 //!
 //! Lists every registered, visible model, grouped by app label, with
 //! each field's column, type, key, nullability and relation. All of it
 //! comes from the admin registry, so the page does no database work.
 //!
-//! Only models are documented. Axum routes cannot be listed at
-//! runtime the way Django's URLconf can, and the Tera filter and tag
-//! set cannot be inspected either.
+//! Only models are documented. Axum gives no way to list the mounted
+//! routes at runtime, and the Tera filter and tag set cannot be
+//! inspected either.
 
 use axum::extract::State;
 use axum::response::Html;

@@ -1,4 +1,4 @@
-//! Static "flat pages" — `django.contrib.flatpages`.
+//! Static "flat pages" — about, terms, privacy.
 //!
 //! Build a [`FlatPageMap`] (path → `FlatPage { title, body }`) and mount
 //! [`flatpages_middleware`] on your axum router. A matching request is

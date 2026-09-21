@@ -1,4 +1,4 @@
-//! English month and weekday names, like `django.utils.dates`.
+//! English month and weekday names.
 //!
 //! Months take a 1-indexed number, weekdays take a
 //! `chrono::Weekday`. The names are always English, which is what
@@ -18,7 +18,7 @@
 
 use chrono::Weekday;
 
-/// Full month name for `1..=12`, like Django's `MONTHS`. Any other
+/// Full month name for `1..=12`. Any other
 /// number gives `""`, so formatting code never panics.
 #[must_use]
 pub fn month_full(month: u32) -> &'static str {
@@ -39,9 +39,8 @@ pub fn month_full(month: u32) -> &'static str {
     }
 }
 
-/// Lowercase three-letter month name, `"jan"` to `"dec"`, like
-/// Django's `MONTHS_3`. Used by `dateformat`'s `b` code and by
-/// date-archive URLs.
+/// Lowercase three-letter month name, `"jan"` to `"dec"`. Used by
+/// `dateformat`'s `b` code and by date-archive URLs.
 #[must_use]
 pub fn month_abbr(month: u32) -> &'static str {
     match month {
@@ -61,7 +60,7 @@ pub fn month_abbr(month: u32) -> &'static str {
     }
 }
 
-/// Associated Press style month name, like Django's `MONTHS_AP`:
+/// Associated Press style month name:
 /// `Jan.`, `Feb.`, `March`, `April`, `May`, `June`, `July`, `Aug.`,
 /// `Sept.`, `Oct.`, `Nov.`, `Dec.`.
 #[must_use]
@@ -83,7 +82,7 @@ pub fn month_ap(month: u32) -> &'static str {
     }
 }
 
-/// Full weekday name, like Django's `WEEKDAYS`. It takes a
+/// Full weekday name. It takes a
 /// `chrono::Weekday`, not a number, so there is no confusion about
 /// where the week starts or whether the index is 0- or 1-based.
 #[must_use]
@@ -99,8 +98,7 @@ pub fn weekday_full(day: Weekday) -> &'static str {
     }
 }
 
-/// Three-letter weekday name, `"Mon"` to `"Sun"`, like Django's
-/// `WEEKDAYS_ABBR`.
+/// Three-letter weekday name, `"Mon"` to `"Sun"`.
 #[must_use]
 pub fn weekday_abbr(day: Weekday) -> &'static str {
     match day {

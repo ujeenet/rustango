@@ -1,4 +1,4 @@
-//! Django `defaultfilters` template filters, as Tera filters.
+//! Everyday template filters, registered on Tera.
 //!
 //! Call [`register_filters`] on a Tera instance to make them available:
 //!
@@ -8,13 +8,11 @@
 //! // now {{ count | pluralize }} renders "" / "s"
 //! ```
 //!
-//! The set is the Django built-ins that Tera does not ship, plus a few
-//! extras such as `mask_email`, `mask_card`, `oxford_join` and
+//! These are the text and number filters Tera does not ship, plus a
+//! few extras such as `mask_email`, `mask_card`, `oxford_join` and
 //! `initials`. See [`register_filters`] for the full list.
 //!
-//! Output matches
-//! [Django defaultfilters](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/)
-//! character for character in the en-US locale.
+//! Output is en-US.
 //!
 //! [`register_filters`]: crate::default_filters::register_filters
 
@@ -76,7 +74,7 @@ pub fn register_filters(tera: &mut Tera) {
 // ------------------------------------------------------------------ pluralize
 
 /// `pluralize` — return the singular/plural suffix that matches an
-/// integer-like value. Django:
+/// integer-like value:
 /// - `{{ 1|pluralize }}` → `""`
 /// - `{{ 2|pluralize }}` → `"s"`
 /// - `{{ 1|pluralize:"es" }}` → `""`
@@ -84,9 +82,9 @@ pub fn register_filters(tera: &mut Tera) {
 /// - `{{ 1|pluralize:"y,ies" }}` → `"y"`
 /// - `{{ 2|pluralize:"y,ies" }}` → `"ies"`
 ///
-/// Django raises on a value that is neither a number nor a collection.
-/// This returns `""` instead, so a typo in a variable name does not
-/// break the page.
+/// A value that is neither a number nor a collection returns `""`
+/// rather than erroring, so a typo in a variable name does not break
+/// the page.
 fn pluralize(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let count = count_for_pluralize(value);
     let suffix_arg = args
@@ -97,7 +95,7 @@ fn pluralize(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value
     Ok(to_value(crate::text::pluralize(count, suffix_arg))?)
 }
 
-/// The count that drives pluralize, as Django resolves it: an integer is
+/// The count that drives pluralize: an integer is
 /// used directly, a float is truncated, an array, map or string uses its
 /// length, and anything else is 0, so the plural form wins.
 fn count_for_pluralize(value: &Value) -> i64 {
@@ -125,15 +123,15 @@ fn count_for_pluralize(value: &Value) -> i64 {
 // ------------------------------------------------------------------ truncatewords
 
 /// `truncatewords` — keep the first N words, append `…` if any
-/// were dropped. Django:
+/// were dropped:
 /// - `{{ "Joel is a slug"|truncatewords:2 }}` → `"Joel is …"`
 /// - `{{ "two words"|truncatewords:5 }}` → `"two words"`
 ///
-/// A zero, negative or non-integer argument gives an empty string, as in
-/// Django. Runs of whitespace collapse to a single space in the output.
+/// A zero, negative or non-integer argument gives an empty string.
+/// Runs of whitespace collapse to a single space in the output.
 fn truncatewords(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
-        // Non-string values pass through; Django raises here.
+        // Non-string values pass through rather than erroring.
         return Ok(value.clone());
     };
     let n = args
@@ -143,7 +141,7 @@ fn truncatewords(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
         .unwrap_or(-1);
     if n <= 0 {
         // Not `text::truncate_words(s, 0, …)`, which emits a stray
-        // suffix. Django's filter gives an empty string here.
+        // suffix. An empty string is the right answer here.
         return Ok(to_value("")?);
     }
     let n = usize::try_from(n).unwrap_or(0);
@@ -191,7 +189,7 @@ fn default_if_none(value: &Value, args: &HashMap<String, Value>) -> tera::Result
 
 // ------------------------------------------------------------------ add
 
-/// `add` — Django's universal addition filter. Numbers add, strings
+/// `add` — a universal addition filter. Numbers add, strings
 /// join, arrays concatenate, and anything else falls back to joining
 /// the two stringified values.
 /// - `{{ 4|add:5 }}` → `"9"`
@@ -274,7 +272,7 @@ fn divisibleby(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
 
 // ------------------------------------------------------------------ floatformat
 
-/// `floatformat` — Django's float formatter, not a plain `round`:
+/// `floatformat` — a float formatter, not a plain `round`:
 /// - `{{ 34.23234|floatformat }}` → `"34.2"` (one decimal by default)
 /// - `{{ 34.00000|floatformat }}` → `"34"` (a zero decimal is dropped)
 /// - `{{ 34.23234|floatformat:3 }}` → `"34.232"`
@@ -561,7 +559,7 @@ fn truncatewords_html(value: &Value, args: &HashMap<String, Value>) -> tera::Res
 
 /// `urlize` — turn `http(s)://…`, `www.host.tld/…` and `user@host.tld`
 /// into `<a>` elements. Pass `nofollow=true` to add `rel="nofollow"`;
-/// it is off by default, as in Django.
+/// it is off by default.
 ///
 /// ```jinja
 /// {{ "see http://example.com" | urlize | safe }}
@@ -647,8 +645,8 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
 
 // ------------------------------------------------------------------ slugify_unicode
 
-/// `slugify_unicode` — Django's `slugify(allow_unicode=True)`. Makes a
-/// URL-safe slug but keeps non-ASCII letters, so it works for users who
+/// `slugify_unicode` — makes a URL-safe slug but keeps non-ASCII
+/// letters, so it works for users who
 /// write in a non-Latin script.
 ///
 /// It lowercases everything, keeps Unicode letters, digits and `_`,
@@ -994,9 +992,9 @@ fn truncate_link_text(html: &str, limit: usize) -> String {
     out
 }
 
-/// `widthratio` — compute `round((value / max) * width)`. Django's
-/// `{% widthratio %}` tag, written here as a Tera function with
-/// keyword arguments:
+/// `widthratio` — compute `round((value / max) * width)`, for bar
+/// charts and progress bars. A Tera function with keyword
+/// arguments:
 ///
 /// ```jinja
 /// <div style="width: {{ widthratio(value=this, max=upper, width=200) }}px"></div>
@@ -1083,8 +1081,8 @@ fn json_script(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
     Ok(to_value(rendered)?)
 }
 
-/// `unordered_list` — render a nested array as a `<ul>` tree. The input
-/// follows Django's list-of-lists shape, where a label may be followed
+/// `unordered_list` — render a nested array as a `<ul>` tree. The
+/// input is a list of lists, where a label may be followed
 /// by a list of its children:
 /// `["States", ["Kansas", ["Lawrence", "Topeka"], "Illinois"]]`.
 ///
@@ -1120,8 +1118,8 @@ fn render_unordered_list(items: &[Value], out: &mut String) {
     }
 }
 
-/// `filesizeformat` — a byte count as "13 KB" or "4.1 MB". Same as
-/// `humanize::naturalsize`, under the Django name.
+/// `filesizeformat` — a byte count as "13 KB" or "4.1 MB". An alias
+/// of `humanize::naturalsize`.
 fn filesizeformat(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let n = match value {
         Value::Number(n) => n.as_f64().unwrap_or(0.0),
@@ -1140,7 +1138,7 @@ mod tests {
 
     fn args_pos(v: Value) -> HashMap<String, Value> {
         // Tera passes positional filter args via the "0" key (or any
-        // key — Django's `:arg` becomes a single named arg in Tera's
+        // key — a `:arg` becomes a single named arg in Tera's
         // shape). Both registration paths put the arg through, so
         // we just stuff it under "0" / "suffix" — `pluralize` looks
         // at both.
@@ -1185,7 +1183,7 @@ mod tests {
 
     #[test]
     fn pluralize_uses_array_length() {
-        // Django: passing a list runs pluralize against len(list).
+        // Passing a list runs pluralize against its length.
         let one = pluralize(&json!(["a"]), &HashMap::new()).unwrap();
         assert_eq!(one, json!(""));
         let three = pluralize(&json!(["a", "b", "c"]), &HashMap::new()).unwrap();
@@ -1208,7 +1206,7 @@ mod tests {
 
     #[test]
     fn truncatewords_collapses_multi_whitespace() {
-        // Django normalizes whitespace on join. Input has tabs +
+        // Whitespace is normalized on join. Input has tabs +
         // multiple spaces; output is single-spaced.
         let out = truncatewords(&json!("a\tb   c"), &args_pos(json!(2))).unwrap();
         assert_eq!(out, json!("a b …"));
@@ -1277,9 +1275,8 @@ mod tests {
 
     #[test]
     fn default_if_none_empty_string_is_not_null() {
-        // Empty string is a real value — passes through. Distinct
-        // from Django's `default` filter which treats falsy as
-        // missing.
+        // Empty string is a real value — it passes through. Only
+        // null is treated as missing.
         let out = default_if_none(&json!(""), &args_pos(json!("fallback"))).unwrap();
         assert_eq!(out, json!(""));
     }
@@ -1470,7 +1467,7 @@ mod tests {
 
     #[test]
     fn add_mixed_types_stringifies_concat() {
-        // "5" + 3 → "53" (Django shape). Both sides stringify, then
+        // "5" + 3 → "53". Both sides stringify, then
         // concatenate.
         let out = add(&json!("5"), &args_pos(json!(3))).unwrap();
         assert_eq!(out, json!("53"));
@@ -1493,7 +1490,7 @@ mod tests {
     #[test]
     fn cut_empty_needle_returns_input_unchanged() {
         // Guard against infinite-replace loops and against silently
-        // gluing every empty position; Django no-ops on empty needle.
+        // gluing every empty position; an empty needle is a no-op.
         let out = cut(&json!("hello"), &args_pos(json!(""))).unwrap();
         assert_eq!(out, json!("hello"));
     }
@@ -2490,8 +2487,8 @@ mod tests {
         register_filters(&mut tera);
         tera.add_raw_template("t", "{{ value|capfirst }}").unwrap();
         let mut ctx = tera::Context::new();
-        ctx.insert("value", "django");
-        assert_eq!(tera.render("t", &ctx).unwrap(), "Django");
+        ctx.insert("value", "hello");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "Hello");
     }
 
     // -------- addslashes --------
@@ -2646,7 +2643,7 @@ mod tests {
 
     #[test]
     fn unordered_list_renders_nested_levels() {
-        // Django shape: label followed by optional sub-array.
+        // A label followed by an optional sub-array.
         let input = json!(["States", ["Kansas", ["Lawrence", "Topeka"], "Illinois"]]);
         let out = unordered_list(&input, &HashMap::new())
             .unwrap()

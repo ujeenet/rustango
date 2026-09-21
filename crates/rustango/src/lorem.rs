@@ -1,5 +1,4 @@
-//! Lorem ipsum placeholder text, shaped like
-//! `django.utils.lorem_ipsum`.
+//! Lorem ipsum placeholder text.
 //!
 //! Use it to fill demo pages, build test fixtures, or draft Tera
 //! templates with text that looks real.
@@ -39,8 +38,8 @@
 
 use rand::seq::SliceRandom;
 
-/// The canonical "Lorem ipsum dolor sit amet, …" opener: 84 words,
-/// same text as Django's `lorem_ipsum.COMMON_P`. Use it when you need
+/// The canonical "Lorem ipsum dolor sit amet, …" opener: 84 words.
+/// Use it when you need
 /// a stable string, such as a snapshot test, instead of a random
 /// [`paragraphs`] call.
 pub const COMMON_PARAGRAPH_TEXT: &str = "Lorem ipsum dolor sit amet, consectetuer adipiscing elit, sed diam nonummy nibh euismod tincidunt ut laoreet dolore magna aliquam erat volutpat. Ut wisi enim ad minim veniam, quis nostrud exerci tation ullamcorper suscipit lobortis nisl ut aliquip ex ea commodo consequat. Duis autem vel eum iriure dolor in hendrerit in vulputate velit esse molestie consequat, vel illum dolore eu feugiat nulla facilisis at vero eros et accumsan et iusto odio dignissim qui blandit praesent luptatum zzril delenit augue duis dolore te feugait nulla facilisi.";
@@ -502,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn words_common_first_19_match_django_opener() {
+    fn words_common_first_19_match_canonical_opener() {
         // common=true starts with the canonical 19-word opener.
         let w = words(19, true);
         let tokens: Vec<&str> = w.split_whitespace().collect();
@@ -573,7 +572,7 @@ mod tests {
         let p = paragraphs(3, true);
         assert!(
             p.starts_with("Lorem ipsum dolor sit amet"),
-            "common=true should start with the Django canonical opener; got: `{}`",
+            "common=true should start with the canonical opener; got: `{}`",
             &p[..50.min(p.len())]
         );
         assert_eq!(p.split("\n\n").count(), 3);

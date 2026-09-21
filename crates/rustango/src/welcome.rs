@@ -179,7 +179,7 @@ a:hover {{ text-decoration: underline; }}
   <img src="{icon_url}" alt="rustango">
   <div>
     <h1>rustango is running<span class="pill">v{version}</span></h1>
-    <p class="tag">Django-shape Rust web framework — ready to build something.</p>
+    <p class="tag">Batteries-included Rust web framework — ready to build something.</p>
   </div>
 </header>
 
@@ -236,7 +236,7 @@ a:hover {{ text-decoration: underline; }}
   <div class="card">
     <h3>HTTP + UI</h3>
     <ul>
-      <li>Auto-admin (Django-shape) + theming</li>
+      <li>Auto-admin + theming</li>
       <li>Class-based views (List/Detail/Create/Update/Delete)</li>
       <li>ViewSets + OpenAPI auto-derive</li>
       <li>Tera templates + CSRF + bulk actions</li>

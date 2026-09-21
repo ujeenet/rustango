@@ -1,4 +1,4 @@
-//! Django-parity #437 — DRF `UniqueTogetherValidator`. Pre-save
+//! Issue #437 — the unique-together serializer validator. Pre-save
 //! check that a candidate row doesn't collide on any of the model's
 //! declared `unique_together` constraints.
 

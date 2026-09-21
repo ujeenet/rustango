@@ -1,4 +1,4 @@
-//! Number formatting, shaped like `django.utils.numberformat.format`.
+//! Number formatting with explicit separators and grouping.
 //!
 //! You choose the decimal separator, the thousand separator, the group
 //! size and how many decimal places to show.
@@ -19,9 +19,9 @@
 //! assert_eq!(format(1234567.0, ",", Some(0), 3, "\u{00A0}"),
 //!            "1\u{00A0}234\u{00A0}567");
 //!
-//! // Indian numbering: groups of 3 then 2 isn't supported — we do
-//! // uniform `grouping=3` like Django's basic shape. Indian-numbering
-//! // apps reach for a custom grouping function.
+//! // Indian numbering — groups of 3 then 2 — is not supported;
+//! // grouping is uniform. Those apps need a custom grouping
+//! // function.
 //! ```
 //!
 //! ## Limits
@@ -85,10 +85,8 @@ pub fn format(
     out
 }
 
-/// Django's
-/// [`floatformat`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#floatformat)
-/// filter. The sign of `precision` decides whether trailing zeros are
-/// kept:
+/// The `floatformat` filter. The sign of `precision` decides whether
+/// trailing zeros are kept:
 ///
 /// * `precision > 0`: exactly that many decimals, zeros kept.
 /// * `precision < 0`: at most that many decimals, zeros dropped.

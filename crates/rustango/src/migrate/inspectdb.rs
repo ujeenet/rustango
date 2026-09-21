@@ -1,6 +1,6 @@
 //! `manage inspectdb`: print `#[derive(Model)]` source for every
 //! table in a live database, so you can adopt rustango against
-//! existing data. Same idea as Django's `inspectdb`.
+//! existing data.
 //!
 //! Introspection works on all three backends:
 //!   - **PostgreSQL**: `information_schema`. `--schema` picks the PG

@@ -990,14 +990,14 @@ jobs:
             --test viewset_sqlite_live \
             --test admin_totp_2fa_sqlite_live \
             --test admin_totp_2fa_e2e \
-            --test django6_aggregation \
-            --test django6_subquery \
-            --test django6_window \
-            --test django6_joins \
-            --test django6_setops \
-            --test django6_json_dates \
-            --test django6_writes \
-            --test django6_delta
+            --test orm_aggregation \
+            --test orm_subquery \
+            --test orm_window \
+            --test orm_joins \
+            --test orm_setops \
+            --test orm_json_dates \
+            --test orm_writes \
+            --test orm_delta
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
@@ -1232,9 +1232,9 @@ jobs:
       - run: cargo test -p rustango --features mysql --test inspectdb_mysql_live
       - run: cargo test -p rustango --features mysql --test funcs_batch1_mysql_live
       - run: cargo test -p rustango --features mysql,testkit --test json_path_tri
-      # Django 6.0 ORM parity execution-verification suite (audit §26).
-      # Shared scenario bodies; the mysql cfg-mod runs here, the sqlite
-      # and PG mods are compiled out.
+      # ORM execution-verification suite (audit §26). Shared scenario
+      # bodies; the mysql cfg-mod runs here, the sqlite and PG mods are
+      # compiled out.
       #
       # `--no-default-features` for the same reason as the cache test
       # above, and these are where it actually cost something (#1435).
@@ -1247,14 +1247,14 @@ jobs:
       # Verified against a real MySQL 8.0 before changing: all eight
       # build and pass under `--no-default-features --features mysql`,
       # same test counts, in under a second each.
-      - run: cargo test -p rustango --no-default-features --features mysql --test django6_aggregation
-      - run: cargo test -p rustango --no-default-features --features mysql --test django6_subquery
-      - run: cargo test -p rustango --no-default-features --features mysql --test django6_window
-      - run: cargo test -p rustango --no-default-features --features mysql --test django6_joins
-      - run: cargo test -p rustango --no-default-features --features mysql --test django6_setops
-      - run: cargo test -p rustango --no-default-features --features mysql --test django6_json_dates
-      - run: cargo test -p rustango --no-default-features --features mysql --test django6_writes
-      - run: cargo test -p rustango --no-default-features --features mysql --test django6_delta
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_aggregation
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_subquery
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_window
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_joins
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_setops
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_json_dates
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_writes
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_delta
 
   # PostGIS geometry live suite (#443). The regular `postgres_test` runs
   # against `pgvector/pgvector:pg16`, which has no PostGIS, so the

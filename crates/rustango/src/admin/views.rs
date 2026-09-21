@@ -1,4 +1,4 @@
-//! Admin view handlers — Django's `views.py` shape.
+//! Admin view handlers: the code behind every admin screen.
 //!
 //! One async fn per route, each returning either rendered HTML or a
 //! redirect. Errors flow through [`AdminError`] which converts to a JSON
@@ -285,8 +285,8 @@ pub(crate) async fn table_view(
         active_field_filters.push((field.name, value.clone()));
     }
 
-    // Custom list filters (Django's `SimpleListFilter`). When a
-    // filter's parameter is present in the URL, call its predicate
+    // Custom list filters: a named filter with its own choices. When
+    // a filter's parameter is present in the URL, call its predicate
     // function and add the predicates it returns.
     let mut active_custom_filters: Vec<(&'static str, String)> = Vec::new();
     for cf in crate::admin::list_filters::for_table(model.table) {
@@ -299,8 +299,8 @@ pub(crate) async fn table_view(
         }
     }
 
-    // Queryset hooks (Django's `ModelAdmin.get_queryset`). Each hook
-    // sees the request and returns extra predicates. They only add
+    // Queryset hooks. Each hook sees the request and returns extra
+    // predicates for this model's list. They only add
     // WHERE conjuncts, so they compose with search, facets, the date
     // hierarchy and pagination.
     for h in crate::admin::queryset_hooks::for_table(model.table) {
@@ -1411,8 +1411,6 @@ fn decode_bucket_sq_row(row: &sqlx::sqlite::SqliteRow) -> (i32, i64) {
 //   _save        → the list view
 //   _continue    → back to the detail page
 //   _addanother  → an empty add form
-//
-// The names match Django's `response_post_save_*` buttons.
 pub(crate) fn post_save_redirect(
     admin_prefix: &str,
     table: &str,
@@ -1453,8 +1451,8 @@ use crate::url_codec::url_encode;
 // `GET <admin>/<target>/__autocomplete?q=…` and puts the matches in
 // a `<datalist>`.
 //
-// The route lives on the *target* model, not the field's owner, like
-// Django's `ModelAdmin.autocomplete_view`. A target with no
+// The route lives on the *target* model, not on the field's owner, so
+// one route serves every form that points at it. A target with no
 // searchable columns returns an empty list rather than every row.
 
 pub(crate) async fn autocomplete_view(
@@ -2027,7 +2025,7 @@ pub(crate) async fn update_submit(
     // installs gives a "who changed what" trail for free.
     super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
     // The `post_save` hook fires after the UPDATE and the audit
-    // emit. `change = true` matches Django's argument.
+    // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
         pk: pk_raw.clone(),

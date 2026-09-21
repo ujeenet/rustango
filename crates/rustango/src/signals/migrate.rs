@@ -1,5 +1,4 @@
-//! Migration signals, in Django's shape: `pre_migrate` and
-//! `post_migrate`.
+//! Migration signals: `pre_migrate` and `post_migrate`.
 //!
 //! Receivers register globally and run around two migrate paths:
 //!

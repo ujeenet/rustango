@@ -94,7 +94,7 @@ fn get_string<'r>(row: &'r HashMap<String, SqlValue>, key: &str) -> &'r str {
 }
 
 /// Shape 2 — `.values("author_id").annotate("n", count(*))`.
-/// "Sales per author" — the Django canonical example.
+/// "Posts per author" — the canonical grouped count.
 #[tokio::test]
 async fn shape2_posts_per_author() {
     let _g = live_lock().lock().await;
@@ -158,8 +158,8 @@ async fn shape2_monthly_revenue_per_author() {
     cleanup(&pool).await;
 }
 
-/// Shape 3 — bare `.annotate(...)` without `.values(...)`. Django's
-/// implicit "GROUP BY every selected non-aggregate column" rule. The
+/// Shape 3 — bare `.annotate(...)` without `.values(...)`, which
+/// infers "GROUP BY every selected non-aggregate column". The
 /// test runs the query and proves the database accepts the inferred
 /// SELECT-all-cols + GROUP-BY-all-cols shape.
 #[tokio::test]

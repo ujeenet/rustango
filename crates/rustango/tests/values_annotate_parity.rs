@@ -27,7 +27,7 @@ pub struct Post {
     revenue: i64,
 }
 
-// ---------- Django Shape 2: `.values(cols).annotate(agg)` → GROUP BY cols ----------
+// ---------- Shape 2: `.values(cols).annotate(agg)` → GROUP BY cols ----------
 
 #[test]
 fn shape2_emits_group_by_on_every_dialect() {
@@ -74,7 +74,7 @@ fn shape2_multi_column_group_by() {
     );
 }
 
-// ---------- Django Shape 3: `.annotate(agg)` alone → GROUP BY every scalar column ----------
+// ---------- Shape 3: `.annotate(agg)` alone → GROUP BY every scalar column ----------
 
 #[test]
 fn shape3_emits_group_by_every_scalar_column_on_every_dialect() {
@@ -188,7 +188,7 @@ fn mixed_filters_route_to_both_where_and_having() {
 #[test]
 fn bare_values_emits_no_group_by_no_aggregate() {
     // `.values()` without an aggregating `.annotate()` is a pure
-    // projection (Django Shape 1) — no GROUP BY emitted.
+    // projection (Shape 1) — no GROUP BY emitted.
     use rustango::query::QuerySet;
     let qs: QuerySet<Post> = QuerySet::default();
     let q = qs.values_dict(&["author_id", "status"]).compile().unwrap();

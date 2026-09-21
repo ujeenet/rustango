@@ -46,17 +46,15 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Django-parity
-/// [`django.utils.crypto.constant_time_compare(val1, val2)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) —
-/// compare two byte strings in time that depends on their length but
+/// Compare two byte strings in time that depends on their length but
 /// not on their content. Use it for HMAC tags, CSRF tokens, session
 /// signatures and TOTP codes. A normal `==` returns early on the
 /// first differing byte, which lets an attacker guess a secret one
 /// byte at a time.
 ///
-/// Different lengths return `false` right away, like Django. That
-/// path is not constant-time, but the length of an HMAC tag or a
-/// token is not a secret.
+/// Different lengths return `false` right away. That path is not
+/// constant-time, but the length of an HMAC tag or a token is not a
+/// secret.
 ///
 /// **This must stay the only such function in the crate.** It calls
 /// `subtle::ConstantTimeEq` instead of a hand-written XOR loop,
@@ -82,11 +80,8 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-/// Django-parity
-/// [`django.utils.crypto.salted_hmac(key_salt, value, secret=None,
-/// algorithm='sha1')`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.salted_hmac) —
-/// compute `HMAC(SHA256(secret || key_salt), value)` and return the
-/// raw 32-byte tag. Django uses SHA-1 by default; this uses SHA-256.
+/// Compute `HMAC(SHA256(secret || key_salt), value)` and return the
+/// raw 32-byte tag.
 ///
 /// The salt gives each purpose its own derived key from one shared
 /// secret. A value signed for sessions then cannot be replayed as a
@@ -241,7 +236,7 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    // ---------------- constant_time_compare (Django parity) ----------------
+    // ---------------- constant_time_compare ----------------
 
     #[test]
     fn ct_compare_equal_inputs_match() {
@@ -257,7 +252,7 @@ mod tests {
 
     #[test]
     fn ct_compare_length_mismatch_fails() {
-        // Django shape: length mismatch → False, no panic.
+        // Length mismatch → false, no panic.
         assert!(!constant_time_compare(b"abc", b"abcd"));
         assert!(!constant_time_compare(b"abcd", b"abc"));
         assert!(!constant_time_compare(b"x", b""));
@@ -300,7 +295,7 @@ mod tests {
         assert!(constant_time_compare(&a, &c));
     }
 
-    // -------- salted_hmac (Django parity) --------
+    // -------- salted_hmac --------
 
     #[test]
     fn salted_hmac_returns_32_byte_tag() {

@@ -1,5 +1,5 @@
-//! Custom facet filters with your own lookup values and predicates,
-//! like Django's `admin.SimpleListFilter`.
+//! A named filter that puts its own choices in the list sidebar and
+//! decides what each choice means as a predicate.
 //!
 //! `list_filter = "field"` builds a facet card from the distinct
 //! values of one column. A filter here instead declares a fixed list

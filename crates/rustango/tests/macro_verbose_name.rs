@@ -1,4 +1,4 @@
-//! `#[rustango(verbose_name = "...")]` field attribute (Django parity #448).
+//! `#[rustango(verbose_name = "...")]` field attribute (#448).
 //!
 //! Covers:
 //! - macro threads the value through to `FieldSchema::verbose_name`

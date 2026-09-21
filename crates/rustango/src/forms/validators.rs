@@ -1,12 +1,12 @@
 //! Reusable declarative field-constraint validators.
 //!
-//! Used by the `#[derive(Serializer)]` write path (DRF
-//! `validators=[…]`): each writable field is checked against the
-//! constraints resolved for it — the serializer-declared value when
-//! given (`#[serializer(max_length = …)]`), otherwise the model's
+//! Used by the `#[derive(Serializer)]` write path: each writable
+//! field is checked against the constraints resolved for it — the
+//! serializer-declared value when given
+//! (`#[serializer(max_length = …)]`), otherwise the model's
 //! [`crate::core::FieldSchema`] (`max_length` / `min` / `max` /
-//! `choices`). The messages match the admin `DynamicForm` so every
-//! validation surface speaks the same Django/DRF language.
+//! `choices`). The messages match the admin `DynamicForm`, so a
+//! field reports the same wording wherever it is validated.
 
 use super::FormErrors;
 use serde_json::Value;

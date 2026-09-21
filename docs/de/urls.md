@@ -2,12 +2,12 @@
 
 URLs (`/posts/42`) überall in Handlern und Templates fest zu verdrahten ist fragil
 — ändern Sie eine Route und jedes Literal bricht stillschweigend. **Rustango**
-gibt Ihnen Djangos Antwort: **benennen Sie ein URL-Muster einmal, dann bauen Sie
+gibt Ihnen die Antwort darauf: **benennen Sie ein URL-Muster einmal, dann bauen Sie
 die URL überall über den Namen** — in Rust mit `reverse(...)`, in Templates mit
-`{{ url(...) }}` und in Redirects mit `redirect_to_view(...)`. Die API-Oberfläche
-spiegelt Djangos `reverse()` / `{% url %}` / `resolve_url()` / `redirect()`.
+`{{ url(...) }}` und in Redirects mit `redirect_to_view(...)`; `resolve_url(...)`
+nimmt wahlweise einen Namen oder einen fertigen Pfad entgegen.
 
-[![Reverse-URLs im Django-Stil: register_url! benennt ein Muster, reverse() baut die URL in Rust, und {{ url(...) }} baut die URL in einem Template](../img/urls.png)](../img/urls.png)
+[![Benannte Reverse-URLs: register_url! benennt ein Muster, reverse() baut die URL in Rust, und {{ url(...) }} baut die URL in einem Template](../img/urls.png)](../img/urls.png)
 
 > **Quelle:** `rustango::urls` (`register_url!`, `reverse`, `reverse_owned`,
 > `all_routes`, `duplicates`, `register_url_tag`) und `rustango::shortcuts`
@@ -79,7 +79,7 @@ Fehlabgleich) — siehe [Fehler](#fehler).
 
 ## Reverse in Templates
 
-Templates erhalten Djangos `{% url %}` als Tera-Funktion. Registrieren Sie sie
+Templates erhalten eine `url`-Funktion für Tera. Registrieren Sie sie
 einmalig auf Ihrer `Tera`-Instanz beim Setup (sie liegt hinter dem
 `template_views`-Feature):
 
@@ -96,8 +96,7 @@ Pfadparameter (Strings, Zahlen und Booleans werden akzeptiert):
 <a href="{{ url(name='user-posts', user_id=7, post_id=42) }}">…</a>
 ```
 
-Das entspricht Djangos `{% url 'post-detail' id=42 %}`. Für das Capture-Muster
-`{% url 'x' as var %}` verwenden Sie Teras `{% set %}`:
+Um das Ergebnis in einer Variablen festzuhalten, verwenden Sie Teras `{% set %}`:
 
 ```jinja
 {% set post_url = url(name='post-detail', id=post.id) %}
@@ -111,8 +110,8 @@ fehl, statt stillschweigend eine kaputte URL zu erzeugen.
 
 ## Redirect per Name
 
-`rustango::shortcuts` spiegelt Djangos View-Namen-Redirect-Helfer, sodass Handler
-niemals ein `Location` fest verdrahten:
+`rustango::shortcuts` liefert Redirect-Helfer, die auf Routennamen arbeiten,
+sodass Handler niemals ein `Location` fest verdrahten:
 
 ```rust
 use std::collections::HashMap;
@@ -124,7 +123,7 @@ params.insert("id", "42".to_string());
 let response = redirect_to_view("post-detail", &params)?;
 ```
 
-`resolve_url(spec, &params)` ist Djangos `resolve_url`: Wenn `spec` bereits wie
+`resolve_url(spec, &params)` nimmt beides entgegen: Wenn `spec` bereits wie
 eine URL aussieht (`/…`, `http://`, `https://`, `./`, `../`), wird es unverändert
 zurückgegeben; sonst wird es als Routenname behandelt und per Reverse aufgelöst.
 Praktisch für einen `?next=`-Parameter oder eine Einstellung, die *entweder* einen
@@ -144,8 +143,8 @@ ein schlichtes `302` zurück.)
 
 Es gibt kein `include()` und keinen automatisch angewandten App-Namespace — jedes
 `register_url!` landet in einer globalen Registry. Namespacing ist eine
-**Konvention im Namen selbst**: mit `app:` präfixieren, genau wie Sie Djangos
-`reverse("app:detail")` aufrufen würden.
+**Konvention im Namen selbst**: mit `app:` präfixieren und den vollen Namen an
+`reverse("app:detail")` übergeben.
 
 ```rust
 register_url!("blog:post-detail", "/blog/posts/{id}");
@@ -220,7 +219,7 @@ Das Routing *ist* [axum](https://docs.rs/axum) 0.8, und axum matcht Pfade mit
 [`matchit`](https://docs.rs/matchit), einem **Radix-Trie**-Router. Er läuft die URL
 segmentweise einen Präfixbaum hinunter, sodass ein Match O(Pfadlänge) kostet und
 unabhängig davon ist, wie viele Routen Sie registriert haben. Ein Regex-Router
-macht das Gegenteil: Django wertet `urlpatterns` von oben nach unten aus und führt
+macht das Gegenteil: Er wertet eine Musterliste von oben nach unten aus und führt
 die Regex jedes Eintrags gegen den Pfad aus, bis eine passt. Der Trie erkauft
 Matching in konstanter Zeit und eine eindeutige „spezifischstes Literal
 gewinnt“-Präzedenz — zum Preis, Zeichenklassen-Beschränkungen nicht *im Pfad
@@ -235,15 +234,15 @@ eine Regex-Engine.
 Die Form `{int:id}` wird nur als **Portierungshilfe** für `reverse()` akzeptiert:
 Der Builder teilt den Platzhalter an `:` und behält nur den Namen, verwirft das
 Typpräfix ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). Das lässt `reverse()` auf
-einem Muster laufen, das wortwörtlich aus einem Django-`path("<int:id>/", …)`
-kopiert wurde — aber nichts validiert, dass der gelieferte Wert tatsächlich eine
-Ganzzahl ist.
+einem Muster laufen, das wortwörtlich aus einer typisierten Routendefinition
+eines anderen Frameworks kopiert wurde — aber nichts validiert, dass der
+gelieferte Wert tatsächlich eine Ganzzahl ist.
 
 ### Wie man eine eingeschränkte Route ausdrückt
 
 Matchen Sie das Segment mit einem schlichten `{placeholder}`, dann erzwingen Sie
-seine Form dort, wo der Wert verwendet wird. Djangos
-`re_path(r'^articles/(?P<year>[0-9]{4})/$', …)` wird zu:
+seine Form dort, wo der Wert verwendet wird. Eine Route, die nur vierstellige
+Jahreszahlen akzeptieren soll, sieht dann so aus:
 
 ```rust
 register_url!("article-by-year", "/articles/{year}");
@@ -259,7 +258,7 @@ async fn article_by_year(Path(year): Path<String>) -> impl IntoResponse {
 }
 ```
 
-Um *bevor* der Handler läuft abzulehnen (näher an Djangos Konverter-Semantik),
+Um *bevor* der Handler läuft abzulehnen,
 legen Sie die Prüfung in einen eigenen axum-Extractor (`FromRequestParts`) und
 nehmen Sie diesen Typ statt `Path<String>` als Handler-Argument — das Framework
 liefert keinen mit, aber axums Extractor-Trait ist die vorgesehene Nahtstelle. Der
@@ -281,7 +280,7 @@ kompilieren und über Anfragen hinweg wiederverwenden kann.
   mounten, damit sie synchron bleiben.
 - **Werte werden prozentkodiert** von `reverse`, sodass sie sicher in einen
   `Location`-Header oder ein `href` fallengelassen werden können.
-- **Keine Regex-/typisierten Konverter** in Mustern (Djangos `<int:pk>`);
+- **Keine Regex-/typisierten Konverter** in Mustern (etwa `<int:pk>`);
   Platzhalter sind schlichte `{name}`, und Werte werden unverändert eingesetzt
   (nach der Kodierung). Siehe [Regex & typisierte Pfadmuster](#regex--typisierte-pfadmuster)
   für das Warum und wie man eine Route stattdessen einschränkt.

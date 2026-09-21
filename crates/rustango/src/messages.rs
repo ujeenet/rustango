@@ -1,5 +1,4 @@
-//! Django's [messages framework](https://docs.djangoproject.com/en/6.0/ref/contrib/messages/),
-//! backed by a signed cookie.
+//! Flash messages, backed by a signed cookie.
 //!
 //! Use it for the POST→303→render flash idiom: a handler stages a
 //! one-shot message ("Saved successfully") and redirects. The next
@@ -30,8 +29,8 @@
 //! ## Storage
 //!
 //! The cookie body is `base64url(payload).base64url(signature)`,
-//! signed with `HMAC-SHA256`. Reading drops it, so messages are
-//! one-shot like Django's.
+//! signed with `HMAC-SHA256`. Reading drops it, so a message shows
+//! exactly once.
 //!
 //! ## Tampering and replay
 //!
@@ -56,7 +55,7 @@ use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-/// Message severity, mirroring Django's five-level scheme.
+/// Message severity, in five levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     Debug,
@@ -109,7 +108,7 @@ impl<'de> serde::Deserialize<'de> for Level {
     }
 }
 
-/// One flash message. `tags` is Django's `extra_tags`: a free-form
+/// One flash message. `tags` is a free-form
 /// string, usually CSS class names, that the template renders next to
 /// the class derived from the level.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -221,8 +220,8 @@ pub fn error(secret: &[u8], headers: &axum::http::HeaderMap, body: &str) -> Stri
 // ------------------------------------------------------------------ redirect-with-message
 
 /// Stage a message at `level` and return a `302 Found` redirect to
-/// `url` with the `Set-Cookie` already attached. Same as Django's
-/// `messages.add_message` followed by `redirect(url)`.
+/// `url` with the `Set-Cookie` already attached — the staging step
+/// and the redirect in one call.
 ///
 /// ```ignore
 /// use rustango::messages::{redirect_with_message, Level};

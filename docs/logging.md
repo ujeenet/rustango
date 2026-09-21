@@ -1,8 +1,8 @@
 # Logging
 
 Logs are how a running app tells you what it did. **Rustango** builds on
-[`tracing`](https://docs.rs/tracing) — the same shape as Django's `LOGGING`
-setting or Laravel's channels, but structured: an event carries named fields
+[`tracing`](https://docs.rs/tracing) — the same shape as Laravel's logging
+channels, but structured: an event carries named fields
 (`status=500`, `tenant=acme`) rather than a formatted sentence, so a log
 aggregator can filter on them.
 

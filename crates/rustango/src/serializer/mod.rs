@@ -1,5 +1,4 @@
-//! Serializers, in the shape DRF uses: typed JSON built from model
-//! instances.
+//! Serializers — typed JSON built from model instances.
 //!
 //! A serializer is a struct that maps a [`Model`] to a JSON shape.
 //! Field attributes decide what is included, renamed or left out.
@@ -270,8 +269,8 @@ pub async fn check_unique_together_pool(
         }
 
         // Build a WHERE of ANDed equalities. If a column has no
-        // value, skip the whole constraint, as Django does when only
-        // part of the set is bound.
+        // value, skip the whole constraint: a partly bound set cannot
+        // be checked for a collision.
         let mut predicates: Vec<Filter> = Vec::with_capacity(index.columns.len());
         let mut all_bound = true;
         for col in index.columns {
@@ -340,8 +339,7 @@ pub async fn check_unique_together_pool(
     }
 }
 
-// Helpers for hyperlinked output, like DRF's
-// `HyperlinkedModelSerializer`. A normal serializer emits keys such
+// Helpers for hyperlinked output. A normal serializer emits keys such
 // as `{"id": 42, "author_id": 7}`; a hyperlinked one emits
 // `{"url": "/api/posts/42", "author_url": "/api/users/7"}`. You
 // could do this with `#[serializer(method = "url")]` and a hand-
@@ -392,9 +390,9 @@ pub fn hyperlink_url(template: &str, pk: &crate::core::SqlValue) -> String {
 ///
 /// - Adds `url`, by putting `base[pk_field]` into `self_template`.
 /// - For each `(fk_field, template)`, adds a `<fk_field>_url` key.
-///   A missing or null FK gives a null URL, as DRF does.
-/// - Keeps the original `id` and `<fk>_id` keys, again as DRF does.
-///   Remove them afterwards if you do not want them.
+///   A missing or null FK gives a null URL.
+/// - Keeps the original `id` and `<fk>_id` keys. Remove them
+///   afterwards if you do not want them.
 ///
 /// # Panics
 /// When `base` is not a JSON object. A serializer's `to_value`

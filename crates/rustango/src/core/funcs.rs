@@ -604,8 +604,8 @@ pub fn sign(x: impl Into<Expr>) -> Expr {
 
 /// `a % b` — modulo. Every dialect uses `%`, so this lowers to
 /// [`Expr::BinOp`] with [`super::expr::BinOp::Mod`] rather than a
-/// function call. The function spelling matches Django's
-/// `Mod(F('a'), F('b'))`.
+/// function call. The function spelling is there so it composes with
+/// the other `funcs` builders.
 #[must_use]
 pub fn mod_(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     a.into().binop(super::expr::BinOp::Mod, b)

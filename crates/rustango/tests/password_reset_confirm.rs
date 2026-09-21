@@ -1,4 +1,4 @@
-//! Django-parity #391 — `PasswordResetConfirmView`.
+//! Issue #391 — the password-reset confirmation view.
 //!
 //! Verifies `auth_flows::confirm_password_reset_pool_into` against
 //! sqlite: token round-trips, password gets hashed + written, weak

@@ -1,5 +1,5 @@
-//! Django-parity `EmailMessage.attach(filename, content, mimetype)` —
-//! attachment builder + backend serialization.
+//! `Email::attach(filename, content, mimetype)` — attachment builder
+//! + backend serialization.
 
 #![cfg(feature = "email")]
 

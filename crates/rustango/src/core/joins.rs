@@ -44,7 +44,7 @@
 //!
 //! | Need | Tool |
 //! |---|---|
-//! | Pull related rows along with the main row (Django shape) | `select_related` |
+//! | Pull related rows along with the main row | `select_related` |
 //! | Filter the main rows by a related-table predicate | `exists(...)` / `not_exists(...)` |
 //! | Need both joined columns AND a custom join predicate | `join(...)` |
 //! | One-shot anti-join | `not_exists(...)` |

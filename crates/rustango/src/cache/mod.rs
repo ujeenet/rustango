@@ -121,8 +121,8 @@ pub trait Cache: Send + Sync + 'static {
         Ok(new)
     }
 
-    /// Like Django's `cache.add`: store the value only if the key is
-    /// absent or expired. Returns `true` when the write happened.
+    /// Store the value only if the key is absent or expired.
+    /// Returns `true` when the write happened.
     ///
     /// The default is `exists` then `set`, which can race between
     /// processes. Backends with a native "set if absent" (Redis
@@ -143,7 +143,7 @@ pub trait Cache: Send + Sync + 'static {
         Ok(true)
     }
 
-    /// Like Django's `cache.touch`: replace the TTL on a key without
+    /// Replace the TTL on a key without
     /// changing its value. Returns `true` when the key was there,
     /// `false` when it was absent or expired.
     ///
@@ -199,8 +199,7 @@ pub trait Cache: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Alias for [`Self::exists`], under the name Django uses. Never
-    /// needs an override.
+    /// Alias for [`Self::exists`]. Never needs an override.
     async fn has_key(&self, key: &str) -> Result<bool, CacheError> {
         self.exists(key).await
     }
@@ -214,7 +213,7 @@ pub trait Cache: Send + Sync + 'static {
     }
 
     /// Return the stored value, or `default` when the key is absent or
-    /// expired. Matches Django's `cache.get(key, default)`.
+    /// expired.
     ///
     /// ```ignore
     /// let name = cache.get_or("username", "anonymous").await?;
@@ -817,8 +816,7 @@ impl Cache for InMemoryCache {
 
 // ------------------------------------------------------------------ FileCache
 
-/// Cache on disk, one file per key. Modelled on Django's
-/// `FileBasedCache`.
+/// Cache on disk, one file per key.
 ///
 /// Use it when you want a cache that survives a restart without
 /// running Redis, and the working set fits on local disk. Keys are
@@ -841,8 +839,8 @@ impl Cache for InMemoryCache {
 /// then drops the entry. But the value carries no length, so a tear
 /// after the key returns `Some(_)` with a silently short value.
 ///
-/// Django takes a lock file per entry and supports `MAX_ENTRIES` with
-/// a cull strategy. This backend has neither. Write-to-temp plus
+/// There is no per-entry lock file and no entry cap with a cull
+/// strategy. Write-to-temp plus
 /// rename, a value length, and file locking are tracked in #1530.
 pub struct FileCache {
     dir: std::path::PathBuf,

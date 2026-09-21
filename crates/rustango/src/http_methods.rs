@@ -1,18 +1,5 @@
-//! Django-shape HTTP method restriction layer — mirrors
-//! `django.views.decorators.http.{require_http_methods, require_GET,
-//! require_POST, require_safe}`.
-//!
-//! Django uses these as decorators on view functions:
-//!
-//! ```python
-//! @require_http_methods(["GET", "POST"])
-//! def my_view(request):
-//!     ...
-//!
-//! @require_POST
-//! def submit(request):
-//!     ...
-//! ```
+//! HTTP method restriction layer — `require_methods`, `require_get`,
+//! `require_post`, `require_safe`.
 //!
 //! axum routes already pick a method, so this looks redundant until
 //! one handler must take GET and POST but not PUT, DELETE or PATCH.
@@ -37,7 +24,7 @@
 //!     .route("/feed", any(handler))
 //!     .require_methods(["GET", "HEAD", "POST"]);  // multi-method view
 //!
-//! // Convenience shortcuts mirror Django's per-verb decorators.
+//! // Convenience shortcuts for the common sets.
 //! let safe_only: Router = Router::new()
 //!     .route("/health", any(handler))
 //!     .require_safe();                            // GET / HEAD / OPTIONS
@@ -83,20 +70,20 @@ impl MethodRestrictLayer {
         }
     }
 
-    /// Django parity `@require_GET` — accept only GET.
+    /// Accept only GET.
     #[must_use]
     pub fn get_only() -> Self {
         Self::any_of([Method::GET])
     }
 
-    /// Django parity `@require_POST` — accept only POST.
+    /// Accept only POST.
     #[must_use]
     pub fn post_only() -> Self {
         Self::any_of([Method::POST])
     }
 
-    /// Like Django's `@require_safe`: GET, HEAD and OPTIONS, the
-    /// methods RFC 7231 §4.2.1 calls safe.
+    /// Accept GET, HEAD and OPTIONS — the methods RFC 7231 §4.2.1
+    /// calls safe.
     #[must_use]
     pub fn safe_only() -> Self {
         Self::any_of([Method::GET, Method::HEAD, Method::OPTIONS])
@@ -113,11 +100,11 @@ pub trait MethodRestrictRouterExt {
         I: IntoIterator<Item = M>,
         M: Into<Method>;
 
-    /// Django parity `@require_GET`.
+    /// Accept only GET.
     #[must_use]
     fn require_get(self) -> Self;
 
-    /// Django parity `@require_POST`.
+    /// Accept only POST.
     #[must_use]
     fn require_post(self) -> Self;
 

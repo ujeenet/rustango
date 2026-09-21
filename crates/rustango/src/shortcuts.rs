@@ -1,7 +1,6 @@
-//! Django-shape view shortcuts — the helpers every page render needs, so
+//! Handler shortcuts — the helpers every page render needs, so
 //! handlers do not reach for status codes, Tera and redirect builders by
-//! hand. Mirrors the Django
-//! [shortcuts module](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/).
+//! hand.
 //!
 //! ```ignore
 //! use rustango::shortcuts::{get_object_or_404, render, redirect, ShortcutError};
@@ -101,8 +100,7 @@ impl From<ExecError> for ShortcutError {
 }
 
 /// Fetch the first row matching `qs`, or return
-/// [`ShortcutError::NotFound`]. Django's
-/// [`get_object_or_404`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#get-object-or-404).
+/// [`ShortcutError::NotFound`].
 ///
 /// Add whatever filters and ordering you need to the queryset first; this
 /// only collapses the "fetch one or 404" branch.
@@ -139,8 +137,7 @@ where
 }
 
 /// Fetch every row matching `qs`, or return [`ShortcutError::NotFound`]
-/// when there are none. Django's
-/// [`get_list_or_404`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#get-list-or-404).
+/// when there are none.
 ///
 /// ```ignore
 /// let comments = get_list_or_404(
@@ -175,8 +172,7 @@ where
     }
 }
 
-/// Render a Tera template into an HTML response. Django's
-/// [`render(request, template, context)`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#render).
+/// Render a Tera template into an HTML response.
 ///
 /// A render failure returns `500 Internal Server Error` with the Tera
 /// error in the body. For a nicer error page, render your own error
@@ -199,8 +195,7 @@ pub fn render(tera: &tera::Tera, name: &str, ctx: &tera::Context) -> Response {
     }
 }
 
-/// Render a Tera template to a `String`. Django's
-/// [`render_to_string(template_name, context)`](https://docs.djangoproject.com/en/6.0/topics/templates/#django.template.loader.render_to_string).
+/// Render a Tera template to a `String`.
 ///
 /// Use it when the output is not an HTTP body: emails, reports, PDF
 /// source, snapshot tests, or a string spliced into a parent context.
@@ -227,23 +222,19 @@ pub fn render_to_string(
     tera.render(name, ctx)
 }
 
-/// Return a `302 Found` redirect to `url`. Django's
-/// [`redirect(to)`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#redirect).
+/// Return a `302 Found` redirect to `url`.
 ///
 /// See [`redirect_permanent`] for 301, [`redirect_see_other`] for 303,
-/// and [`redirect_to_view`] for Django's `redirect('post-detail', pk=1)`
-/// shape, which resolves a route name.
+/// and [`redirect_to_view`] to redirect to a registered route name.
 ///
-/// This matches Django's 302. Note axum's own `Redirect::to` sends 303
-/// instead, which treats the request method differently.
+/// Note axum's own `Redirect::to` sends 303 instead, which treats the
+/// request method differently.
 #[must_use]
 pub fn redirect(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::FOUND, url.into())
 }
 
 /// Turn either a raw URL or a registered route name into a URL string.
-/// Django's
-/// [`resolve_url`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#resolve-url).
 ///
 /// A `spec` starting with `/`, `http://`, `https://`, `./` or `../` is
 /// already a URL and comes back unchanged. Anything else is a route name
@@ -284,8 +275,7 @@ pub fn resolve_url(
 }
 
 /// Resolve a route name and params into a URL and return a `302 Found`
-/// to it. Django's `redirect('view-name', kwargs={'pk': 1})`. See also
-/// [`resolve_url`].
+/// to it. See also [`resolve_url`].
 ///
 /// # Errors
 /// Forwards [`crate::urls::ReverseError`] when the name or params do not
@@ -348,8 +338,7 @@ pub fn redirect_permanent_preserve_method(url: impl Into<String>) -> Response {
 }
 
 /// Redirect to a login page with the current URL as `?next=<path>`, so
-/// the login handler can send the user back afterwards. Django's
-/// [`redirect_to_login(next, login_url)`](https://docs.djangoproject.com/en/6.0/_modules/django/contrib/auth/views/#redirect_to_login).
+/// the login handler can send the user back afterwards.
 ///
 /// `next` is URL-encoded. It is joined with `&` when `login_url` already
 /// has a query string, and with `?` otherwise.
@@ -372,8 +361,8 @@ pub fn redirect_to_login(next: &str, login_url: &str) -> Response {
 }
 
 fn build_redirect(status: StatusCode, url: String) -> Response {
-    // Built by hand so the status matches Django (302/301) instead of
-    // axum's default (303/308). A URL with characters a header cannot
+    // Built by hand so the status is 302/301 instead of axum's default
+    // 303/308. A URL with characters a header cannot
     // hold yields a response with no Location; that is a caller bug, and
     // the bare status still helps debugging.
     let mut res = Response::builder()
@@ -387,8 +376,7 @@ fn build_redirect(status: StatusCode, url: String) -> Response {
 }
 
 /// Serialize `data` to JSON and return it with the given `status` and
-/// `Content-Type: application/json`. Django's
-/// [`JsonResponse(data, status=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#jsonresponse-objects).
+/// `Content-Type: application/json`.
 ///
 /// ```ignore
 /// use rustango::shortcuts::{json_response, json_ok};
@@ -470,8 +458,7 @@ pub fn json_server_error<T: serde::Serialize>(data: &T) -> Response {
 }
 
 /// Return an HTML string with the given status and
-/// `Content-Type: text/html; charset=utf-8`. Django's
-/// [`HttpResponse(html, status=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#httpresponse-objects).
+/// `Content-Type: text/html; charset=utf-8`.
 ///
 /// Use it when the HTML is already in hand and Tera is not worth
 /// starting. For Tera output, use [`render`], or [`render_to_string`]
@@ -528,12 +515,11 @@ pub fn text_response(content: impl Into<String>, status: u16) -> Response {
 }
 
 /// `304 Not Modified` with no body, for conditional GET when the
-/// client's cached copy is still fresh. Django's
-/// [`HttpResponseNotModified()`](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponseNotModified).
+/// client's cached copy is still fresh.
 ///
 /// A 304 must not carry a body, so the body is always empty. Copy any
-/// `ETag`, `Last-Modified` or `Cache-Control` headers yourself; Django
-/// does not copy them either.
+/// `ETag`, `Last-Modified` or `Cache-Control` headers yourself; a 304
+/// carries no body and no copied headers.
 ///
 /// ```ignore
 /// use rustango::shortcuts::not_modified;
@@ -554,8 +540,6 @@ pub fn not_modified() -> Response {
 /// resource existed and was removed on purpose: clients and crawlers
 /// should drop it from caches and indexes. `404 Not Found` says
 /// something weaker — that the server does not know the URL at all.
-/// Django's
-/// [`HttpResponseGone`](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponseGone).
 ///
 /// ```ignore
 /// use rustango::shortcuts::gone;
@@ -676,8 +660,7 @@ pub fn unprocessable_entity(message: impl Into<String>) -> Response {
 /// Build a download response: sets `Content-Type` and
 /// `Content-Disposition: attachment; filename="..."`, so the browser
 /// saves the body instead of showing it. Use it for CSV exports,
-/// generated PDFs and the like. Django's
-/// [`FileResponse(as_attachment=True, filename=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#fileresponse-objects).
+/// generated PDFs and the like.
 ///
 /// ```ignore
 /// use rustango::shortcuts::file_response;
@@ -1181,7 +1164,7 @@ mod tests {
         assert_eq!(ct, "application/octet-stream");
     }
 
-    // -------- resolve_url + redirect_to_view (Django parity) --------
+    // -------- resolve_url + redirect_to_view --------
 
     use std::collections::HashMap;
 
@@ -1262,7 +1245,7 @@ mod tests {
         assert!(redirect_to_view("no_such_route_xyz_for_redirect", &p).is_err());
     }
 
-    // -------- not_modified + gone (Django parity) --------
+    // -------- not_modified + gone --------
 
     #[tokio::test]
     async fn not_modified_is_304_with_empty_body() {

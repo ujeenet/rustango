@@ -1,13 +1,7 @@
-//! `Q()` — a composable boolean predicate, Django style.
+//! `Q()` — a composable boolean predicate.
 //!
 //! It wraps the dialect-neutral [`WhereExpr`] tree in a builder with
-//! operator overloads. Django writes:
-//!
-//! ```python
-//! qs.filter(Q(name__startswith='A') | (Q(age__gt=18) & ~Q(banned=True)))
-//! ```
-//!
-//! The Rust shape:
+//! operator overloads, so `|`, `&` and `!` compose predicates:
 //!
 //! ```ignore
 //! use rustango::query::Q;
@@ -138,38 +132,38 @@ impl Q {
         )
     }
 
-    /// Django `__contains`. The value is a literal substring: `%` and
+    /// `__contains`. The value is a literal substring: `%` and
     /// `_` in it match themselves. Use [`Q::like`] for a raw pattern.
     #[must_use]
     pub fn contains(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "%", "%", value, false)
     }
 
-    /// Django `__icontains`. Case-insensitive literal substring match.
+    /// `__icontains`. Case-insensitive literal substring match.
     #[must_use]
     pub fn icontains(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "%", "%", value, true)
     }
 
-    /// Django `__startswith`. Literal prefix match.
+    /// `__startswith`. Literal prefix match.
     #[must_use]
     pub fn startswith(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "", "%", value, false)
     }
 
-    /// Django `__istartswith`. Case-insensitive literal prefix match.
+    /// `__istartswith`. Case-insensitive literal prefix match.
     #[must_use]
     pub fn istartswith(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "", "%", value, true)
     }
 
-    /// Django `__endswith`. Literal suffix match.
+    /// `__endswith`. Literal suffix match.
     #[must_use]
     pub fn endswith(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "%", "", value, false)
     }
 
-    /// Django `__iendswith`. Case-insensitive literal suffix match.
+    /// `__iendswith`. Case-insensitive literal suffix match.
     #[must_use]
     pub fn iendswith(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "%", "", value, true)

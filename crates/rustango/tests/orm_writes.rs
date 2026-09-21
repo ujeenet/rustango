@@ -1,19 +1,17 @@
-//! Django 6.0 ORM parity — execution-based verification.
-//! Scenario group I: complex write paths — UPSERT, F-expression
-//! atomic updates, Case/When in UPDATE SET, zero-row update
-//! semantics (Django 6.0 `Model.NotUpdated`), get_or_create /
+//! ORM write paths — execution-based verification.
+//! Scenario group I: UPSERT, F-expression atomic updates, Case/When
+//! in UPDATE SET, zero-row update semantics, get_or_create /
 //! update_or_create.
 //!
-//! Django scenarios covered (docs.djangoproject.com/en/6.0):
-//! - `bulk_create(objs, update_conflicts=True, unique_fields=...,
-//!   update_fields=...)` — single- and two-column conflict targets
-//! - `update(qty=F("qty") + 5)` atomic arithmetic, no
+//! Scenarios covered:
+//! - bulk insert with an update-on-conflict target — single- and
+//!   two-column conflict targets
+//! - `update(qty = F("qty") + 5)` atomic arithmetic, no
 //!   read-modify-write race
-//! - `update(status=Case(When(qty=0, then=Value("out")), ...))`
-//! - Django 6.0 NEW: `save(force_update=True)` affecting 0 rows now
-//!   raises `Model.NotUpdated` — rustango's divergence is pinned
-//!   (silent `Ok(())`, rows-affected discarded by the macro save
-//!   path; the QuerySet update path does surface the count)
+//! - `Case`/`When` on the right-hand side of an UPDATE SET
+//! - an update that affects 0 rows: both the save family and the
+//!   QuerySet update path return the affected-row count, so a miss is
+//!   `Ok(0)` rather than an error (#1029)
 //! - `get_or_create()` / `update_or_create()`
 
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql"))]
@@ -70,9 +68,9 @@ mod scenarios {
         rows.into_iter().next().unwrap()
     }
 
-    /// Django `bulk_create(update_conflicts=True, unique_fields=
-    /// ["code"], update_fields=["qty"])` — idempotent re-run updates
-    /// only the listed columns.
+    /// `bulk_upsert_pool` with conflict target `["code"]` and update
+    /// set `["qty"]` — an idempotent re-run updates only the listed
+    /// columns.
     pub async fn check_bulk_upsert_idempotent(pool: &Pool) {
         let first = vec![sku("a", 10, 100), sku("b", 20, 200)];
         Sku::bulk_upsert_pool(&first, &["code"], &["qty", "price"], pool)
@@ -92,8 +90,8 @@ mod scenarios {
         assert_eq!(a.price, 100, "price is NOT in update_fields");
     }
 
-    /// Two-column conflict target — Django's `unique_fields=
-    /// ["warehouse", "sku"]` against a composite UNIQUE constraint.
+    /// Two-column conflict target `["warehouse", "sku"]` against a
+    /// composite UNIQUE constraint.
     pub async fn check_bulk_upsert_two_column_unique_target(pool: &Pool) {
         let mk = |wh: &str, s: &str, qty: i64| Stock {
             id: Auto::default(),
@@ -128,7 +126,7 @@ mod scenarios {
         assert_eq!(east[0].qty, 50);
     }
 
-    /// Django `update(qty=F("qty") + 5)` — DB-side arithmetic.
+    /// `update().set_expr("qty", F("qty") + 5)` — DB-side arithmetic.
     pub async fn check_f_expression_atomic_update(pool: &Pool) {
         Sku::bulk_upsert_pool(&[sku("f-test", 10, 1)], &["code"], &["qty"], pool)
             .await
@@ -144,8 +142,8 @@ mod scenarios {
         assert_eq!(fetch_sku(pool, "f-test").await.qty, 15);
     }
 
-    /// Django `update(status=Case(When(qty=0, then=Value("out")),
-    /// default=Value("in")))` — conditional bulk update.
+    /// `Case`/`When` on the SET side — set `status` to "out" when qty
+    /// is 0 and "in" otherwise, in one conditional bulk update.
     pub async fn check_case_when_in_update(pool: &Pool) {
         Sku::bulk_upsert_pool(
             &[sku("c-zero", 0, 1), sku("c-some", 4, 1)],
@@ -171,14 +169,12 @@ mod scenarios {
         assert_eq!(fetch_sku(pool, "c-some").await.status, "in");
     }
 
-    /// Django 6.0 NEW: a forced update affecting 0 rows raises
-    /// `Model.NotUpdated`. rustango's analogue (#1029): the whole save
-    /// family returns `Result<u64, _>` — a 0-row UPDATE surfaces as
-    /// `Ok(0)` and an INSERT as `Ok(1)`, so userland can `if n == 0 {…}`
-    /// (no exception, matching rustango's no-raise convention).
+    /// An update that affects 0 rows is not an error (#1029): the
+    /// whole save family returns `Result<u64, _>`, so a 0-row UPDATE
+    /// surfaces as `Ok(0)` and an INSERT as `Ok(1)`, and userland can
+    /// write `if n == 0 {…}`.
     pub async fn check_zero_row_update_semantics(pool: &Pool) {
-        // QuerySet path: no match → 0 affected, no error. Same as
-        // Django's `.update()` (which never raises NotUpdated).
+        // QuerySet path: no match → 0 affected, no error.
         let q = Sku::objects()
             .filter("code", "ghost")
             .update()
@@ -198,9 +194,8 @@ mod scenarios {
             .await
             .expect("delete behind the instance's back");
         stale.qty = 99;
-        // #1029 — a 0-row UPDATE now surfaces as `Ok(0)` (rustango's
-        // analogue of Django 6.0's `Model.NotUpdated` — we return the
-        // count rather than raising) instead of a silent `Ok(())`.
+        // #1029 — a 0-row UPDATE now surfaces as `Ok(0)`, where it
+        // used to be a silent `Ok(())`.
         let affected = stale.save_pool(pool).await.expect("save on a stale row");
         assert_eq!(affected, 0, "stale-row save affected zero rows");
         assert_eq!(
@@ -219,7 +214,7 @@ mod scenarios {
         assert_eq!(inserted, 1, "insert affects one row");
     }
 
-    /// Django `get_or_create(code="goc")` — create-then-find.
+    /// `get_or_create` on `code = "goc"` — create, then find.
     pub async fn check_get_or_create(pool: &Pool) {
         let (created_sku, created) = Sku::objects()
             .filter("code", "goc")
@@ -248,7 +243,7 @@ mod scenarios {
         assert_eq!(found.qty, 1);
     }
 
-    /// Django `update_or_create(code="uoc", defaults={"qty": 5})`.
+    /// `update_or_create` on `code = "uoc"` with a `qty` default.
     pub async fn check_update_or_create(pool: &Pool) {
         let (row, created) = Sku::objects()
             .filter("code", "uoc")
@@ -339,7 +334,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this scenario");
                     return;
                 };
                 scenarios::$name(&pool).await;
@@ -461,7 +456,7 @@ mod mysql_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("MYSQL_TEST_URL unset — skipping MySQL django6 test");
+                    eprintln!("MYSQL_TEST_URL unset — skipping the MySQL arm of this scenario");
                     return;
                 };
                 scenarios::$name(&pool).await;

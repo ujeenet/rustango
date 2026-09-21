@@ -1,6 +1,5 @@
 //! Window functions: `OVER (…)` with partition, order and frame
-//! clauses. Django's `Window(expression, partition_by=, order_by=,
-//! frame=)`.
+//! clauses.
 //!
 //! Every backend rustango supports has native window syntax
 //! (PG 9.0+, MySQL 8.0+, SQLite 3.25+), so the SQL is the same on all

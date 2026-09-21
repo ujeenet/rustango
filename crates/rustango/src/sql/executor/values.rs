@@ -1,5 +1,5 @@
-//! Django-style `.values()` and `.values_list()`: fetch chosen
-//! columns as plain data instead of decoding whole models.
+//! `.values()` and `.values_list()`: fetch chosen columns as plain
+//! data instead of decoding whole models.
 //!
 //! Each backend decodes a cell into a `SqlValue` its own way, then
 //! the `fetch_values_*` functions shape the rows into dicts, tuples
@@ -408,7 +408,7 @@ pub trait MaybeSqliteScalar {}
 impl<T> MaybeSqliteScalar for T {}
 
 /// Run a one-column [`SelectQuery`] and decode each row's only cell
-/// into `U`, as Django's `.values_list('col', flat=True)` does.
+/// into `U` — the flat form of `.values_list()`.
 ///
 /// # Errors
 /// SQL compilation or driver failure, including a decode error when

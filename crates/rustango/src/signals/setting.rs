@@ -2,8 +2,8 @@
 //! [`crate::test_settings::with_overridden`] scope is entered or
 //! left.
 //!
-//! Django sends one per setting, with a name and a value. Here an
-//! overlay replaces the whole `Settings`, so the signal carries only
+//! An overlay replaces the whole `Settings` at once rather than one
+//! key at a time, so the signal carries no name or value, only
 //! `enter`: `true` on the way in, `false` on the way out. Receivers
 //! mostly use it to drop caches that depend on config.
 //!

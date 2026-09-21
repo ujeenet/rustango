@@ -5,7 +5,7 @@ an upload, syncing a third-party API. Doing it inline makes the user wait and
 couples the response to a flaky external call. A **background job** moves that
 work onto a queue: the handler returns immediately, and a pool of workers runs
 the job moments later, with **automatic retries** and a **dead-letter** path for
-failures. This is Django-Q / Celery / Laravel queues, in Rust.
+failures. This is Celery or Laravel queues, in Rust.
 
 [![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](img/jobs.png)](img/jobs.png)
 

@@ -729,7 +729,7 @@ pub(crate) struct SessionGate {
     pub(crate) secret: Arc<AdminSessionSecret>,
     pub(crate) login_path: String,
     /// When `true`, a non-superuser session gets a 403 page. On by
-    /// default for the bare admin, like Django's `is_staff` check.
+    /// default for the bare admin.
     pub(crate) require_superuser: bool,
     /// Pool for the per-request password-fingerprint check that rejects
     /// cookies minted before a password change.

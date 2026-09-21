@@ -27,9 +27,9 @@ jamais construit d'API web, commencez par
 C'est une introduction de cinq minutes aux requêtes, aux routes, aux handlers et
 aux migrations, écrite exactement pour combler ce manque. Revenez ici ensuite.
 
-**Django n'est pas supposé acquis** — mais c'est de là que vient la conception,
-et cette documentation s'y compare donc en permanence. Ces comparaisons sont des
-apartés, jamais l'explication : si un parallèle avec Django ne vous évoque rien,
+**Aucune expérience préalable d'un autre framework web n'est supposée acquise.**
+Lorsque cette documentation fait une comparaison, c'est un aparté, jamais
+l'explication : si un parallèle ne vous évoque rien,
 passez-le, l'étape tient debout toute seule. Là où un terme joue un vrai rôle, le
 [glossaire](glossary.md) le définit en langage clair.
 
@@ -161,7 +161,7 @@ avec le même pilote et le même schéma d'URL.
 
 ## Étape 1 : installer le générateur de squelette
 
-Le générateur de squelette (scaffolder) crée pour vous des squelettes de projet et d'application, comme `django-admin` ou `rails new`.
+Le générateur de squelette (scaffolder) crée pour vous des squelettes de projet et d'application, comme `rails new`.
 
 ```bash
 cargo install cargo-rustango
@@ -210,7 +210,7 @@ myblog/
     └── urls.rs                 # agrégateur de routes `pub fn api()`
 ```
 
-Il n'y a qu'un seul binaire : `cargo run` démarre le serveur HTTP, et chaque verbe de style Django (`migrate`, `makemigrations`, `startapp`, `check`, …) passe par ce même binaire via `cargo run -- <verb>`. Il n'y a pas de binaire `manage` séparé.
+Il n'y a qu'un seul binaire : `cargo run` démarre le serveur HTTP, et chaque verbe d'administration (`migrate`, `makemigrations`, `startapp`, `check`, …) passe par ce même binaire via `cargo run -- <verb>`. Il n'y a pas de binaire `manage` séparé.
 
 `Cargo.toml` est le manifeste de dépendances (comme un `composer.json` ou un `Gemfile`). Ouvrez-le et vérifiez que `rustango` figure bien dans `[dependencies]`.
 
@@ -237,7 +237,7 @@ Il n'y a qu'un seul binaire : `cargo run` démarre le serveur HTTP, et chaque ve
 
 ## Étape 3 : configurer votre environnement
 
-La configuration se trouve dans un fichier `.env`, tout comme dans Django ou Laravel. Copiez le modèle :
+La configuration se trouve dans un fichier `.env`. Copiez le modèle :
 
 ```bash
 cp .env.example .env
@@ -333,7 +333,7 @@ Appuyez sur Ctrl-C pour arrêter.
 
 ## Étape 7 : créer une application
 
-Une « application » est un module fonctionnel autonome, exactement comme une application Django. Votre application blog contiendra le modèle Post, ses routes et ses gabarits (templates).
+Une « application » est un module fonctionnel autonome. Votre application blog contiendra le modèle Post, ses routes et ses gabarits (templates).
 
 ```bash
 cargo run -- startapp blog
@@ -350,13 +350,13 @@ src/blog/
 └── tests.rs               # in-process router + inventory smoke tests
 ```
 
-`startapp` branche le nouveau module pour vous (de manière similaire à l'ajout d'une entrée dans `INSTALLED_APPS` de Django) : il déclare `mod blog;` dans `src/main.rs` et insère une ligne `.merge(crate::blog::urls::api())` dans l'agrégateur `api()` de `src/urls.rs`, si bien que les routes du blog s'intègrent automatiquement à l'application. Aucun enregistrement manuel de module n'est nécessaire.
+`startapp` branche le nouveau module pour vous : il déclare `mod blog;` dans `src/main.rs` et insère une ligne `.merge(crate::blog::urls::api())` dans l'agrégateur `api()` de `src/urls.rs`, si bien que les routes du blog s'intègrent automatiquement à l'application. Aucun enregistrement manuel de module n'est nécessaire.
 
 ---
 
 ## Étape 8 : définir un modèle
 
-Un modèle est une table de base de données décrite comme une structure Rust, comme un modèle Django ou une classe Eloquent/Active Record. Ouvrez `src/blog/models.rs` et définissez votre `Post`. (Pour la référence complète — chaque type de champ, les clés primaires personnalisées et tous les attributs — voir le [guide des modèles](models.md).)
+Un modèle est une table de base de données décrite comme une structure Rust — une classe façon Active Record en Rust. Ouvrez `src/blog/models.rs` et définissez votre `Post`. (Pour la référence complète — chaque type de champ, les clés primaires personnalisées et tous les attributs — voir le [guide des modèles](models.md).)
 
 ```rust
 use rustango::{Auto, Model};
@@ -408,7 +408,7 @@ Quelques points Rust à noter :
 
 ## Étape 9 : créer et appliquer la migration
 
-Transformons maintenant ce modèle en une véritable table. Générez d'abord la migration à partir de votre modèle (comme `makemigrations` dans Django) :
+Transformons maintenant ce modèle en une véritable table. Générez d'abord la migration à partir de votre modèle :
 
 ```bash
 cargo run -- makemigrations
@@ -443,7 +443,7 @@ psql "$DATABASE_URL" -c "\d posts"
 
 ## Étape 10 : essayer l'ORM
 
-Lisons et écrivons des lignes depuis le code. L'ORM vous permet de manipuler les lignes de la base de données comme des structures Rust plutôt que du SQL brut, comme l'ORM de Django, Eloquent, ou Active Record.
+Lisons et écrivons des lignes depuis le code. L'ORM vous permet de manipuler les lignes de la base de données comme des structures Rust plutôt que du SQL brut.
 
 Modifiez temporairement `src/main.rs` pour exécuter un rapide test de création-et-lecture avant de démarrer le serveur. Remplacez le corps du `Cli` par un test ad hoc de l'ORM (conservez le `#[rustango::main]` du générateur de squelette ainsi que les déclarations `mod` en haut du fichier) :
 
@@ -490,7 +490,7 @@ Ce qui se passe ici, en termes simples :
 - `pool` est le pool de connexions à la base de données partagé. Vous passez une référence à celui-ci (`&pool`) dans les appels de requête plutôt que d'ouvrir une nouvelle connexion chaque fois.
 - Les appels à la base de données sont asynchrones, donc chacun se termine par `.await` — cela met en pause jusqu'à ce que le résultat revienne, puis continue. Le `?` après un `.await` signifie « si ceci a échoué, arrête et renvoie l'erreur ».
 - `main` renvoie un `Result`, le type succès-ou-erreur de Rust, ce qui explique pourquoi `?` et le `Ok(())` final fonctionnent.
-- Pour enregistrer une ligne, appelez `.save_pool(&pool)` sur celle-ci. Pour lire des lignes, construisez une requête avec `Post::objects()` et exécutez-la avec `.fetch(&pool)` — l'équivalent approximatif du `Post.objects.all()` de Django.
+- Pour enregistrer une ligne, appelez `.save_pool(&pool)` sur celle-ci. Pour lire des lignes, construisez une requête avec `Post::objects()` et exécutez-la avec `.fetch(&pool)` — sans filtre, cela renvoie toutes les lignes de la table.
 - `.fetch(…)` provient du trait `FetcherPool`, c'est pourquoi les imports l'incluent. Sans cette ligne, la méthode n'existe pas et le compilateur vous le signale sans expliquer pourquoi.
 - Ce sont là les appels multi-backend, et tout ce qui précède compile sans modification sur les trois bases de données. Il existe aussi `.save(&pool)` et `.fetch_on(&pool)`, qui prennent un `sqlx::PgPool` propre au pilote et n'existent que lorsque la feature `postgres` est activée. Préférez la paire multi-backend, sauf si vous visez délibérément une seule base de données. Voir le [guide de l'ORM](orm.md).
 
@@ -506,7 +506,7 @@ Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lue
 
 ## Étape 11 : activer l'administration automatique
 
-**Rustango** fournit une interface d'administration générée pour vos modèles, tout comme l'administration Django. Sa mise en place tient en deux petites étapes : un utilitaire qui transforme un pool en routeur d'administration, et un seul appel `.nest(...)` pour le monter.
+**Rustango** fournit une interface d'administration générée pour vos modèles — un back-office prêt à parcourir et modifier vos données. Sa mise en place tient en deux petites étapes : un utilitaire qui transforme un pool en routeur d'administration, et un seul appel `.nest(...)` pour le monter.
 
 Ajoutez vous-même cet utilitaire dans `src/urls.rs` — le générateur de squelette ne le crée pas, car rien de ce qu'il génère ne l'appellerait. Le `admin_prefix` doit correspondre au chemin sous lequel vous l'imbriquerez à l'étape suivante (`/admin`) afin que les propres liens et actions de formulaire de l'administration se résolvent correctement :
 
@@ -561,7 +561,7 @@ Ouvrez <http://localhost:8080/admin> (sans barre oblique finale). Vous verrez l'
 
 ## Étape 12 : construire l'API JSON
 
-Un ViewSet expose un modèle comme une API REST avec des points de terminaison de liste, création, récupération, mise à jour et suppression, tout comme un ViewSet Django REST Framework ou un contrôleur de ressource API Laravel.
+Un ViewSet expose un modèle comme une API REST avec des points de terminaison de liste, création, récupération, mise à jour et suppression — à partir d'une seule déclaration, sans écrire les routes à la main.
 
 ### 12a. Générer le ViewSet
 
@@ -633,7 +633,7 @@ curl "http://localhost:8080/api/posts?status__ne=draft"                   # look
 
 ## Étape 13 : façonner la sortie avec un Serializer
 
-Par défaut, le ViewSet renvoie tous les champs du modèle. Un Serializer vous permet de contrôler la forme de la réponse : masquer des champs internes, les renommer, ou en marquer certains en lecture seule. Il joue le même rôle qu'un serializer DRF ou une ressource API Laravel.
+Par défaut, le ViewSet renvoie tous les champs du modèle. Un Serializer vous permet de contrôler la forme de la réponse : masquer des champs internes, les renommer, ou en marquer certains en lecture seule. C'est le contrat entre vos modèles et le JSON que sert votre API.
 
 ```bash
 cargo run -- make:serializer PostSerializer --model Post
@@ -677,7 +677,7 @@ Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les rép
 pub struct PostViewSet;
 ```
 
-Ceci fonctionne à l'identique sur PostgreSQL, MySQL et SQLite. Les redéfinitions `method` / `read_only` / `source` / `write_only` s'appliquent toutes à la réponse, et **les corps de requête sont eux aussi validés via le serializer** : `create` / `update` exécutent sa `validate()` (par champ et inter-champs), renvoyant un `400` de forme DRF (`{field: [messages]}`) en cas d'échec, et les champs en lecture seule / calculés qu'un client tenterait de poster sont ignorés. (Remarque : les champs de serializer `nested` / `many` nécessitent que les lignes liées soient chargées via `select_related` ; sinon ils s'affichent avec leur valeur par défaut.) Voir le [guide des ViewSets](viewsets.md) pour le comportement complet en entrée et en sortie.
+Ceci fonctionne à l'identique sur PostgreSQL, MySQL et SQLite. Les redéfinitions `method` / `read_only` / `source` / `write_only` s'appliquent toutes à la réponse, et **les corps de requête sont eux aussi validés via le serializer** : `create` / `update` exécutent sa `validate()` (par champ et inter-champs), renvoyant un `400` avec une carte d'erreurs par champ (`{field: [messages]}`) en cas d'échec, et les champs en lecture seule / calculés qu'un client tenterait de poster sont ignorés. (Remarque : les champs de serializer `nested` / `many` nécessitent que les lignes liées soient chargées via `select_related` ; sinon ils s'affichent avec leur valeur par défaut.) Voir le [guide des ViewSets](viewsets.md) pour le comportement complet en entrée et en sortie.
 
 ---
 
@@ -729,7 +729,7 @@ let roles: Vec<String> = claims.get("roles").unwrap_or_default();
 
 ## Étape 15 : ajouter le middleware de sécurité
 
-Le middleware englobe chaque requête pour y ajouter un comportement transversal. Ce code se place dans `src/main.rs` : il remplace la ligne `let api = ...` de l'étape 11, afin que le routeur soit entièrement assemblé avant d'atteindre le `Cli`. Ici, vous empilez les identifiants de requête, la journalisation des accès, la limitation de débit, le CORS et les en-têtes de sécurité en une seule chaîne. Chaque `.method(...)` ajoute une couche, de manière similaire au middleware Django ou à la pile de middleware de Laravel. Voir le [guide du middleware](middleware.md) pour le catalogue complet des couches et les règles d'ordonnancement.
+Le middleware englobe chaque requête pour y ajouter un comportement transversal. Ce code se place dans `src/main.rs` : il remplace la ligne `let api = ...` de l'étape 11, afin que le routeur soit entièrement assemblé avant d'atteindre le `Cli`. Ici, vous empilez les identifiants de requête, la journalisation des accès, la limitation de débit, le CORS et les en-têtes de sécurité en une seule chaîne. Chaque `.method(...)` ajoute une couche ; l'ordre des appels détermine l'ordre de la pile. Voir le [guide du middleware](middleware.md) pour le catalogue complet des couches et les règles d'ordonnancement.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
@@ -762,7 +762,7 @@ Remettez le `app` fini au `Cli` exactement comme avant — `rustango::manage::Cl
 
 ## Étape 16 : écrire des tests
 
-**Rustango** inclut un client de test qui pilote votre routeur en process, ce qui vous permet de faire des assertions sur de vraies réponses HTTP sans démarrer de serveur, tout comme le client de test de Django ou les tests HTTP de Laravel. Générez un fichier de test :
+**Rustango** inclut un client de test qui pilote votre routeur en process, ce qui vous permet de faire des assertions sur de vraies réponses HTTP sans démarrer de serveur ni toucher au réseau. Générez un fichier de test :
 
 ```bash
 cargo run -- make:test PostSmoke      # generates tests/post_smoke.rs
@@ -837,7 +837,7 @@ cargo test --test post_smoke
 
 ## Étape 17 : exécuter la vérification système
 
-Avant de déployer, exécutez le vérificateur intégré. Il signale les erreurs de configuration courantes (comme un `RUSTANGO_SESSION_SECRET` trop faible ou une base de données inaccessible), de façon similaire au `check --deploy` de Django.
+Avant de déployer, exécutez le vérificateur intégré. Il signale les erreurs de configuration courantes (comme un `RUSTANGO_SESSION_SECRET` trop faible ou une base de données inaccessible) avant qu'elles ne se manifestent en production.
 
 ```bash
 cargo run -- check --deploy
@@ -903,7 +903,6 @@ Assurez-vous que votre proxy inverse :
 | Benchmarks de performance (vs Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | Conventions d'API (nommage, patrons de construction, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Fonctionnalités de sécurité en détail | [`docs/security.md`](security.md) |
-| Audit de parité avec Django | [`docs/django-parity-audit-2026-05-21.md`](https://github.com/ujeenet/rustango/blob/develop/docs/django-parity-audit-2026-05-21.md) |
 | Multi-tenancy | [README — section Multi-tenancy](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
 | Documentation de l'API | <https://docs.rs/rustango> |
 

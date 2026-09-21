@@ -1,5 +1,5 @@
 //! End-to-end live test for `assert_num_queries` against a real
-//! SQLite pool (Django-parity #431). Verifies the per-task counter
+//! SQLite pool (issue #431). Verifies the per-task counter
 //! actually fires from every instrumented `_pool` and `_tx` entry
 //! point in [`rustango::sql`].
 //!
@@ -159,7 +159,7 @@ async fn scope_take_resets_mid_block() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "assertNumQueries failed: expected 1 queries, observed 2")]
+#[should_panic(expected = "assert_num_queries failed: expected 1 queries, observed 2")]
 async fn fails_loudly_when_count_diverges() {
     let pool = fresh_pool().await;
 

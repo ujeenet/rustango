@@ -128,9 +128,8 @@ async fn get_for_models_returns_matching_rows() {
     assert_eq!(cts2.len(), 2, "both String pairs should resolve");
 }
 
-/// Unknown pairs are silently omitted from the result map — same
-/// shape Django's `get_for_models` returns when a model isn't
-/// migrated yet.
+/// Unknown pairs are silently omitted from the result map — the shape
+/// callers get when a model isn't migrated yet.
 #[tokio::test]
 async fn get_for_models_omits_unknown_pairs() {
     let _g = cache_lock().lock().await;

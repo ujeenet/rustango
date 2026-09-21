@@ -1,5 +1,4 @@
-//! A real HTTP server for tests, like Django's
-//! `LiveServerTestCase`.
+//! A real HTTP server for tests, on a real port.
 //!
 //! It binds an `axum::Router` to a random localhost port and serves
 //! it on a background task. Reach for it when

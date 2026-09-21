@@ -1,5 +1,5 @@
-//! Pluggable bulk actions for the auto-admin — Django's `actions = [...]`
-//! dropdown.
+//! Pluggable bulk actions for the auto-admin — the "Action" dropdown
+//! above a list view.
 //!
 //! A [`BulkAction`](crate::bulk_actions::BulkAction) has a codename, a
 //! label, and a `run` that acts on the selected primary keys. The admin's

@@ -1,6 +1,5 @@
 //! `manage dbshell`: open the native CLI client for the current
-//! `DATABASE_URL`, like Django's
-//! [`dbshell`](https://docs.djangoproject.com/en/6.0/ref/django-admin/#dbshell).
+//! `DATABASE_URL`.
 //!
 //! The URL scheme picks the client, and the process is replaced with
 //! `exec()` on Unix so Ctrl-C reaches the child.

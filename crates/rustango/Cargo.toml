@@ -1,6 +1,6 @@
 [package]
 name = "rustango"
-description = "Django-shaped batteries-included web framework for Rust: ORM + migrations + auto-admin + multi-tenancy + audit log + auth (sessions, JWT, OAuth2/OIDC, HMAC) + APIs (ViewSet, OpenAPI auto-derive, JSON:API) + jobs (in-mem + Postgres) + email + media (S3 / R2 / B2 / MinIO + presigned uploads + collections + tags) + production middleware (CSRF, CSP, rate-limiting, compression, idempotency, etc.)."
+description = "Batteries-included web framework for Rust: ORM + migrations + auto-admin + multi-tenancy + audit log + auth (sessions, JWT, OAuth2/OIDC, HMAC) + APIs (ViewSet, OpenAPI auto-derive, JSON:API) + jobs (in-mem + Postgres) + email + media (S3 / R2 / B2 / MinIO + presigned uploads + collections + tags) + production middleware (CSRF, CSP, rate-limiting, compression, idempotency, etc.)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -154,13 +154,13 @@ serializer = ["forms"]
 # backend is behind the separate `cache-redis` feature.
 cache = ["_async_trait", "dep:sha2"]
 
-# Per-view caching tower layer (`rustango::cache_page`) — Django's
-# @cache_page / @cache_control / @vary_on_headers analogs. Implies
-# `cache` (cache backend) + `admin` (axum types) + base64 for body
-# round-trip serialization. Issue #55.
+# Per-view caching tower layer (`rustango::cache_page`) — caches a
+# whole successful response, plus `Cache-Control` / `Vary` builders.
+# Implies `cache` (cache backend) + `admin` (axum types) + base64 for
+# body round-trip serialization.
 cache-page = ["cache", "admin", "dep:base64"]
 
-# Signals layer (`rustango::signals`) — Django-shape pre_save / post_save
+# Signals layer (`rustango::signals`) — pre_save / post_save
 # / pre_delete / post_delete async dispatch. Receivers register globally
 # per model type; senders fire signals after write paths.
 #
@@ -360,7 +360,7 @@ cache-redis = ["cache", "dep:redis"]
 csrf = ["forms", "_axum", "dep:base64", "dep:cookie", "_rand", "_tower"]
 
 # Generic class-based views for HTML templates (`rustango::template_views`)
-# — Django-shape `ListView` / `DetailView` / `CreateView` / `UpdateView` /
+# — `ListView` / `DetailView` / `CreateView` / `UpdateView` /
 # `DeleteView` over `#[derive(Model)]` types, rendered through Tera.
 # The JSON-API counterpart is `rustango::viewset` (always on).
 template_views = ["forms", "_axum", "_tera", "dep:serde_urlencoded"]

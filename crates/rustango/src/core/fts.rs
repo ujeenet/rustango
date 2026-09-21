@@ -1,8 +1,8 @@
 //! Postgres full-text search builder.
 //!
 //! Wraps the `to_tsvector`, `*_tsquery`, `ts_rank` and `ts_headline`
-//! functions in a builder shaped like Django's
-//! `django.contrib.postgres.search` API.
+//! functions in a typed builder, so a search vector, a query and a
+//! rank compose instead of being spelled out as raw SQL.
 //!
 //! **Postgres only.** MySQL needs a `FULLTEXT INDEX` and SQLite needs
 //! an FTS5 virtual table, so neither can build a vector from arbitrary

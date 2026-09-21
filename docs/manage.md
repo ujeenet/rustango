@@ -1,8 +1,8 @@
 # `manage` CLI reference
 
-This is **Rustango**'s command-line tool, like Django's `manage.py`, Laravel's
-`artisan`, or Rails' `rails` command. In a project scaffolded via
-`cargo rustango new`, one binary runs every command ("verb"):
+This is **Rustango**'s command-line tool, like Laravel's `artisan` or Rails'
+`rails` command. In a project scaffolded via `cargo rustango new`, one binary
+runs every command ("verb"):
 
 ```bash
 cargo run                          # runserver (no args = boot the HTTP server)
@@ -10,7 +10,7 @@ cargo run -- migrate               # any other verb
 cargo run -- --help                # full subcommand list
 ```
 
-[![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands — like Django's manage.py or Laravel's artisan](img/manage.png)](img/manage.png)
+[![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands](img/manage.png)](img/manage.png)
 
 > **Source:** `rustango::manage` (`Cli`, the verb dispatcher) — behind the
 > `manage` feature (on by default).
@@ -179,10 +179,9 @@ Documented in full in [the MCP guide](mcp.md).
 
 ### `makemigrations [name]`
 
-Generates a migration file from changes to your models — like Django's
-`makemigrations`. It compares your registered models against the last
-saved schema snapshot in `migrations/` and writes a new JSON file with
-whatever changed.
+Generates a migration file from changes to your models. It compares your
+registered models against the last saved schema snapshot in `migrations/`
+and writes a new JSON file with whatever changed.
 
 ```bash
 cargo run -- makemigrations                          # auto-name (e.g. 0004_add_slug_to_posts)
@@ -238,9 +237,9 @@ and clashed with the constraint already there.
 ### `makemigrations --empty <name>`
 
 Creates a blank migration (no `forward` operations) for you to fill in
-by hand — like Django's `makemigrations --empty`. Use it when you need
-to write data operations or rename operations the auto-detector can't
-generate. Edit the resulting JSON yourself.
+by hand. Use it when you need to write data operations or rename
+operations the auto-detector can't generate. Edit the resulting JSON
+yourself.
 
 ```bash
 cargo run -- makemigrations --empty rename_status_to_state
@@ -252,10 +251,9 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Fixes a migration history that has split into two branches — same idea
-as Django's `makemigrations --merge` (issue #346). This happens when two
-people each run `makemigrations` on their own feature branch, so both
-new files point at the same parent. After both branches merge, the
+Fixes a migration history that has split into two branches (issue #346).
+This happens when two people each run `makemigrations` on their own
+feature branch, so both new files point at the same parent. After both branches merge, the
 history has two "leaves" (end points), and the next `makemigrations`
 would arbitrarily pick one as its parent.
 
@@ -274,15 +272,15 @@ cargo run -- makemigrations --merge
 - **Already a single chain** → prints `no merge needed` and exits
   cleanly. Safe to run on a healthy history.
 - **Genuinely separate histories** (not a branch collision) → errors
-  out instead of inventing a parent. Same safeguard Django uses.
+  out instead of inventing a parent.
 - **Cannot be combined** with `--empty`, `--app`, `--scope`, or a
   positional name.
 
 ### `migrate`
 
-Applies all pending migrations to the database, in order — like Django's
-`migrate` or Laravel's `php artisan migrate`. This is the command you run
-after `makemigrations` to actually change your schema.
+Applies all pending migrations to the database, in order — like Laravel's
+`php artisan migrate`. This is the command you run after `makemigrations`
+to actually change your schema.
 
 ```bash
 cargo run -- migrate
@@ -302,9 +300,8 @@ use [`migrate-registry`](#migrate-registry) /
 
 ### `migrate <target>`
 
-Migrates to a specific point in the history, forward or backward — like
-Django's `migrate <app> <name>`. Name a migration to move to it; the
-special target `zero` undoes everything.
+Migrates to a specific point in the history, forward or backward. Name a
+migration to move to it; the special target `zero` undoes everything.
 
 ```bash
 cargo run -- migrate 0003_add_slug      # forward to 0003
@@ -340,7 +337,7 @@ contains. It decides automatically:
 |---|---|
 | fresh — no history, no tables | the squash runs for real |
 | every replaced migration is in the ledger | recorded, predecessors tombstoned, **no DDL** |
-| tables exist but the ledger has no history | recorded, **no DDL** (Django's `--fake-initial`) |
+| tables exist but the ledger has no history | recorded, **no DDL** (adopts the existing tables) |
 | only *some* replaced rows / tables present | **refused**, naming what's missing |
 
 The partial case is deliberately a hard error: no automatic choice is
@@ -393,8 +390,8 @@ cargo run -- downgrade 3                # three steps
 
 ### `showmigrations` / `status`
 
-Lists every migration and whether it's been applied — like Django's
-`showmigrations`. `[X]` means applied, `[ ]` means still pending.
+Lists every migration and whether it's been applied. `[X]` means
+applied, `[ ]` means still pending.
 
 ```bash
 cargo run -- showmigrations
@@ -417,9 +414,8 @@ Output:
 
 Adds a raw-SQL data step to a migration without editing JSON by hand.
 Reach for this when you need to transform existing rows — backfill a
-column, clean up data — as part of a migration. It's the equivalent of
-Django's `RunSQL` data migration, generated for you from the command
-line.
+column, clean up data — as part of a migration. The SQL runs as one step
+of the migration, and the command writes the JSON for you.
 
 ```bash
 # New migration with up + down
@@ -455,9 +451,9 @@ any attempt to roll it back fails immediately.
 
 ### `cargo rustango new <name>` *(separate binary)*
 
-Creates a brand-new **Rustango** project — like `django-admin startproject`
-or `laravel new`. This is a separate tool, so install it first with
-`cargo install cargo-rustango`. Pick from three templates:
+Creates a brand-new **Rustango** project — like `laravel new`. This is a
+separate tool, so install it first with `cargo install cargo-rustango`.
+Pick from three templates:
 
 ```bash
 cargo rustango new myblog                          # default = fullstack (ORM + admin)
@@ -501,9 +497,8 @@ JSON. See [`migrate`](#migrate) / [`migrate-registry`](#migrate-registry).
 
 ### `startapp <name> [flags]`
 
-Creates a new app (a feature module) under `src/<name>/` — exactly like
-Django's `startapp`. Use it to keep models, views, and URLs for one part
-of your project grouped together.
+Creates a new app (a feature module) under `src/<name>/`. Use it to keep
+models, views, and URLs for one part of your project grouped together.
 
 ```bash
 cargo run -- startapp blog
@@ -544,7 +539,7 @@ for `make:test`) and:
 
 ### `make:viewset <Name> [--model <Model>] [--tenant | --no-tenant] [--crate <path>]`
 
-Generates a REST endpoint for a model, like a Django REST Framework ViewSet.
+Generates a full REST endpoint for a model — list, create, retrieve, update, delete.
 
 **Two templates, chosen for you.** The single-pool `#[derive(ViewSet)]` captures
 one pool at mount time, which is wrong for a tenancy project, so the generator
@@ -585,7 +580,7 @@ projects that import `rustango` under a different name.
 ### `make:serializer <Name> [--model <Model>]`
 
 Generates a `#[derive(Serializer)]` struct — controls how a model is
-converted to and from JSON (like a DRF serializer).
+converted to and from JSON.
 
 ```bash
 cargo run -- make:serializer PostSerializer --model Post
@@ -594,7 +589,7 @@ cargo run -- make:serializer PostSerializer --model Post
 ### `make:form <Name>`
 
 Generates a `#[derive(Form)]` struct for validating and processing form
-input — like a Django `Form`.
+input.
 
 ```bash
 cargo run -- make:form ContactForm
@@ -751,9 +746,8 @@ rustango
 
 ### `check [--deploy]`
 
-Runs health checks on your project — like Django's `check`. Add
-`--deploy` for the stricter production-readiness checks, the same way
-Django's `check --deploy` works.
+Runs health checks on your project. Add `--deploy` for the stricter
+production-readiness checks.
 
 **Always-on checks:**
 - ≥ 1 model registered via `inventory`
@@ -859,7 +853,7 @@ cargo run -- wizard
 hand-built bootstrap migrations. Its own tables (`rustango_orgs`,
 `rustango_operators`, `rustango_users`, roles/permissions, …) are
 generated into `system/migrations/` from the compiled models — the
-normal Django flow (models → `makemigrations` → `migrate`) — and applied
+normal flow (models → `makemigrations` → `migrate`) — and applied
 by [`migrate`](#migrate) / [`migrate-registry`](#migrate-registry), which
 generate them on demand if the files are missing.
 
@@ -900,9 +894,9 @@ its own.
 
 ### `runserver` / `run-server`
 
-Starts the multi-tenant web server — Django's `runserver`. In a tenancy
-project this is the same as bare `cargo run`; the named form exists so
-custom binaries that parse their own arguments can still trigger it.
+Starts the multi-tenant web server. In a tenancy project this is the
+same as bare `cargo run`; the named form exists so custom binaries that
+parse their own arguments can still trigger it.
 
 ```bash
 cargo run                        # implicit
@@ -1095,8 +1089,8 @@ does not go red.
 
 ### `create-user <tenant> <username> --password <pwd> [--superuser]`
 
-Creates a user inside one tenant — roughly Django's `createsuperuser`,
-but scoped to a single tenant.
+Creates a user inside one tenant. The account exists only in that
+tenant.
 
 ```bash
 cargo run -- create-user acme alice --password hunter2 --superuser
@@ -1109,8 +1103,7 @@ console.
 
 ### `create-role <tenant> <name>`
 
-Creates a role (a named bundle of permissions, like a Django group)
-inside one tenant.
+Creates a role (a named bundle of permissions) inside one tenant.
 
 ```bash
 cargo run -- create-role acme editor
@@ -1144,7 +1137,7 @@ cargo run -- revoke-role acme alice editor
 
 Grants a single permission. By default the second argument is a
 **username**, so the permission goes straight to that user; add `--role`
-to grant it to a role instead. Permission codenames use Django's
+to grant it to a role instead. Permission codenames use the
 `<app>.<action>_<model>` format (`blog.add_post`, `blog.change_post`,
 …). The `auto_create_permissions` feature creates the four standard CRUD
 codenames automatically for any model marked `#[rustango(permissions)]`.
@@ -1238,9 +1231,8 @@ The operator console has a button for this too, on the tenant list.
 
 ## Custom user model (extra columns on `rustango_users`)
 
-This is **Rustango**'s version of Django's "custom user model" — how you add
-your own fields to the user table. The built-in tenant `User` has seven
-fixed columns: `id`, `username`, `password_hash`, `is_superuser`,
+This is how you add your own fields to the user table. The built-in
+tenant `User` has seven fixed columns: `id`, `username`, `password_hash`, `is_superuser`,
 `active`, `created_at`, plus a `data` JSONB column (a flexible
 JSON blob) for any extra per-user metadata. **For most apps that JSONB
 column is all you need** — no migration, no override, no surprises.
@@ -1355,10 +1347,9 @@ builds the server `Builder` directly, without going through `Cli`.
 
 ## Custom subcommands
 
-You can add your own commands — **Rustango**'s take on Django's custom
-management commands. The trick is to inspect the arguments yourself and
-handle your command before passing the rest to `Cli::run`. Two ways to
-do it:
+You can add your own management commands. The trick is to inspect the
+arguments yourself and handle your command before passing the rest to
+`Cli::run`. Two ways to do it:
 
 **Inline in `src/main.rs`** (no extra binary):
 

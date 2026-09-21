@@ -1,4 +1,4 @@
-//! Django-parity #351 — custom `SimpleListFilter`.
+//! Issue #351 — custom `SimpleListFilter`.
 
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "tenancy"))]
 

@@ -3,9 +3,9 @@
 //! Register them once with the macros below and every Tera instance
 //! the framework builds picks them up.
 //!
-//! Tera has no plugin API for block tags, so Django's `{% mytag %}`
-//! shape is not available. See [`crate::cache_fragment`] for the same
-//! limit.
+//! Tera has no plugin API for block tags, so a custom
+//! `{% mytag %}…{% endmytag %}` is not available. See
+//! [`crate::cache_fragment`] for the same limit.
 //!
 //! ## Usage
 //!

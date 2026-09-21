@@ -1,4 +1,4 @@
-//! The `m2m_changed` signal, in Django's shape. It is sent when
+//! The `m2m_changed` signal. It is sent when
 //! [`crate::sql::M2MManager`] changes what is in a junction table.
 //!
 //! ## Quick start
@@ -42,9 +42,8 @@
 //!   may be empty.
 //! - `Clear`: everything removed, `dst_pks` is empty.
 //!
-//! Django also has `pre_add`, `pre_remove` and `pre_clear`. Only the
-//! `post_*` case exists here, sent after the SQL succeeds, because a
-//! Rust receiver cannot cancel the operation anyway.
+//! The signal is sent only after the SQL succeeds. There is no
+//! `pre_*` form, because a receiver cannot cancel the write anyway.
 
 use std::any::Any;
 use std::collections::HashMap;

@@ -1,5 +1,4 @@
-//! Template error page for development, in the style of Django's
-//! DEBUG page.
+//! Template error page for development.
 //!
 //! In production a failed Tera render returns a plain 500 and the
 //! operator reads the details from the log. That is no help locally,

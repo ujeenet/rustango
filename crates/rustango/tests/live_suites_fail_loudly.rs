@@ -11,7 +11,7 @@
 //! but unreachable means a wrong port, a service that never came up, or a
 //! container that died mid-run — and the suite then reports `ok. N passed`
 //! having done nothing at all. 66 suites and 204 test functions did that,
-//! after #1434 and #1444 fixed the eight django6 files. (60 of them were
+//! after #1434 and #1444 fixed the eight ORM scenario files. (60 of them were
 //! found by a single-line grep; the last six build the pool through
 //! `PoolOptions` across several lines and this guard is what caught them.)
 //!

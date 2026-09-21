@@ -1,9 +1,9 @@
 //! Aggregate builders with an optional `FILTER` clause and default.
 //!
-//! Gives the Django shapes `Count("id", filter=Q(...))` and
-//! `Sum("price", default=0)`, plus the `StdDev` and `Variance`
-//! families. On MySQL the `FILTER (WHERE …)` clause is rewritten as
-//! `CASE WHEN`.
+//! Count or sum only the rows that match a predicate, and fall back to
+//! a value when the result set is empty. Also the `StdDev` and
+//! `Variance` families. On MySQL the `FILTER (WHERE …)` clause is
+//! rewritten as `CASE WHEN`.
 //!
 //! ```ignore
 //! use rustango::core::aggregates::{count, sum, avg};
@@ -132,8 +132,8 @@ pub fn count_distinct(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::CountDistinct(column))
 }
 
-/// `SUM(column)`. Combined with `.default(0)`, produces the
-/// "treat empty-result as zero" Django shape.
+/// `SUM(column)`. Combined with `.default(0)`, an empty result set
+/// reads back as zero instead of `NULL`.
 #[must_use]
 pub fn sum(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::Sum(column))

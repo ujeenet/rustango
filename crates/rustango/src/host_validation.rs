@@ -1,4 +1,4 @@
-//! Host-header allowlist middleware — Django's `ALLOWED_HOSTS`.
+//! Host-header allowlist middleware.
 //!
 //! The client sends the `Host:` header, so it is only a claim. Code
 //! that builds absolute URLs, reset links or cache keys from it trusts
@@ -25,9 +25,8 @@
 //!     ]));
 //! ```
 //!
-//! A missing or unlisted `Host` gets a `400 Bad Request` worded like
-//! Django's `DisallowedHost`. The body echoes the rejected host to
-//! help ops, but never the allowed list.
+//! A missing or unlisted `Host` gets a `400 Bad Request`. The body
+//! echoes the rejected host to help ops, but never the allowed list.
 //!
 //! ## Settings wiring
 //!

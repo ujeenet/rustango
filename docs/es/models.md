@@ -2,8 +2,8 @@
 
 Un modelo es una struct de Rust que se asigna a una tabla de base de datos. Añade
 `#[derive(Model)]`, anota los campos, y **Rustango** genera el esquema, un punto de
-entrada de consultas con tipos seguros y los métodos `save`/`find`/`delete` — los modelos
-de Django o el Eloquent de Laravel, con el compilador verificando tus columnas. Esta es
+entrada de consultas con tipos seguros y los métodos `save`/`find`/`delete` — un modelo
+de tipo Active Record, con el compilador verificando tus columnas. Esta es
 la referencia de **declaración**: cada tipo de campo, cada opción de clave primaria y
 cada atributo `#[rustango(...)]`. Para *consultar* los modelos una vez declarados,
 consulta el [recetario del ORM](orm.md).
@@ -407,7 +407,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `manager(ext = "Trait")` | ruta del trait | generar un trait de extensión de manager personalizado |
 | `manager_fn` | `"published"` | añadir un accesor de manager más allá de `objects()` |
 | `get_latest_by` | `"created_at"` | columna por defecto para `latest()`/`earliest()` |
-| `order_with_respect_to` | `"parent"` | ordenación relativa al padre de Django |
+| `order_with_respect_to` | `"parent"` | ordenación de las filas hijas relativa al padre |
 | `index(...)` | `columns`, `method`, `name` | índice secundario (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | restricción de unicidad compuesta |
 | `index_together` | `"a, b"` | índice no único compuesto |

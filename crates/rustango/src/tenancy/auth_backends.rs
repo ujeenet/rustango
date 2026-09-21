@@ -95,7 +95,7 @@ pub type BoxedBackend = Arc<dyn AuthBackend>;
 /// Username + password backend. Reads `Authorization: Basic <b64>` and
 /// verifies against `rustango_users` with argon2id.
 ///
-/// This is the default backend — equivalent to Django's `ModelBackend`.
+/// This is the default backend.
 pub struct ModelBackend;
 
 #[async_trait]

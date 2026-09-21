@@ -1,8 +1,9 @@
-//! Model-inheritance patterns: how to get Django's abstract,
-//! multi-table and proxy models in Rust.
+//! Model-inheritance patterns: how to share fields and behaviour
+//! between models.
 //!
-//! Rust has no class inheritance, but each Django shape has a
-//! counterpart the framework already supports.
+//! Rust has no class inheritance, but each of the usual shapes —
+//! an abstract base, a multi-table split, a proxy view over one
+//! table — has a counterpart the framework already supports.
 //!
 //! ### 1. Abstract base classes → traits
 //!
@@ -91,8 +92,8 @@
 //!
 //! ## Summary
 //!
-//! | Django shape | Rust idiom |
-//! |--------------|-----------|
+//! | What you want | Rust idiom |
+//! |---------------|-----------|
 //! | Abstract base class | trait, plus the fields on each model |
 //! | Multi-table inheritance | explicit `#[rustango(o2o)]` FK |
 //! | Proxy model | extension trait on `QuerySet<T>` |

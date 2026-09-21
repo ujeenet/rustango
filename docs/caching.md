@@ -5,7 +5,7 @@ fragment, a third-party API call — so the next request gets it instantly inste
 of recomputing. **Rustango** gives you one `Cache` trait with swappable backends
 (in-memory, Redis, database), a compute-on-miss helper (`get_or_set`), and typed
 JSON helpers. Swap the backend without touching a single call site — like
-Django's cache framework or Laravel's `Cache` facade.
+Laravel's `Cache` facade.
 
 [![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](img/caching.png)](img/caching.png)
 

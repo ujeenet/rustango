@@ -1,5 +1,4 @@
-//! HTTP to HTTPS redirect middleware, like Django's
-//! `SECURE_SSL_REDIRECT` and `SECURE_REDIRECT_EXEMPT`.
+//! HTTP to HTTPS redirect middleware, with exempt path prefixes.
 //!
 //! Every plain-HTTP request gets a `301` to the same URL on HTTPS.
 //! Behind a proxy that terminates TLS, set the trusted header with
@@ -68,8 +67,7 @@ impl SslRedirectLayer {
     }
 
     /// Declare the header your proxy sets when the original request
-    /// used HTTPS, like Django's `SECURE_PROXY_SSL_HEADER`. A
-    /// matching value skips the redirect.
+    /// used HTTPS. A matching value skips the redirect.
     ///
     /// The layer trusts this header, so the proxy must strip any
     /// copy the client sends.

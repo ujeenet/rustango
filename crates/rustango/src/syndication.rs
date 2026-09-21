@@ -1,4 +1,4 @@
-//! RSS 2.0 and Atom 1.0 feeds, like `django.contrib.syndication`.
+//! RSS 2.0 and Atom 1.0 feeds.
 //!
 //! Build a [`Feed`] and call [`render_rss`] or [`render_atom`]. Adding
 //! the route is up to you: serve the RSS string with

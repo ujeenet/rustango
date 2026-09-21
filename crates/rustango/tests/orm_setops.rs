@@ -1,19 +1,18 @@
-//! Django 6.0 ORM parity — execution-based verification.
-//! Scenario group E: set operations — union / union_all /
-//! intersection / difference with per-branch and combined-result
-//! ordering.
+//! ORM set operations — execution-based verification.
+//! Scenario group E: union / union_all / intersection / difference
+//! with per-branch and combined-result ordering.
 //!
-//! Django scenarios covered (docs.djangoproject.com/en/6.0):
-//! - `qs1.union(qs2)` dedups; `union(all=True)` keeps duplicates
+//! Scenarios covered:
+//! - `qs1.union(qs2)` dedups; `union_all` keeps duplicates
 //! - per-branch `ORDER BY`/`LIMIT` (each branch wraps in parens)
 //! - `.order_by()/.limit()` AFTER `.union()` applies to the combined
-//!   result (Django's documented compound semantics)
+//!   result
 //! - `qs1.intersection(qs2)` / `qs1.difference(qs2)`
 //!
 //! Dialect floor: MySQL needs 8.0.31+ for native INTERSECT / EXCEPT
 //! (docker-compose pins `mysql:8.0`, currently ≥ 8.0.31 — older
-//! servers surface a driver syntax error; that floor is recorded in
-//! the parity audit rather than branch-handled here).
+//! servers surface a driver syntax error, which this file does not
+//! branch-handle).
 
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql"))]
 mod scenarios {
@@ -72,8 +71,8 @@ mod scenarios {
         assert_eq!(union_all.len(), 7, "3 + 4 with duplicates kept");
     }
 
-    /// Per-branch ORDER BY + LIMIT (Django 4.0+ component-queryset
-    /// slicing — `qs1[:2].union(qs2[:1])`). Both the head queryset and
+    /// Per-branch ORDER BY + LIMIT — each component queryset is
+    /// sliced before the union. Both the head queryset and
     /// the argument branches carry their OWN parenthesized
     /// branch-scoped ORDER BY/LIMIT (#1032 + #1034):
     /// - #1032: each derived-table wrapper carries an alias
@@ -116,7 +115,7 @@ mod scenarios {
         );
     }
 
-    /// Django: ordering/slicing applied AFTER `.union()` operates on
+    /// Ordering/slicing applied AFTER `.union()` operates on
     /// the combined resultset.
     pub async fn check_outer_order_limit_on_combined(pool: &Pool) {
         let rows: Vec<Item> = Item::objects()
@@ -214,7 +213,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;
@@ -320,7 +319,7 @@ mod mysql_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("MYSQL_TEST_URL unset — skipping MySQL django6 test");
+                    eprintln!("MYSQL_TEST_URL unset — skipping the MySQL arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;

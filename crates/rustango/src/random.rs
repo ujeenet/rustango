@@ -1,10 +1,9 @@
-//! Django-shape random strings — `get_random_string` /
+//! Random strings — `get_random_string` /
 //! `get_random_token_urlsafe`.
 //!
-//! Mirrors `django.utils.crypto.get_random_string(length,
-//! allowed_chars=…)`: a uniformly random string of `length`
-//! characters drawn from `allowed_chars`. Use it for session IDs,
-//! password-reset tokens and email verification codes.
+//! A uniformly random string of `length` characters drawn from
+//! `allowed_chars`. Use it for session IDs, password-reset tokens
+//! and email verification codes.
 //!
 //! Both generators here are cryptographically secure. Bulk fills use
 //! `OsRng`; per-character draws use `rand::thread_rng` (ChaCha12,
@@ -15,17 +14,17 @@
 //! use rustango::random::{get_random_string, get_random_string_default,
 //!                       get_random_token_urlsafe, ALPHANUM_CHARS};
 //!
-//! // Default Django shape — 12 alphanumeric chars.
+//! // Default alphabet — 12 alphanumeric chars.
 //! let session_id: String = get_random_string_default(12);
 //!
-//! // Custom allowlist — Django shape, second arg.
+//! // Custom allowlist as the second arg.
 //! let pin: String = get_random_string(6, "0123456789");
 //!
 //! // URL-safe base64 — better entropy/char than alphanumeric for
 //! // reset-token use cases.
 //! let reset_token: String = get_random_token_urlsafe(32);
 //!
-//! // Re-export of the default Django allowlist.
+//! // The default allowlist.
 //! assert!(ALPHANUM_CHARS.contains('a'));
 //! ```
 //!
@@ -40,17 +39,15 @@
 //! | URL-safe base64 (64)        | 6 bits           | 22 chars       |
 //!
 //! `get_random_string_default(N)` uses the mixed-case alphanumeric
-//! alphabet, matching Django's `RANDOM_STRING_CHARS`.
+//! alphabet, [`ALPHANUM_CHARS`](crate::random::ALPHANUM_CHARS).
 
 use rand::{Rng, RngCore};
 
-/// Mixed-case ASCII letters and digits. Mirrors Django's
-/// `RANDOM_STRING_CHARS`, the default `get_random_string` alphabet.
+/// Mixed-case ASCII letters and digits — the default
+/// `get_random_string` alphabet.
 pub const ALPHANUM_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-/// Django-parity
-/// [`get_random_string(length, allowed_chars=…)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) —
-/// return a uniformly random string of `length` characters chosen
+/// Return a uniformly random string of `length` characters chosen
 /// from `allowed_chars`. Backed by `rand::thread_rng`, a CSPRNG
 /// seeded from the OS, so it is safe for security tokens.
 ///
@@ -81,7 +78,7 @@ pub fn get_random_string(length: usize, allowed_chars: &str) -> String {
         .collect()
 }
 
-/// `get_random_string(length, ALPHANUM_CHARS)` — the Django default
+/// `get_random_string(length, ALPHANUM_CHARS)` — the default
 /// alphabet.
 #[must_use]
 pub fn get_random_string_default(length: usize) -> String {

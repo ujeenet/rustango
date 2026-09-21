@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ujeenet/rustango"
 homepage = "https://github.com/ujeenet/rustango"
 documentation = "https://docs.rs/rustango"
-keywords = ["web-framework", "orm", "django", "sqlite", "async"]
+keywords = ["web-framework", "orm", "migrations", "sqlite", "async"]
 categories = ["web-programming::http-server", "database", "asynchronous"]
 
 [workspace.dependencies]

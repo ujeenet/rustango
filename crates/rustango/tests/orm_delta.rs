@@ -1,32 +1,28 @@
-//! Django 6.0 ORM parity — execution-based verification.
-//! Scenario group J: the Django 6.0 release-note delta — features new
-//! or changed in 6.0, each verified or pinned against rustango.
+//! ORM behaviour — execution-based verification.
+//! Scenario group J: the newest ORM surfaces, each verified or pinned
+//! on every backend.
 //!
-//! Release-note items covered here:
-//! - `StringAgg` is database-agnostic in Django 6.0 (was PG-only
-//!   contrib.postgres) — rustango lowers it to GROUP_CONCAT (MySQL) /
-//!   group_concat (SQLite) (#1024)
-//! - `AnyValue` aggregate (new in 6.0) — PG `any_value()`, MySQL
+//! Covered here:
+//! - `string_agg` is database-agnostic — lowered to `STRING_AGG` (PG) /
+//!   `GROUP_CONCAT` (MySQL) / `group_concat` (SQLite) (#1024)
+//! - the `any_value` aggregate — PG `any_value()`, MySQL
 //!   `ANY_VALUE()`, SQLite `min()` fallback (#1025)
-//! - `GeneratedField` values are refreshed from the database after
-//!   `save()` on RETURNING-capable backends (PG/SQLite) — rustango
-//!   decodes them from the `INSERT … RETURNING` row (#1028); MySQL
-//!   defers (no RETURNING), matching Django 6.0
-//! - `DEFAULT_AUTO_FIELD` now defaults to `BigAutoField` — rustango's
-//!   `Auto<i64>` ↔ BIGSERIAL/BIGINT AUTO_INCREMENT already matches
+//! - generated-column values are refreshed from the database after
+//!   `save()` on RETURNING-capable backends (PG/SQLite), decoded from
+//!   the `INSERT … RETURNING` row (#1028); MySQL has no RETURNING, so
+//!   it defers the refresh
+//! - a 64-bit auto PK is the default — `Auto<i64>` ↔ BIGSERIAL /
+//!   BIGINT AUTO_INCREMENT
 //!
-//! - `Aggregate(order_by=...)` (new in 6.0, deprecates PG
-//!   `OrderableAggMixin`) — `string_agg_ordered` / `_distinct_ordered`
-//!   emit `ORDER BY` inside the aggregate (#1026).
+//! - ordering inside an aggregate — `string_agg_ordered` /
+//!   `_distinct_ordered` emit `ORDER BY` within the aggregate (#1026).
 //!
-//! Release-note items that are compile-time API absences (no runtime
-//! pin possible — audit rows + issues only):
-//! - `Model.NotUpdated` on forced 0-row update — pinned in
-//!   django6_writes.rs::check_zero_row_update_semantics.
-//! - CompositePrimaryKey enhancements (raw(), subquery lookups) — N/A
-//!   by architecture: rustango's composite-key idiom is surrogate
-//!   `Auto<i64>` PK + `unique_together`, so the 6.0 enhancements have
-//!   no surface to land on.
+//! Related surfaces pinned elsewhere:
+//! - the forced 0-row update error — see the writes scenario file's
+//!   `check_zero_row_update_semantics`.
+//! - composite-key raw()/subquery lookups — N/A by architecture:
+//!   rustango's composite-key idiom is a surrogate `Auto<i64>` PK plus
+//!   `unique_together`, so there is no surface for them to land on.
 
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql"))]
 mod scenarios {
@@ -69,9 +65,9 @@ mod scenarios {
         }
     }
 
-    /// Django 6.0: `StringAgg("name", delimiter=Value(","))` is
-    /// database-agnostic — PG `string_agg`, MySQL `GROUP_CONCAT`, SQLite
-    /// `group_concat` (#1024). Uniform assertion across all backends.
+    /// `string_agg("name", ",")` is database-agnostic — PG
+    /// `string_agg`, MySQL `GROUP_CONCAT`, SQLite `group_concat`
+    /// (#1024). Uniform assertion across all backends.
     pub async fn check_string_agg_dialect_matrix(pool: &Pool) {
         let rows = DeltaRow::objects()
             .aggregate()
@@ -117,7 +113,7 @@ mod scenarios {
         );
     }
 
-    /// Django 6.0 `Aggregate(order_by=…)` (#1026) — ordered StringAgg.
+    /// ORDER BY inside an aggregate (#1026) — ordered `string_agg`.
     /// With ORDER BY the joined string is deterministic, so we assert the
     /// EXACT result (no sort-to-compensate). PG/MySQL native; SQLite needs
     /// 3.44+ for ORDER BY inside an aggregate.
@@ -142,7 +138,7 @@ mod scenarios {
         );
     }
 
-    /// Django 6.0 `AnyValue` (#1025) — projects a value from each group
+    /// `any_value` (#1025) — projects a value from each group
     /// without adding the column to GROUP BY. Group by name, then take
     /// `any_value(id)`: the returned id must be a member of that name's
     /// group (PG/MySQL pick arbitrarily; SQLite's `min()` fallback picks
@@ -180,7 +176,7 @@ mod scenarios {
         }
     }
 
-    /// Django 6.0: after `save()`, `GeneratedField`s refresh from the
+    /// After `save()`, generated columns refresh from the
     /// database via RETURNING (PG/SQLite; deferred on MySQL, which has no
     /// `INSERT … RETURNING`). #1028.
     pub async fn check_generated_column_refreshed_on_save(pool: &Pool) {
@@ -193,7 +189,7 @@ mod scenarios {
         inv.save_pool(pool).await.expect("insert");
         if pool.dialect().name() == "mysql" {
             // No `INSERT … RETURNING` on MySQL — the generated column
-            // stays at its placeholder (deferred refresh, matching Django).
+            // stays at its placeholder — the refresh is deferred.
             assert_eq!(inv.total, 0, "MySQL: generated-column refresh deferred");
         } else {
             // PG / SQLite decode the DB-computed value from the RETURNING
@@ -208,11 +204,10 @@ mod scenarios {
         assert_eq!(fetched[0].total, 12, "the DB-side value IS computed");
     }
 
-    /// Django 6.0: `DEFAULT_AUTO_FIELD` now defaults to
-    /// `BigAutoField`. rustango's `Auto<i64>` maps to
-    /// BIGSERIAL / BIGINT AUTO_INCREMENT / INTEGER PRIMARY KEY —
-    /// 64-bit on every backend, already matching.
-    pub async fn check_auto_pk_is_big_auto_field(pool: &Pool) {
+    /// The default auto PK is 64-bit: `Auto<i64>` maps to
+    /// BIGSERIAL / BIGINT AUTO_INCREMENT / INTEGER PRIMARY KEY on
+    /// PG / MySQL / SQLite respectively.
+    pub async fn check_auto_pk_is_64_bit(pool: &Pool) {
         let mut inv = Invoice {
             id: Auto::default(),
             price: 1,
@@ -275,7 +270,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;
@@ -289,7 +284,7 @@ mod pg_live {
     pg_case!(check_any_value);
     pg_case!(check_string_agg_ordered);
     pg_case!(check_generated_column_refreshed_on_save);
-    pg_case!(check_auto_pk_is_big_auto_field);
+    pg_case!(check_auto_pk_is_64_bit);
 }
 
 // --------------------------------------------------------------- SQLite
@@ -337,7 +332,7 @@ mod sqlite_live {
     sqlite_case!(check_any_value);
     sqlite_case!(check_string_agg_ordered);
     sqlite_case!(check_generated_column_refreshed_on_save);
-    sqlite_case!(check_auto_pk_is_big_auto_field);
+    sqlite_case!(check_auto_pk_is_64_bit);
 }
 
 // ---------------------------------------------------------------- MySQL
@@ -389,7 +384,7 @@ mod mysql_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("MYSQL_TEST_URL unset — skipping MySQL django6 test");
+                    eprintln!("MYSQL_TEST_URL unset — skipping the MySQL arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;
@@ -403,5 +398,5 @@ mod mysql_live {
     mysql_case!(check_any_value);
     mysql_case!(check_string_agg_ordered);
     mysql_case!(check_generated_column_refreshed_on_save);
-    mysql_case!(check_auto_pk_is_big_auto_field);
+    mysql_case!(check_auto_pk_is_64_bit);
 }

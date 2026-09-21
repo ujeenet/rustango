@@ -5,7 +5,7 @@ transactional email. **Rustango** gives you a `Mailer` trait with swappable
 backends (console for dev, SMTP for production, an in-memory recorder for tests),
 a fluent `Email` builder with header-injection protection, and template
 rendering. Write `mailer.send(&email)` once; switch from printing to your
-terminal to real SMTP with a one-line change — like Django's email framework.
+terminal to real SMTP with a one-line change.
 
 [![Email in Rustango: an Email builder (to/subject/body/html) is validated against header injection, then sent through the Mailer trait — ConsoleMailer in dev, SmtpMailer in prod, InMemoryMailer in tests](img/email.png)](img/email.png)
 
@@ -110,7 +110,7 @@ smuggled into a header is how attackers add a hidden `Bcc`:
 // Missing recipients or an empty subject → MailError::InvalidMessage
 Email::new().subject("hi").validate()?;          // Err: no recipients
 
-// A CRLF in any header field → MailError::BadHeader (Django's BadHeaderError)
+// A CRLF in any header field → MailError::BadHeader
 Email::new()
     .to("a@example.com")
     .subject("Hello\r\nBcc: victim@example.com")  // injection attempt

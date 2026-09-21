@@ -1,5 +1,5 @@
 //! URL codec helpers: `application/x-www-form-urlencoded` decoding,
-//! RFC 3986 percent encoding, and Django-shape urlsafe base64.
+//! RFC 3986 percent encoding, and urlsafe base64.
 //!
 //! URL decoders are an easy place to hide a security bug, so all of it
 //! lives here and a fix lands everywhere at once.
@@ -101,9 +101,7 @@ pub fn percent_decode_path(s: &str) -> String {
     decode_escapes(s, false)
 }
 
-/// Django-parity
-/// [`django.utils.encoding.iri_to_uri(iri)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) —
-/// turn an IRI (RFC 3987) into a plain URI (RFC 3986) by
+/// Turn an IRI (RFC 3987) into a plain URI (RFC 3986) by
 /// percent-encoding every byte outside the URI-safe set. Reserved
 /// syntax characters such as `/`, `?`, `#` and `%` are kept, so a URI
 /// the caller built stays parseable.
@@ -124,7 +122,7 @@ pub fn percent_decode_path(s: &str) -> String {
 pub fn iri_to_uri(iri: &str) -> String {
     let mut out = String::with_capacity(iri.len());
     for byte in iri.bytes() {
-        // Django's safe set: the RFC 3986 unreserved chars, the
+        // The safe set: the RFC 3986 unreserved chars, the
         // reserved syntax chars, and `%` so already-encoded input
         // round-trips.
         let safe = matches!(
@@ -145,9 +143,7 @@ pub fn iri_to_uri(iri: &str) -> String {
     out
 }
 
-/// Django-parity
-/// [`django.utils.encoding.uri_to_iri(uri)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.uri_to_iri) —
-/// turn a URI back into IRI form: decode the escapes that make valid
+/// Turn a URI back into IRI form: decode the escapes that make valid
 /// Unicode, and keep the URI's structure.
 ///
 /// Inverse of [`iri_to_uri`]. Encoded reserved characters such as `/`,
@@ -267,9 +263,7 @@ fn is_uri_reserved(ch: char) -> bool {
     )
 }
 
-/// Django-parity
-/// [`django.utils.encoding.escape_uri_path(path)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.escape_uri_path) —
-/// percent-encode the path part of a URI. `/` is kept, so the path
+/// Percent-encode the path part of a URI. `/` is kept, so the path
 /// structure survives.
 ///
 /// Use it when you build a path from raw segments and do not want to
@@ -313,9 +307,7 @@ pub fn escape_uri_path(path: &str) -> String {
     out
 }
 
-/// Django-parity
-/// [`django.utils.encoding.filepath_to_uri(path)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.filepath_to_uri) —
-/// turn a filesystem path into a URI path. Windows `\` separators
+/// Turn a filesystem path into a URI path. Windows `\` separators
 /// become `/`.
 ///
 /// Safe set: alphanumeric plus `-` `_` `.` `~` `/` `!` `*` `(` `)` `'`.
@@ -348,12 +340,11 @@ pub fn escape_uri_path(path: &str) -> String {
 /// ```
 #[must_use]
 pub fn filepath_to_uri(path: &str) -> String {
-    // Windows to POSIX separators, as Django does.
+    // Windows to POSIX separators.
     let normalized = path.replace('\\', "/");
     let mut out = String::with_capacity(normalized.len());
     for byte in normalized.bytes() {
-        // Python's `quote` default safe set, plus the `/~!*()'`
-        // Django passes in.
+        // The conventional safe set, plus `/~!*()'`.
         let safe = matches!(
             byte,
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
@@ -370,11 +361,10 @@ pub fn filepath_to_uri(path: &str) -> String {
     out
 }
 
-// ============================================================ Django urlsafe_base64
+// ============================================================ urlsafe_base64
 
-/// Django-parity
-/// [`urlsafe_base64_encode(bytes)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.urlsafe_base64_encode) —
-/// encode `bytes` as URL-safe base64 with the `=` padding stripped, so
+/// Base64-encode `bytes` with the URL-safe alphabet and the `=`
+/// padding stripped, so
 /// the result drops into a URL path or query value with no escaping.
 /// Used for the `uidb64` part of `/reset/<uidb64>/<token>/`.
 ///
@@ -396,9 +386,7 @@ pub fn urlsafe_base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Django-parity
-/// [`urlsafe_base64_decode(s)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.urlsafe_base64_decode) —
-/// decode a URL-safe base64 string into raw bytes. Padding is
+/// Decode a URL-safe base64 string into raw bytes. Padding is
 /// optional, so senders that include `=` still work.
 ///
 /// # Errors
@@ -604,14 +592,14 @@ mod tests {
         }
     }
 
-    // ---- urlsafe_base64 (Django parity) ----
+    // ---- urlsafe_base64 ----
     //
     // Gated like the functions they cover; the rest of the suite runs
     // in every feature set.
 
     #[cfg(feature = "_base64")]
     #[test]
-    fn urlsafe_b64_encode_matches_django_examples() {
+    fn urlsafe_b64_encode_known_vectors() {
         assert_eq!(urlsafe_base64_encode(b"foo"), "Zm9v");
         assert_eq!(urlsafe_base64_encode(b"foobar"), "Zm9vYmFy");
         assert_eq!(urlsafe_base64_encode(b""), "");
@@ -644,7 +632,7 @@ mod tests {
 
     #[cfg(feature = "_base64")]
     #[test]
-    fn urlsafe_b64_decode_accepts_padding_for_django_compat() {
+    fn urlsafe_b64_decode_accepts_optional_padding() {
         // `=` padding is stripped, so senders that add it still work.
         assert_eq!(
             urlsafe_base64_decode("Zm9v====").as_deref(),
@@ -674,7 +662,7 @@ mod tests {
         assert_eq!(urlsafe_base64_decode("").as_deref(), Some(&[][..]));
     }
 
-    // ---- iri_to_uri (Django parity) ----
+    // ---- iri_to_uri ----
 
     #[test]
     fn iri_to_uri_ascii_passes_through() {
@@ -727,7 +715,7 @@ mod tests {
         assert_eq!(iri_to_uri(""), "");
     }
 
-    // ---- escape_uri_path (Django parity) ----
+    // ---- escape_uri_path ----
 
     #[test]
     fn escape_uri_path_preserves_slashes() {
@@ -782,7 +770,7 @@ mod tests {
         assert_eq!(decoded, input);
     }
 
-    // ---- uri_to_iri (Django parity) ----
+    // ---- uri_to_iri ----
 
     #[test]
     fn uri_to_iri_decodes_non_ascii_utf8() {
@@ -840,7 +828,7 @@ mod tests {
         assert_eq!(decoded, original);
     }
 
-    // ---- filepath_to_uri (Django parity) ----
+    // ---- filepath_to_uri ----
 
     #[test]
     fn filepath_to_uri_plain_path_passes_through() {

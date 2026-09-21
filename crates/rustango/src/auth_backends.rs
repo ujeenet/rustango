@@ -1,5 +1,4 @@
-//! A chain of authentication backends, like Django's
-//! `AUTHENTICATION_BACKENDS`.
+//! A chain of authentication backends, tried in order.
 //!
 //! ## The chain
 //!

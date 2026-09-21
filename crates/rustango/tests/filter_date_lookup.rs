@@ -1,4 +1,4 @@
-//! Tri-dialect emission tests for the Django `__year` / `__month` /
+//! Tri-dialect emission tests for the `__year` / `__month` /
 //! `__day` / `__date` / `__week_day` / `__hour` / `__minute` /
 //! `__second` / `__quarter` / `__week` field-lookup transforms on
 //! `.filter()` — issue #829.

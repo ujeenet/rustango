@@ -1,7 +1,7 @@
 //! Subquery, `EXISTS` and `OuterRef` builders.
 //!
-//! Django-shape primitives that turn a [`SelectQuery`] into something
-//! you can embed inside a larger queryset.
+//! Primitives that turn a [`SelectQuery`] into something you can
+//! embed inside a larger queryset.
 //!
 //! [`SelectQuery`]: crate::core::SelectQuery
 //!
@@ -67,17 +67,14 @@ use super::schema::{GenericReverseRelation, M2MRelation, ReverseRelation};
 use super::SqlValue;
 
 /// `EXISTS (subquery)` — true when the subquery returns at least one
-/// row. Django's [`Exists`] expression.
-///
-/// [`Exists`]: https://docs.djangoproject.com/en/6.0/ref/models/expressions/#django.db.models.Exists
+/// row.
 #[must_use]
 pub fn exists(subquery: SelectQuery) -> WhereExpr {
     WhereExpr::Exists(Box::new(subquery))
 }
 
 /// `NOT EXISTS (subquery)` — true when the subquery returns no rows.
-/// Django's `~Exists(…)`. Use it to find rows in A with no related
-/// row in B.
+/// Use it to find rows in A with no related row in B.
 #[must_use]
 pub fn not_exists(subquery: SelectQuery) -> WhereExpr {
     WhereExpr::NotExists(Box::new(subquery))
@@ -118,8 +115,8 @@ pub fn subquery(inner: SelectQuery) -> Expr {
     Expr::Subquery(Box::new(inner))
 }
 
-/// Project a correlated scalar subquery as an annotation column —
-/// Django's `annotate(newest=Subquery(books.values("title")[:1]))`.
+/// Project a correlated scalar subquery as an annotation column,
+/// such as "the title of each author's newest book".
 /// Wraps the subquery as an [`AggregateExpr`], so it fits
 /// [`crate::query::QuerySet::annotate`] and
 /// [`crate::query::AggregateBuilder::annotate`]. Any [`outer_ref`]
@@ -241,7 +238,7 @@ pub fn exists_as_int(exists: WhereExpr) -> Expr {
 }
 
 /// `OuterRef("col")` — use a column of the enclosing query inside a
-/// correlated subquery. Django's [`OuterRef('col')`].
+/// correlated subquery.
 ///
 /// It only works inside a subquery wrapper ([`exists`],
 /// [`not_exists`], [`in_subquery`], [`subquery`]); anywhere else the
@@ -250,8 +247,6 @@ pub fn exists_as_int(exists: WhereExpr) -> Expr {
 /// column on the outer model and is emitted as
 /// `"<outer_table>"."<col>"`, so it stays unambiguous when inner and
 /// outer tables share a column name.
-///
-/// [`OuterRef('col')`]: https://docs.djangoproject.com/en/6.0/ref/models/expressions/#django.db.models.OuterRef
 #[must_use]
 pub fn outer_ref(column: &'static str) -> Expr {
     Expr::OuterRef(column)

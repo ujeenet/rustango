@@ -1,4 +1,4 @@
-//! Django's `humanize` filters, as Tera filters.
+//! Human-readable number, size and time filters for Tera.
 //!
 //! * Numbers: `intcomma`, `intword`, `apnumber`, `ordinal`,
 //!   `format_number`, `format_currency`.
@@ -16,8 +16,7 @@
 //! // now {{ count | intcomma }} renders "1,234,567"
 //! ```
 //!
-//! Output matches [Django humanize](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/)
-//! for en-US. `format_number` and `format_currency` take a `locale`
+//! Output is en-US. `format_number` and `format_currency` take a `locale`
 //! argument; every other filter writes English words.
 //!
 //! [`register_filters`]: crate::humanize::register_filters
@@ -49,8 +48,7 @@ pub fn register_filters(tera: &mut Tera) {
 
 // ------------------------------------------------------------------ intcomma
 
-/// [`django.contrib.humanize.intcomma`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#intcomma) —
-/// put thousands separators into an integer. For floats use
+/// Put thousands separators into an integer. For floats use
 /// [`intcomma_f64`].
 ///
 /// ```
@@ -434,8 +432,7 @@ fn format_currency_filter(value: &Value, args: &HashMap<String, Value>) -> tera:
 
 // ------------------------------------------------------------------ intword
 
-/// [`django.contrib.humanize.intword`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#intword) —
-/// write a large number as a word: `1_200_000` becomes
+/// Write a large number as a word: `1_200_000` becomes
 /// `"1.2 million"`. Below one million the integer comes back plain.
 ///
 /// The scales run from million up to decillion (`1e6` to `1e33`).
@@ -496,8 +493,7 @@ fn intword_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Val
 
 // ------------------------------------------------------------------ naturalsize
 
-/// [`django.contrib.humanize.naturalsize`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalsize) —
-/// a byte count people can read, on the 1024 scale. Under 1024 you
+/// A byte count people can read, on the 1024 scale. Under 1024 you
 /// get `"N bytes"`, or `"1 byte"` for exactly one.
 ///
 /// Units: bytes, KB, MB, GB, TB, PB, EB, ZB, YB.
@@ -590,8 +586,7 @@ fn naturalsize_si_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Res
 
 // ------------------------------------------------------------------ ordinal
 
-/// [`django.contrib.humanize.ordinal`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#ordinal) —
-/// add the English ordinal suffix: `1` becomes `"1st"`, `2` becomes
+/// Add the English ordinal suffix: `1` becomes `"1st"`, `2` becomes
 /// `"2nd"`. 11, 12 and 13 always take "th"; every other number
 /// follows its last digit. A negative number takes the same suffix
 /// as its absolute value.
@@ -633,8 +628,7 @@ fn ordinal_suffix(n: u64) -> &'static str {
 
 // ------------------------------------------------------------------ apnumber
 
-/// [`django.contrib.humanize.apnumber`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#apnumber) —
-/// spell out 1 to 9 as `"one"` to `"nine"`, following AP style. Any
+/// Spell out 1 to 9 as `"one"` to `"nine"`, following AP style. Any
 /// other value comes back as its digits.
 ///
 /// ```
@@ -703,8 +697,7 @@ fn parse_datetime(value: &Value) -> Option<DateTime<Utc>> {
     serde_json::from_value(value.clone()).ok()
 }
 
-/// [`django.contrib.humanize.naturaltime`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturaltime) —
-/// a time relative to `now`: `"3 minutes ago"`, `"in 5 hours"`, or
+/// A time relative to `now`: `"3 minutes ago"`, `"in 5 hours"`, or
 /// `"now"` within 30 seconds either way.
 ///
 /// It reports one unit only, the largest that fits. For
@@ -774,8 +767,7 @@ pub fn naturaltime_short(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     }
 }
 
-/// [`django.contrib.humanize.naturalday`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalday) —
-/// name a day relative to today: `"today"`, `"yesterday"`,
+/// Name a day relative to today: `"today"`, `"yesterday"`,
 /// `"tomorrow"`, or a date like `"Apr 27"`.
 ///
 /// ```
@@ -1003,8 +995,8 @@ fn natural_day_string(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
 /// `"N units"` with no `"ago"` or `"in"` around it, for
 /// [`timesince`] and [`timeuntil`].
 ///
-/// A delta of zero or less reads `"0 minutes"`, as Django's
-/// `timesince` does: no time has passed yet.
+/// A delta of zero or less reads `"0 minutes"`: no time has passed
+/// yet.
 fn magnitude_string(seconds: i64) -> String {
     if seconds <= 0 {
         return "0 minutes".to_owned();

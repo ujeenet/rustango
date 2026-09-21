@@ -1,6 +1,6 @@
-//! Sub-apps. Each mirrors the Django shape (`models.rs`, `urls.rs`,
-//! `views.rs`, `admin.rs`, `mod.rs`) and the E2E suite has a matching
-//! `e2e/tests/<app>/` folder.
+//! Sub-apps. Each has the same layout (`models.rs`, `urls.rs`,
+//! `views.rs`, `admin.rs`, `mod.rs`) and a matching
+//! `e2e/tests/<app>/` folder in the E2E suite.
 
 pub mod accounts;
 pub mod blog;

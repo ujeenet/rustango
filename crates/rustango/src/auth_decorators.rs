@@ -1,5 +1,5 @@
-//! Django-shape access decorators: `login_required` middleware and
-//! `?next=` round-trip helpers.
+//! Access gates: `login_required` middleware and `?next=` round-trip
+//! helpers.
 //!
 //! An anonymous request is redirected to a login URL with the original
 //! URL kept in `?next=`. After the user signs in, the login handler
@@ -71,7 +71,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 
-/// Configuration for [`login_required`]. Defaults match Django:
+/// Configuration for [`login_required`]. Defaults:
 /// `login_url = "/login"`, `redirect_field = "next"`.
 #[derive(Debug, Clone)]
 pub struct LoginRequiredConfig {
@@ -91,8 +91,7 @@ impl Default for LoginRequiredConfig {
 }
 
 /// Middleware layer that redirects anonymous requests to `login_url`,
-/// keeping the original URL in `?next=`. Django's
-/// `@login_required(login_url=...)`.
+/// keeping the original URL in `?next=`.
 ///
 /// "Anonymous" means `SessionUser` resolved to `None`: no session
 /// cookie, or a cookie for a different tenant.
@@ -123,8 +122,7 @@ pub fn login_required(
     })
 }
 
-/// Predicate-based access gate. Django's
-/// `@user_passes_test(test_func, login_url=...)`.
+/// Predicate-based access gate.
 ///
 /// `predicate` runs against the [`crate::tenancy::auth::User`] row, so
 /// it can read any field. On `true` the request continues. On `false`,

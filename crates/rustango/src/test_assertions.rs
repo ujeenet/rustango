@@ -1,7 +1,7 @@
-//! Django-shape assertion helpers for axum responses.
+//! Assertion helpers for axum responses.
 //!
-//! The quick checks a Django test suite reaches for, in axum's
-//! `Response` shape:
+//! The quick checks a view test reaches for, written against axum's
+//! `Response`:
 //!
 //! ```ignore
 //! use rustango::test_assertions::{assert_contains, assert_redirects, assert_status};
@@ -39,9 +39,9 @@
 //! * Flash messages: [`assert_messages`], gated on `template_views`.
 //! * Query counts: `assert_num_queries`, from [`query_counter`].
 //!
-//! Still missing from Django's set: `assertTemplateUsed`, which needs
-//! a render hook inside Tera, and `assertFormError`, which needs the
-//! form errors from the rendered template context.
+//! Two checks are still missing: "this template was used", which
+//! needs a render hook inside Tera, and "this form field errored",
+//! which needs the form errors from the rendered template context.
 //!
 //! [`assert_status`]: crate::test_assertions::assert_status
 //! [`assert_status_in`]: crate::test_assertions::assert_status_in
@@ -192,7 +192,7 @@ pub async fn assert_not_contains(res: Response, fragment: &str) {
 }
 
 /// Assert the response is a 3xx redirect whose `Location` equals
-/// `target`. Django's `assertRedirects`.
+/// `target`.
 ///
 /// ```ignore
 /// assert_redirects(&res, "/login?next=%2Fprofile");
@@ -331,8 +331,8 @@ pub fn assert_content_type(res: &Response, expected: &str) {
     assert_header(res, "content-type", expected);
 }
 
-/// Assert the body, parsed as JSON, equals `expected`. Django's
-/// `assertJSONEqual`. Key order does not matter.
+/// Assert the body, parsed as JSON, equals `expected`. Key order
+/// does not matter.
 ///
 /// ```ignore
 /// use serde_json::json;
@@ -361,8 +361,8 @@ pub async fn assert_json_eq(res: Response, expected: &serde_json::Value) {
     }
 }
 
-/// Opposite of [`assert_json_eq`], Django's `assertJSONNotEqual`:
-/// the parsed body must **differ** from `unexpected`.
+/// Opposite of [`assert_json_eq`]: the parsed body must **differ**
+/// from `unexpected`.
 ///
 /// Good for a regression test that an endpoint no longer returns an
 /// old, leaky shape.
@@ -421,8 +421,7 @@ pub fn assert_redirect_chain(chain: &[(u16, String)], final_path: &str, final_st
 }
 
 /// Assert the body contains `fragment` exactly `count` times.
-/// Django's `assertContains(..., count=N)`. `count = 0` means
-/// absent, like [`assert_not_contains`].
+/// `count = 0` means absent, like [`assert_not_contains`].
 ///
 /// ```ignore
 /// // Three article cards on the index.

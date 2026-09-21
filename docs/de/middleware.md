@@ -5,9 +5,8 @@ Handler sieht und nachdem er eine Response erzeugt hat. Hier leben die
 Querschnittsthemen: Logging, Rate Limiting, Security-Header, CSRF, Auflösung von
 Locale und Zeitzone. **Rustango** liefert einen umfangreichen Katalog
 gebrauchsfertiger Middleware und macht das Schreiben eigener zu einer Sache
-weniger Zeilen. Wenn du von Django kommst, ist das die `MIDDLEWARE`-Liste; von
-Express `app.use()`; von Laravel der HTTP-Kernel — dieselbe Idee, an deinen
-Router angehängt.
+weniger Zeilen. Aus Express kennst du das als `app.use()`, aus Laravel als den
+HTTP-Kernel — dieselbe Idee, an deinen Router angehängt.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)
 
@@ -179,8 +178,8 @@ gefragt hat.
 ## Locale-bewusste Middleware
 
 `LocaleMiddleware` löst eine Locale pro Request auf und injiziert sie in den
-Request, damit jeder Handler sie lesen kann. Die Auswahlreihenfolge ist die von
-Django: **Cookie → `Accept-Language` → Standard**. Die erste Locale, die du
+Request, damit jeder Handler sie lesen kann. Die Auswahlreihenfolge lautet:
+**Cookie → `Accept-Language` → Standard**. Die erste Locale, die du
 auflistest, ist der Standard, sofern du ihn nicht überschreibst.
 
 ```rust
@@ -209,7 +208,8 @@ loc.direction()  // "ltr" / "rtl" — feed straight into <html dir="…">
 loc.is_rtl()     // true for ar, he, fa, …
 ```
 
-Der Cookie-Name ist standardmäßig `django_language` (Django-kompatibel); ändere
+Der Cookie-Name ist standardmäßig `django_language` — ein historisch gewachsener
+Name, der aus Kompatibilitätsgründen erhalten bleibt; ändere
 ihn mit `.cookie_name("my_locale".to_string())` — der Parameter ist
 `impl Into<Option<String>>`, was `&str` nicht erfüllt, ein blankes Literal ist
 also ein Trait-Bound-Fehler — oder übergib `None`, um das Cookie-Lookup ganz zu
@@ -237,8 +237,8 @@ die Locale dort.
 Es gibt bewusst **keinen Zeitzonen-Layer**. Stattdessen gibt dir das Framework
 einen task-lokalen aktiven Offset (`rustango::i18n::timezone`) und einen
 Header-/Cookie-Decoder, und du komponierst eine einzeilige Middleware, die ihn
-aktiviert — das kanonische „Schreib deine eigene"-Beispiel. Das spiegelt Djangos
-`USE_TZ=True`: speichere in UTC, rendere in der lokalen Uhr des Benutzers.
+aktiviert — das kanonische „Schreib deine eigene"-Beispiel. Die Haltung dahinter:
+speichere in UTC, rendere in der lokalen Uhr des Benutzers.
 
 ```rust
 use axum::middleware::{from_fn, Next};

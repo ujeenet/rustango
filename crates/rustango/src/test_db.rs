@@ -1,14 +1,14 @@
-//! Database isolation for tests, in Django's four tiers.
+//! Database isolation for tests, in four tiers.
 //!
-//! Django uses base classes. rustango has no test classes, so each
-//! tier is a helper you wrap around the test body:
+//! There are no test base classes here. Each tier is a helper you
+//! wrap around the test body, so pick the cheapest one that works:
 //!
-//! | Django class            | rustango analog                        | Use when …                                              |
-//! |-------------------------|----------------------------------------|---------------------------------------------------------|
-//! | `SimpleTestCase`        | plain `#[tokio::test]`                 | no DB access — fastest.                                 |
-//! | `TestCase`              | [`with_rollback`]                      | reads / writes that should be rolled back at end.       |
-//! | `TransactionTestCase`   | [`with_truncate_after`]                | code under test commits (signals, on_commit hooks).     |
-//! | `LiveServerTestCase`    | [`crate::test_server::LiveServer`]     | needs a real listening socket (Selenium, websockets).   |
+//! | Tier                   | Helper                                 | Use when …                                              |
+//! |------------------------|----------------------------------------|---------------------------------------------------------|
+//! | no database            | plain `#[tokio::test]`                 | no DB access — fastest.                                 |
+//! | rolled-back writes     | [`with_rollback`]                      | reads / writes that should be rolled back at end.       |
+//! | committed writes       | [`with_truncate_after`]                | code under test commits (signals, on_commit hooks).     |
+//! | real socket            | [`crate::test_server::LiveServer`]     | needs a real listening socket (browser, websockets).    |
 //!
 //! The two DB helpers differ in what happens between tests:
 //!

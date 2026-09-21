@@ -2,8 +2,8 @@
 
 Ein Modell ist ein Rust-Struct, das auf eine Datenbanktabelle abgebildet wird. Füge
 `#[derive(Model)]` hinzu, annotiere die Felder, und **Rustango** generiert das Schema,
-einen typsicheren Abfrage-Einstiegspunkt sowie `save`/`find`/`delete`-Methoden — Djangos
-Modelle oder Laravels Eloquent, mit dem Compiler, der deine Spalten prüft. Dies ist die
+einen typsicheren Abfrage-Einstiegspunkt sowie `save`/`find`/`delete`-Methoden — ein
+Active-Record-Modell, bei dem der Compiler deine Spalten prüft. Dies ist die
 **Deklarations**-Referenz: jeder Feldtyp, jede Primärschlüssel-Option und jedes
 `#[rustango(...)]`-Attribut. Für das *Abfragen* von Modellen, sobald sie deklariert sind,
 siehe das [ORM-Kochbuch](orm.md).
@@ -407,7 +407,7 @@ spezifischer.
 | `manager(ext = "Trait")` | Trait-Pfad | ein benutzerdefiniertes Manager-Erweiterungs-Trait generieren |
 | `manager_fn` | `"published"` | einen Manager-Accessor über `objects()` hinaus hinzufügen |
 | `get_latest_by` | `"created_at"` | Standardspalte für `latest()`/`earliest()` |
-| `order_with_respect_to` | `"parent"` | Django elternrelative Ordnung |
+| `order_with_respect_to` | `"parent"` | Ordnung der Kindzeilen relativ zum Elternobjekt |
 | `index(...)` | `columns`, `method`, `name` | Sekundärindex (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | zusammengesetzter Unique-Constraint |
 | `index_together` | `"a, b"` | zusammengesetzter Nicht-Unique-Index |

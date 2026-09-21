@@ -1,4 +1,4 @@
-//! Django REST Framework–style router viewsets.
+//! Router viewsets: five REST endpoints from one model.
 //!
 //! A [`ViewSet`] wires five standard REST endpoints for any [`Model`]
 //! table in ~5 lines. No hand-written handlers, no SQL, no repetition.
@@ -43,7 +43,7 @@
 //! | `ordering` | configured default | Comma-separated field names, prefix `-` for DESC |
 //! | `search` | — | Full-text search across `search_fields` |
 //! | `{field}` | — | Exact filter for any `filter_fields` |
-//! | `{field}__{lookup}` | — | Django-style lookup (gt/gte/lt/lte/ne/in/not_in/contains/icontains/startswith/istartswith/endswith/iendswith/isnull) |
+//! | `{field}__{lookup}` | — | Lookup suffix (gt/gte/lt/lte/ne/in/not_in/contains/icontains/startswith/istartswith/endswith/iendswith/isnull) |
 //!
 //! Response: `{"count": N, "page": P, "page_size": S, "last_page": L, "results": [...]}`
 //!
@@ -62,7 +62,7 @@
 //!
 //! ### Limit/offset pagination (opt-in)
 //!
-//! Enable via `.limit_offset_pagination()`. DRF-shape `?limit=&offset=`
+//! Enable via `.limit_offset_pagination()`. `?limit=&offset=`
 //! windowing — handy for tables/grids that page by row offset rather
 //! than page number. Runs `COUNT(*)` per request (same cost as
 //! page-number).
@@ -223,7 +223,7 @@ pub enum PaginationStyle {
         /// of `>`. Default ordering is set automatically to match.
         desc: bool,
     },
-    /// DRF-shape limit/offset windowing — `?limit=20&offset=40`.
+    /// Limit/offset windowing — `?limit=20&offset=40`.
     /// Returns `count`, `limit` and `offset`. Costs the same as
     /// [`PaginationStyle::PageNumber`]; pick it when callers think in
     /// row offsets rather than page numbers.
@@ -249,7 +249,7 @@ impl PaginationStyle {
         Self::Cursor { field, desc: true }
     }
 
-    /// DRF-shape limit/offset pagination.
+    /// Limit/offset pagination.
     #[must_use]
     pub const fn limit_offset() -> Self {
         Self::LimitOffset
@@ -289,7 +289,7 @@ trait SerializerBridge: Send + Sync {
 
     /// Validate a JSON request body: parse the writable fields, then
     /// call the serializer's `validate()` hook. `Err` carries
-    /// DRF-shape field errors for a 400 response.
+    /// per-field errors for a 400 response.
     fn validate_body(&self, body: &Value) -> Result<(), crate::forms::FormErrors>;
 
     /// The **model** field names the serializer accepts on write,
@@ -1680,7 +1680,7 @@ fn no_content() -> Response {
 
 /// Build a `WhereExpr` from one query-param `field[__lookup]=value` entry.
 ///
-/// Supported Django-style lookups:
+/// Supported lookups:
 /// - (none) / `exact` — `Op::Eq`
 /// - `gt`, `gte`, `lt`, `lte`, `ne`
 /// - `in` / `not_in` — comma-separated values
@@ -1798,7 +1798,7 @@ async fn run_list(
     //
     // Supports both:
     //   ?author_id=42                — exact match (Op::Eq)
-    //   ?author_id__gt=10            — Django-style lookup
+    //   ?author_id__gt=10            — lookup suffix
     //   ?status__in=draft,published  — comma-separated for IN/NOT_IN
     //   ?title__icontains=hello      — pattern lookups
     //   ?published_at__isnull=true   — IS NULL / IS NOT NULL
@@ -2530,7 +2530,7 @@ async fn create_one(
     }
 }
 
-/// Bulk create — Django DRF `ListSerializer(many=True)` shape.
+/// Bulk create from a JSON array body.
 /// Validates every entry first; on first failure, the WHOLE bulk
 /// is rejected with the index + message (atomic-validate, not
 /// atomic-insert — partial-insert recovery is a separate concern).
@@ -2551,8 +2551,7 @@ async fn create_many(
 
     // Atomic validation: collect every (columns, values) up front
     // so a bad row near the end of the list doesn't leave half the
-    // INSERTs committed. DRF's default ListSerializer.create has
-    // the same shape — validate the whole list before any save.
+    // INSERTs committed: validate the whole list before any save.
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
         // Serializer validation + non-writable skip, per entry.
@@ -2906,8 +2905,7 @@ async fn extract_form_body(
 }
 
 /// Sniff a POST body and return either a single record (object body
-/// or form-urlencoded body) or a bulk list (JSON array body — DRF's
-/// `ListSerializer(many=True)` shape). Issue #435.
+/// or form-urlencoded body) or a bulk list (JSON array body).
 ///
 /// Bulk shape is only recognized for `application/json` content-type
 /// + a JSON array body — form-urlencoded payloads always parse as

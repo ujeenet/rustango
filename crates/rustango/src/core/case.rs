@@ -73,8 +73,8 @@ pub fn case() -> CaseBuilder {
     }
 }
 
-/// Short for `Expr::Literal(v.into())`, like Django's `Value()`. Use
-/// it where a bare literal could read as a column name:
+/// Short for `Expr::Literal(v.into())`. Use it where a bare literal
+/// could otherwise read as a column name:
 ///
 /// ```ignore
 /// case()

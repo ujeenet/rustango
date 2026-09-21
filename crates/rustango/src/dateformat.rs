@@ -1,4 +1,4 @@
-//! Django's date format codes, as in `django.utils.dateformat`.
+//! Template-style date format codes.
 //!
 //! Render a `DateTime<Utc>`, `NaiveDate` or `NaiveTime` with the
 //! format string you would write in a template as
@@ -33,7 +33,7 @@
 //!
 //! The codes `b`, `e`, `I`, `L`, `O`, `T`, `Z`, `c`, `r`, `u`, `o`,
 //! `t`, `S`, `f`, `P` and `W` also work; [`format_datetime`] has the
-//! full list. A few need a word: `P` gives Django's "1:30 p.m." /
+//! full list. A few need a word: `P` gives the "1:30 p.m." /
 //! "noon" / "midnight" form, `f` writes "1" rather than "1:00" on the
 //! hour, `W` is the ISO-8601 week number, `t` is the number of days
 //! in the month, and `o` is the ISO-8601 week-numbering year, which
@@ -52,11 +52,11 @@
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
 
-/// Format a `DateTime<Utc>` with Django's single-character codes;
+/// Format a `DateTime<Utc>` with the single-character codes;
 /// the module doc has the table.
 ///
 /// A backslash makes the next character literal, so
-/// `r"\Y\e\a\r: Y"` gives `"Year: 2026"`. Like Django, any character
+/// `r"\Y\e\a\r: Y"` gives `"Year: 2026"`. Any character
 /// that is not a code passes through unchanged.
 #[must_use]
 pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
@@ -120,15 +120,15 @@ pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
             't' => out.push_str(&format!("{}", days_in_month(dt.year(), dt.month()))),
             // ISO-8601 week-numbering year, which can differ from Y.
             'o' => out.push_str(&format!("{:04}", dt.iso_week().year())),
-            // Not a code: keep it, as Django does.
+            // Not a code: keep it.
             other => out.push(other),
         }
     }
     out
 }
 
-/// [`format_datetime`] for a `NaiveDate`. As in Django, a date with
-/// no time is read as midnight, so `H:i:s` gives `00:00:00`.
+/// [`format_datetime`] for a `NaiveDate`. A date with no time is
+/// read as midnight, so `H:i:s` gives `00:00:00`.
 ///
 /// ```ignore
 /// use chrono::NaiveDate;
@@ -171,9 +171,9 @@ mod tera_filters {
     use std::collections::HashMap;
     use tera::{to_value, Tera, Value};
 
-    /// Add Django-shape date and time filters to a Tera instance.
+    /// Add date and time filters to a Tera instance.
     /// Each one parses its ISO 8601 string input, then formats it
-    /// with Django's codes (see [`format_datetime`]). A value that
+    /// with the codes in [`format_datetime`]. A value that
     /// does not parse is passed through unchanged.
     ///
     /// Two filters are added: `dateformat` for a date or datetime,
@@ -393,7 +393,7 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     }
 }
 
-/// Django's `P`: `"midnight"`, `"noon"`, `"1 p.m."`, `"1:30 p.m."`.
+/// The `P` code: `"midnight"`, `"noon"`, `"1 p.m."`, `"1:30 p.m."`.
 fn fmt_pretty_meridiem(hour: u32, minute: u32) -> String {
     if hour == 0 && minute == 0 {
         return "midnight".to_owned();
@@ -410,7 +410,7 @@ fn fmt_pretty_meridiem(hour: u32, minute: u32) -> String {
     }
 }
 
-/// Django's `f`: the 12-hour hour, with `:MM` only when the minutes
+/// The `f` code: the 12-hour hour, with `:MM` only when the minutes
 /// are not zero. `"1"`, `"1:30"`, `"12"`.
 fn fmt_12h_minutes(hour: u32, minute: u32) -> String {
     let h12 = ((hour + 11) % 12) + 1;
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn date_time_codes_render_as_zeros() {
-        // No time, so Django renders midnight.
+        // No time, so it renders midnight.
         let d = NaiveDate::from_ymd_opt(2026, 6, 4).unwrap();
         assert_eq!(format_date(&d, "H:i:s"), "00:00:00");
         assert_eq!(format_date(&d, "a"), "am");
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(time_format(&t, "Y-m-d"), "1970-01-01");
     }
 
-    // -------- Django P / f / W / t / o --------
+    // -------- P / f / W / t / o --------
 
     #[test]
     fn p_midnight_and_noon() {

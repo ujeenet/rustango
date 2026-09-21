@@ -1,4 +1,4 @@
-//! Django-shape ContentType framework — sub-slice F.1 of v0.15.0.
+//! The ContentType framework.
 //!
 //! A `ContentType` row is a runtime handle to a registered model:
 //! `(id, app_label, model_name, table)`. Lets framework features
@@ -43,10 +43,8 @@ use crate::core::{inventory, Model as _, ModelEntry, SqlValue};
 use crate::sql::{Auto, ExecError, FetcherPool as _};
 use crate::Model;
 
-/// One row per registered model. The schema mirrors Django's
-/// `django_content_types` table closely enough that any code reading
-/// it (audit log front-ends, generic FKs, permissions) feels
-/// instantly familiar.
+/// One row per registered model, so audit log front-ends, generic
+/// FKs and permissions can all name a model the same way.
 ///
 /// `(app_label, model_name)` is a natural key — the migration
 /// emits a `UNIQUE` constraint on the pair so duplicate inserts
@@ -60,7 +58,7 @@ pub struct ContentType {
     /// generic FKs, audit log targets in F.2 / F.3).
     #[rustango(primary_key)]
     pub id: Auto<i64>,
-    /// Django-shape app label — `module_path!()`'s first segment
+    /// App label — `module_path!()`'s first segment
     /// after the crate root, or the explicit `#[rustango(app = "...")]`
     /// override from the model's container attr.
     #[rustango(max_length = 100)]
@@ -155,8 +153,8 @@ impl ContentType {
     /// `ContentType` rows in a **single** DB round trip, returning a
     /// `HashMap` keyed by the natural pair (cloned strings). Pairs
     /// that don't have a row in the table are simply omitted from
-    /// the map (no error — same shape Django's `get_for_models`
-    /// gives back when a model isn't migrated yet).
+    /// the map — no error, because a model that is not migrated yet
+    /// simply has no row.
     ///
     /// Implemented as `all_ordered` + a Rust-side filter — the
     /// `rustango_content_types` table is O(dozens) of rows in
@@ -273,7 +271,7 @@ fn cache() -> &'static std::sync::RwLock<std::collections::HashMap<CacheKey, Con
 /// `None` (the negative result isn't cached, but a stale positive
 /// entry could mask a re-seeded row's new id).
 ///
-/// Issue #35 — matches Django's `ContentType.objects.clear_cache()`.
+/// Call it after re-seeding, so a stale id cannot linger.
 pub fn clear_cache() {
     let mut w = cache().write().unwrap_or_else(|e| e.into_inner());
     w.clear();
@@ -505,7 +503,7 @@ where
 /// activity-stream entry, or tag can point at any model. Typed FKs
 /// (`ForeignKey<User>`) are the right choice when the target type
 /// is fixed; `GenericForeignKey` is for the "could be anything"
-/// case Django's `contenttypes` framework solves.
+/// case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenericForeignKey {
     /// FK to `rustango_content_types.id`. Identifies which model
@@ -786,8 +784,8 @@ where
 /// Fetch all rows of the model described by `child_schema` whose
 /// `GenericForeignKey` pair points at `(parent_ct_id, parent_pk)`.
 ///
-/// Reverse-direction counterpart of [`GenericForeignKey::get_object`]
-/// — Django's `GenericRelation(...)` field. The polymorphic-target
+/// Reverse-direction counterpart of
+/// [`GenericForeignKey::get_object`]. The polymorphic-target
 /// child rows are returned as JSON maps (same shape as
 /// [`fetch_row_as_json`]) so callers don't have to commit to a
 /// specific typed `Child: Model + Decode<...>` here.
@@ -883,7 +881,7 @@ pub async fn reverse_generic_for<Parent: crate::core::Model>(
     fetch_reverse_generic(pool, child_schema, ct_id, parent_pk, relation_name).await
 }
 
-/// Batched reverse-generic prefetch — Django's `GenericPrefetch`.
+/// Batched reverse-generic prefetch.
 /// Given a list of parent primary keys (same model), fetches all
 /// matching child rows in a single SELECT and groups them by
 /// parent_pk. Eliminates the N+1 query pattern when rendering an

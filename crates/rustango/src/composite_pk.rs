@@ -1,19 +1,10 @@
-//! How to model a composite primary key, the way Django 5.2's
-//! `CompositePrimaryKey` does.
+//! How to model a key made of several columns — an order line
+//! identified by `(order_id, line_no)`, say.
 //!
-//! Django spells it like this:
-//!
-//! ```python
-//! class OrderLine(models.Model):
-//!     pk = models.CompositePrimaryKey("order_id", "line_no")
-//!     order_id = models.BigIntegerField()
-//!     line_no = models.IntegerField()
-//!     sku = models.CharField(max_length=64)
-//! ```
-//!
-//! The rustango ORM supports one `Auto<i64>` primary key per model.
-//! Use the pattern Django itself used before 5.2. It covers the usual
-//! cases: invoice line numbers, tenant-scoped rows, through-tables.
+//! The rustango ORM supports one `Auto<i64>` primary key per model, so
+//! a multi-column key is expressed as a surrogate key plus a uniqueness
+//! constraint. That covers the usual cases: invoice line numbers,
+//! tenant-scoped rows, through-tables.
 //!
 //! ## The pattern: a surrogate key plus `unique_together`
 //!

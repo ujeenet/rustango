@@ -1,4 +1,4 @@
-//! Django-parity `send_mail` + `send_many` (= `send_mass_mail`) helpers.
+//! The `send_mail` (one message) + `send_many` (a batch) helpers.
 
 #![cfg(feature = "email")]
 
@@ -28,7 +28,7 @@ async fn send_mail_dispatches_one_message() {
 
 #[tokio::test]
 async fn send_mail_with_none_from_omits_from_field() {
-    // Django parity: from_email=None defers to the mailer's default.
+    // A `None` from-address defers to the mailer's default.
     let m = InMemoryMailer::new();
     send_mail(&m, "s", "b", None, &["x@example.com"])
         .await
@@ -77,8 +77,8 @@ async fn send_many_empty_slice_is_zero_send() {
 
 #[tokio::test]
 async fn send_many_short_circuits_on_first_invalid_message() {
-    // Matches Django's `fail_silently=False` default — the first bad
-    // message halts the batch. Sent count == valid messages that made
+    // The batch does not fail silently — the first bad
+    // message halts it. Sent count == valid messages that made
     // it through BEFORE the bad one.
     let m = InMemoryMailer::new();
     let emails = vec![

@@ -11,8 +11,7 @@
 ///
 /// Both pieces come from a single SQL round trip via
 /// `COUNT(*) OVER ()`, so paginated endpoints don't pay the
-/// customary "two queries per page" cost Django's `Paginator`
-/// imposes.
+/// customary "one query for the page, one for the count" cost.
 pub struct Page<T> {
     pub rows: Vec<T>,
     pub total: i64,

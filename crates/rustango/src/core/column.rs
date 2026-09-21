@@ -77,7 +77,7 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::NotILike, value.into().into())
     }
 
-    /// Django `__contains` — the value is a **literal** substring.
+    /// `__contains` — the value is a **literal** substring.
     /// `%` and `_` in it match themselves: they are escaped and the
     /// SQL carries `ESCAPE '!'` on every dialect. Use [`Column::like`]
     /// for a raw pattern you build yourself.
@@ -85,34 +85,34 @@ pub trait Column: Copy + 'static {
         Self::escaped_like(self, "%", "%", value, false)
     }
 
-    /// Django `__icontains` — case-insensitive literal substring
+    /// `__icontains` — case-insensitive literal substring
     /// match.
     fn icontains(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
         Self::escaped_like(self, "%", "%", value, true)
     }
 
-    /// Django `__startswith` — literal prefix match.
+    /// `__startswith` — literal prefix match.
     fn startswith(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
         Self::escaped_like(self, "", "%", value, false)
     }
 
-    /// Django `__istartswith` — case-insensitive literal prefix
+    /// `__istartswith` — case-insensitive literal prefix
     /// match.
     fn istartswith(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
         Self::escaped_like(self, "", "%", value, true)
     }
 
-    /// Django `__endswith` — literal suffix match.
+    /// `__endswith` — literal suffix match.
     fn endswith(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
         Self::escaped_like(self, "%", "", value, false)
     }
 
-    /// Django `__iendswith` — case-insensitive literal suffix match.
+    /// `__iendswith` — case-insensitive literal suffix match.
     fn iendswith(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
         Self::escaped_like(self, "%", "", value, true)
     }
 
-    /// Django `__iexact` — case-insensitive **equality**. The value
+    /// `__iexact` — case-insensitive **equality**. The value
     /// is a literal, never a pattern: `%` and `_` match themselves.
     /// [`Column::ilike`] instead binds your pattern as written.
     fn iexact(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
@@ -143,7 +143,7 @@ pub trait Column: Copy + 'static {
         )
     }
 
-    /// `column REGEXP pattern` — POSIX regex match, Django `__regex`.
+    /// `column REGEXP pattern` — POSIX regex match, the `__regex` lookup.
     /// The pattern is bound as a `String`. Emits PG `~`, MySQL
     /// `REGEXP`, SQLite `REGEXP`.
     ///
@@ -154,13 +154,13 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::Regex, SqlValue::String(pattern.into()))
     }
 
-    /// `NOT column REGEXP pattern`. Django `~Q(field__regex=...)`.
-    /// Same SQLite caveat as [`Column::regex`].
+    /// `NOT column REGEXP pattern` — the negation of
+    /// [`Column::regex`], with the same SQLite caveat.
     fn not_regex(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::NotRegex, SqlValue::String(pattern.into()))
     }
 
-    /// Case-insensitive POSIX regex match, Django `__iregex`. Emits
+    /// Case-insensitive POSIX regex match, the `__iregex` lookup. Emits
     /// PG `~*`. MySQL and SQLite use
     /// `LOWER(col) REGEXP LOWER(pattern)`, so case folding does not
     /// depend on the collation.
@@ -168,8 +168,8 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::IRegex, SqlValue::String(pattern.into()))
     }
 
-    /// Case-insensitive POSIX regex non-match. Django
-    /// `~Q(field__iregex=...)`.
+    /// Case-insensitive POSIX regex non-match — the negation of
+    /// [`Column::iregex`].
     fn not_iregex(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(
             Self::COLUMN,
@@ -178,8 +178,8 @@ pub trait Column: Copy + 'static {
         )
     }
 
-    /// `column % pattern` — pg_trgm trigram similarity, Django's
-    /// `__trigram_similar`. Compares whole strings at
+    /// `column % pattern` — pg_trgm trigram similarity, the
+    /// `__trigram_similar` lookup. Compares whole strings at
     /// `pg_trgm.similarity_threshold` (0.3 unless changed).
     /// **PG-only**: MySQL and SQLite reject it at compile time.
     /// Needs `CREATE EXTENSION pg_trgm` on the database.
@@ -191,8 +191,8 @@ pub trait Column: Copy + 'static {
         )
     }
 
-    /// `column %> pattern` — pg_trgm word similarity, Django's
-    /// `__trigram_word_similar`. Matches when **any word** in
+    /// `column %> pattern` — pg_trgm word similarity, the
+    /// `__trigram_word_similar` lookup. Matches when **any word** in
     /// `column` is similar to the pattern. **PG-only**, and needs the
     /// same `pg_trgm` extension as [`Column::trigram_similar`].
     fn trigram_word_similar(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
@@ -204,7 +204,7 @@ pub trait Column: Copy + 'static {
     }
 
     /// `to_tsvector(column) @@ plainto_tsquery(query)` — Postgres
-    /// full-text search, Django's `__search`. Uses the database's
+    /// full-text search, the `__search` lookup. Uses the database's
     /// default text-search config. **PG-only**: MySQL and SQLite
     /// reject it at compile time, because their FTS shapes
     /// (MATCH…AGAINST, FTS5 MATCH) need different table layouts.
@@ -212,8 +212,8 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::Search, SqlValue::String(query.into()))
     }
 
-    /// `column @> value` — PG array containment, Django's
-    /// `__contains` lookup on `ArrayField`. Returns rows whose array
+    /// `column @> value` — PG array containment, the
+    /// `__array_contains` lookup. Returns rows whose array
     /// holds every element of `values`. **PG-only**: MySQL and SQLite
     /// have no array type and reject it at compile time.
     ///
@@ -231,8 +231,8 @@ pub trait Column: Copy + 'static {
         )
     }
 
-    /// `column <@ value` — PG array containment, inverted. Django's
-    /// `__contained_by` lookup. **PG-only**.
+    /// `column <@ value` — PG array containment, inverted. The
+    /// `__array_contained_by` lookup. **PG-only**.
     fn array_contained_by<V>(self, values: V) -> TypedFilter<Self::Model>
     where
         V: IntoIterator,
@@ -245,7 +245,7 @@ pub trait Column: Copy + 'static {
         )
     }
 
-    /// `column && value` — PG array overlap. Django's `__overlap`
+    /// `column && value` — PG array overlap, the `__array_overlap`
     /// lookup. Returns rows whose array shares at least one element
     /// with `values`. **PG-only**.
     fn array_overlap<V>(self, values: V) -> TypedFilter<Self::Model>
@@ -261,7 +261,7 @@ pub trait Column: Copy + 'static {
     }
 
     /// `column @> range_literal` — the range column contains the
-    /// given range. Django's `__range_contains`. `literal` is a PG
+    /// given range — the `__range_contains` lookup. `literal` is a PG
     /// range literal such as `"[1, 10)"` or
     /// `"[2025-01-01, 2025-02-01)"`; PG casts it to the column's
     /// range type. **PG-only**.
@@ -274,7 +274,7 @@ pub trait Column: Copy + 'static {
     }
 
     /// `column <@ range_literal` — the range column is contained by
-    /// the given range. Django's `__range_contained_by`.
+    /// the given range — the `__range_contained_by` lookup.
     /// **PG-only**.
     fn range_contained_by(self, literal: impl Into<String>) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(
@@ -284,7 +284,7 @@ pub trait Column: Copy + 'static {
         )
     }
 
-    /// `column && range_literal` — PG range overlap. Django's
+    /// `column && range_literal` — PG range overlap, the
     /// `__range_overlap` lookup. **PG-only**.
     fn range_overlap(self, literal: impl Into<String>) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(
@@ -438,9 +438,10 @@ pub trait Column: Copy + 'static {
         }
     }
 
-    // ----- Column-vs-expression predicates (Django `F()` rhs) -----
+    // ----- Column-vs-expression predicates -----
 
-    /// `column = <expr>` — Django's `filter(col=F("other"))` shape.
+    /// `column = <expr>` — compare a column against another column
+    /// or expression, not a bound value.
     /// Takes a bare [`F`](crate::core::F), a full
     /// [`Expr`](crate::core::Expr) such as `F("a") + 1`, or anything
     /// with `Into<Expr>`. Returns a [`TypedExpr`], so `.and()` and
@@ -514,8 +515,8 @@ impl<M: Model> TypedFilter<M> {
         TypedExpr::from(self).or(rhs)
     }
 
-    /// Join with another predicate using SQL `XOR` — Django 4.1+
-    /// `Q(a) ^ Q(b)`. Returns a [`TypedExpr`], so `.and()` / `.or()`
+    /// Join with another predicate using SQL `XOR`.
+    /// Returns a [`TypedExpr`], so `.and()` / `.or()`
     /// / `.xor()` can chain on the result.
     #[must_use]
     pub fn xor<E: Into<TypedExpr<M>>>(self, rhs: E) -> TypedExpr<M> {
@@ -657,7 +658,7 @@ impl<M: Model> TypedExpr<M> {
         }
     }
 
-    /// Join with `XOR` — Django 4.1+ `Q(a) ^ Q(b)`. Matches a row
+    /// Join with `XOR`. Matches a row
     /// when an odd number of operands are true. Adjacent `Xor` nodes
     /// flatten like `.and()` / `.or()`, so `a.xor(b).xor(c)` keeps
     /// that odd-parity meaning instead of nesting `(a^b)^c`.

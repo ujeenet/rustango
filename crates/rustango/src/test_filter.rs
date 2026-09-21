@@ -1,4 +1,4 @@
-//! Run tests by tag, like Django's `@tag('slow', 'core')`.
+//! Run tests by tag — label a test `slow` or `core` and filter on it.
 //!
 //! `cargo test` can only filter on the test name. This module adds
 //! tags that work with plain `#[test]` and `#[tokio::test]`:

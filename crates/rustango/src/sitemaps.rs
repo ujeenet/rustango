@@ -1,4 +1,4 @@
-//! XML sitemaps, like `django.contrib.sitemaps`.
+//! XML sitemaps.
 //!
 //! Builds `sitemap.xml` and `sitemap_index.xml` bodies that follow the
 //! [sitemaps.org protocol](https://www.sitemaps.org/protocol.html).

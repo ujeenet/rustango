@@ -82,8 +82,8 @@ const AUTH_NAMESPACE: &str = "auth";
 
 // ------------------------------------------------------------------ Models
 
-/// A permission codename bound to a logical table — Django's
-/// `Permission` equivalent. Composite-unique on `(table_name, codename)`.
+/// A permission codename bound to a logical table.
+/// Composite-unique on `(table_name, codename)`.
 ///
 /// Historically this table was created by hand-written DDL
 /// (`ENSURE_SQL`) and had no model, so it was invisible to
@@ -120,7 +120,7 @@ pub struct Permission {
     pub name: String,
 }
 
-/// A named group of permissions (Django `Group` equivalent).
+/// A named group of permissions.
 ///
 /// Assign a user to a role via [`UserRole`]; grant codenames to a role
 /// via [`RolePermission`].
@@ -1371,16 +1371,15 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
         }
         let table = entry.schema.table;
         let model_name = entry.schema.name;
-        // Django Meta.default_permissions — operator-declared subset of
-        // the CRUD codename set. Empty slice (the default) means "all
-        // four" (matches Django's behavior when the attribute is
-        // omitted). When non-empty, the seeder only emits codenames
-        // whose action appears in the list. Issue #319 follow-up.
+        // `default_permissions` — the model's chosen subset of the CRUD
+        // codename set. An empty slice (the default) means all four.
+        // When non-empty, the seeder only emits codenames whose action
+        // appears in the list.
         let allowed_actions = entry.schema.default_permissions;
         let action_allowed = |action: &str| -> bool {
             allowed_actions.is_empty() || allowed_actions.contains(&action)
         };
-        // Django Meta.permissions — extra (codename, name) pairs seeded
+        // `permissions` — extra (codename, name) pairs seeded
         // alongside the auto CRUD codenames so apps can declare custom
         // authorization buckets (`("approve", "Can approve posts")`).
         // The codename is stored as `<table>.<codename>` for consistency

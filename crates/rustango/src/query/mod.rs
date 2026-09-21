@@ -34,7 +34,7 @@ pub struct QuerySet<T: Model> {
     pending: Vec<PendingFilter>,
     limit: Option<i64>,
     offset: Option<i64>,
-    /// Django `.distinct(*fields)`. `None` emits no DISTINCT clause.
+    /// DISTINCT mode. `None` emits no DISTINCT clause.
     /// See [`crate::core::DistinctMode`] for what each mode means.
     distinct: Option<crate::core::DistinctMode>,
     /// FK field names registered by [`Self::select_related`]. Each one
@@ -54,8 +54,8 @@ pub struct QuerySet<T: Model> {
     /// from `.order_by_expr(...)`. Lowered in registration order, so
     /// chain order survives mixed builder calls.
     order_by: Vec<PendingOrderItem>,
-    /// Row-lock mode for `SELECT … FOR UPDATE`, like Django's
-    /// `select_for_update(...)`. `None` emits no lock clause.
+    /// Row-lock mode for `SELECT … FOR UPDATE`. `None` emits no lock
+    /// clause.
     lock_mode: Option<crate::core::LockMode>,
     /// Set-algebra branches from `.union()` / `.intersection()` /
     /// `.difference()`. Each entry is a compiled
@@ -63,7 +63,7 @@ pub struct QuerySet<T: Model> {
     compound: Vec<crate::core::CompoundBranch>,
     /// Head-branch `ORDER BY`, frozen at the first set-op call.
     /// `order_by` / `limit` / `offset` set BEFORE the first set-op belong
-    /// to the first queryset only (Django 4.0+ component slicing).
+    /// to the first queryset only.
     /// Freezing them here lets anything chained after the set-op apply
     /// to the combined result. Empty until the first set-op call.
     head_order_by: Vec<PendingOrderItem>,
@@ -73,11 +73,11 @@ pub struct QuerySet<T: Model> {
     /// Head-branch `OFFSET`, frozen at the first set-op call.
     /// See [`Self::head_order_by`].
     head_offset: Option<i64>,
-    /// Django `.none()` short-circuit. When `true`, every terminal op
+    /// `.none()` short-circuit. When `true`, every terminal op
     /// compiles to a statement that matches nothing: SELECT gets
     /// `LIMIT 0`; UPDATE / DELETE get an `IS NULL` test against the
     /// NOT NULL primary key. Later calls still accumulate filters and
-    /// orderings, like Django's immutable empty queryset.
+    /// orderings; the queryset stays empty.
     is_none: bool,
     /// Scope names from `T::SCHEMA.global_scopes` to skip on this
     /// queryset (Eloquent `withoutGlobalScope($name)`). Empty keeps every
@@ -295,7 +295,7 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Django `.none()` — a queryset that matches zero rows. Handy as a
+    /// A queryset that matches zero rows. Handy as a
     /// safe base for conditional filters, such as
     /// `if !user.has_perm { qs = qs.none() }`.
     ///
@@ -307,7 +307,7 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Django `.distinct()` — emit `SELECT DISTINCT ...`. Behaves the
+    /// Emit `SELECT DISTINCT ...`. Behaves the
     /// same on every dialect. Add `.order_by(...)` to decide which row
     /// of a duplicate group survives; without it the order is undefined.
     ///
@@ -318,13 +318,13 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Django `.distinct(*fields)`. Emits `DISTINCT ON (col1, col2)` on
+    /// Distinct on named columns. Emits `DISTINCT ON (col1, col2)` on
     /// Postgres. On MySQL / SQLite it lowers to a `ROW_NUMBER() OVER
     /// (PARTITION BY cols ORDER BY <order_by>)` subquery. All three give
     /// "first row per group", and the queryset's `ORDER BY` decides
     /// which row is first.
     ///
-    /// The columns must come first in `.order_by(...)`, as in Django.
+    /// The columns must come first in `.order_by(...)`.
     /// Otherwise `.compile()` returns
     /// [`QueryError::DistinctOnOrderByMismatch`]. Empty `fields`
     /// returns [`QueryError::DistinctOnEmpty`]; use
@@ -335,7 +335,7 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Django's `select_for_update(...)`. Emits `SELECT … FOR UPDATE` on
+    /// Take a row lock. Emits `SELECT … FOR UPDATE` on
     /// Postgres and MySQL 8+. SQLite has no row-lock syntax, so it is a
     /// no-op there; a SQLite transaction locks the whole database.
     ///
@@ -426,7 +426,7 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Django's `union(other_qs)`. Combines this queryset with `other`
+    /// Combines this queryset with `other`
     /// using SQL `UNION`, which removes duplicates. Both target model
     /// `T`, so the column shape always matches.
     ///
@@ -436,7 +436,7 @@ impl<T: Model> QuerySet<T> {
     ///
     /// `.order_by()` / `.limit()` / `.offset()` called AFTER `.union()`
     /// apply to the combined result. The same calls BEFORE it apply to
-    /// the first queryset only (Django 4.0+ component slicing). Each
+    /// the first queryset only. Each
     /// branch keeps its own clauses, because every component is wrapped
     /// in an aliased derived table (`SELECT * FROM (…) AS
     /// __rustango_bN`) on all three backends.
@@ -464,7 +464,7 @@ impl<T: Model> QuerySet<T> {
         self.add_compound(crate::core::SetOp::UnionAll, other)
     }
 
-    /// Django's `intersection(other_qs)`. Rows present in BOTH
+    /// Rows present in BOTH
     /// querysets. Postgres, SQLite and MySQL 8.0.31+.
     ///
     /// # Panics
@@ -474,7 +474,7 @@ impl<T: Model> QuerySet<T> {
         self.add_compound(crate::core::SetOp::Intersection, other)
     }
 
-    /// Django's `difference(other_qs)`. Emits `EXCEPT`: rows in this
+    /// Emits `EXCEPT`: rows in this
     /// queryset but not in `other`. Postgres, SQLite and MySQL 8.0.31+.
     ///
     /// # Panics
@@ -631,9 +631,9 @@ impl<T: Model> QuerySet<T> {
     /// `#[rustango(default_order = "...")]` is prepended to the pending
     /// ORDER BY list, so a later `.order_by(...)` adds secondary keys.
     ///
-    /// **You must opt in per query.** Unlike Django's `Meta.ordering`,
-    /// the default order is not applied on its own; every queryset
-    /// starts unsorted. This keeps `.count()`, `.exists()` and
+    /// **You must opt in per query.** A model's default order is not
+    /// applied on its own; every queryset starts unsorted. This keeps
+    /// `.count()`, `.exists()` and
     /// `.delete()` from paying for a sort they do not need.
     ///
     /// A no-op when the model has no `default_order`, and calling it
@@ -857,8 +857,8 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()` (MySQL),
-    /// like Django's `.order_by('?')`. Good for "random N rows" needs
+    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()` (MySQL).
+    /// Good for "random N rows" needs
     /// such as banner rotation or sampling.
     ///
     /// ```ignore
@@ -906,11 +906,10 @@ impl<T: Model> QuerySet<T> {
         self.order_by(items)
     }
 
-    /// Django's `QuerySet.reverse()`. Flips the direction of every
-    /// pending `ORDER BY` entry. `Random` has no direction, so it stays
-    /// as it is.
+    /// Flips the direction of every pending `ORDER BY` entry.
+    /// `Random` has no direction, so it stays as it is.
     ///
-    /// No-op when no ordering is set, just like Django.
+    /// No-op when no ordering is set.
     ///
     /// ```ignore
     /// // newest first
@@ -965,8 +964,8 @@ impl<T: Model> QuerySet<T> {
         !self.order_by.is_empty()
     }
 
-    /// Load a `ForeignKey<Parent>` field with a `LEFT JOIN`, like
-    /// Django's `select_related`. Pass the field name on `T`, not the
+    /// Load a `ForeignKey<Parent>` field with a `LEFT JOIN`, in the
+    /// same query. Pass the field name on `T`, not the
     /// FK column or the parent table. `fetch_on` then returns rows
     /// whose `ForeignKey<Parent>` is already `Loaded`, from a single
     /// query, with no N+1.
@@ -1183,7 +1182,7 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Append a `WHERE field <op> value` predicate with an explicit
-    /// `Op`. Use it when you already know the operator; for the Django
+    /// `Op`. Use it when you already know the operator; for the
     /// `filter("field__lookup", value)` shape see [`Self::filter`].
     ///
     /// `field` is the Rust-side field name. The column is looked up in
@@ -1203,7 +1202,7 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Django-shape `filter()`. Parses a `"field"` or
+    /// Append a `WHERE` predicate. Parses a `"field"` or
     /// `"field__lookup"` key and picks the matching `Op`.
     ///
     /// | Suffix | SQL | Value treatment |
@@ -1251,22 +1250,19 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Django `.exclude(key, value)` — the negation of [`Self::filter`].
-    /// Each call wraps **its own** predicate in `NOT (…)`, and chained
-    /// excludes AND together, like Django's single-kwarg excludes. The
+    /// The negation of [`Self::filter`]. Each call wraps **its own**
+    /// predicate in `NOT (…)`, and chained excludes AND together. The
     /// full `__lookup` grammar works here too.
     ///
     /// ```ignore
-    /// // Django: Post.objects.exclude(status="draft")
     /// Post::objects().exclude("status", "draft").fetch(&pool).await?;
     /// // with a lookup suffix:
     /// Post::objects().exclude("views__lt", 100_i64)
     /// ```
     ///
     /// **NULLs:** `NOT (col = v)` also drops rows where `col IS NULL`,
-    /// because of SQL three-valued logic. Django emits the same.
-    /// For Django's multi-kwarg `exclude(a=1, b=2)`, which puts one
-    /// `NOT` over the whole group, use `where_raw(!Q(...))`.
+    /// because of SQL three-valued logic. To put one `NOT` over a
+    /// whole group of conditions, use `where_raw(!Q(...))`.
     #[must_use]
     pub fn exclude(mut self, key: &str, value: impl Into<SqlValue>) -> Self {
         self.pending
@@ -1413,8 +1409,7 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Keep rows that have at least one related row through the
-    /// relation named `name`. Eloquent `has($rel)`, Django
-    /// `filter(<rel>__isnull=False)`.
+    /// relation named `name`.
     ///
     /// `name` is looked up in three relation kinds, in this order, so
     /// the same call works however the relation is declared on `T`:
@@ -1617,8 +1612,7 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Keep rows whose **count** of related rows satisfies
-    /// `<count> <op> n`. Eloquent `has($rel, $op, $n)`, Django
-    /// `.annotate(c=Count(<rel>)).filter(c__<op>=n)`.
+    /// `<count> <op> n`.
     ///
     /// Emits a correlated aggregate subquery in the WHERE clause:
     /// `(SELECT COUNT(*) FROM <child> WHERE <child_fk> =
@@ -1656,8 +1650,6 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Add the **count** of related rows as a `<name>_count` column.
-    /// Eloquent `withCount('comments')`, Django
-    /// `.annotate(comments_count=Count('comments'))`.
     ///
     /// This turns the queryset into an [`AggregateBuilder`], whose rows
     /// are `Vec<HashMap<String, SqlValue>>`, like every other
@@ -1717,8 +1709,7 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Add a `<name>_exists` column saying whether **any** related row
-    /// exists. Eloquent `withExists('comments')`, Django
-    /// `.annotate(has_comments=Exists(...))`.
+    /// exists.
     ///
     /// Emits `CASE WHEN EXISTS (…) THEN 1 ELSE 0 END`, which is cheaper
     /// than [`Self::annotate_count`] when you only need presence,
@@ -2012,7 +2003,7 @@ impl<T: Model> QuerySet<T> {
             }
         }
         // `.distinct_on(&[...])` needs its columns at the head of the
-        // ORDER BY. Django checks this at runtime; we catch it here.
+        // ORDER BY, so catch a mismatch at compile time.
         // An empty list is rejected: it would just mean `.distinct()`.
         if let Some(crate::core::DistinctMode::On(cols)) = &self.distinct {
             if cols.is_empty() {
@@ -2086,8 +2077,8 @@ impl<T: Model> QuerySet<T> {
         })
     }
 
-    /// Project to `Vec<HashMap<String, SqlValue>>`, like Django's
-    /// `.values('id', 'name')`. Returns a [`ValuesQuerySet`] whose
+    /// Project to `Vec<HashMap<String, SqlValue>>` — named columns
+    /// only, no typed model. Returns a [`ValuesQuerySet`] whose
     /// `.fetch(&pool)` decodes rows into a `HashMap` keyed by column
     /// name.
     ///
@@ -2108,8 +2099,7 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Project to `Vec<Vec<SqlValue>>`, like Django's
-    /// `.values_list('id', 'name')`. Same as [`Self::values_dict`],
+    /// Project to `Vec<Vec<SqlValue>>`. Same as [`Self::values_dict`],
     /// but each row is an ordered `Vec<SqlValue>` matching the `cols`
     /// order instead of a `HashMap`.
     #[must_use]
@@ -2120,8 +2110,7 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Single-column projection, like Django's
-    /// `.values_list('id', flat=True)`. Returns a
+    /// Single-column projection, flattened. Returns a
     /// [`ValuesFlatQuerySet`] whose `.fetch::<U>(&pool)` decodes the
     /// column into `Vec<U>` through sqlx's `query_scalar`.
     ///
@@ -2132,8 +2121,8 @@ impl<T: Model> QuerySet<T> {
         ValuesFlatQuerySet { qs: self, col }
     }
 
-    /// Project only the listed columns, like Django's
-    /// `.only('id', 'name')`. Same behaviour as [`Self::values_dict`]:
+    /// Project only the listed columns.
+    /// Same behaviour as [`Self::values_dict`]:
     /// the SQL is `SELECT cols FROM …` and each row is a
     /// `HashMap<String, SqlValue>` keyed by column name. The separate
     /// name just reads better at the call site.
@@ -2142,15 +2131,16 @@ impl<T: Model> QuerySet<T> {
     /// [`QueryError::UnknownField`], and an empty list gives
     /// [`QueryError::EmptyValuesProjection`].
     ///
-    /// Unlike Django, you get a `HashMap` rather than a partly filled
-    /// `Model`; rustango has no lazy-attribute descriptors.
+    /// You get a `HashMap` rather than a partly filled `Model`: there
+    /// are no lazy-loading field descriptors, so a half-built struct
+    /// would silently read as zeroed.
     #[must_use]
     pub fn only(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
         self.values_dict(cols)
     }
 
-    /// Project every scalar column EXCEPT the listed ones, like
-    /// Django's `.defer('big_field', 'huge_blob')`. The SELECT leaves
+    /// Project every scalar column EXCEPT the listed ones — the
+    /// inverse of [`Self::only`]. The SELECT leaves
     /// out the named columns, which saves IO on wide tables.
     ///
     /// Same return shape as [`Self::only`].
@@ -2229,18 +2219,18 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Django-shape `.values(&[...]).annotate(...)` projection.
+    /// Group by the named columns.
     ///
     /// Switches the queryset into aggregate mode and records the
     /// projection columns. Followed by `.annotate("alias", aggregate)`,
     /// it emits `SELECT cols, AGGR(...) FROM t GROUP BY cols`; the
     /// GROUP BY comes from the values list.
     ///
-    /// This is **Django Shape 2**. The same IR gives equivalent SQL on
-    /// Postgres, MySQL and SQLite.
+    /// This is **shape 2** in the cheat-sheet on [`Self::annotate`].
+    /// The same IR gives equivalent SQL on Postgres, MySQL and SQLite.
     ///
     /// ```ignore
-    /// // "Posts per author" — Django's canonical example.
+    /// // "Posts per author".
     /// Post::objects()
     ///     .values(&["author_id"])
     ///     .annotate("n", count_all().into())
@@ -2262,7 +2252,7 @@ impl<T: Model> QuerySet<T> {
     /// ```
     ///
     /// Calling `.values()` without a subsequent aggregating `.annotate(...)`
-    /// is **Django Shape 1** — a pure projection (no GROUP BY emitted).
+    /// is **shape 1** — a pure projection, with no GROUP BY emitted.
     #[must_use]
     pub fn values(self, columns: &[&'static str]) -> AggregateBuilder<T> {
         AggregateBuilder {
@@ -2279,13 +2269,13 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Django-shape `.annotate(...)` without calling `.aggregate()`.
+    /// Add a derived column without calling `.aggregate()`.
     ///
     /// Promotes to an [`AggregateBuilder`]. If the annotation
     /// aggregates rows (`Count`, `Sum`, `Avg`, …) and you did not call
     /// `.values()`, `compile()` fills GROUP BY with every
-    /// non-aggregate scalar column. This is **Django Shape 3**: each
-    /// row plus a derived aggregate over its children.
+    /// non-aggregate scalar column. This is **shape 3**: each row plus
+    /// a derived aggregate over its children.
     ///
     /// ```ignore
     /// // "Each author + their post count" — every column of `Author`
@@ -2295,7 +2285,7 @@ impl<T: Model> QuerySet<T> {
     ///     .compile()?;
     /// ```
     ///
-    /// # Django shape cheat-sheet
+    /// # Projection cheat-sheet
     ///
     /// | Shape | Call site                                | GROUP BY        |
     /// |-------|------------------------------------------|-----------------|
@@ -2308,7 +2298,7 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Project a correlated scalar subquery under `alias`, promoting to
-    /// an [`AggregateBuilder`]. Django's `annotate(newest=Subquery(…))`.
+    /// an [`AggregateBuilder`].
     /// Shorthand for [`Self::annotate`] with
     /// [`crate::core::subquery::scalar_subquery`]. `inner` must return
     /// one column and at most one row. Correlate it with
@@ -2700,7 +2690,7 @@ fn date_compare_op(suffix: &str) -> Option<Op> {
     }
 }
 
-/// Parse a Django-shape `"field"` or `"field__suffix"` key and its
+/// Parse a `"field"` or `"field__suffix"` key and its
 /// value into a [`ParsedLookup`]. The suffix table lives on
 /// [`QuerySet::filter`].
 ///
@@ -2902,10 +2892,9 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             }
             Ok(pair(field, Op::Search, value))
         }
-        // Django spells the array operators `__contains` /
-        // `__contained_by` / `__overlap`, but the parser has no field
-        // type to dispatch on, so rustango uses explicit `__array_*`
-        // suffixes that cannot collide with text `__contains`. Prefer
+        // The array operators get explicit `__array_*` suffixes: the
+        // parser has no field type to dispatch on, so a bare
+        // `__contains` would collide with the text one. Prefer
         // the typed `Column::array_*` methods where you can.
         "range_contains"
         | "range_contained_by"
@@ -3544,7 +3533,7 @@ pub struct AggregateBuilder<T: Model> {
     qs: QuerySet<T>,
     group_by: Vec<&'static str>,
     aggregates: Vec<(std::borrow::Cow<'static, str>, AggregateExpr)>,
-    /// Django 3.2 `.alias()`: annotations you can use in
+    /// Aliases: annotations you can use in
     /// `.filter(name, …)` and `.order_by([(name, …)])`, but that never
     /// appear in the SELECT list. `compile()` lifts the expression
     /// into the predicate or ORDER item.
@@ -3563,7 +3552,7 @@ pub struct AggregateBuilder<T: Model> {
     /// With `Some(cols)` and no explicit `.group_by(...)`, `compile()`
     /// derives `GROUP BY cols`. With `None` and an aggregating
     /// annotation, it groups by every non-aggregate scalar column
-    /// (Django Shape 3).
+    /// (shape 3).
     values: Option<Vec<&'static str>>,
 }
 
@@ -3595,8 +3584,8 @@ impl<T: Model> AggregateBuilder<T> {
         self
     }
 
-    /// Project a correlated scalar subquery under `alias`. Django's
-    /// `annotate(x=Subquery(…))`. Shorthand for [`Self::annotate`]
+    /// Project a correlated scalar subquery under `alias`.
+    /// Shorthand for [`Self::annotate`]
     /// with [`crate::core::subquery::scalar_subquery`]. `inner` must
     /// return one column and at most one row.
     #[must_use]
@@ -3764,7 +3753,7 @@ impl<T: Model> AggregateBuilder<T> {
         self
     }
 
-    /// Django 3.2 `.alias()` — annotate without projecting. The
+    /// Annotate without projecting. The
     /// expression is registered under `name` and usable in
     /// [`Self::filter`] and [`Self::order_by`], but the writer
     /// **leaves it out of the SELECT list**.
@@ -3810,8 +3799,8 @@ impl<T: Model> AggregateBuilder<T> {
         self
     }
 
-    /// String-keyed filter that routes itself to WHERE or HAVING, like
-    /// Django's `.filter()` on an aggregating queryset. If `field`
+    /// String-keyed filter that routes itself to WHERE or HAVING.
+    /// If `field`
     /// matches an annotation alias from [`Self::annotate`], the
     /// predicate joins `HAVING`. Otherwise it goes to the WHERE path
     /// on the underlying `QuerySet`.
@@ -3828,8 +3817,8 @@ impl<T: Model> AggregateBuilder<T> {
     /// ```
     ///
     /// **Order matters**: `.annotate(alias, ...)` must come BEFORE the
-    /// matching `.filter(alias, ...)`, because rustango resolves the
-    /// alias at call time. Django resolves it later.
+    /// matching `.filter(alias, ...)`, because the alias is resolved
+    /// at call time, not when the query compiles.
     ///
     /// **Gap**: an alias-routed HAVING predicate skips the schema
     /// column check, because the alias is not a real column, so a
@@ -3930,9 +3919,9 @@ impl<T: Model> AggregateBuilder<T> {
     ///
     /// Without an explicit `.group_by(...)`, the builder fills it in:
     ///
-    /// * `.values(cols).annotate(agg)` → `GROUP BY cols` (Django Shape 2).
+    /// * `.values(cols).annotate(agg)` → `GROUP BY cols` (shape 2).
     /// * `.annotate(agg)` (no values) → `GROUP BY` every non-aggregate
-    ///   scalar column on the model (Django Shape 3).
+    ///   scalar column on the model (shape 3).
     /// * `.annotate(window)` only → no GROUP BY (window functions are
     ///   per-row).
     ///
@@ -4023,8 +4012,8 @@ impl<T: Model> AggregateBuilder<T> {
             }
             cols.clone()
         } else if has_aggregating {
-            // Shape 3: group by every scalar column, like Django's
-            // implicit GROUP BY over all non-aggregate columns.
+            // Shape 3: an implicit GROUP BY over every non-aggregate
+            // scalar column.
             model.scalar_fields().map(|f| f.column).collect()
         } else {
             // No aggregating annotation and no values: a pure window
@@ -4106,7 +4095,7 @@ fn validate_aggregate_expr_columns(
 }
 
 // ====================================================================
-// Pure projection — Django `.values()` / `.values_list()`
+// Pure projection — `.values_dict()` / `.values_list()`
 // ====================================================================
 
 /// Pure-projection queryset returned by [`QuerySet::values_dict`].
@@ -4185,11 +4174,11 @@ impl<T: Model> ValuesFlatQuerySet<T> {
 }
 
 // ====================================================================
-// Django `.dates(field, kind)` — distinct truncated dates
+// `.dates(field, kind)` — distinct truncated dates
 // ====================================================================
 
 /// Truncation granularity for [`QuerySet::dates`] / [`QuerySet::datetimes`].
-/// Mirrors Django's `'year' | 'month' | 'day'` shape.
+/// One of year, month or day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateKind {
     Year,
@@ -4243,7 +4232,7 @@ pub struct DatesQuerySet<T: Model> {
 
 impl<T: Model> DatesQuerySet<T> {
     /// Reverse the ORDER BY direction. The default is ascending,
-    /// oldest first, as in Django.
+    /// oldest first.
     #[must_use]
     pub fn order_desc(mut self, desc: bool) -> Self {
         self.descending = desc;
@@ -4286,8 +4275,7 @@ impl<T: Model> DatesQuerySet<T> {
 }
 
 impl<T: Model> QuerySet<T> {
-    /// Django `.dates(field, kind)` — the distinct date values of
-    /// `field`, truncated to `kind`.
+    /// The distinct date values of `field`, truncated to `kind`.
     ///
     /// Output is ascending by default, oldest first. Chain
     /// [`DatesQuerySet::order_desc`] for newest first.
@@ -4304,8 +4292,7 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Django `.datetimes(field, kind)` — the distinct datetime values
-    /// of `field`, truncated to `kind`.
+    /// The distinct datetime values of `field`, truncated to `kind`.
     ///
     /// Finer than [`Self::dates`]: as well as `Year`, `Month` and
     /// `Day`, it takes `Hour`, `Minute` and `Second`. Each value is a
@@ -4321,8 +4308,8 @@ impl<T: Model> QuerySet<T> {
     }
 }
 
-/// Truncation granularity for [`QuerySet::datetimes`]. Mirrors
-/// Django's `'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'`.
+/// Truncation granularity for [`QuerySet::datetimes`]: year, month,
+/// day, hour, minute or second.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateTimeKind {
     Year,

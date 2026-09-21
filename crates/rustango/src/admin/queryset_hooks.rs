@@ -1,5 +1,5 @@
-//! Request-aware scoping for the admin list view, like Django's
-//! `ModelAdmin.get_queryset(request)`.
+//! Request-aware scoping for the admin list view: a hook that reads
+//! the request and narrows the rows the list may show.
 //!
 //! An inventory registry of `(table, fn(&Parts) -> Vec<Filter>)`
 //! entries. The list view walks it per request and adds the filters to

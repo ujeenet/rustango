@@ -27,7 +27,7 @@
 //! }
 //! ```
 //!
-//! ## Crate-internal layout (Django-shape, slice 6)
+//! ## Crate-internal layout
 //!
 //! - [`tenants`] — `create-tenant`, `drop-tenant`, `purge-tenant`,
 //!   `list-tenants` plus the database-mode admin-DROP helper.
@@ -798,10 +798,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "  startapp <name> [--into <dir>] [--with-manage-bin] [--with-bootstrap-migration]"
     )?;
-    writeln!(
-        w,
-        "                       Scaffold a Django-shape app module."
-    )?;
+    writeln!(w, "                       Scaffold an app module.")?;
     writeln!(w)?;
     writeln!(w, "EXAMPLES:")?;
     writeln!(w, "  cargo run -- migrate")?;

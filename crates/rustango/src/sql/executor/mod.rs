@@ -270,8 +270,8 @@ pub use row_to_json::row_to_json_sqlite;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 
 /// Annotate each parent row with the COUNT of its children, from a
-/// single query — the Django `annotate(post_count=Count('post'))`
-/// shape:
+/// single query, so a list page costs one round trip instead of
+/// N + 1:
 ///
 /// ```text
 ///   SELECT parent.<every-column>, COUNT(child.<pk>) AS __annotated_count
@@ -379,7 +379,7 @@ where
     Ok(out)
 }
 
-/// Django-shape `prefetch_related`: fetch parents and, for each one,
+/// Prefetch children: fetch parents and, for each one,
 /// the children whose foreign key points at it. Two queries in total,
 /// however many parents there are:
 ///
@@ -1748,7 +1748,7 @@ where
     }
 }
 
-// Django-style `.values()` / `.values_list()` projection.
+// `.values_dict()` / `.values_list()` projection.
 mod values;
 #[allow(unused_imports)]
 pub use values::{
@@ -1860,7 +1860,7 @@ where
     }
 }
 
-/// Django's `.dates(field, kind)`. Wraps the queryset's SELECT in
+/// Run a `.dates(field, kind)` queryset. Wraps its SELECT in
 /// `SELECT DISTINCT <trunc(col)> FROM (<inner>) ORDER BY …` to get
 /// the distinct truncated dates.
 ///
@@ -1892,7 +1892,7 @@ pub async fn fetch_dates_pool<T: crate::core::Model + Send>(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-/// Django's `.datetimes(field, kind)`: [`fetch_dates_pool`] with
+/// Run a `.datetimes(field, kind)` queryset: [`fetch_dates_pool`] with
 /// finer buckets (`Hour` / `Minute` / `Second`) and a `DateTime<Utc>`
 /// result.
 ///
@@ -1947,7 +1947,7 @@ impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
     }
 }
 
-/// Django-shape boolean predicates on a `QuerySet`: `exists`,
+/// Boolean predicates on a `QuerySet`: `exists`,
 /// `is_empty`, `doesnt_exist` and `contains_pk`.
 ///
 /// All of them run the same `COUNT(*)` as [`CounterPool::count`] and
@@ -2295,7 +2295,7 @@ where
 {
     /// Fetch the first row by the current ordering, or `None` when
     /// nothing matches. With no `order_by`, it sorts by primary key
-    /// ASC, like Django's `QuerySet.first()`.
+    /// ASC, so the result is stable.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2319,8 +2319,7 @@ where
     }
 
     /// Fetch the smallest row by `field`, or `None` when nothing
-    /// matches. Django's `QuerySet.earliest("field")`. It replaces
-    /// any `order_by` already set.
+    /// matches. It replaces any `order_by` already set.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2331,8 +2330,7 @@ where
     }
 
     /// Fetch the largest row by `field`, or `None` when nothing
-    /// matches. Django's `QuerySet.latest("field")`. It replaces any
-    /// `order_by` already set.
+    /// matches. It replaces any `order_by` already set.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2421,7 +2419,7 @@ where
         }
     }
 
-    /// Django's `QuerySet.latest()`: the largest row by the column in
+    /// The largest row by the column in
     /// `#[rustango(get_latest_by = "<col>")]`. Use [`Self::latest`]
     /// to name the field yourself.
     ///
@@ -2438,14 +2436,13 @@ where
                 .into(),
             )));
         };
-        // Like Django: the attribute only names the column, and
-        // `.latest()` is always the descending end.
+        // The attribute only names the column; `.latest()` is always
+        // the descending end.
         let _ = attr_desc;
         self.latest(field, pool).await
     }
 
-    /// Django's `QuerySet.earliest()`, the other end of
-    /// [`Self::latest_default`].
+    /// The other end of [`Self::latest_default`].
     ///
     /// # Errors
     /// As [`Self::latest_default`].
@@ -2462,7 +2459,7 @@ where
         self.earliest(field, pool).await
     }
 
-    /// Django's `QuerySet.iterator(chunk_size)`: read the results
+    /// Read the results
     /// `chunk_size` rows at a time with `LIMIT N OFFSET M`, so a huge
     /// export never has to fit in memory. The queryset is compiled
     /// here, so a schema error surfaces before the first chunk.
@@ -2534,7 +2531,7 @@ where
         })
     }
 
-    /// Django's `Model.objects.in_bulk(ids, field_name=)`: fetch rows
+    /// Fetch rows
     /// by a list of column values and return them in a `HashMap`
     /// keyed by that column.
     ///

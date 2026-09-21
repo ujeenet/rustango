@@ -1,4 +1,4 @@
-//! Django-parity #363 — `register_admin_view!` adds a per-model
+//! Issue #363 — `register_admin_view!` adds a per-model
 //! custom URL route to the admin Builder. This verifies the
 //! end-to-end wiring: handler reaches HTTP, runs the handler body,
 //! returns the response intact.

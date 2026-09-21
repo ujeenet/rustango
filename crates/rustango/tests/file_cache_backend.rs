@@ -1,4 +1,4 @@
-//! Django-parity #408 — file-system cache backend.
+//! Issue #408 — file-system cache backend.
 //!
 //! Verifies `FileCache` round-trips through the disk, applies TTL,
 //! prunes expired entries on read, and is selectable through

@@ -57,8 +57,8 @@ pub struct Settings {
     /// rolling file. Unset fields keep the `logging::Setup` defaults.
     pub logging: LoggingSettings,
 
-    /// `[i18n]`: `LANGUAGE_CODE`, `LANGUAGES` and `LOCALE_PATHS`, as
-    /// in Django. Builds a [`crate::i18n::Translator`] from TOML; see
+    /// `[i18n]`: default language, supported languages and locale
+    /// paths. Builds a [`crate::i18n::Translator`] from TOML; see
     /// [`crate::i18n::Translator::from_settings`].
     pub i18n: I18nSettings,
 
@@ -408,7 +408,7 @@ pub struct CacheSettings {
     /// Redis connection URL when `backend = "redis"`.
     pub redis_url: Option<String>,
     /// Directory the `"file"` backend stores entries in, one file per
-    /// key. Django calls this `CACHES["default"]["LOCATION"]`. If
+    /// key. If
     /// `backend = "file"` but this is unset, the resolver warns and
     /// uses `InMemoryCache` so boot is not blocked.
     pub file_cache_dir: Option<std::path::PathBuf>,
@@ -448,35 +448,35 @@ pub struct MailSettings {
     /// port 587) or `"implicit"` (TLS from the first byte, port 465).
     /// An unknown value warns and uses `"starttls"`.
     pub smtp_tls: Option<String>,
-    /// SMTP connection timeout in seconds, Django's `EMAIL_TIMEOUT`.
+    /// SMTP connection timeout in seconds.
     /// `None` leaves lettre with no timeout. Set it in production: a
     /// stuck relay otherwise holds request workers for minutes.
     #[serde(default)]
     pub smtp_timeout_secs: Option<u64>,
-    /// The `From:` address on normal outgoing mail, Django's
-    /// `DEFAULT_FROM_EMAIL`. `default_from_email` is the other name
-    /// for this field and wins when both are set.
+    /// The `From:` address on normal outgoing mail.
+    /// `default_from_email` is the other name for this field and
+    /// wins when both are set.
     pub from_address: Option<String>,
     /// The `From:` address on mail the server generates, such as
-    /// `mail_admins`. Django's `SERVER_EMAIL`. Falls back to
+    /// `mail_admins`. Falls back to
     /// `from_address`. Set it to send ops mail from its own address.
     #[serde(default)]
     pub server_email: Option<String>,
     /// Text put in front of subjects sent by `mail_admins` and
-    /// `mail_managers`, Django's `EMAIL_SUBJECT_PREFIX`. Empty by
+    /// `mail_managers`. Empty by
     /// default. Use something like `"[Acme] "`, with the space.
     #[serde(default)]
     pub email_subject_prefix: Option<String>,
-    /// Addresses `email::mail_admins` writes to, Django's `ADMINS`.
-    /// Usually the people paged for a 5xx.
+    /// Addresses `email::mail_admins` writes to — usually the people
+    /// paged for a 5xx.
     #[serde(default)]
     pub admins: Vec<String>,
-    /// Addresses `email::mail_managers` writes to, Django's
-    /// `MANAGERS`. A wider, less urgent list than `admins`.
+    /// Addresses `email::mail_managers` writes to — a wider, less
+    /// urgent list than `admins`.
     #[serde(default)]
     pub managers: Vec<String>,
     /// Directory the `"file"` mail backend writes `.eml` files to
-    /// instead of sending, Django's `EMAIL_FILE_PATH`. If
+    /// instead of sending. If
     /// `backend = "file"` but this is unset, the resolver warns and
     /// uses `ConsoleMailer`.
     pub file_email_dir: Option<std::path::PathBuf>,
@@ -588,38 +588,34 @@ pub struct SecuritySettings {
     /// allows everything, though browsers reject it with
     /// credentials.
     pub cors_allowed_origins: Vec<String>,
-    /// Allowed Host headers, Django's `ALLOWED_HOSTS`, enforced by
+    /// Allowed Host headers, enforced by
     /// [`crate::host_validation::AllowedHostsLayer`]. An entry is a
     /// hostname, a `.example.com` wildcard, or `*`. Empty turns the
     /// layer off, which `manage check --deploy` warns about in prod.
     pub allowed_hosts: Vec<String>,
     /// Extra origins that pass the CSRF Origin check, on top of
-    /// same-host requests. Django's `CSRF_TRUSTED_ORIGINS`. Each
+    /// same-host requests. Each
     /// entry is scheme plus host, such as `"https://app.example.com"`
     /// or `"https://*.example.com"`. Empty skips the Origin check.
     /// Used by
     /// [`crate::forms::csrf::CsrfConfig::with_trusted_origins`].
     pub csrf_trusted_origins: Vec<String>,
     /// `true` mounts [`crate::ssl_redirect::SslRedirectLayer`], which
-    /// redirects plain HTTP to HTTPS. Django's
-    /// `SECURE_SSL_REDIRECT`. Default `false`.
+    /// redirects plain HTTP to HTTPS. Default `false`.
     pub secure_ssl_redirect: Option<bool>,
     /// Path prefixes that skip the SSL redirect even when
-    /// [`Self::secure_ssl_redirect`] is on. Django's
-    /// `SECURE_REDIRECT_EXEMPT`. Useful for health checks that arrive
-    /// over plain HTTP.
+    /// [`Self::secure_ssl_redirect`] is on. Useful for health checks
+    /// that arrive over plain HTTP.
     pub secure_redirect_exempt: Vec<String>,
     /// The header name and value a reverse proxy sets to say the
-    /// original request was HTTPS, Django's
-    /// `SECURE_PROXY_SSL_HEADER`. It feeds
+    /// original request was HTTPS. It feeds
     /// [`crate::ssl_redirect::SslRedirectLayer::proxy_ssl_header`],
     /// so there is no redirect loop behind a TLS-terminating load
     /// balancer, and the real-IP and Host checks. Must hold exactly
     /// two entries; otherwise it is ignored.
     pub secure_proxy_ssl_header: Vec<String>,
     /// `true` marks the framework's auth cookies `Secure`, so
-    /// browsers send them over HTTPS only. Django spells this
-    /// `SESSION_COOKIE_SECURE` and `CSRF_COOKIE_SECURE`. `None`
+    /// browsers send them over HTTPS only. `None`
     /// counts as `true`. Set `false` in `dev_settings.toml` for local
     /// HTTP; `manage check --deploy` reports `false` in prod.
     pub secure_cookies: Option<bool>,
@@ -738,8 +734,8 @@ pub struct LoggingSettings {
     pub access_log: Option<bool>,
 }
 
-/// `[i18n]`: the Django settings `LANGUAGE_CODE`, `LANGUAGES` and
-/// `LOCALE_PATHS`. [`crate::i18n::Translator::from_settings`] builds
+/// `[i18n]`: the default language, the supported languages and the
+/// locale paths. [`crate::i18n::Translator::from_settings`] builds
 /// a `Translator` from them, so locale wiring stays out of
 /// `src/main.rs`.
 ///
@@ -759,18 +755,17 @@ pub struct LoggingSettings {
 #[serde(default)]
 pub struct I18nSettings {
     /// The locale used when nothing else picks one: no URL prefix,
-    /// cookie or Accept-Language match. Django's `LANGUAGE_CODE`.
-    /// `None` means `"en"`.
+    /// cookie or Accept-Language match. `None` means `"en"`.
     pub default_locale: Option<String>,
 
-    /// The locales the project supports, Django's `LANGUAGES`.
+    /// The locales the project supports.
     /// `LocaleMiddleware` treats this as the allowlist when reading
     /// Accept-Language. An empty list activates every catalog found
     /// under `locale_paths`.
     pub languages: Vec<String>,
 
-    /// Directories holding catalog files at `<dir>/<lang>.json`,
-    /// Django's `LOCALE_PATHS`. They are searched in order, so a
+    /// Directories holding catalog files at `<dir>/<lang>.json`.
+    /// They are searched in order, so a
     /// later path can shadow an earlier one for the same key. An
     /// empty list skips the loader, which suits apps that call
     /// `add_locale` themselves.

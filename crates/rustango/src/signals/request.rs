@@ -1,5 +1,5 @@
-//! Request lifecycle signals, in Django's shape: `request_started`,
-//! `request_finished` and `got_request_exception`.
+//! Request lifecycle signals: `request_started`, `request_finished`
+//! and `got_request_exception`.
 //!
 //! There is no model here, so receivers register globally. They run
 //! one at a time, in registration order, around every request that

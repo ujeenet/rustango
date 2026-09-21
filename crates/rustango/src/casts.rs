@@ -1,5 +1,4 @@
-//! Transform a field on its way to and from the database, like
-//! Eloquent's `$casts` or Django's `from_db_value`.
+//! Transform a field on its way to and from the database.
 //!
 //! A field typed [`Cast<C>`](crate::casts::Cast) holds the value you work with in Rust,
 //! but stores it through the [`CastValue`] impl `C`: `to_db` when

@@ -1,5 +1,4 @@
-//! Pluggable password-hasher chain with **upgrade-on-login** —
-//! Django's `PASSWORD_HASHERS = [...]` setting.
+//! Pluggable password-hasher chain with **upgrade-on-login**.
 //!
 //! Every entry implements [`PasswordHasher`]. The **first** entry is
 //! the preferred hasher: it writes all new hashes. When a login

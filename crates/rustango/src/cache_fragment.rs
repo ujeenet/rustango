@@ -1,5 +1,4 @@
-//! Fragment caching, the handler-side answer to Django's
-//! `{% cache %}` tag.
+//! Fragment caching: cache one rendered piece of a page.
 //!
 //! Tera has no custom block tags, only filters and functions, so a
 //! lazy `{% cache 500 sidebar %}…{% endcache %}` block is not
@@ -86,8 +85,7 @@ where
 }
 
 /// Build a stable cache key from a fragment name and the values the
-/// fragment varies on, matching Django's
-/// [`make_template_fragment_key`](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching).
+/// fragment varies on.
 ///
 /// Shape: `template.cache.{name}.{hash}`. Order matters, so
 /// `["a", "b"]` and `["b", "a"]` give different keys.
@@ -97,7 +95,7 @@ where
 /// ```ignore
 /// use rustango::cache_fragment::make_template_fragment_key;
 ///
-/// // Build the key Django's `{% cache 600 sidebar user.id %}` would use.
+/// // Build the key for the per-user sidebar fragment.
 /// let key = make_template_fragment_key("sidebar", &[&user_id.to_string()]);
 /// cache.delete(&key).await?;  // invalidate when underlying data changes
 /// ```
@@ -111,8 +109,8 @@ pub fn make_template_fragment_key(fragment_name: &str, vary_on: &[&str]) -> Stri
         }
         joined.push_str(part);
     }
-    // Django uses MD5; SHA-256 cut to 32 hex chars gives the same key
-    // length without an extra dependency.
+    // SHA-256 cut to 32 hex chars: a short key, and no extra
+    // dependency for a weaker hash.
     let digest = Sha256::digest(joined.as_bytes());
     let hex: String = digest.iter().take(16).fold(String::new(), |mut s, b| {
         use std::fmt::Write as _;

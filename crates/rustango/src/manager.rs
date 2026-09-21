@@ -1,29 +1,6 @@
-//! How to attach your own query shortcuts to a model, the way
-//! Django's custom Managers and `QuerySet.as_manager()` do.
-//!
-//! Django lets an app add shortcuts to `.objects`, so callers can
-//! write `Article.objects.published()`:
-//!
-//! ```python
-//! # 1. Custom Manager that overrides get_queryset:
-//! class PublishedManager(models.Manager):
-//!     def get_queryset(self):
-//!         return super().get_queryset().filter(published=True)
-//!
-//! class Article(models.Model):
-//!     objects = models.Manager()
-//!     published = PublishedManager()
-//!
-//! # 2. Custom QuerySet promoted to Manager via .as_manager():
-//! class ArticleQuerySet(models.QuerySet):
-//!     def published(self):
-//!         return self.filter(published=True)
-//!     def by_author(self, user):
-//!         return self.filter(author=user)
-//!
-//! class Article(models.Model):
-//!     objects = ArticleQuerySet.as_manager()
-//! ```
+//! How to attach your own query shortcuts to a model, so callers can
+//! write `Article::objects().published()` instead of repeating the
+//! same filter everywhere.
 //!
 //! ## The Rust idiom: extension traits
 //!
@@ -45,8 +22,8 @@
 //!     pub author_id: i64,
 //! }
 //!
-//! /// Article-specific QuerySet helpers — Django's
-//! /// `ArticleQuerySet.published()` / `.by_author(user)` shape.
+//! /// Article-specific QuerySet helpers: `.published()` and
+//! /// `.by_author(user)`.
 //! pub trait ArticleQuerySetExt: Sized {
 //!     fn published(self) -> Self;
 //!     fn by_author(self, author_id: i64) -> Self;
@@ -81,7 +58,7 @@
 //!     /// Default accessor — every Article, no filter applied.
 //!     /// (Already provided by `#[derive(Model)]` as `Article::objects()`.)
 //!
-//!     /// Published-only accessor — Django's `Article.published`.
+//!     /// Published-only accessor.
 //!     pub fn published_objects() -> QuerySet<Article> {
 //!         Article::objects().where_(Article::published.eq(true))
 //!     }

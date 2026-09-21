@@ -75,9 +75,8 @@ impl Locale {
         self.0.split('-').next().unwrap_or(&self.0)
     }
 
-    /// `true` for right-to-left scripts. Django parity #429 — matches
-    /// `LANGUAGE_BIDI` / `{% get_current_language_bidi %}`. The check
-    /// is on the base language (`ar-EG` ≡ `ar`).
+    /// `true` for right-to-left scripts. The check is on the base
+    /// language (`ar-EG` ≡ `ar`).
     ///
     /// Covered RTL families: Arabic (`ar`), Hebrew (`he`, plus its
     /// retired ISO code `iw`), Persian / Farsi (`fa`), Urdu (`ur`),
@@ -91,7 +90,7 @@ impl Locale {
 
     /// `"rtl"` for right-to-left scripts, `"ltr"` otherwise — the
     /// value you'd hand to an HTML `dir` attribute or CSS
-    /// `direction` property. Django parity #429.
+    /// `direction` property.
     #[must_use]
     pub fn direction(&self) -> &'static str {
         if self.is_rtl() {
@@ -345,7 +344,7 @@ pub struct Translator {
     default_locale: Locale,
     /// Optional explicit fallback chain — checked AFTER the
     /// requested locale + its base language, BEFORE `default_locale`.
-    /// Django parity #425. Lowercased on insert.
+    /// Lowercased on insert.
     fallback_chain: Vec<Locale>,
     catalogs: RwLock<HashMap<Locale, HashMap<String, String>>>,
     /// DB-sourced override layer (#532). Same `locale → key → value`
@@ -376,7 +375,7 @@ impl Translator {
         }
     }
 
-    /// Set an explicit fallback chain (#425, Django parity). When
+    /// Set an explicit fallback chain. When
     /// `translate(locale, key, ...)` doesn't find a key in `locale`
     /// or its base language, the lookup walks `chain` in order
     /// before falling through to the default locale.
@@ -692,9 +691,8 @@ impl Translator {
         Ok(t)
     }
 
-    /// Build a `Translator` from a [`crate::config::I18nSettings`]
-    /// — Django-shape `LANGUAGE_CODE` / `LANGUAGES` / `LOCALE_PATHS`
-    /// (#403). Reads each `locale_paths` entry as a directory of
+    /// Build a `Translator` from a [`crate::config::I18nSettings`].
+    /// Reads each `locale_paths` entry as a directory of
     ///
     /// Gated behind the `config` feature since it consults the
     /// loader's typed sections.
@@ -782,15 +780,13 @@ impl Translator {
         Ok(t)
     }
 
-    /// Django/gettext-shape alias for [`Self::translate`] — issue #422.
-    /// Mirrors Django's `gettext(message)`: look up the key in the
-    /// supplied locale and return the translated string (or the
-    /// key itself when no translation is found). No parameter
-    /// substitution — Django's `gettext` is the raw lookup.
+    /// gettext-shape alias for [`Self::translate`]: look up the key
+    /// in the supplied locale and return the translated string, or
+    /// the key itself when no translation is found. This is the raw
+    /// lookup, with no parameter substitution.
     ///
-    /// For interpolation use [`Self::translate`] (rustango shape)
-    /// or [`Self::gettext_fmt`] (gettext shape that accepts a
-    /// placeholder map).
+    /// For interpolation use [`Self::translate`] or
+    /// [`Self::gettext_fmt`], which accepts a placeholder map.
     #[must_use]
     pub fn gettext(&self, locale: &str, key: &str) -> String {
         self.translate(locale, key, &[])
@@ -798,15 +794,14 @@ impl Translator {
 
     /// gettext-shape lookup with placeholder substitution. Same
     /// substitution rules as [`Self::translate`] (`{name}` →
-    /// `params["name"]`). Provided so projects porting from Django
-    /// keep their muscle memory: `gettext_fmt(locale, "Hi, {name}",
+    /// `params["name"]`): `gettext_fmt(locale, "Hi, {name}",
     /// &[("name", &user.name)])`.
     #[must_use]
     pub fn gettext_fmt(&self, locale: &str, key: &str, params: &[(&str, &str)]) -> String {
         self.translate(locale, key, params)
     }
 
-    /// Django/gettext-shape `pgettext(context, message)` — context-
+    /// gettext-shape `pgettext(context, message)` — context-
     /// disambiguated translation. Identical keys with different
     /// contexts can resolve to different translations. Issue #422.
     ///
@@ -843,9 +838,9 @@ impl Translator {
         substitute(&raw, params)
     }
 
-    /// Django/gettext-shape `ngettext(singular, plural, count)` —
+    /// gettext-shape `ngettext(singular, plural, count)` —
     /// pluralization. Returns `singular` when `count == 1`,
-    /// `plural` otherwise. Issue #422.
+    /// `plural` otherwise.
     ///
     /// Catalog format mirrors gettext's `msgid_plural` convention:
     /// register two keys, one for each form. The fallback chain is
@@ -1355,9 +1350,9 @@ mod tests {
         assert_eq!(lang, None);
     }
 
-    // ============================================================ #422
+    // ============================================================
     //
-    // Django/gettext-shape aliases: `gettext`, `pgettext` (context
+    // gettext-shape aliases: `gettext`, `pgettext` (context
     // disambiguation), `ngettext` (English plural rule), + their
     // `_fmt` placeholder-substitution variants.
 
@@ -1411,9 +1406,8 @@ mod tests {
     #[test]
     fn gettext_falls_back_to_key_on_miss() {
         let t = translator_with_en_fr();
-        // Missing keys fall through to the literal source string —
-        // matches Django's behavior where untranslated msgids
-        // surface unchanged.
+        // Missing keys fall through to the literal source string, so
+        // an untranslated message surfaces unchanged.
         assert_eq!(t.gettext("en", "no_such_key"), "no_such_key");
     }
 
@@ -1427,8 +1421,7 @@ mod tests {
     #[test]
     fn pgettext_falls_back_to_bare_key_when_context_entry_missing() {
         let t = translator_with_en_fr();
-        // Unknown context → fall through to the bare-key entry
-        // (matches Django's pgettext fallback).
+        // Unknown context → fall through to the bare-key entry.
         assert_eq!(t.pgettext("en", "adjective", "save"), "Save (bare)");
     }
 

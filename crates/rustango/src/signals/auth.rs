@@ -1,5 +1,5 @@
-//! Auth signals, in Django's shape: `user_logged_in`,
-//! `user_logged_out` and `user_login_failed`.
+//! Auth signals: `user_logged_in`, `user_logged_out` and
+//! `user_login_failed`.
 //!
 //! These are lifecycle events, not row events, so receivers register
 //! globally and run one at a time, in registration order. The

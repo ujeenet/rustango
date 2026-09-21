@@ -1,5 +1,5 @@
-//! Live test for admin inlines — Django `TabularInline` /
-//! `StackedInline` read-only display on the parent detail page.
+//! Live test for admin inlines — tabular / stacked read-only display
+//! of child rows on the parent detail page.
 //! Issue #50 slice 1.
 //!
 //! Spins up two models (`il_blog` + `il_blog_post`), registers an

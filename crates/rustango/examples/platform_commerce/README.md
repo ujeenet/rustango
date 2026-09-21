@@ -30,8 +30,9 @@ cargo run -- --help                  # full verb list (makemigrations, startapp,
 ```
 
 Either way: `cargo run` (no args) is `runserver`. Every other
-Django-style verb flows through the same binary via
-`rustango::manage::Cli` — see `src/main.rs`.
+management verb (`makemigrations`, `migrate`, `startapp`, `check`, …)
+flows through the same binary via `rustango::manage::Cli` — see
+`src/main.rs`.
 
 ## Project layout
 
@@ -39,7 +40,7 @@ Django-style verb flows through the same binary via
 src/
   main.rs         — Cli::new().api(urls::api()).run() boots both server + verbs
   models.rs       — every #[derive(Model)] lives here
-  views.rs        — request handlers (Django-style "views")
+  views.rs        — request handlers ("views")
   urls.rs         — pub fn api() -> Router aggregator
 
 migrations/       — JSON migration files (committed to git)

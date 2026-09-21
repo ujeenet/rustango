@@ -1,5 +1,5 @@
-//! A registry of named databases, like Django's `DATABASES` setting
-//! and `QuerySet.using(alias)`.
+//! A registry of named databases, plus `QuerySet::using(alias)` to
+//! route a query to one of them.
 //!
 //! Every terminal normally takes a pool, so multi-database work is
 //! already possible by passing the right one. This module maps a name
@@ -11,7 +11,7 @@
 //! rustango::databases::register("default", primary_pool);
 //! rustango::databases::register("replica", replica_pool);
 //!
-//! // Route a read to the replica — Django's `.using("replica")`:
+//! // Route a read to the replica:
 //! let posts = Post::objects()
 //!     .filter("published", true)
 //!     .using("replica")
@@ -105,9 +105,7 @@ pub fn clear() {
 
 // ---- routers ----
 
-/// Picks the alias a model's reads and writes should go to, like
-/// Django's
-/// [`DATABASE_ROUTERS`](https://docs.djangoproject.com/en/6.0/topics/db/multi-db/#database-routers).
+/// Picks the alias a model's reads and writes should go to.
 /// Use it for read replicas or sharding without naming an alias at
 /// each call site.
 ///
@@ -203,8 +201,7 @@ pub fn write_pool_for(model: &crate::core::ModelSchema) -> Pool {
 
 impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// Run this queryset against the connection registered under
-    /// `alias`, like Django's
-    /// [`QuerySet.using`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#using).
+    /// `alias`.
     ///
     /// The returned [`UsingQuerySet`] has read terminals only. Writes
     /// stay on the explicit `fetch(&pool)` family so one cannot reach

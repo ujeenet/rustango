@@ -1,15 +1,14 @@
 //! Trailing-slash redirect middleware: one canonical form per URL.
 //!
 //! When the path is not in canonical form, the request is redirected to
-//! it with a `301` (or a `308`, if you set one). Same idea as Django's
-//! `APPEND_SLASH`.
+//! it with a `301` (or a `308`, if you set one).
 //!
 //! ## Quick start
 //!
 //! ```ignore
 //! use rustango::trailing_slash::{TrailingSlashLayer, TrailingSlashRouterExt, SlashStyle};
 //!
-//! // Force every URL to end with `/` (Django default)
+//! // Force every URL to end with `/`
 //! let app = axum::Router::new()
 //!     .route("/posts/", axum::routing::get(list))
 //!     .trailing_slash(TrailingSlashLayer::new(SlashStyle::Append));
@@ -40,7 +39,7 @@ use axum::Router;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlashStyle {
-    /// Add `/` to paths that lack one (Django `APPEND_SLASH = True`).
+    /// Add `/` to paths that lack one (common for HTML pages).
     Append,
     /// Remove the trailing `/` (common for REST APIs).
     Strip,

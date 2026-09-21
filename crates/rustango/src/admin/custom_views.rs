@@ -1,5 +1,4 @@
-//! Per-model custom admin views, like Django's
-//! `ModelAdmin.get_urls()`.
+//! Extra admin routes that a single model owns.
 //!
 //! The admin ships the list, detail, new, edit and action routes. This
 //! module lets a model add its own on top, such as

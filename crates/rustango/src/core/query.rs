@@ -75,7 +75,7 @@ pub enum Op {
     /// JSONB `?&` — all of the text keys exist. Bind a `SqlValue::List`
     /// of `SqlValue::String`.
     JsonHasAllKeys,
-    /// POSIX regex match, case-sensitive — Django's `__regex`. Bind a
+    /// POSIX regex match, case-sensitive — the `__regex` lookup. Bind a
     /// `SqlValue::String` holding the pattern. PG `~`, MySQL `REGEXP`,
     /// SQLite `REGEXP`. On SQLite the connection must register a
     /// `regexp(pattern, value)` function; sqlx-sqlite does not add it.
@@ -83,7 +83,7 @@ pub enum Op {
     /// POSIX regex non-match. PG `!~`, MySQL `NOT REGEXP`, SQLite
     /// `NOT REGEXP` (same SQLite caveat as [`Op::Regex`]).
     NotRegex,
-    /// Case-insensitive regex match — Django's `__iregex`. PG `~*`.
+    /// Case-insensitive regex match — the `__iregex` lookup. PG `~*`.
     /// MySQL and SQLite have no such operator, so the writer wraps
     /// both sides in `LOWER(...)` for ASCII case folding.
     IRegex,
@@ -91,18 +91,18 @@ pub enum Op {
     /// use `LOWER(<col>) NOT REGEXP LOWER(<pattern>)`, for the same
     /// reason as [`Op::IRegex`].
     NotIRegex,
-    /// pg_trgm similarity — Django's `__trigram_similar`. Emits
+    /// pg_trgm similarity — the `__trigram_similar` lookup. Emits
     /// `<col> % <pattern>`; bind a `SqlValue::String`. Needs
     /// `CREATE EXTENSION pg_trgm` (default threshold `0.3`, change it
     /// with `SET pg_trgm.similarity_threshold`). **PG-only** — MySQL
     /// and SQLite reject it when the query compiles.
     TrigramSimilar,
-    /// pg_trgm word similarity — Django's `__trigram_word_similar`.
+    /// pg_trgm word similarity — the `__trigram_word_similar` lookup.
     /// Emits `<col> %> <pattern>`, which matches when any single
     /// **word** in the column is similar; the bare `%` needs the whole
     /// string to be similar. **PG-only**, same extension requirement.
     TrigramWordSimilar,
-    /// Postgres full-text search — Django's `__search`. Emits
+    /// Postgres full-text search — the `__search` lookup. Emits
     /// `to_tsvector(<col>) @@ plainto_tsquery(<pattern>)` with the
     /// database's default text-search config; bind a
     /// `SqlValue::String`. For a chosen language, weighted vectors or
@@ -110,21 +110,22 @@ pub enum Op {
     /// **PG-only** — MySQL `MATCH … AGAINST` and SQLite FTS5 `MATCH`
     /// mean something different, so both reject at compile time.
     Search,
-    /// Postgres array containment — Django's `__contains` on an
-    /// `ArrayField`. Emits `<col> @> <value>`: rows whose array holds
+    /// Postgres array containment — the `__array_contains` lookup.
+    /// Emits `<col> @> <value>`: rows whose array holds
     /// every element of the value array. **PG-only** — MySQL and
     /// SQLite have no array type and reject with
     /// `OpNotSupportedInDialect`.
     ArrayContains,
     /// Inverse of [`Self::ArrayContains`]: `<col> <@ <value>`, rows
-    /// whose array is held by the value array. Django's
-    /// `__contained_by`. **PG-only**.
+    /// whose array is held by the value array — the
+    /// `__array_contained_by` lookup. **PG-only**.
     ArrayContainedBy,
     /// Postgres array overlap — `<col> && <value>`: the two arrays
-    /// share at least one element. Django's `__overlap`. **PG-only**.
+    /// share at least one element — the `__array_overlap` lookup.
+    /// **PG-only**.
     ArrayOverlap,
-    /// Postgres range containment — `<col> @> <value>`, Django's
-    /// `__range_contains` on a `RangeField`. The right side is a
+    /// Postgres range containment — `<col> @> <value>`, the
+    /// `__range_contains` lookup. The right side is a
     /// single element or a range literal. Same SQL operator as
     /// [`Self::ArrayContains`], but a separate variant so the intent
     /// is clear and the bind path can pick the value shape
@@ -132,10 +133,10 @@ pub enum Op {
     /// range-vs-element). **PG-only**.
     RangeContains,
     /// Inverse of [`Self::RangeContains`]: `<col> <@ <value>`.
-    /// Django's `__range_contained_by`. **PG-only**.
+    /// The `__range_contained_by` lookup. **PG-only**.
     RangeContainedBy,
-    /// Range overlap — `<col> && <value>`. Django's
-    /// `__range_overlap`. **PG-only**.
+    /// Range overlap — `<col> && <value>`, the
+    /// `__range_overlap` lookup. **PG-only**.
     RangeOverlap,
     /// Range strictly left of — `<col> << <value>`: the whole range
     /// falls below the value range. **PG-only**.
@@ -158,8 +159,8 @@ pub const LIKE_ESCAPE_CHAR: char = '!';
 pub const LIKE_ESCAPE_CLAUSE: &str = " ESCAPE '!'";
 
 /// Escape LIKE metacharacters in **user input**, so `%` and `_` match
-/// as plain characters (Django treats `__contains` as a literal
-/// substring, not a pattern).
+/// as plain characters — `__contains` means a literal substring,
+/// not a pattern.
 ///
 /// The result only means anything under [`LIKE_ESCAPE_CLAUSE`], so
 /// bind it to an [`Op::LikeEscaped`] / [`Op::ILikeEscaped`] predicate.
@@ -189,8 +190,8 @@ pub struct Filter {
     pub value: SqlValue,
 }
 
-/// `WHERE` predicate that compares two columns of the same row — the
-/// rustango form of Django's `F()` on the right side of a filter.
+/// `WHERE` predicate that compares two columns of the same row, such
+/// as `WHERE updated_at > created_at`.
 ///
 /// Emits `<column> <op> <rhs>`. The left side is the model column
 /// being filtered; `rhs` is any [`Expr`], usually `Expr::Column` for a
@@ -238,7 +239,7 @@ pub enum WhereExpr {
     Or(Vec<WhereExpr>),
     /// Logical negation. Emits `NOT (child)`.
     Not(Box<WhereExpr>),
-    /// Logical XOR — Django `Q(a) ^ Q(b)`. True when an odd number of
+    /// Logical XOR. True when an odd number of
     /// children are true. Only MySQL has a native XOR, so the writer
     /// always rewrites: two children become
     /// `(a AND NOT b) OR (NOT a AND b)`, three or more fold into a
@@ -255,7 +256,7 @@ pub enum WhereExpr {
     /// returns at least one row. Boxed because `SelectQuery` carries
     /// its own `WhereExpr`, which would make the enum unbounded.
     Exists(Box<SelectQuery>),
-    /// `NOT EXISTS (<subquery>)` — Django's `~Exists`.
+    /// `NOT EXISTS (<subquery>)` — the negation of [`Self::Exists`].
     NotExists(Box<SelectQuery>),
     /// `<col> IN (<subquery>)` / `<col> NOT IN (<subquery>)`. Like
     /// `Op::In` / `Op::NotIn` over a literal list, but the right side
@@ -585,15 +586,14 @@ pub struct SelectQuery {
     pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-    /// Row lock appended after LIMIT/OFFSET — Django's
-    /// `select_for_update(skip_locked=, of=, nowait=, no_key=)`.
+    /// Row lock appended after LIMIT/OFFSET.
     /// `None` emits no lock clause. Run it inside a transaction on PG
     /// and MySQL; SQLite has no row-level lock syntax, so the writer
     /// does nothing there.
     pub lock_mode: Option<LockMode>,
-    /// Set-algebra branches combined with this query — Django's
-    /// `.union(other_qs, all=)` / `.intersection(other_qs)` /
-    /// `.difference(other_qs)`. Empty emits a plain `SELECT …`.
+    /// Set-algebra branches combined with this query, via
+    /// `.union()` / `.intersection()` /
+    /// `.difference()`. Empty emits a plain `SELECT …`.
     /// Non-empty wraps every branch in parens and joins them with the
     /// matching keyword:
     ///
@@ -610,13 +610,13 @@ pub struct SelectQuery {
     /// parens. The outer `order_by` / `limit` / `offset` /
     /// `lock_mode` apply to the merged result.
     pub compound: Vec<CompoundBranch>,
-    /// Column list for a pure projection — Django's `.values()` /
+    /// Column list for a pure projection, from `.values_dict()` /
     /// `.values_list()`. `None` emits every scalar field on the
     /// model; `Some(cols)` emits exactly `cols`, in that order. Joins
     /// still add their `project` columns. Checked when the query is
     /// built, so every column resolves on the model schema.
     pub projection: Option<Vec<&'static str>>,
-    /// Django `.distinct(*fields)`. `None` emits no DISTINCT clause.
+    /// DISTINCT mode. `None` emits no DISTINCT clause.
     /// `Some(DistinctMode::All)` emits `SELECT DISTINCT ...`.
     /// `Some(DistinctMode::On(cols))` emits PG `SELECT DISTINCT ON
     /// (cols) ...`; on MySQL and SQLite the writer wraps the query in
@@ -742,7 +742,7 @@ impl SelectQuery {
     }
 }
 
-/// Distinct mode — Django's `.distinct()` / `.distinct(*fields)`.
+/// Distinct mode — all columns, or a named subset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DistinctMode {
     /// `SELECT DISTINCT ...` — the same on every dialect.
@@ -763,8 +763,8 @@ pub struct CompoundBranch {
     pub query: Box<SelectQuery>,
 }
 
-/// SQL set-algebra operator — Django's
-/// `QuerySet.union(all=)` / `.intersection()` / `.difference()`.
+/// SQL set-algebra operator, behind `.union()` / `.intersection()` /
+/// `.difference()`.
 ///
 /// Dialect support:
 /// - **Postgres**: all four ops.
@@ -781,8 +781,7 @@ pub enum SetOp {
     UnionAll,
     /// `INTERSECT` — rows present in every branch.
     Intersection,
-    /// `EXCEPT` — rows in the first branch but not the others
-    /// (Django's `.difference()`).
+    /// `EXCEPT` — rows in the first branch but not the others.
     Difference,
 }
 
@@ -807,8 +806,8 @@ impl PartialEq for CompoundBranch {
     }
 }
 
-/// `SELECT … FOR UPDATE` row-lock options — Django's
-/// `QuerySet.select_for_update(skip_locked=, nowait=, of=, no_key=)`.
+/// `SELECT … FOR UPDATE` row-lock options — `skip_locked`, `nowait`,
+/// `of` and `no_key`.
 ///
 /// It is `#[non_exhaustive]`, so a new per-backend flag can be added
 /// without breaking code that builds a `LockMode` directly. Build one
@@ -942,7 +941,7 @@ pub enum OrderItem {
         nulls: NullsOrder,
     },
     /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()`
-    /// (MySQL) — Django's `.order_by('?')`. No direction and no NULLS
+    /// (MySQL). No direction and no NULLS
     /// clause: the random key is computed per row and is never NULL.
     ///
     /// **Performance**: this forces a full table scan and an
@@ -1244,8 +1243,7 @@ pub struct BulkInsertQuery {
 }
 
 impl BulkInsertQuery {
-    /// Chainable builder — Django's `bulk_create(update_conflicts=True,
-    /// unique_fields=..., update_fields=...)`. Sets `on_conflict` to
+    /// Chainable builder — upsert on conflict. Sets `on_conflict` to
     /// `DoUpdate { target, update_columns }`.
     ///
     /// The writer emits:
@@ -1265,7 +1263,7 @@ impl BulkInsertQuery {
         self
     }
 
-    /// Chainable builder — Django's `bulk_create(ignore_conflicts=True)`.
+    /// Chainable builder — skip rows that conflict.
     /// Sets `on_conflict` to `DoNothing`.
     ///
     /// The writer emits:
@@ -1462,15 +1460,14 @@ pub enum AggregateExpr {
     /// `MIN(column)`.
     Min(&'static str),
     /// `ANY_VALUE(column)` — some value from the group's non-null
-    /// inputs (Django 6.0). It lets a functionally dependent column
+    /// inputs. It lets a functionally dependent column
     /// be projected without adding it to GROUP BY. PG 16+
     /// `any_value()`, MySQL `ANY_VALUE()`; on SQLite the writer uses
     /// `min()`, which is deterministic and still meets the contract.
     AnyValue(&'static str),
     /// `STDDEV_SAMP(column)` — sample standard deviation. Native on
     /// PG and MySQL 8+. SQLite has none, so the writer raises
-    /// [`crate::sql::SqlError::AggregateNotSupported`], as Django
-    /// does.
+    /// [`crate::sql::SqlError::AggregateNotSupported`].
     StdDev(&'static str),
     /// `STDDEV_POP(column)` — population standard deviation. Same
     /// dialect support as [`StdDev`](AggregateExpr::StdDev).
@@ -1522,8 +1519,7 @@ pub enum AggregateExpr {
         column: &'static str,
         delimiter: String,
         distinct: bool,
-        /// `ORDER BY` inside the aggregate (Django 6.0
-        /// `Aggregate(order_by=…)`). Empty = the backend picks the
+        /// `ORDER BY` inside the aggregate. Empty = the backend picks the
         /// order. With `distinct`, every clause must order by
         /// `column` itself; that is checked at emit time.
         order_by: Vec<OrderClause>,
@@ -1630,7 +1626,7 @@ impl AggregateExpr {
     }
 
     /// `string_agg(column, delimiter ORDER BY …)` — ordered
-    /// concatenation (Django 6.0 `Aggregate(order_by=…)`). `order` is
+    /// concatenation. `order` is
     /// a slice of `(column, desc)` pairs, as in
     /// `WindowBuilder::order_by`.
     #[must_use]
@@ -1711,7 +1707,7 @@ pub struct AggregateQuery {
     /// (`{rel}_count`, `{rel}_sum_{col}`), which needs an owned
     /// string.
     pub aggregates: Vec<(Cow<'static, str>, AggregateExpr)>,
-    /// Non-projected annotations — Django 3.2 `.alias()`. Same
+    /// Non-projected annotations, from `.alias()`. Same
     /// `(name, expr)` shape as [`Self::aggregates`], but the writer
     /// leaves them out of the SELECT projection. They still resolve
     /// in `HAVING` and `ORDER BY`, because the builder inlines the
