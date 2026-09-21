@@ -1,11 +1,9 @@
 //! Send email off the request path via the [`crate::jobs`] queue.
 //!
-//! Every framework with both an email layer and a job queue ends up
-//! reinventing this glue: render the message inside a request, push
-//! the rendered envelope onto a queue, and let a worker actually
-//! talk to the SMTP/SES/Mailgun backend. Doing that on a per-request
-//! basis keeps handler latency predictable (SMTP can be slow + flaky)
-//! and gets you free retry-with-backoff via the queue.
+//! Render the message in the request, push it on the queue, and let a
+//! worker talk to SMTP, SES or Mailgun. SMTP is slow and flaky, so
+//! this keeps handler latency steady and gets retry with backoff from
+//! the queue.
 //!
 //! ## Quick start
 //!
@@ -29,16 +27,16 @@
 //!
 //! ## Behavior
 //!
-//! - The full [`Email`] (subject, bodies, recipients, headers) is
-//!   serialized into the queue payload, so the worker re-creates it
-//!   before sending.
-//! - Send failures bubble up as [`crate::jobs::JobError::Retryable`],
-//!   so the queue's exponential backoff handles transient SMTP
-//!   issues. Permanent failures (invalid address etc.) are logged by
-//!   the dead-letter callback.
-//! - The worker pulls the [`crate::email::Mailer`] from a static
-//!   registry keyed by job name. Re-registering replaces the
-//!   previous mailer (handy for tests).
+//! - The whole [`Email`] goes into the job payload, so the worker
+//!   rebuilds it before sending.
+//! - A send failure becomes [`crate::jobs::JobError::Retryable`], so
+//!   the queue backs off and retries. A job that runs out of attempts
+//!   goes to the dead-letter callback.
+//! - The worker reads the [`crate::email::Mailer`] from a static
+//!   registry keyed by job name. Registering again replaces it, which
+//!   is handy in tests.
+//!
+//! [`Email`]: crate::email::Email
 
 use std::sync::{OnceLock, RwLock};
 
@@ -47,20 +45,19 @@ use serde::{Deserialize, Serialize};
 use crate::email::{BoxedMailer, Email};
 use crate::jobs::{Job, JobError, JobQueue};
 
-/// Static registry of mailers, keyed by [`Job::NAME`]. Lets the
-/// worker grab the Mailer without it being part of the queue
-/// payload (which would force `Mailer: Serialize`, defeating the
-/// trait-object pattern).
+/// Mailers by [`Job::NAME`]. The worker looks one up here so the
+/// mailer stays out of the job payload, which would need
+/// `Mailer: Serialize`.
 fn mailer_registry() -> &'static RwLock<std::collections::HashMap<&'static str, BoxedMailer>> {
     static REG: OnceLock<RwLock<std::collections::HashMap<&'static str, BoxedMailer>>> =
         OnceLock::new();
     REG.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
 }
 
-/// Per-app config carried alongside the registered job.
+/// Config registered together with the job.
 #[derive(Clone)]
 pub struct EmailJobConfig {
-    /// Mailer used by the worker to actually send.
+    /// The mailer the worker sends with.
     pub mailer: BoxedMailer,
 }
 
@@ -71,7 +68,7 @@ impl EmailJobConfig {
     }
 }
 
-/// The job payload — a serializable snapshot of an [`Email`].
+/// The job payload: a copy of the [`Email`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailJob {
     pub email: Email,
@@ -80,8 +77,8 @@ pub struct EmailJob {
 #[async_trait::async_trait]
 impl Job for EmailJob {
     const NAME: &'static str = "rustango.send_email";
-    /// Email senders typically retry for a while — 5 attempts at the
-    /// queue's `1s · 2^attempt` backoff covers ~1 minute total.
+    /// 5 attempts at the queue's `1s · 2^attempt` backoff, about a
+    /// minute in all.
     const MAX_ATTEMPTS: u32 = 5;
 
     async fn run(&self) -> Result<(), JobError> {
@@ -102,8 +99,8 @@ impl Job for EmailJob {
     }
 }
 
-/// Register the email job + mailer on `queue`. Call once at startup.
-/// Re-calling replaces the previously registered mailer.
+/// Register the email job and its mailer on `queue`, once at startup.
+/// Calling it again replaces the mailer.
 pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
     mailer_registry()
         .write()
@@ -112,12 +109,11 @@ pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
     queue.register::<EmailJob>().await;
 }
 
-/// Enqueue an email for asynchronous delivery. Returns immediately;
-/// delivery happens on a worker.
+/// Queue an email and return at once; a worker delivers it.
 ///
 /// # Errors
-/// Returns the underlying [`JobError::Queue`] when the enqueue fails
-/// (DB unavailable, channel closed, payload not serializable).
+/// [`JobError::Queue`] when the enqueue fails, for example the
+/// database is down or the payload will not serialize.
 pub async fn dispatch_email<Q: JobQueue>(queue: &Q, email: &Email) -> Result<(), JobError> {
     queue
         .dispatch(&EmailJob {
@@ -126,8 +122,7 @@ pub async fn dispatch_email<Q: JobQueue>(queue: &Q, email: &Email) -> Result<(),
         .await
 }
 
-/// Test-only — wipe the static mailer registry. Use between tests so
-/// one fixture's mailer doesn't leak into the next.
+/// Clear the mailer registry between tests.
 #[cfg(test)]
 pub fn reset_mailer_registry() {
     if let Ok(mut g) = mailer_registry().write() {
@@ -144,8 +139,8 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Mutex;
 
-    /// Serializes the tests in this module — they share the global
-    /// mailer registry, so running in parallel would race.
+    /// These tests share the global mailer registry, so they must run
+    /// one at a time.
     fn lock() -> &'static Mutex<()> {
         static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
         M.get_or_init(|| Mutex::new(()))
@@ -188,11 +183,11 @@ mod tests {
     async fn no_mailer_registered_returns_queue_error() {
         let _g = lock().lock().await;
         reset_mailer_registry();
-        // Only register the Job (so dispatch works) — skip mailer.
+        // Register the job so dispatch works, but no mailer.
         let q = InMemoryJobQueue::with_workers(1);
         q.register::<EmailJob>().await;
 
-        // Capture dead-letter so we know the worker rejected it.
+        // Count dead letters to see the worker reject the job.
         let dl_count = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
         let dl = dl_count.clone();
         q.on_dead_letter(move |_dl| {
@@ -206,8 +201,7 @@ mod tests {
 
         dispatch_email(&q, &email()).await.unwrap();
 
-        // The worker hits JobError::Queue immediately -> dead-letters
-        // (Queue/Fatal are not retried).
+        // JobError::Queue is not retried, so it dead-letters at once.
         for _ in 0..40 {
             if dl_count.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 break;
@@ -252,10 +246,10 @@ mod tests {
         register_email_job(&q, EmailJobConfig::new(mailer)).await;
         q.start().await;
 
-        // No error, no observation — just doesn't panic / dead-letter.
+        // Nothing to observe: it must not panic or dead-letter.
         dispatch_email(&q, &email()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        // pending_count should be back to 0 (job processed).
+        // Back to 0 once the job is done.
         assert_eq!(q.pending_count().await, 0);
         q.shutdown().await;
     }

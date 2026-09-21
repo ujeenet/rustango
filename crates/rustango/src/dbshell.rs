@@ -1,35 +1,26 @@
-//! `manage dbshell` — spawn the native CLI client (`psql`, `mysql`,
-//! `sqlite3`) for the current `DATABASE_URL`. Django's
+//! `manage dbshell`: open the native CLI client for the current
+//! `DATABASE_URL`, like Django's
 //! [`dbshell`](https://docs.djangoproject.com/en/6.0/ref/django-admin/#dbshell).
-//! Issue #56 (partial).
 //!
-//! Convention over configuration: parse the URL's scheme + components,
-//! find the right binary on `PATH`, hand control off via `exec()`
-//! (Unix) / process replacement so signals (Ctrl-C) reach the child
-//! cleanly.
+//! The URL scheme picks the client, and the process is replaced with
+//! `exec()` on Unix so Ctrl-C reaches the child.
 //!
-//! Run-time deps the user must install themselves:
-//! - PostgreSQL: `psql`
-//! - MySQL / MariaDB: `mysql`
-//! - SQLite: `sqlite3`
-//!
-//! Each is the standard CLI shipped with its server. The verb returns
-//! a clear error if the binary isn't on `PATH`.
+//! The client itself must already be installed: `psql` for PostgreSQL,
+//! `mysql` for MySQL and MariaDB, `sqlite3` for SQLite. If it is not on
+//! `PATH`, the verb says so.
 
 use std::ffi::OsString;
 use std::process::Command;
 
-/// What the URL parser pulled out of `DATABASE_URL`. Each variant
-/// carries enough information to assemble the right CLI invocation.
-/// Passwords are kept separate from positional args because passing
-/// them through `argv` would leak the secret to anyone running
-/// `ps aux` — instead the [`run`] function sets `PGPASSWORD` /
-/// `MYSQL_PWD` in the child's environment, matching Django's
-/// dbshell behavior.
+/// What the parser found in `DATABASE_URL`, split into the parts each
+/// client needs.
+///
+/// The password is held apart from the other parts on purpose: a
+/// password in `argv` is visible to anyone who runs `ps aux`, so it
+/// goes to the child through `PGPASSWORD` or `MYSQL_PWD` instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbTarget {
-    /// PostgreSQL. Parsed into structured components so the password
-    /// rides via `PGPASSWORD` env var rather than the URL argv.
+    /// PostgreSQL. The password goes out through `PGPASSWORD`.
     Postgres {
         host: Option<String>,
         port: Option<u16>,
@@ -37,8 +28,8 @@ pub enum DbTarget {
         password: Option<String>,
         database: Option<String>,
     },
-    /// MySQL / MariaDB — `mysql` needs separate flags (`-h`, `-u`,
-    /// `-p`, etc.). Password rides via `MYSQL_PWD` env var.
+    /// MySQL or MariaDB. `mysql` takes separate flags, and the
+    /// password goes out through `MYSQL_PWD`.
     Mysql {
         host: Option<String>,
         port: Option<u16>,
@@ -46,22 +37,20 @@ pub enum DbTarget {
         password: Option<String>,
         database: Option<String>,
     },
-    /// SQLite — `sqlite3` takes the database file path positionally.
-    /// `:memory:` is preserved verbatim.
+    /// SQLite. `sqlite3` takes the file path, and `:memory:` is kept
+    /// as is.
     Sqlite { path: String },
 }
 
-/// Parse a `DATABASE_URL`-shaped string into a [`DbTarget`].
+/// Parse a `DATABASE_URL` into a [`DbTarget`].
 ///
-/// Accepts the standard schemes Django + sqlx recognize:
-/// - `postgres://...` / `postgresql://...`
-/// - `mysql://...` / `mariadb://...`
-/// - `sqlite://path/to/db` / `sqlite:///abs/path` / `sqlite::memory:`
+/// Accepted schemes: `postgres`, `postgresql`, `mysql`, `mariadb` and
+/// `sqlite` (`sqlite://path`, `sqlite:///abs/path`, `sqlite::memory:`).
 ///
 /// # Errors
-/// Returns the offending input as a string when the scheme is missing
-/// or unrecognized. URL components beyond the scheme are parsed loosely
-/// — invalid percent-encoding stays as-is rather than rejecting.
+/// Returns a message naming the input when the scheme is missing or
+/// unknown. The rest of the URL is parsed loosely, so bad
+/// percent-encoding is kept rather than rejected.
 pub fn parse_target(url: &str) -> Result<DbTarget, String> {
     let url = url.trim();
     if url.is_empty() {
@@ -100,23 +89,22 @@ pub fn parse_target(url: &str) -> Result<DbTarget, String> {
     }
 }
 
-/// Parse the `[user[:pass]@]host[:port][/db][?query]` body shared by
-/// the postgres / mysql URL shapes.
+/// Parse the `[user[:pass]@]host[:port][/db][?query]` body that the
+/// postgres and mysql URLs share.
 fn parse_userinfo_host_db<F, T>(rest: &str, build: F) -> T
 where
     F: FnOnce(Option<String>, Option<u16>, Option<String>, Option<String>, Option<String>) -> T,
 {
-    // Strip any `?query` suffix — native CLI clients don't take URL
-    // query strings.
+    // Drop any `?query`: the CLI clients do not take URL options.
     let body = rest.split_once('?').map_or(rest, |(b, _)| b);
-    // Pull database path off the end.
+    // Take the database name off the end.
     let (auth_host, database) = match body.split_once('/') {
         Some((auth_host, db)) if !db.is_empty() => (auth_host, Some(db.to_owned())),
         Some((auth_host, _)) => (auth_host, None),
         None => (body, None),
     };
-    // Split auth + host on '@' (rsplit so a `:` in password before
-    // it doesn't confuse the split).
+    // Split auth from host on the last '@', so an '@' in the password
+    // does not break it.
     let (auth, host_port) = match auth_host.rsplit_once('@') {
         Some((a, hp)) => (Some(a), hp),
         None => (None, auth_host),
@@ -145,32 +133,22 @@ where
 }
 
 fn parse_sqlite_path(rest: &str) -> String {
-    // sqlx accepts `sqlite::memory:`, `sqlite:///abs/path`,
-    // `sqlite://path` (technically wrong but tolerated). After the
-    // `split_once` in [`parse_target`] strips the scheme, the rest is
-    // `:memory:` / `/abs/path` / `path` / `/path` — pass through.
+    // sqlx accepts `sqlite::memory:`, `sqlite:///abs/path` and
+    // `sqlite://path`. Once the scheme is stripped, what is left is
+    // already the path `sqlite3` wants, so pass it through. The leading
+    // `/` of the absolute form is part of the path and must stay.
     if rest == ":memory:" || rest.starts_with(":memory:") {
         return ":memory:".to_owned();
     }
-    // Strip a leading `/` introduced by the `sqlite:///abs/path` form
-    // (third `/` becomes part of the path) if a literal absolute path
-    // wasn't intended — but actually we WANT the absolute path. Just
-    // pass through verbatim.
     rest.to_owned()
 }
 
-/// Build the `Command` invocation for `target`. Returns
-/// `(program, args, env_vars)` where `env_vars` carries the password
-/// (out of argv to avoid `ps aux` exposure). Tests inspect all three
-/// without spawning.
+/// Build the call for `target` as `(program, args, env_vars)`.
 ///
-/// **Password handling**:
-/// - **Postgres** — `PGPASSWORD` env var. `psql` reads it natively.
-/// - **MySQL** — `MYSQL_PWD` env var. `mysql` reads it natively
-///   (but logs a "using password on the command line is insecure"
-///   warning if you use `-p`; the env var path is the recommended
-///   one).
-/// - **SQLite** — no auth, no env var needed.
+/// The password never goes in `args`, because argv is readable by any
+/// user running `ps aux`. It goes in `env_vars` instead: `PGPASSWORD`
+/// for `psql`, `MYSQL_PWD` for `mysql`. SQLite has no auth, so it gets
+/// neither.
 #[must_use]
 pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>, Vec<(String, String)>) {
     match target {
@@ -237,16 +215,13 @@ pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>, Vec<(Stri
     }
 }
 
-/// Spawn the right CLI for the given `DATABASE_URL` and replace the
-/// current process. Returns an `Err` only when the URL parse fails;
-/// on success the child takes over and this never returns. On Unix
-/// uses `exec()` to swap the process image; on other targets falls
-/// back to `Command::status` + a propagating exit code.
+/// Start the right CLI for `url` and hand the process over to it. On
+/// success this never returns. Unix uses `exec()`; other targets run
+/// the child and pass its exit code on.
 ///
 /// # Errors
-/// - URL parse failure ([`parse_target`]).
-/// - On non-Unix targets, errors from spawning the child or
-///   non-zero exit codes from the client itself.
+/// When the URL cannot be parsed, and on non-Unix targets when the
+/// child fails to start or exits non-zero.
 pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let target = parse_target(url).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let (program, args, env) = command_for(&target);
@@ -261,7 +236,7 @@ pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Er
     {
         use std::os::unix::process::CommandExt as _;
         let err = cmd.exec();
-        // `exec` only returns on failure (e.g. binary not on PATH).
+        // `exec` returns only when it fails, e.g. binary not on PATH.
         Err(format!(
             "failed to exec `{program}` for dbshell: {err}. \
              Is the {program} client installed and on PATH?"
@@ -357,8 +332,8 @@ mod tests {
 
     #[test]
     fn parse_mysql_strips_query_string() {
-        // sqlx-style options like `?ssl-mode=REQUIRED` don't carry over
-        // to the mysql CLI; strip them.
+        // sqlx options like `?ssl-mode=REQUIRED` mean nothing to the
+        // mysql CLI, so they are dropped.
         assert_eq!(
             parse_target("mysql://localhost/db?ssl-mode=REQUIRED").unwrap(),
             DbTarget::Mysql {
@@ -432,7 +407,7 @@ mod tests {
 
     // ---- command_for ----
 
-    /// Helper to fold args+env into searchable strings.
+    /// Turn args into plain strings so tests can search them.
     fn args_str(args: Vec<OsString>) -> Vec<String> {
         args.into_iter().map(|s| s.into_string().unwrap()).collect()
     }
@@ -479,9 +454,8 @@ mod tests {
 
     #[test]
     fn command_for_postgres_password_never_appears_in_args() {
-        // Regression: passing the password via argv (whole-URL form,
-        // `-p<pass>`, etc.) leaks it to anyone running `ps aux`.
-        // Pin that no argv element ever contains the secret.
+        // A password in argv is visible to anyone running `ps aux`, so
+        // pin that no argument ever holds it.
         let target = DbTarget::Postgres {
             host: Some("h".to_owned()),
             port: None,
@@ -495,7 +469,7 @@ mod tests {
             !argv.iter().any(|a| a.contains("SUPER_SECRET_PASSWORD")),
             "password leaked into argv: {argv:?}"
         );
-        // Env var IS allowed to carry it — it's the safe path.
+        // The env var may carry it; that is the safe path.
         assert!(env
             .iter()
             .any(|(k, v)| k == "PGPASSWORD" && v == "SUPER_SECRET_PASSWORD"));
@@ -521,8 +495,7 @@ mod tests {
 
     #[test]
     fn command_for_mysql_password_never_appears_in_args() {
-        // Same regression as postgres — no `--password=...` /
-        // `-p<pass>` shape that lands the secret in argv.
+        // Same as postgres: no `--password=...` or `-p<pass>` in argv.
         let target = DbTarget::Mysql {
             host: Some("h".to_owned()),
             port: None,

@@ -44,6 +44,12 @@
 //!     }
 //! }
 //! ```
+//!
+//! [`ConsoleMailer`]: crate::email::ConsoleMailer
+//! [`InMemoryMailer`]: crate::email::InMemoryMailer
+//! [`FileMailer`]: crate::email::FileMailer
+//! [`NullMailer`]: crate::email::NullMailer
+//! [`SmtpMailer`]: crate::email::smtp::SmtpMailer
 
 use std::sync::{Arc, Mutex};
 

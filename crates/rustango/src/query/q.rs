@@ -1,7 +1,7 @@
-//! `Q()` — Django-shape composable boolean predicate. Issue #263 / T1.1.
+//! `Q()` — a composable boolean predicate, Django style.
 //!
-//! Wraps the dialect-neutral [`WhereExpr`] AST in an ergonomic builder
-//! with operator overloads, mirroring Django's:
+//! It wraps the dialect-neutral [`WhereExpr`] tree in a builder with
+//! operator overloads. Django writes:
 //!
 //! ```python
 //! qs.filter(Q(name__startswith='A') | (Q(age__gt=18) & ~Q(banned=True)))
@@ -20,45 +20,36 @@
 //!     .fetch(&pool).await?;
 //! ```
 //!
-//! ## When to reach for `Q()` vs `Q!()` macro vs typed methods
+//! ## `Q()` vs the `Q!()` macro vs typed methods
 //!
-//! * `Q!(User.name = "alice")` (issue #269) — **highest safety**:
-//!   field name resolves at *parse* time via the typed-column const.
-//!   Use when the field name is statically known.
-//! * `User::name.eq("alice")` — full typed path, same compile-time
-//!   safety as `Q!()` but more verbose.
-//! * `Q::eq("name", "alice")` — **runtime-composable**: lets you build
-//!   filter trees dynamically (admin filter chips, REST query params,
-//!   conditional WHERE branches). Field-name validation still happens
-//!   at `compile()` time on the queryset, so a typo errors there.
+//! * `Q!(User.name = "alice")` — safest. The field name resolves at
+//!   parse time. Use it when the name is known at compile time.
+//! * `User::name.eq("alice")` — same safety, more typing.
+//! * `Q::eq("name", "alice")` — built at runtime, so you can assemble
+//!   filter trees from admin chips or query params. The field name is
+//!   checked when the queryset compiles, so a typo errors there.
 //!
-//! ## Tri-dialect
-//!
-//! Pure builder over the existing [`WhereExpr`] AST — every lowering
-//! routes through the per-dialect writer that the typed path already
-//! uses. No new SQL emission machinery; tri-dialect support is
-//! inherent.
+//! Every `Q` lowers to [`WhereExpr`], which the per-dialect writers
+//! already handle, so all three backends work.
 
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
 use crate::core::{Filter, Op, SqlValue, WhereExpr};
 
-/// Composable boolean predicate. Build with the per-lookup constructors
-/// (`Q::eq`, `Q::ilike`, `Q::in_`, …) and combine via the standard Rust
-/// operator overloads (`&`, `|`, `^`, `!`) — or the equivalent
-/// `.and()` / `.or()` / `.xor()` / `.not()` methods if you prefer
-/// method chains.
+/// Composable boolean predicate. Build one with a lookup constructor
+/// (`Q::eq`, `Q::ilike`, `Q::in_`, …), then combine with `&`, `|`, `^`
+/// and `!`, or with the `.and()` / `.or()` / `.xor()` / `.negate()`
+/// methods.
 ///
-/// Lowers to [`WhereExpr`] via `Into`, so `.where_raw(q.into())` and
-/// `.where_(q)` both work.
+/// It lowers to [`WhereExpr`] via `Into`, so both `.where_(q)` and
+/// `.where_raw(q.into())` work.
 #[derive(Debug, Clone)]
 pub struct Q(WhereExpr);
 
 impl Q {
-    /// Wrap an arbitrary [`WhereExpr`] into a `Q`. Escape hatch for
-    /// users who need predicate shapes the constructors don't cover
-    /// (e.g. `WhereExpr::ColumnCompare` for `F()`-expression
-    /// comparisons).
+    /// Wrap any [`WhereExpr`] in a `Q`. Escape hatch for predicates the
+    /// constructors do not cover, such as `WhereExpr::ColumnCompare`
+    /// for `F()` comparisons.
     #[must_use]
     pub fn raw(expr: WhereExpr) -> Self {
         Self(expr)
@@ -106,28 +97,27 @@ impl Q {
         Self::predicate(column, Op::Lte, value.into())
     }
 
-    /// `column LIKE value` — case-sensitive. `value` is bound as-is
-    /// (no wildcard wrapping); pass `"%alice%"` literally for a
-    /// contains-style match, or use the dedicated [`Self::contains`].
+    /// `column LIKE value`, case-sensitive. The value is bound as-is,
+    /// with no wildcards added. Pass `"%alice%"` yourself, or use
+    /// [`Self::contains`].
     #[must_use]
     pub fn like(column: &'static str, value: impl Into<SqlValue>) -> Self {
         Self::predicate(column, Op::Like, value.into())
     }
 
-    /// `column ILIKE value` — case-insensitive. Same wildcard caveat
-    /// as [`Self::like`].
+    /// `column ILIKE value`, case-insensitive. Same wildcard rule as
+    /// [`Self::like`].
     #[must_use]
     pub fn ilike(column: &'static str, value: impl Into<SqlValue>) -> Self {
         Self::predicate(column, Op::ILike, value.into())
     }
 
-    /// Build one escaped-LIKE predicate: the user value is run through
-    /// [`crate::core::escape_like`] and paired with the matching
-    /// `*Escaped` op, so `%` / `_` in it match literally on every
-    /// dialect (#1257). The wrapping wildcards `prefix` / `suffix` are
-    /// added after escaping and keep their pattern meaning. Bundling the
-    /// escape with the op here is what makes the pairing invariant
-    /// unbreakable at the call sites below.
+    /// Build one escaped-LIKE predicate. The value goes through
+    /// [`crate::core::escape_like`] and gets the matching `*Escaped`
+    /// op, so any `%` or `_` in it matches itself on every dialect.
+    /// The `prefix` / `suffix` wildcards are added after escaping, so
+    /// they still act as wildcards. Escaping and op stay together here
+    /// so the callers below cannot pair them wrongly.
     fn wrap_escaped(
         column: &'static str,
         prefix: &str,
@@ -148,50 +138,46 @@ impl Q {
         )
     }
 
-    /// Django `__contains` — the value is a **literal** substring: `%`
-    /// and `_` in it match themselves (#1257). Use [`Q::like`] for a
-    /// raw pattern you build yourself.
+    /// Django `__contains`. The value is a literal substring: `%` and
+    /// `_` in it match themselves. Use [`Q::like`] for a raw pattern.
     #[must_use]
     pub fn contains(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "%", "%", value, false)
     }
 
-    /// Django `__icontains` — case-insensitive literal substring match
-    /// (`%` / `_` in the value match themselves, #1257).
+    /// Django `__icontains`. Case-insensitive literal substring match.
     #[must_use]
     pub fn icontains(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "%", "%", value, true)
     }
 
-    /// Django `__startswith` — literal prefix match (#1257).
+    /// Django `__startswith`. Literal prefix match.
     #[must_use]
     pub fn startswith(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "", "%", value, false)
     }
 
-    /// Django `__istartswith` — case-insensitive literal prefix match
-    /// (#1257).
+    /// Django `__istartswith`. Case-insensitive literal prefix match.
     #[must_use]
     pub fn istartswith(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "", "%", value, true)
     }
 
-    /// Django `__endswith` — literal suffix match (#1257).
+    /// Django `__endswith`. Literal suffix match.
     #[must_use]
     pub fn endswith(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "%", "", value, false)
     }
 
-    /// Django `__iendswith` — case-insensitive literal suffix match
-    /// (#1257).
+    /// Django `__iendswith`. Case-insensitive literal suffix match.
     #[must_use]
     pub fn iendswith(column: &'static str, value: impl AsRef<str>) -> Self {
         Self::wrap_escaped(column, "%", "", value, true)
     }
 
-    /// `column IN (v1, v2, …)`. Empty iterators are accepted at
-    /// construction; the writer rejects them at compile time.
-    /// Named `in_` because `in` is a Rust keyword.
+    /// `column IN (v1, v2, …)`. An empty iterator is accepted here and
+    /// rejected later by the writer. Named `in_` because `in` is a
+    /// Rust keyword.
     #[must_use]
     pub fn in_<V, I>(column: &'static str, values: I) -> Self
     where
@@ -247,8 +233,8 @@ impl Q {
         self | rhs
     }
 
-    /// Compose with `XOR` (Django 4.1+). Method-style alias for `^`.
-    /// SQLite rejects XOR at compile time; PG / MySQL emit native XOR.
+    /// Compose with `XOR`. Method-style alias for `^`. PG and MySQL
+    /// emit a native XOR; SQLite rejects it at compile time.
     #[must_use]
     pub fn xor(self, rhs: Self) -> Self {
         self ^ rhs
@@ -270,7 +256,7 @@ impl Q {
 impl BitAnd for Q {
     type Output = Self;
     fn bitand(self, rhs: Self) -> Self {
-        // Flatten adjacent `And` nodes — matches `TypedExpr::and`.
+        // Flatten adjacent `And` nodes, as `TypedExpr::and` does.
         let inner = match (self.0, rhs.0) {
             (WhereExpr::And(mut a), WhereExpr::And(b)) => {
                 a.extend(b);
@@ -400,7 +386,7 @@ mod tests {
         let WhereExpr::Predicate(f) = we else {
             panic!()
         };
-        // #1257 — contains escapes and pairs with the escaped op.
+        // `contains` escapes the value and uses the escaped op.
         assert_eq!(f.op, Op::LikeEscaped);
         assert_eq!(f.value, SqlValue::String("%alice%".into()));
     }

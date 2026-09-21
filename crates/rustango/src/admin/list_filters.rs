@@ -1,12 +1,10 @@
-//! Django-shape `admin.SimpleListFilter` — operator-defined facet
-//! filters with custom lookup values + predicate logic. Issue #351.
+//! Custom facet filters with your own lookup values and predicates,
+//! like Django's `admin.SimpleListFilter`.
 //!
-//! Where `list_filter = "field"` builds a facet card from the
-//! distinct values of one column, a `SimpleListFilter` defines its
-//! *own* finite list of lookup choices and decides what each choice
-//! means as a `WhereExpr`. Examples: "decade born" (1980s / 1990s)
-//! over a `birthday` column, or "active" / "stale" over a
-//! `last_login_at` column.
+//! `list_filter = "field"` builds a facet card from the distinct
+//! values of one column. A filter here instead declares a fixed list
+//! of choices and decides what each one means as a predicate. For
+//! example "1980s" and "1990s" over a `birthday` column.
 //!
 //! ## Example
 //!
@@ -44,46 +42,42 @@
 
 use crate::core::Filter;
 
-/// Function signature a custom list filter implements. Receives the
-/// active value from the URL (URL-decoded) and returns the predicates
-/// to AND onto the list view's WHERE. An empty `Vec` means "no
-/// narrowing" — Django's `if self.value() is None` shape.
+/// A custom list filter. Takes the URL-decoded value from the query
+/// string and returns the predicates to AND onto the list view's
+/// WHERE. An empty `Vec` means no narrowing.
 pub type AdminListFilterFn = fn(value: &str) -> Vec<Filter>;
 
-/// One registration. Inventory-collected; submit via the
+/// One registration, collected by inventory. Submit it with the
 /// [`register_admin_list_filter!`](crate::register_admin_list_filter)
 /// macro.
 pub struct AdminListFilter {
-    /// SQL table the filter attaches to — must match
-    /// `ModelSchema::table` exactly.
+    /// SQL table the filter belongs to. Must equal
+    /// `ModelSchema::table`.
     pub table: &'static str,
-    /// URL query parameter name the filter reads from
-    /// (e.g. `"status"` for `?status=draft`).
+    /// Query parameter the filter reads, such as `"status"` for
+    /// `?status=draft`.
     pub parameter_name: &'static str,
-    /// Display label shown above the filter card.
+    /// Label shown above the filter card.
     pub title: &'static str,
-    /// Choices the operator sees as clickable links. Each pair is
-    /// `(value, display_label)` — `value` round-trips through the URL.
+    /// Choices rendered as links. Each pair is
+    /// `(value, display_label)`, and `value` travels in the URL.
     pub lookups: &'static [(&'static str, &'static str)],
-    /// Predicate-emitter. Pure — receives the URL value and returns
-    /// the filters to AND onto the list view's WHERE.
+    /// Turns the URL value into the filters to AND onto the WHERE.
     pub to_filters: AdminListFilterFn,
 }
 
 inventory::collect!(AdminListFilter);
 
-/// Yield every registered filter for `table`. Cheap — the iterator is
-/// `O(N)` over the entire admin-filter registry but `N` is small
-/// (bounded by the number of `register_admin_list_filter!` calls
-/// across the whole binary).
+/// Every registered filter for `table`. The scan is `O(N)` over all
+/// registrations in the binary, which stays small.
 pub fn for_table(table: &str) -> impl Iterator<Item = &'static AdminListFilter> + use<'_> {
     inventory::iter::<AdminListFilter>
         .into_iter()
         .filter(move |f| f.table == table)
 }
 
-/// Register a custom list filter. Pair with the table whose admin
-/// list view should expose the filter card.
+/// Register a custom list filter on the table whose list view should
+/// show the filter card.
 ///
 /// ```ignore
 /// use rustango::core::{Filter, Op, SqlValue};
@@ -119,9 +113,8 @@ mod tests {
 
     #[test]
     fn iter_compiles_with_zero_entries() {
-        // No `register_admin_list_filter!` in this test binary → empty
-        // iter. The point is the inventory link doesn't panic when
-        // nothing's submitted.
+        // This test binary registers nothing, so the iterator is
+        // empty. The point is that it does not panic.
         assert_eq!(for_table("nonexistent").count(), 0);
     }
 }

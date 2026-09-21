@@ -1,9 +1,13 @@
-//! Django-shape `Set-Cookie` builder.
+//! A `Set-Cookie` builder shaped like Django's
+//! `HttpResponse.set_cookie`, plus a parser for a `Cookie:` header.
 //!
-//! Mirrors `django.http.HttpResponse.set_cookie(key, value, max_age=None,
-//! expires=None, path='/', domain=None, secure=False, httponly=False,
-//! samesite=None)`. Produces the `Set-Cookie` header value as a string
-//! (and an axum [`HeaderValue`] convenience).
+//! [`Cookie::build`](crate::cookies::Cookie::build) gives the header
+//! value as a `String`;
+//! `header_value` gives an axum `HeaderValue`.
+//!
+//! No flag is on by default. A cookie that carries a session or any
+//! other sensitive value needs `.http_only()`, `.secure()` and a
+//! `SameSite` set on it by hand.
 //!
 //! ```ignore
 //! use rustango::cookies::{Cookie, SameSite};
@@ -26,33 +30,30 @@
 //!
 //! ## Why not the `cookie` crate?
 //!
-//! The `cookie` crate (used by axum-extra / tower-cookies) is the
-//! production-grade choice for parsing + signed/private cookies.
-//! This module is intentionally smaller — just the `Set-Cookie`
-//! emission path Django code translates to most often. The output
-//! is a plain `String` (or `HeaderValue`), so it composes cleanly
-//! with whatever cookie crate the project uses for parsing.
+//! The `cookie` crate, which axum-extra and tower-cookies use, is
+//! the fuller choice, with parsing and signed or private cookies.
+//! This module covers only the `Set-Cookie` side that Django code
+//! maps onto most often, and its output is a plain string, so it
+//! composes with whatever crate you use elsewhere.
 //!
-//! Doesn't validate cookie names against RFC 6265 token rules —
-//! caller is responsible for sane names (the `messages` module
-//! used `rustango_messages`, the `csrf` module uses `csrftoken`,
-//! etc.). Empty names build cleanly but produce a malformed header
-//! that browsers will reject; that's a caller bug, not a crate one.
+//! Names are not checked against the RFC 6265 token rules. Pass a
+//! sane name. An empty or odd name builds fine here but produces a
+//! header the browser will reject.
 
 use std::time::Duration;
 
-/// Django-parity `SameSite` cookie attribute values. Default `None`
-/// in the cookie struct means the attribute is omitted entirely.
+/// Values for the `SameSite` attribute. Leaving it unset on a
+/// [`Cookie`] leaves the attribute out of the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SameSite {
-    /// `SameSite=Strict` — cookie withheld on all cross-site requests.
+    /// Never sent on a cross-site request.
     Strict,
-    /// `SameSite=Lax` — default browser behavior; allowed on top-
-    /// level cross-site GET navigations. **Recommended for session
-    /// cookies.**
+    /// Sent on a top-level cross-site GET only. **Use this for a
+    /// session cookie.**
     Lax,
-    /// `SameSite=None` — cookie sent on all cross-site requests.
-    /// Browsers require `Secure` alongside `None` since Chrome 80.
+    /// Sent on every cross-site request. Browsers reject it unless
+    /// `Secure` is set too, so always pair it with
+    /// [`Cookie::secure`].
     None,
 }
 
@@ -68,11 +69,9 @@ impl SameSite {
     }
 }
 
-/// Django-shape cookie builder. Construct via [`Cookie::new`] or
-/// [`Cookie::deletion`]; chain attribute methods; finalize with
-/// [`Cookie::build`] (string) or [`Cookie::header_value`]
-/// (`axum::http::HeaderValue` — falls back to a panic-safe form on
-/// invalid bytes).
+/// Cookie builder. Start with [`Cookie::new`] or
+/// [`Cookie::deletion`], chain the attribute methods, and finish
+/// with [`Cookie::build`].
 #[derive(Debug, Clone)]
 pub struct Cookie {
     name: String,
@@ -87,14 +86,13 @@ pub struct Cookie {
 }
 
 impl Cookie {
-    /// Start a new cookie with the given name + value. Default
-    /// attributes: no `Path`, no `Domain`, no `Max-Age`, no
-    /// `Expires`, NO `HttpOnly` / `Secure` / `SameSite`. Chain
-    /// builder methods to set them.
+    /// Start a cookie with this name and value. Nothing else is set:
+    /// no `Path`, `Domain`, `Max-Age` or `Expires`, and **no
+    /// `HttpOnly`, `Secure` or `SameSite`**. Chain the methods you
+    /// need; a session cookie needs all three flags.
     ///
-    /// Django defaults `Path=/`; we don't apply that here so the
-    /// builder is composable — callers wire `.path("/")` explicitly
-    /// (most modern axum cookies do).
+    /// Django defaults to `Path=/`. This builder does not, so set
+    /// `.path("/")` yourself when you want it.
     #[must_use]
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
@@ -110,14 +108,13 @@ impl Cookie {
         }
     }
 
-    /// Django-parity `response.delete_cookie(key, path='/', domain=None)`.
-    /// Returns a builder pre-set to expire the cookie at the Unix
-    /// epoch (`Max-Age=0` + `Expires=Thu, 01 Jan 1970 00:00:00 GMT`)
-    /// so browsers drop it on receipt.
+    /// A builder that deletes the cookie, like Django's
+    /// `response.delete_cookie`. It sets an empty value with
+    /// `Max-Age=0` and an epoch `Expires`, so the browser drops it.
     ///
-    /// `path` must match the original `Set-Cookie`'s path — browsers
-    /// scope the delete to the path. Django defaults to `/`; pass
-    /// the same path you used on creation.
+    /// `path` must be the path the cookie was set with, and a cookie
+    /// set with a `Domain` needs the same `.domain(...)` here too;
+    /// the browser matches all three or keeps the cookie.
     #[must_use]
     pub fn deletion(name: impl Into<String>, path: impl Into<String>) -> Self {
         Self::new(name, "")
@@ -126,81 +123,80 @@ impl Cookie {
             .expires_at_epoch()
     }
 
-    /// `Path=<path>` attribute. Scopes which request paths the
-    /// browser sends the cookie on. Most projects want `"/"`.
+    /// `Path=<path>`: which request paths the browser sends the
+    /// cookie on. Most projects want `"/"`.
     #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
     }
 
-    /// `Domain=<domain>` attribute. Without it the cookie is
-    /// host-only (sent only to the exact host that set it).
+    /// `Domain=<domain>`, which widens the cookie to subdomains.
+    /// Without it the cookie goes only to the exact host that set
+    /// it, so leave it out unless you need the wider scope.
     #[must_use]
     pub fn domain(mut self, domain: impl Into<String>) -> Self {
         self.domain = Some(domain.into());
         self
     }
 
-    /// `Max-Age=<secs>` attribute. Browsers prefer this over
-    /// `Expires` when both are set.
+    /// `Max-Age=<secs>`. A browser prefers it over `Expires` when
+    /// both are set.
     #[must_use]
     pub fn max_age(mut self, ttl: Duration) -> Self {
         self.max_age = Some(i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX));
         self
     }
 
-    /// Explicit `Expires=<http-date>` attribute. Most callers prefer
-    /// [`Self::max_age`] which is relative + clock-independent.
-    /// Pass an RFC 1123 IMF-fixdate string
-    /// (`"Thu, 01 Jan 1970 00:00:00 GMT"`); pair with
-    /// [`crate::http_date::http_date`] to format from a Unix
-    /// timestamp.
+    /// `Expires=<http-date>`. Prefer [`Self::max_age`], which is
+    /// relative and does not depend on the client clock.
+    ///
+    /// Pass an RFC 1123 date such as
+    /// `"Thu, 01 Jan 1970 00:00:00 GMT"`;
+    /// [`crate::http_date::http_date`] formats one for you.
     #[must_use]
     pub fn expires(mut self, http_date_str: impl Into<String>) -> Self {
         self.expires = Some(http_date_str.into());
         self
     }
 
-    /// Pre-set `Expires` to the Unix epoch — convenience shorthand
-    /// for [`Self::deletion`]. Useful when chaining manually.
+    /// Set `Expires` to the Unix epoch. [`Self::deletion`] uses it;
+    /// call it yourself when you build a delete by hand.
     #[must_use]
     pub fn expires_at_epoch(mut self) -> Self {
         self.expires = Some("Thu, 01 Jan 1970 00:00:00 GMT".to_owned());
         self
     }
 
-    /// Set the `HttpOnly` flag — cookie unreachable from JS
-    /// (defends against XSS-stealing session cookies). Default
-    /// `false`.
+    /// Set `HttpOnly`, so JavaScript cannot read the cookie. This
+    /// stops an XSS bug from stealing a session. Off by default, so
+    /// set it on any cookie the page script does not need.
     #[must_use]
     pub fn http_only(mut self) -> Self {
         self.http_only = true;
         self
     }
 
-    /// Set the `Secure` flag — cookie only sent over HTTPS.
-    /// Required when `SameSite=None`.
+    /// Set `Secure`, so the cookie only travels over HTTPS. Off by
+    /// default. Set it on anything sensitive, and always when
+    /// `SameSite=None`, which browsers reject without it.
     #[must_use]
     pub fn secure(mut self) -> Self {
         self.secure = true;
         self
     }
 
-    /// Set the `SameSite=<value>` attribute. See [`SameSite`] for
-    /// strict / lax / none semantics.
+    /// Set `SameSite`, which limits cross-site sending and so blunts
+    /// CSRF. See [`SameSite`] for the three values.
     #[must_use]
     pub fn same_site(mut self, value: SameSite) -> Self {
         self.same_site = Some(value);
         self
     }
 
-    /// Build the final `Set-Cookie` header value as a `String`.
-    /// Suitable for `axum::http::HeaderValue::from_str`.
-    ///
-    /// Attribute order follows the Django shape:
-    /// `<name>=<value>; Path; Domain; Max-Age; Expires; HttpOnly;
-    /// Secure; SameSite`.
+    /// Render the `Set-Cookie` header value. Attributes come out in
+    /// Django's order: `<name>=<value>; Path; Domain; Max-Age;
+    /// Expires; HttpOnly; Secure; SameSite`.
     #[must_use]
     pub fn build(&self) -> String {
         let mut s = String::with_capacity(64);
@@ -236,15 +232,15 @@ impl Cookie {
         s
     }
 
-    /// Build as an `axum::http::HeaderValue` directly. Returns
-    /// `None` if the rendered string contains bytes axum considers
-    /// invalid (control characters, etc.) — should never happen
-    /// with sane caller-supplied names/values, but exposed as
-    /// `Option` to avoid panicking on attacker-controlled input.
+    /// Build the header as an `axum::http::HeaderValue`.
     ///
-    /// The one axum-typed method on an otherwise dependency-free builder, so
-    /// it gates alone rather than taking the module with it — `build()` still
-    /// returns the same cookie as a `String` in a bare-ORM build.
+    /// Gives `None` when the rendered string holds a byte a header
+    /// may not carry, such as a control character or CR/LF. That is
+    /// an `Option` rather than a panic because the value may come
+    /// from an attacker, and it also stops response splitting.
+    ///
+    /// This is the only axum-typed method here, so it alone is
+    /// gated; `build()` still works without the feature.
     #[cfg(feature = "_axum")]
     #[must_use]
     pub fn header_value(&self) -> Option<axum::http::HeaderValue> {
@@ -255,17 +251,16 @@ impl Cookie {
 /// [`django.utils.http.parse_cookie`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.parse_cookie) —
 /// parse a `Cookie:` header value into a name → value map.
 ///
-/// Splits on `;`, then each chunk on the first `=`. Whitespace
-/// around keys / values is trimmed. Quoted values
-/// (`name="value with spaces"`) have their surrounding quotes
-/// stripped per RFC 6265 §5.2. Malformed chunks (no `=`, empty
-/// key) are skipped; well-formed chunks after a malformed one
-/// still parse.
+/// It splits on `;`, then on the first `=` in each chunk, and trims
+/// spaces. A value wrapped in double quotes loses them, per RFC 6265
+/// §5.2. A bad chunk is skipped, and the good ones after it still
+/// parse.
 ///
-/// Use when you need to parse a raw `Cookie:` header outside an
-/// axum request (test fixtures, manual proxying, header-replay
-/// audits). For axum handler code prefer the `axum-extra`
-/// `CookieJar` extractor, which uses the same parsing rules.
+/// Values come from the client, so treat every one as untrusted:
+/// check or decode it before you use it.
+///
+/// Use this outside a request, in tests or a proxy. In an axum
+/// handler prefer the `axum-extra` `CookieJar` extractor.
 ///
 /// ```
 /// use rustango::cookies::parse_cookie_header;
@@ -289,8 +284,7 @@ pub fn parse_cookie_header(header: &str) -> std::collections::HashMap<String, St
             continue;
         }
         let Some((key, val)) = chunk.split_once('=') else {
-            // Malformed chunk (no `=`) — skip silently, matching
-            // Django's "ignore weirdness, decode what we can" shape.
+            // No `=`: skip it and keep decoding, as Django does.
             continue;
         };
         let key = key.trim();
@@ -298,8 +292,8 @@ pub fn parse_cookie_header(header: &str) -> std::collections::HashMap<String, St
             continue;
         }
         let val = val.trim();
-        // RFC 6265 §5.2 — strip surrounding double-quotes if both
-        // ends are quoted. Single quote on one end stays verbatim.
+        // RFC 6265 §5.2: drop the quotes only when both ends have
+        // one. A quote on one end alone stays in the value.
         let unquoted = if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
             &val[1..val.len() - 1]
         } else {
@@ -324,7 +318,7 @@ mod tests {
 
     #[test]
     fn empty_value_renders_cleanly() {
-        // Common shape during a deletion before path/expires kick in.
+        // The shape a deletion starts from.
         let s = Cookie::new("session", "").build();
         assert_eq!(s, "session=");
     }
@@ -417,13 +411,12 @@ mod tests {
         );
     }
 
-    // -------- deletion (Django parity) --------
+    // -------- deletion --------
 
     #[test]
     fn deletion_shape() {
-        // Django `response.delete_cookie('session')` — the cookie
-        // gets set to empty with Max-Age=0 + Expires=epoch so the
-        // browser drops it.
+        // Empty value, Max-Age=0 and an epoch Expires make the
+        // browser drop the cookie.
         let s = Cookie::deletion("session", "/").build();
         assert_eq!(
             s,
@@ -433,8 +426,8 @@ mod tests {
 
     #[test]
     fn deletion_with_domain_for_subdomain_scoping() {
-        // Browsers scope deletes by (name, path, domain). Subdomain
-        // cookies need the same Domain on delete.
+        // A browser matches a delete on name, path and domain, so a
+        // subdomain cookie needs the same Domain here.
         let s = Cookie::deletion("session", "/")
             .domain(".example.com")
             .build();
@@ -444,8 +437,7 @@ mod tests {
 
     // -------- header_value --------
     //
-    // Follow the `_axum` gate on the method they exercise; the rest of the
-    // cookie suite is dependency-free.
+    // Gated like the method they test; the rest of the suite is not.
 
     #[cfg(feature = "_axum")]
     #[test]
@@ -457,8 +449,7 @@ mod tests {
     #[cfg(feature = "_axum")]
     #[test]
     fn header_value_returns_none_for_invalid_chars() {
-        // A NUL byte in the value should make axum reject the
-        // HeaderValue construction.
+        // A NUL byte in the value must not reach a header.
         let v = Cookie::new("session", "a\0b").header_value();
         assert!(v.is_none(), "axum should reject NUL bytes in headers");
     }
@@ -493,10 +484,10 @@ mod tests {
 
     #[test]
     fn parse_cookie_header_strips_quoted_value() {
-        // Both-sides quoted → strip both quotes.
+        // Quoted at both ends, so both quotes go.
         let m = parse_cookie_header(r#"pref="dark mode""#);
         assert_eq!(m.get("pref"), Some(&"dark mode".to_owned()));
-        // Single-sided quote stays verbatim.
+        // Quoted at one end only, so the quote stays.
         let m = parse_cookie_header(r#"x="not closed"#);
         assert_eq!(m.get("x"), Some(&"\"not closed".to_owned()));
     }
@@ -505,13 +496,13 @@ mod tests {
     fn parse_cookie_header_empty_input() {
         assert!(parse_cookie_header("").is_empty());
         assert!(parse_cookie_header("   ").is_empty());
-        // All semicolons — no actual chunks.
+        // Semicolons alone hold no chunks.
         assert!(parse_cookie_header(";;;").is_empty());
     }
 
     #[test]
     fn parse_cookie_header_skips_malformed_chunks() {
-        // "no-equals" chunk → skipped; "good=value" → kept.
+        // The chunk with no `=` is skipped, the next one is kept.
         let m = parse_cookie_header("no-equals; good=value");
         assert_eq!(m.len(), 1);
         assert_eq!(m.get("good"), Some(&"value".to_owned()));
@@ -519,7 +510,7 @@ mod tests {
 
     #[test]
     fn parse_cookie_header_skips_empty_keys() {
-        // "=val" → empty key, skipped.
+        // `=val` has an empty key, so it is skipped.
         let m = parse_cookie_header("=val; ok=1");
         assert_eq!(m.len(), 1);
         assert_eq!(m.get("ok"), Some(&"1".to_owned()));
@@ -527,7 +518,7 @@ mod tests {
 
     #[test]
     fn parse_cookie_header_handles_value_with_equals() {
-        // First `=` wins — value can contain `=`.
+        // The first `=` splits, so the value may hold more.
         let m = parse_cookie_header("token=abc=xyz==");
         assert_eq!(m.get("token"), Some(&"abc=xyz==".to_owned()));
     }

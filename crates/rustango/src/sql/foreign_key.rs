@@ -322,7 +322,8 @@ where
     ///   built with an out-of-band value.
     /// * [`ExecError::MissingPrimaryKey`] — the target model has no
     ///   `#[rustango(primary_key)]` field (programming error).
-    /// * Any [`ExecError`] produced by the underlying [`Fetcher`].
+    /// * Any [`ExecError`] produced by the underlying
+    ///   [`FetcherPool`](crate::sql::FetcherPool).
     pub async fn get(&mut self, pool: &PgPool) -> Result<&T, ExecError> {
         self.get_on(pool).await
     }

@@ -32,6 +32,12 @@
 //! `id` (a `BIGSERIAL`) is that identifier. `(app_label, model_name)`
 //! is the natural key for human-facing wiring; numeric `id` is the
 //! foreign key everywhere else.
+//!
+//! [`ensure_seeded()`]: crate::contenttypes::ensure_seeded
+//! [`ContentType::for_model`]: crate::contenttypes::ContentType::for_model
+//! [`ContentType::all_ordered`]: crate::contenttypes::ContentType::all_ordered
+//! [`ContentType::by_id`]: crate::contenttypes::ContentType::by_id
+//! [`ContentType::by_natural_key`]: crate::contenttypes::ContentType::by_natural_key
 
 use crate::core::{inventory, Model as _, ModelEntry, SqlValue};
 use crate::sql::{Auto, ExecError, FetcherPool as _};

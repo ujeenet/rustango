@@ -1,7 +1,15 @@
-//! Multipart file upload helper — wraps axum's multipart extractor +
-//! the [`crate::storage::Storage`] trait so a file upload handler is
-//! a one-liner instead of buffering / size-checking / extension-
-//! validating glue.
+//! Multipart file uploads. Joins axum's multipart extractor to the
+//! [`crate::storage::Storage`] trait, and handles size limits,
+//! extension checks and filename sanitizing for you.
+//!
+//! ## Security
+//!
+//! Set `max_bytes` and `allowed_extensions` on every upload route. With
+//! no extension list any type is accepted, including scripts. The
+//! client's `Content-Type` is never trusted: it is stored for reference
+//! only, so sniff or re-encode the bytes yourself if the type matters.
+//! Filenames are stripped to a basename, so a client-sent path such as
+//! `../../etc/passwd` cannot escape the prefix.
 //!
 //! ## Quick start
 //!
@@ -58,15 +66,13 @@ pub struct UploadConfig {
     pub prefix: String,
     /// Hard cap on a single file's size. Default: 10 MiB.
     pub max_bytes: usize,
-    /// Whitelist of allowed extensions (lowercase, no leading dot).
-    /// Empty set = allow any extension.
+    /// Extensions to accept (lowercase, no leading dot). An empty set
+    /// accepts anything, which is rarely what you want.
     pub allowed_extensions: HashSet<String>,
-    /// Number of multipart fields to skip when iterating. Useful when
-    /// you have non-file fields you've already read.
+    /// How many non-file fields to skip while iterating.
     pub skip_fields: usize,
-    /// If `true`, prepend a UUID-style timestamp to the saved key so
-    /// concurrent uploads of the same name don't clobber each other.
-    /// Default: true.
+    /// Prepend a timestamp to the key so two uploads with the same name
+    /// do not overwrite each other. Default: true.
     pub randomize_filename: bool,
 }
 
@@ -103,20 +109,21 @@ impl UploadConfig {
 /// Result of saving one uploaded file.
 #[derive(Debug, Clone)]
 pub struct SavedUpload {
-    /// Logical key under [`crate::storage::Storage`] — pass to
-    /// `storage.url(&saved.key)` for a public URL when supported.
+    /// Storage key. Pass to `storage.url(&saved.key)` for a public URL.
     pub key: String,
     /// Original filename from the multipart field.
     pub original_filename: String,
-    /// Content-type sent by the client (best-effort; clients lie).
+    /// Content type the client claimed. Clients lie; do not trust it
+    /// for access or rendering decisions.
     pub content_type: Option<String>,
     pub size_bytes: usize,
 }
 
-/// Drain `mp`, save every file field to `storage`, and return one
-/// [`SavedUpload`] per file. Skips non-file fields (those without a
-/// `filename`). Errors short-circuit — anything saved before the
-/// error is left in storage (callers can clean up if they care).
+/// Save every file field in `mp` to `storage` and return one
+/// [`SavedUpload`] per file. Fields without a `filename` are skipped.
+///
+/// The first error stops the loop. Files saved before it stay in
+/// storage, so clean them up if that matters.
 ///
 /// # Errors
 /// See [`UploadError`].
@@ -129,7 +136,7 @@ pub async fn save_uploads(
     let mut skipped = 0;
     while let Some(mut field) = mp.next_field().await? {
         let Some(filename) = field.file_name().map(str::to_owned) else {
-            // Non-file field — skip if requested or just ignore.
+            // Not a file field.
             if skipped < cfg.skip_fields {
                 skipped += 1;
             }
@@ -137,12 +144,9 @@ pub async fn save_uploads(
         };
         let content_type = field.content_type().map(str::to_owned);
 
-        // #421 — stream chunk-by-chunk and short-circuit as soon as
-        // the accumulated size exceeds `cfg.max_bytes`. The previous
-        // `field.bytes().await?` form buffered the full upload before
-        // bound-checking, so a 100MB body with a 5MB cap still cost
-        // 100MB of memory. Now the second chunk that pushes us over
-        // the limit drops the connection.
+        // Read chunk by chunk and stop at the first chunk that crosses
+        // `max_bytes`. Buffering the whole field first would let a huge
+        // body eat memory even when the cap is small.
         let mut bytes: Vec<u8> = Vec::new();
         while let Some(chunk) = field.chunk().await? {
             if bytes.len().saturating_add(chunk.len()) > cfg.max_bytes {
@@ -187,9 +191,7 @@ pub async fn save_uploads(
     Ok(out)
 }
 
-// =====================================================================
-// Pure helpers (filename sanitization, extension extraction)
-// =====================================================================
+// ---- pure helpers ----
 
 fn ensure_trailing_slash(mut s: String) -> String {
     if !s.is_empty() && !s.ends_with('/') {
@@ -198,17 +200,14 @@ fn ensure_trailing_slash(mut s: String) -> String {
     s
 }
 
-/// Strip directory components and replace anything outside `[a-zA-Z0-9._-]`
-/// with `_`. The result is safe to embed in any storage key.
+/// Drop directory parts and replace anything outside `[a-zA-Z0-9._-]`
+/// with `_`, so the result is safe to use as a storage key. This is
+/// what stops a client-supplied path from escaping the upload prefix.
 pub fn sanitize_filename(name: &str) -> String {
-    // Take the basename only — clients sometimes send full paths.
-    //
-    // Split on both separators rather than `Path::file_name`, which
-    // answers per-platform: `\` is a separator on Windows and an ordinary
-    // character everywhere else, so the same upload produced a different
-    // stored name depending on the server's OS. A browser on Windows
-    // sends `C:\Users\me\photo.jpg`, and a Linux server kept the whole
-    // string as one mangled filename (#1285).
+    // Keep the basename only; clients sometimes send a full path.
+    // Split on both separators instead of `Path::file_name`, which
+    // treats `\` as a separator only on Windows. Otherwise the same
+    // upload gets a different name depending on the server's OS.
     let base = name
         .rsplit(['/', '\\'])
         .next()
@@ -228,8 +227,7 @@ pub fn sanitize_filename(name: &str) -> String {
     out
 }
 
-/// Extract the lowercase extension (no leading dot) or `None` when
-/// absent.
+/// The lowercase extension without its dot, or `None`.
 fn lowercase_ext(name: &str) -> Option<String> {
     Path::new(name)
         .extension()
@@ -237,8 +235,8 @@ fn lowercase_ext(name: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// Prepend a unix-nanos prefix to keep concurrent same-name uploads
-/// from overwriting each other. Output: `{nanos}-{name}`.
+/// Build `{unix_nanos}-{name}` so two uploads with the same name do
+/// not overwrite each other.
 fn randomize(name: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -260,14 +258,10 @@ mod tests {
 
     #[test]
     fn sanitize_strips_directory_components() {
-        // Client sends a full path; we keep only the basename.
+        // A client-sent path must not escape the prefix.
         assert_eq!(sanitize_filename("/etc/passwd"), "passwd");
         assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
-        // Windows separators too, on every platform. `Path::file_name`
-        // treats `\` as a separator only on Windows, so this used to
-        // return `C__windows_evil.exe` on Linux and `evil.exe` on
-        // Windows — the same upload stored under two different names
-        // depending on the server's OS (#1285).
+        // Windows separators too, on every platform.
         assert_eq!(sanitize_filename("C:\\windows\\evil.exe"), "evil.exe");
         assert_eq!(sanitize_filename("C:/Users/me/photo.jpg"), "photo.jpg");
     }
@@ -360,9 +354,7 @@ mod tests {
         use std::sync::Arc as StdArc;
         use tower::ServiceExt;
 
-        // Build a minimal axum app that takes Multipart, uploads it,
-        // and returns the saved keys. Lets us exercise the real
-        // multipart parser without hand-building MultipartError stubs.
+        // A tiny app so the test runs the real multipart parser.
         let storage: BoxedStorage = StdArc::new(InMemoryStorage::new());
         let storage_for_handler = storage.clone();
         let app = Router::new().route(
@@ -408,7 +400,7 @@ mod tests {
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
         assert_eq!(body_str, "uploads/hello.txt");
 
-        // Confirm the file actually landed in storage.
+        // The file really landed in storage.
         let stored = storage.load("uploads/hello.txt").await.unwrap();
         assert_eq!(&stored, b"hello world");
     }
@@ -473,18 +465,9 @@ mod tests {
         assert!(body_str.contains("file too large"), "got: {body_str}");
     }
 
-    /// #421 — streaming early-abort. The save loop reads `field.chunk()`
-    /// in a loop and short-circuits as soon as the accumulated size
-    /// exceeds `max_bytes`. Previously the bound check ran AFTER the
-    /// full body buffered, so a 100MB upload with a 5MB cap still
-    /// allocated 100MB before erroring.
-    ///
-    /// Hard to observe "did we abort before reading the rest?" from the
-    /// outside without instrumentation, but we can verify two things:
-    ///   1. The error still surfaces with the actual size encoded.
-    ///   2. The `actual` byte count never significantly exceeds
-    ///      `max_bytes` — strictly, it's at most `max_bytes + chunk_size`
-    ///      where chunk_size is the multipart parser's read granularity.
+    /// An oversize body must error and write nothing. We cannot see the
+    /// early abort from outside, but we can check the error surfaces
+    /// and storage stays empty.
     #[tokio::test]
     async fn save_uploads_aborts_streaming_on_oversize() {
         use crate::storage::InMemoryStorage;
@@ -513,8 +496,7 @@ mod tests {
         );
 
         let boundary = "b";
-        // 50 KiB payload against a 1 KiB cap — early-abort SHOULD
-        // surface the error well before the full body is consumed.
+        // 50 KiB payload against a 1 KiB cap.
         let payload = "x".repeat(50 * 1024);
         let body = format!(
             "--{boundary}\r\n\
@@ -544,7 +526,7 @@ mod tests {
         .unwrap()
         .to_owned();
         assert!(body_str.contains("file too large"), "got: {body_str}");
-        // Storage MUST be empty — early-abort means we never wrote.
+        // Nothing was written.
         assert!(
             storage.load("u/big.bin").await.is_err(),
             "no file should have been saved"

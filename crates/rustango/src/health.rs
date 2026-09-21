@@ -13,16 +13,15 @@
 //!
 //! ## Endpoints
 //!
-//! - **`GET /health`** — liveness. Returns `200 OK` with `{"status":"ok"}`.
-//!   Always succeeds — used by orchestrators to detect process crashes.
-//! - **`GET /ready`** — readiness. Pings the database with `SELECT 1`,
-//!   plus any extra probes you've registered. Returns `200 OK` only
-//!   when every probe succeeds; otherwise `503 Service Unavailable`.
+//! - **`GET /health`** always returns `200 OK`. It only shows that
+//!   the process is alive.
+//! - **`GET /ready`** pings the database with `SELECT 1` and runs any
+//!   probes you added. It returns `200 OK` only if all of them pass,
+//!   and `503` otherwise.
 //!
-//! Each probe runs under a per-check timeout (default 5s) so a single
-//! hanging downstream can't pin the whole readiness handler. Each probe's
-//! latency is reported in the response so you can spot creeping slowness
-//! before it becomes a failure.
+//! Each probe has its own timeout, 5 seconds by default, so one slow
+//! service cannot hold up the whole handler. The response reports
+//! each probe's latency, so you can see it getting slower over time.
 //!
 //! ## Custom checks
 //!
@@ -41,15 +40,11 @@
 //!
 //! ## Built-in probes
 //!
-//! When the corresponding feature is on, factory helpers wire common
-//! probes for you:
-//!
-//! - [`HealthRouter::cache_probe`] — `Cache::set`/`get` round-trip
-//!   (requires `cache`).
-//! - [`HealthRouter::http_probe`] — GET a URL, checking it returns 2xx
-//!   (requires `http-client`).
-//! - [`HealthRouter::tcp_probe`] — open a TCP connection. Always
-//!   available.
+//! - [`HealthRouter::tcp_probe`] opens a TCP connection.
+//! - [`HealthRouter::cache_probe`] writes and reads a cache key.
+//!   Needs the `cache` feature.
+//! - [`HealthRouter::http_probe`] GETs a URL and wants a 2xx. Needs
+//!   the `http-client` feature.
 //!
 //! ## Sample response
 //!
@@ -62,6 +57,11 @@
 //!   }
 //! }
 //! ```
+//!
+//! [`HealthRouter::check`]: crate::health::HealthRouter::check
+//! [`HealthRouter::tcp_probe`]: crate::health::HealthRouter::tcp_probe
+//! [`HealthRouter::cache_probe`]: crate::health::HealthRouter::cache_probe
+//! [`HealthRouter::http_probe`]: crate::health::HealthRouter::http_probe
 
 use std::future::Future;
 use std::pin::Pin;
@@ -77,25 +77,22 @@ use serde_json::{json, Value};
 
 use crate::sql::Pool;
 
-/// Async health-check function: returns `Ok(())` when healthy,
-/// `Err(message)` otherwise. Each check has a name shown in the JSON
-/// response.
+/// A health check. It returns `Ok(())` when healthy and
+/// `Err(message)` when not. Its name appears in the JSON response.
 pub type CheckFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
 /// Builder for the health router.
 pub struct HealthRouter {
     pool: Pool,
-    /// `(name, target, check)`. `target` is what the probe is reaching
-    /// for — an address, a URL — and exists so a **timeout** can name it.
-    /// A probe's own errors carry it already; a timeout is raised outside
-    /// the probe, so without this it reads "timed out after 500ms" and
-    /// says nothing about where (#1285).
+    /// `(name, target, check)`. `target` is the address or URL the
+    /// probe reaches for. A timeout is raised outside the probe, so
+    /// without this the message would only say "timed out after
+    /// 500ms" and never say what it was talking to.
     extra_checks: Vec<(String, Option<String>, CheckFn)>,
     per_check_timeout: Duration,
-    /// Should the built-in `database` probe run? Set to false if your
-    /// app wants to register its own DB probe with a different
-    /// connectivity sentinel.
+    /// Whether the built-in `database` probe runs. Turn it off to
+    /// register your own with a different query.
     include_db_probe: bool,
 }
 
@@ -108,14 +105,9 @@ struct HealthState {
 }
 
 impl HealthRouter {
-    /// Create a health router with the default `/health` + `/ready`
-    /// endpoints. `/ready` pings the pool with `SELECT 1` (universal
-    /// across Postgres / MySQL / SQLite). Default per-check timeout:
-    /// 5 seconds.
-    ///
-    /// v0.36 — accepts `impl Into<Pool>`, so existing `PgPool` callers
-    /// keep working via the `From<PgPool>` blanket; passing
-    /// `crate::sql::Pool` directly is the tri-dialect path.
+    /// Health router with the default `/health` and `/ready` routes.
+    /// `/ready` pings the pool with `SELECT 1`, which every backend
+    /// accepts. Each check may take up to 5 seconds.
     #[must_use]
     pub fn new(pool: impl Into<Pool>) -> Self {
         Self {
@@ -126,29 +118,27 @@ impl HealthRouter {
         }
     }
 
-    /// Override the per-check timeout. Lower = faster failure-mode
-    /// signaling, higher = tolerant of slow downstreams.
+    /// Change the per-check timeout. A lower value reports failure
+    /// sooner; a higher one tolerates a slow service.
     #[must_use]
     pub fn timeout(mut self, t: Duration) -> Self {
         self.per_check_timeout = t;
         self
     }
 
-    /// Disable the built-in `database` probe. Useful when you want to
-    /// register your own with a different sentinel query, or when the
-    /// pool you passed isn't actually expected to be ready (e.g. in
-    /// tests).
+    /// Turn off the built-in `database` probe. Use it when you have
+    /// your own, or when the pool is not meant to be ready, as in a
+    /// test.
     #[must_use]
     pub fn skip_db_probe(mut self) -> Self {
         self.include_db_probe = false;
         self
     }
 
-    /// Register an additional check that runs as part of `/ready`.
+    /// Add a check that `/ready` runs.
     ///
-    /// `name` appears in the JSON response. `check` returns `Ok(())` on
-    /// success or `Err(message)` on failure. Errors longer than 200
-    /// chars are truncated in the response.
+    /// `name` appears in the JSON. `check` returns `Ok(())` or
+    /// `Err(message)`. A message over 200 characters is cut short.
     #[must_use]
     pub fn check<F, Fut>(mut self, name: &str, check: F) -> Self
     where
@@ -160,8 +150,8 @@ impl HealthRouter {
         self
     }
 
-    /// [`Self::check`], plus what the probe is reaching for, so a
-    /// timeout can name it.
+    /// Like [`Self::check`], but also names what the probe reaches
+    /// for, so a timeout message can say where it was going.
     fn check_with_target<F, Fut>(mut self, name: &str, target: String, check: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -173,10 +163,10 @@ impl HealthRouter {
         self
     }
 
-    /// Built-in probe — opens a TCP connection to `addr` and closes it.
-    /// `addr` is anything `tokio::net::TcpStream::connect` accepts:
-    /// `"redis.svc:6379"`, `"127.0.0.1:5432"`, etc. Useful when the
-    /// service you depend on doesn't expose an HTTP health endpoint.
+    /// Probe that opens a TCP connection to `addr`, then closes it.
+    /// `addr` is anything `tokio::net::TcpStream::connect` takes, such
+    /// as `"redis.svc:6379"`. Use it for a service with no HTTP
+    /// health endpoint.
     #[must_use]
     pub fn tcp_probe(self, name: &str, addr: impl Into<String>) -> Self {
         let addr = addr.into();
@@ -192,10 +182,9 @@ impl HealthRouter {
         })
     }
 
-    /// Built-in probe — exercises the [`Cache`](crate::cache::Cache) by
-    /// writing a value, reading it back, and asserting it round-trips.
-    /// Catches both connection failures and read-after-write
-    /// inconsistencies.
+    /// Probe that writes a value to the
+    /// [`Cache`](crate::cache::Cache) and reads it back. It catches
+    /// both a dead connection and a bad read-after-write.
     #[cfg(feature = "cache")]
     #[must_use]
     pub fn cache_probe(self, name: &str, cache: crate::cache::BoxedCache) -> Self {
@@ -231,8 +220,8 @@ impl HealthRouter {
         })
     }
 
-    /// Built-in probe — issues a GET via [`HttpClient`] and checks the
-    /// response is 2xx. Useful for probing a downstream API.
+    /// Probe that sends a GET with
+    /// [`HttpClient`](crate::http_client::HttpClient) and wants a 2xx.
     #[cfg(feature = "http-client")]
     #[must_use]
     pub fn http_probe(
@@ -277,7 +266,7 @@ impl HealthRouter {
     }
 }
 
-/// Convenience — `HealthRouter::new(pool).into_router()` in one call.
+/// Shorthand for `HealthRouter::new(pool).into_router()`.
 #[must_use]
 pub fn health_router(pool: impl Into<Pool>) -> Router {
     HealthRouter::new(pool).into_router()
@@ -294,10 +283,8 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
     if state.include_db_probe {
         let pool = state.pool.clone();
         let outcome = run_with_timeout(state.per_check_timeout, None, async move {
-            // `SELECT 1` is universal — Postgres, MySQL, SQLite all
-            // accept it as a connectivity sentinel. We dispatch
-            // through the Pool enum so this works across backends
-            // without any per-dialect SQL.
+            // Postgres, MySQL and SQLite all accept `SELECT 1`, and
+            // the Pool enum dispatches it, so no per-dialect SQL.
             crate::sql::raw_execute_pool(&pool, "SELECT 1", Vec::new())
                 .await
                 .map(|_| ())
@@ -328,16 +315,15 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// Run `fut` under `timeout`, capturing the elapsed time alongside the
-/// outcome.
-/// `target` names what the probe was reaching for, and is included in the
-/// timeout message. A probe's own error carries it, but a timeout is
-/// raised out here where only the future is in scope — so without it an
-/// operator reads "timed out after 500ms" and learns nothing about where.
+/// Run `fut` under `timeout` and record how long it took.
 ///
-/// Not hypothetical: a connection to a closed port is refused on Linux
-/// and macOS but times out on Windows, so the same probe reported the
-/// address on two platforms and withheld it on the third.
+/// `target` goes into the timeout message. A probe's own error names
+/// its target already, but the timeout is raised out here, where only
+/// the future is in scope. Without `target` an operator would read
+/// "timed out after 500ms" and learn nothing about where.
+///
+/// This matters in practice: connecting to a closed port is refused
+/// on Linux and macOS but times out on Windows.
 async fn run_with_timeout<F>(
     timeout: Duration,
     target: Option<&str>,
@@ -357,8 +343,8 @@ where
     (outcome, start.elapsed())
 }
 
-/// Insert a check result into the response map. Returns `true` if the
-/// check FAILED (so the caller can flip the global `all_ok`).
+/// Add one check result to the response map. Returns `true` when the
+/// check failed, so the caller can clear the overall status.
 fn record(
     checks: &mut serde_json::Map<String, Value>,
     name: &str,
@@ -397,10 +383,8 @@ mod tests {
     use tower::ServiceExt;
 
     fn lazy_pool() -> Pool {
-        // v0.36 — feature-gate by which backend is on. Tests run on
-        // whichever backend the test profile picked; the health
-        // router itself is tri-dialect (the db probe uses
-        // `raw_execute_pool` with `SELECT 1`).
+        // Gate on whichever backend the test profile picked. The
+        // health router itself works on all three.
         #[cfg(feature = "postgres")]
         {
             return Pool::Postgres(

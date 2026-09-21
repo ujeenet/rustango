@@ -1,10 +1,10 @@
 //! Generate the next migration file from a registry diff.
 //!
-//! [`make_migrations`] is the entry point: load the latest snapshot in
-//! `dir`, build the current snapshot from the inventory registry, diff,
-//! and write the new file. [`make_migrations_from`] is the testable
-//! form — it takes the current snapshot as a parameter so tests can
-//! supply controlled fixtures without touching the global registry.
+//! [`make_migrations`] is the entry point. It loads the latest
+//! snapshot in `dir`, builds the current one from the model registry,
+//! diffs them and writes a new file. [`make_migrations_from`] takes
+//! the current snapshot as an argument, so a test can pass a fixture
+//! instead of using the global registry.
 //!
 //! Auto-naming heuristic (used when `name_override` is `None`):
 //!
@@ -40,20 +40,17 @@ pub fn make_migrations(
     make_migrations_from(dir, &current, name_override)
 }
 
-/// Tenancy-aware counterpart of [`make_migrations`] — diffs only the
-/// models whose [`crate::core::ModelSchema::scope`] matches `scope`,
-/// and emits the migration with [`super::MigrationScope`] set to the
-/// matching value. Powers the `makemigrations` flow on tenancy
-/// projects so registry-scoped framework tables (`Org`, `Operator`)
-/// don't bleed into tenant-scoped migrations.
+/// [`make_migrations`] for one scope. Diffs only the models whose
+/// [`crate::core::ModelSchema::scope`] matches, and tags the new file
+/// with the matching [`super::MigrationScope`]. This keeps registry
+/// tables such as `Org` out of tenant-scoped migrations.
 ///
-/// Both the current snapshot AND the prior on-disk snapshot are
-/// filtered to `scope` before diffing — the latter is critical for
-/// projects that scaffolded against pre-v0.24.2 bootstrap migrations
-/// (which carry every framework table in one snapshot regardless of
-/// scope). Tables not currently in the inventory default to
-/// [`crate::core::ModelScope::Tenant`] (see
-/// [`SchemaSnapshot::filtered_to_scope`]).
+/// Both the current snapshot and the prior on-disk one are filtered
+/// to `scope` first. Filtering the prior one matters: older bootstrap
+/// migrations hold every framework table in one snapshot whatever
+/// their scope. A table no longer in the inventory counts as
+/// [`crate::core::ModelScope::Tenant`]; see
+/// [`SchemaSnapshot::filtered_to_scope`].
 ///
 /// Returns `Ok(None)` when nothing in this scope changed.
 ///
@@ -72,14 +69,12 @@ pub fn make_migrations_for_scope(
     make_migrations_scoped(dir, &current, scope, migration_scope, name_override)
 }
 
-/// Per-app counterpart of [`make_migrations`] — diffs only the models
-/// whose Django-shape app label matches `app`, and writes the result
-/// into `<project_root>/<app>/migrations/`. Powers the
-/// `manage makemigrations <app>` flow (slice 9.0g).
+/// [`make_migrations`] for one app. Diffs only the models whose app
+/// label is `app` and writes to `<project_root>/<app>/migrations/`.
+/// This backs `manage makemigrations <app>`.
 ///
-/// `project_root` is typically the project's `src/` (or whatever the
-/// scaffolder's `--into` was set to). Returns `Ok(None)` when nothing
-/// changed, or when no models carry that `app_label`.
+/// `project_root` is usually the project's `src/`. Returns `Ok(None)`
+/// when nothing changed or no model carries that app label.
 ///
 /// # Errors
 /// Anything [`make_migrations_from`] can return, plus
@@ -98,12 +93,11 @@ pub fn make_migrations_for_app(
     make_migrations_from(&app_dir, &current, name_override)
 }
 
-/// Scope-filtered counterpart of [`make_migrations_from`] used by
-/// [`make_migrations_for_scope`]. Considers only prior migrations
-/// whose `MigrationScope` matches `migration_scope` when building the
-/// previous snapshot, and filters that snapshot down to `model_scope`
-/// to handle pre-v0.24.2 bootstrap migrations that mixed every
-/// framework table into one snapshot.
+/// [`make_migrations_from`] for one scope, used by
+/// [`make_migrations_for_scope`]. Builds the previous snapshot from
+/// prior migrations of the same `migration_scope`, then filters it to
+/// `model_scope` so an older bootstrap migration holding every
+/// framework table does not pollute the diff.
 ///
 /// # Errors
 /// As [`make_migrations_from`].
@@ -115,34 +109,26 @@ pub fn make_migrations_scoped(
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
     let prior = file::list_dir(dir)?;
-    // Filter prior to migrations in our scope only — registry runs in
-    // its own chain, tenant in its own chain. Both bootstrap files
-    // share the `0001_` prefix because they're both "head" migrations
-    // in their respective chains.
+    // Each scope has its own chain, so keep only this scope's prior
+    // migrations. Both chains start at `0001_`, since each has its
+    // own head.
     let prior_scoped: Vec<&Migration> = prior
         .iter()
         .filter(|m| m.scope == migration_scope)
         .collect();
-    // v0.31.1 (#2): the chain head's snapshot is the obvious baseline,
-    // but it's incomplete when the project has multiple "head"
-    // migrations in the same scope. Concrete case: `init-tenancy`
-    // writes `0001_rustango_tenant_initial` (tenant scope, no `prev`)
-    // alongside the user's `0001_initial`. Subsequent user-app
-    // migrations chain off `0001_initial` and carry forward only the
-    // user-app tables in their snapshots — the framework tables drop
-    // out of the baseline. Diffing against the inventory then re-emits
-    // `CreateTable` for every framework table and the migration runner
-    // crashes with `relation already exists`.
+    // The last migration's snapshot is the obvious baseline, but it
+    // is incomplete when a scope has more than one head. For example
+    // `init-tenancy` writes its own `0001_` beside the user's, and
+    // later user migrations chain off the user's head only, so the
+    // framework tables fall out of the baseline. The diff then
+    // re-emits `CreateTable` for them and the run fails with
+    // `relation already exists`.
     //
-    // Two-step fix:
-    //   1. Merge any side-chain bootstrap snapshots (no `prev`, not in
-    //      the main chain) into the baseline.
-    //   2. Pre-populate the baseline with every `rustango_*` table the
-    //      current registry knows about. The framework reserves the
-    //      `rustango_` table-name prefix for tables it manages itself
-    //      (bootstrap migrations + lazy ensure-table paths like
-    //      `audit_log`, `content_types`, `permissions`). User-app
-    //      makemigrations should never emit CreateTable for those.
+    // So build the baseline in two extra steps:
+    //   1. Fold in the snapshots of side-chain heads.
+    //   2. Add every `rustango_*` table the registry knows. The
+    //      framework owns that prefix, so an app migration must
+    //      never create one of those tables.
     let mut prev_snapshot = prior_scoped
         .last()
         .map_or_else(empty_snapshot, |m| m.snapshot.clone());
@@ -155,9 +141,8 @@ pub fn make_migrations_scoped(
     fold_in_framework_tables(&mut prev_snapshot, current);
     let prev_snapshot = prev_snapshot.filtered_to_scope(model_scope);
     let prev_name = prior_scoped.last().map(|m| m.name.clone());
-    // Index numbering walks the WHOLE directory — we don't want
-    // tenant-scoped 0002 colliding with registry-scoped 0002 in the
-    // same directory.
+    // Numbering looks at the whole directory, so a tenant `0002` and
+    // a registry `0002` cannot collide as filenames.
     let next_index = prior
         .last()
         .and_then(|m| extract_index(&m.name))
@@ -207,17 +192,16 @@ pub fn make_migrations_scoped(
 /// Generate the framework's own **system-app** migrations into
 /// `<project_root>/system/migrations/`.
 ///
-/// Diffs the framework (`rustango_*`) models of `scope` against the
-/// prior system migrations of that scope and writes a scope-tagged
-/// migration. Unlike the user path ([`make_migrations_scoped`]) this
-/// does NOT fold framework tables into the baseline — here they ARE the
-/// subject, so a fresh project emits `CreateTable` for every framework
-/// table and later runs emit `AddColumn`/`DropColumn` as the models (and
-/// their `#[cfg]` features) evolve. This is what replaces the
-/// hand-written bootstrap/ensure DDL.
+/// Diffs the framework's own `rustango_*` models for `scope` against
+/// the prior system migrations of that scope.
 ///
-/// Returns `Ok(None)` when nothing in the framework's schema changed for
-/// this scope.
+/// Unlike [`make_migrations_scoped`], this does **not** fold
+/// framework tables into the baseline: here they are the subject. A
+/// fresh project gets `CreateTable` for each of them, and later runs
+/// get `AddColumn` or `DropColumn` as the framework models change.
+///
+/// Returns `Ok(None)` when the framework's schema for this scope is
+/// unchanged.
 ///
 /// # Errors
 /// As [`make_migrations_from`], plus [`MigrateError::Io`] if the
@@ -227,20 +211,17 @@ pub fn make_migrations_system(
     scope: crate::core::ModelScope,
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
-    // Skip the registry scope when no model declares it — i.e. when
+    // Skip the registry scope when no model declares it, which means
     // this build has no registry database. Its snapshot is still
-    // non-empty there, because the shared tables are pulled into
-    // every scope by name, so it emitted a registry-scoped `0001`
-    // creating two tables the tenant-scope migration already creates.
-    // `migrate_system` only ever applies tenant-scoped migrations, so
-    // that file was written, never applied, and then collided with
-    // `relation already exists` the day the project enabled tenancy
-    // (#1307).
+    // non-empty, because the shared tables are copied into every
+    // scope, so without this guard we write a registry `0001` that
+    // creates tables the tenant migration also creates. Nothing
+    // applies it until the project turns on tenancy, and then it
+    // fails with `relation already exists`.
     //
-    // Deliberately registry-only. In a single-database project the
-    // tenant scope is the one that gets applied and it carries the
-    // shared tables, so suppressing it when it happens to own nothing
-    // else would leave nothing to create them.
+    // Registry only, on purpose. In a single-database project the
+    // tenant scope is the one that runs, and it carries the shared
+    // tables, so skipping it would leave nothing to create them.
     if scope == crate::core::ModelScope::Registry
         && !super::snapshot::scope_owns_system_tables(scope)
     {
@@ -306,13 +287,13 @@ pub fn make_migrations_system(
     Ok(Some(mig))
 }
 
-/// Testable form of [`make_migrations`] that takes the current snapshot
-/// as input rather than building it from the registry.
+/// [`make_migrations`] with the current snapshot passed in, instead
+/// of read from the registry.
 ///
 /// # Errors
-/// Returns [`MigrateError::Io`] / [`MigrateError::Json`] for file
-/// problems (loading prior migrations, writing the new one) and
-/// [`MigrateError::Validation`] if any prior migration is corrupt.
+/// Returns [`MigrateError::Io`] or [`MigrateError::Json`] on a file
+/// problem, and [`MigrateError::Validation`] if a prior migration is
+/// corrupt.
 pub fn make_migrations_from(
     dir: &Path,
     current: &SchemaSnapshot,
@@ -322,20 +303,14 @@ pub fn make_migrations_from(
     let mut prev_snapshot = prior
         .last()
         .map_or_else(empty_snapshot, |m| m.snapshot.clone());
-    // #1271 / #1298 — the framework owns its own `rustango_*` tables:
-    // `migrate` generates and applies a **system** migration chain
-    // (`system/migrations/`, ledger `__rustango_system_migrations__`)
-    // that creates them, on the very first run. A user-app diff must
-    // therefore treat them as already-present, or the first
-    // `makemigrations` after that emits `CreateTable` for every one of
-    // them and the next `migrate` dies on `table "rustango_admin_users"
-    // already exists`.
+    // The framework owns its `rustango_*` tables: `migrate` creates
+    // them from its own system migration chain on the first run. An
+    // app diff must treat them as already present, or the next
+    // `makemigrations` emits `CreateTable` for each one and the
+    // following `migrate` fails on `already exists`.
     //
-    // This fold already existed for the tenancy path
-    // (`make_migrations_scoped`, #2) but had only that one call site, so
-    // the ordinary path — plain projects and `--app` — walked straight
-    // into it. `make_migrations_system` deliberately does NOT fold:
-    // there the `rustango_*` tables ARE the subject.
+    // `make_migrations_system` does not fold: there those tables are
+    // the subject.
     fold_in_framework_tables(&mut prev_snapshot, current);
     let prev_name = prior.last().map(|m| m.name.clone());
     let next_index = prior
@@ -343,12 +318,9 @@ pub fn make_migrations_from(
         .and_then(|m| extract_index(&m.name))
         .map_or(1, |n| n + 1);
 
-    // Reject metadata-only changes that v0.3's `SchemaChange` set can't
-    // represent (type swaps, nullability flips, default/CHECK/FK
-    // tweaks, etc.). Without this guard `make_migrations` would
-    // silently produce `Ok(None)` and the user would think the schema
-    // was already up to date. v0.4 will introduce `AlterField` ops to
-    // close this gap; until then, surface the change as a clear error.
+    // Reject metadata changes no `SchemaChange` can express. Without
+    // this the function would return `Ok(None)` and the user would
+    // believe the schema was already up to date.
     let unsupported = detect_unsupported_field_changes(&prev_snapshot, current);
     if !unsupported.is_empty() {
         return Err(MigrateError::Validation(format!(
@@ -387,11 +359,10 @@ pub fn make_migrations_from(
     Ok(Some(mig))
 }
 
-/// Names reachable from the lex-last in-scope migration by walking
-/// `prev` links backward. Migrations whose names are NOT in this set
-/// are side-chain bootstrap migrations whose tables would otherwise
-/// drop out of the baseline. See `make_migrations_scoped` for the
-/// `0001_rustango_tenant_initial` collision this guards against (#2).
+/// Names reachable from the last in-scope migration by following
+/// `prev` backwards. A name missing from this set belongs to a side
+/// chain whose tables would otherwise drop out of the baseline. See
+/// `make_migrations_scoped`.
 fn chain_membership(prior_scoped: &[&Migration]) -> std::collections::HashSet<String> {
     let mut seen = std::collections::HashSet::new();
     let Some(last) = prior_scoped.last() else {
@@ -400,8 +371,8 @@ fn chain_membership(prior_scoped: &[&Migration]) -> std::collections::HashSet<St
     let mut cur: Option<&str> = Some(last.name.as_str());
     while let Some(name) = cur {
         if !seen.insert(name.to_owned()) {
-            // Defensive — a cyclic `prev` chain shouldn't happen but
-            // would loop forever if it did.
+            // A cyclic `prev` chain should not happen, but would
+            // loop forever here.
             break;
         }
         cur = prior_scoped
@@ -412,13 +383,10 @@ fn chain_membership(prior_scoped: &[&Migration]) -> std::collections::HashSet<St
     seen
 }
 
-/// Pre-populate `prev_snapshot` with every `rustango_*` table the
-/// current inventory knows about. The `rustango_` table-name prefix is
-/// a reserved framework namespace — the framework creates those
-/// tables itself (via bootstrap migrations or lazy ensure-table
-/// paths). User-app makemigrations diffs should treat them as
-/// already-present so they don't get re-emitted as CreateTable ops
-/// that crash on `relation already exists` (#2).
+/// Add every `rustango_*` table the registry knows to `into`. The
+/// `rustango_` prefix is reserved: the framework creates those tables
+/// itself. An app diff must see them as already present, or it emits
+/// `CreateTable` ops that fail on `relation already exists`.
 fn fold_in_framework_tables(into: &mut SchemaSnapshot, current: &SchemaSnapshot) {
     for t in &current.tables {
         if t.name.starts_with("rustango_") && !into.tables.iter().any(|x| x.name == t.name) {
@@ -444,10 +412,10 @@ fn fold_in_framework_tables(into: &mut SchemaSnapshot, current: &SchemaSnapshot)
     }
 }
 
-/// Add every table / m2m / index / check from `from` to `into` that
-/// isn't already named in `into`. Used to fold side-chain bootstrap
-/// snapshots into the chain head's baseline (#2). The "missing-only"
-/// semantics keep in-chain DropTable operations honored.
+/// Copy every table, m2m, index and check from `from` into `into`
+/// that `into` does not already name. Used to fold a side chain's
+/// snapshot into the baseline. Adding only what is missing keeps a
+/// `DropTable` in the main chain from being undone.
 fn fold_in_missing_tables(into: &mut SchemaSnapshot, from: &SchemaSnapshot) {
     for t in &from.tables {
         if !into.tables.iter().any(|x| x.name == t.name) {
@@ -537,13 +505,9 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
         {
             "initial".into()
         }
-        // v0.31.1: previously this case fell through to the
-        // unhelpful "auto" — generating uninformative filenames like
-        // `0004_auto.json` even when the diff was a clean set of
-        // `CreateTable`s + their indexes. Now: if every op is a
-        // CreateTable, or a CreateIndex targeting one of those new
-        // tables, name the migration after the tables created
-        // (capped at 3, joined with `_and_`).
+        // When every op just creates tables (plus their indexes),
+        // name the file after those tables instead of `auto`. At
+        // most 3 names, joined with `_and_`.
         many if many.iter().all(|c| {
             matches!(
                 c,
@@ -574,36 +538,30 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
     }
 }
 
-/// Django-shape `makemigrations --merge` — issue #346. Reconcile
-/// a divergent migration history by writing an empty-forward
-/// "merge" file whose `prev` points at the lex-last leaf, so the
-/// next `makemigrations` writes a proper linear successor.
+/// Reconcile a branched migration history, like Django's
+/// `makemigrations --merge`.
 ///
-/// A *leaf* is a migration whose name is NOT referenced as another
-/// migration's `prev`. With a single branch the chain has exactly
-/// one leaf (the latest file). Two engineers each running
-/// `makemigrations` on a feature branch produce a second leaf
-/// pointing at the same parent — when their PRs both merge to
-/// main, the resulting tree has two leaves and the next
-/// `makemigrations` would arbitrarily pick one as its `prev`,
-/// silently losing the convergence point.
+/// A *leaf* is a migration no other migration names as its `prev`. A
+/// linear chain has one. Two people each running `makemigrations` on
+/// their own branch create a second leaf with the same parent, and
+/// after both merge the next `makemigrations` would pick one of them
+/// at random as its `prev`.
 ///
-/// This function snapshots the current model registry, writes a
-/// new `NNNN_merge.json` whose `prev` is the lex-last leaf with
-/// `forward: []`, and returns the written migration. Re-merging an
+/// This writes a new `NNNN_merge.json` with an empty `forward` whose
+/// `prev` is the last leaf, so the chain has one head again. An
 /// already-linear chain returns `Ok(None)` and writes nothing.
 ///
 /// # Errors
-/// Returns [`MigrateError::Validation`] if a chain prerequisite
-/// fails (broken `prev` link, missing PK index), or
-/// [`MigrateError::Io`] / [`MigrateError::Json`] on file I/O.
+/// Returns [`MigrateError::Validation`] when the chain cannot be
+/// merged, or [`MigrateError::Io`] / [`MigrateError::Json`] on file
+/// problems.
 pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateError> {
     let current = SchemaSnapshot::from_registry();
     make_merge_migration_from(dir, &current)
 }
 
-/// Testable form of [`make_merge_migration`] — takes the post-merge
-/// snapshot as input rather than building it from the registry.
+/// [`make_merge_migration`] with the post-merge snapshot passed in,
+/// instead of read from the registry.
 ///
 /// # Errors
 /// See [`make_merge_migration`].
@@ -628,13 +586,12 @@ pub fn make_merge_migration_from(
     leaves.sort_by(|a, b| a.name.cmp(&b.name));
 
     if leaves.len() < 2 {
-        // Chain is already linear — nothing to merge.
+        // Already linear, nothing to merge.
         return Ok(None);
     }
 
-    // Reject leaves whose own `prev`s point at different ancestors —
-    // those represent *legitimately diverging* histories, not branch
-    // collisions. Django's --merge guards the same case.
+    // Leaves with different parents are real diverging histories,
+    // not a branch collision, so refuse to merge them.
     let parents: std::collections::HashSet<Option<String>> =
         leaves.iter().map(|m| m.prev.clone()).collect();
     if parents.len() > 1 {
@@ -646,15 +603,14 @@ pub fn make_merge_migration_from(
         )));
     }
 
-    // `prev` for the merge node = the lex-last leaf so the chain is
-    // unambiguous from this point forward. Lex-sort apply order
-    // already runs the other leaves first, so applying this merge
-    // file (empty `forward`) is a no-op at runtime — its only job
-    // is to anchor the chain for future `makemigrations`.
+    // Point the merge node at the last leaf, so the chain has one
+    // head from here on. Name order already applies the other leaves
+    // first, and `forward` is empty, so running this file does
+    // nothing. Its only job is to anchor the chain.
     let merge_prev = leaves.last().unwrap().name.clone();
 
-    // Pick the next sequential prefix from the highest existing
-    // index across the whole directory, not just within the leaves.
+    // Number from the highest index in the whole directory, not
+    // just among the leaves.
     let next_index = prior
         .iter()
         .filter_map(|m| extract_index(&m.name))
@@ -670,14 +626,11 @@ pub fn make_merge_migration_from(
         prev: Some(merge_prev),
         atomic: true,
         scope: super::MigrationScope::default(),
-        // A merge migration reconciles two branches; it doesn't collapse
-        // history, so it replaces nothing.
+        // A merge joins two branches, it does not collapse history.
         replaces: Vec::new(),
-        // Snapshot reflects the post-merge cumulative schema. The
-        // registry's current state IS that snapshot — by the time
-        // the operator runs `--merge`, the checkout has both
-        // branches' model changes compiled in. Future
-        // `makemigrations` will diff against this snapshot.
+        // The registry already holds both branches' model changes by
+        // the time `--merge` runs, so it is the post-merge schema.
+        // Future `makemigrations` runs diff against this snapshot.
         snapshot: current.clone(),
         forward: Vec::new(),
     };
@@ -744,18 +697,14 @@ mod tests {
 
     // ============================================================ scope-aware
     //
-    // Regression coverage for the v0.24.2 fix: a tenancy project with
-    // mixed registry-scoped (Org/Operator) and tenant-scoped (User +
-    // user models) models in inventory used to dump every change into
-    // a single tenant-scoped migration. When `migrate-tenants` fanned
-    // it out per-tenant, the registry-table ALTER would re-resolve via
-    // search_path to the registry copy and crash with `relation …
-    // already exists`.
+    // Diffs must split by `ModelScope`: registry models into a file
+    // tagged `MigrationScope::Registry`, tenant models into one
+    // tagged `MigrationScope::Tenant`. Mixing them puts a registry
+    // ALTER in a tenant migration, where `search_path` resolves it
+    // to the registry copy and the run fails.
     //
-    // The fix splits diffs by `ModelScope`: registry models go to a
-    // file tagged `MigrationScope::Registry`, tenant models go to one
-    // tagged `MigrationScope::Tenant`. These tests exercise the
-    // partitioning helpers without touching the global inventory.
+    // These tests drive the split helpers without touching the
+    // global inventory.
 
     use crate::core::ModelScope;
     use crate::migrate::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
@@ -831,14 +780,12 @@ mod tests {
 
     #[test]
     fn make_migrations_scoped_emits_with_correct_migration_scope() {
-        // First call from empty dir → snapshot has 1 tenant table → file
-        // created and tagged with MigrationScope::Tenant.
+        // First call in an empty dir writes one file tagged
+        // `MigrationScope::Tenant`.
         //
-        // v0.31.1 (#2): table name must NOT start with `rustango_` —
-        // that prefix is reserved for framework-managed tables which
-        // are now filtered out of the user-app diff baseline. Use a
-        // user-app-shape name (`posts`) so this test exercises the
-        // "first migration created" path.
+        // The table name must not start with `rustango_`: that
+        // prefix is filtered out of an app diff baseline, so a
+        // framework-shaped name would test nothing.
         let dir = tempdir();
         let snap = snap_with(vec![t("posts")]);
         let mig = make_migrations_scoped(
@@ -857,18 +804,14 @@ mod tests {
 
     #[test]
     fn make_migrations_scoped_filters_prev_to_scope_for_old_bootstrap_layout() {
-        // Simulate the v0.23.x / pre-v0.24.2 bootstrap: snapshot
-        // contains BOTH registry and tenant framework tables. The
-        // `filtered_to_scope` step in make_migrations_scoped must drop
-        // the registry tables before diffing, so the tenant-scope
-        // diff sees only tenant-side changes (here: a new user table)
-        // and does NOT emit ops for `rustango_operators`.
+        // An old bootstrap snapshot holds both registry and tenant
+        // framework tables. `filtered_to_scope` must drop the
+        // registry ones before the diff, so a tenant-scope diff sees
+        // only the new user table and emits nothing for
+        // `rustango_operators`.
         //
-        // We use a tenant-scope diff with prev containing a name that
-        // looks like the old bootstrap. Inventory lookup falls back to
-        // Tenant for unknown tables, so only tables explicitly in
-        // inventory with `scope = Registry` get filtered out — for
-        // this test we trust the lookup path's default behavior.
+        // A table missing from the inventory counts as Tenant, so
+        // only tables declared `scope = Registry` are filtered out.
         let dir = tempdir();
         let prev = Migration {
             name: "0001_initial".into(),
@@ -901,11 +844,9 @@ mod tests {
 
     #[test]
     fn make_migrations_scoped_indexes_walk_full_dir_not_just_scope() {
-        // Two prior migrations in different scopes. Index numbering
-        // walks both so we don't get filename collisions:
-        // - 0001_registry_initial.json (scope=Registry)
-        // - 0002_initial.json          (scope=Tenant)
-        // A new tenant migration must land at 0003, not 0002.
+        // With a registry `0001` and a tenant `0002` in the same
+        // directory, the next tenant migration must be `0003`.
+        // Numbering walks both scopes so filenames cannot collide.
         let dir = tempdir();
         let r = Migration {
             name: "0001_registry_initial".into(),
@@ -967,26 +908,18 @@ mod tests {
         p
     }
 
-    // ==================================================== #1271 / #1298
+    // ============================================ framework-table fold
     //
-    // `migrate` generates and applies a **system** migration chain
-    // (`system/migrations/`, ledger `__rustango_system_migrations__`)
-    // that owns every `rustango_*` table, and it does so on the very
-    // first run. So by the time a user runs their first
-    // `makemigrations`, those tables already exist in the database
-    // while the user-app migration dir is still empty.
+    // The first `migrate` applies the system migration chain, which
+    // creates every `rustango_*` table. So by the user's first
+    // `makemigrations` those tables already exist while the app's
+    // migration directory is still empty.
     //
-    // The diff baseline for a user-app migration therefore has to
-    // treat them as already-present. Before the fix it didn't on the
-    // ordinary path, so `makemigrations` emitted `CreateTable` for
-    // every framework table and the next `migrate` died on
-    // `table "rustango_admin_users" already exists` — reported on
-    // SQLite (#1271) and Postgres 42P07 (#1298), i.e. every fresh
-    // project following the documented flow.
-    //
-    // The tenancy path (`make_migrations_scoped`) already folded them
-    // in for #2; these tests pin the same guarantee onto the plain and
-    // `--app` paths, which share `make_migrations_from`.
+    // An app diff baseline must therefore treat them as present.
+    // Otherwise `makemigrations` emits `CreateTable` for each one and
+    // the next `migrate` fails on `already exists`. These tests pin
+    // that for the plain and `--app` paths, which both go through
+    // `make_migrations_from`.
 
     fn idx(name: &str, table: &str) -> crate::migrate::snapshot::IndexSnapshot {
         crate::migrate::snapshot::IndexSnapshot {
@@ -1000,14 +933,13 @@ mod tests {
         }
     }
 
-    /// The headline regression: a first `makemigrations` in an empty
-    /// dir must claim the user's tables and leave the framework's
-    /// alone.
+    /// A first `makemigrations` in an empty dir must create the
+    /// user's tables and leave the framework's alone.
     #[test]
     fn plain_makemigrations_does_not_re_emit_framework_tables() {
         let dir = tempdir();
-        // Mirrors the reproduced scaffold: two user models alongside
-        // the framework tables the system chain has already created.
+        // Two user models beside the framework tables the system
+        // chain has already created.
         let current = snap_with(vec![
             t("blog"),
             t("item"),
@@ -1036,9 +968,8 @@ mod tests {
         );
     }
 
-    /// Indexes ride along with the tables — an index on a framework
-    /// table is just as fatal on re-apply, and the repro emitted eight
-    /// of them.
+    /// Indexes must be folded in too: re-creating an index on a
+    /// framework table fails the same way re-creating the table does.
     #[test]
     fn plain_makemigrations_does_not_re_emit_framework_indexes() {
         let dir = tempdir();
@@ -1067,9 +998,8 @@ mod tests {
         );
     }
 
-    /// The fold must not swallow real work: when the user's own schema
-    /// is unchanged and only framework tables are present, there is
-    /// genuinely nothing to write.
+    /// With only framework tables present there is nothing for an
+    /// app migration to write.
     #[test]
     fn framework_only_registry_yields_no_migration() {
         let dir = tempdir();
@@ -1082,8 +1012,8 @@ mod tests {
         );
     }
 
-    /// And the fold must stay scoped to the reserved prefix — a user
-    /// table whose name merely *contains* `rustango` is still theirs.
+    /// The fold matches the reserved prefix only. A user table whose
+    /// name merely contains `rustango` still belongs to the user.
     #[test]
     fn fold_only_matches_the_reserved_prefix() {
         let dir = tempdir();
@@ -1104,12 +1034,11 @@ mod tests {
         assert_eq!(created, vec!["my_rustango_notes"]);
     }
 
-    // ============================================================ #346
+    // ====================================== makemigrations --merge
     //
-    // makemigrations --merge — reconcile a divergent chain by writing an
-    // empty-forward `NNNN_merge.json` whose `prev` points at the lex-last
-    // leaf. The merge file's snapshot is the cumulative post-merge
-    // schema (the `current` snapshot supplied at merge time).
+    // Reconciles a branched chain with an empty-forward
+    // `NNNN_merge.json` whose `prev` is the last leaf. Its snapshot
+    // is the post-merge schema passed in as `current`.
 
     fn write_mig(dir: &std::path::Path, mig: &Migration) {
         std::fs::write(
@@ -1184,23 +1113,14 @@ mod tests {
             mig.name
         );
         assert_eq!(mig.name, "0003_merge");
-        // Lex-last leaf wins prev — alphabetically 0002b > 0002a.
+        // The last leaf by name wins `prev`: 0002b sorts after 0002a.
         assert_eq!(mig.prev.as_deref(), Some("0002b_branch"));
-        // No schema changes — the merge file just anchors the chain.
+        // The merge file only anchors the chain, so it runs nothing.
         assert!(mig.forward.is_empty(), "merge file must have empty forward");
-        // Re-running on the now-linearized chain (0001 ← 0002a, 0002b ← 0003_merge)
-        // returns None since 0002a is the only remaining leaf, but wait —
-        // 0002a was never linked to either by `prev`. After the merge it's
-        // STILL a leaf because nothing references it. So another merge file
-        // would still want to be written.
-        //
-        // The Django-shape behavior is: lex-sort applies 0002a BEFORE 0002b BEFORE
-        // 0003_merge so all schema changes from both branches apply in order.
-        // The merge file's only job is to give the next `makemigrations` a
-        // single unambiguous parent. Once 0003_merge is written, 0003_merge
-        // is the new lex-last leaf. 0002a is also still a "leaf" (no
-        // dependents) — but that's a graph degenerate case, not a chain
-        // conflict, so this test stops at the first merge write.
+        // Name order still applies 0002a, then 0002b, then the merge
+        // file, so both branches' changes land. 0002a stays a leaf
+        // afterwards because nothing names it, but that is a graph
+        // quirk, not a chain conflict, so the test stops here.
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1208,9 +1128,8 @@ mod tests {
     fn merge_rejects_leaves_with_different_parents() {
         let dir = tempdir();
         let snap = snap_with(vec![t("posts")]);
-        // Two leaves with different parents — legitimately divergent
-        // history, not a branch-collision. Django's --merge does the
-        // same.
+        // Two leaves with different parents is a real divergence,
+        // not a branch collision, so the merge must refuse.
         write_mig(&dir, &mig_at("0001_a", None, snap.clone()));
         write_mig(&dir, &mig_at("0002_b", Some("0001_a"), snap.clone()));
         write_mig(&dir, &mig_at("0001_z", None, snap.clone()));
@@ -1230,10 +1149,9 @@ mod tests {
     #[test]
     fn merge_uses_supplied_snapshot_for_post_merge_state() {
         let dir = tempdir();
-        // Pre-existing leaves carry a snapshot with one table; the
-        // post-merge `current` snapshot has TWO. The merge file should
-        // record the post-merge snapshot so future `makemigrations`
-        // diffs against the correct baseline.
+        // The existing leaves hold a one-table snapshot; `current`
+        // holds two. The merge file must record `current`, so later
+        // `makemigrations` runs diff against the right baseline.
         let pre = snap_with(vec![t("posts")]);
         let post = snap_with(vec![t("posts"), t("comments")]);
         write_mig(&dir, &mig_at("0001_initial", None, pre.clone()));

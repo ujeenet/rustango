@@ -1,48 +1,37 @@
-//! `manage inspectdb` — emit `#[derive(Model)]` source for every
-//! table in a live database. Mirrors Django's `inspectdb` shape:
-//! point at an existing schema, get a copy-paste-ready Rust file,
-//! adopt rustango against the existing data without rewriting it.
+//! `manage inspectdb`: print `#[derive(Model)]` source for every
+//! table in a live database, so you can adopt rustango against
+//! existing data. Same idea as Django's `inspectdb`.
 //!
-//! v0.38 — tri-dialect. The introspection layer dispatches per
-//! backend:
-//!   - **PostgreSQL**: ANSI `information_schema.{tables, columns,
-//!     table_constraints, key_column_usage, constraint_column_usage}`.
-//!     `--schema` filters to a specific PG schema; default `public`.
-//!   - **MySQL 8+**: same `information_schema` shape, but
-//!     `--schema` maps to MySQL's `TABLE_SCHEMA` (i.e. the database
-//!     name). When unset, the current database is used. Auto-
-//!     increment detection uses `EXTRA = 'auto_increment'`.
-//!   - **SQLite**: `sqlite_master` for the table list,
-//!     `PRAGMA table_info(<t>)` for columns,
-//!     `PRAGMA foreign_key_list(<t>)` for FKs. `--schema` is ignored
-//!     (sqlite has a single namespace per file).
+//! Introspection works on all three backends:
+//!   - **PostgreSQL**: `information_schema`. `--schema` picks the PG
+//!     schema, default `public`.
+//!   - **MySQL 8+**: the same `information_schema` tables, where
+//!     `--schema` is the database name. Auto-increment comes from
+//!     `EXTRA = 'auto_increment'`.
+//!   - **SQLite**: `sqlite_master` plus `PRAGMA table_info` and
+//!     `PRAGMA foreign_key_list`. `--schema` is ignored, since a
+//!     file has one namespace.
 //!
 //! ## What it covers
 //!
-//! - Tables (`BASE TABLE` on PG/MySQL; `type = 'table'` on SQLite)
-//! - Views — emitted with `#[rustango(view)]` so the migration runner
-//!   skips `CREATE TABLE` / `DROP TABLE` against them. The view's
-//!   `view_definition` lands in a fenced ```sql doc comment above the
-//!   emitted struct. Issue #293 / T2.10.
-//! - Standard column types per backend (integers, text/varchar,
-//!   bool, timestamp[tz], date, uuid/blob, json[b]/text-as-json,
-//!   numeric/decimal)
+//! - Tables, and views marked `#[rustango(view)]` so the migration
+//!   runner never creates or drops them. The view's SQL goes in a
+//!   fenced ```sql doc comment above the struct.
+//! - The standard column types of each backend.
 //! - PRIMARY KEY → `#[rustango(primary_key)]`
-//! - NOT NULL → required field; nullable → `Option<T>`
+//! - NOT NULL → a plain field; nullable → `Option<T>`
 //! - `varchar(N)` → `#[rustango(max_length = N)]`
-//! - SERIAL / IDENTITY / AUTO_INCREMENT / INTEGER PRIMARY KEY
-//!   AUTOINCREMENT → `Auto<T>` PK wrapper
+//! - Any auto-increment spelling → an `Auto<T>` PK
 //! - FK references → `#[rustango(fk = "<target_table>")]`
 //!
-//! ## What it skips (v1)
+//! ## What it skips
 //!
-//! - Materialized views, foreign tables (regular views are walked)
-//! - Composite primary keys (emits the first PK column with the
-//!   marker; the user adjusts as needed)
-//! - CHECK constraints (no rustango-side equivalent yet)
-//! - Triggers, sequences, generated columns
-//! - Custom enum types (mapped to `String` with a `// TODO`)
-//! - Index definitions (run `manage makemigrations` after to capture)
+//! - Materialized views and foreign tables. Plain views are covered.
+//! - Composite primary keys. It marks the first PK column only, so
+//!   fix that up by hand.
+//! - CHECK constraints, triggers, sequences, generated columns.
+//! - Custom enum types, which become `String` with a `// TODO`.
+//! - Indexes. Run `manage makemigrations` afterwards to pick them up.
 //!
 //! ## Usage
 //!
@@ -68,17 +57,12 @@ pub(super) struct InspectdbArgs {
     pub schema: String,
     /// When `Some(name)`, only emit that one table.
     pub table: Option<String>,
-    /// Crate-root identifier the emitted `use ...::sql::Auto;` /
-    /// `use ...::Model;` statements should reference. Defaults to
-    /// `"rustango"`. Issue [#145](https://github.com/ujeenet/rustango/issues/145)
-    /// Phase 1 — first prep step for the rustango-orm extract.
+    /// Crate name for the emitted `use ...` lines. Defaults to
+    /// `"rustango"`.
     ///
-    /// Consumers that depend on the framework facade (`rustango = "…"`)
-    /// take the default; the future `rustango-orm` CLI binding will
-    /// pass `--crate rustango_orm` so the emitted source compiles
-    /// against the bare ORM dep. The argument is parsed verbatim, so
-    /// renamed deps (`use foo as rustango_alias;`) work too — pass
-    /// the *crate name as the consumer's Cargo.toml uses it*.
+    /// Set it when the target project depends on a renamed crate, so
+    /// the emitted source compiles there. Pass the name exactly as
+    /// that project's `Cargo.toml` spells it.
     pub crate_root: String,
 }
 
@@ -116,11 +100,8 @@ pub(super) fn parse_inspectdb_args(args: &[String]) -> Result<InspectdbArgs, Mig
                 out.table = Some(v.clone());
             }
             "--crate" => {
-                // Issue #145 Phase 1 — let `rustango-orm` (and any other
-                // consumer that renames the dep in their Cargo.toml)
-                // emit `use <crate>::sql::Auto;` / `use <crate>::Model;`
-                // with the right crate root. Default stays `"rustango"`
-                // so today's invocations emit bit-identical output.
+                // Lets a project that renames the dependency get
+                // `use <crate>::...` lines that compile there.
                 let v = iter
                     .next()
                     .ok_or_else(|| MigrateError::Validation("`--crate` requires a value".into()))?;
@@ -149,10 +130,9 @@ pub(super) fn parse_inspectdb_args(args: &[String]) -> Result<InspectdbArgs, Mig
     Ok(out)
 }
 
-/// Top-level entry — read the live schema, emit Rust source. v0.38 —
-/// tri-dialect via [`crate::sql::Pool`]. Issue #293 / T2.10 —
-/// walks views as well as tables; view-backed models are emitted with
-/// `#[rustango(view)]` so the migration runner skips them.
+/// Read the live schema through a [`crate::sql::Pool`] and write
+/// Rust source. Covers views as well as tables; a view's model gets
+/// `#[rustango(view)]` so the migration runner leaves it alone.
 pub(super) async fn inspectdb_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
@@ -225,27 +205,25 @@ fn write_header<W: Write>(
     Ok(())
 }
 
-/// One column row. The struct is dialect-agnostic — each backend's
-/// introspection path normalizes its native column metadata into
-/// these fields.
+/// One column, in a shape every backend's introspection normalises
+/// its native metadata into.
 #[derive(Debug, Clone)]
 pub(super) struct ColumnRow {
     pub name: String,
-    /// Normalized native type token — for PG this is `udt_name`
-    /// (e.g. `int8`, `varchar`, `timestamptz`); for MySQL it's
-    /// `data_type` (e.g. `bigint`, `varchar`, `datetime`, `json`);
-    /// for SQLite the declared type (e.g. `INTEGER`, `TEXT`, `REAL`)
-    /// — sqlite's type affinity rules mean a column declared
-    /// `VARCHAR(80)` returns `VARCHAR(80)` verbatim, so callers
-    /// should match case-insensitively + strip parens.
+    /// The backend's own type token: `udt_name` on PG, `data_type`
+    /// on MySQL, the declared type on SQLite.
+    ///
+    /// SQLite returns the declaration verbatim, such as
+    /// `VARCHAR(80)`, so match it case-insensitively and strip the
+    /// parentheses.
     pub udt_name: String,
     pub nullable: bool,
     pub max_length: Option<i32>,
     pub default: Option<String>,
-    /// `true` when the column is auto-incremented. Detected via
-    /// per-dialect signals (PG: `is_identity = YES` or `nextval(...)`;
-    /// MySQL: `EXTRA = 'auto_increment'`; SQLite: `INTEGER PRIMARY KEY`
-    /// or explicit `AUTOINCREMENT`).
+    /// `true` when the column auto-increments. Each backend signals
+    /// this differently: `is_identity` or `nextval(...)` on PG,
+    /// `EXTRA = 'auto_increment'` on MySQL, `INTEGER PRIMARY KEY` or
+    /// `AUTOINCREMENT` on SQLite.
     pub is_auto: bool,
 }
 
@@ -555,14 +533,12 @@ async fn list_tables_my(
     only: Option<&str>,
 ) -> Result<Vec<String>, MigrateError> {
     use sqlx::Row as _;
-    // On MySQL, `--schema` is the database name. Default ("public")
-    // doesn't make sense — use DATABASE() when no override.
-    // MySQL 8.0+ flags `information_schema` string columns as
-    // VARBINARY (with `BINARY` collation), which sqlx can't decode as
-    // `String` directly — it errors with a `VARCHAR vs VARBINARY`
-    // type mismatch. `CAST(... AS CHAR)` forces a real VARCHAR shape
-    // that sqlx decodes cleanly. Without this, inspectdb on MySQL
-    // silently produced `pub struct Unnamed {}` for every table.
+    // On MySQL `--schema` is the database name, so the PG default
+    // `"public"` means nothing here: fall back to `DATABASE()`.
+    //
+    // **Every string column needs `CAST(... AS CHAR)`.** MySQL 8
+    // reports `information_schema` strings as VARBINARY, and sqlx
+    // refuses to decode those as `String`.
     let use_default = schema == "public" || schema.is_empty();
     let sql = match (only, use_default) {
         (Some(_), true) => {
@@ -641,8 +617,8 @@ async fn list_columns_my(
         let name: String = r.try_get("COLUMN_NAME").unwrap_or_default();
         let data_type: String = r.try_get("DATA_TYPE").unwrap_or_default();
         let nullable: String = r.try_get("IS_NULLABLE").unwrap_or_else(|_| "NO".into());
-        // MySQL's CHARACTER_MAXIMUM_LENGTH is u64 in information_schema —
-        // fetch as i64 and downcast (varchar(80) fits trivially).
+        // `CHARACTER_MAXIMUM_LENGTH` is u64, so read it as i64 and
+        // narrow. Real column lengths fit easily.
         let max_length: Option<i32> = r
             .try_get::<Option<i64>, _>("CHARACTER_MAXIMUM_LENGTH")
             .ok()
@@ -824,8 +800,7 @@ async fn list_tables_sqlite(
 ) -> Result<Vec<String>, MigrateError> {
     use sqlx::Row as _;
     let sql = if only.is_some() {
-        // `sqlite_sequence` and other sqlite-internal tables aren't
-        // user tables — filter the `sqlite_%` prefix.
+        // Skip `sqlite_%`: those are SQLite's own tables.
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name = ? ORDER BY name"
     } else {
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
@@ -847,17 +822,17 @@ async fn list_columns_sqlite(
     table: &str,
 ) -> Result<Vec<ColumnRow>, MigrateError> {
     use sqlx::Row as _;
-    // PRAGMA can't be parameterized — table names go in literally.
-    // sqlite_master is the source of truth for declared type +
-    // AUTOINCREMENT presence; PRAGMA table_info gives us nullable +
-    // default + pk flag.
+    // PRAGMA takes no placeholders, so the table name is spliced in
+    // and must be quoted. `PRAGMA table_info` gives nullability,
+    // default and the PK flag; `sqlite_master` gives the declared
+    // type and whether AUTOINCREMENT is set.
     let pragma = format!("PRAGMA table_info({})", quote_sqlite_ident(table));
     let rows = sqlx::query(&pragma)
         .fetch_all(pool)
         .await
         .map_err(MigrateError::Driver)?;
-    // Pull the table's CREATE TABLE source to detect AUTOINCREMENT —
-    // PRAGMA doesn't expose this flag.
+    // PRAGMA does not report AUTOINCREMENT, so read the stored
+    // CREATE TABLE text instead.
     let create_sql: Option<String> = sqlx::query_scalar::<_, String>(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
     )
@@ -875,9 +850,9 @@ async fn list_columns_sqlite(
         let notnull: i64 = r.try_get("notnull").unwrap_or(0);
         let default: Option<String> = r.try_get("dflt_value").ok().flatten();
         let pk_flag: i64 = r.try_get("pk").unwrap_or(0);
-        // INTEGER PRIMARY KEY columns are aliases for ROWID and are
-        // implicitly auto-increment. `AUTOINCREMENT` keyword is the
-        // stricter (gap-free) variant — detect either.
+        // An `INTEGER PRIMARY KEY` column is a ROWID alias, so it
+        // auto-increments already. `AUTOINCREMENT` is the stricter,
+        // gap-free form. Either counts.
         let upper = declared_ty.to_ascii_uppercase();
         let is_int_pk = pk_flag > 0 && (upper == "INTEGER" || upper.starts_with("INT"));
         let is_auto = (is_int_pk && pk_flag == 1) || (has_autoincrement && pk_flag == 1);
@@ -918,8 +893,8 @@ async fn list_pk_columns_sqlite(
             }
         })
         .collect();
-    // `pk` is the ordinal in the primary key — sort to get the
-    // canonical composite order.
+    // `pk` is the column's position in the key, so sort by it to
+    // get the composite order right.
     pk_pairs.sort_by_key(|(ord, _)| *ord);
     Ok(pk_pairs.into_iter().map(|(_, n)| n).collect())
 }
@@ -1079,9 +1054,9 @@ pub(super) fn mysql_type_to_rust(data_type: &str) -> (&'static str, Option<&'sta
     }
 }
 
-/// Map a SQLite declared type (case-insensitive, parens stripped) to
-/// a `(rust_type, notes)` tuple. SQLite's affinity rules mean column
-/// declared types are loose — common conventions are honored.
+/// Map a SQLite declared type to a `(rust_type, notes)` pair. Match
+/// is case-insensitive with parens stripped. SQLite's type affinity
+/// makes declared types loose, so this follows common conventions.
 pub(super) fn sqlite_type_to_rust(declared: &str) -> (&'static str, Option<&'static str>) {
     let upper = declared.trim().to_ascii_uppercase();
     if upper.contains("INT") {
@@ -1175,18 +1150,14 @@ fn write_model<W: Write>(
     write_model_with_dialect(w, table, columns, pk_columns, fks, "postgres")
 }
 
-/// Emit one `#[derive(Model)]` block for a SQL view. Issue #293 /
-/// T2.10. The struct carries `#[rustango(view)]` so the migration
-/// runner skips it (the view is operator-owned). `view_definition` —
-/// when present — lands as a fenced doc comment above the struct so
-/// reviewers can read the SQL without hunting through `pg_views`.
+/// Emit one `#[derive(Model)]` block for a SQL view. The struct gets
+/// `#[rustango(view)]`, so the migration runner never creates or
+/// drops it. When `definition` is present it goes in a fenced doc
+/// comment above the struct.
 ///
-/// Unlike `write_model_with_dialect`, view models do NOT emit a PK
-/// attribute or FK attributes: the view's underlying expression is
-/// already constrained by the source tables. Users editing the
-/// emitted source can add `#[rustango(primary_key)]` to the column
-/// they want to use as the ORM-side identity if the view exposes
-/// one (Django's `Meta.managed = False` convention).
+/// No PK or FK attributes are emitted: the view's own query already
+/// constrains those. Add `#[rustango(primary_key)]` by hand if you
+/// want one column to act as the ORM-side identity.
 fn write_view_model_with_dialect<W: Write>(
     w: &mut W,
     view: &str,
@@ -1337,8 +1308,6 @@ mod tests {
         let a = parse_inspectdb_args(&[]).unwrap();
         assert_eq!(a.schema, "public");
         assert!(a.table.is_none());
-        // Issue #145 — `--crate` defaults to `"rustango"` so today's
-        // invocations emit `use rustango::sql::Auto;` bit-identically.
         assert_eq!(a.crate_root, "rustango");
     }
 
@@ -1357,16 +1326,11 @@ mod tests {
 
     #[test]
     fn parse_args_picks_up_crate_root() {
-        // Issue #145 Phase 1 — the `rustango-orm` CLI (future #144)
-        // will pass `--crate rustango_orm` so the emitted source
-        // compiles in a crate that depends on the bare ORM dep.
         let a = parse_inspectdb_args(&["--crate".into(), "rustango_orm".into()]).unwrap();
         assert_eq!(a.crate_root, "rustango_orm");
 
-        // Renamed-dep consumers can pass an arbitrary identifier —
-        // matches the pattern `rustango-renamed-smoke` exercises for
-        // proc-macro renames. The arg is trimmed but otherwise
-        // passed through unchanged.
+        // Any identifier is accepted, trimmed but otherwise passed
+        // through, so a renamed dependency works.
         let renamed = parse_inspectdb_args(&["--crate".into(), "  orm  ".into()]).unwrap();
         assert_eq!(renamed.crate_root, "orm");
     }
@@ -1375,14 +1339,14 @@ mod tests {
     fn parse_args_rejects_missing_value() {
         assert!(parse_inspectdb_args(&["--schema".into()]).is_err());
         assert!(parse_inspectdb_args(&["--table".into()]).is_err());
-        // `--crate` with no value also fails — matches `--schema` shape.
+        // `--crate` with no value fails the same way.
         assert!(parse_inspectdb_args(&["--crate".into()]).is_err());
     }
 
     #[test]
     fn parse_args_rejects_empty_crate_root() {
-        // Empty `--crate ""` would emit `use ::sql::Auto;` which won't
-        // compile — fail at parse time with a clear error.
+        // An empty name would emit `use ::sql::Auto;`, which does not
+        // compile, so reject it at parse time.
         let err = parse_inspectdb_args(&["--crate".into(), "".into()])
             .err()
             .expect("empty crate name must error");
@@ -1391,10 +1355,6 @@ mod tests {
 
     #[test]
     fn header_emits_default_crate_root_bit_identically() {
-        // Issue #145 — when `--crate` is unset the default
-        // `"rustango"` flows through, and the emitted header matches
-        // the pre-#145 output token-for-token. No downstream codegen
-        // regression for callers that don't opt in.
         let mut buf = Vec::<u8>::new();
         write_header(&mut buf, "public", "postgres", "rustango").unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -1405,16 +1365,13 @@ mod tests {
 
     #[test]
     fn header_threads_renamed_crate_root_into_use_statements() {
-        // The whole point of #145 Phase 1: passing `rustango_orm`
-        // produces source a `rustango-orm`-only consumer can compile.
         let mut buf = Vec::<u8>::new();
         write_header(&mut buf, "public", "postgres", "rustango_orm").unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("use rustango_orm::sql::Auto;"));
         assert!(out.contains("use rustango_orm::Model;"));
-        // And the unparameterized `rustango::…` form is gone — proves
-        // a downstream `cargo build` against only `rustango-orm`
-        // won't see an unresolved-import error.
+        // No bare `rustango::` may survive, or the emitted source
+        // fails to build against the renamed crate alone.
         assert!(!out.contains("use rustango::"));
     }
 

@@ -1,18 +1,17 @@
-//! Agent authentication (epic #1013, Slice 2 / #1015).
+//! Agent authentication, in two layers.
 //!
-//! Two layers:
+//! **Token logic.** [`issue_agent_token`] and [`verify_agent_token`]
+//! wrap [`crate::tenancy::jwt_lifecycle::JwtLifecycle`] with the
+//! claims MCP needs: `kind`, `tenant`, `skills` and `tools`. The
+//! agent marker goes under `kind`, because `JwtLifecycle` reserves
+//! `typ` for access and refresh. These are plain functions, testable
+//! without HTTP.
 //!
-//! * **Pure token logic** — [`issue_agent_token`] / [`verify_agent_token`]
-//!   wrap [`crate::tenancy::jwt_lifecycle::JwtLifecycle`] with MCP's custom
-//!   claims (`kind:"agent"`, `tenant`, `skills`, `tools`). `tenant` is
-//!   reserved-claim-safe; note `typ` is reserved by `JwtLifecycle`
-//!   (access/refresh), so the agent marker rides under `kind`. These are
-//!   plain functions, unit-tested without HTTP.
-//! * **HTTP handlers** — [`agent_token`] (the client-credentials
-//!   `{name, secret}` → scoped-JWT endpoint) and [`post_authed`] (the
-//!   JSON-RPC endpoint guarded by a tenant-pinned agent JWT). Both resolve
-//!   the request tenant via the [`Tenant`] extractor and operate on that
-//!   tenant's pool — a token minted for tenant A is refused on tenant B.
+//! **HTTP handlers.** [`agent_token`] trades a `{name, secret}` pair
+//! for a scoped JWT, and [`post_authed`] is the JSON-RPC endpoint
+//! behind such a token. Both resolve the tenant with the [`Tenant`]
+//! extractor and work on that tenant's pool, so a token minted for
+//! one tenant is refused on another.
 
 use std::sync::Arc;
 
@@ -30,45 +29,43 @@ use crate::tenancy::jwt_lifecycle::{JwtIssueError, JwtLifecycle};
 use super::router::McpState;
 use super::transport::handle_message;
 
-/// Custom-claim key carrying the principal kind; value [`KIND_AGENT`].
+/// Claim naming what kind of principal this is; see [`KIND_AGENT`].
 pub const CLAIM_KIND: &str = "kind";
-/// Value of [`CLAIM_KIND`] for agent tokens.
+/// The [`CLAIM_KIND`] value an agent token carries.
 pub const KIND_AGENT: &str = "agent";
-/// Custom-claim key pinning the token to one tenant slug.
+/// Claim pinning the token to one tenant slug.
 pub const CLAIM_TENANT: &str = "tenant";
-/// Custom-claim key carrying the agent's granted skill codenames (Slice 4).
+/// Claim listing the agent's granted skill codenames.
 pub const CLAIM_SKILLS: &str = "skills";
-/// Custom-claim key carrying the agent's flattened tool set (Slice 4).
+/// Claim listing the tools those skills add up to.
 pub const CLAIM_TOOLS: &str = "tools";
-/// Custom-claim key carrying the owning `rustango_users.id` for a user-owned
-/// key. Absent for a standalone machine agent.
+/// Claim naming the user who owns the key. A machine agent has none.
 pub const CLAIM_UID: &str = "uid";
 
-/// A verified agent principal, resolved from a tenant-pinned access token.
+/// A verified agent, read out of a tenant-pinned access token.
 #[derive(Debug, Clone)]
 pub struct McpAgent {
-    /// `rustango_agents.id` (the JWT `sub`).
+    /// The agent row's id, which is the token's `sub`.
     pub agent_id: i64,
-    /// Tenant slug the token is pinned to.
+    /// The tenant slug this token is pinned to.
     pub tenant: String,
-    /// Granted skill codenames (empty until Slice 4 fills the claim).
+    /// The granted skill codenames.
     pub skills: Vec<String>,
-    /// Flattened allowed tool set (empty until Slice 4).
+    /// The tools those skills add up to.
     pub tools: Vec<String>,
-    /// Owning `rustango_users.id` for a user-owned key; `None` for a
-    /// standalone machine agent. Tool handlers scope work to this user via
-    /// `ctx.agent.user_id`.
+    /// The user who owns the key, or `None` for a machine agent. A
+    /// tool handler scopes its work to this user.
     pub user_id: Option<i64>,
-    /// Unique token id — the revocation handle.
+    /// The token id, which is what revocation acts on.
     pub jti: String,
 }
 
-/// Issue a short-lived access token for `agent_id`, pinned to `tenant` and
-/// carrying its skill/tool grants.
+/// Issue a short-lived access token for `agent_id`, pinned to
+/// `tenant` and carrying its grants.
 ///
 /// # Errors
-/// [`JwtIssueError`] only if a custom claim collides with a reserved name
-/// (it won't here — `kind`/`tenant`/`skills`/`tools` are all non-reserved).
+/// [`JwtIssueError`] if a custom claim collides with a reserved
+/// name, which none of these do.
 pub fn issue_agent_token(
     jwt: &JwtLifecycle,
     agent_id: i64,
@@ -88,12 +85,13 @@ pub fn issue_agent_token(
     jwt.issue_access_with(agent_id, custom)
 }
 
-/// Verify an agent access token and pin it to `expected_tenant`. Returns
-/// the resolved [`McpAgent`], or `None` for any failure — bad signature,
-/// expired, revoked JTI, not an agent token, or wrong tenant. Fail-closed.
+/// Verify an agent token against `expected_tenant` and return the
+/// [`McpAgent`]. Anything wrong gives `None`: a bad signature, an
+/// expired or revoked token, a token that is not an agent token, or
+/// the wrong tenant.
 ///
-/// Async since v0.52 — the revoked-JTI check may consult a durable
-/// [`crate::jti_store::JtiStore`] (#1191).
+/// It is async because the revocation check may read a durable
+/// [`crate::jti_store::JtiStore`].
 #[must_use]
 pub async fn verify_agent_token(
     jwt: &JwtLifecycle,
@@ -137,25 +135,25 @@ pub(crate) struct AgentTokenOutput {
     pub expires_in: i64,
 }
 
-/// Outcome of [`mint_agent_jwt`] — a scoped token + its granted scope, or a
-/// typed failure both token endpoints render in their own shape.
+/// What [`mint_agent_jwt`] produces. Both token endpoints render it
+/// in their own shape.
 pub(crate) struct MintedToken {
     pub token: String,
     pub expires_in: i64,
-    /// Space-delimited granted skills (OAuth `scope`).
+    /// The granted skills, space-separated, as OAuth's `scope`.
     pub scope: String,
 }
 
 pub(crate) enum MintError {
-    /// Bad agent name/secret.
+    /// The name or secret was wrong.
     Unauthorized,
-    /// Server-side failure (DB / issuance).
+    /// Something failed on our side.
     Internal,
 }
 
-/// Shared minting path: authenticate `{name, secret}` against the tenant,
-/// resolve grants, and issue a tenant-pinned scoped JWT. Used by both the
-/// bespoke JSON `/token` and the OAuth 2.1 client-credentials `/oauth/token`.
+/// Check `{name, secret}` against the tenant, resolve the agent's
+/// grants, and issue a tenant-pinned token. Both `/token` and
+/// `/oauth/token` go through here.
 pub(crate) async fn mint_agent_jwt(
     jwt: &JwtLifecycle,
     pool: &crate::sql::Pool,
@@ -172,8 +170,8 @@ pub(crate) async fn mint_agent_jwt(
         }
     };
     let agent_id = agent.id.get().copied().unwrap_or_default();
-    // A user-owned key resolves its capabilities from the owner's permissions
-    // (RBAC); a standalone machine agent uses its explicit grants only.
+    // A user-owned key takes its capabilities from the owner's
+    // permissions. A machine agent has only its own grants.
     let grants = match agent.user_id {
         Some(uid) => crate::tenancy::resolve_user_agent_grants_pool(pool, agent_id, uid).await,
         None => crate::tenancy::resolve_agent_grants_pool(pool, agent_id).await,
@@ -194,8 +192,8 @@ pub(crate) async fn mint_agent_jwt(
     })
 }
 
-/// `POST {prefix}/token` — exchange `{name, secret}` for a scoped agent
-/// JWT pinned to the resolved request tenant. Client-credentials style.
+/// `POST {prefix}/token`: trade `{name, secret}` for a scoped token,
+/// pinned to the request's tenant.
 pub(crate) async fn agent_token(
     t: Tenant,
     State(state): State<McpState>,
@@ -220,14 +218,16 @@ pub(crate) async fn agent_token(
     }
 }
 
-/// Why a bearer was refused. Separated from the response so both the
-/// JSON-RPC POST and the SSE GET render it identically.
+/// Why a bearer token was refused. It is separate from the response
+/// so the JSON-RPC POST and the SSE GET render it the same way.
 pub(crate) enum BearerRejection {
-    /// No shape matched, or the agent is revoked / deactivated.
+    /// The token matched no accepted shape, or the agent is revoked
+    /// or deactivated.
     Unauthorized,
-    /// The liveness lookup itself failed — a database problem, not the
-    /// caller's. Never report this as 401: a client reads 401 as "start an
-    /// OAuth flow" and will chase a sign-in that was never the issue.
+    /// The liveness lookup itself failed. That is our problem, not
+    /// the caller's, so it must never be a 401: a client reads 401
+    /// as "start an OAuth flow" and would chase a sign-in that was
+    /// never the issue.
     CheckFailed,
 }
 
@@ -242,23 +242,24 @@ impl BearerRejection {
     }
 }
 
-/// Resolve a Bearer token to a live, tenant-pinned agent.
+/// Resolve a bearer token to a live agent, pinned to one tenant.
 ///
-/// Two accepted bearer shapes: a minted agent JWT, or the raw
-/// `prefix.secret` credential itself (epic #1013) — the copy-paste key a
-/// member generates in an app's UI works directly in any MCP client without
-/// a token-exchange step. The raw path verifies liveness and resolves grants
-/// per request inside [`verify_raw_agent_credential`], so RBAC changes and
-/// revocation apply immediately (no 15-minute JWT window).
+/// Two token shapes are accepted: a minted JWT, or the raw
+/// `prefix.secret` credential. The raw one is the copy-paste key a
+/// member generates in the app's UI, and it works in any MCP client
+/// with no exchange step. [`verify_raw_agent_credential`] checks
+/// liveness and resolves grants on every request, so a permission
+/// change or a revocation takes effect at once, with no JWT window
+/// to wait out.
 ///
-/// **Every** authenticated MCP surface must go through this, not just the
-/// JSON-RPC POST. The SSE GET used to verify JWTs only, so a raw key
-/// authenticated on POST and 401'd on GET. That split is not a cosmetic
-/// inconsistency: a client opening the Streamable-HTTP notification stream
-/// reads that 401 as "this resource wants OAuth", abandons the bearer it
-/// already had working, and walks the discovery → dynamic-registration path
-/// instead — which fails somewhere else entirely and reports *that* as the
-/// error. The connection is dead and the log points at the wrong thing.
+/// **Every** authenticated MCP surface must call this, not only the
+/// JSON-RPC POST. If the SSE GET verified JWTs alone, a raw key
+/// would work on POST and 401 on GET. That is not a cosmetic
+/// difference: a client reads the 401 as "this resource wants
+/// OAuth", drops the bearer that was already working, and walks the
+/// discovery and registration path instead. That fails elsewhere and
+/// reports *that* as the error, so the connection is dead and the
+/// log points at the wrong thing.
 pub(crate) async fn authenticate_bearer(
     jwt: &JwtLifecycle,
     pool: &crate::sql::Pool,
@@ -267,10 +268,10 @@ pub(crate) async fn authenticate_bearer(
 ) -> Result<McpAgent, BearerRejection> {
     match verify_agent_token(jwt, token, slug).await {
         Some(agent) => {
-            // Revocation immediacy: the JWT is stateless, so re-check at
-            // request time that the agent (and, for a user-owned key, its
-            // owner) still exists and is active. A revoked / deactivated key
-            // is refused straight away rather than lingering until expiry.
+            // The JWT holds no state, so check here that the agent,
+            // and the owner of a user-owned key, still exist and are
+            // active. A revoked key is then refused at once instead
+            // of working until it expires.
             match crate::tenancy::agent_token_still_valid_pool(pool, agent.agent_id, agent.user_id)
                 .await
             {
@@ -288,9 +289,9 @@ pub(crate) async fn authenticate_bearer(
     }
 }
 
-/// `POST {prefix}` (authed) — require a tenant-pinned agent JWT, then
-/// dispatch the JSON-RPC message. A token whose `tenant` claim ≠ the
-/// resolved request tenant (or a revoked / expired one) is refused.
+/// `POST {prefix}`, authenticated: require an agent token, then run
+/// the JSON-RPC message. A token for another tenant, or a revoked or
+/// expired one, is refused.
 pub(crate) async fn post_authed(
     t: Tenant,
     State(state): State<McpState>,
@@ -308,46 +309,48 @@ pub(crate) async fn post_authed(
         Ok(agent) => agent,
         Err(e) => return e.into_response(&headers, &uri),
     };
-    // Agent verified + tenant-pinned: hand the tools layer the resolved
-    // tenant pool + principal so `tools/call` runs against the right tenant.
+    // The agent is verified, so hand the tools layer this tenant's
+    // pool along with it, and `tools/call` runs on the right tenant.
     let ctx = super::tools::McpContext {
         pool: t.pool().clone(),
         agent,
-        // Progress + cancellation are wired per-call by `call_tool_with`.
+        // `call_tool_with` sets these up per call.
         progress: super::progress::ProgressReporter::disabled(),
         cancel: super::progress::CancelToken::never(),
     };
     handle_message(&state, &body, Some(ctx)).await
 }
 
-/// Resolve a raw `prefix.secret` agent credential presented directly as the
-/// Bearer token (epic #1013). Returns the same [`McpAgent`] shape
-/// [`verify_agent_token`] yields, or `None` for any failure — fail-closed.
+/// Resolve a raw `prefix.secret` credential used straight as the
+/// bearer token. It returns the same [`McpAgent`] that
+/// [`verify_agent_token`] does, or `None` on any failure.
 ///
-/// This is the copy-paste path: the show-once key a member generates works
-/// directly in any MCP client (`Authorization: Bearer <prefix.secret>`)
-/// without a token-exchange step. Liveness
-/// ([`crate::tenancy::agent_token_still_valid_pool`]) and grant resolution
-/// run on **every request**, so a user-owned key always reflects its owner's
-/// live RBAC and revocation is immediate — strictly fresher than a minted
-/// JWT's claim snapshot.
+/// This is the copy-paste path: the show-once key a member generates
+/// works in any MCP client as `Authorization: Bearer
+/// <prefix.secret>`, with no exchange step. Liveness and grants are
+/// resolved on **every request**, so a user-owned key always
+/// reflects its owner's current permissions, and revocation is
+/// immediate. That is fresher than the snapshot a JWT carries.
 ///
-/// Cost control: the argon2 verification is the expensive step, so a
-/// successful verification is remembered for [`RAW_KEY_CACHE_TTL`] in a
-/// small bounded, process-local cache keyed by `(tenant, sha256(token))`.
-/// Only the *hash check* is skipped on a cache hit — liveness and grants are
-/// never cached. A garbage bearer never reaches argon2: the shape gate
-/// requires a `prefix.secret` split, and
-/// [`crate::tenancy::authenticate_agent_by_prefix_pool`] burns a dummy
-/// verification for unknown prefixes to stay timing-neutral (#1099).
+/// The Argon2 check is the expensive part, so a successful one is
+/// remembered for [`RAW_KEY_CACHE_TTL`] in a small bounded cache,
+/// keyed by tenant and token hash. Only the hash check is skipped on
+/// a hit; liveness and grants are never cached.
+///
+/// A junk token never reaches Argon2: it must split into
+/// `prefix.secret` first. And
+/// [`crate::tenancy::authenticate_agent_by_prefix_pool`] runs a
+/// dummy verification for an unknown prefix, so the timing gives
+/// nothing away.
 pub async fn verify_raw_agent_credential(
     pool: &crate::sql::Pool,
     slug: &str,
     token: &str,
 ) -> Option<McpAgent> {
-    // Shape gate: credentials are `<8-hex prefix>.<hex secret>` (see
-    // `tenancy::agents::generate_credential`) — anything else (a JWT, a
-    // random string) is refused before any DB or argon2 work.
+    // A credential is `<8-hex prefix>.<hex secret>`; see
+    // `tenancy::agents::generate_credential`. Anything else, a JWT
+    // or a random string, is refused before any database or Argon2
+    // work happens.
     let (prefix, secret) = token.split_once('.')?;
     let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
     if prefix.len() != 8 || !is_hex(prefix) || !is_hex(secret) {
@@ -374,13 +377,13 @@ pub async fn verify_raw_agent_credential(
         }
     };
 
-    // The live row decides, on every request, cache hit included.
+    // The row decides, on every request, cache hit or not.
     //
-    // The cache holds one fact — "this token hashed to this agent at
-    // time T" — and nothing that authorization depends on. `user_id`
-    // selects the grant resolver and is read here rather than cached,
-    // because an owner change would otherwise keep routing through the
-    // wrong one for the rest of the TTL.
+    // The cache holds one fact: this token hashed to this agent at
+    // some earlier time. Nothing authorization depends on is in
+    // there. `user_id` picks the grant resolver, so it is read from
+    // the row; caching it would keep using the wrong resolver for
+    // the rest of the TTL after an owner change.
     let state = match crate::tenancy::agent_auth_state_pool(pool, agent_id).await {
         Ok(Some(s)) => s,
         Ok(None) => return None,
@@ -393,32 +396,23 @@ pub async fn verify_raw_agent_credential(
         raw_key_cache_forget(&cache_key);
         return None;
     }
-    // Re-bind the cached id to the credential actually presented.
+    // Check the cached id against the credential actually presented.
     //
-    // This is what closes #1539, and it took three attempts. The
-    // cache holds "token T hashed to agent N" — a fact about the
-    // past. `secret_prefix` is regenerated on every rotation and is
-    // random per credential, so comparing it against the prefix in
-    // hand asks the two questions the entry cannot answer itself:
-    // has this been rotated since, and does this row even belong to
-    // the credential presented.
+    // A cache entry only says that some token hashed to agent N in
+    // the past. `secret_prefix` is random per credential and is
+    // regenerated on every rotation, so comparing it with the prefix
+    // in hand answers the two questions the entry cannot: has the
+    // secret rotated since, and does this row even belong to this
+    // credential?
     //
-    // What it replaced, and why each failed:
-    //
-    // * Clearing the cache on rotation — the only callers are
-    //   `manage` subcommands, a different process from the server,
-    //   so the serving replica was never told.
-    // * Comparing `secret_rotated_at` against a timestamp the server
-    //   took — wrong even with synchronised clocks, because the
-    //   rotation stamps before its own commit while the verifier
-    //   stamps after an ~11.5 ms Argon2, so both biases make a
-    //   rotation inside that window look older than the verify.
-    //
-    // A string comparison has neither problem, and needs no clock,
-    // no ordering and no timestamp precision — which also means
-    // #1464's proposed second-resolution datetime encoding cannot
-    // reopen this (#1604 review: correctness-001, security-003/004,
-    // tenancy-001, dialects-002).
+    // Two other approaches do not work here. Clearing the cache on
+    // rotation fails because rotation runs in the `manage` CLI, a
+    // different process from the server, so the serving replica
+    // never hears about it. Comparing timestamps fails even when the
+    // clocks agree: a rotation stamps before its own commit
+    // while a verify stamps after an Argon2 of about 11 ms, and both
+    // biases make a rotation inside that window look older than the
+    // verify. A string comparison needs no clock at all.
     if state.secret_prefix != prefix {
         raw_key_cache_forget(&cache_key);
         return None;
@@ -437,7 +431,7 @@ pub async fn verify_raw_agent_credential(
         }
     }
 
-    // Grants resolve fresh on every request — never cached.
+    // Grants resolve on every request, and are never cached.
     let grants = match user_id {
         Some(uid) => crate::tenancy::resolve_user_agent_grants_pool(pool, agent_id, uid).await,
         None => crate::tenancy::resolve_agent_grants_pool(pool, agent_id).await,
@@ -459,23 +453,21 @@ pub async fn verify_raw_agent_credential(
     })
 }
 
-/// TTL for a positive raw-key verification (argon2 skip window).
+/// How long a successful raw-key verification lets us skip Argon2.
 const RAW_KEY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-/// Bound on cached verifications; oldest entries are evicted past this.
+/// How many verifications the cache may hold before it evicts.
 const RAW_KEY_CACHE_CAP: usize = 256;
 
-/// `token hash → (agent id, monotonic TTL clock)`.
+/// Maps a token hash to an agent id and the time it was verified.
 ///
-/// Holds the agent id and nothing else. Every fact authorization
-/// depends on — the owner, the grants, whether the row still accepts
-/// this credential — is read from the row on each request, so a hit
-/// can carry neither a stale owner nor a stale permission set, and
-/// the id it does carry is re-bound to the presented credential
-/// before use.
+/// The id is all it holds. Everything authorization depends on — the
+/// owner, the grants, whether the row still accepts this credential
+/// — is read from the row on each request. So a hit cannot carry a
+/// stale owner or a stale permission set, and even the id is checked
+/// against the presented credential before use.
 ///
-/// `Instant`, not a wall clock: the TTL must not move when the system
-/// clock does, and nothing here is compared against a timestamp from
-/// another machine any more.
+/// The time is an `Instant`, not a wall clock, so the TTL does not
+/// move when the system clock does.
 type RawKeyCache = std::collections::HashMap<[u8; 32], (i64, std::time::Instant)>;
 
 fn raw_key_cache() -> &'static std::sync::Mutex<RawKeyCache> {
@@ -483,8 +475,9 @@ fn raw_key_cache() -> &'static std::sync::Mutex<RawKeyCache> {
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Cache key = SHA-256 over `tenant \0 token` — tenant-scoped so a credential
-/// verified against one tenant's pool can never authenticate on another.
+/// The cache key: SHA-256 over the tenant and the token together.
+/// The tenant is in there so a credential verified against one
+/// tenant's pool can never authenticate on another.
 fn raw_key_cache_key(slug: &str, token: &str) -> [u8; 32] {
     use sha2::Digest as _;
     let mut hasher = sha2::Sha256::new();
@@ -500,9 +493,9 @@ fn raw_key_cache_get(key: &[u8; 32]) -> Option<i64> {
     (cached_at.elapsed() < RAW_KEY_CACHE_TTL).then_some(*agent_id)
 }
 
-/// Drop one entry. Used when the row says the verification it records
-/// is stale, so the next request re-runs Argon2 rather than repeating
-/// the same rejected lookup for the rest of the TTL.
+/// Drop one entry, for when the row shows it is stale. The next
+/// request then re-runs Argon2, instead of repeating a lookup that
+/// will be rejected again for the rest of the TTL.
 fn raw_key_cache_forget(key: &[u8; 32]) {
     if let Ok(mut cache) = raw_key_cache().lock() {
         cache.remove(key);
@@ -514,8 +507,9 @@ fn raw_key_cache_put(key: [u8; 32], agent_id: i64) {
         return;
     };
     if cache.len() >= RAW_KEY_CACHE_CAP {
-        // Drop expired entries first; if still over cap, clear outright —
-        // the cache is a pure optimization and refilling costs one argon2.
+        // Drop the expired entries first. If that is not enough,
+        // clear the lot: this is only an optimization, and refilling
+        // costs one Argon2 per key.
         cache.retain(|_, (_, at)| at.elapsed() < RAW_KEY_CACHE_TTL);
         if cache.len() >= RAW_KEY_CACHE_CAP {
             cache.clear();
@@ -524,12 +518,11 @@ fn raw_key_cache_put(key: [u8; 32], agent_id: i64) {
     cache.insert(key, (agent_id, std::time::Instant::now()));
 }
 
-// `invalidate_raw_key_cache(agent_id)` stood here. It was removed in
-// the review of #1604 rather than fixed: this cache is process-local
-// and the callers that would have invoked it run in the `manage` CLI,
-// so it could never reach the serving replica's cache. Rotation is
-// detected from `AgentAuthState::secret_rotated_at` instead, which is
-// read from the row and therefore works across processes.
+// There is deliberately no `invalidate_raw_key_cache(agent_id)`.
+// This cache is per-process, and every caller that would want it
+// runs in the `manage` CLI, so it could never reach a serving
+// replica. Rotation is spotted from the row instead, which works
+// across processes.
 
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -540,9 +533,9 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
-/// Best-effort request origin (`scheme://host`) from headers. Honors
-/// `X-Forwarded-Proto`; defaults to `http` for localhost, `https` otherwise.
-/// Shared by [`unauthorized`] and the OAuth metadata handlers.
+/// The request's origin, `scheme://host`, read from the headers. It
+/// honours `X-Forwarded-Proto`, and otherwise assumes `http` on
+/// localhost and `https` anywhere else.
 pub(crate) fn origin(headers: &HeaderMap) -> String {
     let host = headers
         .get(header::HOST)
@@ -562,14 +555,17 @@ pub(crate) fn origin(headers: &HeaderMap) -> String {
     format!("{scheme}://{host}")
 }
 
-/// Public base URL the MCP surface is actually mounted at, derived from the
-/// request origin + the *original* (pre-nest) request path with `strip_suffix`
-/// removed and any trailing slash trimmed. This makes RFC-9728 / RFC-8414 URLs
-/// track the real `.nest(prefix)` mount instead of assuming origin-root (#1094).
+/// The public base URL the MCP routes are mounted at. It is the
+/// request origin plus the original path, before nesting, with
+/// `strip_suffix` and any trailing slash removed. That way the
+/// discovery documents follow the real `.nest(prefix)` mount instead
+/// of assuming the origin root.
 ///
-/// E.g. origin `https://h`, original path `/mcp/.well-known/oauth-protected-resource`,
-/// `strip_suffix = "/.well-known/oauth-protected-resource"` → `https://h/mcp`.
-/// For the JSON-RPC endpoint itself the path *is* the prefix, so pass `""`.
+/// With origin `https://h` and original path
+/// `/mcp/.well-known/oauth-protected-resource`, stripping
+/// `/.well-known/oauth-protected-resource` gives `https://h/mcp`.
+/// For the JSON-RPC endpoint the path already is the prefix, so pass
+/// an empty `strip_suffix`.
 pub(crate) fn mount_base(
     headers: &HeaderMap,
     original: &axum::http::Uri,
@@ -583,10 +579,10 @@ pub(crate) fn mount_base(
     format!("{}{}", origin(headers), prefix)
 }
 
-/// `401` with an RFC 9728 `WWW-Authenticate: Bearer resource_metadata=…`
-/// challenge so spec-compliant MCP clients can discover the auth server
-/// (#1088). The metadata URL tracks the actual mount prefix via the request's
-/// [`OriginalUri`] (#1094), not the origin root.
+/// A `401` whose `WWW-Authenticate` header carries a
+/// `resource_metadata` URL, so a standards-compliant client can find
+/// the authorization server. The URL follows the real mount prefix,
+/// not the origin root.
 pub(crate) fn unauthorized(headers: &HeaderMap, original: &axum::http::Uri) -> Response {
     let base = mount_base(headers, original, "");
     let challenge =
@@ -599,18 +595,19 @@ pub(crate) fn unauthorized(headers: &HeaderMap, original: &axum::http::Uri) -> R
         .into_response()
 }
 
-/// Build the default [`JwtLifecycle`] for the MCP auth router — HMAC key
-/// from `RUSTANGO_SESSION_SECRET` (shared with the rest of the framework),
-/// falling back to a per-process random key with a warning so dev still
-/// works but operators are nudged to set a stable secret.
+/// The default [`JwtLifecycle`] for the MCP auth router. Its key
+/// comes from `RUSTANGO_SESSION_SECRET`, as the rest of the
+/// framework's does.
 pub(crate) fn default_jwt() -> Arc<JwtLifecycle> {
     Arc::new(JwtLifecycle::new(jwt_secret()))
 }
 
-/// HMAC key for MCP agent tokens — `RUSTANGO_SESSION_SECRET` (shared with
-/// the rest of the framework), falling back to a per-process random key
-/// with a warning so dev works but operators are nudged to set a stable
-/// secret. `manage check --deploy` flags the missing/short secret.
+/// The key that signs agent tokens: `RUSTANGO_SESSION_SECRET`, which
+/// the rest of the framework uses too.
+///
+/// With that unset it warns and uses a random key for this process,
+/// so dev works but nothing survives a restart. `manage check
+/// --deploy` reports a missing or short secret.
 pub(crate) fn jwt_secret() -> Vec<u8> {
     std::env::var("RUSTANGO_SESSION_SECRET")
         .ok()
@@ -656,7 +653,7 @@ mod tests {
         assert_eq!(agent.user_id, Some(99));
         assert_eq!(agent.tools, vec!["log"]);
 
-        // A standalone machine agent has no `uid`.
+        // A machine agent has no `uid`.
         let token = issue_agent_token(&jwt, 5, "acme", &[], &[], None).expect("issue");
         assert_eq!(
             verify_agent_token(&jwt, &token, "acme")
@@ -676,10 +673,10 @@ mod tests {
     #[test]
     fn mount_base_tracks_the_nest_prefix() {
         let h = headers("app.example");
-        // JSON-RPC endpoint: the path *is* the prefix (strip nothing).
+        // On the JSON-RPC endpoint the path already is the prefix.
         let uri: Uri = "/mcp".parse().unwrap();
         assert_eq!(mount_base(&h, &uri, ""), "https://app.example/mcp");
-        // Well-known doc: strip the suffix to recover the prefix.
+        // On a discovery document, strip the suffix off to get it.
         let uri: Uri = "/api/mcp/.well-known/oauth-protected-resource"
             .parse()
             .unwrap();
@@ -687,7 +684,8 @@ mod tests {
             mount_base(&h, &uri, "/.well-known/oauth-protected-resource"),
             "https://app.example/api/mcp"
         );
-        // Origin-root mount → empty prefix (no trailing slash artifact).
+        // A mount at the origin root gives an empty prefix, with no
+        // trailing slash left behind.
         let uri: Uri = "/.well-known/oauth-protected-resource".parse().unwrap();
         assert_eq!(
             mount_base(&h, &uri, "/.well-known/oauth-protected-resource"),
@@ -720,7 +718,7 @@ mod tests {
         assert_eq!(mount_base(&h, &uri, ""), "http://localhost:8080/mcp");
     }
 
-    /// The raw-key cache is process-global, so these serialize.
+    /// The raw-key cache is shared, so these tests take turns.
     fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -728,14 +726,12 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    // The behavioural rules — rotation and cross-tenant redemption —
-    // are asserted in `tests/mcp_raw_key.rs`, which has a `Pool` and
-    // can call `verify_raw_agent_credential`. Two tests lived here
-    // that could not: one compared two locally-built timestamps and
-    // so asserted `chrono`'s `>` operator, the other destructured the
-    // cache tuple. Deleting the entire rotation check left both green
-    // (#1604 review, tests-001 and tests-005). What is left here is
-    // what this module can actually decide on its own.
+    // Rotation and cross-tenant redemption are checked in
+    // `tests/mcp_raw_key.rs`, which has a `Pool` and can call
+    // `verify_raw_agent_credential`. They cannot be checked here:
+    // an earlier attempt only asserted `chrono`'s `>` operator, and
+    // stayed green even with the whole rotation check deleted. What
+    // is left in this module is what it can decide on its own.
 
     #[test]
     fn a_cached_entry_round_trips_and_can_be_forgotten() {
@@ -760,10 +756,9 @@ mod tests {
 
     #[test]
     fn the_cache_key_is_tenant_scoped() {
-        // Two tenants routinely have an agent 7, because ids are
-        // per-tenant database sequences. The key must separate them —
-        // the removed invalidation hook matched on the id alone and
-        // evicted every tenant's agent 7 at once.
+        // Two tenants both having an agent 7 is normal, because ids
+        // come from per-tenant sequences. The cache key must keep
+        // them apart.
         let _g = cache_lock();
         assert_ne!(
             raw_key_cache_key("acme", "pfx.secret"),

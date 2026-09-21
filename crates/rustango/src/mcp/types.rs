@@ -1,15 +1,11 @@
-//! JSON-RPC 2.0 envelope + the MCP `initialize` handshake types.
-//!
-//! Slice 1 (#1014) keeps this deliberately small: the request/response
-//! envelope, the standard JSON-RPC error codes, and the `initialize`
-//! result shape. Tools / prompts / resources types land in later slices.
+//! The JSON-RPC 2.0 envelope, its error codes, and the shape of the
+//! MCP `initialize` result.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// MCP protocol revision this server speaks. Echoed back from
-/// `initialize`; clients compare against their own and decide whether to
-/// proceed.
+/// The MCP revision this server speaks. `initialize` returns it, and
+/// the client decides whether to go on.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// The `"2.0"` literal every JSON-RPC message must carry.
@@ -17,14 +13,15 @@ pub const JSONRPC_VERSION: &str = "2.0";
 
 // ----------------------------------------------------------------- envelope
 
-/// An inbound JSON-RPC request (or notification, when `id` is absent).
+/// An inbound JSON-RPC message: a request, or a notification when it
+/// has no `id`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcRequest {
-    #[allow(dead_code)] // validated in the transport layer, not read here
+    #[allow(dead_code)] // the transport checks this, not this module
     #[serde(default)]
     pub jsonrpc: String,
-    /// Present for requests (server must reply), absent for notifications
-    /// (server must NOT reply, per JSON-RPC 2.0 §4.1).
+    /// A request has one and must be answered. A notification has
+    /// none and must not be.
     #[serde(default)]
     pub id: Option<Value>,
     pub method: String,
@@ -33,16 +30,15 @@ pub struct JsonRpcRequest {
 }
 
 impl JsonRpcRequest {
-    /// A request with no `id` is a notification: the server processes it
-    /// but sends no response.
+    /// A message with no `id` is a notification: handle it, but send
+    /// nothing back.
     #[must_use]
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
     }
 }
 
-/// A successful or failed JSON-RPC response. Exactly one of `result` /
-/// `error` is `Some`.
+/// A JSON-RPC response. Exactly one of `result` and `error` is set.
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: &'static str,
@@ -54,7 +50,7 @@ pub struct JsonRpcResponse {
 }
 
 impl JsonRpcResponse {
-    /// Build a success response for the given request `id`.
+    /// A success response for request `id`.
     #[must_use]
     pub fn success(id: Value, result: Value) -> Self {
         Self {
@@ -65,8 +61,8 @@ impl JsonRpcResponse {
         }
     }
 
-    /// Build an error response. `id` is `Value::Null` when the offending
-    /// request couldn't be parsed far enough to recover its id.
+    /// An error response. Pass `Value::Null` as `id` when the request
+    /// could not be parsed far enough to find its own.
     #[must_use]
     pub fn failure(id: Value, error: JsonRpcError) -> Self {
         Self {
@@ -78,8 +74,7 @@ impl JsonRpcResponse {
     }
 }
 
-/// A JSON-RPC error object. `code` follows the JSON-RPC 2.0 reserved
-/// ranges (see [`codes`]).
+/// A JSON-RPC error. `code` comes from [`codes`].
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonRpcError {
     pub code: i64,
@@ -122,17 +117,17 @@ impl JsonRpcError {
     }
 }
 
-/// JSON-RPC 2.0 reserved error codes (§5.1) plus the MCP-specific range.
+/// The error codes JSON-RPC 2.0 reserves, plus the two this server
+/// defines in the range left for servers.
 pub mod codes {
     pub const PARSE_ERROR: i64 = -32700;
     pub const INVALID_REQUEST: i64 = -32600;
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
     pub const INTERNAL_ERROR: i64 = -32603;
-    // MCP server-defined range (-32000..-32099).
-    /// `tools/call` named a tool that isn't registered.
+    /// `tools/call` named a tool that is not registered.
     pub const TOOL_NOT_FOUND: i64 = -32002;
-    /// `tools/call` named a tool the agent isn't authorized for.
+    /// `tools/call` named a tool the agent may not use.
     pub const TOOL_FORBIDDEN: i64 = -32003;
 }
 
@@ -147,9 +142,8 @@ pub struct InitializeResult {
     pub server_info: Implementation,
 }
 
-/// Server capability advertisement. Every field is omitted when `None`,
-/// so Slice 1 (which supports none yet) serializes to `{}`. Later slices
-/// flip `tools` / `prompts` / `resources` / `logging` / `completions` on.
+/// What the server tells the client it supports. A `None` field is
+/// left out, so a server that supports nothing serializes to `{}`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ServerCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,7 +158,7 @@ pub struct ServerCapabilities {
     pub completions: Option<Value>,
 }
 
-/// Name + version of an MCP party (server or client).
+/// The name and version of a server or client.
 #[derive(Debug, Clone, Serialize)]
 pub struct Implementation {
     pub name: &'static str,

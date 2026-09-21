@@ -1,8 +1,8 @@
-//! DRF-style serializer layer — typed JSON output from model instances.
+//! Serializers, in the shape DRF uses: typed JSON built from model
+//! instances.
 //!
-//! A serializer is a Rust struct that maps a [`Model`] instance to a
-//! JSON-ready shape, with per-field control over what is included,
-//! renamed, or excluded.
+//! A serializer is a struct that maps a [`Model`] to a JSON shape.
+//! Field attributes decide what is included, renamed or left out.
 //!
 //! ## Quick start
 //!
@@ -44,31 +44,33 @@
 //! | `skip` | `Default::default()` | included | no |
 //! | `method = "fn"` | calls `Self::fn(&model)` | included | no |
 //! | `nested` | reads `model.<field>.value()` then `Child::from_model(parent)` | included | no |
-//! | `nested(strict)` | same, but panics on unloaded FK | included | no |
-//! | `many = TagSerializer` | initializes to `Vec::new()`; populate via `set_<field>(&[Tag])` helper | included | no |
-//! | `slug = "name"` | clones `model.<source>.value()?.name` (DRF SlugRelatedField) | included | no |
-//! | `validate = "fn"` | per-field validator called by `Self::validate(&self)` | n/a | n/a |
-//! | `max_length = N` | caps string length on write (DRF `MaxLengthValidator`) | n/a | n/a |
-//! | `min_length = N` | min string length on write (DRF `MinLengthValidator`) | n/a | n/a |
-//! | `min = N` / `max = N` | inclusive integer bounds on write (DRF `Min/MaxValueValidator`) | n/a | n/a |
+//! | `nested(strict)` | the same, but panics when the FK is not loaded | included | no |
+//! | `many = TagSerializer` | starts empty; fill it with the `set_<field>(&[Tag])` helper | included | no |
+//! | `slug = "name"` | clones `model.<source>.value()?.name` | included | no |
+//! | `validate = "fn"` | per-field validator, run by `Self::validate(&self)` | n/a | n/a |
+//! | `max_length = N` | caps string length on write | n/a | n/a |
+//! | `min_length = N` | requires a minimum string length on write | n/a | n/a |
+//! | `min = N` / `max = N` | inclusive integer bounds on write | n/a | n/a |
 //!
-//! ## Declarative field validators
+//! ## Field validators
 //!
-//! `max_length` / `min_length` / `min` / `max` are checked on **write**
-//! (create/update through a ViewSet) and surface DRF-shape `400`s. They
-//! **auto-inherit from the model**: every writable field is validated
-//! against the model's [`crate::core::FieldSchema`] (`max_length`, `min`,
-//! `max`, and `choices`) even with no attribute; a per-field attribute
-//! overrides the inherited value. `min_length` is serializer-only (no
-//! model column). `choices` is inherited from the model (no attribute).
-//! String length is measured in characters. For arbitrary rules, use
-//! `validate = "fn"` (per-field) or the container `validate` (cross-field).
+//! `max_length`, `min_length`, `min` and `max` are checked on write,
+//! that is on create and update through a ViewSet, and a failure
+//! becomes a `400`.
 //!
-//! ## Nested serializers — auto-resolved via `#[serializer(nested)]`
+//! You often need no attribute at all: every writable field is
+//! checked against the model's [`crate::core::FieldSchema`], which
+//! carries `max_length`, `min`, `max` and `choices`. An attribute
+//! overrides what the model says. `min_length` has no model column,
+//! so it only exists here. String length counts characters.
 //!
-//! When the field type is another serializer and the model's FK is
-//! already loaded (via `select_related`), the macro emits a `from_model`
-//! initializer that walks the FK automatically:
+//! For any other rule use `validate = "fn"` on a field, or the
+//! container `validate` across fields.
+//!
+//! ## Nested serializers: `#[serializer(nested)]`
+//!
+//! When the field is another serializer and `select_related` already
+//! loaded the FK, the macro walks the FK for you:
 //!
 //! ```ignore
 //! #[derive(Serializer, serde::Deserialize, Default)]
@@ -81,21 +83,20 @@
 //! }
 //! ```
 //!
-//! If the FK was *not* loaded (no `select_related`), the field falls
-//! back to `Default::default()` rather than panicking — production
-//! degrades gracefully. Use `#[serializer(nested(strict))]` to opt
-//! back into the v0.18.1 panic-on-unloaded behaviour for tests.
+//! If the FK was not loaded, the field falls back to
+//! `Default::default()` instead of panicking, so production degrades
+//! gently. Use `#[serializer(nested(strict))]` to panic instead,
+//! which is useful in tests.
 //!
-//! For lists of children (one-to-many / M2M), use
+//! For a list of children, use
 //! `#[serializer(many = ChildSerializer)]`. The macro emits a
-//! `set_<field>(&[Child])` setter; the caller fetches the children
-//! and calls it after `from_model` (auto-load isn't possible because
-//! the M2M accessor is async).
+//! `set_<field>(&[Child])` setter. Fetch the children yourself and
+//! call it after `from_model`; it cannot happen automatically,
+//! because the M2M accessor is async.
 //!
-//! ## Computed fields — `#[serializer(method = "fn")]`
+//! ## Computed fields: `#[serializer(method = "fn")]`
 //!
-//! DRF `SerializerMethodField` analog. The macro emits a `from_model`
-//! initializer that calls `Self::fn(&model)`:
+//! The macro calls `Self::fn(&model)` to fill the field:
 //!
 //! ```ignore
 //! impl PostSerializer {
@@ -115,8 +116,8 @@
 //!
 //! ## Validation
 //!
-//! Cross-field validation: implement `validate(&self)` as an inherent
-//! method on the serializer struct:
+//! For rules that span fields, write `validate(&self)` on the
+//! serializer:
 //!
 //! ```ignore
 //! impl PostSerializer {
@@ -130,51 +131,42 @@
 //! }
 //! ```
 //!
-//! Per-field validators: declare `#[serializer(validate = "fn_name")]`
-//! on the field and write `fn fn_name(value: &T) -> Result<(), String>`
-//! as an associated method. The macro-generated `validate(&self)`
-//! aggregates per-field results into a `FormErrors`.
+//! For one field, put `#[serializer(validate = "fn_name")]` on it and
+//! write `fn fn_name(value: &T) -> Result<(), String>` as an
+//! associated method. The generated `validate(&self)` collects every
+//! field's result into one `FormErrors`.
 
 use serde_json::Value;
 
-/// Core serializer trait. Implemented by `#[derive(Serializer)]` structs.
+/// The serializer trait. `#[derive(Serializer)]` implements it.
 ///
-/// # Required implementations
-///
-/// The derive macro generates:
-/// - `from_model` — maps a model instance to the serializer struct
-/// - `writable_fields` — field names accepted on create/update (excludes `read_only` and `skip`)
-///
-/// # Default implementations
-///
-/// - `to_value` — calls `serde::Serialize` (which the macro also emits, skipping `write_only` fields)
-/// - `many` / `many_to_value` — batch `from_model` calls
-/// - `validate` — no-op; override to add cross-field validation
+/// The macro writes `from_model` and `writable_fields` for you. The
+/// rest have defaults: `to_value` goes through `serde::Serialize`,
+/// `many` and `many_to_value` loop over `from_model`, and `validate`
+/// does nothing until you override it.
 pub trait ModelSerializer: serde::Serialize + Sized {
     /// The [`crate::core::Model`] type this serializer maps from.
     type Model;
 
-    /// Construct a serializer from a model instance.
+    /// Build a serializer from a model.
     ///
-    /// `read_only` and normal fields are cloned from the model.
-    /// `write_only` and `skip` fields are `Default::default()` —
-    /// set them manually after calling this if needed.
+    /// Plain and `read_only` fields are cloned from the model.
+    /// `write_only` and `skip` fields get their default; set those
+    /// yourself afterwards if you need them.
     fn from_model(model: &Self::Model) -> Self;
 
-    /// Serialize this instance to a JSON value.
-    ///
-    /// Uses the `serde::Serialize` implementation emitted by the derive
-    /// macro, which respects `write_only` (those fields are excluded).
+    /// Turn this instance into JSON. `write_only` fields are left
+    /// out.
     fn to_value(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
 
-    /// Serialize a slice of model instances into a `Vec` of serializers.
+    /// Build one serializer per model.
     fn many(models: &[Self::Model]) -> Vec<Self> {
         models.iter().map(Self::from_model).collect()
     }
 
-    /// Serialize a slice of model instances directly to a JSON array.
+    /// Turn a slice of models straight into a JSON array.
     fn many_to_value(models: &[Self::Model]) -> Value {
         Value::Array(
             models
@@ -184,34 +176,34 @@ pub trait ModelSerializer: serde::Serialize + Sized {
         )
     }
 
-    /// Field names accepted on create/update requests (excludes `read_only`
-    /// and `skip` fields). Used by the ViewSet write path to filter the
-    /// incoming JSON body.
+    /// Field names a create or update request may set. `read_only`
+    /// and `skip` fields are not in the list. The ViewSet write path
+    /// uses it to filter the incoming JSON.
     fn writable_fields() -> &'static [&'static str];
 
-    /// The **model** field names of the writable serializer fields
-    /// (`source`-resolved). The ViewSet write path skips every model
-    /// column NOT in this set, so `read_only` / `method` / computed
-    /// fields a client posts are ignored instead of written.
+    /// The same fields, but under their **model** names. A field with
+    /// `#[serializer(source = "x")]` appears as `"x"`; any other
+    /// appears under its own name.
     ///
-    /// For a field with `#[serializer(source = "x")]` this is `"x"`; for
-    /// a plain field it's the field name. Defaults to
-    /// [`Self::writable_fields`] (correct when no `source` rename is in
-    /// play); the derive macro overrides it with the resolved names.
+    /// The ViewSet write path ignores every model column outside this
+    /// set, so a client cannot write a `read_only` or computed field.
+    /// The default is [`Self::writable_fields`], which is right when
+    /// nothing is renamed; the macro overrides it when something is.
     fn writable_source_fields() -> &'static [&'static str] {
         Self::writable_fields()
     }
 
-    /// Build a partial instance from a JSON request body for **input
-    /// validation**: writable fields are parsed (by serializer field
-    /// name); read-only / computed fields default. Per-field type errors
-    /// land in [`crate::forms::FormErrors`] keyed by the field name. The
-    /// derive macro generates this; the default errors out so a manual
-    /// impl that forgets it fails loudly rather than silently skipping
-    /// validation.
+    /// Parse a JSON request body for validation. Writable fields are
+    /// read by their serializer name; read-only and computed fields
+    /// get their default. A type error lands in
+    /// [`crate::forms::FormErrors`] under the field's name.
+    ///
+    /// The macro writes this. The default returns an error, so a
+    /// hand-written impl that forgets it fails loudly instead of
+    /// skipping validation.
     ///
     /// # Errors
-    /// A `FormErrors` carrying every field that failed to parse.
+    /// A `FormErrors` naming every field that failed to parse.
     fn from_writable_json(body: &Value) -> Result<Self, crate::forms::FormErrors> {
         let _ = body;
         let mut errors = crate::forms::FormErrors::default();
@@ -219,25 +211,22 @@ pub trait ModelSerializer: serde::Serialize + Sized {
         Err(errors)
     }
 
-    /// Cross-field / per-field validation hook (DRF `validate`). The
-    /// derive macro overrides this when the serializer declares any
-    /// `#[serializer(validate = "...")]` field validator or a container
-    /// `validate = "..."` cross-field method. Default: no-op.
+    /// Run the serializer's validators. The macro overrides this when
+    /// the serializer declares any `validate = "..."`, on a field or
+    /// on the container. By default it does nothing.
     ///
     /// # Errors
-    /// A [`crate::forms::FormErrors`] aggregating every failed rule.
+    /// A [`crate::forms::FormErrors`] holding every failed rule.
     fn validate(&self) -> Result<(), crate::forms::FormErrors> {
         Ok(())
     }
 }
 
-/// Django-shape `UniqueTogetherValidator` — pre-save check that a
-/// candidate row doesn't collide with an existing row on any of the
-/// model's declared `unique_together` constraints. Issue #437.
+/// Check, before a save, that a row does not collide with an
+/// existing one on any of the model's `unique_together` constraints.
 ///
-/// Returns `Ok(())` when no collision is detected. Returns `Err(FormErrors)`
-/// with a non-field error per colliding constraint (DRF shape:
-/// `"The fields a, b must be unique together"`).
+/// Returns `Ok(())` when nothing collides, or a `FormErrors` with one
+/// non-field error per clashing constraint.
 ///
 /// ## Usage
 ///
@@ -252,18 +241,15 @@ pub trait ModelSerializer: serde::Serialize + Sized {
 /// check_unique_together_pool(&pool, Membership::SCHEMA, &values, None).await?;
 /// ```
 ///
-/// Pass `exclude_pk = Some(&pk)` on updates so the row being edited
-/// doesn't collide with itself. The PK column is read off
-/// `ModelSchema::primary_key()` — pass `None` for inserts.
+/// On an update, pass `exclude_pk = Some(&pk)` so the row being
+/// edited does not collide with itself. Pass `None` on an insert.
 ///
-/// Partial unique constraints (`unique_when` / `WHERE`-clause partial
-/// indexes) are skipped — their conflict semantics depend on the
-/// predicate, which this layer doesn't evaluate.
+/// Partial unique indexes are skipped, because whether they conflict
+/// depends on a predicate this function does not evaluate.
 ///
 /// # Errors
-/// - [`crate::sql::ExecError`] forwarded from the underlying query.
-/// - The check is non-fatal on errors: a query failure surfaces as
-///   `Err` rather than masking as "no collision".
+/// A failed query returns `Err` rather than reporting "no
+/// collision".
 pub async fn check_unique_together_pool(
     pool: &crate::sql::Pool,
     schema: &'static crate::core::ModelSchema,
@@ -275,18 +261,17 @@ pub async fn check_unique_together_pool(
     let mut errors = crate::forms::FormErrors::default();
 
     for index in schema.indexes {
-        // Only multi-column unique indexes — Django's `unique_together`.
-        // Single-column UNIQUE is the `unique` field attr (caught by
-        // INSERT's RETURNING-on-conflict). Partial unique
-        // (`where_clause = Some(_)`) skipped — predicate evaluation
-        // would need a stub planner we don't have today.
+        // Only multi-column unique indexes. A single-column UNIQUE is
+        // the field's own `unique` attribute, which the INSERT
+        // catches. Partial unique indexes need predicate evaluation,
+        // which this layer does not do.
         if !index.unique || index.columns.len() < 2 || index.where_clause.is_some() {
             continue;
         }
 
-        // Build the AND-of-equality WHERE clause. Missing column values
-        // skip the constraint — Django's behavior when only a partial
-        // subset of the unique-together fields is bound.
+        // Build a WHERE of ANDed equalities. If a column has no
+        // value, skip the whole constraint, as Django does when only
+        // part of the set is bound.
         let mut predicates: Vec<Filter> = Vec::with_capacity(index.columns.len());
         let mut all_bound = true;
         for col in index.columns {
@@ -304,7 +289,7 @@ pub async fn check_unique_together_pool(
             continue;
         }
 
-        // Exclude-self on updates: PK != $N.
+        // On an update, exclude the row being edited.
         if let (Some(pk_field), Some(pk_value)) = (schema.primary_key(), exclude_pk) {
             predicates.push(Filter {
                 column: pk_field.column,
@@ -332,8 +317,7 @@ pub async fn check_unique_together_pool(
         let where_sql = clauses.join(" AND ");
         let sql = format!("SELECT 1 FROM {table_q} WHERE {where_sql} LIMIT 1");
 
-        // Use `raw_query_pool::<(i64,)>` and ignore the actual returned
-        // value — presence of any row means a collision.
+        // The value does not matter; any row at all is a collision.
         let hits: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, params, pool)
             .await
             .map_err(|e| {
@@ -356,42 +340,33 @@ pub async fn check_unique_together_pool(
     }
 }
 
-// ============================================================ #434
-//
-// Django/DRF-shape `HyperlinkedModelSerializer`. Where a regular
-// serializer emits PKs (`{"id": 42, "author_id": 7}`), a
-// hyperlinked one emits resource URLs (`{"url": "/api/posts/42",
-// "author_url": "/api/users/7"}`). rustango's Serializer derive
-// is already rich enough that the user can roll their own with
-// `#[serializer(method = "url")]` + a manual `fn url(&self) -> String`,
-// but that's boilerplate-heavy for the common case. These free
-// functions cover the 95% case — substitute `{pk}` placeholders
-// in a URL template.
+// Helpers for hyperlinked output, like DRF's
+// `HyperlinkedModelSerializer`. A normal serializer emits keys such
+// as `{"id": 42, "author_id": 7}`; a hyperlinked one emits
+// `{"url": "/api/posts/42", "author_url": "/api/users/7"}`. You
+// could do this with `#[serializer(method = "url")]` and a hand-
+// written function, but these two cover the common case by filling
+// in `{pk}` in a URL template.
 
-/// Substitute `{pk}` in `template` with the formatted PK value.
+/// Replace every `{pk}` in `template` with the primary key.
 ///
-/// `pk` formats as: integers/floats render their numeric form,
-/// strings/UUIDs render their `Display`, everything else falls
-/// back to JSON encoding (rare in practice — most PK fields are
-/// integer / UUID / string).
+/// Numbers print as numbers, and strings and UUIDs print as
+/// themselves. Anything else falls back to its debug form, which is
+/// rare: almost every key is an integer, a UUID or a string.
 ///
 /// ```ignore
 /// use rustango::core::SqlValue;
 /// let url = rustango::serializer::hyperlink_url("/api/posts/{pk}", &SqlValue::I64(42));
 /// assert_eq!(url, "/api/posts/42");
 /// ```
-///
-/// Every `{pk}` occurrence is substituted — useful for nested
-/// resource URLs.
 #[must_use]
 pub fn hyperlink_url(template: &str, pk: &crate::core::SqlValue) -> String {
     let pk_str = render_pk(pk);
     template.replace("{pk}", &pk_str)
 }
 
-/// Wrap a serializer's JSON output with a `url` field (from the
-/// model's PK) and optional `<fk>_url` fields (from named FK
-/// templates). Issue #434.
+/// Add a `url` field, built from the primary key, and one
+/// `<fk>_url` field per named FK template, to a serializer's JSON.
 ///
 /// ```ignore
 /// use rustango::serializer::{hyperlinked_to_value, Serializer};
@@ -413,21 +388,17 @@ pub fn hyperlink_url(template: &str, pk: &crate::core::SqlValue) -> String {
 /// // {"url": "/api/posts/42", "author_id_url": "/api/users/7", ...}
 /// ```
 ///
-/// Behaviour:
+/// What it does:
 ///
-/// - Adds a `url` field to the top-level object, derived by
-///   substituting `{pk}` in `self_template` with `base[pk_field]`.
-/// - For each `(fk_field, template)` in `fk_templates`, looks up
-///   `base[fk_field]` and emits a sibling `<fk_field>_url` key
-///   with the substituted URL. Null / missing FK values produce
-///   a null URL (matches DRF's behavior on nullable FKs).
-/// - Does NOT remove the original `id` / `<fk>_id` keys. DRF's
-///   `HyperlinkedModelSerializer` also keeps them by default;
-///   apps that want to redact them can `obj.as_object_mut()
-///   .remove("id")` after this call.
+/// - Adds `url`, by putting `base[pk_field]` into `self_template`.
+/// - For each `(fk_field, template)`, adds a `<fk_field>_url` key.
+///   A missing or null FK gives a null URL, as DRF does.
+/// - Keeps the original `id` and `<fk>_id` keys, again as DRF does.
+///   Remove them afterwards if you do not want them.
 ///
-/// Panics if `base` isn't a JSON object (the standard serializer
-/// `to_value` always returns one).
+/// # Panics
+/// When `base` is not a JSON object. A serializer's `to_value`
+/// always returns one.
 #[must_use]
 pub fn hyperlinked_to_value(
     mut base: serde_json::Value,
@@ -439,15 +410,15 @@ pub fn hyperlinked_to_value(
         .as_object_mut()
         .expect("hyperlinked_to_value: base must be a JSON object");
 
-    // Self URL — derived from base[pk_field].
+    // The object's own URL, from base[pk_field].
     if let Some(pk_val) = obj.get(pk_field) {
         let pk_str = render_pk_json(pk_val);
         let url = self_template.replace("{pk}", &pk_str);
         obj.insert("url".into(), serde_json::Value::String(url));
     }
 
-    // FK URLs — one per (field, template) pair. Output key is
-    // `<field>_url`. Missing / null FK values emit a JSON null URL.
+    // One `<field>_url` per template. A missing or null FK gives a
+    // null URL.
     for (fk_field, template) in fk_templates {
         let url_key = format!("{fk_field}_url");
         match obj.get(*fk_field) {
@@ -475,11 +446,8 @@ fn render_pk(pk: &crate::core::SqlValue) -> String {
         SqlValue::F64(v) => v.to_string(),
         SqlValue::String(s) => s.clone(),
         SqlValue::Uuid(u) => u.to_string(),
-        // Other variants (Bool / Json / Date / DateTime / Decimal /
-        // Binary / Time / Null / List / Array / RangeLiteral) are
-        // not realistic PK shapes — fall back to the Debug
-        // repr so the URL is at least non-empty, but don't try
-        // hard.
+        // The other variants are not realistic primary keys. Use the
+        // debug form, so the URL is at least not empty.
         other => format!("{other:?}"),
     }
 }
@@ -528,7 +496,7 @@ mod hyperlinked_tests {
             &std::collections::HashMap::new(),
         );
         assert_eq!(out["url"], "/api/posts/42");
-        // Original fields stay.
+        // The original fields stay.
         assert_eq!(out["id"], 42);
         assert_eq!(out["title"], "Hi");
     }
@@ -552,7 +520,7 @@ mod hyperlinked_tests {
 
     #[test]
     fn hyperlinked_to_value_handles_missing_pk_key_gracefully() {
-        // base has no `id` field → no `url` field emitted, but no
+        // No `id` in the input means no `url` in the output, and no
         // panic.
         let base = serde_json::json!({"title": "Hi"});
         let out = hyperlinked_to_value(

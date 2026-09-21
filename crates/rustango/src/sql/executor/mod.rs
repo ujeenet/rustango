@@ -18,52 +18,34 @@ use super::ExecError;
 #[cfg(feature = "postgres")]
 use super::Postgres;
 
-/// Hidden trait every `#[derive(Model)]` type implements via the
-/// macro — slice 9.0e's bridge between `fetch_with_prefetch` and
-/// the per-Model FK-PK accessor. For each `ForeignKey<T>` field on
-/// a Child model, the macro generates an arm that returns the FK's
-/// stored PK (regardless of `Loaded` / `Unloaded` state) so the
-/// prefetch grouper can stitch children to the right parent.
-///
-/// Models with no `ForeignKey<T>` fields get a no-op impl
-/// (returns `None` for any field name).
+/// Reads the PK stored in a model's `ForeignKey` fields by name, so
+/// prefetch can group children under the right parent. The `Model`
+/// derive implements it; models with no FK fields get a no-op impl.
 #[doc(hidden)]
 pub trait FkPkAccess {
-    /// Read the i64 PK stored in a `ForeignKey<T>` field by name.
-    /// `None` for unknown field names, non-FK fields, or FKs whose
-    /// PK type isn't `i64` (use [`Self::__rustango_fk_pk_value`] for
-    /// those).
+    /// Read the i64 PK in a `ForeignKey<T>` field by name.
+    /// `None` for unknown or non-FK fields, or a non-i64 PK type
+    /// (use [`Self::__rustango_fk_pk_value`] for those).
     fn __rustango_fk_pk(&self, field_name: &str) -> Option<i64>;
 
-    /// Read the PK stored in a `ForeignKey<T, K>` field by name as a
-    /// dialect-neutral [`crate::core::SqlValue`]. Works for every PK
-    /// type — `i64`, `i32`, `String`, `Uuid`, etc. — so
-    /// `fetch_with_prefetch` no longer has to force-cast to `i64`.
-    /// `None` for unknown field names or non-FK fields.
+    /// Read the PK in a `ForeignKey<T, K>` field by name as a
+    /// [`crate::core::SqlValue`]. Works for any PK type.
+    /// `None` for unknown or non-FK fields.
     fn __rustango_fk_pk_value(&self, field_name: &str) -> Option<crate::core::SqlValue>;
 }
 
-/// Hidden trait every `#[derive(Model)]` type implements via the
-/// macro — slice 9.0d's bridge between `QuerySet::fetch_on` and the
-/// per-Model `__rustango_load_related` dispatcher. Loaders for
-/// individual FK fields live on the Model's inherent impl; this
-/// trait makes them callable polymorphically from generic
-/// fetch_on code.
-///
-/// Models with no `ForeignKey<T>` fields get a no-op impl
-/// (returns `Ok(false)` for any field name), so the trait bound on
-/// `fetch_on` is universally satisfied — users don't have to think
-/// about it.
+/// Lets generic `fetch_on` code call a model's per-FK
+/// `select_related` loaders. The `Model` derive implements it;
+/// models with no FK fields get a no-op impl, so the bound on
+/// `fetch_on` is always satisfied.
 #[doc(hidden)]
 #[cfg(feature = "postgres")]
 pub trait LoadRelated {
     /// Stitch a `select_related`-loaded parent onto this instance's
     /// FK field. `field_name` is the FK field's Rust name (e.g.
-    /// `"author"`); `alias` is the SELECT writer's alias prefix
-    /// for that JOIN's projected columns (typically the same as
-    /// `field_name`). Returns `Ok(false)` for unknown field names —
-    /// callers may pass select directives that don't apply to this
-    /// model and get a graceful skip.
+    /// `"author"`); `alias` is the SELECT writer's alias prefix for
+    /// that JOIN's columns. Unknown field names return `Ok(false)`,
+    /// so directives that don't apply are skipped.
     ///
     /// # Errors
     /// `sqlx::Error` from `try_get` decoding the joined columns.
@@ -83,13 +65,12 @@ pub trait LoadRelated {}
 #[cfg(not(feature = "postgres"))]
 impl<T> LoadRelated for T {}
 
-/// Audit #451 — reduce all `select_related` join aliases to the **leaf**
-/// aliases (those that aren't a `__`-boundary prefix of a longer alias),
-/// each paired with its first-hop alias. `lower_select_related` emits one
-/// join per hop (`author`, `author__profile`), so for a multi-hop chain
-/// only the deepest alias is a leaf; the recursive `__rustango_load_related*`
-/// decodes the whole chain from that single leaf. Single-hop aliases come
-/// back as `(alias, alias)` — bit-identical to the pre-#451 stitch.
+/// Reduce `select_related` join aliases to the leaf ones — those that
+/// no longer alias extends at a `__` boundary — each paired with its
+/// first hop. One join is emitted per hop (`author`, `author__profile`),
+/// but `__rustango_load_related` decodes the whole chain from the leaf,
+/// so stitching only needs the leaves. A single-hop alias yields
+/// `(alias, alias)`.
 pub(crate) fn select_related_leaves(aliases: &[&'static str]) -> Vec<(&'static str, &'static str)> {
     aliases
         .iter()
@@ -115,12 +96,13 @@ impl<T> QuerySet<T>
 where
     T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
 {
-    /// Like [`FetcherPool::fetch`] but takes any sqlx executor — `&PgPool`,
-    /// `&mut PgConnection`, or a `Transaction`. The escape hatch for
-    /// tenant-scoped queries: schema-mode tenants share the registry
-    /// pool but rely on a per-checkout `SET search_path`, so passing
-    /// `&PgPool` would silently hit the wrong schema. Acquire a
-    /// connection via `TenantPools::acquire(&org)` and pass that here.
+    /// Like [`FetcherPool::fetch`] but takes any sqlx executor:
+    /// `&PgPool`, `&mut PgConnection`, or a `Transaction`.
+    ///
+    /// Use this for tenant-scoped queries. Schema-mode tenants share
+    /// the registry pool and rely on a per-checkout `SET search_path`,
+    /// so a plain `&PgPool` would quietly read the wrong schema.
+    /// Get a connection from `TenantPools::acquire(&org)` instead.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -135,7 +117,7 @@ where
         let stmt = Postgres.compile_select(&select)?;
 
         if select_related_aliases.is_empty() {
-            // No JOINs — fast path identical to the v0.8.1 shape.
+            // No JOINs — fast path, decode straight into `T`.
             let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
                 sqlx::query_as::<_, T>(&stmt.sql);
             for value in stmt.params {
@@ -145,17 +127,16 @@ where
             return Ok(rows);
         }
 
-        // Slice 9.0d: select_related path. Fetch raw rows so we can
-        // both decode `T` via `from_row` AND call
-        // `T::__rustango_load_related(&mut t, &row, alias, alias)`
-        // for each JOINed target — single SQL round trip, no N+1.
+        // select_related path: fetch raw rows so we can decode `T` and
+        // also stitch each JOINed target from the same row. One round
+        // trip, no N+1.
         let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
         for value in stmt.params {
             q = bind_query(q, value);
         }
         let raw_rows = q.fetch_all(executor).await?;
-        // Audit #451 — drive the stitch from leaf aliases so each FK
-        // chain (incl. multi-hop `a__b__c`) is decoded once, recursively.
+        // Stitch from leaf aliases so each FK chain (including
+        // multi-hop `a__b__c`) is decoded once.
         let leaves = select_related_leaves(&select_related_aliases);
         let mut out = Vec::with_capacity(raw_rows.len());
         for row in &raw_rows {
@@ -168,11 +149,9 @@ where
         Ok(out)
     }
 
-    /// Fetch a page of rows **and** the total matching count in a
-    /// single SQL round trip. Postgres' `COUNT(*) OVER ()` window
-    /// function returns the pre-LIMIT total alongside each row, so a
-    /// paginated endpoint never needs the customary second
-    /// `SELECT COUNT(*)` Django's `Paginator` triggers.
+    /// Fetch a page of rows **and** the total matching count in one
+    /// round trip. `COUNT(*) OVER ()` returns the pre-LIMIT total on
+    /// every row, so there is no second `SELECT COUNT(*)`.
     ///
     /// ```ignore
     /// let page: Page<Post> = Post::objects()
@@ -190,8 +169,7 @@ where
     /// ORDER BY ... LIMIT 20 OFFSET 40
     /// ```
     ///
-    /// Empty result set → `Page { rows: vec![], total: 0 }` (no
-    /// driver round trip is wasted on an extra COUNT).
+    /// An empty result gives `Page { rows: vec![], total: 0 }`.
     ///
     /// # Errors
     /// As [`Self::fetch_on`].
@@ -219,8 +197,7 @@ where
         Ok(Page { rows, total })
     }
 
-    /// Pool-side companion to [`Self::fetch_paginated_on`] — same
-    /// query, ergonomics for non-tenant code.
+    /// [`Self::fetch_paginated_on`] against a pool, for non-tenant code.
     ///
     /// # Errors
     /// As [`Self::fetch_paginated_on`].
@@ -228,11 +205,9 @@ where
         self.fetch_paginated_on(pool).await
     }
 
-    /// Tenant-scoped companion to [`QuerySet::in_bulk`] — same
-    /// semantic but takes any sqlx executor (`&PgPool`,
-    /// `&mut PgConnection`, or a `Transaction`) so schema-mode tenant
-    /// queries route through the per-checkout `SET search_path`
-    /// connection. Issue #24.
+    /// [`QuerySet::in_bulk`] against any sqlx executor, so schema-mode
+    /// tenant queries can use the connection that holds their
+    /// `SET search_path`.
     ///
     /// # Errors
     /// As [`Self::fetch_on`].
@@ -277,10 +252,7 @@ mod page;
 use page::inject_total_count;
 pub use page::Page;
 
-// ====================================================================
-// PG `_on` CRUD family — extracted to pg_on.rs (#116 step 9)
-// ====================================================================
-
+// PG `_on` CRUD family — see pg_on.rs.
 #[cfg(feature = "postgres")]
 mod pg_on;
 #[cfg(feature = "postgres")]
@@ -297,8 +269,9 @@ pub use row_to_json::row_to_json_my;
 pub use row_to_json::row_to_json_sqlite;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 
-/// Slice 9.0b — annotate each parent row with the COUNT of its
-/// children, returning `Vec<(Parent, i64)>` from a **single** SQL:
+/// Annotate each parent row with the COUNT of its children, from a
+/// single query — the Django `annotate(post_count=Count('post'))`
+/// shape:
 ///
 /// ```text
 ///   SELECT parent.<every-column>, COUNT(child.<pk>) AS __annotated_count
@@ -308,15 +281,11 @@ pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 ///   [WHERE / ORDER BY clauses from `parent_qs` apply]
 /// ```
 ///
-/// Closes the demo's per-parent `count_on` loop (which was N+1) with
-/// the canonical Django `Author.objects.annotate(post_count=Count('post'))`
-/// shape. Restricted to a single Count aggregate over a single
-/// reverse-FK relation in this MVP — full Django aggregation
-/// (`.annotate(other_field=Sum(...), Avg(...), ...)`) is queued for
-/// a follow-on slice.
+/// Handles one Count over one reverse-FK relation. For `Sum`, `Avg`
+/// and friends use the aggregate query builder.
 ///
-/// `child_table` is the SQL table of the child model; `child_fk_column`
-/// is the column on that table that stores the parent's PK.
+/// `child_table` is the child model's table; `child_fk_column` is the
+/// column on it that holds the parent's PK.
 ///
 /// # Errors
 /// SQL-writing or driver failures from the single SELECT.
@@ -333,12 +302,9 @@ where
     annotate_count_children_on(parent_qs, child_table, child_fk_column, pool).await
 }
 
-/// Like [`annotate_count_children`] but accepts any sqlx executor —
-/// `&PgPool`, `&mut PgConnection`, or a transaction handle. Lets
-/// tenant-scoped admin / API code use the optimized one-query form
-/// against a `Tenant::conn()` connection (search_path scoped to the
-/// tenant's schema), instead of falling back to a per-parent
-/// `count_on` loop (N+1).
+/// [`annotate_count_children`] against any sqlx executor, so
+/// tenant-scoped code can run it on a `Tenant::conn()` connection
+/// whose `search_path` points at the tenant schema.
 ///
 /// # Errors
 /// As [`annotate_count_children`].
@@ -360,9 +326,8 @@ where
         table: parent.table,
     })?;
 
-    // Build the SQL by hand — the existing compile_select doesn't
-    // emit GROUP BY or aggregate columns. We mirror its conventions
-    // (qualified columns, $N placeholders) for consistency.
+    // Hand-built SQL: compile_select emits no GROUP BY or aggregate
+    // columns. Follows its conventions (qualified columns, $N binds).
     let cols: Vec<&'static str> = parent.scalar_fields().map(|f| f.column).collect();
     let mut sql = String::from("SELECT ");
     for (i, col) in cols.iter().enumerate() {
@@ -414,33 +379,23 @@ where
     Ok(out)
 }
 
-/// Slice 9.0e — `prefetch_related` Django-shape: fetch a list of
-/// parents and, for each one, the children that point at it via a
-/// foreign key. **Two SQL queries total**, regardless of how many
-/// parents:
+/// Django-shape `prefetch_related`: fetch parents and, for each one,
+/// the children whose foreign key points at it. Two queries in total,
+/// however many parents there are:
 ///
 /// ```text
 ///   SELECT * FROM <parent>;
 ///   SELECT * FROM <child> WHERE <fk_column> IN ($1, $2, ...);
 /// ```
 ///
-/// Returns `Vec<(Parent, Vec<Child>)>` — each parent paired with its
-/// children. Parents with no matching children get an empty `Vec`.
-/// The order of parents matches the queryset; the order of children
-/// within each group matches the order of the second query (lex by
-/// PK is the typical default; pass `.limit()` / `.offset()` on the
-/// child queryset if you need to scope).
+/// Each parent is paired with its children; a parent with no children
+/// gets an empty `Vec`. Parents keep the queryset's order, children
+/// keep the second query's order.
 ///
-/// `child_fk_column` is the SQL column on the child table that
-/// stores the parent's PK — for `Post { author: ForeignKey<Author> }`,
-/// that's `"author"`. The function looks up child rows where
-/// `<child_fk_column> IN (parent_pks)` and groups them by reading
-/// the same column on each fetched child via the
-/// macro-generated [`FkPkAccess`] impl.
-///
-/// Closes the multi-parent gap left by v0.8.2's `<parent>::<child>_set`
-/// helper (which fetches one parent's children at a time, requiring
-/// N queries for N parents).
+/// `child_fk_column` is the column on the child table that holds the
+/// parent's PK — for `Post { author: ForeignKey<Author> }` that is
+/// `"author"`. Children are grouped by reading the same column back
+/// through [`FkPkAccess`].
 ///
 /// # Errors
 /// Anything either of the underlying `fetch` calls returns.
@@ -459,10 +414,8 @@ where
         return Ok(Vec::new());
     }
 
-    // Collect parent PKs as dialect-neutral `SqlValue`s — works for
-    // every PK type (i64, i32, String, Uuid). Pre-v0.26 this path
-    // force-cast to `i64` and silently dropped non-integer-keyed
-    // parents; closes the P10 gap from `orm-improvements.md`.
+    // Collect parent PKs as `SqlValue`, so any PK type works
+    // (i64, i32, String, Uuid).
     let pk_field = P::SCHEMA
         .primary_key()
         .ok_or(ExecError::MissingPrimaryKey {
@@ -475,9 +428,7 @@ where
             parent_pks.push(pk);
         }
     }
-    // Dedupe via the display-string form so parents with the same PK
-    // (shouldn't happen, but cheap insurance) only land once in the
-    // IN clause.
+    // Dedupe on the display form so a repeated PK lands once in IN.
     {
         let mut seen = std::collections::HashSet::new();
         parent_pks.retain(|v| seen.insert(v.to_display_string()));
@@ -497,10 +448,8 @@ where
         .fetch_on(pool)
         .await?;
 
-    // Group children by FK PK. Key is the `SqlValue::to_display_string`
-    // form — unambiguous for every PK type used as a key (integers,
-    // strings, UUIDs all stringify uniquely; floats wouldn't but PKs
-    // aren't floats).
+    // Group children by FK PK, keyed on the display form. Integers,
+    // strings and UUIDs all stringify uniquely; PKs are never floats.
     let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
     for child in children {
         let Some(fk_pk) = child.__rustango_fk_pk_value(child_fk_column) else {
@@ -523,29 +472,14 @@ where
     Ok(out)
 }
 
-/// Extract a model's PK as a `SqlValue` via the macro-generated
-/// `__rustango_pk_value`. The trait bound `LoadRelated` is satisfied
-/// by every Model derive but doesn't expose `__rustango_pk_value`,
-/// so we go through `sqlx::Row` instead — every Model also impls
-/// `FromRow`, and we already have an instance.
-///
-/// Actually we have the instance; the macro emits
-/// `__rustango_pk_value` as an inherent method. Calling it through
-/// a trait object would force a new trait. Punt: use sqlx-side
-/// extraction via `sqlx::Encode` against the schema field. Cleaner:
-/// just have callers' Models implement `PrefetchableParent`.
-///
-/// For the v0.9 MVP we leverage the fact that every Model with a
-/// PK has `__rustango_pk_value`. We add a small trait `HasPkValue`
-/// that the macro impls; its body just calls the inherent method.
+/// Read a model's PK as a [`crate::core::SqlValue`] through
+/// [`HasPkValue`].
 pub(super) fn extract_pk_value<P: HasPkValue>(parent: &P) -> crate::core::SqlValue {
     parent.__rustango_pk_value_impl()
 }
 
-/// Hidden trait — exposes the macro-generated inherent
-/// `__rustango_pk_value` method polymorphically so generic
-/// `fetch_with_prefetch` can read parent PKs without forcing the
-/// caller to write a closure.
+/// Exposes a model's `__rustango_pk_value` to generic code, so
+/// `fetch_with_prefetch` can read parent PKs without a caller closure.
 #[doc(hidden)]
 pub trait HasPkValue {
     fn __rustango_pk_value_impl(&self) -> crate::core::SqlValue;
@@ -553,10 +487,8 @@ pub trait HasPkValue {
 
 #[cfg(feature = "postgres")]
 impl<T: Model + Send> QuerySet<T> {
-    /// Count rows matching the queryset's filters. Issue #270 / T1.8
-    /// wave 3 — replaces the `Counter` extension trait (deleted).
-    /// Accepts any sqlx executor (`&PgPool` or `&mut PgConnection` for
-    /// tenancy-scoped reads), same as [`Self::fetch_on`].
+    /// Count rows matching this queryset's filters. Takes any sqlx
+    /// executor, like [`Self::fetch_on`].
     ///
     /// # Errors
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
@@ -579,13 +511,10 @@ impl<T: Model + Send> QuerySet<T> {
         Ok(count)
     }
 
-    /// Run `EXPLAIN [(...)] <select>` against this queryset and return
-    /// the planner output as a `Vec<String>` (one row per plan line).
-    ///
-    /// Use [`Self::explain_on`] for full control over the executor +
-    /// `EXPLAIN` options. This shorthand runs against `&PgPool` with
-    /// the default options (plain `EXPLAIN`, no `ANALYZE` — safe to
-    /// call without executing the query).
+    /// Run `EXPLAIN` on this queryset and return the plan, one line
+    /// per `Vec` entry. Runs against a pool with the default options:
+    /// plain `EXPLAIN`, no `ANALYZE`, so the query itself is not run.
+    /// Use [`Self::explain_on`] to pick the executor and options.
     ///
     /// ```ignore
     /// use rustango::sql::ExplainOptions;
@@ -602,9 +531,9 @@ impl<T: Model + Send> QuerySet<T> {
         self.explain_on(pool, ExplainOptions::default()).await
     }
 
-    /// Like [`Self::explain`] but accepts any sqlx executor + custom
-    /// [`ExplainOptions`]. Setting `analyze = true` actually runs the
-    /// query — caveat: side effects, slow scans — so it's opt-in.
+    /// [`Self::explain`] with your own executor and [`ExplainOptions`].
+    /// `analyze = true` really runs the query, side effects included,
+    /// so it is opt-in.
     ///
     /// # Errors
     /// As [`Self::explain`].
@@ -633,10 +562,8 @@ impl<T: Model + Send> QuerySet<T> {
         }
         let rows = q.fetch_all(executor).await?;
         let mut out = Vec::with_capacity(rows.len());
-        // EXPLAIN's row-shape varies by `FORMAT`: text/yaml/xml come
-        // back as `TEXT`, but `FORMAT JSON` returns column 0 as the
-        // `JSON` SQL type. Try the json decoder first when that's
-        // the requested format; otherwise the text path.
+        // EXPLAIN's row type follows `FORMAT`: text/yaml/xml come back
+        // as TEXT, `FORMAT JSON` gives column 0 as the JSON type.
         for row in &rows {
             let line: String = match options.format {
                 ExplainFormat::Json => {
@@ -653,24 +580,15 @@ impl<T: Model + Send> QuerySet<T> {
     }
 }
 
-// ====================================================================
-// EXPLAIN — extracted to explain.rs (#116 step 5)
-// ====================================================================
-
 mod explain;
 pub use explain::{explain_pool, ExplainFormat, ExplainOptions};
 
-/// Extension trait that drives a `QuerySet` to a bulk `DELETE`.
-///
-/// Pulled in via `use rustango::sql::Deleter;`.
 #[cfg(feature = "postgres")]
 #[cfg(feature = "postgres")]
 impl<T: Model + Send> QuerySet<T> {
-    /// Bulk-DELETE every row matching this queryset's filters. Issue
-    /// #270 / T1.8 wave 3 — replaces the `Deleter` extension trait
-    /// (deleted). Accepts any sqlx executor (`&PgPool` or `&mut
-    /// PgConnection` for tenancy-scoped writes), same as
-    /// [`Self::fetch_on`]. Returns rows affected.
+    /// Bulk-DELETE every row matching this queryset's filters. Takes
+    /// any sqlx executor, like [`Self::fetch_on`]. Returns the number
+    /// of rows affected.
     ///
     /// # Errors
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
@@ -685,9 +603,8 @@ impl<T: Model + Send> QuerySet<T> {
 
 #[cfg(feature = "postgres")]
 impl<T: Model + Send> UpdateBuilder<T> {
-    /// Compile + execute this `UpdateBuilder` against any sqlx
-    /// executor. Issue #270 / T1.8 wave 3 — replaces the `Updater`
-    /// extension trait (deleted). Returns rows affected.
+    /// Compile and run this `UpdateBuilder` against any sqlx executor.
+    /// Returns the number of rows affected.
     ///
     /// # Errors
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
@@ -700,18 +617,16 @@ impl<T: Model + Send> UpdateBuilder<T> {
     }
 }
 
-/// Backend-agnostic counterpart of [`Updater`]. `UpdateBuilder` gets
-/// an `execute_pool(&Pool)` method via this trait that dispatches the
-/// compiled `UpdateQuery` through [`update_pool`] — works on any
-/// backend rustango supports.
+/// Gives `UpdateBuilder` an `execute_pool(&Pool)` method that runs on
+/// any backend, via [`update_pool`].
 ///
-/// Pulled in via `use rustango::sql::UpdaterPool;`.
+/// Import with `use rustango::sql::UpdaterPool;`.
 pub trait UpdaterPool<T: Model + Send> {
-    /// Compile and execute the update against `pool`. Returns rows
-    /// affected.
+    /// Compile and run the update against `pool`. Returns the number
+    /// of rows affected.
     ///
     /// # Errors
-    /// As [`Updater::execute`].
+    /// [`ExecError`] for schema, SQL-writing, or driver failures.
     fn execute_pool(
         self,
         pool: &Pool,
@@ -725,25 +640,13 @@ impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
     }
 }
 
-/// A NULL with no type attached, so PostgreSQL infers one from the
-/// column it lands in (#1450).
+/// A NULL with no type attached, so PostgreSQL infers the type from
+/// the column it lands in.
 ///
-/// [`SqlValue::Null`] used to bind `None::<String>`, which sends the
-/// parameter with the **text** OID. Postgres then refuses it anywhere but
-/// a text column:
-///
-/// ```text
-/// column "uploaded_by_id" is of type bigint but expression is of type text
-/// ```
-///
-/// So writing NULL to any non-text column failed — media upload was
-/// broken outright, and 50-odd other sites shared the expression. MySQL
-/// and SQLite type parameters loosely enough not to care, which is why
-/// only Postgres ever showed it, and why the two tri-dialect binders
-/// below are left alone.
-///
-/// OID 0 is the wire protocol's "unspecified": the server resolves the
-/// type from context during Parse.
+/// Binding `None::<String>` would send the text OID, and Postgres then
+/// rejects the parameter for any non-text column. OID 0 is the wire
+/// protocol's "unspecified", so the server resolves the type during
+/// Parse. MySQL and SQLite type parameters loosely and don't need this.
 #[cfg(feature = "postgres")]
 struct UntypedNull;
 
@@ -764,14 +667,12 @@ impl sqlx::Encode<'_, sqlx::Postgres> for UntypedNull {
     }
 }
 
-/// Match on `SqlValue` and bind to a sqlx query builder. Used twice below for
-/// `Query` and `QueryAs`, which don't share a bind trait. PG-only — the
-/// macro depends on `sqlx::types::Json` round-tripping through
-/// `PgArguments` and `SqlValue::Array` binding as a typed PG array,
-/// neither of which exists on MySQL / SQLite. The bi-directional
-/// counterparts are `bind_match_mysql!` + `bind_match_sqlite!`.
+/// Match on `SqlValue` and bind it to a sqlx query builder. Used for
+/// both `Query` and `QueryAs`, which share no bind trait.
 ///
-// Macros are made visible to sibling modules below via `pub(super) use`.
+/// PG-only: it relies on `sqlx::types::Json` through `PgArguments` and
+/// on `SqlValue::Array` binding as a typed PG array. Use
+/// `bind_match_mysql!` / `bind_match_sqlite!` for the other dialects.
 #[cfg(feature = "postgres")]
 macro_rules! bind_match {
     ($q:expr, $value:expr) => {
@@ -794,28 +695,22 @@ macro_rules! bind_match {
             SqlValue::List(_) => {
                 unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
             }
-            // PG range literal — text-bound, implicit-cast by PG to
-            // the column's range type. Issue #31.
+            // Range literal: bound as text, cast by PG to the column's
+            // range type.
             SqlValue::RangeLiteral(s) => $q.bind(s),
-            // PG hstore — bind as a native `PgHstore` (issue #342). No
-            // text-literal escaping; sqlx encodes the map directly.
+            // hstore: bound as a native `PgHstore`, no text escaping.
             SqlValue::HStore(pairs) => {
                 $q.bind(sqlx::postgres::types::PgHstore(pairs.into_iter().collect()))
             }
-            // pgvector embedding (#824) — bind via the `Vector` newtype's
-            // PG `Encode` (binary wire format); the column/param type is
-            // `vector`, resolved by name.
+            // pgvector: binary wire format via the `Vector` newtype.
             SqlValue::Vector(v) => $q.bind(crate::sql::Vector(v)),
-            // PostGIS geometry (#443) — bind via the `Point` newtype's
-            // PG `Encode` (EWKB binary); the column/param type is
-            // `geometry`, resolved by name.
+            // PostGIS: EWKB binary via the `Point` newtype.
             SqlValue::Geometry { x, y, srid } => {
                 $q.bind(crate::sql::Point { x, y, srid })
             }
-            // PG single-parameter array (issue #30). v1 supports
-            // I32/I64/String/Bool elements; other element kinds
-            // panic at bind time. Homogeneous-element arrays are
-            // required by PG's typed array shape.
+            // PG arrays are typed, so elements must be homogeneous.
+            // I32/I64/String/Bool are supported; anything else panics
+            // at bind time.
             SqlValue::Array(elems) => match elems.first() {
                 None => $q.bind(Vec::<i32>::new()),
                 Some(SqlValue::I64(_)) => {
@@ -860,11 +755,9 @@ macro_rules! bind_match {
     };
 }
 
-/// MySQL-only counterpart of [`bind_match`]. MySQL has no array
-/// type, so the `Array` arm is `unreachable!()` — the SQL writer
-/// rejects array operators via `write_array_op` before any bind
-/// is attempted. Otherwise identical to the PG bind_match. Issue
-/// #30.
+/// MySQL counterpart of [`bind_match`]. MySQL has no array type, so
+/// the `Array` arm is `unreachable!()`: the writer rejects array
+/// operators before any bind happens.
 #[cfg(feature = "mysql")]
 macro_rules! bind_match_mysql {
     ($q:expr, $value:expr) => {
@@ -906,12 +799,10 @@ macro_rules! bind_match_mysql {
     };
 }
 
-/// SQLite-only counterpart: `sqlx-sqlite` doesn't ship a
-/// `rust_decimal::Decimal: Type<Sqlite>` impl (only PG + MySQL get
-/// that via sqlx's `rust_decimal` feature), so the `Decimal` arm
-/// here serializes via `to_string()` and lands on SQLite's NUMERIC
-/// affinity as TEXT — round-trips through the matching `try_get::<String>`
-/// path in `row_to_json_sqlite`.
+/// SQLite counterpart of [`bind_match`]. `sqlx-sqlite` has no
+/// `Decimal: Type<Sqlite>` impl, so the `Decimal` arm binds
+/// `to_string()`. It lands as TEXT on NUMERIC affinity and reads back
+/// through the `try_get::<String>` path in `row_to_json_sqlite`.
 #[cfg(feature = "sqlite")]
 macro_rules! bind_match_sqlite {
     ($q:expr, $value:expr) => {
@@ -924,11 +815,11 @@ macro_rules! bind_match_sqlite {
             SqlValue::F64(v) => $q.bind(v),
             SqlValue::Bool(v) => $q.bind(v),
             SqlValue::String(v) => $q.bind(v),
-            // #1464 — encoded here rather than handed to sqlx. sqlx uses
-            // chrono's `AutoSi`, which emits 0/3/6/9 fractional digits by
-            // value, so a stored timestamp did not equal its own re-bound
-            // form and a cursor re-emitted its last row forever. This is
-            // fixed-width and matches what the DDL default writes.
+            // Encoded here, not by sqlx. SQLite stores datetimes as
+            // TEXT and compares them as text, so the width must be
+            // fixed. sqlx emits 0/3/6/9 fractional digits depending on
+            // the value, so a stored timestamp would not equal its own
+            // re-bound form. This matches what the DDL default writes.
             SqlValue::DateTime(v) => $q.bind(crate::sql::encode_datetime(v)),
             SqlValue::Date(v) => $q.bind(v),
             SqlValue::Time(v) => $q.bind(v),
@@ -940,8 +831,6 @@ macro_rules! bind_match_sqlite {
             SqlValue::List(_) => {
                 unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
             }
-            // SQLite has no array type — the writer rejects array
-            // ops via `write_array_op` long before bind is reached.
             SqlValue::Array(_) => unreachable!(
                 "SQLite has no array type; `write_array_op` rejects before bind. Issue #30."
             ),
@@ -977,14 +866,10 @@ pub(crate) fn bind_query(
     bind_match!(q, value)
 }
 
-// ------------------------------------------------------------------ bulk UPDATE
-
-// ------------------------------------------------------------------ aggregate
-
-/// Like [`fetch_aggregate`] but accepts any sqlx executor.
+/// Like [`fetch_aggregate_pool`] but accepts any sqlx executor.
 ///
 /// # Errors
-/// As [`fetch_aggregate`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 #[cfg(feature = "postgres")]
 pub async fn fetch_aggregate_on<'c, E>(
     query: &AggregateQuery,
@@ -1000,17 +885,15 @@ where
     }
     let raw_rows = q.fetch_all(executor).await?;
 
-    // Collect result column names from the first row's columns.
     let mut out = Vec::with_capacity(raw_rows.len());
     for row in &raw_rows {
         use sqlx::{Column as _, Row as _};
         let mut map = std::collections::HashMap::new();
         for (i, col) in row.columns().iter().enumerate() {
             let name = col.name().to_owned();
-            // Try to decode as each possible SqlValue type, falling back to Null.
-            // Order matters: try cheaper / more-specific decoders first.
-            // PG-specific composite types (jsonb, arrays) handled after
-            // scalars so int8/text aren't accidentally decoded as JSON.
+            // Try each decoder in turn, falling back to Null. Order
+            // matters: scalars first, then jsonb and arrays, so an
+            // int8 or text column is not decoded as JSON.
             let val: SqlValue = if let Ok(v) = row.try_get::<i64, _>(i) {
                 SqlValue::I64(v)
             } else if let Ok(v) = row.try_get::<i32, _>(i) {
@@ -1022,18 +905,16 @@ where
             } else if let Ok(v) = row.try_get::<String, _>(i) {
                 SqlValue::String(v)
             } else if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
-                // jsonb / json — issue #33's jsonb_agg returns this.
+                // jsonb / json, e.g. from jsonb_agg.
                 SqlValue::Json(v)
             } else if let Ok(v) = row.try_get::<Vec<String>, _>(i) {
-                // text[] / varchar[] — issue #33's array_agg on a text col
-                // returns this. Wrap as a JSON array so the aggregate
-                // result map stays a Vec<HashMap<String, SqlValue>> shape
-                // — SqlValue has no Vec<T> variant.
+                // text[] from array_agg. Wrapped as a JSON array —
+                // `SqlValue` has no Vec<T> variant.
                 SqlValue::Json(serde_json::Value::Array(
                     v.into_iter().map(serde_json::Value::String).collect(),
                 ))
             } else if let Ok(v) = row.try_get::<Vec<i64>, _>(i) {
-                // bigint[] — array_agg on an integer column.
+                // bigint[] from array_agg.
                 SqlValue::Json(serde_json::Value::Array(
                     v.into_iter()
                         .map(|n| serde_json::Value::Number(n.into()))
@@ -1049,45 +930,19 @@ where
     Ok(out)
 }
 
-// ====================================================================
-// `transaction_pool` + PoolTx — extracted to tx.rs (#116 step 4)
-// ====================================================================
-
 mod tx;
 pub use tx::{transaction_pool, PoolTx};
-
-// ====================================================================
-// atomic() + on_commit() — extracted to atomic.rs (#116 step 4)
-// ====================================================================
 
 mod atomic;
 pub use atomic::{atomic, on_commit, on_commit_pending};
 
-// ====================================================================
-// `&Pool` dispatch — bi-dialect executor surface (v0.23.0-batch5)
-// ====================================================================
-//
-// Phase A of the v0.23.0 executor migration: the **non-`FromRow`**
-// operations (insert, update, delete, count, bulk_insert, bulk_update,
-// raw_execute) now have `_pool` variants that accept a [`super::Pool`]
-// and dispatch to the right sqlx driver. SQL is compiled via
-// `pool.dialect()`, so the same call works against either backend.
-//
-// The `FromRow`-bound operations (select_rows, fetch, insert_returning,
-// fetch_aggregate, raw_query, fetch_with_prefetch) stay
-// `&PgPool`-typed for now — they require macro changes so models
-// derive `FromRow<MySqlRow>` alongside `FromRow<PgRow>`. Phase B
-// in batch6 covers that.
-//
-// Existing `&PgPool` callers keep working — we don't touch the
-// existing functions. New code that already has `&Pool` (e.g. via
-// `Pool::connect_from_env`) can call the `_pool` variants directly.
-
+// `&Pool` dispatch. The `_pool` functions below take a [`Pool`],
+// compile SQL through `pool.dialect()` and run it on the matching
+// sqlx driver, so one call works against any backend. The older
+// `&PgPool`-typed functions still work for existing callers.
 use super::Pool;
 
-/// Bind a `Query<MySql, MySqlArguments>` from a `SqlValue`. Mirrors
-/// the Postgres-typed [`bind_query`] using the same polymorphic
-/// `bind_match!` body.
+/// MySQL counterpart of [`bind_query`].
 #[cfg(feature = "mysql")]
 pub(crate) fn bind_query_my(
     q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
@@ -1096,11 +951,7 @@ pub(crate) fn bind_query_my(
     bind_match_mysql!(q, value)
 }
 
-/// SQLite counterpart of [`bind_query_my`] / [`bind_query`]. sqlx-sqlite
-/// supports the same `bind` API for the scalar `SqlValue` variants this
-/// crate emits (chrono types route through the `chrono` feature, JSON
-/// values go through the `json` feature into TEXT — both feature flags
-/// are pulled in by the runtime feature set when `sqlite` is on).
+/// SQLite counterpart of [`bind_query`].
 #[cfg(feature = "sqlite")]
 pub(crate) fn bind_query_sqlite<'a>(
     q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
@@ -1109,12 +960,10 @@ pub(crate) fn bind_query_sqlite<'a>(
     bind_match_sqlite!(q, value)
 }
 
-/// `INSERT` against either backend. Equivalent to [`insert`] but
-/// dispatches via [`Pool`] — runs against the dialect's compiled SQL
-/// and the matching sqlx driver.
+/// `INSERT` on any backend: compiled for the [`Pool`]'s dialect.
 ///
 /// # Errors
-/// As [`insert`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_insert(query)?;
@@ -1122,37 +971,25 @@ pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecErr
     Ok(())
 }
 
-/// `INSERT … RETURNING <cols>` (Postgres) or `INSERT … ; SELECT
-/// LAST_INSERT_ID()` (MySQL) against either backend. Returns the
-/// auto-assigned PK as `i64`.
+/// `INSERT` that returns the new row's data, on any backend. The
+/// result shape differs per backend, so callers `match` on
+/// [`InsertReturningPool`].
 ///
-/// MySQL contract:
-/// - The query's `returning` list must contain exactly one column,
-///   and that column must be the model's `Auto<T>` PK. MySQL's
-///   `LAST_INSERT_ID()` only reports the most recently auto-generated
-///   value of an `AUTO_INCREMENT` column, so multi-column `RETURNING`
-///   is not expressible in MySQL syntax.
-/// - The INSERT and `SELECT LAST_INSERT_ID()` run on the **same
-///   acquired connection** — `LAST_INSERT_ID()` is connection-scoped,
-///   so reading it on a fresh checkout would see a stale (or zero)
-///   value if another task ran an INSERT in between.
+/// Postgres and SQLite use `INSERT … RETURNING` and give back the
+/// whole row, with every requested column.
 ///
-/// Postgres contract: the IR's `returning` list is honored as-is and
-/// the row is returned with all requested columns (the executor's
-/// caller pulls each via `try_get`).
+/// MySQL has no `RETURNING`, so it runs the INSERT and then
+/// `SELECT LAST_INSERT_ID()` on the **same connection** —
+/// `LAST_INSERT_ID()` is per-connection, and a fresh checkout could
+/// see another task's value. It can only report one auto-increment
+/// value, so `query.returning` must name exactly one column, the
+/// model's `Auto<T>` PK.
 ///
 /// # Errors
 /// - [`ExecError::EmptyReturning`] when `query.returning` is empty.
-/// - [`SqlError::OperatorNotSupportedInDialect`] from the writer when
-///   MySQL is asked for a multi-column RETURNING (translation isn't
-///   expressible in MySQL syntax).
+/// - [`SqlError::OperatorNotSupportedInDialect`](crate::sql::SqlError::OperatorNotSupportedInDialect)
+///   when MySQL is asked for a multi-column RETURNING.
 /// - Validation, SQL-writing, or driver failures otherwise.
-///
-/// Returns the PG `PgRow` directly when the pool is Postgres so
-/// existing callers can use `try_get` for any column. For MySQL,
-/// returns the single auto-assigned i64 PK wrapped in
-/// [`InsertReturningPool::MySqlAutoId`] — callers handle the two
-/// shapes with a `match`.
 pub async fn insert_returning_pool(
     pool: &Pool,
     query: &InsertQuery,
@@ -1170,8 +1007,7 @@ pub async fn insert_returning_pool(
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            // Compile a plain INSERT (no RETURNING — MySQL can't
-            // express it) and run it + LAST_INSERT_ID() on the same
+            // Plain INSERT, then LAST_INSERT_ID() on the same
             // checked-out connection.
             let plain = InsertQuery {
                 model: query.model,
@@ -1188,29 +1024,20 @@ pub async fn insert_returning_pool(
                 q = bind_query_my(q, v);
             }
             q.execute(&mut *conn).await?;
-            // SELECT LAST_INSERT_ID() — connection-scoped, returns
-            // the most recently AUTO_INCREMENT-assigned value on
-            // *this* connection.
             use sqlx::Row as _;
             let row = sqlx::query("SELECT LAST_INSERT_ID()")
                 .fetch_one(&mut *conn)
                 .await?;
-            // sqlx-mysql decodes LAST_INSERT_ID() as u64; we surface
-            // it as i64 to match the Auto<i64>/Auto<i32> convention
-            // and the rest of the framework.
+            // sqlx decodes LAST_INSERT_ID() as u64; surfaced as i64 to
+            // match `Auto<T>`. The conversion only fails above 2^63.
             let id_u64: u64 = row.try_get::<u64, _>(0)?;
-            // i64::try_from would only fail at >2^63 IDs — a 9.2e18
-            // table that no realistic app will hit.
             let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
             Ok(InsertReturningPool::MySqlAutoId(id))
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
-            // SQLite ≥ 3.35 supports `INSERT … RETURNING <cols>` with
-            // the same shape as Postgres, so the flow mirrors PG: bind
-            // params, fetch the row, hand it to the macro-emitted
-            // `__rustango_assign_from_sqlite_row` body via
-            // `apply_auto_pk`.
+            // SQLite 3.35+ has `INSERT … RETURNING`, so this mirrors
+            // the Postgres path.
             let stmt = pool.dialect().compile_insert(query)?;
             let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
                 sqlx::query(&stmt.sql);
@@ -1223,14 +1050,8 @@ pub async fn insert_returning_pool(
     }
 }
 
-/// Two-shape return from [`insert_returning_pool`] — a full Postgres
-/// row (caller picks columns via `try_get`) or a single MySQL
-/// auto-assigned `i64` PK from `LAST_INSERT_ID()`.
-///
-/// Macro-generated `Model::insert_pool` will pattern-match this:
-/// store every `RETURNING` column from the PG variant; store the
-/// single `i64` into the model's `Auto<T>` PK field on the MySQL
-/// variant.
+/// What [`insert_returning_pool`] gives back: a full row on Postgres
+/// and SQLite, or just the auto-assigned `i64` PK on MySQL.
 pub enum InsertReturningPool {
     #[cfg(feature = "postgres")]
     PgRow(PgRow),
@@ -1256,7 +1077,7 @@ impl ::core::fmt::Debug for InsertReturningPool {
 /// `UPDATE` against either backend; returns rows affected.
 ///
 /// # Errors
-/// As [`update`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecError> {
     let stmt = pool.dialect().compile_update(query)?;
     execute_pool(pool, &stmt.sql, stmt.params).await
@@ -1265,7 +1086,7 @@ pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecEr
 /// `DELETE` against either backend; returns rows affected.
 ///
 /// # Errors
-/// As [`delete`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecError> {
     let stmt = pool.dialect().compile_delete(query)?;
     execute_pool(pool, &stmt.sql, stmt.params).await
@@ -1274,44 +1095,35 @@ pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecEr
 /// `SELECT COUNT(*)` against either backend.
 ///
 /// # Errors
-/// As [`count_rows`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn count_rows_pool(pool: &Pool, query: &CountQuery) -> Result<i64, ExecError> {
     let stmt = pool.dialect().compile_count(query)?;
     fetch_scalar_pool(pool, &stmt.sql, stmt.params).await
 }
 
-/// Multi-row `INSERT`. Bypasses any `Auto<T>` PK reconciliation that
-/// [`bulk_insert`] does for Postgres' `RETURNING` shape — the macro
-/// layer in batch6 will route Auto<T>-bearing models to a different
-/// path on MySQL (`LAST_INSERT_ID()` follow-up).
+/// Multi-row `INSERT` on any backend. It does not read back `Auto<T>`
+/// PKs the way [`bulk_insert_on`] does on Postgres, so the rows you
+/// passed in keep their unset PKs.
+///
+/// Large batches are split to fit the backend's bind-parameter limit,
+/// so they run as several statements. Wrap the call in a transaction
+/// if you need all-or-nothing.
 ///
 /// # Errors
-/// As [`bulk_insert`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<(), ExecError> {
     if query.rows.is_empty() {
         return Ok(());
     }
-    // Every `pool.dialect()` here is a short-lived temporary, deliberately
-    // not bound to a variable: it yields `&dyn Dialect`, which is not
-    // `Sync`, so holding one across an `.await` makes this future non-Send
-    // and breaks every boxed handler that transitively calls it.
+    // Keep every `pool.dialect()` a temporary: it yields `&dyn Dialect`,
+    // which is not `Sync`, so holding one across an `.await` would make
+    // this future non-Send.
     //
-    // Split into batches that fit the backend's bind-parameter ceiling
-    // (#1284). One multi-row INSERT binds `rows × columns` parameters,
-    // and every backend caps that — 65535 on Postgres (an int16 on the
-    // wire), 32766 on modern SQLite, `max_allowed_packet` on MySQL. A
-    // single statement past the cap fails with an opaque driver error,
-    // so an 8-column model died at ~8k rows on PG and ~4k on SQLite.
-    // Django's `bulk_create` batches for the same reason.
-    //
-    // Small inserts are untouched: under the ceiling this is the same
-    // single statement it always was. Only oversized batches split, and
-    // those previously failed outright.
-    //
-    // Note the trade-off, which matches Django's: above the threshold
-    // this is no longer one statement, so a mid-way failure leaves the
-    // earlier chunks committed. Callers needing all-or-nothing should
-    // wrap the call in a transaction.
+    // One multi-row INSERT binds `rows × columns` parameters, and every
+    // backend caps that: 65535 on Postgres, 32766 on SQLite,
+    // `max_allowed_packet` on MySQL. Past the cap the driver fails with
+    // an opaque error, so split into batches that fit. Batches under
+    // the cap still run as one statement.
     let columns = query.columns.len().max(1);
     let max_rows = (pool.dialect().max_bind_params() / columns).max(1);
 
@@ -1336,7 +1148,7 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
 /// (VALUES …)` (MySQL); returns rows affected.
 ///
 /// # Errors
-/// As [`bulk_update`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u64, ExecError> {
     if query.rows.is_empty() {
         return Ok(0);
@@ -1345,10 +1157,13 @@ pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u6
     execute_pool(pool, &stmt.sql, stmt.params).await
 }
 
-/// Execute arbitrary SQL with bound `SqlValue` params; returns rows
-/// affected. SQL must use the **dialect's** placeholder shape (`$1`
-/// for Postgres, `?` for MySQL) — read it from `pool.dialect().placeholder(n)`
-/// when constructing dynamic queries.
+/// Run arbitrary SQL with bound `SqlValue` params; returns rows
+/// affected.
+///
+/// The SQL must use the dialect's placeholder shape. Build it with
+/// `pool.dialect().placeholder(n)`. Note that `n` is ignored outside
+/// Postgres, so binds must appear in the same order as their
+/// placeholders in the text.
 ///
 /// # Errors
 /// Driver / SQL failures.
@@ -1360,20 +1175,8 @@ pub async fn raw_execute_pool(
     execute_pool(pool, sql, binds).await
 }
 
-/// Execute a parameterized statement inside an open [`PoolTx`].
-/// Bi-dialect counterpart of [`raw_execute_pool`] for callers
-/// composing multiple writes inside a transaction.
-///
-/// Dispatches per-backend bind via the executor's `bind_query*`
-/// helpers, then runs the statement against the transaction's
-/// connection. The `PoolTx` variant must match the underlying
-/// pool's variant (sqlx enforces this at compile time via the
-/// transaction's `<DB>` parameter).
-///
-/// Use this to collapse audit-tx arms that previously had
-/// `sqlx::query(sql).bind(...).execute(&mut *tx).await` repeated
-/// per-backend with byte-identical body. Pair with [`PoolTx::commit`]
-/// at the end of the tx.
+/// [`raw_execute_pool`] inside an open [`PoolTx`], so several writes
+/// share one transaction. Finish with [`PoolTx::commit`].
 ///
 /// # Errors
 /// Driver / SQL failures.
@@ -1382,8 +1185,7 @@ pub async fn raw_execute_tx(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
-    // #431 — bump the per-task query counter when an `assert_num_queries`
-    // scope is active. No-op in production (try_with returns Err).
+    // Counts toward `assert_num_queries`; a no-op outside tests.
     crate::test_assertions::query_counter::bump();
     match tx {
         #[cfg(feature = "postgres")]
@@ -1415,50 +1217,30 @@ pub async fn raw_execute_tx(
     }
 }
 
-/// Run a `;`-separated DDL script idempotently across every backend.
-/// Each statement is dispatched through [`raw_execute_pool`]; on
-/// MySQL the helper swallows `ER_DUP_KEYNAME` (1061) so that index-
-/// create statements in a bootstrap script can re-run without
-/// failing (MySQL has no `CREATE INDEX IF NOT EXISTS`).
+/// Run a `;`-separated DDL script on any backend, safe to re-run.
+/// Use it for the "make sure this table exists" step in modules that
+/// ship their own schema constants. Empty fragments are skipped.
 ///
-/// This is the canonical "ensure-this-DDL-applied" primitive for
-/// modules that ship hand-written per-dialect schema constants
-/// (`audit::ensure_table_pool`, the JSON-side
-/// `jobs::pg::ensure_jobs_table`, etc.). The non-MySQL
-/// errors surface as [`sqlx::Error`] verbatim (driver-level); only
-/// the dup-index case is swallowed.
-///
-/// Empty / whitespace-only fragments between `;` separators are
-/// skipped — convenient for the multi-statement DDL constants the
-/// callers ship.
-///
-/// #561 — single owner of the "split-by-`;` + dispatch + swallow
-/// dup-index" loop that used to live as ~6 copies in `audit.rs`,
-/// `media/*.rs`, `jobs/pg.rs`, and `contenttypes.rs`.
+/// Errors that mean "the object already exists" are ignored, so a
+/// second run succeeds. Everything else is returned.
 ///
 /// # Errors
-/// `sqlx::Error` forwarded from the executor on any statement other
-/// than the dup-index swallowed case. Non-driver `ExecError`
-/// variants (counter / structural) map to `sqlx::Error::Protocol`.
+/// The driver's [`sqlx::Error`], except for the already-exists cases.
+/// Non-driver `ExecError` variants map to `sqlx::Error::Protocol`.
 pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Error> {
     for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
         match execute_pool(pool, stmt, Vec::new()).await {
             Ok(_) => {}
             Err(crate::sql::ExecError::Driver(err)) => {
-                // Two ways an idempotent DDL statement can fail while
-                // still having done its job:
+                // Two ways a re-run can fail with the job already done:
                 //
-                //  * MySQL has no `CREATE INDEX IF NOT EXISTS`, so a
+                //  * MySQL has no `CREATE INDEX IF NOT EXISTS`, so the
                 //    second run raises ER_DUP_KEYNAME.
-                //  * Postgres *has* the syntax but it is **not atomic**
-                //    (#1458): two sessions can both pass the existence
-                //    check and race on the catalogue insert. The loser
-                //    errors even though the object now exists — which
-                //    is exactly what a web and a worker process do when
-                //    they start together and both call
-                //    `ensure_table_pool`.
+                //  * Postgres has that syntax but it is not atomic, so
+                //    two processes starting together can both pass the
+                //    existence check and one loses the race.
                 //
-                // Either way the post-condition holds, so continue.
+                // The object exists either way, so continue.
                 if !crate::sql::is_mysql_dup_index_error(&err)
                     && !crate::sql::is_pg_dup_object_error(&err)
                 {
@@ -1473,11 +1255,10 @@ pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Erro
 
 // ---- internal dispatch helpers ----
 
-/// Execute a parameterized statement that doesn't return rows. Used
-/// by every non-`FromRow` `_pool` function.
+/// Run a parameterized statement that returns no rows. Shared by the
+/// non-`FromRow` `_pool` functions.
 async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
-    // #431 — bump the per-task query counter when an `assert_num_queries`
-    // scope is active. No-op in production (try_with returns Err).
+    // Counts toward `assert_num_queries`; a no-op outside tests.
     crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
@@ -1509,21 +1290,12 @@ async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u6
     }
 }
 
-// ====================================================================
-// `&mut PoolTx` dispatch — tri-dialect transaction executor surface
-// ====================================================================
-//
-// Mirrors the `_pool` non-`FromRow` helpers above but executes against
-// an open transaction (a `PoolTx` obtained from `transaction_pool`).
-// Each helper compiles SQL through `tx.dialect()` and dispatches to
-// the correct sqlx driver branch via `match tx { ... }`.
-//
-// `execute_tx` is the internal building-block (private); the rest
-// are the public API consumed by macro-generated `_tx` model methods.
+// `&mut PoolTx` dispatch: the `_tx` helpers below mirror the `_pool`
+// ones but run against an open transaction from `transaction_pool`.
 
-// #431 — `insert_tx` / `update_tx` / `delete_tx` all funnel through
-// here, so one bump covers the three. `raw_execute_tx` has its own
-// match and its own bump; it does not reach this.
+// `insert_tx` / `update_tx` / `delete_tx` all funnel through here, so
+// one query-counter bump covers all three. `raw_execute_tx` bumps on
+// its own and does not reach this.
 async fn execute_tx(
     tx: &mut PoolTx<'_>,
     sql: &str,
@@ -1560,9 +1332,8 @@ async fn execute_tx(
     }
 }
 
-/// `INSERT` inside an open transaction. Equivalent to [`insert_pool`]
-/// but executes against `tx` so the write participates in the
-/// caller's transaction boundary.
+/// [`insert_pool`] inside an open transaction, so the write joins the
+/// caller's transaction.
 ///
 /// # Errors
 /// As [`insert_pool`].
@@ -1573,13 +1344,9 @@ pub async fn insert_tx(tx: &mut PoolTx<'_>, query: &InsertQuery) -> Result<(), E
     Ok(())
 }
 
-/// `INSERT … RETURNING` / `LAST_INSERT_ID()` inside an open
-/// transaction. Returns the same [`InsertReturningPool`] shape as
-/// [`insert_returning_pool`], but all operations run against `tx`.
-///
-/// MySQL contract: the INSERT and `SELECT LAST_INSERT_ID()` both
-/// execute on the transaction's connection, so the auto-id is always
-/// correct even under concurrent inserts on other connections.
+/// [`insert_returning_pool`] inside an open transaction. On MySQL the
+/// INSERT and `SELECT LAST_INSERT_ID()` share the transaction's
+/// connection, so the id is right even under concurrent inserts.
 ///
 /// # Errors
 /// As [`insert_returning_pool`].
@@ -1677,8 +1444,7 @@ where
     crate::test_assertions::query_counter::bump();
     let stmt = tx.dialect().compile_select(query)?;
     let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
-    // Audit #451 — drive the stitch from leaf aliases so each FK chain
-    // (incl. multi-hop `a__b__c`) is decoded once, recursively.
+    // Stitch from leaf aliases so each FK chain is decoded once.
     let leaves = select_related_leaves(&aliases);
     match tx {
         #[cfg(feature = "postgres")]
@@ -1765,12 +1531,10 @@ where
     }
 }
 
-/// Run a SELECT that returns a single scalar `i64` (used by
-/// [`count_rows_pool`]). Inlined per-backend so we can use the
-/// driver-specific `Row::try_get` directly.
+/// Run a SELECT that returns one `i64` scalar, per backend so each
+/// can use its own `Row::try_get`.
 async fn fetch_scalar_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<i64, ExecError> {
-    // #431 — counted here rather than in `count_rows_pool` so every
-    // caller of this helper is counted, not just the one.
+    // Counted here, not in the callers, so every caller is covered.
     crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
@@ -1808,10 +1572,6 @@ async fn fetch_scalar_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Resu
     }
 }
 
-// ====================================================================
-// Tri-dialect marker trait family — extracted to traits.rs (#116 step 8)
-// ====================================================================
-
 mod traits;
 #[cfg(feature = "mysql")]
 pub use traits::LoadRelatedMy;
@@ -1821,14 +1581,13 @@ pub use traits::{
     MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
 };
 
-/// Run a `SelectQuery` against either backend and decode each row
-/// into `T`. Equivalent to [`select_rows`] but takes [`Pool`] and
-/// dispatches per backend. Joins (`select_related`) are not yet
-/// supported on the `&Pool` path — use the `&PgPool` variant on
-/// Postgres until the join decoder migrates in batch7.
+/// Run a `SelectQuery` on any backend and decode each row into `T`.
+/// It ignores `select_related` joins; use
+/// [`select_rows_pool_with_related`] when the query has them.
 ///
 /// # Errors
-/// As [`select_rows`].
+/// [`ExecError`] if the query is invalid, the driver rejects it, or a
+/// column does not decode into `T`.
 pub async fn select_rows_pool<T>(pool: &Pool, query: &SelectQuery) -> Result<Vec<T>, ExecError>
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
@@ -1874,7 +1633,8 @@ where
 /// when no rows match.
 ///
 /// # Errors
-/// As [`select_one_row`] but routed through `&Pool`.
+/// [`ExecError`] if the query is invalid, the driver rejects it, or a
+/// column does not decode into `T`.
 pub async fn select_one_row_pool<T>(
     pool: &Pool,
     query: &SelectQuery,
@@ -1937,17 +1697,13 @@ pub(super) fn bind_query_as_sqlite<'a, T>(
     bind_match_sqlite!(q, value)
 }
 
-/// `fetch_aggregate` against either backend — runs an
-/// `AggregateQuery` (GROUP BY / HAVING / aggregate exprs) and
-/// decodes each row into `T` via `FromRow`. Bi-dialect counterpart
-/// of [`fetch_aggregate`].
-///
-/// Bound on `T` adds [`MaybeMyFromRow`] over the `&PgPool` version's
-/// bound — universally satisfied by `#[derive(Model)]` types and by
-/// any tuple/struct deriving sqlx's `FromRow`.
+/// Aggregates on any backend: runs an `AggregateQuery`
+/// (GROUP BY / HAVING / aggregate expressions) and decodes each row
+/// into `T`.
 ///
 /// # Errors
-/// As [`fetch_aggregate`].
+/// [`ExecError`] if the query is invalid, the driver rejects it, or a
+/// column does not decode into `T`.
 pub async fn fetch_aggregate_pool<T>(
     pool: &Pool,
     query: &AggregateQuery,
@@ -1992,11 +1748,7 @@ where
     }
 }
 
-// ====================================================================
-// Pure projection — Django `.values()` / `.values_list()` (issue #22)
-// Extracted to values.rs (#116 step 3).
-// ====================================================================
-
+// Django-style `.values()` / `.values_list()` projection.
 mod values;
 #[allow(unused_imports)]
 pub use values::{
@@ -2004,17 +1756,17 @@ pub use values::{
     MaybePgScalar, MaybeSqliteScalar,
 };
 
-/// Execute arbitrary SQL with bound `SqlValue` params and decode each
-/// row into `T` via `FromRow`. Bi-dialect counterpart of
-/// [`raw_query`].
+/// Raw SQL on any backend: runs it with bound `SqlValue`
+/// params and decodes each row into `T`.
 ///
-/// SQL must use the **dialect's** placeholder shape (`$1` for
-/// Postgres, `?` for MySQL) — read it from `pool.dialect().placeholder(n)`
-/// when constructing dynamic queries. Apps writing literal SQL pick
-/// the right shape themselves.
+/// The SQL must use the dialect's placeholder shape. Build it with
+/// `pool.dialect().placeholder(n)`. Note that `n` is ignored outside
+/// Postgres, so binds must appear in the same order as their
+/// placeholders in the text.
 ///
 /// # Errors
-/// As [`raw_query`].
+/// [`ExecError`] if the driver rejects the SQL, or a column does not
+/// decode into `T`.
 pub async fn raw_query_pool<T>(
     sql: &str,
     binds: Vec<SqlValue>,
@@ -2058,13 +1810,9 @@ where
     }
 }
 
-/// Bi-dialect SELECT inside an open [`PoolTx`]. Companion to
-/// [`raw_query_pool`] for queries scoped to a transaction (read-
-/// after-write, FOR UPDATE row locks, lookup-then-modify flows).
-///
-/// Dispatches per `PoolTx` variant; binds via the canonical
-/// `bind_query_as*` helpers (same path the macro-emitted
-/// `_pool` / `_tx` fetchers use).
+/// [`raw_query_pool`] inside an open [`PoolTx`], for reads that must
+/// see the transaction: read-after-write, `FOR UPDATE` locks, and
+/// lookup-then-modify flows.
 ///
 /// # Errors
 /// Driver / SQL failures.
@@ -2076,8 +1824,7 @@ pub async fn raw_query_tx<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    // #431 — bump the per-task query counter when an `assert_num_queries`
-    // scope is active. No-op in production (try_with returns Err).
+    // Counts toward `assert_num_queries`; a no-op outside tests.
     crate::test_assertions::query_counter::bump();
     match tx {
         #[cfg(feature = "postgres")]
@@ -2113,11 +1860,9 @@ where
     }
 }
 
-/// Django `.dates(field, kind)` terminal — issue #327. Compiles the
-/// underlying queryset to a `SELECT … WHERE …` statement, then wraps
-/// it in `SELECT DISTINCT <trunc(col)> FROM (<inner>) ORDER BY d` to
-/// extract distinct truncated date values. Params from the WHERE
-/// clause pass through unchanged.
+/// Django's `.dates(field, kind)`. Wraps the queryset's SELECT in
+/// `SELECT DISTINCT <trunc(col)> FROM (<inner>) ORDER BY …` to get
+/// the distinct truncated dates.
 ///
 /// # Errors
 /// - [`ExecError::Query`] forwarded from the underlying
@@ -2131,10 +1876,8 @@ pub async fn fetch_dates_pool<T: crate::core::Model + Send>(
     let descending = qs.descending;
     let kind = qs.kind;
     let column = qs.resolve_column()?;
-    // Compile the underlying queryset into a SelectQuery — preserves
-    // WHERE / JOINs / ORDER BY / LIMIT. The wrap below then ignores
-    // the inner ORDER BY (the truncated bucket order is what callers
-    // expect from `.dates()`).
+    // The inner SELECT keeps WHERE / JOINs / LIMIT. Its ORDER BY is
+    // overridden below: `.dates()` orders by the truncated bucket.
     let select_query = qs.qs.compile()?;
     let dialect = pool.dialect();
     let inner = dialect.compile_select(&select_query)?;
@@ -2149,9 +1892,9 @@ pub async fn fetch_dates_pool<T: crate::core::Model + Send>(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-/// Django `.datetimes(field, kind)` terminal — issue #328. Sibling
-/// to [`fetch_dates_pool`] with finer granularity (`Hour` / `Minute` /
-/// `Second`) and `DateTime<Utc>` return type.
+/// Django's `.datetimes(field, kind)`: [`fetch_dates_pool`] with
+/// finer buckets (`Hour` / `Minute` / `Second`) and a `DateTime<Utc>`
+/// result.
 ///
 /// # Errors
 /// Same shape as [`fetch_dates_pool`].
@@ -2177,16 +1920,14 @@ pub async fn fetch_datetimes_pool<T: crate::core::Model + Send>(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-/// `CounterPool::count` against either backend — fills the QuerySet
-/// counter gap from batches 5/15. Counts rows matching the queryset's
-/// filters via `count_rows_pool`.
+/// Gives `QuerySet` a `count(&Pool)` method that works on any backend.
 ///
-/// Pulled in via `use rustango::sql::CounterPool;`.
+/// Import with `use rustango::sql::CounterPool;`.
 pub trait CounterPool<T: Model + Send> {
-    /// Count rows matching the queryset's filters against either backend.
+    /// Count rows matching the queryset's filters.
     ///
     /// # Errors
-    /// As [`CounterPool::count`].
+    /// [`ExecError`] for schema, SQL-writing, or driver failures.
     fn count(self, pool: &Pool)
         -> impl std::future::Future<Output = Result<i64, ExecError>> + Send;
 }
@@ -2206,28 +1947,16 @@ impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
     }
 }
 
-/// Django-shape `QuerySet.exists()` + `QuerySet.contains(obj)`
-/// (issue #330) — boolean predicates on top of the existing count
-/// path.
+/// Django-shape boolean predicates on a `QuerySet`: `exists`,
+/// `is_empty`, `doesnt_exist` and `contains_pk`.
 ///
-/// `exists` returns `Ok(true)` when at least one row matches the
-/// queryset's filters, `Ok(false)` otherwise. Internally runs the
-/// same `COUNT(*)` as [`CounterPool::count`] and compares to
-/// zero — simple + dialect-agnostic. Future optimization: emit
-/// `SELECT 1 FROM … LIMIT 1` instead of `COUNT(*)`, which doesn't
-/// scan all matching rows. Tracked as a follow-up; the count
-/// path is correct semantically.
+/// All of them run the same `COUNT(*)` as [`CounterPool::count`] and
+/// compare it to zero, so they scan every matching row.
 ///
-/// `contains_pk` adds the convenience of "is THIS pk in the
-/// queryset?" — looks up the model's primary key column from the
-/// schema, builds an `Eq` predicate, and forwards to `exists`.
-/// Equivalent to `qs.filter("<pk_col>", pk).exists(pool)` with
-/// the column lookup baked in.
-///
-/// Pulled in via `use rustango::sql::ExistsPool;`.
+/// Import with `use rustango::sql::ExistsPool;`.
 pub trait ExistsPool<T: Model + Send> {
     /// `Ok(true)` when at least one row matches the queryset's
-    /// filters, `Ok(false)` otherwise. #330.
+    /// filters.
     ///
     /// # Errors
     /// As [`CounterPool::count`].
@@ -2236,10 +1965,8 @@ pub trait ExistsPool<T: Model + Send> {
         pool: &Pool,
     ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
 
-    /// `Ok(true)` when the queryset matches zero rows, `Ok(false)`
-    /// otherwise — inverse of [`Self::exists`]. Reads naturally
-    /// in negation-flavored code (`if qs.is_empty(&pool).await? {
-    /// ... }`) where `!qs.exists(...).await?` is awkward.
+    /// `Ok(true)` when the queryset matches no rows. The inverse of
+    /// [`Self::exists`], easier to read than `!qs.exists(..).await?`.
     ///
     /// # Errors
     /// As [`Self::exists`].
@@ -2248,9 +1975,8 @@ pub trait ExistsPool<T: Model + Send> {
         pool: &Pool,
     ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
 
-    /// Eloquent `Builder::doesntExist()` alias for [`Self::is_empty`]
-    /// — `Ok(true)` when no row matches the queryset's filters. One-
-    /// line muscle-memory alias; identical semantics + cost.
+    /// Alias for [`Self::is_empty`], named after Eloquent's
+    /// `doesntExist()`.
     ///
     /// # Errors
     /// As [`Self::is_empty`].
@@ -2259,14 +1985,12 @@ pub trait ExistsPool<T: Model + Send> {
         pool: &Pool,
     ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
 
-    /// `Ok(true)` when a row with `pk = pk_value` is contained in the
-    /// queryset. #330. Looks up the PK column from `T::SCHEMA`; errors
-    /// when the model has no primary key (very rare — view-backed
-    /// models without an explicit `#[rustango(primary_key)]`).
+    /// `Ok(true)` when the queryset contains the row with this PK.
+    /// The PK column comes from `T::SCHEMA`.
     ///
     /// # Errors
-    /// As [`Self::exists`], plus a model-without-PK error wrapped
-    /// in `ExecError::Query`.
+    /// As [`Self::exists`], plus an `ExecError::Query` when the model
+    /// has no primary key.
     fn contains_pk(
         self,
         pool: &Pool,
@@ -2306,23 +2030,12 @@ impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
     }
 }
 
-/// `fetch_paginated` against either backend — fetches a page of rows
-/// AND the pre-LIMIT total count in a single SQL round trip via
-/// `COUNT(*) OVER ()`. Bi-dialect counterpart of
-/// [`QuerySet::fetch_paginated_on`].
+/// [`QuerySet::fetch_paginated_on`] on any backend: a page of rows
+/// and the pre-LIMIT total in one round trip, via `COUNT(*) OVER ()`.
+/// An empty result gives `Page { rows: vec![], total: 0 }`.
 ///
-/// Both PG and MySQL 8.0+ support `COUNT(*) OVER ()` window
-/// functions, so the SQL splice is identical across backends — only
-/// the placeholder shape and identifier quoting differ, and those
-/// already come from `pool.dialect()`.
-///
-/// MySQL caveat: `COUNT(*) OVER ()` requires MySQL 8.0+ (window
-/// functions weren't supported pre-8.0). Apps targeting MySQL 5.7
-/// must use a separate `count_rows_pool` + `select_rows_pool`
-/// instead.
-///
-/// Empty result set → `Page { rows: vec![], total: 0 }` (no extra
-/// driver round trip wasted on a separate COUNT).
+/// MySQL needs 8.0 or later for that window function. On MySQL 5.7,
+/// call `count_rows_pool` and `select_rows_pool` separately.
 ///
 /// # Errors
 /// As [`QuerySet::fetch_paginated_on`].
@@ -2367,7 +2080,6 @@ where
             }
             use sqlx::Row as _;
             let raw_rows: Vec<sqlx::mysql::MySqlRow> = q.fetch_all(my).await?;
-            // sqlx-mysql exposes COUNT(*) OVER () as i64 (BIGINT).
             let total: i64 = raw_rows
                 .first()
                 .map(|row| row.try_get::<i64, _>("__rustango_total"))
@@ -2404,23 +2116,15 @@ where
     }
 }
 
-// ====================================================================
-// fetch_with_prefetch_pool family — extracted to prefetch.rs (#116 step 6)
-// ====================================================================
-
 mod prefetch;
 pub use prefetch::{fetch_with_prefetch_filtered, fetch_with_prefetch_pool};
 
-/// `select_rows_pool` with `select_related` join decoding. When the
-/// query carries no joins, behaves identically to [`select_rows_pool`]
-/// (fast `query_as` path). When joins are present, fetches raw rows
-/// and dispatches to `T::__rustango_load_related` (Postgres) or
-/// `T::__rustango_load_related_my` (MySQL) for each join alias.
+/// [`select_rows_pool`] that also decodes `select_related` joins.
+/// With no joins it takes the same fast path. With joins it fetches
+/// raw rows and stitches each join alias onto the decoded model.
 ///
-/// Bound on `T` adds [`LoadRelated`] + [`MaybeMyLoadRelated`] over
-/// [`select_rows_pool`]'s bound — every `#[derive(Model)]` type
-/// satisfies these (FK-less models get empty-arm impls so the trait
-/// bound is universal).
+/// The extra [`LoadRelated`] and [`MaybeMyLoadRelated`] bounds are
+/// satisfied by every `#[derive(Model)]` type.
 ///
 /// # Errors
 /// As [`select_rows_pool`].
@@ -2441,8 +2145,7 @@ where
     crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
     let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
-    // Audit #451 — drive the stitch from leaf aliases so each FK chain
-    // (incl. multi-hop `a__b__c`) is decoded once, recursively.
+    // Stitch from leaf aliases so each FK chain is decoded once.
     let leaves = select_related_leaves(&aliases);
 
     match pool {
@@ -2456,8 +2159,8 @@ where
                 }
                 return Ok(q.fetch_all(pg).await?);
             }
-            // Join path — fetch raw rows so we can both decode T and
-            // stitch each JOIN target via __rustango_load_related.
+            // Join path: fetch raw rows so we can decode T and stitch
+            // each JOIN target from the same row.
             let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
             for v in stmt.params {
                 q = bind_query(q, v);
@@ -2483,8 +2186,6 @@ where
                 }
                 return Ok(q.fetch_all(my).await?);
             }
-            // Join path on MySQL — symmetric with PG arm but routes
-            // through LoadRelatedMy::__rustango_load_related_my.
             let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                 sqlx::query(&stmt.sql);
             for v in stmt.params {
@@ -2536,15 +2237,8 @@ where
     }
 }
 
-/// `QuerySet::fetch` variant that takes `&Pool` — works against
-/// either backend when the model derives `Model` (the macro emits
-/// both `FromRow<PgRow>` and the cfg-gated `FromRow<MySqlRow>`).
-///
-/// `select_related` joins are decoded automatically via
-/// [`LoadRelated`] (PG) and [`MaybeMyLoadRelated`] (MySQL); both
-/// traits are universally implemented on `#[derive(Model)]` types
-/// (FK-less models get empty-arm impls), so the bound is satisfied
-/// without user action.
+/// Gives `QuerySet` a `fetch(&Pool)` method that works on any
+/// backend. `select_related` joins are decoded for you.
 pub trait FetcherPool<T>
 where
     T: Model
@@ -2557,12 +2251,10 @@ where
         + Send
         + Unpin,
 {
-    /// Compile the queryset and run `fetch_all` against either backend.
-    /// Stitches `select_related` joins automatically when the queryset
-    /// declared any.
+    /// Compile the queryset and fetch every matching row.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch`].
+    /// [`ExecError`] for schema, SQL-writing, or driver failures.
     fn fetch(
         self,
         pool: &Pool,
@@ -2587,12 +2279,8 @@ where
     }
 }
 
-// v0.45 — single-row sugar on top of FetcherPool. Each method
-// applies the appropriate `order_by` + `limit(1)` then forwards to
-// `fetch`. All four are inherent methods on `QuerySet<T>` (not
-// trait methods) because adding default methods to `FetcherPool`
-// would require RTN syntax against `Self::Future` and bound shuffling
-// we don't need — `QuerySet<T>` is the only Self that matters.
+// Single-row sugar over `FetcherPool`. Each method sets an
+// `order_by`, adds `limit(1)` and forwards to `fetch`.
 impl<T> crate::query::QuerySet<T>
 where
     T: Model
@@ -2606,12 +2294,8 @@ where
         + Unpin,
 {
     /// Fetch the first row by the current ordering, or `None` when
-    /// the result is empty.
-    ///
-    /// If no `order_by` is set, "first" means "first by primary key
-    /// ASC" — the natural insertion order on Auto<T> PKs and stable
-    /// across drivers. Django's `QuerySet.first()` behaves the same
-    /// way (it falls back to PK ordering for determinism).
+    /// nothing matches. With no `order_by`, it sorts by primary key
+    /// ASC, like Django's `QuerySet.first()`.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2622,11 +2306,9 @@ where
     }
 
     /// Fetch the last row by the current ordering, or `None` when
-    /// the result is empty.
-    ///
-    /// Implemented as "flip every ordering direction, take the first"
-    /// — avoids `OFFSET COUNT(*) - 1` and works on every dialect.
-    /// If no `order_by` is set, sorts by PK DESC.
+    /// nothing matches. It flips every sort direction and takes the
+    /// first row, so no `OFFSET COUNT(*) - 1` is needed. With no
+    /// `order_by`, it sorts by primary key DESC.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2636,11 +2318,9 @@ where
         Ok(rows.into_iter().next())
     }
 
-    /// Fetch the smallest row by `field` (ASC ordering), or `None`
-    /// when the result is empty. Django's `QuerySet.earliest("field")`.
-    ///
-    /// Any previously-set `order_by` is **replaced** — `earliest`
-    /// declares the sort itself.
+    /// Fetch the smallest row by `field`, or `None` when nothing
+    /// matches. Django's `QuerySet.earliest("field")`. It replaces
+    /// any `order_by` already set.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2650,11 +2330,9 @@ where
         Ok(rows.into_iter().next())
     }
 
-    /// Fetch the largest row by `field` (DESC ordering), or `None`
-    /// when the result is empty. Django's `QuerySet.latest("field")`.
-    ///
-    /// Any previously-set `order_by` is **replaced** — `latest`
-    /// declares the sort itself.
+    /// Fetch the largest row by `field`, or `None` when nothing
+    /// matches. Django's `QuerySet.latest("field")`. It replaces any
+    /// `order_by` already set.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2664,28 +2342,19 @@ where
         Ok(rows.into_iter().next())
     }
 
-    /// Eloquent `Builder::find($pk)` — fetch the row matching the
-    /// queryset's accumulated filters **and** the model's PK = `pk`,
-    /// or `None` when no row matches.
-    ///
-    /// Sugar over `self.where_key(pk).first(pool)`. The key
-    /// difference from `Model::find(pk, &pool)` is that this method
-    /// honors **pre-applied scopes** — e.g. a global scope, default
-    /// manager filter, or chained `.filter(...)` calls still narrow
-    /// the lookup. Eloquent's typical pattern:
+    /// Fetch the row with this PK that also matches the queryset's
+    /// filters, or `None`. Unlike `Model::find(pk, &pool)`, the
+    /// filters already on the queryset still apply.
     ///
     /// ```ignore
-    /// // Eloquent: Post::published()->find($id);
-    /// // rustango:
     /// let post = Post::objects()
     ///     .filter("published", true)
     ///     .find(42_i64, &pool).await?;
-    /// // -> Some(post) only when the row with id=42 is *also* published.
+    /// // Some(post) only when row 42 is also published.
     /// ```
     ///
-    /// Models without `#[rustango(primary_key)]` surface as
-    /// [`ExecError::Query(QueryError::UnknownField)`] (field `"<pk>"`)
-    /// via the deferred-error path.
+    /// A model with no primary key gives
+    /// [`ExecError::Query(QueryError::UnknownField)`].
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2693,16 +2362,9 @@ where
         self.where_key(pk).first(pool).await
     }
 
-    /// Eloquent `Builder::firstOrFail()` — fetch the first row by
-    /// the current ordering, or surface
-    /// [`sqlx::Error::RowNotFound`] when the queryset is empty.
-    ///
-    /// Wrapper over [`Self::first`] that converts `None` to an
-    /// error — same shape as the table-wide
-    /// `Model::first_or_fail(&pool)`, but honors **pre-applied
-    /// scopes** (so e.g. `Post::objects().filter("published", true)
-    /// .first_or_fail(&pool)` errors only when no published post
-    /// exists, not when no post exists at all).
+    /// [`Self::first`], but an empty result is an error instead of
+    /// `None`. The queryset's filters still apply, so it fails only
+    /// when nothing matches them.
     ///
     /// # Errors
     /// As [`Self::first`]; additionally
@@ -2715,13 +2377,7 @@ where
         }
     }
 
-    /// Eloquent `Builder::findOrFail($pk)` — scoped PK lookup that
-    /// errors when no row matches. Sugar over
-    /// `self.where_key(pk).first_or_fail(pool)`.
-    ///
-    /// Like [`Self::find`] but errors on miss; like
-    /// [`Self::first_or_fail`] but adds the PK filter.
-    /// Mirrors Eloquent's `Post::published()->findOrFail(\$id)`.
+    /// [`Self::find`], but a miss is an error instead of `None`.
     ///
     /// ```ignore
     /// let post = Post::objects()
@@ -2737,18 +2393,12 @@ where
         self.where_key(pk).first_or_fail(pool).await
     }
 
-    /// Eloquent `Builder::sole()` — fetch the **single** row matching
-    /// this queryset's accumulated filters. Errors when zero match
-    /// ([`sqlx::Error::RowNotFound`]) or more than one matches
-    /// ([`ExecError::MultipleRowsReturned`]).
-    ///
-    /// Scoped counterpart of `Model::sole(col, val, &pool)` — honors
-    /// pre-applied filters / global scopes / chained `.filter(...)`
-    /// calls. Uses `LIMIT 2` so the >1 case is detected without
-    /// scanning the whole result set.
+    /// Fetch the one row matching this queryset. It is an error if
+    /// no row matches ([`sqlx::Error::RowNotFound`]) or if more than
+    /// one does ([`ExecError::MultipleRowsReturned`]). Uses `LIMIT 2`,
+    /// so it does not scan the whole result.
     ///
     /// ```ignore
-    /// // Eloquent: Post::where('slug', $slug)->sole();
     /// let post = Post::objects()
     ///     .filter("slug", "hello-world".to_string())
     ///     .sole(&pool).await?;
@@ -2771,20 +2421,13 @@ where
         }
     }
 
-    /// Django `QuerySet.latest()` — picks the largest row by the
-    /// column set in `Meta.get_latest_by`. The model must declare
-    /// `#[rustango(get_latest_by = "<col>")]`; without it this
-    /// returns [`ExecError::Query`] with a clear pointer at the
-    /// missing attribute. Use [`Self::latest`] when you need to
-    /// pass the field explicitly.
-    ///
-    /// Direction defaults to descending (largest first); the
-    /// attribute's `-`/`+` prefix is honored at macro-parse time
-    /// so a `get_latest_by = "-priority"` reverses the sort.
+    /// Django's `QuerySet.latest()`: the largest row by the column in
+    /// `#[rustango(get_latest_by = "<col>")]`. Use [`Self::latest`]
+    /// to name the field yourself.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch`]; also returns
-    /// [`ExecError::Query`] when `Meta.get_latest_by` is unset.
+    /// As [`FetcherPool::fetch`]; also an error when the model does
+    /// not declare `get_latest_by`.
     pub async fn latest_default(self, pool: &Pool) -> Result<Option<T>, ExecError> {
         let Some((field, attr_desc)) = T::SCHEMA.get_latest_by else {
             return Err(ExecError::Driver(sqlx::Error::Configuration(
@@ -2795,15 +2438,13 @@ where
                 .into(),
             )));
         };
-        // `latest` always sorts descending; the attr's `-` prefix is
-        // a no-op for `latest` (already descending) and inverts for
-        // `earliest`. Match Django's interpretation: the attribute
-        // names the column, and `.latest()` is the "newest" pole.
+        // Like Django: the attribute only names the column, and
+        // `.latest()` is always the descending end.
         let _ = attr_desc;
         self.latest(field, pool).await
     }
 
-    /// Django `QuerySet.earliest()` companion of
+    /// Django's `QuerySet.earliest()`, the other end of
     /// [`Self::latest_default`].
     ///
     /// # Errors
@@ -2821,15 +2462,10 @@ where
         self.earliest(field, pool).await
     }
 
-    /// Issue #23 — Django's `QuerySet.iterator(chunk_size=2000)`.
-    /// Return a chunked iterator over results, fetching `chunk_size`
-    /// rows at a time via `LIMIT N OFFSET M`. Never buffers the full
-    /// result set — apps processing million-row exports can stream
-    /// rows without OOM.
-    ///
-    /// Compiles the queryset eagerly so any schema validation error
-    /// surfaces here rather than mid-stream. The compiled `SelectQuery`
-    /// is then re-issued per chunk with rotating `OFFSET`.
+    /// Django's `QuerySet.iterator(chunk_size)`: read the results
+    /// `chunk_size` rows at a time with `LIMIT N OFFSET M`, so a huge
+    /// export never has to fit in memory. The queryset is compiled
+    /// here, so a schema error surfaces before the first chunk.
     ///
     /// ```ignore
     /// // Two iteration styles, both work:
@@ -2849,57 +2485,38 @@ where
     /// }
     /// ```
     ///
-    /// **Order-by recommended.** `OFFSET` without a stable sort returns
-    /// unpredictable rows across chunks — set `.order_by(&[("pk", …)])`
-    /// before `.iterator()` so each chunk picks up where the previous
-    /// left off. The method doesn't enforce it (some queries
-    /// legitimately want no ordering, e.g. a one-shot drain).
+    /// **Set an order.** Without a stable sort, `OFFSET` returns
+    /// unpredictable rows across chunks. Call
+    /// `.order_by(&[("pk", …)])` first. This is not enforced, since
+    /// some drains do not care about order.
     ///
-    /// **Trade-off vs server-side cursors.** This is a simple
-    /// LIMIT/OFFSET chunker — each chunk re-runs the query with a
-    /// larger offset. On a btree-indexed column with `OFFSET N`,
-    /// Postgres scans the first N rows before returning the (N+1)th,
-    /// so deep pagination is O(n²) total work. For truly streaming
-    /// reads on PG, callers can drop into `transaction()` + the raw
-    /// `sqlx::query(...).fetch(...)` Stream API directly — that uses
-    /// the extended protocol with no offset reseek. The chunker is the
-    /// simple choice that works on every backend.
+    /// **Cost.** Each chunk re-runs the query with a larger offset,
+    /// and the database scans the skipped rows every time, so deep
+    /// paging does O(n²) work. For real streaming on Postgres, use
+    /// `transaction()` with sqlx's `fetch(...)` Stream API. This
+    /// chunker is the simple option that works on every backend.
     ///
-    /// **Concurrent-write hazard.** Each chunk is its own query, so
-    /// rows inserted ahead of the current offset between fetches can
-    /// be skipped, and rows deleted can shift a row down into the
-    /// next chunk and be returned twice. **The chunker API is
-    /// `&Pool`-only — it can't run inside a `&mut Transaction`** —
-    /// so for write-concurrent tables you have to hand-roll the
-    /// LIMIT/OFFSET loop against [`select_rows_on`] inside your
-    /// `pool.begin()` + `SET TRANSACTION ISOLATION LEVEL REPEATABLE
-    /// READ` block. See the cookbook for the boilerplate. For
-    /// read-only / append-only tables (the typical export use case)
-    /// this isn't a concern.
+    /// **Writes can skew the result.** Each chunk is its own query,
+    /// so a row inserted ahead of the offset can be missed, and a
+    /// delete can shift a row into the next chunk and return it
+    /// twice. The chunker only takes a `&Pool`, never a transaction.
+    /// On a table other writers touch, write the LIMIT/OFFSET loop
+    /// yourself against [`select_rows_on`] inside a repeatable-read
+    /// transaction. Read-only or append-only tables are fine.
     ///
-    /// **`select_for_update()` does NOT propagate.** Row locks
-    /// acquired by a `.select_for_update()` call on the queryset are
-    /// released between chunks because each chunk runs in its own
-    /// implicit transaction, and the chunker API doesn't take a
-    /// transaction. Two compromises for a locked drain:
-    ///
-    /// * `.fetch_on(&mut *tx)` — single round trip, returns full
-    ///   `Vec<T>`; fine when the result fits in memory.
-    /// * Hand-roll LIMIT/OFFSET inside the tx via [`select_rows_on`]
-    ///   — same shape as the snapshot-isolation pattern; streams
-    ///   chunks but outside the [`ChunkedIter`] API.
-    ///
-    /// A future `iterator_on(&mut *tx, chunk_size)` companion would
-    /// close this gap; not in scope for issue #23.
+    /// **`select_for_update()` is lost.** Each chunk runs in its own
+    /// implicit transaction, so row locks are released between
+    /// chunks. For a locked drain, either use `.fetch_on(&mut *tx)`
+    /// when the result fits in memory, or run your own LIMIT/OFFSET
+    /// loop inside the transaction.
     ///
     /// # Errors
-    /// Returns [`QueryError`] if the queryset fails to compile.
+    /// [`QueryError`](crate::core::QueryError) if the queryset fails
+    /// to compile.
     ///
     /// # Panics
-    /// If `chunk_size <= 0`. Zero or negative chunk sizes silently
-    /// yield no rows, which is almost always a programmer error
-    /// (e.g. `iterator(unchecked_user_input as i64)`); the assert
-    /// surfaces it loudly.
+    /// If `chunk_size <= 0`. Such a size would silently yield no
+    /// rows, which is almost always a bug.
     pub fn iterator(self, chunk_size: i64) -> Result<ChunkedIter<T>, crate::core::QueryError> {
         assert!(
             chunk_size > 0,
@@ -2917,30 +2534,23 @@ where
         })
     }
 
-    /// Issue #24 — Django's `Model.objects.in_bulk(ids, field_name=)`:
-    /// fetch a set of rows by a column value list and return them
-    /// keyed by that column in a `HashMap`.
+    /// Django's `Model.objects.in_bulk(ids, field_name=)`: fetch rows
+    /// by a list of column values and return them in a `HashMap`
+    /// keyed by that column.
     ///
-    /// `column` is a typed [`crate::core::Column`] reference (e.g.
-    /// `User::id` or `Book::isbn`) so the filter column is checked
-    /// against the model at compile time. `ids` is an iterable of
-    /// values — the SQL becomes `… WHERE <column> IN ($1, $2, …)`.
-    /// `extract` reads the key off each fetched row so the map can be
-    /// built without re-decoding the column from the raw `sqlx::Row`
-    /// (a closure also gives callers full control over `Auto<T>` /
-    /// `ForeignKey<T, K>` unwrap shape).
+    /// `column` is a typed [`crate::core::Column`], so the compiler
+    /// checks it against the model. The SQL becomes
+    /// `… WHERE <column> IN (…)`. `extract` reads the key off each
+    /// fetched row, which also lets you choose how to unwrap
+    /// `Auto<T>` or `ForeignKey<T, K>`.
     ///
-    /// Empty `ids` short-circuits with an empty `HashMap` — no SQL is
-    /// issued, sidestepping `Op::In` with an empty list (which the
-    /// writer rejects with [`crate::sql::SqlError::EmptyInList`]).
+    /// An empty `ids` returns an empty map and runs no SQL.
     ///
     /// ```ignore
     /// use std::collections::HashMap;
     /// use rustango::sql::Auto;
     ///
-    /// // Default — keyed by the Auto<i64> PK. The closure handles
-    /// // Auto::Set unwrap (every fetched row has an `Auto::Set`
-    /// // value; `Auto::Unset` would be a programming error).
+    /// // Keyed by the Auto<i64> PK. A fetched row is always Set.
     /// let books: HashMap<i64, Book> = Book::objects()
     ///     .in_bulk(Book::id, [1_i64, 2, 3], |b| match b.id {
     ///         Auto::Set(v) => v,
@@ -2948,16 +2558,14 @@ where
     ///     }, &pool)
     ///     .await?;
     ///
-    /// // `field_name=` equivalent — key by any unique column.
+    /// // Or key by any other unique column.
     /// let books_by_isbn: HashMap<String, Book> = Book::objects()
     ///     .in_bulk(Book::isbn, ["isbn-1", "isbn-2"], |b| b.isbn.clone(), &pool)
     ///     .await?;
     /// ```
     ///
-    /// When the result contains multiple rows sharing the same key
-    /// (only possible if `column` is not unique), the *later* row
-    /// wins — matches `HashMap::insert` semantics. Pair with a
-    /// unique column to avoid surprises.
+    /// If two rows share a key, which only happens on a non-unique
+    /// column, the later row wins. Prefer a unique column.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -2974,10 +2582,8 @@ where
         I: IntoIterator<Item = K>,
         F: Fn(&T) -> K,
     {
-        // `column` is consumed only to thread the `Column<Model = T>`
-        // bound — its `COLUMN` const drives the WHERE filter below.
-        // Discarding the value keeps the ZST instance from triggering
-        // an unused-variable warning.
+        // `column` only carries the `Column<Model = T>` bound; the
+        // filter below uses its `COLUMN` const.
         let _ = column;
         let id_values: Vec<crate::core::SqlValue> = ids.into_iter().map(|v| v.into()).collect();
         if id_values.is_empty() {
@@ -3003,11 +2609,9 @@ where
 mod get_or_create;
 pub use get_or_create::{get_or_create, update_or_create};
 
-/// v0.45 helper — ensure the queryset has *some* deterministic
-/// ordering before slicing to one row. Used by `first` and
-/// `last`. If the caller already provided an `order_by`, we
-/// either keep it (forward) or flip every direction (reverse). If
-/// they didn't, we fall back to the model's primary key.
+/// Give the queryset a deterministic order before taking one row.
+/// An existing `order_by` is kept, or flipped when `reverse`;
+/// otherwise the model's primary key is used.
 fn ensure_pk_ordering<T: Model>(
     qs: crate::query::QuerySet<T>,
     reverse: bool,
@@ -3017,10 +2621,8 @@ fn ensure_pk_ordering<T: Model>(
         if let Some(pk_col) = pk {
             return qs.replace_order_by(&[(pk_col, reverse)]);
         }
-        // No PK on this model — leave the order_by empty. The caller
-        // is going to get a row deterministic-by-row-order, which is
-        // dialect-defined but stable enough for the no-pk-no-order
-        // edge case.
+        // No PK: leave the order empty and take whatever row the
+        // dialect returns first.
         qs
     } else if reverse {
         qs.flip_order_by()
@@ -3029,15 +2631,8 @@ fn ensure_pk_ordering<T: Model>(
     }
 }
 
-/// `QuerySet::fetch` variant that takes `&mut PoolTx` — executes the
-/// SELECT inside an open transaction so the read and subsequent writes
-/// share the same transaction boundary.
-///
-/// Mirrors [`FetcherPool`] but routes through
-/// [`select_rows_tx_with_related`] instead of
-/// [`select_rows_pool_with_related`]. All model types that derive
-/// `Model` automatically satisfy the bounds (`#[derive(Model)]` emits
-/// both PG and cfg-gated MySQL/SQLite `FromRow` impls).
+/// [`FetcherPool`] for an open transaction, so a read and the writes
+/// that follow it share one transaction.
 pub trait FetcherTx<T>
 where
     T: Model
@@ -3050,8 +2645,8 @@ where
         + Send
         + Unpin,
 {
-    /// Compile the queryset and run `fetch_all` against the open
-    /// transaction. Stitches `select_related` joins automatically.
+    /// Compile the queryset and fetch every matching row inside the
+    /// open transaction.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
@@ -3089,11 +2684,8 @@ mod pool_dispatch_tests {
     #[allow(unused_imports)]
     use super::*;
 
-    /// Smoke test: a `Pool::Mysql` from a `connect_lazy` handle picks
-    /// the MySQL dialect when compiling, so a `count_rows_pool` call
-    /// would ship MySQL-shape SQL (backticks + `?`). We can't actually
-    /// execute without a live DB, but we can confirm the dispatch
-    /// finds the right compiler via `pool.dialect()`.
+    /// A `Pool::Mysql` must pick the MySQL dialect, so the SQL it
+    /// ships uses backticks and `?`. No live DB needed.
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn mysql_pool_dispatch_uses_mysql_dialect() {
@@ -3102,16 +2694,13 @@ mod pool_dispatch_tests {
             .connect_lazy("mysql://user:pass@localhost:1/none")
             .unwrap();
         let pool: Pool = my.into();
-        // Confirm the dispatch path's compile step is routed to the
-        // MySQL dialect — this is what protects against regressions
-        // where a future refactor accidentally hard-codes Postgres.
+        // Guards against a refactor hard-coding Postgres.
         assert_eq!(pool.dialect().name(), "mysql");
         assert_eq!(pool.dialect().quote_ident("col"), "`col`");
         assert_eq!(pool.dialect().placeholder(1), "?");
     }
 
-    /// Same shape for Postgres — confirms the dispatch matrix has
-    /// both arms reachable via the public `Pool` enum.
+    /// The same for Postgres: both arms of the dispatch are reachable.
     #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_pool_dispatch_uses_postgres_dialect() {
@@ -3126,22 +2715,19 @@ mod pool_dispatch_tests {
     }
 
     /// Compile-time guard for the `MaybeMyFromRow` blanket impl.
-    /// `()` implements `FromRow<R>` for any `R` in sqlx, so it
-    /// satisfies the bound under both feature configs and is the
-    /// safest universal probe. The integration test
-    /// `tests/mysql_from_row.rs` covers the `#[derive(Model)]`
-    /// emission end-to-end.
+    /// `()` implements sqlx's `FromRow<R>` for any `R`, so it is the
+    /// safest probe under either feature set.
     #[test]
     fn maybe_my_from_row_resolves_for_unit_type() {
         fn check<T: super::MaybeMyFromRow>() {}
         check::<()>();
     }
 
-    /// Audit #451 — `select_related_leaves` reduces join aliases to the
-    /// deepest in each FK chain, paired with the first-hop alias.
+    /// `select_related_leaves` reduces join aliases to the deepest in
+    /// each FK chain, paired with the first-hop alias.
     #[test]
     fn select_related_leaves_keeps_deepest_chain_aliases() {
-        // Single-hop FKs: (alias, alias) — bit-identical to pre-#451.
+        // Single-hop FKs come back as (alias, alias).
         assert_eq!(
             super::select_related_leaves(&["author", "editor"]),
             vec![("author", "author"), ("editor", "editor")],
@@ -3161,8 +2747,8 @@ mod pool_dispatch_tests {
             super::select_related_leaves(&["editor", "author", "author__profile"]),
             vec![("editor", "editor"), ("author__profile", "author")],
         );
-        // String-prefix collision that is NOT a `__` boundary must keep
-        // both (e.g. `author` vs `authorship` — not a parent/child).
+        // A shared prefix without a `__` boundary keeps both:
+        // `authorship` is not a child of `author`.
         assert_eq!(
             super::select_related_leaves(&["author", "authorship"]),
             vec![("author", "author"), ("authorship", "authorship")],

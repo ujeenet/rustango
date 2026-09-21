@@ -1,8 +1,9 @@
-//! Typed environment variable readers — pydantic-settings / django-environ shape.
+//! Typed readers for environment variables, in the shape of
+//! django-environ or pydantic-settings.
 //!
-//! Reads `std::env::var` and parses the value into the target type. Returns
-//! `Result` so missing or malformed values surface explicitly at startup
-//! rather than silently defaulting in handlers.
+//! Each reader parses `std::env::var` into the type you ask for and
+//! returns a `Result`, so a missing or bad value fails at startup
+//! instead of quietly defaulting inside a handler.
 //!
 //! ## Quick start
 //!
@@ -43,13 +44,13 @@ pub enum EnvError {
         ty: &'static str,
         detail: String,
     },
-    /// Required env var missing during structured assembly (e.g.
-    /// [`database_url_from_env`]). Carries a `hint` so the operator
-    /// sees what to set, not just what's missing.
+    /// A variable needed to assemble a value (see
+    /// [`database_url_from_env`]) is unset. The `hint` tells the
+    /// operator what to set.
     #[error("environment variable `{name}` is required: {hint}")]
     MissingRequired { name: String, hint: String },
-    /// `DB_DRIVER` (or sniffed `DATABASE_URL` scheme) wasn't a
-    /// recognized backend.
+    /// `DB_DRIVER`, or the scheme read from `DATABASE_URL`, is not a
+    /// backend we support.
     #[error("unsupported DB driver `{0}` — expected one of: postgres, postgresql, mysql")]
     UnsupportedDriver(String),
 }
@@ -83,8 +84,9 @@ where
 /// Read an env var, returning `default` when unset.
 ///
 /// # Errors
-/// [`EnvError::Parse`] if the variable IS set but can't be parsed into `T`.
-/// (A typo'd value is more dangerous than a missing one — surface it.)
+/// [`EnvError::Parse`] if the variable is set but does not parse into
+/// `T`. A typo is reported rather than replaced by the default,
+/// because a wrong value is more dangerous than a missing one.
 pub fn with_default<T>(name: &str, default: T) -> Result<T, EnvError>
 where
     T: FromStr,
@@ -119,10 +121,9 @@ where
     })
 }
 
-/// Read a comma-separated env var into a `Vec<T>`.
-///
-/// Empty entries (e.g. trailing comma) are dropped. Returns `None` when
-/// the variable is unset.
+/// Read a comma-separated env var into a `Vec<T>`. Empty entries,
+/// such as the one a trailing comma makes, are dropped. Gives `None`
+/// when the variable is unset.
 ///
 /// # Errors
 /// [`EnvError::Parse`] if any entry can't be parsed into `T`.
@@ -146,7 +147,7 @@ where
     Ok(Some(out))
 }
 
-/// Read an env var as a `Duration` interpreting the value as seconds.
+/// Read an env var as a `Duration`, reading the value as seconds.
 ///
 /// # Errors
 /// [`EnvError::Missing`] when unset.
@@ -156,7 +157,7 @@ pub fn duration_secs(name: &str) -> Result<Duration, EnvError> {
     Ok(Duration::from_secs(secs))
 }
 
-/// Read an env var as a `Duration` interpreting the value as milliseconds.
+/// Read an env var as a `Duration`, reading the value as milliseconds.
 ///
 /// # Errors
 /// As [`duration_secs`].
@@ -175,10 +176,11 @@ pub struct EnvRequirement {
     pub required: bool,
 }
 
-/// Validator that collects required env vars and reports ALL missing ones at once.
+/// Collects the env vars an app needs and reports every missing one
+/// at once.
 ///
-/// Use during `Builder::serve(...)` startup so misconfigurations surface as
-/// a single clear error message instead of crashing on the first DB call.
+/// Run it at startup so a bad config gives one clear message instead
+/// of a crash on the first DB call.
 ///
 /// ## Quick start
 ///
@@ -213,7 +215,8 @@ impl Validator {
         self
     }
 
-    /// Add an optional env var (logged as a hint when absent, not a failure).
+    /// Add an optional env var. Missing ones are listed as a hint,
+    /// not a failure.
     #[must_use]
     pub fn optional(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
         self.reqs.push(EnvRequirement {
@@ -224,8 +227,8 @@ impl Validator {
         self
     }
 
-    /// Run validation. Returns names of missing REQUIRED vars (empty when all set).
-    /// Optional vars are not in the failure list.
+    /// Return the required vars that are unset. Optional ones are
+    /// never included.
     #[must_use]
     pub fn check(&self) -> Vec<&EnvRequirement> {
         self.reqs
@@ -234,11 +237,11 @@ impl Validator {
             .collect()
     }
 
-    /// Run validation and return `Err(message)` listing every missing required var.
-    /// The message is formatted as a multi-line shell-runnable hint block.
+    /// Like [`Self::check`], but returns a ready-to-print message
+    /// listing each missing var and an `export` line for it.
     ///
     /// # Errors
-    /// Returns the formatted error message when any required vars are missing.
+    /// The formatted message, when a required var is missing.
     pub fn check_or_error(&self) -> Result<(), String> {
         let missing = self.check();
         if missing.is_empty() {
@@ -255,11 +258,11 @@ impl Validator {
         Err(out)
     }
 
-    /// Run validation and panic with a multi-line message if any required
-    /// vars are missing. Suitable for `Builder::serve(...)` startup.
+    /// Like [`Self::check_or_error`], but panics with the message.
+    /// Meant for startup.
     ///
     /// # Panics
-    /// Panics with a formatted message when any required vars are missing.
+    /// When a required var is missing.
     pub fn check_or_panic(&self) {
         if let Err(msg) = self.check_or_error() {
             panic!("{msg}");
@@ -289,9 +292,8 @@ pub enum DbDriver {
 }
 
 impl DbDriver {
-    /// Canonical scheme as it appears in the URL (`"postgres"` /
-    /// `"mysql"`). `postgresql://` is accepted on parse but normalized
-    /// to `postgres://` here.
+    /// The scheme as it appears in the URL: `"postgres"` or
+    /// `"mysql"`. `postgresql` parses, but comes back as `postgres`.
     #[must_use]
     pub fn scheme(self) -> &'static str {
         match self {
@@ -318,13 +320,13 @@ impl DbDriver {
     }
 }
 
-/// Builder for a database URL assembled from individual fields.
+/// Builds a database URL from separate fields.
 ///
-/// Used by [`database_url_from_env`] when `DATABASE_URL` is unset and
-/// the connection details are split across `DB_HOST` / `DB_USER` etc.
-/// Passwords are percent-encoded automatically so `@`, `:`, `/`, `#`,
-/// `?`, `%`, and other URL-special characters in passwords don't
-/// corrupt the URL.
+/// [`database_url_from_env`] uses it when `DATABASE_URL` is unset and
+/// the details come from `DB_HOST`, `DB_USER` and friends. The user
+/// and password are percent-encoded, so `@`, `:`, `/`, `#`, `?`, `%`
+/// and other URL-special characters in a password cannot break the
+/// URL apart.
 ///
 /// ```ignore
 /// use rustango::env::{DatabaseUrlBuilder, DbDriver};
@@ -387,18 +389,17 @@ impl DatabaseUrlBuilder {
         self.database = Some(database.into());
         self
     }
-    /// Raw query string appended after `?` (e.g.
-    /// `"sslmode=require&application_name=app"`). Caller is
-    /// responsible for percent-encoding inside `params`.
+    /// Raw query string put after `?`, such as
+    /// `"sslmode=require&application_name=app"`. You must
+    /// percent-encode it yourself; this builder does not.
     #[must_use]
     pub fn params(mut self, params: impl Into<String>) -> Self {
         self.params = Some(params.into());
         self
     }
 
-    /// Assemble the URL. Always emits `scheme://[user[:pw]@]host:port[/db][?params]`.
-    /// Host defaults to `localhost`; port defaults to the driver's default
-    /// when the field is unset.
+    /// Build `scheme://[user[:pw]@]host:port[/db][?params]`. Host
+    /// falls back to `localhost` and port to the driver's default.
     #[must_use]
     pub fn build(&self) -> String {
         let scheme = self.driver.scheme();
@@ -433,11 +434,11 @@ impl DatabaseUrlBuilder {
 /// Resolve a database URL from environment variables.
 ///
 /// Resolution order:
-/// 1. `DATABASE_URL` if set — returned verbatim (driver sniffed from
-///    scheme; `postgresql://` → `postgres://`).
+/// 1. `DATABASE_URL` if set. It is returned as given, except that
+///    `postgresql://` becomes `postgres://`.
 /// 2. Otherwise assembled from:
-///    - `DB_DRIVER` (default `postgres`) — one of `postgres` /
-///      `postgresql` / `mysql` / `mariadb`.
+///    - `DB_DRIVER` (default `postgres`): one of `postgres`,
+///      `postgresql`, `mysql`, `mariadb`.
 ///    - `DB_HOST` (default `localhost`)
 ///    - `DB_PORT` (default `5432` for postgres, `3306` for mysql)
 ///    - `DB_USER` (**required** when assembling)
@@ -446,14 +447,13 @@ impl DatabaseUrlBuilder {
 ///    - `DB_PARAMS` (optional raw query string)
 ///
 /// # Errors
-/// - [`EnvError::MissingRequired`] when assembling and `DB_USER` /
-///   `DB_NAME` are unset.
-/// - [`EnvError::UnsupportedDriver`] when `DB_DRIVER` isn't recognized.
-/// - [`EnvError::Parse`] if `DB_PORT` is set to something non-numeric.
+/// - [`EnvError::MissingRequired`] when assembling without `DB_USER`
+///   or `DB_NAME`.
+/// - [`EnvError::UnsupportedDriver`] for an unknown `DB_DRIVER`.
+/// - [`EnvError::Parse`] when `DB_PORT` is not a number.
 pub fn database_url_from_env() -> Result<String, EnvError> {
     if let Some(url) = lookup("DATABASE_URL") {
-        // Normalize `postgresql://` → `postgres://` so callers can
-        // match on a single scheme downstream.
+        // One scheme downstream, so callers match on `postgres://`.
         if let Some(rest) = url.strip_prefix("postgresql://") {
             return Ok(format!("postgres://{rest}"));
         }
@@ -487,10 +487,10 @@ pub fn database_url_from_env() -> Result<String, EnvError> {
     Ok(b.build())
 }
 
-/// RFC 3986 percent-encode for the *userinfo* component (user / password).
-/// Encodes everything outside the unreserved set + `-._~`. Conservative —
-/// we'd rather over-encode than risk a `@` or `:` in a password breaking
-/// the URL parser on the other end.
+/// RFC 3986 percent-encoding for the userinfo part (user and
+/// password). Everything outside the unreserved set is encoded. This
+/// over-encodes on purpose: a `@` or `:` left raw in a password would
+/// change how the other side parses the URL.
 fn percent_encode_userinfo(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
@@ -505,9 +505,7 @@ fn percent_encode_userinfo(s: &str) -> String {
     out
 }
 
-/// Percent-encode for the *path* component. More permissive than
-/// userinfo — `/` is the segment separator so we leave it alone in
-/// the rare case someone names a DB with a `/` (they shouldn't).
+/// Percent-encoding for the path part, used for the database name.
 fn percent_encode_path(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
@@ -538,7 +536,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Serialize env-var tests so they don't trample each other
+    // Env vars are process-global, so these tests run one at a time.
     fn env_lock() -> &'static Mutex<()> {
         static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
         M.get_or_init(|| Mutex::new(()))
@@ -669,7 +667,7 @@ mod tests {
 
     #[test]
     fn validator_check_passes_when_all_required_set() {
-        // Set two vars without nesting with_env — nested locks would deadlock
+        // Set both vars inline: nesting `with_env` would deadlock.
         let _g = env_lock().lock().unwrap();
         std::env::set_var("RUSTANGO_TEST_VALID_DB", "x");
         std::env::set_var("RUSTANGO_TEST_VALID_KEY", "y");
@@ -784,10 +782,8 @@ mod tests {
         ));
     }
 
-    /// Drop-guard that restores or unsets a list of env vars on exit.
-    /// Lets a test capture and restore the *original* state — important
-    /// because the test process might already have e.g. `DATABASE_URL`
-    /// set by the developer's shell.
+    /// Drop guard that puts a set of env vars back as it found them.
+    /// The developer's shell may already export `DATABASE_URL`.
     struct EnvSnapshot {
         saved: Vec<(&'static str, Option<String>)>,
     }

@@ -1,17 +1,16 @@
-//! Generic API key generation and verification.
+//! Create and check API keys.
 //!
-//! For the tenancy-integrated version (with DB-backed `rustango_api_keys`
-//! table + `ApiKeyBackend`), see [`crate::tenancy::auth_backends`]. This
-//! module is the lower-level standalone helper for apps that want to
-//! manage API keys themselves.
+//! This is the standalone helper. If you want keys stored and
+//! checked for you, see [`crate::tenancy::auth_backends`].
 //!
 //! ## Format
 //!
-//! API keys are `{prefix}.{secret}`:
-//! - `prefix` — 8-char hex, public. Stored alongside the hash so you can
-//!   look up the key in O(1) without a full table scan.
-//! - `secret` — 32-char hex, kept secret. Hashed with argon2id; the
-//!   plaintext is only available at creation time.
+//! A key is `{prefix}.{secret}`:
+//! - `prefix` — 8 hex chars, public. Index it so you can find the
+//!   row without scanning the table.
+//! - `secret` — 32 hex chars. Never store it. Store only the
+//!   argon2id hash, and show the plaintext to the user once, at
+//!   creation.
 //!
 //! ## Quick start
 //!
@@ -41,17 +40,17 @@ pub enum ApiKeyError {
     Verify(String),
 }
 
-/// Generate a fresh API key. Returns `(full_token, prefix, hash)`:
-/// - `full_token` — `{prefix}.{secret}` to give to the user
-/// - `prefix` — 8-char hex prefix for the lookup column
-/// - `hash` — argon2id hash of the secret for the password column
+/// Make a new API key. Returns `(full_token, prefix, hash)`.
+///
+/// Give `full_token` to the user. Store only `prefix` and `hash`;
+/// storing the token would let anyone who reads your database use
+/// the key.
 ///
 /// # Errors
-/// [`ApiKeyError::Hash`] on argon2 failures (extremely rare).
+/// [`ApiKeyError::Hash`] if argon2 fails, which is very rare.
 pub fn generate_key() -> Result<(String, String, String), ApiKeyError> {
-    // v0.30.12 — use OsRng directly. Cryptographic secret bytes
-    // for the user's bearer token; consistent with the rest of
-    // the framework (csrf.rs / passwords.rs / session.rs).
+    // `OsRng`: these bytes are a bearer token, so they need a
+    // cryptographic source.
     let mut prefix_bytes: [u8; 4] = [0; 4];
     OsRng.fill_bytes(&mut prefix_bytes);
     let prefix = to_hex(&prefix_bytes);
@@ -63,11 +62,12 @@ pub fn generate_key() -> Result<(String, String, String), ApiKeyError> {
     Ok((token, prefix, hash))
 }
 
-/// Hash a secret with argon2id. Returns the standard PHC string format
-/// (`$argon2id$v=19$...`) suitable for storing in a varchar column.
+/// Hash a secret with argon2id. The result is a PHC string
+/// (`$argon2id$v=19$...`) that fits a varchar column. Store this,
+/// never the secret.
 ///
 /// # Errors
-/// [`ApiKeyError::Hash`] on argon2 failures.
+/// [`ApiKeyError::Hash`] if argon2 fails.
 pub fn hash_secret(secret: &str) -> Result<String, ApiKeyError> {
     use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
     use argon2::Argon2;
@@ -80,10 +80,15 @@ pub fn hash_secret(secret: &str) -> Result<String, ApiKeyError> {
         .map_err(|e| ApiKeyError::Hash(e.to_string()))
 }
 
-/// Verify a plaintext secret against a stored argon2 hash.
+/// Check a plaintext secret against a stored argon2 hash. Always
+/// compare this way: argon2 does the compare in constant time, so
+/// it does not leak the hash through timing. Never use `==`.
 ///
-/// Returns `Ok(true)` for a match, `Ok(false)` for a mismatch, `Err`
-/// when the stored hash isn't a valid argon2 PHC string.
+/// `Ok(true)` means the secret matches.
+///
+/// # Errors
+/// [`ApiKeyError::Verify`] if `stored_hash` is not a valid argon2
+/// PHC string.
 pub fn verify_key(secret: &str, stored_hash: &str) -> Result<bool, ApiKeyError> {
     use argon2::password_hash::{PasswordHash, PasswordVerifier};
     use argon2::Argon2;
@@ -94,7 +99,7 @@ pub fn verify_key(secret: &str, stored_hash: &str) -> Result<bool, ApiKeyError> 
         .is_ok())
 }
 
-/// Split a `{prefix}.{secret}` token. Returns `None` for malformed input.
+/// Split a `{prefix}.{secret}` token, or `None` if it is malformed.
 #[must_use]
 pub fn split_token(token: &str) -> Option<(&str, &str)> {
     let (prefix, secret) = token.split_once('.')?;

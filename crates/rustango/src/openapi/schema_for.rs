@@ -1,16 +1,15 @@
-//! `OpenApiSchema` trait + blanket impls for primitives, std types,
-//! chrono date/time, uuid, and serde_json::Value.
+//! The `OpenApiSchema` trait, with impls for primitives, std types,
+//! chrono dates and times, uuid and `serde_json::Value`.
 //!
-//! `#[derive(Serializer)]` emits `impl OpenApiSchema for YourSerializer`
-//! when the `openapi` feature is on (forwarded through the macro crate).
-//! That impl walks the struct fields and assembles a [`Schema::object`]
-//! with each field's schema looked up via this trait. Primitive fields
-//! "just work" because of the blanket impls below.
+//! With the `openapi` feature on, `#[derive(Serializer)]` implements
+//! this trait for your serializer. That impl walks the fields and
+//! builds a [`Schema::object`], looking up each field's schema
+//! through this trait. Primitive fields need nothing from you,
+//! because of the impls below.
 //!
-//! ## Adding your own types
+//! ## Your own types
 //!
-//! Implement [`OpenApiSchema`] manually for any custom field type used
-//! in a serializer:
+//! Implement [`OpenApiSchema`] for any other field type you use:
 //!
 //! ```ignore
 //! struct Money { cents: i64 }
@@ -29,19 +28,19 @@ use indexmap::IndexMap;
 
 use super::Schema;
 
-/// Map a Rust type to its OpenAPI / JSON Schema fragment.
+/// Maps a Rust type to its JSON Schema fragment.
 ///
-/// Implemented automatically by `#[derive(Serializer)]` for serializer
-/// structs (when the `openapi` feature is on). Implement manually for
-/// any custom field type used in a serializer.
+/// `#[derive(Serializer)]` implements it for serializer structs when
+/// the `openapi` feature is on. Implement it yourself for any other
+/// field type.
 pub trait OpenApiSchema {
-    /// Return the schema describing JSON of this type.
+    /// The schema for this type's JSON form.
     fn openapi_schema() -> Schema;
 }
 
-// Helper: create a [`Schema`] from a Serializer type without naming the trait.
 impl Schema {
-    /// Shortcut: `Schema::for_serializer::<MySerializer>()`.
+    /// Get a type's schema without importing the trait:
+    /// `Schema::for_serializer::<MySerializer>()`.
     #[must_use]
     pub fn for_serializer<S: OpenApiSchema>() -> Schema {
         S::openapi_schema()
@@ -117,13 +116,13 @@ impl OpenApiSchema for char {
 }
 
 // =====================================================================
-// Container types (transparent forwarding for Option/Vec/Box/etc)
+// Containers: Option, Vec, Box and friends forward to the inner type
 // =====================================================================
 
 impl<T: OpenApiSchema> OpenApiSchema for Option<T> {
-    /// `Option<T>` returns the inner schema. The macro adds `.nullable()`
-    /// itself so the produced schema reflects that the field can be null.
-    /// Doing it here too would double-mark.
+    /// `Option<T>` gives the inner schema unchanged. The macro adds
+    /// `.nullable()` at the property, so doing it here would mark it
+    /// twice.
     fn openapi_schema() -> Schema {
         T::openapi_schema()
     }
@@ -159,11 +158,10 @@ impl<T: OpenApiSchema> OpenApiSchema for std::sync::Arc<T> {
     }
 }
 
-/// `Auto<T>` represents a server-assigned value (`SERIAL` /
-/// `BIGSERIAL` / `gen_random_uuid()` / DB DEFAULT NOW()) — clients
-/// don't supply it on create, but it's always present on read. The
-/// schema mirrors `T`. Surfaced when `#[derive(Serializer)]` runs
-/// against any model that uses `Auto<T>`.
+/// `Auto<T>` holds a value the database assigns, from `SERIAL`,
+/// `gen_random_uuid()` or a column default. A client never sends it
+/// on create, but it is always there on read, so the schema is just
+/// `T`'s.
 impl<T: OpenApiSchema> OpenApiSchema for crate::sql::Auto<T> {
     fn openapi_schema() -> Schema {
         T::openapi_schema()
@@ -195,7 +193,7 @@ impl<V: OpenApiSchema> OpenApiSchema for IndexMap<String, V> {
 }
 
 // =====================================================================
-// chrono / uuid / serde_json — always-on workspace deps
+// chrono, uuid and serde_json, which are always compiled in
 // =====================================================================
 
 impl OpenApiSchema for chrono::DateTime<chrono::Utc> {
@@ -233,7 +231,7 @@ impl OpenApiSchema for uuid::Uuid {
 }
 
 impl OpenApiSchema for serde_json::Value {
-    /// Free-form JSON — any shape is allowed.
+    /// Any JSON at all.
     fn openapi_schema() -> Schema {
         Schema::default()
     }
@@ -278,8 +276,8 @@ mod tests {
 
     #[test]
     fn option_passes_through_inner() {
-        // The `.nullable()` modifier is added by the macro at the
-        // property site, not here, so the inner schema is unchanged.
+        // The macro adds `.nullable()` at the property, so the inner
+        // schema comes back unchanged.
         let v = type_of::<Option<String>>();
         assert_eq!(v["type"], "string");
         assert!(v.get("nullable").is_none());

@@ -48,8 +48,7 @@ use axum::Router;
 /// Origin matching policy.
 #[derive(Clone, Debug)]
 pub enum AllowOrigin {
-    /// Echo back any incoming `Origin` (sets `Access-Control-Allow-Origin: *`
-    /// when no specific origin is sent — request-aware reflection).
+    /// Accept any origin. Sends `Access-Control-Allow-Origin: *`.
     Any,
     /// Allow only origins in this list (case-insensitive exact match).
     List(Arc<Vec<String>>),
@@ -73,8 +72,8 @@ impl Default for CorsLayer {
 }
 
 impl CorsLayer {
-    /// Empty CORS layer — no origins allowed by default. Configure with
-    /// `allow_origins` / `allow_any_origin`.
+    /// Empty layer: no origin is allowed. Add some with
+    /// `allow_origins` or `allow_any_origin`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -87,8 +86,8 @@ impl CorsLayer {
         }
     }
 
-    /// Wide-open development config: any origin, common methods, common
-    /// headers. **Do not use in production.**
+    /// Development config: any origin, plus the common methods and
+    /// headers. **Do not use it in production.**
     #[must_use]
     pub fn permissive() -> Self {
         Self {
@@ -101,9 +100,8 @@ impl CorsLayer {
                 "DELETE".into(),
                 "HEAD".into(),
                 "OPTIONS".into(),
-                // RFC 10008 — QUERY always triggers a preflight (never
-                // CORS-safelisted), so it must be advertised here to work
-                // cross-origin.
+                // QUERY is never CORS-safelisted, so it always needs a
+                // preflight and must be listed here.
                 "QUERY".into(),
             ],
             allow_headers: vec!["*".into()],
@@ -125,14 +123,11 @@ impl CorsLayer {
         self
     }
 
-    /// Allow any origin (echoes the incoming Origin back).
+    /// Allow any origin.
     ///
-    /// v0.30.12 (security audit) — emits a `tracing::warn!` if
-    /// credentials are already enabled. Browsers reject `*` with
-    /// credentials, and while the framework works around this by
-    /// echoing the Origin per-request, preflights without an
-    /// Origin header fail. Build with an explicit allowlist
-    /// (`.allow_origins([...])`) for credentialed CORS.
+    /// This warns if credentials are already on. Browsers reject `*`
+    /// together with credentials. For credentialed CORS, list the
+    /// origins with `.allow_origins([...])` instead.
     #[must_use]
     pub fn allow_any_origin(mut self) -> Self {
         self.allow_origin = AllowOrigin::Any;
@@ -146,20 +141,16 @@ impl CorsLayer {
         self
     }
 
-    /// Build the layer from a loaded
-    /// [`crate::config::SecuritySettings`] section (#87 wiring,
-    /// v0.29). Three branches:
+    /// Build the layer from a [`crate::config::SecuritySettings`]
+    /// section:
     ///
-    /// - `cors_allowed_origins` empty → returns `None`. CORS is
-    ///   opt-in; an empty list means "don't mount the layer at
-    ///   all" (different from "allow zero origins").
-    /// - List contains `"*"` → returns
-    ///   `Some(Self::permissive())`. Wildcard is the canonical way
-    ///   to write "any origin" in TOML; it maps to the existing
-    ///   permissive preset.
-    /// - Specific origins → returns `Some` with allowlist + the
-    ///   common methods/headers most APIs need. Callers that want
-    ///   tighter control build their own layer.
+    /// - `cors_allowed_origins` empty gives `None`. CORS is opt-in,
+    ///   so an empty list means "do not mount the layer", which is
+    ///   not the same as "allow no origin".
+    /// - A list holding `"*"` gives [`Self::permissive`].
+    /// - Named origins give an allowlist plus the methods and
+    ///   headers most APIs need. For tighter control, build the
+    ///   layer yourself.
     ///
     /// ```ignore
     /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -220,19 +211,13 @@ impl CorsLayer {
         self
     }
 
-    /// Set `Access-Control-Allow-Credentials: true`. Note: when `true`
-    /// you cannot use `allow_any_origin()` — browsers reject `*` with
-    /// credentials, and the framework works around this by echoing
-    /// the request's `Origin` back instead of `*` (only on requests
-    /// that carry an `Origin` header). Preflight requests that omit
-    /// `Origin` will still get `*` in the response, which the
-    /// browser rejects with credentials.
+    /// Set `Access-Control-Allow-Credentials: true`.
     ///
-    /// v0.30.12 (security audit) — this method emits a
-    /// `tracing::warn!` at construction time when `yes = true`
-    /// and the layer is configured with `allow_any_origin()`, so
-    /// the misconfig surfaces in logs instead of silently failing
-    /// preflights for some clients.
+    /// **Do not combine this with `allow_any_origin()`.** Browsers
+    /// reject `*` together with credentials, so those requests fail.
+    /// List your origins instead. This method warns at build time if
+    /// the layer already allows any origin, so the mistake shows up
+    /// in the logs and not only as a broken preflight.
     #[must_use]
     pub fn allow_credentials(mut self, yes: bool) -> Self {
         self.allow_credentials = yes;
@@ -259,15 +244,13 @@ impl CorsLayer {
     /// Returns `None` when the origin should be rejected.
     fn resolve_origin(&self, request_origin: Option<&str>) -> Option<String> {
         match (&self.allow_origin, request_origin) {
-            // Never echo a concrete origin while credentials are on (#1394).
+            // Never echo a concrete origin while credentials are on.
             //
-            // Browsers refuse `Access-Control-Allow-Origin: *` together with
-            // credentials, but they *accept* a reflected concrete origin — so
-            // echoing here turned "any origin" into "every origin, with
-            // cookies", readable by any site the victim visits. Answering `*`
-            // is what this page's own documentation already claimed happened,
-            // and the browser then blocks the request, which is correct: a
-            // wildcard and credentials are not a combination anyone can have.
+            // A browser refuses `Access-Control-Allow-Origin: *` with
+            // credentials, but it accepts an echoed concrete origin.
+            // So echoing here would turn "any origin" into "every
+            // origin, with cookies", readable by any site the victim
+            // visits. Answer `*` and let the browser block it.
             (AllowOrigin::Any, _) if self.allow_credentials => Some("*".to_owned()),
             (AllowOrigin::Any, Some(o)) => Some(o.to_owned()),
             (AllowOrigin::Any, None) => Some("*".to_owned()),
@@ -381,11 +364,8 @@ fn attach_cors_headers(
         }
     }
 
-    // Not alongside a wildcard (#1394). `resolve_origin` answers `*` rather
-    // than echoing when credentials are on, and pairing the two is a
-    // combination no browser honours — emitting it would only describe an
-    // intent the response cannot carry. The warning at configure time is
-    // where a misconfigured deployment is told.
+    // Never send credentials next to a wildcard: no browser honours
+    // that pair. The build-time warning tells the operator instead.
     if cfg.allow_credentials && allow_origin != "*" {
         headers.insert(
             ACCESS_CONTROL_ALLOW_CREDENTIALS,
@@ -420,12 +400,10 @@ mod tests {
         assert_eq!(l.resolve_origin(None).as_deref(), Some("*"));
     }
 
-    /// #1394 — the credentialed wildcard hole.
-    ///
-    /// Echoing the request's origin is safe without credentials and is a
-    /// universal read-any-response hole with them, because browsers reject
-    /// `*` + credentials but accept a *reflected* concrete origin. The
-    /// asymmetry is the whole bug, so both halves are pinned here.
+    /// The credentialed wildcard hole. Echoing the request origin is
+    /// safe without credentials, and lets any site read any response
+    /// with them, because browsers reject `*` plus credentials but
+    /// accept an echoed concrete origin. Both halves are pinned here.
     #[test]
     fn any_origin_never_echoes_while_credentials_are_on() {
         let evil = "https://evil.example";
@@ -467,8 +445,8 @@ mod tests {
         );
     }
 
-    /// An explicit allowlist is the supported way to do credentialed CORS,
-    /// and it keeps working — the fix must not break the correct usage.
+    /// An allowlist is the supported way to do credentialed CORS, so
+    /// it must keep working.
     #[test]
     fn allowlisted_origin_still_gets_credentials() {
         let cfg = CorsLayer::new()
@@ -528,8 +506,8 @@ mod tests {
 
     #[test]
     fn permissive_advertises_query_method() {
-        // RFC 10008 QUERY always triggers a preflight, so it must be in
-        // Access-Control-Allow-Methods to work cross-origin.
+        // QUERY always needs a preflight, so it must appear in
+        // Access-Control-Allow-Methods.
         let l = CorsLayer::permissive();
         assert!(
             l.allow_methods.iter().any(|m| m == "QUERY"),
@@ -538,11 +516,11 @@ mod tests {
         );
     }
 
-    // ---- #87 wiring: from_settings ----
+    // ---- from_settings ----
 
-    /// Empty `cors_allowed_origins` returns `None` so callers don't
-    /// mount the layer at all — different from "allow zero origins"
-    /// (which would 403 every preflight).
+    /// An empty `cors_allowed_origins` gives `None`, so the layer is
+    /// not mounted. That differs from "allow no origin", which would
+    /// reject every preflight.
     #[cfg(feature = "config")]
     #[test]
     fn from_settings_empty_returns_none() {
@@ -560,9 +538,8 @@ mod tests {
         assert!(layer.resolve_origin(Some("https://random.test")).is_some());
     }
 
-    /// Specific origins build an allowlist; non-matching origins
-    /// reject. Methods + headers + max-age get sensible defaults so
-    /// the resulting layer is immediately usable.
+    /// Named origins build an allowlist and anything else is
+    /// rejected. Methods, headers and max-age get useful defaults.
     #[cfg(feature = "config")]
     #[test]
     fn from_settings_specific_origins_build_allowlist() {

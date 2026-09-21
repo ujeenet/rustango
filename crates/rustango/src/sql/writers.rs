@@ -1,16 +1,14 @@
 //! Dialect-agnostic SQL writers.
 //!
-//! Both `postgres::Postgres` and `mysql::MySql` route their `compile_*`
-//! methods through these helpers. Identifier quoting, placeholder
-//! shape, NULL-cast emission, and operator translation all dispatch
-//! through the [`Dialect`] reference held by [`Sql`], so the writers
-//! produce dialect-correct SQL without per-backend forks.
+//! Every backend's `compile_*` method routes through these helpers.
+//! Quoting, placeholders, NULL casts and operator translation all go
+//! through the [`Dialect`] held by [`Sql`], so there is no per-backend
+//! fork.
 //!
-//! Postgres-specific syntax that has no portable equivalent
-//! (`ILIKE`, `IS DISTINCT FROM`, JSONB `@>` / `?` / `?|` / `?&`) is
-//! gated on [`Dialect::supports_op`] — dialects that return `false`
-//! produce a clear [`SqlError::OperatorNotSupportedInDialect`] error
-//! instead of mis-translated SQL.
+//! Syntax with no portable form — `ILIKE`, `IS DISTINCT FROM`, the
+//! JSONB operators — is gated on [`Dialect::supports_op`]. A dialect
+//! that says `false` gets a clear
+//! [`SqlError::OperatorNotSupportedInDialect`] instead of wrong SQL.
 
 use std::fmt::Write as _;
 
@@ -22,38 +20,25 @@ use crate::core::{
 
 use super::{CompiledStatement, Dialect, SqlError};
 
-/// Buffer-and-params bundle threaded through every writer below. Owns
-/// a borrowed [`Dialect`] so each helper can ask for the right
-/// identifier quote, parameter placeholder, NULL cast, etc. without
-/// branching on backend.
+/// The SQL buffer and bind list every writer appends to. It carries
+/// the [`Dialect`], so helpers can ask for the right quoting,
+/// placeholder and NULL cast without branching on the backend.
 #[allow(clippy::struct_field_names)] // `sql.sql` reads naturally for builder calls
 pub(super) struct Sql<'d> {
     pub d: &'d dyn Dialect,
     pub sql: String,
     pub params: Vec<SqlValue>,
-    /// Stack of active emission scopes (innermost last). Pushed by
-    /// `write_select` / `write_update` / `write_delete` / `write_count`
-    /// on entry, popped on exit. Issue #5 reads from this to resolve
-    /// `Expr::OuterRef` inside a nested subquery — the OuterRef's
-    /// referent is the second-from-top frame (the immediate enclosing
-    /// query), and bare `Column` refs implicitly resolve against the
-    /// top frame.
+    /// Open emission scopes, innermost last. A bare `Expr::Column`
+    /// resolves against the top frame; `Expr::OuterRef` resolves
+    /// against the one below it, the enclosing query.
     pub scope_stack: Vec<&'static ModelSchema>,
-    /// Issue #80. When `Some`, bare `Expr::Column(name)` refs emitted
-    /// in the current scope are qualified as `"<alias>"."<name>"`
-    /// instead of just `"<name>"`. Set + restored around JOIN `ON`
-    /// emission so bare column references inside ON predicates
-    /// (e.g., `Expr::Column` from `F()`) resolve to the joined alias.
-    /// Unset everywhere else for backward compatibility with top-level
-    /// WHERE / UPDATE-SET emission shapes.
+    /// When `Some`, a bare `Expr::Column(name)` is written as
+    /// `"<alias>"."<name>"`. Set while emitting a JOIN `ON` clause, so
+    /// its columns point at the joined alias; unset elsewhere.
     pub current_qualify_alias: Option<&'static str>,
-    /// Issue #88 — whether `Expr::Aggregate` is allowed in the current
-    /// emission context. Set to `true` only while writing the SELECT
-    /// projection / HAVING predicate / ORDER BY of an aggregating
-    /// query (where SQL natively accepts an aggregate call); `false`
-    /// everywhere else (WHERE / UPDATE-SET / JOIN-ON / GROUP-BY /
-    /// RETURNING / non-aggregate-SELECT). Mirrors the runtime gate
-    /// `SqlError::OuterRefOutsideSubquery` uses for `Expr::OuterRef`.
+    /// Whether `Expr::Aggregate` is legal here. True only inside an
+    /// aggregating query's projection, HAVING or ORDER BY, which are
+    /// the places SQL accepts an aggregate call.
     pub aggregate_allowed: bool,
 }
 
@@ -85,16 +70,13 @@ impl<'d> Sql<'d> {
         self.sql.push_str(&self.d.quote_ident(name));
     }
 
-    /// Push `value` to the param list and emit the dialect's
-    /// placeholder for the new slot. For Postgres, also emit `::TYPE`
-    /// (from [`Dialect::null_cast`]) when:
-    /// - the value is `NULL` — types the otherwise-ambiguous parameter; or
-    /// - the value is a [`SqlValue::RangeLiteral`] (#343) — a range column
-    ///   value binds as a text literal, and PG won't assignment-cast
-    ///   `text` → `int4range`/`daterange`/… in `INSERT`/`UPDATE SET`, so
-    ///   the explicit `$N::<rangetype>` cast is required. (Range *operators*
-    ///   take their type from the operator context and emit a bare
-    ///   placeholder via a separate path, so they're unaffected.)
+    /// Add `value` to the bind list and write its placeholder.
+    ///
+    /// On Postgres it also writes a `::TYPE` cast (from
+    /// [`Dialect::null_cast`]) in two cases: a `NULL`, which would
+    /// otherwise have no type, and a [`SqlValue::RangeLiteral`], which
+    /// binds as text and which PG will not cast to a range type on its
+    /// own in `INSERT` or `UPDATE SET`.
     pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<&'static str>) {
         let needs_cast = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
         self.params.push(value);
@@ -108,9 +90,8 @@ impl<'d> Sql<'d> {
         }
     }
 
-    /// Same as [`Self::push_param_typed`] without a cast hint — used
-    /// for values whose column type the writer can't determine
-    /// (e.g. JSON-key list elements).
+    /// [`Self::push_param_typed`] with no cast, for values whose
+    /// column type the writer cannot work out.
     pub(super) fn push_param(&mut self, value: SqlValue) {
         self.push_param_typed(value, None);
     }
@@ -123,8 +104,8 @@ impl<'d> Sql<'d> {
     }
 }
 
-/// Per-column NULL-cast lookup gated on the dialect. Postgres needs the
-/// hint; `MySQL` doesn't and the writers will get `None`.
+/// Look up a column's NULL cast. Postgres needs one; other dialects
+/// get `None`.
 pub(super) fn null_cast_for(
     d: &dyn Dialect,
     model: &ModelSchema,
@@ -134,9 +115,7 @@ pub(super) fn null_cast_for(
     d.null_cast(field.ty)
 }
 
-// ====================================================================
-// SELECT
-// ====================================================================
+// ---- SELECT ----
 
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     b.scope_stack.push(query.model);
@@ -149,7 +128,7 @@ pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), S
     result
 }
 
-/// Emit a set-algebra compound SELECT (issue #25). Layout:
+/// Emit a compound SELECT (`UNION`, `INTERSECT`, `EXCEPT`):
 ///
 /// ```text
 /// (SELECT … this query …)
@@ -162,37 +141,26 @@ pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), S
 /// FOR UPDATE …  -- outer lock_mode
 /// ```
 ///
-/// Each branch is rendered in parens so a per-branch `ORDER BY`/`LIMIT`
-/// stays inside the parens (required by PG/SQLite SQL grammar; MySQL
-/// is more forgiving but the parens harm nothing). The OUTER
-/// SelectQuery's `order_by`/`limit`/`offset`/`lock_mode` get emitted
-/// AFTER the last branch closes, so they apply to the whole merged
-/// result.
+/// A branch with its own `ORDER BY` or `LIMIT` is wrapped in parens,
+/// so those clauses stay inside that branch. The outer query's
+/// `compound_*` clauses and `lock_mode` come after the last branch
+/// and apply to the merged result.
 ///
-/// The OUTER SelectQuery's own `where_clause` / `joins` / `search`
-/// apply to ITS branch (the first one in the compound, since the
-/// outer is itself a complete `SelectQuery`).
+/// The outer query is itself the first branch, so its `where_clause`,
+/// `joins` and `search` apply only to that branch.
 fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    // First branch: the outer query itself. Build a copy carrying its
-    // WHERE / search / joins AND its own `order_by` / `limit` /
-    // `offset` — #1034: those are the head-branch clauses (set BEFORE
-    // the first `.union()`), so they scope to the first queryset, not
-    // the merged result. The *combined-result* clauses live in
-    // `compound_order_by` / `compound_limit` / `compound_offset` and
-    // emit after the last branch (below).
+    // The first branch is the outer query itself. Its order_by /
+    // limit / offset were set before the first `.union()`, so they
+    // belong to this branch; the merged-result versions live in
+    // `compound_order_by` and friends and emit after the last branch.
+    // The copy clears `compound` and `lock_mode`, which belong to the
+    // whole statement.
     //
-    // Derived-table wrapping (`SELECT * FROM (<branch>) AS __rustango_bN`)
-    // is what keeps a branch's own ORDER BY / LIMIT local instead of
-    // attaching to the whole compound. #1032: every wrapper carries an
-    // alias — MySQL rejects an alias-less derived table (error 1248),
-    // and PG / SQLite accept the alias, so one code path serves all
-    // three. The head reserves `__rustango_b0`; branches start at 1.
-    // SQLite's `compound-select-stmt` grammar forbids bare parens
-    // around a select-core, hence the derived-table form over naked
-    // parens.
-    // #562 — struct-update over SelectQuery::new; the head clears
-    // `compound` (it's one branch, not the whole thing) and
-    // `lock_mode` (that applies to the merged result).
+    // A branch that has its own ORDER BY or LIMIT is wrapped as
+    // `SELECT * FROM (<branch>) AS __rustango_bN` to keep those
+    // clauses local. The alias is required: MySQL rejects a derived
+    // table without one, and SQLite's grammar forbids bare parens
+    // around a select-core. The head takes `__rustango_b0`.
     let head = SelectQuery {
         where_clause: query.where_clause.clone(),
         search: query.search.clone(),
@@ -217,16 +185,11 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         b.sql.push(' ');
         b.sql.push_str(branch.op.keyword());
         b.sql.push(' ');
-        // Push a scope frame for the branch so any subqueries inside
-        // resolve `OuterRef` correctly. write_select handles the
-        // push/pop on the outermost call but recursive branches
-        // need their own frame.
+        // Own scope frame so subqueries in this branch resolve
+        // `OuterRef` against it.
         b.scope_stack.push(branch.query.model);
-        // Branches that carry their own ORDER BY / LIMIT / OFFSET get
-        // wrapped in `SELECT * FROM (<branch>) AS __rustango_bN`. Plain
-        // branches with no ORDER BY / LIMIT emit inline — `SELECT …
-        // UNION SELECT …` is the shortest valid form on every backend
-        // and needs no alias.
+        // Plain branches emit inline; `SELECT … UNION SELECT …` is
+        // valid everywhere and needs no alias.
         let scoped = !branch.query.order_by.is_empty()
             || branch.query.limit.is_some()
             || branch.query.offset.is_some();
@@ -244,8 +207,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
                 write_select_inner(b, &branch.query)
             }
         } else {
-            // Nested compound — recurse. The outer level handles its
-            // own ORDER BY / LIMIT scoping the same way.
+            // Nested compound: recurse, wrapped the same way.
             b.sql.push_str("SELECT * FROM (");
             let r = write_compound_select(b, &branch.query);
             b.sql.push(')');
@@ -259,9 +221,8 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         r?;
     }
 
-    // Combined-result ORDER BY / LIMIT / OFFSET — the clauses chained
-    // AFTER the first set-op call (#1034). No qualify (the compound's
-    // "table" is the merged resultset, not a join target).
+    // Clauses for the merged result. No qualifier: the "table" here
+    // is the merged rows, not a join target.
     write_order_limit_offset(
         b,
         &query.compound_order_by,
@@ -277,10 +238,10 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     Ok(())
 }
 
-/// Write a model column for the distinct-on window fallback's inner
-/// SELECT — qualified with the model table when joins are present (#1039)
-/// so it can't collide with a joined table's same-named column. The outer
-/// SELECT reads from the `sub` derived table, so it always stays bare.
+/// Write a model column for the distinct-on fallback's inner SELECT.
+/// With joins present it is qualified, so it cannot clash with a
+/// joined column of the same name. The outer SELECT reads from the
+/// derived table, so it keeps the bare name.
 fn write_distinct_inner_col(b: &mut Sql<'_>, table: &str, col: &str, qualify: bool) {
     if qualify {
         b.write_ident(table);
@@ -291,12 +252,10 @@ fn write_distinct_inner_col(b: &mut Sql<'_>, table: &str, col: &str, qualify: bo
     }
 }
 
-/// MySQL / SQLite portable fallback for PG's `SELECT DISTINCT ON (cols)`.
-/// Wraps the original SELECT in a subquery that adds
-/// `ROW_NUMBER() OVER (PARTITION BY cols ORDER BY <user_order>) AS __rn`
-/// and selects the outer rows where `__rn = 1`. The user-specified
-/// `ORDER BY` drives both the per-partition row pick (inside the
-/// `OVER (...)`) and the outer row order. Issue #264 / T1.2.
+/// Portable stand-in for PG's `SELECT DISTINCT ON (cols)` on MySQL
+/// and SQLite. It ranks rows per partition with `ROW_NUMBER()` and
+/// keeps the first of each. The caller's `ORDER BY` decides both
+/// which row wins and the final row order.
 ///
 /// Layout:
 /// ```text
@@ -313,13 +272,12 @@ fn write_distinct_on_via_window(
     query: &SelectQuery,
     distinct_cols: &[&'static str],
 ) -> Result<(), SqlError> {
-    // #1039 — the inner SELECT below joins the related tables and
-    // qualifies the model's own columns with the model table so they
-    // can't collide with a joined column. The derived table `sub`
-    // re-exposes them by their bare names for the outer SELECT / ORDER BY.
+    // The inner SELECT does the joins, so it qualifies the model's own
+    // columns to avoid a name clash with a joined one. The derived
+    // table `sub` then exposes them under their bare names.
     let qualify = !query.joins.is_empty();
 
-    // ---------- Outer SELECT — projection columns only (no __rn). ----------
+    // Outer SELECT: projection columns only, no __rn.
     b.sql.push_str("SELECT ");
     let mut first_col = true;
     if let Some(cols) = query.projection.as_ref() {
@@ -341,7 +299,7 @@ fn write_distinct_on_via_window(
     }
     b.sql.push_str(" FROM (");
 
-    // ---------- Inner SELECT — original projection + __rn. ----------
+    // Inner SELECT: the same projection plus __rn.
     b.sql.push_str("SELECT ");
     let mut inner_first = true;
     if let Some(cols) = query.projection.as_ref() {
@@ -400,9 +358,8 @@ fn write_distinct_on_via_window(
     }
     b.sql.push_str(") AS __rn FROM ");
     b.write_ident(query.model.table);
-    // #1039 — the FK-chain / ad-hoc joins live in the inner SELECT next to
-    // the ROW_NUMBER() partition, so they filter/correlate the rows the
-    // window ranks. The outer SELECT reads the survivors from `sub`.
+    // The joins sit in the inner SELECT next to the ROW_NUMBER()
+    // partition, so they shape the rows the window ranks.
     write_model_joins(b, &query.joins)?;
     write_where(b, &query.where_clause, Some(query.model))?;
 
@@ -415,11 +372,8 @@ fn write_distinct_on_via_window(
 }
 
 fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    // Issue #264 / T1.2 — `.distinct_on(cols)` lowers natively on PG
-    // (`SELECT DISTINCT ON (...)`); on MySQL / SQLite the writer
-    // wraps the query in a ROW_NUMBER() OVER (PARTITION BY ...)
-    // subquery with an outer `WHERE __rn = 1`. The wrap path returns
-    // early because it owns the whole SQL emission.
+    // `.distinct_on(cols)` is native on PG. Elsewhere the window
+    // fallback emits the whole statement, so return early.
     if let Some(crate::core::DistinctMode::On(cols)) = &query.distinct {
         if b.d.name() != "postgres" {
             return write_distinct_on_via_window(b, query, cols);
@@ -428,13 +382,12 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
     let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
 
     b.sql.push_str("SELECT ");
-    // PG native DISTINCT / DISTINCT ON. `.distinct()` (DistinctMode::All)
-    // emits on every dialect uniformly.
+    // Plain `DISTINCT` works on every dialect; `DISTINCT ON` is PG
+    // only, and the other dialects already returned above.
     if let Some(distinct) = &query.distinct {
         match distinct {
             crate::core::DistinctMode::All => b.sql.push_str("DISTINCT "),
             crate::core::DistinctMode::On(cols) => {
-                // Reached only on PG (non-PG returned early above).
                 b.sql.push_str("DISTINCT ON (");
                 for (i, col) in cols.iter().enumerate() {
                     if i > 0 {
@@ -448,10 +401,8 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
     }
     let mut first_col = true;
     if let Some(cols) = query.projection.as_ref() {
-        // Pure projection (issue #22 — `.values_dict()` /
-        // `.values_list()` / `.values_list_flat()`): emit exactly
-        // the listed columns in the given order. Validation that
-        // each column resolves on the model is the builder's job.
+        // A `.values()`-style projection: emit exactly these columns,
+        // in this order. The builder already checked they resolve.
         for col in cols {
             if !first_col {
                 b.sql.push_str(", ");
@@ -492,17 +443,14 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
 
     write_model_joins(b, &query.joins)?;
 
-    // Derived-table joins — `JOIN [LATERAL] (<subquery>) AS alias ON …`
-    // (Eloquent joinSub / joinLateral, issue #828). Emitted after the
-    // model joins. No projected columns — a filtering / correlation join.
+    // Derived-table joins: `JOIN [LATERAL] (<subquery>) AS alias ON …`.
+    // They project no columns; they only filter or correlate.
     for sj in &query.subquery_joins {
         use crate::core::JoinKind;
         let kind_kw = match sj.kind {
             JoinKind::Inner => "INNER JOIN",
             JoinKind::Left => "LEFT JOIN",
-            // The QuerySet builders only construct Inner / Left; reject
-            // anything else rather than emit a derived-table RIGHT/FULL
-            // JOIN whose semantics nobody asked for.
+            // The builders only produce Inner / Left here.
             JoinKind::Right => {
                 return Err(SqlError::JoinKindNotSupported {
                     kind: "RIGHT (subquery)",
@@ -528,22 +476,18 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
             b.sql.push_str(" LATERAL");
         }
         b.sql.push_str(" (");
-        // `write_select` / `write_aggregate` push/pop the subquery's own
-        // scope frame, so a correlated `OuterRef` inside a LATERAL subquery
-        // resolves to the enclosing query; explicit `AliasedColumn` refs to
-        // the outer table work regardless (LATERAL exposes earlier FROM
-        // items). The `Aggregate` variant (#1035) lets a window/aggregate
-        // query be joined as a derived table.
+        // The subquery writers push their own scope frame, so an
+        // `OuterRef` inside a LATERAL subquery resolves to the
+        // enclosing query.
         match &sj.subquery {
             crate::core::DerivedSource::Select(s) => write_select(b, s)?,
             crate::core::DerivedSource::Aggregate(a) => write_aggregate(b, a)?,
         }
         b.sql.push_str(") AS ");
         b.write_ident(sj.alias);
-        // Empty `on` → `ON true` (the LATERAL shape, where the
-        // correlation lives in the subquery's WHERE). Non-empty → the
-        // caller's predicate, with unqualified columns resolving to the
-        // derived table's alias.
+        // An empty `on` gives `ON true`, the LATERAL shape where the
+        // correlation lives in the subquery's WHERE. Otherwise the
+        // caller's predicate, with bare columns bound to the alias.
         if sj.on.is_empty() {
             b.sql.push_str(" ON true");
         } else {
@@ -578,31 +522,21 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
     Ok(())
 }
 
-/// Emit `FOR UPDATE [NO KEY] [OF t1, t2] [SKIP LOCKED | NOWAIT]` —
-/// Django's `select_for_update(...)`. Issue #21.
+/// Emit `FOR UPDATE [NO KEY] [OF t1, t2] [SKIP LOCKED | NOWAIT]` for
+/// Django's `select_for_update(...)`.
 ///
-/// Tri-dialect dispatch:
-/// - **PG**: full support — `FOR [NO KEY] UPDATE [OF …] [SKIP LOCKED | NOWAIT]`.
-/// - **MySQL 8.0.1+**: supports `FOR UPDATE [OF] [NOWAIT | SKIP LOCKED]`.
-///   `NO KEY` has no equivalent — the writer falls back to plain
-///   `FOR UPDATE` (the stricter lock).
-/// - **SQLite**: no row-lock syntax. Transactions hold an implicit
-///   write lock for the whole database, so the lock clause is a no-op
-///   here. Callers wanting "claim next row" semantics on SQLite need
-///   a different strategy (typically a busy-wait loop on the
-///   transaction).
+/// Postgres supports all of it. MySQL 8.0.1+ has everything but
+/// `NO KEY`, which falls back to the stricter plain `FOR UPDATE`.
+/// SQLite has no row locks at all, so the clause is dropped there;
+/// a transaction locks the whole database instead.
 ///
-/// `SKIP LOCKED` wins over `NOWAIT` when both are set — `SKIP LOCKED`
-/// is the more permissive option, and both can't appear in the same
-/// statement at the database level.
+/// `SKIP LOCKED` wins over `NOWAIT` when both are set. They cannot
+/// both appear in one statement.
 fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
     if b.d.name() == "sqlite" {
-        // No row-lock syntax — transaction-scope locks are implicit.
-        // Issue #290 / T2.9: warn at write time so callers debugging
-        // concurrency bugs against a sqlite-backed test fixture see
-        // the no-op. Users who knowingly use the SQLite global writer
-        // lock (test apps, single-writer CLIs) can opt out via
-        // `LockMode { silent_on_sqlite: true, .. }`.
+        // Warn so someone debugging concurrency against a SQLite
+        // fixture sees that the clause did nothing. Apps that rely on
+        // SQLite's single-writer lock can silence it.
         if !lock.silent_on_sqlite {
             tracing::warn!(
                 target: "rustango::sql::lock",
@@ -640,9 +574,7 @@ fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
     }
 }
 
-// ====================================================================
-// COUNT
-// ====================================================================
+// ---- COUNT ----
 
 pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), SqlError> {
     b.scope_stack.push(query.model);
@@ -662,19 +594,16 @@ pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), Sql
     r
 }
 
-// ====================================================================
-// AGGREGATE
-// ====================================================================
+// ---- AGGREGATE ----
 
-/// Emit the `KIND JOIN <target> AS <alias> ON <pred>` clauses shared by
-/// the SELECT writer and the aggregate writer (#1040 — group-by-on-a-
-/// joined-column). Rejects dialect-incompatible join kinds up front.
+/// Emit the `KIND JOIN <target> AS <alias> ON <pred>` clauses shared
+/// by the SELECT and aggregate writers.
 fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(), SqlError> {
     use crate::core::JoinKind;
     for join in joins {
-        // Reject dialect-incompatible kinds before emitting anything —
-        // gives users a clear error rather than a parse failure at the
-        // driver. PG supports all four; MySQL has no FULL OUTER JOIN;
+        // Reject a join kind the dialect lacks before writing
+        // anything, so the user gets a clear error instead of a
+        // driver parse failure. PG has all four; MySQL has no FULL;
         // SQLite has neither RIGHT nor FULL.
         let kind_kw = match (join.kind, b.d.name()) {
             (JoinKind::Inner, _) => "INNER JOIN",
@@ -708,11 +637,8 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         b.sql.push_str(" AS ");
         b.write_ident(join.alias);
         b.sql.push_str(" ON ");
-        // The ON predicate's unqualified `Filter` / `ColumnFilter`
-        // columns and bare `Expr::Column` refs (via `F()`) resolve
-        // to the joined alias for the duration of this write. Cross-
-        // references back to the outer (or to another joined alias)
-        // use `Expr::AliasedColumn` to escape the default.
+        // Bare columns in the ON predicate resolve to the joined
+        // alias here. Use `Expr::AliasedColumn` to point elsewhere.
         let prior_qualify = b.current_qualify_alias.replace(join.alias);
         let on_result = write_where_expr(b, &join.on, Some(join.alias), Some(join.target));
         b.current_qualify_alias = prior_qualify;
@@ -722,23 +648,21 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
 }
 
 pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
-    // Push the model onto the scope stack so any `Expr::Aggregate`
-    // (issue #74) emitted inside the HAVING predicate has a model
-    // to resolve its COALESCE-default cast against. Mirrors the
-    // pattern in `write_select`.
+    // The scope frame gives a HAVING predicate's aggregates a model
+    // to resolve their COALESCE-default cast against.
     b.scope_stack.push(query.model);
     let r = write_aggregate_inner(b, query);
     b.scope_stack.pop();
     r
 }
 
-/// Emit one group-by / projection column for the aggregate writer,
-/// qualified when JOINs are present (#1040). A dotted `alias.col` →
-/// `"alias"."col"`; a bare `col` with joins present → `"model_table"."col"`
-/// (disambiguates against joined tables); a bare `col` with no joins →
-/// `"col"` (the pre-#1040 shape). When `project` is set the SELECT-list
-/// form gets a stable `AS` label so the dict-row key is predictable:
-/// `alias__col` for a dotted ref, the bare column name otherwise.
+/// Emit one group-by or projection column for the aggregate writer.
+/// A dotted `alias.col` becomes `"alias"."col"`. A bare `col` is
+/// qualified with the model table when there are joins, to keep it
+/// apart from a joined column, and left bare otherwise. With
+/// `project`, it also gets a stable `AS` label — `alias__col` for a
+/// dotted ref, the bare name otherwise — so dict-row keys are
+/// predictable.
 fn write_agg_group_col(
     b: &mut Sql<'_>,
     col: &str,
@@ -788,8 +712,6 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
 
     b.sql.push_str(" FROM ");
     b.write_ident(query.model.table);
-    // #1040 — JOINs for group-by-on-a-related-column. Emitted between
-    // FROM and WHERE, same position as the SELECT writer.
     write_model_joins(b, &query.joins)?;
     write_where(b, &query.where_clause, Some(query.model))?;
 
@@ -811,9 +733,8 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
 
     if let Some(having) = &query.having {
         b.sql.push_str(" HAVING ");
-        // Issue #88 — `Expr::Aggregate` lhs of a HAVING predicate is its
-        // natural home. Toggle the gate on for the predicate, restore
-        // after so nested subqueries don't inherit permission.
+        // Aggregates are legal in HAVING. Restore afterwards so
+        // nested subqueries do not inherit the permission.
         let prev = b.aggregate_allowed;
         b.aggregate_allowed = true;
         let r = write_where_expr(b, having, None, Some(query.model));
@@ -821,9 +742,8 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
         r?;
     }
 
-    // Issue #88 — aggregating queries are allowed to ORDER BY an
-    // aggregate expression (`ORDER BY COUNT(*) DESC`). Plain SELECT's
-    // ORDER BY keeps the default `false` and rejects `Expr::Aggregate`.
+    // An aggregating query may `ORDER BY COUNT(*) DESC`; a plain
+    // SELECT may not.
     let prev = b.aggregate_allowed;
     b.aggregate_allowed = true;
     let r = write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None);
@@ -833,20 +753,19 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
     Ok(())
 }
 
-/// What kind of decoder-side cast a base aggregate needs.
-/// PG widens `SUM(bigint)` to NUMERIC and `AVG/STDDEV/VAR_*(bigint)`
-/// to NUMERIC too; MySQL widens to DECIMAL/DOUBLE. The SqlValue
-/// decoder only tries `i64`/`f64`, so the writer post-wraps the
-/// aggregate call to a target type per dialect.
+/// The cast an aggregate needs so the decoder can read it. Databases
+/// widen `SUM` and `AVG` results to NUMERIC or DECIMAL, but the
+/// `SqlValue` decoder only tries `i64` and `f64`, so the writer casts
+/// the call back to one of those.
 #[derive(Debug, Clone, Copy)]
 enum AggCast {
     Int,
     Float,
 }
 
-/// Return the cast a flat aggregate variant needs, or `None` for
-/// aggregates whose native return type the decoder already handles
-/// (Count, CountDistinct, Max, Min — return i64 on every dialect).
+/// The cast a flat aggregate needs, or `None` when the decoder
+/// already handles its type. Count, Max and Min return i64
+/// everywhere.
 fn aggregate_cast_kind(expr: &AggregateExpr) -> Option<AggCast> {
     match expr {
         AggregateExpr::Sum(_) => Some(AggCast::Int),
@@ -859,10 +778,9 @@ fn aggregate_cast_kind(expr: &AggregateExpr) -> Option<AggCast> {
     }
 }
 
-/// Apply the dialect's cast helper to an already-emitted aggregate
-/// call (or filtered aggregate call). For PG the form is
-/// `<expr>::bigint` / `<expr>::double precision`; MySQL wraps with
-/// `CAST(... AS SIGNED/DOUBLE)`; SQLite with `CAST(... AS INTEGER/REAL)`.
+/// Wrap an already-written aggregate call in the dialect's cast:
+/// `<expr>::bigint` on PG, `CAST(… AS SIGNED)` on MySQL, and
+/// `CAST(… AS INTEGER)` on SQLite, or the float equivalents.
 fn apply_agg_cast(d: &dyn Dialect, kind: AggCast, inner: &str) -> String {
     match kind {
         AggCast::Int => d.cast_aggregate_to_int(inner),
@@ -870,14 +788,9 @@ fn apply_agg_cast(d: &dyn Dialect, kind: AggCast, inner: &str) -> String {
     }
 }
 
-/// Format the bare aggregate-call SQL (no decoder-side cast) for one
-/// of the flat variants. Doesn't write to `b.sql` — the caller
-/// composes it (optionally inside a FILTER clause, then post-wraps
-/// with `apply_agg_cast` for cast-needing kinds).
-/// Render an aggregate's inner `ORDER BY` clause (#1026) — e.g.
-/// `" ORDER BY \"name\" DESC"`, or `""` when there are no clauses. Used
-/// by `StringAgg`'s per-dialect emission (PG/MySQL/SQLite all spell the
-/// inner ORDER BY the same; only its position differs).
+/// Render an aggregate's inner `ORDER BY`, e.g. `" ORDER BY "name"
+/// DESC"`, or `""` when there is none. Every dialect spells it the
+/// same way; only its position in the call differs.
 fn render_agg_order_by(b: &Sql<'_>, order_by: &[crate::core::OrderClause]) -> String {
     if order_by.is_empty() {
         return String::new();
@@ -895,6 +808,9 @@ fn render_agg_order_by(b: &Sql<'_>, order_by: &[crate::core::OrderClause]) -> St
     s
 }
 
+/// Build the bare aggregate call for a flat variant, with no cast.
+/// It returns the string instead of writing it, so the caller can put
+/// it inside a `FILTER` clause and then apply [`apply_agg_cast`].
 fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, SqlError> {
     Ok(match expr {
         AggregateExpr::Count(None) => "COUNT(*)".into(),
@@ -907,9 +823,8 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
         AggregateExpr::Max(col) => format!("MAX({})", b.d.quote_ident(col)),
         AggregateExpr::Min(col) => format!("MIN({})", b.d.quote_ident(col)),
         AggregateExpr::AnyValue(col) => {
-            // Django 6.0 (#1025): PG 16+ `any_value()`, MySQL
-            // `ANY_VALUE()`, SQLite has neither — fall back to `min()`
-            // (deterministic, satisfies the "arbitrary value" contract).
+            // PG 16+ and MySQL have `any_value()`. SQLite does not,
+            // so use `min()`: any value satisfies the contract.
             let ident = b.d.quote_ident(col);
             match b.d.name() {
                 "mysql" => format!("ANY_VALUE({ident})"),
@@ -929,18 +844,16 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
             }
             format!("{}({})", stddev_variance_name(expr), b.d.quote_ident(col))
         }
+        // The arms below are not flat aggregates. Each has its own
+        // arm in `write_aggregate_expr`, and reaching this helper
+        // means one was wrapped in `Filtered` or `Coalesced`, which
+        // is not supported.
         AggregateExpr::Filtered { .. } | AggregateExpr::Coalesced { .. } => {
-            // `format_bare_aggregate` is only called with a flat
-            // variant — the wrappers are unwrapped first.
             return Err(SqlError::NestedAggregateWrapper {
                 wrapper: "wrapper at format_bare_aggregate site",
             });
         }
         AggregateExpr::Window(_) => {
-            // Window-in-aggregate is emitted by the dedicated
-            // `write_aggregate_expr` arm, not the bare-aggregate
-            // helper. Reaching this point means the writer treated
-            // a Window like a flat aggregate — a programmer error.
             return Err(SqlError::NestedAggregateWrapper {
                 wrapper: "Window at format_bare_aggregate site",
             });
@@ -948,22 +861,11 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
         AggregateExpr::ArrayAgg { .. }
         | AggregateExpr::StringAgg { .. }
         | AggregateExpr::JsonbAgg { .. } => {
-            // PG-specific aggregates are emitted by the dedicated
-            // arms in `write_aggregate_expr` (which bind the
-            // string_agg delimiter as a parameter). Wrapping them in
-            // `Filtered` or `Coalesced` would route here — not yet
-            // designed (semantics of `array_agg(x) FILTER (...)` is
-            // valid PG but the cast-aware fallback path doesn't
-            // model array return types). Reject upfront.
             return Err(SqlError::NestedAggregateWrapper {
                 wrapper: "PG-aggregate at format_bare_aggregate site",
             });
         }
         AggregateExpr::RelatedAggregate(_) => {
-            // Correlated relation aggregates (issue #830) are emitted by
-            // the dedicated `write_aggregate_expr` arm via `write_expr`.
-            // Reaching the bare-aggregate helper means someone wrapped one
-            // in `Filtered`/`Coalesced` — not supported.
             return Err(SqlError::NestedAggregateWrapper {
                 wrapper: "RelatedAggregate at format_bare_aggregate site",
             });
@@ -971,11 +873,12 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
     })
 }
 
-/// Emit one aggregate expression. Recursive for `Filtered` and
-/// `Coalesced` wrappers (issue #6). Dialect dispatch happens here:
-/// PG + SQLite (3.30+) emit native `FILTER (WHERE …)`; MySQL rewrites
-/// to `<agg>(CASE WHEN … THEN <arg> END)`. `Coalesced` always emits
-/// `COALESCE(<inner>, <default>)` regardless of dialect.
+/// Emit one aggregate expression, recursing through the `Filtered`
+/// and `Coalesced` wrappers.
+///
+/// PG and SQLite 3.30+ get a native `FILTER (WHERE …)`; MySQL gets
+/// `<agg>(CASE WHEN … THEN <arg> END)` instead. `Coalesced` is
+/// `COALESCE(<inner>, <default>)` on every dialect.
 fn write_aggregate_expr(
     b: &mut Sql<'_>,
     expr: &AggregateExpr,
@@ -1007,29 +910,21 @@ fn write_aggregate_expr(
                     wrapper: "Filtered(Coalesced)",
                 });
             }
-            // `Filtered { Window }` — combining FILTER with a window
-            // function isn't dispatched today (PG allows it for
-            // aggregate-window funcs, not ranking ones; writer hasn't
-            // been taught the per-fn rule). Reject upfront with a
-            // consistent message before either the PG-FILTER or the
-            // MySQL-CASE-WHEN path renames it to a per-dialect string.
+            // FILTER on a window function is not supported. PG allows
+            // it for aggregate-window functions but not ranking ones,
+            // and the writer does not know the per-function rule.
             if matches!(inner.as_ref(), AggregateExpr::Window(_)) {
                 return Err(SqlError::NestedAggregateWrapper {
                     wrapper: "Filtered(Window)",
                 });
             }
-            // MySQL: no FILTER keyword — rewrite via CASE WHEN. The
-            // helper applies the dialect's cast helper post-emit for
-            // Sum/Avg/StdDev/etc.
+            // MySQL has no FILTER keyword; use CASE WHEN.
             if b.d.name() == "mysql" {
                 return write_aggregate_as_case_when(b, inner, filter);
             }
-            // PG + SQLite (3.30+): native FILTER. Emit
-            // `<bare> FILTER (WHERE <pred>)` into a slice, then
-            // post-wrap with the dialect's cast helper (the cast can't
-            // sit between `<bare>` and `FILTER` on PG — `SUM(x)::bigint
-            // FILTER (...)` is a parse error — so we apply the cast
-            // around `(<bare> FILTER (...))`).
+            // PG and SQLite 3.30+ have FILTER. The cast goes around
+            // the whole `(<bare> FILTER (…))`: on PG,
+            // `SUM(x)::bigint FILTER (…)` is a parse error.
             let bare = format_bare_aggregate(b, inner)?;
             let prior = b.sql.len();
             b.sql.push_str(&bare);
@@ -1066,8 +961,8 @@ fn write_aggregate_expr(
             distinct,
             order_by,
         } => {
-            // #1026 — DISTINCT aggregates may only ORDER BY the aggregated
-            // column (PG hard requirement; kept portable-safe everywhere).
+            // A DISTINCT aggregate may only ORDER BY the aggregated
+            // column. PG requires this; we apply it everywhere.
             if *distinct && order_by.iter().any(|o| o.column != *column) {
                 return Err(SqlError::AggregateNotSupportedInDialect {
                     aggregate: "string_agg(DISTINCT) ORDER BY a non-aggregated column",
@@ -1075,15 +970,13 @@ fn write_aggregate_expr(
                 });
             }
             let order_sql = render_agg_order_by(b, order_by);
-            // Django 6.0 made StringAgg database-agnostic (#1024): PG
-            // `string_agg`, MySQL `GROUP_CONCAT`, SQLite `group_concat`.
-            // ORDER BY (#1026) sits at the dialect-correct position.
+            // `string_agg` on PG, `GROUP_CONCAT` on MySQL,
+            // `group_concat` on SQLite.
             match b.d.name() {
                 "mysql" => {
-                    // `SEPARATOR` does NOT accept a bound parameter — the
-                    // delimiter is inlined as a literal (single-quotes
-                    // doubled to stay injection-safe). ORDER BY goes before
-                    // SEPARATOR.
+                    // `SEPARATOR` takes no bound parameter, so the
+                    // delimiter is inlined with its quotes doubled.
+                    // ORDER BY goes before SEPARATOR.
                     b.sql.push_str("GROUP_CONCAT(");
                     if *distinct {
                         b.sql.push_str("DISTINCT ");
@@ -1095,11 +988,10 @@ fn write_aggregate_expr(
                     b.sql.push_str("')");
                 }
                 "sqlite" => {
-                    // SQLite rejects `group_concat(DISTINCT col, sep)` —
-                    // DISTINCT aggregates take exactly one argument. Mirror
-                    // Django: allow DISTINCT only with the default ','
-                    // separator; reject DISTINCT + a custom delimiter.
-                    // ORDER BY inside the aggregate needs SQLite 3.44+.
+                    // A SQLite DISTINCT aggregate takes exactly one
+                    // argument, so DISTINCT works only with the
+                    // default ',' separator. ORDER BY inside the
+                    // aggregate needs SQLite 3.44+.
                     if *distinct {
                         if delimiter.as_str() != "," {
                             return Err(SqlError::AggregateNotSupportedInDialect {
@@ -1148,23 +1040,18 @@ fn write_aggregate_expr(
             b.sql.push(')');
             Ok(())
         }
-        // Issue #830 — correlated relation aggregate. The wrapped `Expr`
-        // is an `Expr::AggregateSubquery` over the child table; emit it
-        // directly. `write_aggregate` (reached via `write_expr`) pushes
-        // the child model's scope frame, and the inner `OuterRef` reads
-        // the parent frame this `write_aggregate_inner` already pushed,
-        // so the correlation resolves identically on every dialect. Any
-        // numeric cast the inner aggregate needs is applied inside the
-        // subquery, so no outer cast is required here.
+        // A correlated aggregate over a child table. The subquery
+        // writer pushes the child's scope frame, and the inner
+        // `OuterRef` reads the parent frame pushed above, so the
+        // correlation resolves the same on every dialect. Any cast
+        // is applied inside the subquery.
         AggregateExpr::RelatedAggregate(e) => write_expr(b, e, None),
         _ => write_aggregate_kind(b, expr),
     }
 }
 
-/// Emit one of the flat aggregate variants (no `Filtered` /
-/// `Coalesced` wrappers). Pairs `format_bare_aggregate` with a
-/// dialect-aware cast wrap for the kinds whose native return type
-/// the decoder can't otherwise unwrap.
+/// Emit a flat aggregate: [`format_bare_aggregate`] plus the cast
+/// the decoder needs, if any.
 fn write_aggregate_kind(b: &mut Sql<'_>, expr: &AggregateExpr) -> Result<(), SqlError> {
     let bare = format_bare_aggregate(b, expr)?;
     let out = match aggregate_cast_kind(expr) {
@@ -1175,19 +1062,14 @@ fn write_aggregate_kind(b: &mut Sql<'_>, expr: &AggregateExpr) -> Result<(), Sql
     Ok(())
 }
 
-/// MySQL fallback for `<inner> FILTER (WHERE predicate)`: rewrite to
-/// `<agg>(CASE WHEN predicate THEN <argument> END)`. The `<argument>`
-/// depends on the aggregate kind: `COUNT(*)` becomes
-/// `COUNT(CASE WHEN p THEN 1 END)`, everything else becomes
-/// `<AGG>(CASE WHEN p THEN <col> END)`.
+/// MySQL stand-in for `<inner> FILTER (WHERE p)`, written as
+/// `<agg>(CASE WHEN p THEN <arg> END)`. `COUNT(*)` uses `THEN 1`,
+/// every other aggregate uses `THEN <col>`.
 fn write_aggregate_as_case_when(
     b: &mut Sql<'_>,
     inner: &AggregateExpr,
     filter: &WhereExpr,
 ) -> Result<(), SqlError> {
-    // Pick the aggregate keyword (and CASE-THEN argument) for the
-    // emission. COUNT(*) gets `THEN 1`; everything else gets `THEN
-    // <col>`. CountDistinct prefixes the CASE with `DISTINCT`.
     let (agg_kw, case_then, distinct_prefix) = match inner {
         AggregateExpr::Count(None) => ("COUNT", None, ""),
         AggregateExpr::Count(Some(col)) => ("COUNT", Some(*col), ""),
@@ -1206,12 +1088,8 @@ fn write_aggregate_as_case_when(
                 wrapper: "wrapper inside Filtered fallback",
             });
         }
+        // None of these can go through the CASE WHEN rewrite.
         AggregateExpr::Window(_) => {
-            // `<window_fn>(...) OVER (...) FILTER (WHERE ...)` is
-            // valid SQL on some backends (PG since 9.4 for aggregate
-            // window functions; not for ranking ones), but mixing
-            // `Filtered` + `Window` requires careful per-function
-            // dispatch we haven't designed yet. Reject for v1.
             return Err(SqlError::NestedAggregateWrapper {
                 wrapper: "Filtered(Window)",
             });
@@ -1219,17 +1097,11 @@ fn write_aggregate_as_case_when(
         AggregateExpr::ArrayAgg { .. }
         | AggregateExpr::StringAgg { .. }
         | AggregateExpr::JsonbAgg { .. } => {
-            // PG-specific aggregates inside Filtered{} aren't supported
-            // — MySQL has no equivalent native syntax (GROUP_CONCAT
-            // semantics differ), and the CASE-WHEN fallback would lose
-            // the PG-only nature. Reject upfront.
             return Err(SqlError::NestedAggregateWrapper {
                 wrapper: "Filtered(PG-aggregate)",
             });
         }
         AggregateExpr::RelatedAggregate(_) => {
-            // Correlated relation aggregates (issue #830) can't be
-            // rewritten through the MySQL CASE-WHEN FILTER fallback.
             return Err(SqlError::NestedAggregateWrapper {
                 wrapper: "Filtered(RelatedAggregate)",
             });
@@ -1247,8 +1119,6 @@ fn write_aggregate_as_case_when(
         None => b.sql.push('1'),
     }
     b.sql.push_str(" END)");
-    // Apply the dialect's cast wrap for Sum/Avg/StdDev/Variance —
-    // same shape the flat path uses.
     if let Some(kind) = aggregate_cast_kind(inner) {
         let emitted = b.sql[prior..].to_string();
         b.sql.truncate(prior);
@@ -1258,8 +1128,8 @@ fn write_aggregate_as_case_when(
     Ok(())
 }
 
-/// Look up the column referenced by a flat aggregate variant (or by
-/// the inner of a wrapper). Returns `None` for `Count(None)` (no column).
+/// The column an aggregate refers to, looking through wrappers.
+/// `None` when there is none, as for `COUNT(*)`.
 fn aggregate_column(expr: &AggregateExpr) -> Option<&'static str> {
     match expr {
         AggregateExpr::Count(c) => *c,
@@ -1283,9 +1153,8 @@ fn aggregate_column(expr: &AggregateExpr) -> Option<&'static str> {
             crate::core::Expr::Column(c) => Some(*c),
             _ => None,
         }),
-        // The aggregated column lives on the child table inside the
-        // correlated subquery, not on the outer model — there's no outer
-        // column to surface for null-cast resolution. Issue #830.
+        // The column is on the child table inside the subquery, so
+        // there is no outer column to report.
         AggregateExpr::RelatedAggregate(_) => None,
     }
 }
@@ -1300,9 +1169,7 @@ fn stddev_variance_name(expr: &AggregateExpr) -> &'static str {
     }
 }
 
-// ====================================================================
-// INSERT
-// ====================================================================
+// ---- INSERT ----
 
 pub(super) fn write_insert(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), SqlError> {
     if query.columns.is_empty() && query.returning.is_empty() {
@@ -1351,9 +1218,7 @@ pub(super) fn write_insert(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), S
     Ok(())
 }
 
-// ====================================================================
-// BULK INSERT
-// ====================================================================
+// ---- BULK INSERT ----
 
 pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Result<(), SqlError> {
     if query.rows.is_empty() {
@@ -1431,9 +1296,7 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
     Ok(())
 }
 
-// ====================================================================
-// UPDATE
-// ====================================================================
+// ---- UPDATE ----
 
 pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), SqlError> {
     if query.set.is_empty() {
@@ -1464,11 +1327,10 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
     r
 }
 
-/// Render a [`crate::core::Expr`] — the recursive RHS form that
-/// powers `F()` column references and arithmetic. Literal `Expr`s
-/// route through [`Sql::push_param_typed`] so cast hinting (PG
-/// `::TEXT` on NULL) still fires. `Column` writes a quoted ident;
-/// `BinOp` emits `(<left> <op> <right>)` with both sides recursed.
+/// Write a [`crate::core::Expr`], the right-hand-side form behind
+/// `F()` column references and arithmetic. A literal goes through
+/// [`Sql::push_param_typed`], so NULL casts still fire; a `Column`
+/// becomes a quoted ident; a `BinOp` becomes `(<left> <op> <right>)`.
 fn write_expr(
     b: &mut Sql<'_>,
     expr: &crate::core::Expr,
@@ -1481,13 +1343,8 @@ fn write_expr(
             Ok(())
         }
         Expr::Column(name) => {
-            // When a JOIN-ON emission context has set
-            // `current_qualify_alias`, bare `Column` refs from `F()` /
-            // arithmetic / `eq_expr` rhs slots qualify to that alias —
-            // emits `"<alias>"."<col>"` instead of bare `"<col>"`.
-            // Outside that context (top-level WHERE, UPDATE-SET, etc.)
-            // the original unqualified emission is preserved for
-            // backward compatibility.
+            // Inside a JOIN ON clause, qualify the column with the
+            // join's alias; elsewhere leave it bare.
             if let Some(alias) = b.current_qualify_alias {
                 let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(name),);
                 b.sql.push_str(&qualified);
@@ -1497,15 +1354,14 @@ fn write_expr(
             Ok(())
         }
         Expr::BinOp { left, op, right } => {
-            // SQLite doesn't have a bitwise XOR operator; surface a
-            // clear error rather than emitting silently-wrong SQL.
+            // SQLite has no bitwise XOR.
             if matches!(op, BO::BitXor) && b.d.name() == "sqlite" {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "BitXor",
                     dialect: b.d.name(),
                 });
             }
-            // pgvector distance operators are Postgres-only (#824).
+            // pgvector distance operators are Postgres-only.
             if matches!(op, BO::L2Distance | BO::CosineDistance | BO::InnerProduct)
                 && b.d.name() != "postgres"
             {
@@ -1531,8 +1387,7 @@ fn write_expr(
                 BO::Mod => "%",
                 BO::BitAnd => "&",
                 BO::BitOr => "|",
-                // PG spells XOR `#`; MySQL uses `^`. SQLite already
-                // bounced above.
+                // PG spells XOR `#`, MySQL `^`.
                 BO::BitXor => {
                     if b.d.name() == "postgres" {
                         "#"
@@ -1542,7 +1397,6 @@ fn write_expr(
                 }
                 BO::BitShl => "<<",
                 BO::BitShr => ">>",
-                // pgvector distance operators (#824); PG-gated above.
                 BO::L2Distance => "<->",
                 BO::CosineDistance => "<=>",
                 BO::InnerProduct => "<#>",
@@ -1554,8 +1408,8 @@ fn write_expr(
         }
         Expr::Function { kind, args } => write_function(b, *kind, args),
         Expr::Cast { expr, ty } => {
-            // CAST(<expr> AS <ty>) — identical syntax on PG/MySQL/SQLite;
-            // only the type token varies (handled by `cast_type`).
+            // `CAST(x AS t)` is the same everywhere; only the type
+            // token differs.
             let ty_token =
                 b.d.cast_type(*ty)
                     .ok_or(SqlError::OpNotSupportedInDialect {
@@ -1571,15 +1425,10 @@ fn write_expr(
         }
         Expr::Case { branches, default } => write_case(b, branches, default.as_deref()),
         Expr::Subquery(inner) => {
-            // `(SELECT … FROM …)` — write_select pushes/pops its own
-            // scope frame so any nested OuterRef inside `inner` looks
-            // up the right enclosing model.
-            //
-            // Issue #88 — subqueries today carry a plain `SelectQuery`
-            // (not an aggregating one), so any `Expr::Aggregate` inside
-            // the inner SELECT's projection / WHERE / ORDER BY would
-            // be in a non-aggregate context. Force the gate off across
-            // the boundary so the outer's permission doesn't leak in.
+            // `write_select` pushes its own scope frame, so a nested
+            // `OuterRef` finds the right enclosing model. A plain
+            // subquery is not an aggregating query, so turn the
+            // aggregate gate off across the boundary.
             b.sql.push('(');
             let prev = b.aggregate_allowed;
             b.aggregate_allowed = false;
@@ -1590,16 +1439,12 @@ fn write_expr(
             Ok(())
         }
         Expr::AggregateSubquery(inner) => {
-            // `(SELECT COUNT(*) FROM … WHERE … = OuterRef)` — a
-            // correlated scalar-aggregate subquery (issue #830 slice 3).
-            // `write_aggregate` pushes the child model's scope frame so
-            // the inner WHERE's `OuterRef` resolves to the enclosing
-            // parent query. The aggregate call sits in the subquery's own
-            // projection (emitted directly by `write_aggregate_inner`,
-            // not the gated `Expr::Aggregate` path), so reset the
-            // aggregate gate across the boundary exactly like
-            // `Expr::Subquery` does — the outer's HAVING permission must
-            // not leak in.
+            // A correlated scalar aggregate, e.g.
+            // `(SELECT COUNT(*) FROM … WHERE … = OuterRef)`.
+            // `write_aggregate` pushes the child's scope frame, so the
+            // inner `OuterRef` resolves to the parent query. Its
+            // aggregate is written by the projection, not the gated
+            // `Expr::Aggregate` path, so turn the gate off here too.
             b.sql.push('(');
             let prev = b.aggregate_allowed;
             b.aggregate_allowed = false;
@@ -1616,11 +1461,9 @@ fn write_expr(
             correlation,
         } => {
             use crate::core::RelAggKind;
-            // `(SELECT <kind>(<col>|*) FROM <table> WHERE <correlation>)`
-            // over a raw relation table (M2M junction/target or GFK
-            // child, issue #830). SUM/AVG get the dialect's decoder-side
-            // cast so the scalar decodes as i64/f64 just like the flat
-            // aggregate path; MAX/MIN/COUNT need none.
+            // `(SELECT <kind>(<col>) FROM <table> WHERE <correlation>)`
+            // over a relation table, such as an M2M junction. SUM and
+            // AVG get the decoder cast; MAX, MIN and COUNT need none.
             let col_sql = |c: Option<&'static str>, k: &'static str| -> Result<String, SqlError> {
                 c.map(|c| b.d.quote_ident(c))
                     .ok_or(SqlError::RelAggregateMissingColumn { kind: k })
@@ -1646,10 +1489,8 @@ fn write_expr(
             Ok(())
         }
         Expr::OuterRef(col) => {
-            // Resolve against the immediate enclosing scope. The top
-            // frame is the *current* query (the subquery emitting
-            // this OuterRef); the next-most-recent frame is the outer
-            // the user is referring to.
+            // The top frame is this subquery; the one below it is the
+            // enclosing query the `OuterRef` points at.
             let len = b.scope_stack.len();
             if len < 2 {
                 return Err(SqlError::OuterRefOutsideSubquery { column: col });
@@ -1660,34 +1501,21 @@ fn write_expr(
             Ok(())
         }
         Expr::AliasedColumn { alias, column } => {
-            // Explicit `<alias>.<col>` — used in JOIN ON predicates and
-            // anywhere a column reference needs a table prefix that
-            // isn't the current scope. No stack lookup, no validation
-            // beyond what the user passed in.
+            // An explicit `<alias>.<col>`, written as given.
             let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column),);
             b.sql.push_str(&qualified);
             Ok(())
         }
         Expr::Window(w) => write_window_expr(b, w),
         Expr::Aggregate(agg) => {
-            // Issue #88 — refuse to emit an aggregate call into a SQL
-            // slot that doesn't accept one. Every backend rejects
-            // aggregates in WHERE / UPDATE-SET / JOIN-ON / GROUP-BY /
-            // RETURNING / non-aggregate SELECT lists; only HAVING,
-            // an aggregating SELECT's projection, and that query's
-            // ORDER BY toggle the gate on (see `write_aggregate_inner`).
+            // Databases reject an aggregate in WHERE, UPDATE SET,
+            // JOIN ON, GROUP BY, RETURNING and a plain SELECT list,
+            // so refuse to write one there.
             if !b.aggregate_allowed {
                 return Err(SqlError::AggregateOutsideAggregateContext);
             }
-            // Issue #74 — lift the aggregate expression into the
-            // current writer scope (e.g., a HAVING predicate's lhs).
-            // The Aggregate writer handles dialect casting + filter
-            // wrapping internally; we just need an enclosing model
-            // context for the COALESCE cast lookup. Reach for the
-            // current scope frame; if none, fall back to a dummy.
-            // Scope-stack is set in `write_select` for SELECT/HAVING
-            // emission, so by the time HAVING is being walked the
-            // top frame is the right model.
+            // The aggregate writer needs a model for the COALESCE
+            // cast lookup; the top scope frame is the right one.
             let model = b
                 .scope_stack
                 .last()
@@ -1703,19 +1531,15 @@ fn write_expr(
     }
 }
 
-/// Emit a JSON-path traversal — issue #296 / T2.3.
+/// Emit a JSON-path traversal.
 ///
-/// **PG**: chained `->` operators, with the final hop using `->>`
-/// when `as_text` (which returns the unwrapped scalar text instead of
-/// JSON). Each key/index is bound as a parameter so user-supplied
-/// strings can't break out of the SQL.
+/// Postgres chains `->` operators, ending in `->>` when `as_text`,
+/// and binds each key as a parameter.
 ///
-/// **MySQL / SQLite**: a single `JSON_EXTRACT` / `json_extract` call
-/// with a JSON-pointer-style path string (`$.k1.k2[0]`). The path is
-/// inlined into the SQL because both backends require a literal
-/// string for the path argument. To keep the inlined path safe,
-/// keys are validated against a strict charset (`A-Za-z0-9_`) at
-/// write time — anything outside emits `OpNotSupportedInDialect`.
+/// MySQL and SQLite use one `json_extract` call with a path string
+/// like `$.k1.k2[0]`. Both require a literal there, so the path is
+/// inlined. To keep that safe, keys must match `[A-Za-z0-9_]`;
+/// anything else returns `OpNotSupportedInDialect`.
 fn write_json_path(
     b: &mut Sql<'_>,
     source: &crate::core::Expr,
@@ -1729,9 +1553,8 @@ fn write_json_path(
             dialect: b.d.name(),
         });
     }
-    // Key safety: ASCII alphanumeric + `_` for MySQL / SQLite inlining.
-    // PG binds keys as parameters so the validation isn't strictly
-    // necessary there, but apply the same rule for consistency.
+    // MySQL and SQLite inline the key, so it must be safe. PG binds
+    // it, but use the same rule everywhere.
     let key_safe =
         |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     for step in path {
@@ -1746,8 +1569,8 @@ fn write_json_path(
     }
     let dialect = b.d.name();
     if dialect == "postgres" {
-        // Chained `->` … `->>` form. Negative array indices are PG-
-        // native (count-from-end).
+        // Chained `->` … `->>`. PG counts a negative index from the
+        // end on its own.
         write_expr(b, source, None)?;
         for (i, step) in path.iter().enumerate() {
             let is_last = i + 1 == path.len();
@@ -1760,19 +1583,16 @@ fn write_json_path(
                     b.sql.push_str(&p);
                 }
                 JsonPathStep::Index(n) => {
-                    // PG's `->` accepts integer literals inline; binding
-                    // as a parameter forces a `text` cast (PG infers
-                    // `text` from the unknown-typed `$N`) and the
-                    // operator overload resolution then fails. Inline
-                    // the integer.
+                    // Inline the integer. Bound as a parameter, PG
+                    // would type it as text and fail to pick a `->`
+                    // overload.
                     b.sql.push_str(&n.to_string());
                 }
             }
         }
         return Ok(());
     }
-    // MySQL + SQLite — build `$.<k>.<k>[<n>]` path string and call
-    // the dialect's JSON_EXTRACT.
+    // MySQL and SQLite: build a `$.<k>.<k>[<n>]` path string.
     let mut json_path = String::from("$");
     for step in path {
         match step {
@@ -1782,9 +1602,8 @@ fn write_json_path(
             }
             JsonPathStep::Index(n) => {
                 if *n < 0 {
-                    // SQLite 3.31+ has the `$[#-1]` "from the end" anchor;
-                    // `n` is already negative so it renders as `[#-1]`
-                    // (#1027). MySQL's `$[N]` grammar has no negative form.
+                    // SQLite 3.31+ counts from the end with `$[#-1]`.
+                    // MySQL's path grammar has no negative form.
                     if dialect == "sqlite" {
                         json_path.push_str("[#");
                         json_path.push_str(&n.to_string());
@@ -1819,8 +1638,8 @@ fn write_json_path(
         }
         return Ok(());
     }
-    // SQLite — json_extract returns scalars unquoted already, so
-    // `as_text` is a no-op on this backend.
+    // SQLite's json_extract already returns scalars unquoted, so
+    // `as_text` changes nothing here.
     let _ = as_text;
     b.sql.push_str("json_extract(");
     write_expr(b, source, None)?;
@@ -1830,9 +1649,9 @@ fn write_json_path(
     Ok(())
 }
 
-/// Emit a window expression — `<fn>(args) OVER (PARTITION BY … ORDER
-/// BY … [frame])`. Tri-dialect uniform: PG ≥ 9.0, MySQL ≥ 8.0, and
-/// SQLite ≥ 3.25 all accept this SQL-standard form verbatim.
+/// Emit `<fn>(args) OVER (PARTITION BY … ORDER BY … [frame])`. This
+/// is standard SQL, accepted as-is by PG 9.0+, MySQL 8.0+ and
+/// SQLite 3.25+.
 fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(), SqlError> {
     use crate::core::{Expr, WindowFn};
     let fn_name = match w.kind {
@@ -1852,19 +1671,15 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
     };
     b.sql.push_str(fn_name);
     b.sql.push('(');
-    // `COUNT()` is invalid SQL — a bare `count_over()` (no column
-    // argument) is the windowed `COUNT(*)` (#1035).
+    // `COUNT()` is not valid SQL, so a bare `count_over()` means
+    // the windowed `COUNT(*)`.
     if matches!(w.kind, WindowFn::Count) && w.args.is_empty() {
         b.sql.push('*');
     }
-    // PG's LAG/LEAD/NTILE require `offset`/`buckets` as `integer`, not
-    // `bigint`. Binding `i64` as a parameter (which PG types as
-    // `bigint`) makes function lookup fail with
-    // `function lag(bigint, bigint, bigint) does not exist`. The
-    // offset/bucket count is a compile-time constant in user code
-    // anyway — emit it inline as a SQL integer literal. The
-    // value-arg (Lag's first, Lead's first) and the default-arg
-    // (Lag's third, Lead's third) bind normally via params.
+    // PG's LAG, LEAD and NTILE want their offset or bucket count as
+    // `integer`. A bound `i64` arrives as `bigint` and the function
+    // lookup fails, so write that one argument inline. The other
+    // arguments bind normally.
     let integer_arg_index: Option<usize> = match w.kind {
         WindowFn::Lag | WindowFn::Lead => Some(1),
         WindowFn::Ntile => Some(0),
@@ -1972,18 +1787,14 @@ fn write_case(
     }
     b.sql.push_str("CASE");
     for branch in branches {
-        // Empty `And(vec![])` is the legal "no WHERE filter" marker
-        // at the top of an UPDATE/DELETE, but inside a WHEN it would
-        // produce `WHEN  THEN …` with a hole. Reject it before the
-        // database does.
+        // An empty `And` means "no filter" at the top of an UPDATE,
+        // but here it would leave a hole in `WHEN … THEN`.
         if branch.condition.is_empty() {
             return Err(SqlError::EmptyCaseWhenCondition);
         }
         b.sql.push_str(" WHEN ");
-        // `write_where_expr` handles And/Or/Not nesting + parameter
-        // binding. We pass no qualify-with / no model — `Case`
-        // conditions are emitted in the context of the surrounding
-        // statement which already knows the table name.
+        // No qualifier or model: the surrounding statement already
+        // set the table context.
         write_where_expr(b, &branch.condition, None, None)?;
         b.sql.push_str(" THEN ");
         write_expr(b, &branch.then, None)?;
@@ -1996,10 +1807,8 @@ fn write_case(
     Ok(())
 }
 
-/// Emit a scalar function call. Most variants are straight `FN(args…)`
-/// across all three dialects; the divergent ones (`Concat` on SQLite,
-/// `Greatest`/`Least` on SQLite, `Substr` PG `FROM…FOR…` form) get
-/// special-cased.
+/// Emit a scalar function call. Most are a plain `FN(args…)` on
+/// every dialect; the ones that differ get their own arm.
 #[allow(clippy::too_many_lines)] // Per-fn arms are inherently linear.
 fn write_function(
     b: &mut Sql<'_>,
@@ -2038,8 +1847,7 @@ fn write_function(
                 });
             }
             if b.d.name() == "sqlite" {
-                // `||` chain. Parenthesize so precedence is unambiguous
-                // when wrapped in another expression.
+                // A `||` chain, in parens to keep precedence clear.
                 b.sql.push('(');
                 let mut first = true;
                 for a in args {
@@ -2089,16 +1897,10 @@ fn write_function(
         // -------- math: simple unary, arity-checked --------
         F::Abs => write_call_unary(b, "ABS", args),
         F::Floor => write_call_unary(b, "FLOOR", args),
-        F::Ceil => {
-            // MySQL accepts both `CEIL` and `CEILING`; PG / SQLite use
-            // `CEIL` (SQLite 3.35+). Emit `CEIL` everywhere for the
-            // narrowest portable token.
-            write_call_unary(b, "CEIL", args)
-        }
+        // `CEIL` works on all three; SQLite needs 3.35+.
+        F::Ceil => write_call_unary(b, "CEIL", args),
         F::Round => {
-            // 1- or 2-ary. The shape is identical across PG / MySQL /
-            // SQLite at the SQL surface; precision-arg type semantics
-            // diverge (PG `numeric` only), documented at the builder.
+            // Takes 1 or 2 arguments, spelled the same everywhere.
             if args.is_empty() || args.len() > 2 {
                 return Err(SqlError::FunctionArityMismatch {
                     func: "ROUND",
@@ -2128,11 +1930,9 @@ fn write_function(
                     got: 0,
                 });
             }
-            // SQLite has no GREATEST keyword. Its scalar `MAX(a, b, …)`
-            // form requires 2+ args; with 1 arg SQLite parses `MAX(x)` as
-            // the AGGREGATE form, which is a misuse-of-aggregate error
-            // inside `UPDATE SET` and the wrong semantic in `WHERE`.
-            // Surface a clear error rather than emit silently-wrong SQL.
+            // SQLite has no GREATEST; its scalar `MAX(a, b, …)` needs
+            // two or more arguments. With one, SQLite reads `MAX(x)`
+            // as the aggregate, which means something else entirely.
             if b.d.name() == "sqlite" && args.len() == 1 {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "GREATEST with 1 argument (SQLite collides with the aggregate MAX)",
@@ -2154,7 +1954,7 @@ fn write_function(
                     got: 0,
                 });
             }
-            // See `Greatest` above for the SQLite 1-arg rationale.
+            // Same one-argument problem as `Greatest` above.
             if b.d.name() == "sqlite" && args.len() == 1 {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "LEAST with 1 argument (SQLite collides with the aggregate MIN)",
@@ -2179,7 +1979,7 @@ fn write_function(
             write_call(b, "NULLIF", args)
         }
 
-        // -------- date/time (issue #3) --------
+        // -------- date/time --------
         F::Now => {
             if !args.is_empty() {
                 return Err(SqlError::FunctionArityMismatch {
@@ -2188,17 +1988,13 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            // PG and MySQL accept `NOW()` and treat `CURRENT_TIMESTAMP`
-            // as an equivalent alias.
+            // PG and MySQL have `NOW()`.
             //
-            // SQLite used to emit bare `CURRENT_TIMESTAMP` here, and
-            // that is #1464 on the query path rather than the DDL one.
-            // A SQLite datetime column is TEXT compared
-            // lexicographically, so `now()` writing
-            // `YYYY-MM-DD HH:MM:SS` while every other write path writes
-            // RFC3339 puts two shapes in one column — the mixed state
-            // the whole issue is about. `SET col = now()` and
-            // `WHERE col < now()` were the two ways to reach it.
+            // SQLite must use the same format as every other write
+            // path. Its datetime columns are TEXT compared as text,
+            // so a bare `CURRENT_TIMESTAMP` would put a second shape
+            // in the column and break both `SET col = now()` and
+            // `WHERE col < now()`.
             if b.d.name() == "sqlite" {
                 let _ = write!(
                     b.sql,
@@ -2227,9 +2023,8 @@ fn write_function(
                 });
             }
             if b.d.name() == "sqlite" {
-                // SQLite has no quarter token in strftime; synthesize it
-                // from the month (#1037), matching how Django lowers
-                // `__quarter` on SQLite.
+                // strftime has no quarter token, so derive it from
+                // the month, as Django does.
                 write_extract_quarter_sqlite(b, &args[0])
             } else {
                 write_extract_int(b, kind, args)
@@ -2243,7 +2038,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            // All three dialects spell this the same: DATE(x) / date(x).
+            // Every dialect spells this `DATE(x)`.
             b.sql.push_str("DATE(");
             write_expr(b, &args[0], None)?;
             b.sql.push(')');
@@ -2251,10 +2046,6 @@ fn write_function(
         }
         F::TruncYear | F::TruncMonth | F::TruncDay => write_trunc(b, kind, args),
         F::JsonArrayLength => {
-            // Issue #826 — JSON array length, tri-dialect.
-            // PG: jsonb_array_length(x)
-            // MySQL: JSON_LENGTH(x)
-            // SQLite: json_array_length(x)
             if args.len() != 1 {
                 return Err(SqlError::FunctionArityMismatch {
                     func: "JSON_ARRAY_LENGTH",
@@ -2265,8 +2056,7 @@ fn write_function(
             let fname = match b.d.name() {
                 "postgres" => "jsonb_array_length",
                 "mysql" => "JSON_LENGTH",
-                // SQLite + ANSI-leaning fallback. `json_array_length`
-                // ships in SQLite >= 3.38.
+                // SQLite 3.38+.
                 _ => "json_array_length",
             };
             b.sql.push_str(fname);
@@ -2445,7 +2235,7 @@ fn write_function(
             Ok(())
         }
 
-        // -------- DB functions batch 1 (issue #266 / T1.4) --------
+        // -------- text and math helpers --------
         F::LPad | F::RPad => write_pad(b, kind, args),
         F::Md5 | F::Sha1 | F::Sha256 => write_hash(b, kind, args),
         F::Position => write_position(b, args),
@@ -2475,11 +2265,9 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            // SQLite's `POWER`/`SQRT` ship in libsqlite3 3.35+ but only
-            // when compiled with `SQLITE_ENABLE_MATH_FUNCTIONS`. sqlx's
-            // default sqlite build does not enable it, so emitting
-            // `POWER(...)` would produce a `no such function` runtime
-            // error. Surface the limitation at write time.
+            // SQLite only has POWER and SQRT when built with
+            // SQLITE_ENABLE_MATH_FUNCTIONS, which sqlx's default
+            // build does not set.
             if b.d.name() == "sqlite" {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "POWER (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
@@ -2498,7 +2286,7 @@ fn write_function(
             write_call_unary(b, "SQRT", args)
         }
 
-        // -------- DB functions batch 2 (issue #294 / T2.7) --------
+        // -------- more math and date helpers --------
         F::Log => write_log(b, args),
         F::LogWithBase => write_log_with_base(b, args),
         F::Exp => write_exp(b, args),
@@ -2508,22 +2296,20 @@ fn write_function(
         F::Age => write_age(b, args),
         F::TruncWithTz => write_trunc_with_tz(b, args),
 
-        // -------- Full-text search builder (issue #295 / T2.4) --------
+        // -------- full-text search --------
         F::SetWeight => write_setweight(b, args),
         F::TsConcat => write_ts_concat(b, args),
 
-        // -------- PostGIS spatial functions (#58) — PG-only --------
+        // -------- PostGIS, Postgres-only --------
         F::StDistance | F::StDWithin | F::StContains | F::StWithin | F::StIntersects => {
             write_spatial_fn(b, kind, args)
         }
     }
 }
 
-/// PostGIS `ST_*` spatial functions (#58). All are Postgres/PostGIS-only
-/// — MySQL / SQLite reject with `OpNotSupportedInDialect`, mirroring the
-/// pgvector distance operators and FTS functions. Arity is checked so a
-/// hand-built `Expr::Function` fails at emit-time rather than reaching
-/// the database malformed.
+/// PostGIS `ST_*` functions. Postgres only; the others return
+/// `OpNotSupportedInDialect`. Arity is checked here so a hand-built
+/// `Expr::Function` fails before it reaches the database.
 fn write_spatial_fn(
     b: &mut Sql<'_>,
     kind: crate::core::ScalarFn,
@@ -2560,9 +2346,8 @@ fn write_spatial_fn(
     write_call(b, name, args)
 }
 
-/// `LPAD(s, len, fill)` / `RPAD(s, len, fill)` — PG/MySQL native;
-/// SQLite gets a `substr(s || repeat(fill, len), 1, len)`-style
-/// workaround for left-pad and a symmetric form for right-pad.
+/// `LPAD(s, len, fill)` and `RPAD(s, len, fill)`. Native on PG and
+/// MySQL; SQLite gets a `substr`-based stand-in.
 fn write_pad(
     b: &mut Sql<'_>,
     kind: crate::core::ScalarFn,
@@ -2586,15 +2371,14 @@ fn write_pad(
     if b.d.name() != "sqlite" {
         return write_call(b, name, args);
     }
-    // SQLite has no LPAD/RPAD. Build it from `substr` + `replace(printf)`.
-    // For LPad: `substr(replace(printf('%.*c', len, ' '), ' ', fill) || s, -len)`
-    // For RPad: `substr(s || replace(printf('%.*c', len, ' '), ' ', fill), 1, len)`
+    // SQLite has no LPAD or RPAD, so build one:
+    //   LPad: substr(replace(printf('%.*c', len, ' '), ' ', fill) || s, -len)
+    //   RPad: substr(s || replace(printf('%.*c', len, ' '), ' ', fill), 1, len)
     //
-    // The `printf('%.*c', n, ' ')` trick generates `n` space characters,
-    // which we then `replace` with the fill character. Wrapped in `substr`
-    // to clip to `len` characters (handles the case where the source
-    // string is already >= len, where the spec says to truncate to `len`
-    // from one side — LPAD keeps the right side, RPAD keeps the left).
+    // `printf('%.*c', n, ' ')` makes `n` spaces, which `replace`
+    // turns into the fill character. The outer `substr` clips to
+    // `len` when the input is already that long: LPAD keeps the
+    // right side, RPAD the left.
     b.sql.push_str("substr(");
     if matches!(kind, F::LPad) {
         b.sql.push_str("replace(printf('%.*c', ");
@@ -2619,9 +2403,9 @@ fn write_pad(
     Ok(())
 }
 
-/// `MD5(s)` / `SHA1(s)` / `SHA256(s)` — PG via `pgcrypto`'s `digest`
-/// + `encode(..., 'hex')`, MySQL via native `MD5/SHA1/SHA2`, SQLite
-/// errors (no built-in hash).
+/// `MD5(s)`, `SHA1(s)` and `SHA256(s)`. PG uses `pgcrypto`'s
+/// `digest` with `encode(…, 'hex')`, MySQL its own `MD5`/`SHA1`/
+/// `SHA2`. SQLite has no hash function and returns an error.
 fn write_hash(
     b: &mut Sql<'_>,
     kind: crate::core::ScalarFn,
@@ -2650,8 +2434,8 @@ fn write_hash(
         });
     }
     if b.d.name() == "postgres" {
-        // Postgres has a native md5() returning hex; SHA1/SHA256 need
-        // pgcrypto's digest(). Emit the right shape per kind.
+        // `md5()` is built in and returns hex; SHA1 and SHA256 need
+        // pgcrypto's `digest()`.
         match kind {
             F::Md5 => {
                 b.sql.push_str("md5(");
@@ -2685,7 +2469,7 @@ fn write_hash(
     }
 }
 
-/// `POSITION(needle, hay)` — diverges most across dialects.
+/// `POSITION(needle, hay)`. Every dialect spells this differently.
 fn write_position(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 2 {
         return Err(SqlError::FunctionArityMismatch {
@@ -2723,10 +2507,8 @@ fn write_position(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), Sql
     Ok(())
 }
 
-/// `REPEAT(s, n)` — PG/MySQL native; SQLite fakes it via
-/// `replace(printf('%.*c', n, '_'), '_', s)`. The `_` placeholder is
-/// arbitrary — we just need a single char `printf` can stamp `n`
-/// times and `replace` can swap for `s`.
+/// `REPEAT(s, n)`. Native on PG and MySQL; SQLite builds it from
+/// `printf` and `replace`.
 fn write_repeat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 2 {
         return Err(SqlError::FunctionArityMismatch {
@@ -2736,11 +2518,9 @@ fn write_repeat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlEr
         });
     }
     if b.d.name() == "sqlite" {
-        // Use `_` as the placeholder. SQLite's `printf('%.*c', n, '_')`
-        // produces `n` underscores; `replace(...)` swaps each for `s`.
-        // Caveat: if `s` itself contains `_`, the underscore form of
-        // the input is lost — for that corner case the caller should
-        // pre-compute the repeated value in Rust.
+        // `printf('%.*c', n, '_')` makes `n` underscores, and
+        // `replace` swaps each for `s`. If `s` itself contains `_`,
+        // this breaks; repeat the string in Rust instead.
         b.sql.push_str("replace(printf('%.*c', ");
         write_expr(b, &args[1], None)?;
         b.sql.push_str(", '_'), '_', ");
@@ -2751,7 +2531,7 @@ fn write_repeat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlEr
     write_call(b, "REPEAT", args)
 }
 
-/// `SIGN(x)` — PG/MySQL native; SQLite gets a CASE-WHEN expansion.
+/// `SIGN(x)`. Native on PG and MySQL; SQLite gets a CASE WHEN.
 fn write_sign(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 1 {
         return Err(SqlError::FunctionArityMismatch {
@@ -2763,9 +2543,8 @@ fn write_sign(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlErro
     if b.d.name() != "sqlite" {
         return write_call(b, "SIGN", args);
     }
-    // SQLite: CASE WHEN x > 0 THEN 1 WHEN x < 0 THEN -1 ELSE 0 END.
-    // We can't use bind params here without exploding the parameter
-    // count three-fold; literal `0` / `1` / `-1` are inlined.
+    // The `0`, `1` and `-1` are inlined rather than bound, to keep
+    // the parameter count down.
     b.sql.push_str("(CASE WHEN ");
     write_expr(b, &args[0], None)?;
     b.sql.push_str(" > 0 THEN 1 WHEN ");
@@ -2774,14 +2553,9 @@ fn write_sign(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlErro
     Ok(())
 }
 
-// ====================================================================
-// DB functions batch 2 (issue #294 / T2.7)
-// ====================================================================
-
-/// `LN(x)` — natural log. Same name on PG / MySQL; SQLite errors
-/// because `ln` ships only when libsqlite3 was built with
-/// `SQLITE_ENABLE_MATH_FUNCTIONS` (sqlx-sqlite's default build does
-/// not enable it).
+/// `LN(x)`, the natural log. Same name on PG and MySQL. SQLite only
+/// has it when built with `SQLITE_ENABLE_MATH_FUNCTIONS`, which
+/// sqlx's default build does not set, so it returns an error.
 fn write_log(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 1 {
         return Err(SqlError::FunctionArityMismatch {
@@ -2799,8 +2573,8 @@ fn write_log(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError
     write_call_unary(b, "LN", args)
 }
 
-/// `LOG(base, x)` — log of `x` in base `base`. PG / MySQL native (same
-/// argument order); SQLite errors (build-flag caveat per [`write_log`]).
+/// `LOG(base, x)`. Same on PG and MySQL; SQLite errors, see
+/// [`write_log`].
 fn write_log_with_base(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 2 {
         return Err(SqlError::FunctionArityMismatch {
@@ -2818,7 +2592,8 @@ fn write_log_with_base(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
     write_call(b, "LOG", args)
 }
 
-/// `EXP(x)` — `e^x`. PG / MySQL native; SQLite errors (build-flag).
+/// `EXP(x)`. Native on PG and MySQL; SQLite errors, see
+/// [`write_log`].
 fn write_exp(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 1 {
         return Err(SqlError::FunctionArityMismatch {
@@ -2836,8 +2611,7 @@ fn write_exp(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError
     write_call_unary(b, "EXP", args)
 }
 
-/// `PI()` — π. PG `pi()`, MySQL `PI()`. SQLite has no native pi, so
-/// the writer inlines the IEEE-754 double constant.
+/// `PI()`. SQLite has no such function, so the constant is inlined.
 fn write_pi(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if !args.is_empty() {
         return Err(SqlError::FunctionArityMismatch {
@@ -2847,8 +2621,6 @@ fn write_pi(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError>
         });
     }
     if b.d.name() == "sqlite" {
-        // Inline f64::consts::PI to 16 sig digits. SQLite has no pi()
-        // even with the math-functions build flag.
         b.sql.push_str("3.141592653589793");
     } else {
         b.sql.push_str("PI()");
@@ -2856,8 +2628,8 @@ fn write_pi(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError>
     Ok(())
 }
 
-/// `RANDOM()` / `RAND()` — pseudo-random number. **Return-range
-/// divergence is documented** at [`crate::core::ScalarFn::Random`].
+/// `RANDOM()` or `RAND()`. The value range differs per backend; see
+/// [`crate::core::ScalarFn::Random`].
 fn write_random(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if !args.is_empty() {
         return Err(SqlError::FunctionArityMismatch {
@@ -2869,15 +2641,13 @@ fn write_random(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlEr
     match b.d.name() {
         "postgres" => b.sql.push_str("random()"),
         "mysql" => b.sql.push_str("RAND()"),
-        // SQLite returns a 64-bit signed integer; range divergence
-        // documented at the constructor + enum variant.
+        // SQLite returns a signed 64-bit integer, not a 0..1 float.
         _ => b.sql.push_str("random()"),
     }
     Ok(())
 }
 
-/// `make_interval(years => ..., months => ..., days => ..., hours => ...,
-/// mins => ..., secs => ...)` — **PG-only**.
+/// `make_interval(years => …, months => …, …)`. Postgres only.
 fn write_make_interval(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 6 {
         return Err(SqlError::FunctionArityMismatch {
@@ -2906,8 +2676,8 @@ fn write_make_interval(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
     Ok(())
 }
 
-/// `AGE(ts1, ts2)` — duration between two timestamps. **Return type
-/// diverges**: PG `interval`; MySQL / SQLite numeric seconds.
+/// `AGE(ts1, ts2)`, the gap between two timestamps. The result type
+/// differs: an `interval` on PG, a number of seconds elsewhere.
 fn write_age(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 2 {
         return Err(SqlError::FunctionArityMismatch {
@@ -2925,9 +2695,8 @@ fn write_age(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError
             b.sql.push(')');
         }
         "mysql" => {
-            // TIMESTAMPDIFF takes (ts_a, ts_b) and returns ts_b - ts_a;
-            // swap so the result is ts1 - ts2 to match PG's `age(ts1, ts2)`
-            // = ts1 - ts2 sign convention.
+            // TIMESTAMPDIFF(a, b) returns b - a, so swap the args to
+            // match PG's `age(ts1, ts2)` = ts1 - ts2 sign.
             b.sql.push_str("TIMESTAMPDIFF(SECOND, ");
             write_expr(b, &args[1], None)?;
             b.sql.push_str(", ");
@@ -2945,11 +2714,11 @@ fn write_age(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError
     Ok(())
 }
 
-/// `date_trunc(unit, ts AT TIME ZONE tz)` (PG) and equivalents.
-/// `unit` and `tz` arrive as `Expr::Literal(SqlValue::String(...))`
-/// from [`crate::core::funcs::trunc_with_tz`]; this writer extracts
-/// them at emission time (no rebound — the strings are inlined into
-/// the SQL since per-dialect format tokens vary).
+/// `date_trunc(unit, ts AT TIME ZONE tz)` and its equivalents.
+/// `unit` and `tz` arrive as string literals from
+/// [`crate::core::funcs::trunc_with_tz`] and are inlined, because
+/// each dialect needs a different format token. Both are checked
+/// against a safe charset first.
 fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     use crate::core::SqlValue;
     if args.len() != 3 {
@@ -2981,9 +2750,7 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
             dialect: b.d.name(),
         });
     }
-    // Cheap defense against SQL injection via a bogus unit/tz string.
-    // Reject anything outside `[A-Za-z0-9_/+\-: ]` since the value is
-    // inlined into the SQL.
+    // The tz is inlined into the SQL, so restrict its characters.
     let safe_charset = |s: &str| {
         s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '+' | '-' | ':' | ' '))
@@ -3005,9 +2772,8 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
             b.sql.push_str("')");
         }
         "mysql" => {
-            // CONVERT_TZ takes a from/to pair; assume the stored ts is
-            // UTC (the rustango ORM defaults are TIMESTAMPTZ-equivalent).
-            // The DATE_FORMAT mask truncates to the requested unit.
+            // CONVERT_TZ needs a from/to pair; stored timestamps are
+            // UTC. The DATE_FORMAT mask does the truncation.
             let mask = mysql_trunc_mask(&unit_lc);
             b.sql.push_str("DATE_FORMAT(CONVERT_TZ(");
             write_expr(b, &args[0], None)?;
@@ -3018,9 +2784,8 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
             b.sql.push_str("')");
         }
         _ => {
-            // SQLite has no TZ DB. The user passes a `±HH:MM` offset or
-            // a plain IANA-shaped string; strftime applies it as a
-            // modifier. The mask truncates to the requested unit.
+            // SQLite has no timezone database, so `tz` is passed to
+            // strftime as a modifier, usually a `±HH:MM` offset.
             let mask = sqlite_trunc_mask(&unit_lc);
             b.sql.push_str("strftime('");
             b.sql.push_str(mask);
@@ -3056,15 +2821,10 @@ fn sqlite_trunc_mask(unit: &str) -> &'static str {
     }
 }
 
-// ====================================================================
-// Full-text-search builder (issue #295 / T2.4)
-// ====================================================================
-
-/// `setweight(<tsvector>, '<weight>')`. **PG-only**. The weight is
-/// carried as `Expr::Literal(SqlValue::String("A"))` so the writer can
-/// inline it (PG's `setweight` requires the weight literal to live in
-/// the SQL text, not in a bound parameter — `bind` rejects char-typed
-/// inputs and a quoted `'A'` is the only portable form).
+/// `setweight(<tsvector>, '<weight>')`. Postgres only. The weight
+/// must sit in the SQL text, not in a bound parameter, so it arrives
+/// as a string literal and is inlined after a check that it is one
+/// of A, B, C or D.
 fn write_setweight(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     use crate::core::{Expr, SqlValue};
     if args.len() != 2 {
@@ -3103,10 +2863,9 @@ fn write_setweight(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), Sq
     Ok(())
 }
 
-/// `(a || b || c)` — Postgres tsvector concatenation. **PG-only**;
-/// MySQL / SQLite reject because their FTS shapes are schema-bound
-/// (FULLTEXT INDEX + MATCH/AGAINST on MySQL, FTS5 virtual tables on
-/// SQLite) and don't compose with `||`.
+/// `(a || b || c)`, Postgres tsvector concatenation. The other
+/// backends tie full-text search to the schema — a FULLTEXT index on
+/// MySQL, an FTS5 table on SQLite — so `||` has no meaning there.
 fn write_ts_concat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() < 2 {
         return Err(SqlError::FunctionArityMismatch {
@@ -3132,15 +2891,9 @@ fn write_ts_concat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), Sq
     Ok(())
 }
 
-/// Emit an `EXTRACT(<field> FROM x)` family call. PG uses the SQL
-/// standard syntax + cast to integer; MySQL has direct per-field
-/// functions; SQLite routes through `strftime` + cast.
-/// SQLite quarter synthesis (#1037). SQLite's `strftime` has no quarter
-/// token, so derive it from the month via integer division:
-/// `((month + 2) / 3)` → months 1-3 = Q1, 4-6 = Q2, 7-9 = Q3, 10-12 = Q4.
-/// Mirrors how Django lowers `__quarter` on SQLite. Shared by the
-/// `filter("…__quarter", …)` lookup path and the `extract_quarter()`
-/// projection — both route through the `ExtractQuarter` writer arm.
+/// The quarter on SQLite. `strftime` has no quarter token, so derive
+/// it from the month: `((month + 2) / 3)` gives 1 for January to
+/// March, 2 for April to June, and so on. Django does the same.
 fn write_extract_quarter_sqlite(b: &mut Sql<'_>, expr: &crate::core::Expr) -> Result<(), SqlError> {
     b.sql.push_str("((CAST(strftime('%m', ");
     write_expr(b, expr, None)?;
@@ -3148,6 +2901,9 @@ fn write_extract_quarter_sqlite(b: &mut Sql<'_>, expr: &crate::core::Expr) -> Re
     Ok(())
 }
 
+/// Emit an `EXTRACT(<field> FROM x)` call. PG uses the standard
+/// syntax with a cast to integer, MySQL has a function per field,
+/// and SQLite goes through `strftime` plus a cast.
 fn write_extract_int(
     b: &mut Sql<'_>,
     kind: crate::core::ScalarFn,
@@ -3206,10 +2962,9 @@ fn write_extract_int(
     Ok(())
 }
 
-/// Day-of-week with cross-dialect normalization. Picks PG's convention
-/// (0 = Sunday, 6 = Saturday) and adjusts MySQL's `DAYOFWEEK()`
-/// (1 = Sunday) by subtracting 1. SQLite's `strftime('%w')` already
-/// returns 0 = Sunday.
+/// Day of the week, normalised to PG's numbering: 0 is Sunday, 6 is
+/// Saturday. MySQL's `DAYOFWEEK()` starts at 1, so subtract one.
+/// SQLite's `strftime('%w')` already starts at 0.
 fn write_extract_weekday(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     if args.len() != 1 {
         return Err(SqlError::FunctionArityMismatch {
@@ -3235,11 +2990,9 @@ fn write_extract_weekday(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<
     Ok(())
 }
 
-/// `DATE_TRUNC` family — diverges most across dialects. PG has the
-/// canonical `DATE_TRUNC('unit', x)` returning a timestamp. MySQL has
-/// no direct trunc-to-unit; emit `DATE_FORMAT(x, '%Y-...-...')`
-/// returning text. SQLite emits `strftime(...)` also returning text.
-/// The result-type caveat is documented at the builder.
+/// The `DATE_TRUNC` family. PG returns a timestamp from
+/// `DATE_TRUNC('unit', x)`. MySQL and SQLite have no such function,
+/// so they format the value instead and return **text**.
 fn write_trunc(
     b: &mut Sql<'_>,
     kind: crate::core::ScalarFn,
@@ -3300,8 +3053,8 @@ fn write_trunc(
     Ok(())
 }
 
-/// Standard `NAME(arg, arg, …)` emit. Used by every function variant
-/// whose dialect emission is identical across PG / MySQL / SQLite.
+/// Write `NAME(arg, arg, …)`, for the functions every dialect spells
+/// the same way.
 fn write_call(b: &mut Sql<'_>, name: &str, args: &[crate::core::Expr]) -> Result<(), SqlError> {
     b.sql.push_str(name);
     b.sql.push('(');
@@ -3317,13 +3070,9 @@ fn write_call(b: &mut Sql<'_>, name: &str, args: &[crate::core::Expr]) -> Result
     Ok(())
 }
 
-/// `write_call` with an arity-1 assertion. Used for unary functions
-/// (LOWER, UPPER, LENGTH, TRIM, LTRIM, RTRIM, ABS, CEIL, FLOOR) so a
-/// hand-rolled `Expr::Function { args: vec![] }` or `vec![a, b]` fails
-/// at emit-time with a clear error rather than reaching the database
-/// with malformed SQL like `LOWER()` or `LENGTH(a, b)`. The public
-/// builder API is type-locked to a single arg, so this only fires for
-/// callers that construct the IR directly.
+/// [`write_call`] for a one-argument function. The check only fires
+/// for code that builds the IR by hand; the public builders already
+/// take exactly one argument.
 fn write_call_unary(
     b: &mut Sql<'_>,
     name: &'static str,
@@ -3339,9 +3088,7 @@ fn write_call_unary(
     write_call(b, name, args)
 }
 
-// ====================================================================
-// DELETE
-// ====================================================================
+// ---- DELETE ----
 
 pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), SqlError> {
     b.scope_stack.push(query.model);
@@ -3355,21 +3102,15 @@ pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), S
     r
 }
 
-// ====================================================================
-// BULK UPDATE — Postgres-only `UPDATE … FROM (VALUES …)` shape.
-// MySQL would need a different translation (CASE WHEN, or
-// CREATE TEMP TABLE + JOIN); leaving that for batch4. For now the
-// MySql dialect routes bulk_update through a clear "not supported"
-// error in its own compile_bulk_update.
-// ====================================================================
+// ---- BULK UPDATE ----
+//
+// Postgres uses `UPDATE … FROM (VALUES …)`. MySQL has no equivalent
+// shape, so its dialect returns a "not supported" error instead.
 
-/// #560 — SQLite variant of `bulk_update`. SQLite supports
-/// `UPDATE … FROM <subquery>` since 3.33, but **not** the
-/// column-list-alias-on-inline-VALUES form Postgres uses
-/// (`FROM (VALUES …) AS __data(pk, col, …)`); SQLite raises
-/// `near "(": syntax error` at the alias parens. The
-/// CTE + correlated-subquery shape below parses everywhere
-/// SQLite has supported CTEs (3.8.3, 2014).
+/// `bulk_update` for SQLite. SQLite has `UPDATE … FROM <subquery>`
+/// since 3.33, but not Postgres' column-list alias on inline VALUES:
+/// `AS __data(pk, col, …)` is a syntax error there. A CTE with
+/// correlated subqueries works on every SQLite with CTE support.
 pub(super) fn write_bulk_update_sqlite(
     b: &mut Sql<'_>,
     query: &BulkUpdateQuery,
@@ -3495,9 +3236,7 @@ pub(super) fn write_bulk_update_pg(
     Ok(())
 }
 
-// ====================================================================
-// WHERE / Filters
-// ====================================================================
+// ---- WHERE / filters ----
 
 pub(super) fn write_where(
     b: &mut Sql<'_>,
@@ -3532,24 +3271,17 @@ pub(super) fn write_where_with_search(
         if has_where {
             b.sql.push_str(" AND ");
         }
-        // Search routes through the dialect's `write_ilike` so each
-        // backend emits the case-insensitive LIKE shape it actually
-        // supports — Postgres native `ILIKE`, MySQL/SQLite the
-        // `LOWER(col) LIKE LOWER(?)` fallback.
+        // `write_ilike` picks each backend's case-insensitive LIKE:
+        // native `ILIKE` on PG, `LOWER(col) LIKE LOWER(?)` elsewhere.
         //
-        // #438 — push a separate param + placeholder per column. PG
-        // could share one (`$N` references repeat), but MySQL/SQLite
-        // bind positionally so each `?` needs its own pushed param.
-        // Sharing one placeholder across N columns silently failed
-        // on multi-column search on non-PG dialects (only the first
-        // column got the bound value; subsequent ones bound to NULL
-        // / empty / nothing depending on driver). Keeping per-column
-        // binds also keeps the writer dialect-agnostic.
-        // Escape LIKE metacharacters in the user's `?q=` before
-        // wrapping in `%…%`, and append the ESCAPE clause per column —
-        // so a `%` or `_` typed into the admin search box matches
-        // literally instead of acting as a wildcard, on every dialect
-        // (#1257). Built once: the pattern is loop-invariant.
+        // Each column pushes its own param and placeholder. PG could
+        // reuse one `$N`, but MySQL and SQLite bind positionally, so
+        // a shared placeholder would leave every column after the
+        // first bound to nothing.
+        //
+        // The query is escaped before the `%…%` wrap, and each column
+        // gets the ESCAPE clause, so a `%` or `_` a user types
+        // matches literally instead of acting as a wildcard.
         let pattern = format!("%{}%", crate::core::escape_like(&s.query));
         b.sql.push('(');
         for (i, col) in s.columns.iter().enumerate() {
@@ -3558,8 +3290,6 @@ pub(super) fn write_where_with_search(
             }
             b.params.push(SqlValue::String(pattern.clone()));
             let placeholder = b.d.placeholder(b.params.len());
-            // Build the qualified column identifier the same way the
-            // rest of the writer does, then hand it to `write_ilike`.
             let mut qualified = String::new();
             if let Some(table) = qualify_with {
                 qualified.push_str(&b.d.quote_ident(table));
@@ -3639,12 +3369,10 @@ pub(super) fn write_where_expr(
     }
 }
 
-/// Emit the WHERE-clause body that correlates a raw-table relation
-/// subquery ([`WhereExpr::RelExists`] / [`Expr::RelAggregate`], issue
-/// #830) back to the enclosing row. These nodes don't embed a
-/// [`SelectQuery`] and therefore push no scope frame of their own, so
-/// the enclosing query is the **top** of the scope stack (unlike
-/// [`Expr::OuterRef`], whose referent is the second-from-top frame).
+/// Write the WHERE body that ties a raw-table relation subquery back
+/// to the enclosing row. These nodes hold no [`SelectQuery`] and push
+/// no scope frame, so the enclosing query is the **top** of the
+/// stack — unlike [`Expr::OuterRef`], which looks one frame down.
 fn write_rel_correlation(
     b: &mut Sql<'_>,
     table: &str,
@@ -3653,8 +3381,7 @@ fn write_rel_correlation(
     use crate::core::RelCorrelation;
     let outer_table = match b.scope_stack.last() {
         Some(m) => m.table,
-        // Relation subqueries are only ever emitted inside a query that
-        // pushed its model frame; reaching here means a bug.
+        // These only appear inside a query that pushed a frame.
         None => {
             return Err(SqlError::OuterRefOutsideSubquery {
                 column: "<relation>",
@@ -3675,9 +3402,7 @@ fn write_rel_correlation(
             b.write_ident(outer_table);
             b.sql.push('.');
             b.write_ident(outer_column);
-            // GFK content-type discriminator:
-            //   AND <table>.<ct_column> =
-            //       (SELECT <ct_pk> FROM <ct_table> WHERE <ct_table_col> = $param)
+            // Generic-FK content-type check.
             if let Some(ct) = ct {
                 b.sql.push_str(" AND ");
                 b.write_ident(table);
@@ -3725,23 +3450,17 @@ fn write_rel_correlation(
     }
 }
 
-/// Emit `<lhs-expr> <op> <rhs-expr>` for [`WhereExpr::ExprCompare`].
+/// Emit `<lhs> <op> <rhs>` for [`WhereExpr::ExprCompare`].
 ///
-/// Covers the binary-comparison set (`Eq`/`Ne`/`Lt`/`Lte`/`Gt`/`Gte`)
-/// plus the SQL-92 standard predicates that work uniformly across
-/// every dialect inside HAVING: `IN`/`NOT IN`, `BETWEEN`, `IS NULL`/
-/// `IS NOT NULL`, `LIKE`/`NOT LIKE`. The Postgres-specific case-
-/// insensitive `ILIKE`/`NOT ILIKE` route through the dialect's
-/// `write_ilike` helper so non-PG backends fall back to `LOWER()` +
-/// `LIKE` shape automatically (issue #87).
+/// Handles the binary comparisons plus `IN`, `BETWEEN`, `IS NULL` and
+/// `LIKE`, which every dialect accepts in HAVING. `ILIKE` goes
+/// through the dialect's `write_ilike`, so non-PG backends fall back
+/// to `LOWER(a) LIKE LOWER(b)`.
 ///
-/// JSON ops (`JsonContains` / `JsonHasKey` / etc.) and null-safe
-/// equality (`IsDistinctFrom` / `IsNotDistinctFrom`) aren't supported
-/// against an aggregate LHS — those need dialect-specific writers
-/// that take a `&str` for the LHS. The `AggregateBuilder::filter`
-/// gate rejects them at build time with [`crate::core::QueryError::HavingOpNotSupported`]
-/// so the misuse surfaces with a clear message rather than as a
-/// raw dialect error here.
+/// JSON operators and the null-safe comparisons do not work against
+/// an aggregate left-hand side. `AggregateBuilder::filter` rejects
+/// them at build time with
+/// [`crate::core::QueryError::HavingOpNotSupported`].
 fn write_expr_compare(
     b: &mut Sql<'_>,
     lhs: &crate::core::Expr,
@@ -3767,11 +3486,8 @@ fn write_expr_compare(
         write_expr(b, rhs, None)?;
         return Ok(());
     }
-    // The escaped LIKE — same shape as Op::Like above plus the ESCAPE
-    // clause. Relation-spanning lookups (`author__name__contains`) land
-    // here: `resolve_span` re-parses the suffix through `parse_lookup`,
-    // which produces the escaped ops (#1257), and packs the comparison
-    // into an ExprCompare.
+    // Like `Op::Like` plus the ESCAPE clause. Lookups that span a
+    // relation, such as `author__name__contains`, land here.
     if matches!(op, Op::LikeEscaped) {
         write_expr(b, lhs, None)?;
         b.sql.push_str(" LIKE ");
@@ -3782,12 +3498,9 @@ fn write_expr_compare(
 
     match op {
         Op::Search => {
-            // PG full-text search match: `<tsvector> @@ <tsquery>`.
-            // **PG-only by language semantics** — MySQL's MATCH … AGAINST
-            // and SQLite's FTS5 virtual tables don't compose with bare
-            // expression operands. `require_op` routes through the
-            // dialect to surface the same OpNotSupportedInDialect that
-            // the column-bound Op::Search path emits on non-PG.
+            // PG full-text match, `<tsvector> @@ <tsquery>`. MySQL's
+            // MATCH … AGAINST and SQLite's FTS5 tables do not work on
+            // bare expressions, so `require_op` rejects them.
             require_op(b.d, op)?;
             write_expr(b, lhs, None)?;
             b.sql.push_str(" @@ ");
@@ -3795,8 +3508,7 @@ fn write_expr_compare(
             Ok(())
         }
         Op::ILike | Op::NotILike | Op::ILikeEscaped => {
-            // ILikeEscaped shares the dialect gate + shape with ILike; it
-            // only appends the ESCAPE clause after the composed LIKE.
+            // `ILikeEscaped` is `ILike` with an ESCAPE clause added.
             require_op(
                 b.d,
                 if matches!(op, Op::ILikeEscaped) {
@@ -3805,12 +3517,10 @@ fn write_expr_compare(
                     op
                 },
             )?;
-            // Render lhs first so its params land in the param vector
-            // before the rhs literal — keeps `?`-positional dialects
-            // (MySQL / SQLite) in textual order. Then carve the lhs
-            // SQL out of the buffer, bind the rhs as a string param,
-            // and ask the dialect to compose `LOWER(<lhs>) LIKE
-            // LOWER(<p>)` (or PG's native `ILIKE`).
+            // Write the lhs first so its binds land before the rhs
+            // literal: MySQL and SQLite bind in text order. Then take
+            // that SQL back out of the buffer, bind the rhs, and let
+            // the dialect compose the final comparison.
             let lhs_start = b.sql.len();
             write_expr(b, lhs, None)?;
             let lhs_str = b.sql.split_off(lhs_start);
@@ -3879,11 +3589,8 @@ fn write_expr_compare(
                 .push_str(if *is_null { " IS NULL" } else { " IS NOT NULL" });
             Ok(())
         }
-        // JSON-op family + IsDistinctFrom / IsNotDistinctFrom — the
-        // AggregateBuilder::filter gate rejects these at build time
-        // with `HavingOpNotSupported`. If we reach here, someone
-        // hand-built an `ExprCompare` with one of these ops directly;
-        // surface the same shape of error as before.
+        // The builder rejects the remaining ops, so reaching this
+        // means an `ExprCompare` was built by hand.
         _ => Err(SqlError::OpNotSupportedInDialect {
             op: "non-binary comparison in ExprCompare",
             dialect: b.d.name(),
@@ -3891,11 +3598,9 @@ fn write_expr_compare(
     }
 }
 
-/// Render `<col> <op> <rhs-expr>` for a [`crate::core::ColumnFilter`].
-/// Only the binary-comparison `Op` variants are valid here — anything
-/// else (`In`, `Between`, `IsNull`, JSON ops, etc.) is a builder error
-/// and surfaces as [`SqlError::OpNotSupportedInDialect`] so the test
-/// suite catches it.
+/// Write `<col> <op> <rhs>` for a [`crate::core::ColumnFilter`].
+/// Only binary comparisons fit this shape; anything else is a
+/// builder bug and gives [`SqlError::OpNotSupportedInDialect`].
 fn write_column_compare(
     b: &mut Sql<'_>,
     cf: &crate::core::ColumnFilter,
@@ -3911,7 +3616,6 @@ fn write_column_compare(
         crate::core::Op::Lte => " <= ",
         crate::core::Op::Gt => " > ",
         crate::core::Op::Gte => " >= ",
-        // Other ops don't fit a `col <op> col` shape; reject loudly.
         _ => {
             return Err(SqlError::OpNotSupportedInDialect {
                 op: "non-binary comparison in ColumnCompare",
@@ -3951,9 +3655,8 @@ fn write_child(
     match expr {
         WhereExpr::Predicate(filter) => write_filter(b, filter, qualify_with, model),
         WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, qualify_with, model),
-        // Subquery-shaped leaves emit their own parens (EXISTS(…) /
-        // col IN (…)) so we don't need to add a second layer here.
-        // ExprCompare is also a flat `lhs op rhs` leaf — no nesting.
+        // These leaves already write their own parens, or are flat,
+        // so they need no extra layer.
         WhereExpr::Exists(_)
         | WhereExpr::NotExists(_)
         | WhereExpr::InSubquery { .. }
@@ -3968,31 +3671,21 @@ fn write_child(
     }
 }
 
-/// Emit a [`WhereExpr::Xor`] node (issue #27). Django 4.1+ added
-/// `Q(a) ^ Q(b)` with the semantic "odd number of operands evaluate
-/// to true". Native logical XOR exists on MySQL but not on PG or
-/// SQLite, so the writer uses portable SQL-92 rewrites for every
-/// backend:
+/// Emit a [`WhereExpr::Xor`] node, which is true when an odd number
+/// of its operands are true, like Django's `Q(a) ^ Q(b)`. Only MySQL
+/// has a logical XOR, so the writer rewrites it in portable SQL:
 ///
-/// * 0 children → [`SqlError::EmptyXorBranch`] (mirrors the empty-OR
-///   rejection — a vacuously-false predicate is almost always a bug).
-/// * 1 child   → the child itself (XOR over a single operand is the
-///   operand, no rewrite needed).
-/// * 2 children → `((a) AND NOT (b)) OR (NOT (a) AND (b))` —
-///   canonical binary form per the issue acceptance criteria.
-///   **Caveat**: each operand is emitted twice and therefore evaluated
-///   twice on the database side. Deterministic predicates (column =
-///   literal, range checks) are unaffected, but volatile expressions
-///   (`RANDOM()`, `NOW()`, correlated subqueries with side effects) may
-///   return different values across the two evaluations. If you need
-///   single-evaluation semantics for binary XOR, hand-build the
-///   3-element form `Xor([a, b, FALSE])` so the writer falls into the
-///   parity-tally branch below.
-/// * 3+ children → `((CASE WHEN q1 THEN 1 ELSE 0 END) + … +
-///   (CASE WHEN qN THEN 1 ELSE 0 END)) % 2 = 1` — Django's "odd
-///   number of trues" generalization. Portable across PG / MySQL /
-///   SQLite; uses standard `CASE WHEN` and the SQL `%` modulus. Each
-///   child is evaluated exactly once.
+/// * 0 children: [`SqlError::EmptyXorBranch`]. A predicate that can
+///   never be true is almost always a mistake.
+/// * 1 child: the child itself.
+/// * 2 children: `((a) AND NOT (b)) OR (NOT (a) AND (b))`.
+///   **Each operand is written twice, so the database evaluates it
+///   twice.** That is fine for a plain comparison, but a volatile
+///   expression such as `RANDOM()` or `NOW()` can give a different
+///   answer each time. To get one evaluation, build the three-element
+///   `Xor([a, b, FALSE])` and take the branch below.
+/// * 3 or more: `((CASE WHEN q1 THEN 1 ELSE 0 END) + … ) % 2 = 1`.
+///   Every child is evaluated exactly once.
 fn write_xor(
     b: &mut Sql<'_>,
     items: &[WhereExpr],
@@ -4016,13 +3709,8 @@ fn write_xor(
             Ok(())
         }
         _ => {
-            // (sum of CASE WHEN q THEN 1 ELSE 0 END) % 2 = 1.
-            // `write_child` (not `write_where_expr`) so a composite
-            // child — And / Or / nested Xor / Not — gets parenthesized
-            // before the `THEN 1`. SQL operator precedence (NOT > AND
-            // > OR) would parse it correctly without the wrap, but the
-            // explicit parens are belt-and-suspenders against future
-            // additions to the precedence ladder.
+            // `write_child` so a composite child is parenthesized
+            // before the `THEN 1`.
             b.sql.push('(');
             let mut first = true;
             for child in items {
@@ -4059,20 +3747,16 @@ fn write_filter(
         Op::Gte => simple_op(b, &qualified_col, " >= ", filter.value.clone(), cast),
         Op::Like => simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast),
         Op::NotLike => simple_op(b, &qualified_col, " NOT LIKE ", filter.value.clone(), cast),
-        // The escaped variant carries a value produced by
-        // `core::escape_like` and MUST emit the ESCAPE clause (#1257):
-        // SQLite has no default LIKE escape character, so without it the
-        // escaping is not just ignored but wrong. `!` is the portable
-        // choice — `'\'` is not, MySQL eats it as a string-literal
-        // escape.
+        // The value here came from `core::escape_like`, so the ESCAPE
+        // clause is required: SQLite has no default escape character,
+        // and without the clause the escaping is simply wrong. `!` is
+        // the portable escape; MySQL eats a backslash as a string
+        // escape before LIKE ever sees it.
         Op::LikeEscaped => {
             simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast);
             b.sql.push_str(LIKE_ESCAPE_CLAUSE);
         }
-        // ILikeEscaped shares the dialect gate + LOWER-fallback shape
-        // with ILike; it only appends the ESCAPE clause afterwards, so
-        // any future fix to the case-insensitive fallback applies to
-        // both automatically.
+        // `ILikeEscaped` is `ILike` with an ESCAPE clause added.
         Op::ILike | Op::NotILike | Op::ILikeEscaped => {
             require_op(
                 b.d,
@@ -4095,12 +3779,7 @@ fn write_filter(
             }
         }
         Op::Regex | Op::NotRegex | Op::IRegex | Op::NotIRegex => {
-            // Pattern shape is checked upstream — the typed builder
-            // `Column::regex(...)` only accepts `impl Into<String>`,
-            // and the Django-shape parser rejects non-strings with
-            // `QueryError::InvalidLookupValue`. Mirroring LIKE we
-            // pass the param through and let the DB surface any
-            // residual type mismatch.
+            // The builder already checked the pattern is a string.
             require_op(b.d, filter.op)?;
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
@@ -4113,10 +3792,7 @@ fn write_filter(
             );
         }
         Op::TrigramSimilar | Op::TrigramWordSimilar => {
-            // pg_trgm operators — Postgres-only by language semantic.
-            // The dialect's `write_trigram_similar` default returns
-            // `OpNotSupportedInDialect` for MySQL/SQLite; Postgres
-            // emits `<col> % <p>` or `<col> %> <p>`.
+            // pg_trgm's `%` and `%>`. Postgres only.
             require_op(b.d, filter.op)?;
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
@@ -4128,24 +3804,19 @@ fn write_filter(
             )?;
         }
         Op::Search => {
-            // Postgres full-text search. The default writer emits
-            // `to_tsvector(<col>) @@ plainto_tsquery(<p>)`; MySQL +
-            // SQLite override to reject with
-            // `OpNotSupportedInDialect` (their FTS shapes are
-            // schema-bound and don't compose with a bare column).
+            // Postgres full-text search. MySQL and SQLite tie their
+            // FTS to the schema, so a bare column cannot be searched
+            // and they reject this.
             require_op(b.d, filter.op)?;
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
             b.d.write_search(&mut b.sql, &qualified_col, &p)?;
         }
         Op::ArrayContains | Op::ArrayContainedBy | Op::ArrayOverlap => {
-            // Postgres ArrayField operators (`@>`, `<@`, `&&`). The
-            // dialect default emits the PG shape; MySQL + SQLite
-            // override to reject with `OpNotSupportedInDialect`. The
-            // bound value MUST be `SqlValue::Array(_)` so it binds
-            // as a single PG array parameter — `List` would expand
-            // to comma-separated placeholders, which is the wrong
-            // shape for array comparison.
+            // Postgres array operators `@>`, `<@` and `&&`. The value
+            // must be `SqlValue::Array`, which binds as one array
+            // parameter; a `List` would expand to separate
+            // placeholders, which is the wrong shape here.
             if !matches!(filter.value, SqlValue::Array(_)) {
                 return Err(SqlError::ArrayOpRequiresArray);
             }
@@ -4166,24 +3837,15 @@ fn write_filter(
         | Op::RangeStrictlyLeft
         | Op::RangeStrictlyRight
         | Op::RangeAdjacent => {
-            // Postgres range operators. The bound value is either:
-            // - `SqlValue::RangeLiteral(s)` — typical "range vs range"
-            //   shape (e.g. `<col> && '[5,10)'::int4range`). PG
-            //   implicit-casts the text to the column's range type.
-            // - A scalar (`I32`/`I64`/`Date`/`DateTime`) — for the
-            //   element-containment case `<col> @> <element>`.
-            // Both shapes route through the same writer because the
-            // SQL emission is identical (`<col> <op> <placeholder>`).
+            // Postgres range operators. The value is either a
+            // `RangeLiteral`, comparing range to range, or a scalar,
+            // asking whether the range contains that element. Both
+            // emit `<col> <op> <placeholder>`.
             require_op(b.d, filter.op)?;
-            // #343 — when the filtered column is a typed `Range<T>`
-            // (`FieldType::Range`) and the RHS is a *range literal*, cast
-            // the bound text to the column's range type so PG resolves
-            // the operator (`int4range @> $1::int4range`); without it PG
-            // errors `operator does not exist: int4range @> text`. A
-            // scalar RHS is element-containment (`int4range @> integer`)
-            // and must stay un-cast; a non-`Range` column (the legacy
-            // "declare the range as String + raw migration" shape) keeps
-            // the bare placeholder.
+            // A range literal binds as text, and PG will not resolve
+            // `int4range @> text`, so cast it to the column's range
+            // type. A scalar must stay uncast: that is the
+            // element-containment form.
             let range_cast = if matches!(filter.value, SqlValue::RangeLiteral(_)) {
                 model
                     .and_then(|m| m.field_by_column(filter.column))
@@ -4300,11 +3962,8 @@ fn write_filter(
             let SqlValue::List(keys) = &filter.value else {
                 return Err(SqlError::JsonKeysRequiresList);
             };
-            // Bind each key as its own param, collect the placeholder
-            // strings, then ask the dialect to compose the predicate.
-            // PG produces `col ?| ARRAY[$1,$2]` / `col ?& ARRAY[$1,$2]`;
-            // MySQL produces `JSON_CONTAINS_PATH(col, 'one'|'all',
-            // CONCAT('$.', ?), CONCAT('$.', ?))`.
+            // Bind one param per key, then let the dialect build the
+            // predicate from the placeholders.
             let placeholders = bind_param_list(b, keys);
             if matches!(filter.op, Op::JsonHasAnyKey) {
                 b.d.write_json_has_any_keys(&mut b.sql, &qualified_col, &placeholders);
@@ -4328,10 +3987,9 @@ fn simple_op(
     b.push_param_typed(value, cast);
 }
 
-/// Render `[<table>.]<col>` using the dialect's quoting rules.
-/// Allocated up front so `write_filter`'s op handlers can either emit
-/// it directly or wrap it (e.g. `LOWER(<col>) LIKE …`) without having
-/// to backtrack writes already on the buffer.
+/// Render `[<table>.]<col>` with the dialect's quoting. Built up
+/// front so an op handler can either write it as-is or wrap it, for
+/// example in `LOWER(…)`, without editing the buffer afterwards.
 fn render_qualified_col(d: &dyn Dialect, qualify_with: Option<&str>, column: &str) -> String {
     let mut s = String::new();
     if let Some(table) = qualify_with {
@@ -4342,10 +4000,8 @@ fn render_qualified_col(d: &dyn Dialect, qualify_with: Option<&str>, column: &st
     s
 }
 
-/// Bind each value in `values` as a param without writing anything to
-/// `b.sql`; return the placeholder strings (`$1`, `$2`, … on Postgres;
-/// `?`, `?`, … on MySQL) so a per-dialect predicate writer can compose
-/// them into the final fragment.
+/// Bind each value as a param without writing to `b.sql`, and return
+/// the placeholders so a per-dialect writer can place them itself.
 fn bind_param_list(b: &mut Sql<'_>, values: &[SqlValue]) -> Vec<String> {
     let mut out = Vec::with_capacity(values.len());
     for v in values {
@@ -4411,9 +4067,7 @@ fn op_label(op: Op) -> &'static str {
     }
 }
 
-// ====================================================================
-// ORDER BY / LIMIT / OFFSET
-// ====================================================================
+// ---- ORDER BY / LIMIT / OFFSET ----
 
 fn write_order_limit_offset(
     b: &mut Sql<'_>,
@@ -4428,20 +4082,15 @@ fn write_order_limit_offset(
         let supports_nulls = b.d.supports_nulls_order();
         let mut first = true;
         for item in order_by {
-            // Resolve the (target, desc, nulls) triple uniformly.
-            // Column targets get quoted ident; Expr targets get
-            // written through the standard expr writer.
             let (desc, nulls) = match item {
                 OrderItem::Column { desc, nulls, .. } => (*desc, *nulls),
                 OrderItem::Expr { desc, nulls, .. } => (*desc, *nulls),
-                // Random ordering: no direction (unordered by
-                // definition), no NULLS clause (the random key is
-                // per-row + non-NULL). Skip the desc/nulls dance.
+                // Random needs neither a direction nor a NULLS
+                // clause: its key is per-row and never null.
                 OrderItem::Random => (false, NullsOrder::Default),
             };
-            // Emulate NULLS FIRST/LAST on MySQL via a leading
-            // `<target> IS NULL <asc|desc>` term, then fall through
-            // to the actual sort.
+            // Where there is no NULLS clause, sort on
+            // `<target> IS NULL` first, then on the target itself.
             if !supports_nulls && !matches!(nulls, NullsOrder::Default) {
                 if !first {
                     b.sql.push_str(", ");
@@ -4449,8 +4098,7 @@ fn write_order_limit_offset(
                 first = false;
                 write_order_target(b, item, qualify_with)?;
                 b.sql.push_str(" IS NULL");
-                // NULLS FIRST → group NULLs to the top → IS NULL DESC.
-                // NULLS LAST  → group NULLs to the bottom → IS NULL ASC.
+                // NULLS FIRST puts nulls on top, so IS NULL DESC.
                 match nulls {
                     NullsOrder::First => b.sql.push_str(" DESC"),
                     NullsOrder::Last => b.sql.push_str(" ASC"),
@@ -4477,11 +4125,9 @@ fn write_order_limit_offset(
     if let Some(n) = limit {
         let _ = write!(b.sql, " LIMIT {n}");
     } else if offset.is_some() {
-        // #560 — `OFFSET` without `LIMIT` is illegal on MySQL
-        // (`ERROR 1064`). Dialects that need a placeholder LIMIT to
-        // make a bare OFFSET parse return one via
-        // `Dialect::offset_without_limit_clause()`. PG + SQLite
-        // return `None` and accept the bare OFFSET below.
+        // MySQL rejects `OFFSET` with no `LIMIT`, so it supplies a
+        // stand-in LIMIT here. PG and SQLite return `None` and take
+        // the bare OFFSET.
         if let Some(clause) = b.d.offset_without_limit_clause() {
             b.sql.push_str(clause);
         }
@@ -4492,10 +4138,9 @@ fn write_order_limit_offset(
     Ok(())
 }
 
-/// Emit just the column or expression part of an `OrderItem` — the
-/// `<target>` half of `<target> [DESC] [NULLS …]`. Used twice when
-/// a MySQL `NULLS …` emulation needs the target both for the
-/// `IS NULL` pre-sort term and the main sort term.
+/// Write the `<target>` half of `<target> [DESC] [NULLS …]`. The
+/// MySQL nulls workaround needs it twice, once for the `IS NULL`
+/// term and once for the real sort.
 fn write_order_target(
     b: &mut Sql<'_>,
     item: &crate::core::OrderItem,
@@ -4513,10 +4158,7 @@ fn write_order_target(
         OrderItem::Expr { expr, .. } => {
             write_expr(b, expr, None)?;
         }
-        // Issue #77 — tri-dialect random ordering. PG + SQLite use
-        // `RANDOM()`; MySQL uses `RAND()`. Both are 0-arg, return
-        // a per-row pseudorandom value; the surrounding `ORDER BY`
-        // sorts by that value.
+        // `RANDOM()` on PG and SQLite, `RAND()` on MySQL.
         OrderItem::Random => {
             b.sql.push_str(b.d.random_fn());
             b.sql.push_str("()");
@@ -4525,20 +4167,16 @@ fn write_order_target(
     Ok(())
 }
 
-// ====================================================================
-// RETURNING
-// ====================================================================
+// ---- RETURNING ----
 
 fn write_returning(b: &mut Sql<'_>, returning: &[&'static str]) -> Result<(), SqlError> {
     if returning.is_empty() {
         return Ok(());
     }
     if !b.d.supports_returning() {
-        // Caller is expected to fall back to LAST_INSERT_ID() / similar
-        // — but that decision belongs at the executor layer (where we
-        // know whether the model has an Auto<T> PK). Surface a clear
-        // error here so the executor can detect + handle it instead of
-        // silently producing SQL the backend rejects.
+        // Error rather than emit SQL the backend rejects. Only the
+        // executor knows whether a `LAST_INSERT_ID()` fallback fits,
+        // so it catches this and decides.
         return Err(SqlError::OperatorNotSupportedInDialect {
             op: "RETURNING",
             dialect: b.d.name(),
@@ -4556,13 +4194,10 @@ fn write_returning(b: &mut Sql<'_>, returning: &[&'static str]) -> Result<(), Sq
     Ok(())
 }
 
-// ====================================================================
-// Helper exposed to the legacy `compile_where_order_tail` shim
-// (annotate_count_children calls this directly).
-// ====================================================================
-
+/// Compile only the WHERE / ORDER BY / LIMIT / OFFSET tail, for
+/// callers that build the head of the statement themselves.
 #[allow(unused)]
-#[allow(clippy::too_many_arguments)] // 8 args mirrors the existing public shim signature; refactoring the call-sites is a v0.24 cleanup.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_where_order_tail(
     d: &dyn Dialect,
     where_clause: &WhereExpr,

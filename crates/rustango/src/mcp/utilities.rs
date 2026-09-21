@@ -1,19 +1,20 @@
-//! Optional MCP utilities (epic #1013, follow-up #1091): `logging/setLevel`
-//! and `completion/complete`.
+//! Two optional MCP methods.
 //!
-//! * **logging** — `logging/setLevel` validates + acknowledges a client's
-//!   minimum log level. (Per-session level state is a no-op on stateless
-//!   Streamable HTTP; the server-push side rides the SSE bus from #1087.)
-//! * **completion** — `completion/complete` returns prefix suggestions for
-//!   the agent's granted prompts (skill codenames) and resource URIs,
-//!   fail-closed and result-capped.
+//! `logging/setLevel` checks the level a client asks for and
+//! acknowledges it. There is no per-session state to keep, because
+//! Streamable HTTP is stateless; server-side pushes go over the SSE
+//! bus.
+//!
+//! `completion/complete` suggests values that start with a given
+//! prefix, drawn from the prompts and resources this agent was
+//! granted. It fails closed and caps how much it returns.
 
 use serde_json::{json, Value};
 
 use super::tools::McpContext;
 use super::types::{codes, JsonRpcError};
 
-/// MCP syslog-style levels, lowest→highest severity.
+/// The log levels MCP allows, least severe first.
 const LOG_LEVELS: &[&str] = &[
     "debug",
     "info",
@@ -25,13 +26,14 @@ const LOG_LEVELS: &[&str] = &[
     "emergency",
 ];
 
-/// Max suggestions returned by `completion/complete` (MCP caps at 100).
+/// How many suggestions `completion/complete` may return. MCP caps
+/// this at 100.
 const COMPLETION_CAP: usize = 100;
 
-/// `logging/setLevel` — validate the requested level and acknowledge.
+/// `logging/setLevel`: check the level and acknowledge it.
 ///
 /// # Errors
-/// `INVALID_PARAMS` for a missing or unrecognized `level`.
+/// `INVALID_PARAMS` when `level` is missing or unknown.
 pub fn set_log_level(params: Value) -> Result<Value, JsonRpcError> {
     let level = params.get("level").and_then(Value::as_str).ok_or_else(|| {
         JsonRpcError::invalid_params("logging/setLevel requires a string `level`")
@@ -45,13 +47,13 @@ pub fn set_log_level(params: Value) -> Result<Value, JsonRpcError> {
     Ok(json!({}))
 }
 
-/// `completion/complete` — suggest values for an argument, derived from the
-/// agent's granted prompts + resources (fail-closed). `argument.value` is
-/// the prefix to match.
+/// `completion/complete`: suggest values for an argument, taken from
+/// the prompts and resources this agent was granted.
+/// `argument.value` is the prefix to match.
 ///
 /// # Errors
-/// `INVALID_PARAMS` for a malformed request; DB errors propagate as
-/// `INTERNAL_ERROR`.
+/// `INVALID_PARAMS` on a malformed request, `INTERNAL_ERROR` on a
+/// database failure.
 pub async fn complete(ctx: &McpContext, params: Value) -> Result<Value, JsonRpcError> {
     let prefix = params
         .get("argument")
@@ -59,7 +61,8 @@ pub async fn complete(ctx: &McpContext, params: Value) -> Result<Value, JsonRpcE
         .and_then(Value::as_str)
         .unwrap_or("");
 
-    // Candidate pool = granted prompt codenames + granted/static resource URIs.
+    // Candidates are the granted prompt codenames plus the resource
+    // URIs, both granted and static.
     let mut candidates: Vec<String> = ctx.agent.skills.clone();
 
     let resources = crate::tenancy::resources_for_skills_pool(&ctx.pool, &ctx.agent.skills)

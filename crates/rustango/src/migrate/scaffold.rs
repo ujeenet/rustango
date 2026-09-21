@@ -1,7 +1,6 @@
-//! Project scaffolder — Django's `startapp` for rustango.
+//! Project scaffolder: rustango's answer to Django's `startapp`.
 //!
-//! [`startapp`] writes a Django-shape app module into a project's
-//! `src/` tree:
+//! [`startapp`] writes an app module into a project's `src/` tree:
 //!
 //! ```text
 //! src/<app>/
@@ -11,17 +10,14 @@
 //!   urls.rs      — Router builder mapping paths → views
 //! ```
 //!
-//! Idempotent: every file that already exists is reported in
-//! [`StartAppReport::skipped`] and left untouched. Parent directories
-//! are created on demand.
+//! Safe to re-run: an existing file is listed in
+//! [`StartAppReport::skipped`] and left alone. Parent directories are
+//! created as needed.
 //!
-//! The optional `manage_bin` template, when set, additionally writes
-//! `src/bin/manage.rs` — the 5-line dispatcher boilerplate. Caller
-//! decides which template to pass; this crate ships
-//! [`SINGLE_TENANT_MANAGE_BIN`] for the standard
-//! `rustango::migrate::manage::run` flow, and
-//! `crate::tenancy` ships its own tenancy-aware template that
-//! wires `crate::tenancy::manage::run` instead.
+//! Set `manage_bin` to also write `src/bin/manage.rs`. Use
+//! [`SINGLE_TENANT_MANAGE_BIN`] for the plain
+//! `rustango::migrate::manage::run` flow; `crate::tenancy` ships a
+//! tenancy-aware template of its own.
 
 use std::path::{Path, PathBuf};
 
@@ -30,34 +26,24 @@ use super::error::MigrateError;
 /// Options for [`startapp`].
 #[derive(Debug, Clone, Default)]
 pub struct StartAppOptions {
-    /// App module name. Becomes the `<base>/<app_name>/` directory
-    /// (where `<base>` is `src/` by default — see [`Self::base_dir`]).
-    /// Must be a valid Rust identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+    /// App module name, which becomes the `<base>/<app_name>/`
+    /// directory. Must be a valid Rust identifier. See
+    /// [`Self::base_dir`] for `<base>`.
     pub app_name: String,
-    /// When `Some`, also write `<base>/bin/manage.rs` with this body.
-    /// Skipped if the file already exists. `None` leaves manage.rs
-    /// unchanged (the common case once a project has one).
+    /// When `Some`, also write `<base>/bin/manage.rs` with this body,
+    /// unless that file already exists.
     pub manage_bin: Option<&'static str>,
-    /// Override the default `src/` directory the app lands in. Set
-    /// to `Some(path)` for non-standard layouts — e.g.
-    /// `examples/blog_demo` for an in-tree example, or `crates/web`
-    /// for a workspace member with no `src/` parent. The scaffolder
-    /// writes `<project_root>/<base_dir>/<app_name>/` and (when
-    /// `manage_bin` is set) `<project_root>/<base_dir>/bin/manage.rs`.
-    /// `None` keeps the v0.7 default of `src/`.
+    /// Directory the app lands in, relative to `project_root`.
+    /// `None` means `src/`. Set it for an unusual layout, such as an
+    /// in-tree example or a workspace member with no `src/` parent.
     pub base_dir: Option<PathBuf>,
-    /// Crate-root identifier emitted into the scaffolded `use ...::sql`
-    /// statements. `None` defaults to `"rustango"`; consumers that
-    /// depend on a renamed dep (e.g. the future `rustango-orm` carve-
-    /// out, [#144](https://github.com/ujeenet/rustango/issues/144))
-    /// pass `Some("rustango_orm")` so the generated app compiles
-    /// against the renamed crate. Phase 2 of issue
-    /// [#145](https://github.com/ujeenet/rustango/issues/145).
+    /// Crate name to write into the generated `use ...` lines.
+    /// `None` means `"rustango"`. Set it when the project depends on
+    /// a renamed crate, so the generated app still compiles.
     ///
-    /// Note: only `use` paths are parameterized. The `#[rustango(...)]`
-    /// derive attribute name stays literal because the proc-macro
-    /// expects that token regardless of how the consumer renames the
-    /// dep — same shape `rustango-renamed-smoke` proves under #142.
+    /// Only `use` paths change. The `#[rustango(...)]` attribute name
+    /// stays as it is, because the proc-macro expects that token
+    /// whatever the crate is called.
     pub crate_root: Option<String>,
 }
 
@@ -65,27 +51,22 @@ pub struct StartAppOptions {
 /// skipped because they already existed.
 #[derive(Debug, Default)]
 pub struct StartAppReport {
-    /// Filesystem paths (relative to `project_root`) freshly written.
+    /// Paths, relative to `project_root`, that were newly written.
     pub written: Vec<String>,
-    /// Filesystem paths that already existed and were left untouched.
+    /// Paths that already existed and were left alone.
     pub skipped: Vec<String>,
-    /// Filesystem paths that were edited in place (slice 9.0g
-    /// auto-mount). Distinct from `written` because the file already
-    /// existed; we patched it to register the new app.
+    /// Existing files edited in place to register the new app.
     pub patched: Vec<String>,
-    /// Files we tried to patch but couldn't safely (couldn't find
-    /// the expected anchor — user has hand-rolled their main.rs /
-    /// urls.rs into a non-canonical shape). The CLI prints these
-    /// with a "add this manually" hint.
+    /// Files the scaffolder could not patch safely, because their
+    /// layout does not match the expected shape. The CLI prints
+    /// these with an "add this manually" hint.
     pub manual_steps: Vec<String>,
 }
 
-/// Materialize a Django-shape app module into `project_root/src/<app>/`.
+/// Write an app module into `project_root/src/<app>/`.
 ///
-/// `project_root` is typically the directory containing `Cargo.toml`.
-/// The function does **not** parse Cargo.toml or modify it — adding
-/// `mod <app_name>;` to `src/lib.rs` or `src/main.rs` is the user's
-/// step.
+/// `project_root` is usually the directory holding `Cargo.toml`. This
+/// function never reads or edits `Cargo.toml`.
 ///
 /// # Errors
 /// Returns [`MigrateError::Validation`] for an invalid app name,
@@ -109,9 +90,7 @@ pub fn startapp(
 
     let mod_body = render_mod_template(&opts.app_name);
     let singular = singularize(&opts.app_name);
-    // Phase 2 of #145 — pick the crate root for `use ...::sql` paths.
-    // `None` (the default) emits today's `use rustango::...` lines so
-    // every existing call site stays bit-identical.
+    // Crate root for the generated `use ...` paths.
     let crate_root = opts.crate_root.as_deref().unwrap_or("rustango");
     let entries: [(&str, String); 5] = [
         ("mod.rs", mod_body),
@@ -129,18 +108,14 @@ pub fn startapp(
         write_or_skip(&path, &rel, &body, &mut report)?;
     }
 
-    // Slice 9.0g — register the new app in the project's main.rs +
-    // urls.rs. Conservative regex anchors with bail-out: if the file
-    // doesn't have the expected aggregator pattern, we skip the edit
-    // and surface a "add this manually" hint via report.manual_steps.
-    // `lib.rs` first, deliberately. A scaffolded project has both, and
-    // the app's modules live in the library so that binaries under
-    // `src/bin/` — a worker from `manage make:worker` — can reach them.
-    // Registering the new app in `main.rs` would put `mod <app>;` in the
-    // binary, where the library's `urls.rs` aggregator cannot see it.
+    // Register the new app in the project's entry file. If the file
+    // does not have the expected shape, skip the edit and add an
+    // "add this manually" hint to `report.manual_steps`.
     //
-    // Projects predating the library target have only `main.rs` and are
-    // still handled.
+    // `lib.rs` is tried first on purpose. The app's modules must live
+    // in the library so binaries under `src/bin/` can reach them; a
+    // `mod <app>;` in `main.rs` is invisible to the library's
+    // `urls.rs`. Older projects with only a `main.rs` still work.
     let main_path = project_root.join(&base_dir).join("main.rs");
     let lib_path = project_root.join(&base_dir).join("lib.rs");
     let entry_path = if lib_path.exists() {
@@ -160,8 +135,8 @@ pub fn startapp(
             EntryEditOutcome::Patched => report.patched.push(rel),
             EntryEditOutcome::AlreadyRegistered => {} // silent — idempotent
             EntryEditOutcome::CouldNotFindAnchor => {
-                // Match the spelling the patcher would have used, so a
-                // hand-applied step lands the app where urls.rs can see it.
+                // Suggest the same spelling the patcher would use, so
+                // the manual edit lands where urls.rs can see it.
                 let vis = if path.file_name().is_some_and(|f| f == "lib.rs") {
                     "pub mod"
                 } else {
@@ -229,27 +204,20 @@ enum EntryEditOutcome {
     CouldNotFindAnchor,
 }
 
-/// Patch a project entry file (`src/main.rs` / `src/lib.rs`) to add
-/// `mod <app_name>;`. Idempotent: if the line is already present,
-/// returns `AlreadyRegistered` without rewriting. Anchors on:
+/// Add `mod <app_name>;` to `src/main.rs` or `src/lib.rs`. Returns
+/// `AlreadyRegistered` and rewrites nothing if the line is there.
 ///
-///   1. An existing `mod <foo>;` line — appends the new `mod` after
-///      the last consecutive `mod` declaration in the file.
-///   2. Failing that, after the last `//!` doc comment block at the
-///      top of the file.
-///
-/// If neither anchor is found (user has hand-rolled the layout into
-/// something unusual), we bail out without modifying the file and
-/// the caller surfaces a "add manually" hint.
+/// The new line goes after the last `mod ...;` declaration, or after
+/// the leading `//!` block if there is none. With neither anchor the
+/// file is left untouched and the caller prints a manual-step hint.
 fn try_register_app_in_entry(
     path: &Path,
     app_name: &str,
 ) -> Result<EntryEditOutcome, MigrateError> {
     let body = std::fs::read_to_string(path)?;
-    // In a library the app module must be `pub`: binaries (`src/main.rs`
-    // and anything under `src/bin/`) reach it as `my_app::<name>`, and a
-    // private module is invisible to them. Inside the binary-only layout
-    // a plain `mod` is right.
+    // In a library the module must be `pub`, or the binaries that
+    // reach it as `my_app::<name>` cannot see it. A binary-only
+    // layout wants a plain `mod`.
     let is_lib = path.file_name().is_some_and(|f| f == "lib.rs");
     let needle = if is_lib {
         format!("pub mod {app_name};")
@@ -261,10 +229,9 @@ fn try_register_app_in_entry(
     }
 
     let lines: Vec<&str> = body.lines().collect();
-    // Find the last contiguous run of `mod foo;` / `pub mod foo;` lines
-    // and insert after it. Both spellings, because the generated
-    // `lib.rs` uses `pub mod` throughout — anchoring on `mod ` alone
-    // missed every line in it and fell through to the docstring branch.
+    // Insert after the last `mod foo;` or `pub mod foo;` line. Both
+    // spellings matter: a generated `lib.rs` uses `pub mod`
+    // throughout, and matching only `mod ` would miss every line.
     let mod_anchor = lines.iter().rposition(|l| {
         let t = l.trim_start();
         (t.starts_with("mod ") || t.starts_with("pub mod ")) && l.trim_end().ends_with(';')
@@ -272,8 +239,7 @@ fn try_register_app_in_entry(
     let insert_at = if let Some(idx) = mod_anchor {
         idx + 1
     } else {
-        // Fall back: after the leading docstring block (lines starting
-        // with `//!` followed by a blank line).
+        // Fall back to just after the leading `//!` block.
         let mut i = 0;
         while i < lines.len() && lines[i].trim_start().starts_with("//!") {
             i += 1;
@@ -306,14 +272,12 @@ fn try_register_app_in_entry(
     Ok(EntryEditOutcome::Patched)
 }
 
-/// Patch `src/urls.rs` to add `.merge(crate::<app>::urls::api())` to
-/// the project-root aggregator router. Idempotent. Anchors on the
-/// pattern `Router::new()` followed by zero or more `.merge(...)` /
-/// `.route(...)` / `.nest(...)` lines — appends the new `.merge` to
-/// the end of that chain (just before the trailing `}` of the body).
+/// Add `.merge(crate::<app>::urls::api())` to the root router in
+/// `src/urls.rs`, just after the `Router::new()` line. Safe to
+/// re-run.
 ///
-/// Bail-out: if the file doesn't have a `Router::new()` call, return
-/// `CouldNotFindAnchor` and let the caller surface a manual-step hint.
+/// Without a `Router::new()` call, returns `CouldNotFindAnchor` and
+/// the caller prints a manual-step hint.
 fn try_merge_app_into_urls(path: &Path, app_name: &str) -> Result<EntryEditOutcome, MigrateError> {
     let body = std::fs::read_to_string(path)?;
     let merge_call = format!(".merge(crate::{app_name}::urls::api())");
@@ -321,18 +285,16 @@ fn try_merge_app_into_urls(path: &Path, app_name: &str) -> Result<EntryEditOutco
         return Ok(EntryEditOutcome::AlreadyRegistered);
     }
 
-    // Find the line that creates the Router. We append the .merge
-    // immediately after this line — the user can re-indent if they
-    // prefer a different call-chain style, but this works as a
-    // valid expression continuation.
+    // Append the `.merge` right after the line that builds the
+    // Router. It is a valid continuation of the call chain; the user
+    // can re-indent it to taste.
     let lines: Vec<&str> = body.lines().collect();
     let anchor = lines.iter().rposition(|l| l.contains("Router::new()"));
     let Some(idx) = anchor else {
         return Ok(EntryEditOutcome::CouldNotFindAnchor);
     };
 
-    // Detect indentation of the anchor line so the inserted line
-    // looks at home next to siblings.
+    // Match the anchor line's indentation.
     let indent: String = lines[idx]
         .chars()
         .take_while(|c| c.is_whitespace())
@@ -386,23 +348,16 @@ fn render_mod_template(app_name: &str) -> String {
     )
 }
 
-/// Default `models.rs` body — a single starter model named after
-/// the singularized app name (e.g. `startapp posts` → `pub struct Post`
-/// on table `"post"`; `startapp blog` → `pub struct Blog` on table
-/// `"blog"`). Parameterising the struct + table name avoids colliding
-/// with the project-root `Item` example or with another app's `Item`.
+/// Default `models.rs` body: one starter model named after the
+/// singular form of the app name, so `startapp posts` gives
+/// `pub struct Post` on table `"post"`. Naming it after the app keeps
+/// it from clashing with another app's starter model.
 ///
-/// The starter model is admin-visible out of the box: rustango defaults
-/// `permissions = true`, so [`tenancy::permissions::auto_create_permissions`]
-/// seeds the four CRUD codenames during `migrate`. After running
-/// `cargo run -- migrate`, a freshly-created superuser sees the model
-/// in the admin sidebar without any manual permission-grant step.
+/// The model is admin-visible right away. `permissions = true` is the
+/// default, so `migrate` seeds its four CRUD codenames and a new
+/// superuser sees it in the admin sidebar with no extra step.
 ///
-/// Singularization is conservative: trailing `s` is stripped on names
-/// of length ≥ 5 (so `posts → post`, `comments → comment`, but
-/// `news` / `feed` / `cms` stay as-is). Users can rename either the
-/// struct or the `table = "..."` literal freely; the macro reads them
-/// independently.
+/// See [`singularize`] for how the singular name is picked.
 fn render_models_template(app_name: &str, crate_root: &str) -> String {
     let singular = singularize(app_name);
     let struct_name = pascal_case(&singular);
@@ -446,11 +401,10 @@ pub struct {struct_name} {{
     )
 }
 
-/// Strip a trailing `s` for the common English-plural app names
-/// (`posts`, `comments`, `users`). Conservative — leaves anything
-/// shorter than 5 chars or not ending in `s` untouched. Users can
-/// always rename the struct + table literal manually if the
-/// heuristic guesses wrong (e.g. `categories` → `categorie`).
+/// Strip a trailing `s` from a plural app name: `posts` gives
+/// `post`. Deliberately simple, so a name under 5 characters or one
+/// that does not end in `s` is left alone. It guesses wrong on words
+/// like `categories`; rename the struct and table by hand then.
 fn singularize(name: &str) -> String {
     if name.len() >= 5 && name.ends_with('s') && !name.ends_with("ss") && !name.ends_with("us") {
         name[..name.len() - 1].to_owned()
@@ -474,12 +428,11 @@ fn pascal_case(name: &str) -> String {
         .collect::<String>()
 }
 
-/// Default `views.rs` body — placeholder handler.
+/// Default `views.rs` body: one stub handler.
 ///
-/// Project-root `src/views.rs` already ships `index` + `healthz` for
-/// `GET /` and `GET /healthz`, so the new app starts empty (one stub
-/// handler the user can replace) to avoid duplicate-route panics
-/// when the scaffolder auto-merges the new app's router.
+/// The project root already serves `GET /` and `GET /healthz`, so a
+/// new app starts with no real routes. Adding them here would panic
+/// on a duplicate route when the scaffolder merges the app's router.
 const VIEWS_TEMPLATE: &str = "//! App views — request handlers (Django-style \"views\").
 //!
 //! Each handler is a stateless async fn; `urls.rs` mounts them
@@ -503,12 +456,10 @@ pub async fn hello() -> Html<&'static str> {
 }
 ";
 
-/// Default `urls.rs` body for an app — exposes a stateless
-/// `Router<()>` via `pub fn api()` so the project-root urls.rs
-/// aggregator can `.merge(crate::<app>::urls::api())` it. Slice 9.0g
-/// shape — the project's main.rs / Builder mounts admin + tenant
-/// dispatch separately, so the app router stays focused on the
-/// custom routes the user adds.
+/// Default `urls.rs` body: a `pub fn api() -> Router<()>` the
+/// project's root `urls.rs` can `.merge(...)`. Admin and tenant
+/// dispatch are mounted elsewhere, so this router holds only the
+/// app's own routes.
 const URLS_TEMPLATE: &str = "//! App URL routing.
 //!
 //! `pub fn api() -> Router<()>` — every route this app exposes.
@@ -535,13 +486,13 @@ pub fn api() -> Router<()> {
 }
 ";
 
-/// Default `tests.rs` body — generated per-app so the inventory
-/// smoke test can reference the starter model's table by name.
+/// Default `tests.rs` body, rendered per app so the smoke test can
+/// name the starter model's table.
 fn render_tests_template(singular_table: &str, crate_root: &str) -> String {
-    // This file is already pulled in as the `tests` module via
-    // `#[cfg(test)] mod tests;` in `mod.rs`, so the body lives at module
-    // scope here — NOT wrapped in another `mod tests {{ }}` (that would
-    // nest to `<app>::tests::tests` and break the `super::` paths).
+    // `mod.rs` already declares this file as the `tests` module, so
+    // the body sits at module scope. Wrapping it in another
+    // `mod tests { }` would nest to `<app>::tests::tests` and break
+    // the `super::` paths.
     format!(
         "//! App-level integration tests.
 //!
@@ -581,10 +532,9 @@ fn starter_model_registered_in_inventory() {{
     )
 }
 
-/// Single-tenant `manage.rs` template — wires the standard
-/// `rustango::migrate::manage::run` dispatcher. Pass to
-/// [`StartAppOptions::manage_bin`] when bootstrapping a non-tenancy
-/// project.
+/// `manage.rs` template for a single-tenant project. It wires up the
+/// `rustango::migrate::manage::run` dispatcher. Pass it as
+/// [`StartAppOptions::manage_bin`].
 pub const SINGLE_TENANT_MANAGE_BIN: &str =
     "//! Generated by `manage startapp --with-manage-bin`. Edit freely.
 //!
@@ -657,7 +607,7 @@ mod tests {
             "a private `mod blog;` in lib.rs is invisible to src/bin/: {body}"
         );
         // The anchor must be the existing `pub mod` run, not the
-        // docstring fallback — that is what put it above them before.
+        // docstring fallback, which would put it above them.
         assert!(
             body.find("pub mod blog;") > body.find("pub mod settings;"),
             "the new module should join the existing `pub mod` run: {body}"
@@ -828,10 +778,9 @@ mod tests {
         assert_eq!(singularize("posts"), "post");
         assert_eq!(singularize("comments"), "comment");
         assert_eq!(singularize("users"), "user");
-        // Short words (< 5 chars) stay as-is to avoid mangling
-        // names like `cms` / `dms`.
+        // Words under 5 characters stay as they are.
         assert_eq!(singularize("dms"), "dms");
-        // Words ending in `ss` / `us` / non-`s` are untouched.
+        // So do words ending in `ss`, `us`, or not in `s` at all.
         assert_eq!(singularize("address"), "address");
         assert_eq!(singularize("bus"), "bus");
         assert_eq!(singularize("blog"), "blog");
@@ -887,9 +836,7 @@ mod tests {
 
     #[test]
     fn rendered_models_template_threads_default_crate_root() {
-        // Phase 2 of #145 — without an explicit override the emit
-        // mentions `rustango::` exactly as it did pre-#145. This is
-        // the regression guard for every existing call site.
+        // With no override the template must still say `rustango::`.
         let body = render_models_template("posts", "rustango");
         assert!(
             body.contains("use rustango::sql::Auto;"),
@@ -903,12 +850,9 @@ mod tests {
 
     #[test]
     fn rendered_models_template_threads_renamed_crate_root() {
-        // Phase 2 of #145 — passing `"rustango_orm"` produces source
-        // a bare-ORM consumer (post-#144) can compile against. The
-        // `#[rustango(...)]` derive attribute name stays literal —
-        // it's hard-coded in the proc-macro regardless of the
-        // consumer's Cargo.toml package rename. Same shape
-        // `rustango-renamed-smoke` proves under #142.
+        // A renamed crate root must reach the `use` lines, while the
+        // `#[rustango(...)]` attribute name stays as it is: the
+        // proc-macro expects that token whatever the crate is called.
         let body = render_models_template("posts", "rustango_orm");
         assert!(
             body.contains("use rustango_orm::sql::Auto;"),
@@ -930,11 +874,11 @@ mod tests {
 
     #[test]
     fn rendered_tests_template_threads_crate_root() {
-        // Default path stays bit-identical.
+        // Default root.
         let default_body = render_tests_template("post", "rustango");
         assert!(default_body.contains("use rustango::core::ModelEntry;"));
 
-        // Renamed path picks up the new root.
+        // Renamed root.
         let renamed_body = render_tests_template("post", "rustango_orm");
         assert!(renamed_body.contains("use rustango_orm::core::ModelEntry;"));
         assert!(!renamed_body.contains("use rustango::"));
@@ -942,10 +886,9 @@ mod tests {
 
     #[test]
     fn startapp_threads_crate_root_through_models() {
-        // End-to-end: `startapp` with `crate_root: Some("rustango_orm")`
-        // produces an app whose `models.rs` compiles against the
-        // renamed crate. The integration check at the byte level so a
-        // future renderer refactor can't quietly drop the override.
+        // End to end: `startapp` must carry `crate_root` all the way
+        // into the written `models.rs`, so a renderer refactor
+        // cannot quietly drop the override.
         let root = fresh_root("crate_root_e2e");
         startapp(
             &root,
@@ -968,10 +911,9 @@ mod tests {
 
     #[test]
     fn full_startapp_produces_singularized_polished_model() {
-        // End-to-end: invoke `startapp` against a temp project, read
-        // the materialized `models.rs` and `tests.rs`, assert the v0.28.2
-        // polish made it through (singularization, admin config, smoke
-        // test referencing the same singular table).
+        // End to end: run `startapp` on a temp project and check the
+        // written `models.rs` and `tests.rs` for the singular name,
+        // the admin config, and a smoke test on the same table.
         let root = fresh_root("polished_e2e");
         let _ = startapp(
             &root,
@@ -1075,8 +1017,8 @@ mod tests {
         let root = fresh_root("automount_bail");
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
-        // urls.rs without an axum router-construction anchor — should
-        // bail out and emit a manual-step hint.
+        // A urls.rs with no router-construction anchor must be left
+        // alone, with a manual-step hint instead.
         std::fs::write(
             src.join("urls.rs"),
             "// hand-rolled aggregator with no recognisable anchor\npub fn api() {}\n",

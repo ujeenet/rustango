@@ -2,16 +2,14 @@
 //! One [`Media`] row belongs to at most one collection; collections
 //! nest via `parent_id`.
 //!
-//! Sibling to [`crate::media::tag::MediaTag`]: collections express
-//! exclusive location ("/products/2026/launch/"), tags express
-//! inclusive labels ("featured", "approved"). Both are
-//! orthogonal — Media has at most one collection FK and any number
-//! of tag M2M rows.
+//! Sibling to [`crate::media::tag::MediaTag`]: collections are an
+//! exclusive location ("/products/2026/launch/"), tags are inclusive
+//! labels. The two are independent — Media has at most one collection
+//! FK and any number of tag links.
 //!
 //! Soft-deleted via `deleted_at`. `slug` is unique and path-friendly.
-//! A managed `#[derive(Model)]` on a `rustango_*` table, so its schema is
-//! emitted as an ordinary **system migration** — there is no lazy
-//! `ensure_*` creation layer.
+//! A managed `#[derive(Model)]`, so its schema ships as a system
+//! migration.
 //!
 //! [`Media`]: crate::media::Media
 
@@ -20,7 +18,7 @@ use crate::sql::Auto;
 /// One folder. Cheap to clone.
 #[derive(crate::Model, Debug, Clone)]
 // `permissions` so `auto_create_permissions` seeds
-// `rustango_media_collections.{add,change,delete,view}` — the codenames
+// `rustango_media_collections.{add,change,delete,view}`, the codenames
 // `router::MediaPerms` checks. Not a column, so no migration.
 #[rustango(table = "rustango_media_collections", permissions)]
 pub struct MediaCollection {

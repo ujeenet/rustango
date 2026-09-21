@@ -1,13 +1,11 @@
-//! Django-shape `setting_changed` signal — fires when a
-//! [`crate::test_settings::with_overridden`] override scope is
-//! entered or left. Django-parity #415.
+//! The `setting_changed` signal. It is sent when a
+//! [`crate::test_settings::with_overridden`] scope is entered or
+//! left.
 //!
-//! Django's `setting_changed` fires per-setting with `setting`,
-//! `value`, `enter` (bool). rustango's overlay scopes are
-//! whole-Settings replacements rather than per-field deltas, so the
-//! signal carries just `enter: bool` — `true` when the scope begins,
-//! `false` when it ends. Receivers typically use it to invalidate
-//! caches that depend on configuration values.
+//! Django sends one per setting, with a name and a value. Here an
+//! overlay replaces the whole `Settings`, so the signal carries only
+//! `enter`: `true` on the way in, `false` on the way out. Receivers
+//! mostly use it to drop caches that depend on config.
 //!
 //! ## Quick start
 //!
@@ -36,11 +34,10 @@ pub type ReceiverFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReceiverId(u64);
 
-/// Payload delivered to `setting_changed` receivers.
+/// What a `setting_changed` receiver gets.
 #[derive(Debug, Clone, Copy)]
 pub struct SettingChangedContext {
-    /// `true` when an override scope is entered; `false` when the
-    /// scope's future completes and the scope is leaving.
+    /// `true` when a scope is entered, `false` when it ends.
     pub enter: bool,
 }
 
@@ -96,15 +93,13 @@ where
     insert_receiver(boxed)
 }
 
-/// Remove a previously-connected `setting_changed` receiver.
+/// Remove a `setting_changed` receiver.
 pub fn disconnect_setting_changed(id: ReceiverId) -> bool {
     remove_receiver(id)
 }
 
-/// Fire `setting_changed` for `ctx`. Called by
-/// [`crate::test_settings::with_overridden`]; available publicly so
-/// custom configuration-overlay machinery can dispatch the same
-/// signal.
+/// Send `setting_changed`. [`crate::test_settings::with_overridden`]
+/// calls this; it is public so your own overlay code can too.
 pub async fn send_setting_changed(ctx: SettingChangedContext) {
     let receivers: Vec<ChangedReceiver> = snapshot();
     for r in receivers {
@@ -112,7 +107,7 @@ pub async fn send_setting_changed(ctx: SettingChangedContext) {
     }
 }
 
-/// Remove **all** setting-signal receivers. Test maintenance helper.
+/// Remove every `setting_changed` receiver. Mostly for tests.
 pub fn clear_all() {
     registry()
         .write()
@@ -120,7 +115,7 @@ pub fn clear_all() {
         .clear();
 }
 
-/// Total receivers currently registered.
+/// How many receivers are registered.
 #[must_use]
 pub fn receiver_count() -> usize {
     let reg = registry().read().unwrap_or_else(|e| e.into_inner());

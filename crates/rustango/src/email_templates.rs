@@ -1,8 +1,7 @@
-//! Tera-rendered email helpers — bridge the existing
-//! [`crate::email`] mailer trait and the Tera templating engine
-//! (already a dep on the `admin` feature).
+//! Tera-rendered emails: joins the [`crate::email`] mailer to the Tera
+//! template engine.
 //!
-//! Each email is a set of three sibling templates in a directory:
+//! Each email is up to three templates side by side:
 //!
 //! ```text
 //! email_templates/
@@ -11,9 +10,9 @@
 //!   welcome.html          -- HTML body        (optional)
 //! ```
 //!
-//! Subject + plain text are required; HTML is added when present so
-//! mail clients that prefer HTML get it and plain-text fallbacks
-//! still work.
+//! The subject and the plain-text body are required. The HTML body is
+//! added when the file exists, so HTML clients get HTML and the rest
+//! still get text.
 //!
 //! ## Quick start
 //!
@@ -65,39 +64,33 @@ impl From<tera::Error> for EmailRenderError {
     }
 }
 
-/// Holds a Tera engine plus per-instance rendering helpers.
-///
-/// Cheap to clone (the inner `Tera` is wrapped in `Arc` internally
-/// when shared across handlers — pass `Arc<EmailRenderer>` if you
-/// want to avoid the `Tera` clone cost).
+/// A Tera engine loaded with your email templates. Share it between
+/// handlers as `Arc<EmailRenderer>`.
 pub struct EmailRenderer {
     tera: Tera,
 }
 
 impl EmailRenderer {
-    /// Load every `*.txt`, `*.html`, `*.subject.txt` under `dir`.
-    /// Subdirectories are walked.
+    /// Load every template under `dir`, subdirectories included.
     ///
     /// # Errors
-    /// Returns the underlying Tera error when a template doesn't
-    /// parse, or the directory glob can't be evaluated.
+    /// The Tera error when a template does not parse, or the glob
+    /// cannot be read.
     pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self, EmailRenderError> {
         let glob = format!("{}/**/*", dir.as_ref().display());
         let tera = Tera::new(&glob)?;
         Ok(Self { tera })
     }
 
-    /// Build from in-memory `(name, source)` pairs. Useful for
-    /// tests and one-off scripts that don't want a templates dir.
+    /// Build from `(name, source)` pairs held in memory. Good for
+    /// tests and small scripts with no template directory.
     ///
     /// # Errors
-    /// Returns the underlying Tera error if a template doesn't
-    /// parse.
+    /// The Tera error when a template does not parse.
     pub fn from_pairs(pairs: Vec<(&str, &str)>) -> Result<Self, EmailRenderError> {
         let mut tera = Tera::default();
-        // Disable autoescape — email templates are not always HTML, and
-        // the user is responsible for choosing the right escape strategy
-        // per template.
+        // Autoescape is off: these templates are not all HTML. You must
+        // escape untrusted values in HTML bodies yourself.
         tera.autoescape_on(Vec::new());
         for (name, source) in pairs {
             tera.add_raw_template(name, source)?;
@@ -105,26 +98,24 @@ impl EmailRenderer {
         Ok(Self { tera })
     }
 
-    /// Borrow the inner Tera. Useful when you want to register
-    /// custom filters / functions.
+    /// Borrow the inner Tera.
     #[must_use]
     pub fn tera(&self) -> &Tera {
         &self.tera
     }
 
-    /// Mutable borrow for filter/function registration at startup.
+    /// Borrow the inner Tera mutably, to register filters at startup.
     pub fn tera_mut(&mut self) -> &mut Tera {
         &mut self.tera
     }
 
-    /// Render `{name}.subject.txt`, `{name}.txt`, and (optionally)
-    /// `{name}.html` and pack them into an [`Email`]. The returned
-    /// email has only `subject`, `body`, and `html_body` populated —
-    /// chain `.to()` / `.from()` / etc. before sending.
+    /// Render `{name}.subject.txt`, `{name}.txt` and, if it exists,
+    /// `{name}.html` into an [`Email`]. Only the subject and bodies
+    /// are set, so chain `.from()` and `.to()` before sending.
     ///
     /// # Errors
-    /// `Missing(name)` when subject or text body is absent;
-    /// `Tera(_)` for any template error.
+    /// `Missing(name)` when the subject or text body is absent,
+    /// `Tera(_)` for any other template error.
     pub fn render(&self, name: &str, context: &Context) -> Result<Email, EmailRenderError> {
         let subject_name = format!("{name}.subject.txt");
         let text_name = format!("{name}.txt");
@@ -150,7 +141,7 @@ impl EmailRenderer {
 
         let mut email = Email::new().subject(subject).body(body);
 
-        // HTML body is optional — render only when the template exists.
+        // The HTML body is optional.
         if self.tera.get_template_names().any(|t| t == html_name) {
             let html = self.tera.render(&html_name, context)?;
             email = email.html_body(html);
@@ -232,8 +223,7 @@ mod tests {
 
     #[test]
     fn subject_is_trimmed() {
-        // Subject lines often gain leading whitespace from indentation
-        // in templates — trim it.
+        // Template indentation often leaks into the subject line.
         let r =
             EmailRenderer::from_pairs(vec![("hi.subject.txt", "  Hello\n"), ("hi.txt", "body")])
                 .unwrap();
@@ -243,7 +233,7 @@ mod tests {
 
     #[test]
     fn template_syntax_error_propagates() {
-        // Garbled template — Tera should reject at parse time.
+        // Tera rejects a broken template at parse time.
         let r =
             EmailRenderer::from_pairs(vec![("hi.subject.txt", "{{ unbalanced"), ("hi.txt", "x")]);
         assert!(r.is_err(), "parse error should bubble out of from_pairs");
@@ -267,10 +257,9 @@ mod tests {
     fn tera_mut_lets_caller_register_filters() {
         let mut r =
             EmailRenderer::from_pairs(vec![("hi.subject.txt", "x"), ("hi.txt", "x")]).unwrap();
-        // Register a no-op filter; just verifying the access works.
         r.tera_mut()
             .register_filter("noop", |v: &tera::Value, _: &_| Ok(v.clone()));
-        // Smoke test that rendering still works.
+        // Rendering still works afterwards.
         let _ = r.render("hi", &Context::new()).unwrap();
     }
 

@@ -65,6 +65,12 @@
 //! Same builder API across both flavors; pick whichever matches
 //! the project's connection-management strategy. Templates port
 //! between them without edits.
+//!
+//! [`ListView`]: crate::template_views::ListView
+//! [`DetailView`]: crate::template_views::DetailView
+//! [`CreateView`]: crate::template_views::CreateView
+//! [`UpdateView`]: crate::template_views::UpdateView
+//! [`DeleteView`]: crate::template_views::DeleteView
 
 use std::collections::HashMap;
 use std::sync::Arc;

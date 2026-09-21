@@ -1,13 +1,10 @@
-//! Django-shape `ModelAdmin.get_urls()` per-model custom views —
-//! issue #363.
+//! Per-model custom admin views, like Django's
+//! `ModelAdmin.get_urls()`.
 //!
-//! The admin already ships every "list / detail / new / edit /
-//! action" route built-in, but Django's `get_urls()` lets a
-//! ModelAdmin add arbitrary routes scoped to one model:
-//! `/admin/blog/post/<id>/duplicate/`,
-//! `/admin/orders/order/<id>/print/`, etc. This module exposes the
-//! equivalent in rustango as an inventory-collected registry that
-//! the admin Builder walks at `build()` time.
+//! The admin ships the list, detail, new, edit and action routes. This
+//! module lets a model add its own on top, such as
+//! `/admin/blog_post/{id}/duplicate`. Registrations are collected by
+//! inventory and mounted by the Builder at `build()` time.
 //!
 //! ## Usage
 //!
@@ -30,16 +27,15 @@
 //! );
 //! ```
 //!
-//! Mount path resolves to `{admin_prefix}/{table}/{suffix}`. The
-//! suffix may contain axum path params: `"copy/{id}"` mounts as
-//! `…/blog_post/copy/{id}`. Suffix MUST NOT collide with the
-//! framework's built-in routes (`""`, `"new"`, `"__action"`,
-//! `"__autocomplete"`, `"{pk}"`, `"{pk}/edit"`, `"{pk}/delete"`);
-//! the Builder logs a warning + skips on collision rather than
-//! panicking at startup.
+//! The mount path is `{admin_prefix}/{table}/{suffix}`. The suffix may
+//! hold axum path params, so `"copy/{id}"` mounts at
+//! `…/blog_post/copy/{id}`. It must not clash with a built-in route:
+//! `""`, `"new"`, `"__action"`, `"__autocomplete"`, `"{pk}"`,
+//! `"{pk}/edit"` or `"{pk}/delete"`. On a clash the Builder logs a
+//! warning and skips the view instead of panicking.
 //!
 //! Handlers run inside the admin's session-auth scope when one is
-//! configured — the operator must be logged in to reach them.
+//! configured, so the operator must be signed in to reach them.
 
 use axum::http::Method;
 use axum::response::Response;
@@ -49,46 +45,40 @@ use std::pin::Pin;
 /// Boxed future returned by a [`CustomViewHandler`].
 pub type CustomViewFuture = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
 
-/// Signature for a custom admin view handler. Receives the admin's
-/// `Pool` (backend-erasing — PG / MySQL / SQLite) and the raw
-/// `axum::http::Request`. Returns a response.
+/// A custom admin view handler. Takes the admin's `Pool`, which hides
+/// the backend, plus the raw request, and returns a response.
 ///
-/// Plain `fn` pointer (not `Arc<dyn Fn>`) so the registration can
-/// live in `inventory::submit!`'s `static` storage, which can only
-/// hold const-constructible values. The macro side wraps the user's
-/// closure in a non-capturing inner function — any per-handler
-/// state has to live in `static`s the closure references, not
-/// closure captures.
+/// A plain `fn` pointer, not `Arc<dyn Fn>`, because `inventory::submit!`
+/// stores it in a `static` and only const values fit. The macro wraps
+/// the user's closure in a non-capturing function, so per-handler state
+/// must live in a `static`, not in a capture.
 pub type CustomViewHandler =
     fn(crate::sql::Pool, axum::http::Request<axum::body::Body>) -> CustomViewFuture;
 
-/// One per-model custom view registration. Inventory-collected via
+/// One custom view registration, collected by inventory via
 /// [`crate::register_admin_view!`].
 pub struct AdminCustomView {
-    /// Model table the view belongs to — must match
-    /// `ModelSchema::table` exactly. The Builder skips views whose
-    /// table isn't registered.
+    /// Model table the view belongs to. Must equal
+    /// `ModelSchema::table`; the Builder skips unregistered tables.
     pub table: &'static str,
-    /// URL suffix appended after `{admin_prefix}/{table}/`. May
-    /// contain axum path params (e.g. `"copy/{id}"`). Must not
-    /// collide with built-in admin routes (see module docs).
+    /// URL suffix after `{admin_prefix}/{table}/`. May hold axum path
+    /// params, such as `"copy/{id}"`. See the module docs for the
+    /// suffixes it must not use.
     pub suffix: &'static str,
-    /// HTTP method — `GET` / `POST` / `PUT` / `DELETE` / `PATCH`.
+    /// HTTP method the route answers on.
     pub method: Method,
-    /// Short human label — surfaces in future detail-page action
-    /// menus / breadcrumbs. Empty string suppresses any UI hook
-    /// (the route still mounts).
+    /// Short label for UI surfaces. An empty string means no UI entry;
+    /// the route still mounts.
     pub label: &'static str,
-    /// The handler callable. Built by [`crate::register_admin_view!`]
-    /// to wrap a plain `async fn(Pool, Request) -> Response` into
-    /// the boxed-future shape above.
+    /// The handler. [`crate::register_admin_view!`] wraps a plain
+    /// `async fn(Pool, Request) -> Response` into the boxed-future
+    /// shape above.
     pub handler: CustomViewHandler,
 }
 
 inventory::collect!(AdminCustomView);
 
-/// Return every custom view registered for `table`, in registration
-/// order.
+/// Every custom view registered for `table`, in registration order.
 #[must_use]
 pub fn for_table(table: &str) -> Vec<&'static AdminCustomView> {
     inventory::iter::<AdminCustomView>
@@ -97,31 +87,29 @@ pub fn for_table(table: &str) -> Vec<&'static AdminCustomView> {
         .collect()
 }
 
-/// Reserved URL suffixes the admin Builder hard-codes — registrations
-/// that collide are skipped with a tracing warning at build time.
-/// Exposed so tests + the Builder share the same canonical list.
+/// URL suffixes the admin Builder owns. A registration that uses one
+/// is skipped with a warning at build time. Shared by the Builder and
+/// the tests, so both read the same list.
 pub(crate) const RESERVED_SUFFIXES: &[&str] = &["", "new", "__action", "__autocomplete"];
 
-/// Returns `true` when `suffix` collides with a built-in admin route.
-/// Static suffixes match exactly; pk-positional suffixes (anything
-/// that starts with the axum capture `{`) match any single-segment
-/// pk path (`{pk}`, `{pk}/edit`, `{pk}/delete`).
+/// `true` when `suffix` clashes with a built-in admin route: either a
+/// name in `RESERVED_SUFFIXES` or one of the pk paths `{pk}`,
+/// `{pk}/edit` and `{pk}/delete`.
 #[must_use]
 pub(crate) fn is_reserved(suffix: &str) -> bool {
     let trimmed = suffix.trim_matches('/');
     if RESERVED_SUFFIXES.iter().any(|r| *r == trimmed) {
         return true;
     }
-    // The framework owns `/{table}/{pk}`, `/{table}/{pk}/edit`,
-    // `/{table}/{pk}/delete`. Anything that matches one of those
-    // shapes is also reserved.
+    // The framework also owns `/{table}/{pk}` and its `/edit` and
+    // `/delete` forms.
     matches!(trimmed, "{pk}" | "{pk}/edit" | "{pk}/delete")
 }
 
-/// Register a custom admin view scoped to one model.
+/// Register a custom admin view for one model.
 ///
-/// See [the module-level docs](self) for the macro shape and the
-/// list of reserved suffixes.
+/// See [the module-level docs](self) for the argument shape and the
+/// reserved suffixes.
 ///
 /// ```ignore
 /// rustango::register_admin_view!(
@@ -138,11 +126,9 @@ pub(crate) fn is_reserved(suffix: &str) -> bool {
 #[macro_export]
 macro_rules! register_admin_view {
     ($table:expr, $suffix:expr, $method:expr, $label:expr, $handler:expr $(,)?) => {
-        // Wrap the user's expression in a non-capturing fn so the
-        // inventory entry can use a plain fn-pointer (const-
-        // constructible, unlike `Arc::new(...)`). The user's
-        // `$handler` runs inside the body — closures with no
-        // captures fit fine.
+        // Wrap the user's expression in a non-capturing fn, so the
+        // inventory entry holds a plain fn pointer, which is const
+        // constructible. A closure with no captures fits.
         $crate::inventory::submit! {
             $crate::admin::custom_views::AdminCustomView {
                 table: $table,

@@ -731,7 +731,7 @@ pub async fn get_or_create_role(
 /// Routed through the ORM's [`InsertQuery`] IR with
 /// [`ConflictClause::DoNothing`] — the writer emits `INSERT … ON
 /// CONFLICT DO NOTHING`, which matches the `(role_id, codename)`
-/// unique constraint declared in [`ENSURE_SQL`].
+/// unique constraint the ensure-table DDL declares.
 /// #562 — delegates to [`grant_role_perm_pool`].
 #[cfg(feature = "postgres")]
 pub async fn grant_role_perm(
@@ -870,7 +870,7 @@ pub async fn remove_role_pool(
 ///
 /// #562 — delegates to [`set_user_perm_pool`]. The
 /// `InsertQuery` IR (with `ConflictClause::DoUpdate` targeting the
-/// `(user_id, codename)` unique constraint from [`ENSURE_SQL`]) lives
+/// `(user_id, codename)` unique constraint from the ensure-table DDL) lives
 /// there; the `granted` column is the only one in `update_columns`
 /// so existing `data` JSONB (reason / granted-by / etc.) survives
 /// a re-grant.

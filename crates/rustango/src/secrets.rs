@@ -15,9 +15,9 @@
 //!
 //! | Backend | Description |
 //! |---------|-------------|
-//! | [`EnvSecrets`] | Reads from environment variables (with optional prefix) |
-//! | [`InMemorySecrets`] | Tests — secrets in a HashMap |
-//! | Vault / AWS / GCP | Plug your own — implement `Secrets` for the SDK of your choice |
+//! | [`EnvSecrets`] | Environment variables, with an optional prefix |
+//! | [`InMemorySecrets`] | A map, for tests |
+//! | Vault, AWS, GCP | Write your own `Secrets` impl over their SDK |
 //!
 //! ## Example: AWS Secrets Manager
 //!
@@ -36,6 +36,9 @@
 //!     }
 //! }
 //! ```
+//!
+//! [`EnvSecrets`]: crate::secrets::EnvSecrets
+//! [`InMemorySecrets`]: crate::secrets::InMemorySecrets
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -51,11 +54,10 @@ pub enum SecretsError {
 /// Pluggable secrets backend.
 #[async_trait]
 pub trait Secrets: Send + Sync + 'static {
-    /// Retrieve the secret value for `key`. Returns `None` when the
-    /// secret is not present in the backend.
+    /// Read the secret for `key`, or `None` if the backend has none.
     async fn get(&self, key: &str) -> Result<Option<String>, SecretsError>;
 
-    /// Convenience: get a required secret. Returns `Err(Backend)` if missing.
+    /// Read a secret that must exist. Missing gives `Err(Backend)`.
     async fn require(&self, key: &str) -> Result<String, SecretsError> {
         self.get(key)
             .await?
@@ -68,16 +70,16 @@ pub type BoxedSecrets = Arc<dyn Secrets>;
 
 // ------------------------------------------------------------------ EnvSecrets
 
-/// Environment-variable backed secrets store.
+/// Secrets read from environment variables.
 ///
-/// With a prefix (e.g. `"MYAPP_"`), `get("DB_PASSWORD")` reads `MYAPP_DB_PASSWORD`.
-/// Without a prefix, reads `DB_PASSWORD` directly.
+/// With the prefix `"MYAPP_"`, `get("DB_PASSWORD")` reads
+/// `MYAPP_DB_PASSWORD`. With no prefix, it reads `DB_PASSWORD`.
 pub struct EnvSecrets {
     prefix: String,
 }
 
 impl EnvSecrets {
-    /// New env-secrets reader with no prefix — reads env vars verbatim.
+    /// Reader with no prefix: the key is the variable name.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -85,7 +87,7 @@ impl EnvSecrets {
         }
     }
 
-    /// New env-secrets reader that prepends `prefix` to every key lookup.
+    /// Reader that puts `prefix` in front of every key.
     #[must_use]
     pub fn with_prefix(prefix: impl Into<String>) -> Self {
         Self {
@@ -116,8 +118,8 @@ impl Secrets for EnvSecrets {
 
 // ------------------------------------------------------------------ InMemorySecrets
 
-/// In-memory secrets store — for tests. `Arc<Mutex<HashMap>>` inside so
-/// you can mutate after construction.
+/// In-memory secrets store for tests. You can change it after it is
+/// built, because the map is behind a lock.
 pub struct InMemorySecrets {
     inner: Mutex<HashMap<String, String>>,
 }
@@ -130,7 +132,7 @@ impl InMemorySecrets {
         }
     }
 
-    /// Pre-populate with key→value pairs. Builder-style.
+    /// Fill the store with key and value pairs.
     #[must_use]
     pub fn with(mut self, pairs: &[(&str, &str)]) -> Self {
         for (k, v) in pairs {

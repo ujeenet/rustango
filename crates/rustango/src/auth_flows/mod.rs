@@ -44,6 +44,10 @@
 //!
 //! Same pattern with [`EmailVerification`] — issue the URL after signup,
 //! verify on the callback, mark the user's `email_verified_at` column.
+//!
+//! [`EmailVerification`]: crate::auth_flows::EmailVerification
+//! [`PasswordReset::issue`]: crate::auth_flows::PasswordReset::issue
+//! [`PasswordReset::verify`]: crate::auth_flows::PasswordReset::verify
 
 use std::time::Duration;
 

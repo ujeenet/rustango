@@ -1,21 +1,17 @@
-//! Django-shape per-view caching — `@cache_page` analog plus
-//! `Cache-Control` / `Vary` header builders. Issue #55.
+//! Django-shape per-view caching: a `@cache_page` analog plus
+//! `Cache-Control` and `Vary` header builders.
 //!
 //! ## What you get
 //!
-//! 1. [`CachePageLayer`] — a tower layer that caches successful GET
-//!    responses under a key derived from `(method, path, Vary-on
-//!    header values)`. Subsequent matching requests bypass the inner
-//!    service and return the cached response. RFC 10008 `QUERY`
-//!    responses are cacheable too — opt in with
-//!    [`CachePageLayer::cache_query`], which folds a digest of the
-//!    request body into the key.
-//! 2. [`CacheControl`] — fluent builder for the `Cache-Control`
-//!    header (`max_age`, `public`, `private`, `no_cache`, `no_store`,
-//!    `must_revalidate`).
-//! 3. [`never_cache`] — shorthand for `Cache-Control: no-store,
-//!    no-cache, must-revalidate, max-age=0`.
-//! 4. [`vary_on`] — builds a `Vary` header from a list of header names.
+//! 1. [`CachePageLayer`]: a tower layer that caches successful GET
+//!    responses. The key is the method, path and the values of the
+//!    vary-on headers. RFC 10008 `QUERY` responses can be cached too;
+//!    turn that on with [`CachePageLayer::cache_query`], which folds a
+//!    digest of the request body into the key.
+//! 2. [`CacheControl`]: a builder for the `Cache-Control` header.
+//! 3. [`never_cache`]: `Cache-Control: no-store, no-cache,
+//!    must-revalidate, max-age=0`.
+//! 4. [`vary_on`]: builds a `Vary` header from header names.
 //!
 //! ## Quick start
 //!
@@ -40,30 +36,33 @@
 //!
 //! ## Semantics
 //!
-//! - **GET, and QUERY when opted in.** POST / PUT / PATCH / DELETE /
-//!   HEAD bypass the cache (mutating methods invalidate semantics; HEAD
-//!   is too rare to be worth the body-stripping path). RFC 10008 `QUERY`
-//!   is cached only when [`CachePageLayer::cache_query`] is enabled;
-//!   those responses are forced `private` so shared caches (which can't
-//!   key on the request body) never mis-serve them, and a QUERY body
-//!   over the 1 MiB cacheable cap gets `413`.
-//! - **Status 200-only.** Errors / redirects / 304s aren't cached so
-//!   transient failures don't poison the cache.
-//! - **`Cache-Control: no-store` / `private` / `no-cache`** on the
-//!   response disables caching for it — `private` because this is a
-//!   shared cache (matches RFC 9111).
-//! - **Per-user responses are never shared (#1251).** A response
-//!   carrying `Set-Cookie` is never cached, and by default a request
-//!   carrying `Authorization` or `Cookie` is neither served from nor
-//!   stored in the cache — its response is assumed to depend on the
-//!   caller. Opt a known-public route back in with
-//!   [`CachePageLayer::cache_authenticated`].
-//! - **Body is buffered.** The layer materializes the full response
-//!   body so it can store it; streaming responses lose their streaming
-//!   property under the cache. Use `[never_cache]` headers on
-//!   streaming handlers, or omit the layer on those routes.
-//! - **Vary-on values are case-insensitive** (HTTP convention) and
-//!   missing headers are treated as empty.
+//! - **GET, and QUERY when opted in.** Every other method bypasses
+//!   the cache. A cached QUERY response is forced `private`, because
+//!   a shared cache cannot key on the request body, and a QUERY body
+//!   over the 1 MiB cap gets `413`.
+//! - **200 only.** Errors, redirects and 304s are not cached, so a
+//!   transient failure cannot poison the cache.
+//! - **`Cache-Control: no-store`, `private` or `no-cache`** on the
+//!   response stops it being cached. This is a shared cache, so
+//!   `private` counts as an opt-out.
+//! - **Per-user responses are never shared.** A response with
+//!   `Set-Cookie` is never cached, and by default a request with
+//!   `Authorization` or `Cookie` is neither served from nor stored in
+//!   the cache, since its response probably depends on the caller.
+//!   Only [`CachePageLayer::cache_authenticated`] changes that, and
+//!   only for a route you know is public.
+//! - **The body is buffered.** A response loses its streaming
+//!   behaviour under this layer. Use [`never_cache`] on streaming
+//!   handlers, or leave the layer off those routes.
+//! - **Vary-on values are case-insensitive** and a missing header
+//!   counts as empty.
+//!
+//! [`CachePageLayer`]: crate::cache_page::CachePageLayer
+//! [`CachePageLayer::cache_query`]: crate::cache_page::CachePageLayer::cache_query
+//! [`CachePageLayer::cache_authenticated`]: crate::cache_page::CachePageLayer::cache_authenticated
+//! [`CacheControl`]: crate::cache_page::CacheControl
+//! [`never_cache`]: crate::cache_page::never_cache
+//! [`vary_on`]: crate::cache_page::vary_on
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -80,16 +79,14 @@ use crate::cache::BoxedCache;
 
 // ---------------------------------------------------------------- Wire format
 
-/// Serialized form stored in the cache. JSON-encoded so the
-/// `Cache` trait's `String` value works without a separate binary
-/// channel. Body is base64-encoded to survive non-UTF8 content
-/// (binary images, gzipped HTML, etc.).
+/// What gets stored in the cache. JSON, so the `Cache` trait's
+/// `String` value is enough. The body is base64 so non-UTF8 content
+/// such as images or gzipped HTML survives.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedResponse {
     status: u16,
-    /// `(name, value)` pairs. We pre-stringify names + values so the
-    /// cached payload doesn't depend on `http::HeaderName` /
-    /// `http::HeaderValue` stable serde shapes.
+    /// `(name, value)` pairs, stringified so the payload does not
+    /// depend on how `http` serializes its header types.
     headers: Vec<(String, String)>,
     /// Response body, base64-encoded.
     body_b64: String,
@@ -97,8 +94,8 @@ struct CachedResponse {
 
 // ---------------------------------------------------------------- Layer
 
-/// Tower layer that caches GET responses under a key derived from
-/// `(prefix, method, path, vary-on header values)`. Issue #55.
+/// Tower layer that caches GET responses. The key is the prefix,
+/// method, path and the vary-on header values.
 #[derive(Clone)]
 pub struct CachePageLayer {
     cache: BoxedCache,
@@ -106,17 +103,16 @@ pub struct CachePageLayer {
     key_prefix: String,
     vary_on: Vec<HeaderName>,
     cache_query: bool,
-    /// When `false` (default), a request carrying `Authorization` or
-    /// `Cookie` is neither served from nor stored in the shared cache —
-    /// its response is assumed per-user. Opt in only for a route you
-    /// know is genuinely public despite the header. See
-    /// [`Self::cache_authenticated`] (#1251).
+    /// When `false` (the default), a request with `Authorization` or
+    /// `Cookie` is neither served from nor stored in the shared
+    /// cache, because its response is probably per-user. See
+    /// [`Self::cache_authenticated`].
     cache_authenticated: bool,
 }
 
 impl CachePageLayer {
-    /// Build a layer against an existing [`BoxedCache`]. Default
-    /// timeout is 60 seconds; tune via [`Self::timeout`].
+    /// Build a layer on an existing [`BoxedCache`]. The default TTL
+    /// is 60 seconds; change it with [`Self::timeout`].
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
         Self {
@@ -129,30 +125,28 @@ impl CachePageLayer {
         }
     }
 
-    /// Cache TTL — entries expire after this duration.
+    /// Cache TTL: entries expire after this duration.
     #[must_use]
     pub fn timeout(mut self, dur: Duration) -> Self {
         self.timeout = dur;
         self
     }
 
-    /// Override the cache-key prefix (default `"rustango.cache_page"`).
-    /// Useful when multiple cache_page layers share one cache backend
-    /// and you want to be able to selectively `cache.delete_prefix(...)`
-    /// later (per the `Cache` trait's `delete` per-key shape).
+    /// Override the cache-key prefix. The default is
+    /// `"rustango.cache_page"`. Give each layer its own prefix when
+    /// several share one cache backend, so you can clear them apart.
     #[must_use]
     pub fn key_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.key_prefix = prefix.into();
         self
     }
 
-    /// Add header names whose values participate in the cache key.
-    /// Names are case-insensitively normalized to ASCII-lowercase.
-    /// Calling this method multiple times appends.
+    /// Add header names whose values go into the cache key. Names are
+    /// lowercased. Calling this again appends.
     ///
     /// # Panics
-    /// Panics when a name fails [`HeaderName::from_bytes`] — invalid
-    /// header names are programmer errors, not runtime conditions.
+    /// Panics on a name that is not a valid header name. That is a
+    /// programmer error, not a runtime condition.
     #[must_use]
     pub fn vary_on<I, S>(mut self, names: I) -> Self
     where
@@ -169,38 +163,34 @@ impl CachePageLayer {
     }
 
     /// Allow caching responses to requests that carry `Authorization`
-    /// or `Cookie` (#1251).
+    /// or `Cookie`.
     ///
-    /// **Off by default, and leave it off unless you are certain.** The
-    /// safe default treats a request bearing either header as per-user:
-    /// it is neither served from nor stored in the shared cache, so one
-    /// user's page can't be handed to another. Enable this only for a
-    /// route whose response you know does not depend on the caller's
-    /// identity even though the header is present (e.g. a public page on
-    /// a site that sets an analytics cookie on everyone).
+    /// **Off by default. Leave it off unless you are sure.** The
+    /// default treats such a request as per-user and keeps it out of
+    /// the shared cache, so one user's page cannot be handed to
+    /// another. Turn it on only for a route whose response does not
+    /// depend on who is calling, such as a public page on a site that
+    /// sets an analytics cookie for everyone.
     ///
-    /// A response that itself sends `Set-Cookie`, or marks itself
-    /// `Cache-Control: private` / `no-cache` / `no-store`, is **never**
-    /// cached regardless of this flag — that is not configurable.
+    /// A response that sends `Set-Cookie`, or marks itself
+    /// `Cache-Control: private`, `no-cache` or `no-store`, is
+    /// **never** cached, whatever this flag says.
     #[must_use]
     pub fn cache_authenticated(mut self, enabled: bool) -> Self {
         self.cache_authenticated = enabled;
         self
     }
 
-    /// Opt into caching RFC 10008 `QUERY` requests (default `false`).
+    /// Cache RFC 10008 `QUERY` requests. Default `false`.
     ///
-    /// QUERY is safe + idempotent and its response is cacheable, keyed on
-    /// the request body (the query criteria). When enabled, a `QUERY`
-    /// request has its body buffered and a digest of it folded into the
-    /// cache key, so byte-identical query bodies hit the cache and
-    /// anything else misses. Off by default because buffering request
-    /// bodies has a cost and should be a deliberate choice.
+    /// QUERY is safe and idempotent, and its response depends on the
+    /// request body. When enabled, the body is buffered and a digest
+    /// of it goes into the cache key, so only a byte-identical body
+    /// hits. It is off by default because buffering costs something.
     ///
-    /// Buffering is capped at the cacheable limit (1 MiB); a QUERY body
-    /// larger than that is rejected with `413 Payload Too Large` (a
-    /// megabyte of search criteria is pathological). Pair with a request
-    /// body-limit layer to reject oversized bodies earlier and uniformly.
+    /// Buffering stops at 1 MiB; a larger QUERY body is rejected with
+    /// `413`. Add a request body-limit layer to reject oversized
+    /// bodies earlier.
     #[must_use]
     pub fn cache_query(mut self, enabled: bool) -> Self {
         self.cache_query = enabled;
@@ -263,19 +253,16 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
         Box::pin(async move {
-            // GET is always cacheable. QUERY (RFC 10008) is cacheable only
-            // when opted in; every other method bypasses the cache.
+            // GET is always cacheable; QUERY only when opted in.
+            // Every other method bypasses the cache.
             let is_get = req.method() == axum::http::Method::GET;
             let is_query = cache_query && req.method().as_str() == "QUERY";
             if !is_get && !is_query {
                 return inner.call(req).await;
             }
 
-            // For QUERY, buffer the body so we can (a) fold its digest into
-            // the cache key and (b) hand a fresh body to the inner service.
-            // A body over the cacheable cap is forwarded uncached rather
-            // than truncated. Buffering is bounded by any upstream
-            // body-limit layer (documented on `cache_query`).
+            // For QUERY, buffer the body so its digest can go into
+            // the key and a fresh body can reach the inner service.
             let (req, body_digest) = if is_query {
                 let (parts, body) = req.into_parts();
                 match to_bytes(body, MAX_CACHEABLE_BODY_BYTES).await {
@@ -284,15 +271,11 @@ where
                         (Request::from_parts(parts, Body::from(bytes)), Some(digest))
                     }
                     Err(_) => {
-                        // QUERY body exceeds the cacheable cap (or a read
-                        // error). `to_bytes` has consumed it and won't hand
-                        // the bytes back, so we can't forward it to the
-                        // handler untouched. Reject cleanly with 413 rather
-                        // than run the handler against a truncated/empty
-                        // body and return silently-wrong results — enabling
-                        // `cache_query` caps QUERY bodies at the cacheable
-                        // limit (documented). `_parts` intentionally
-                        // dropped; the request is not forwarded.
+                        // Body over the cap, or a read error. `to_bytes`
+                        // consumed it and will not give the bytes back,
+                        // so the handler cannot get the real body.
+                        // Return 413 rather than run it on an empty body
+                        // and answer with something quietly wrong.
                         let _ = parts;
                         return Ok(payload_too_large());
                     }
@@ -301,10 +284,10 @@ where
                 (req, None)
             };
 
-            // A request bearing `Authorization` or `Cookie` is treated as
-            // per-user unless the route opted in: it is neither served
-            // from nor stored in the shared cache, so one user's response
-            // can't be handed to another (#1251).
+            // Unless the route opted in, a request with `Authorization`
+            // or `Cookie` is per-user: never served from and never
+            // stored in the shared cache, so one user's response
+            // cannot reach another user.
             let req_is_authed = !cache_authenticated
                 && (req
                     .headers()
@@ -326,19 +309,19 @@ where
                         return Ok(resp);
                     }
                 }
-                // Corrupt entry — fall through to recompute.
+                // Corrupt entry: fall through and recompute.
             }
 
-            // Cache miss — run inner, then store the response.
+            // Miss: run the inner service, then store the response.
             let resp = inner.call(req).await?;
-            // Only cache 200 OK responses. Refuse to cache anything that
-            // is per-user or explicitly opted out:
+            // Cache only 200 OK, and never something per-user or
+            // opted out:
             //   - `Set-Cookie`: the response mints a cookie, so it is
-            //     definitionally per-user. Caching it would replay one
-            //     user's session cookie to the next (#1251).
+            //     per-user. Caching it would replay one user's session
+            //     cookie to the next caller.
             //   - `Cache-Control: no-store | private | no-cache`: the
-            //     handler said don't (`private` = not for a shared cache,
-            //     which this is).
+            //     handler said no. This is a shared cache, so
+            //     `private` counts.
             let status = resp.status();
             let sets_cookie = resp.headers().contains_key(axum::http::header::SET_COOKIE);
             let cache_control_opt_out = resp
@@ -360,11 +343,7 @@ where
                 return Ok(resp);
             }
 
-            // Buffer the body so we can store + replay. If the body
-            // exceeds MAX_CACHEABLE_BODY_BYTES we pass the original
-            // response through with a tracing::warn — the handler's
-            // result is what the client wanted; failing to cache it
-            // is not a reason to turn a successful 200 into a 500.
+            // Buffer the body so it can be stored and replayed.
             let (parts, body) = resp.into_parts();
             let bytes = match to_bytes(body, MAX_CACHEABLE_BODY_BYTES).await {
                 Ok(b) => b,
@@ -376,10 +355,9 @@ where
                         "response body exceeds cache size limit or failed to buffer; \
                          passing through uncached"
                     );
-                    // We've already consumed `body` — can't return the
-                    // original. Substitute an empty body and let the
-                    // caller see a degraded but successful response.
-                    // Mark as bypassed so observability sees the issue.
+                    // `body` is already consumed, so the original
+                    // cannot be returned. Send an empty body marked
+                    // BYPASS so monitoring can see it.
                     let mut resp = Response::from_parts(parts, Body::empty());
                     resp.headers_mut()
                         .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
@@ -401,15 +379,13 @@ where
             // Rebuild the response from the buffered bytes.
             let mut rebuilt = Response::from_parts(parts, Body::from(bytes));
             let headers = rebuilt.headers_mut();
-            // Defensive: insert an X-Cache-Status: MISS marker so
-            // downstream observability can split hit/miss easily.
+            // Mark the miss so monitoring can split hit from miss.
             headers.insert(X_CACHE_STATUS, HeaderValue::from_static("MISS"));
-            // RFC 9111 §4.1 — when we partitioned the cache on
-            // specific request headers, downstream caches need to
-            // know so they can repeat the partitioning.
+            // Tell downstream caches which request headers this cache
+            // partitioned on, so they can do the same.
             apply_vary_header(headers, &vary);
-            // QUERY partitions on the request body, which `Vary` can't
-            // express — keep these responses out of shared caches.
+            // QUERY partitions on the request body, which `Vary`
+            // cannot express, so keep it out of shared caches.
             if is_query {
                 mark_query_response_private(headers);
             }
@@ -418,26 +394,21 @@ where
     }
 }
 
-/// Limit cached response bodies to 1 MiB. Larger responses pass
-/// through uncached (with a tracing::warn) instead of becoming 500s —
-/// failing to cache isn't a reason to break a successful handler.
+/// Cached response bodies are limited to 1 MiB. A bigger body is not
+/// cached; failing to cache is no reason to break a good response.
 const MAX_CACHEABLE_BODY_BYTES: usize = 1 << 20;
 
-/// Header set on cached responses so clients / proxies can see
-/// hit-vs-miss in tooling. `HIT` for served-from-cache, `MISS` for
-/// freshly computed.
+/// Header naming where the response came from: `HIT` from the cache,
+/// `MISS` freshly computed.
 const X_CACHE_STATUS: HeaderName = HeaderName::from_static("x-cache-status");
 
-/// Build the cache key. Components are length-prefixed so values
-/// containing the previous separator (`|`, `=`) can't collide with
-/// adjacent keys — a request with `Cookie: foo|bar=baz` and a vary-on
-/// list that includes `Cookie` would otherwise be ambiguous against
-/// a request with `Cookie: foo` + another vary-on header whose value
-/// is `bar=baz`. Format: `prefix|<len>:<bytes>|<len>:<bytes>|...`.
+/// Build the cache key, as `prefix|<len>:<bytes>|<len>:<bytes>|...`.
 ///
-/// The `Host` header is included by default — multi-tenant apps
-/// serving different content per Host would otherwise see
-/// cross-tenant cache hits.
+/// Each part is length-prefixed, so a value holding a separator
+/// cannot make two different requests produce the same key.
+///
+/// `Host` is always part of the key. Without it a multi-tenant app
+/// serving different content per host would get cross-tenant hits.
 fn compute_cache_key(
     prefix: &str,
     req: &Request<Body>,
@@ -467,22 +438,20 @@ fn compute_cache_key(
         write_lp(&mut k, name.as_str());
         write_lp(&mut k, v);
     }
-    // QUERY (RFC 10008) carries its criteria in the body, so the body
-    // digest partitions the cache — GET keys stay unchanged (`None`).
+    // QUERY carries its criteria in the body, so the digest joins the
+    // key. GET passes `None`, so its keys are unchanged.
     if let Some(digest) = body_digest {
         write_lp(&mut k, digest);
     }
     k
 }
 
-/// Mark a QUERY response `private` so shared/downstream caches (CDNs,
-/// reverse proxies) never store it. This layer keys QUERY on the request
-/// body, but HTTP `Vary` can't reference a body, so a shared cache keying
-/// on URL + headers alone would serve one query's result for a different
-/// query. `private` keeps QUERY responses out of shared caches while this
-/// layer's own body-keyed cache keeps working; a stray `public` from the
-/// handler is downgraded for safety. Freshness directives (`max-age`, …)
-/// are preserved.
+/// Mark a QUERY response `private` so a CDN or proxy never stores it.
+///
+/// This layer keys QUERY on the request body, but `Vary` cannot name a
+/// body, so a shared cache keying on URL and headers alone would serve
+/// one query's result for a different query. Any `public` the handler
+/// set is downgraded. Freshness directives such as `max-age` are kept.
 fn mark_query_response_private(headers: &mut HeaderMap) {
     use axum::http::header::CACHE_CONTROL;
     let existing = headers
@@ -502,8 +471,8 @@ fn mark_query_response_private(headers: &mut HeaderMap) {
     }
 }
 
-/// Base64 SHA-256 of a QUERY request body — the cache-key component that
-/// makes byte-identical query bodies hit and anything else miss.
+/// Base64 SHA-256 of a QUERY body. This key component makes only a
+/// byte-identical body hit the cache.
 fn query_body_digest(body: &[u8]) -> String {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;
@@ -520,16 +489,14 @@ fn payload_too_large() -> Response<Body> {
     resp
 }
 
-/// Length-prefixed append: writes `<len-in-bytes>:<bytes>|` so the
-/// caller can concatenate components unambiguously.
+/// Append `<len>:<bytes>|` so parts can be joined without ambiguity.
 fn write_lp(buf: &mut String, s: &str) {
     use std::fmt::Write as _;
     let _ = write!(buf, "{}:{}|", s.len(), s);
 }
 
-/// Set / extend the `Vary` response header to communicate which
-/// request headers our cache partitions on. Host is included
-/// automatically by the cache key, so we list it here too.
+/// Set or extend `Vary` to name the request headers this cache
+/// partitions on. `host` is always in the key, so it is listed too.
 fn apply_vary_header(headers: &mut HeaderMap, vary_on: &[HeaderName]) {
     use std::fmt::Write as _;
     let mut parts: Vec<String> = Vec::with_capacity(vary_on.len() + 1);
@@ -545,9 +512,9 @@ fn apply_vary_header(headers: &mut HeaderMap, vary_on: &[HeaderName]) {
         let _ = write!(&mut s, "{p}");
     }
     if let Ok(v) = HeaderValue::from_str(&s) {
-        // Append to existing Vary (handler may have set their own
-        // vary directives) — RFC 9110 §12.5.5 permits the comma-
-        // separated form, and repeated Vary headers are equivalent.
+        // Append rather than replace: the handler may have set its
+        // own Vary, and repeated Vary headers are equivalent to one
+        // comma-separated header.
         headers.append(axum::http::header::VARY, v);
     }
 }
@@ -556,11 +523,9 @@ impl CachedResponse {
     fn from_parts(parts: &axum::http::response::Parts, body: &[u8]) -> Self {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine as _;
-        // Walk the HeaderMap with .iter() — yields every entry,
-        // including duplicates, so multi-value headers like
-        // `Set-Cookie: a` + `Set-Cookie: b` survive the round-trip.
-        // Skip our own `x-cache-status` so a re-cache doesn't
-        // double-stack it; the served value is set fresh on HIT.
+        // `.iter()` yields duplicates too, so multi-value headers
+        // survive the round-trip. Skip `x-cache-status`: it is set
+        // fresh on every hit and would otherwise stack up.
         let mut headers = Vec::with_capacity(parts.headers.len());
         for (name, value) in parts.headers.iter() {
             if name == X_CACHE_STATUS {
@@ -569,10 +534,8 @@ impl CachedResponse {
             if let Ok(v) = value.to_str() {
                 headers.push((name.as_str().to_owned(), v.to_owned()));
             }
-            // Non-UTF8 values are dropped — re-serialising binary
-            // headers (rare but legal) would corrupt the JSON. The
-            // common cacheable case (HTML / JSON pages) doesn't hit
-            // this path.
+            // Non-UTF8 values are dropped: they are legal but rare,
+            // and re-serialising them would corrupt the JSON.
         }
         Self {
             status: parts.status.as_u16(),
@@ -582,11 +545,11 @@ impl CachedResponse {
     }
 
     /// Rebuild a `Response<Body>` from the cached bytes. Returns
-    /// `None` if the stored body fails base64 decode (corrupt
-    /// entry — caller falls through to recompute).
+    /// `None` when the stored body will not base64-decode, and the
+    /// caller then recomputes.
     ///
-    /// `vary_on` is taken from the live layer config so a layer
-    /// rebuild with a different vary list applies on the next HIT.
+    /// `vary_on` comes from the live layer config, so a changed vary
+    /// list takes effect on the next hit.
     fn into_response(self, vary_on: &[HeaderName]) -> Option<Response<Body>> {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine as _;
@@ -596,8 +559,7 @@ impl CachedResponse {
             .body(Body::from(body))
             .ok()?;
         let headers = resp.headers_mut();
-        // Append every stored header — duplicates preserved.
-        // `HeaderMap::append` is the multi-value-safe insert.
+        // `append`, not `insert`, so duplicates are preserved.
         for (name, value) in self.headers {
             let Ok(n) = HeaderName::from_bytes(name.as_bytes()) else {
                 continue;
@@ -615,8 +577,8 @@ impl CachedResponse {
 
 // ---------------------------------------------------------------- Cache-Control builder
 
-/// Fluent builder for the `Cache-Control` response header — issue #55.
-/// Matches the directives Django's `@cache_control` accepts.
+/// Builder for the `Cache-Control` response header. Covers the same
+/// directives as Django's `@cache_control`.
 ///
 /// ```ignore
 /// use rustango::cache_page::CacheControl;
@@ -641,9 +603,7 @@ pub struct CacheControl {
 }
 
 impl CacheControl {
-    /// Empty builder. No directives set — `.build()` on an empty
-    /// builder produces an empty string header value (effectively
-    /// a no-op directive).
+    /// Empty builder. `.build()` on it gives an empty header value.
     pub fn new() -> Self {
         Self::default()
     }
@@ -654,36 +614,35 @@ impl CacheControl {
         self
     }
 
-    /// `s-maxage=N` (shared-cache max age, seconds). Used by CDNs and
-    /// proxies; private-cache implementations ignore it in favour of
-    /// `max-age`.
+    /// `s-maxage=N`, the max age for shared caches such as CDNs and
+    /// proxies. A private cache ignores it and uses `max-age`.
     pub fn s_maxage(mut self, secs: u64) -> Self {
         self.s_maxage = Some(secs);
         self
     }
 
-    /// `public`. Mutually exclusive with `private` — last call wins.
+    /// `public`. Clears `private`; the last call wins.
     pub fn public(mut self) -> Self {
         self.public = true;
         self.private = false;
         self
     }
 
-    /// `private`. Mutually exclusive with `public` — last call wins.
+    /// `private`. Clears `public`; the last call wins.
     pub fn private(mut self) -> Self {
         self.private = true;
         self.public = false;
         self
     }
 
-    /// `no-cache` — caches must revalidate before serving.
+    /// `no-cache`: a cache must revalidate before serving.
     pub fn no_cache(mut self) -> Self {
         self.no_cache = true;
         self
     }
 
-    /// `no-store` — caches must not store the response at all. This
-    /// also disables [`CachePageLayer`]'s storage for the response.
+    /// `no-store`: no cache may store the response. This also stops
+    /// [`CachePageLayer`] storing it.
     pub fn no_store(mut self) -> Self {
         self.no_store = true;
         self
@@ -695,8 +654,7 @@ impl CacheControl {
         self
     }
 
-    /// Render to an `http::HeaderValue` suitable for
-    /// `headers.insert(CACHE_CONTROL, ...)`.
+    /// Render the header value for `headers.insert(CACHE_CONTROL, ..)`.
     pub fn build(self) -> HeaderValue {
         let mut parts: Vec<String> = Vec::with_capacity(7);
         if let Some(n) = self.max_age {
@@ -724,9 +682,8 @@ impl CacheControl {
     }
 }
 
-/// Shorthand for `@never_cache` — produces the header value
-/// `no-store, no-cache, must-revalidate, max-age=0`. Attach to any
-/// response that must never be cached by any agent / CDN / proxy.
+/// `no-store, no-cache, must-revalidate, max-age=0`. Put it on any
+/// response no browser, CDN or proxy may ever store.
 ///
 /// ```ignore
 /// response.headers_mut().insert(
@@ -744,8 +701,7 @@ pub fn never_cache() -> HeaderValue {
         .build()
 }
 
-/// Build a `Vary` header value from a list of header names. Names
-/// are joined with `, ` per RFC 9110.
+/// Build a `Vary` header value from header names, joined with `, `.
 ///
 /// ```ignore
 /// response.headers_mut().insert(
@@ -755,9 +711,8 @@ pub fn never_cache() -> HeaderValue {
 /// ```
 ///
 /// # Panics
-/// Panics on non-ASCII / control-byte input. Header names are
-/// programmer constants, not runtime input — the panic catches typos
-/// at first request.
+/// Panics on a non-ASCII or control byte. Header names are constants
+/// in your code, so the panic catches a typo on the first request.
 #[must_use]
 pub fn vary_on<I, S>(names: I) -> HeaderValue
 where
@@ -769,21 +724,15 @@ where
         .expect("vary_on: header names must be ASCII without control characters")
 }
 
-/// Django-parity
-/// [`django.utils.cache.patch_vary_headers(response, newheaders)`](https://docs.djangoproject.com/en/6.0/topics/cache/#using-vary-headers) —
-/// add additional names to the existing `Vary` header on
-/// `headers`, deduplicating case-insensitively. Use from
-/// middleware that wants to extend whatever the view already set
-/// without clobbering it.
+/// Add names to the existing `Vary` header, skipping ones already
+/// there. Use it from middleware that must extend, not replace, what
+/// the view set. Matches Django's
+/// [`patch_vary_headers`](https://docs.djangoproject.com/en/6.0/topics/cache/#using-vary-headers).
 ///
-/// If `Vary` is absent, it's added with the new names. If `Vary: *`
-/// is already set, the patch is a no-op (per Django shape — `*` is
-/// the strongest cache key and adding more names doesn't change
-/// behavior).
+/// A missing `Vary` is created. `Vary: *` is left alone, since it is
+/// already the strongest key.
 ///
-/// Name comparison is case-insensitive (HTTP header names are
-/// case-insensitive per RFC 7230 §3.2). Output names preserve
-/// the first-seen casing.
+/// Names are compared without case; the first spelling seen is kept.
 ///
 /// ```ignore
 /// use axum::http::HeaderMap;

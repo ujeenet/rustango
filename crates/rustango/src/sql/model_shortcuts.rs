@@ -69,9 +69,9 @@ pub fn add_signed_expr(col_static: &'static str, signed_by: i64) -> Expr {
 /// str` so the macro can pass `stringify!(#pk_ident)`.
 ///
 /// # Errors
-/// As [`UpdaterPool::execute_pool`]; or
-/// [`ExecError::Query(QueryError::UnknownField)`] when `col` does
-/// not match any model field.
+/// As [`UpdaterPool::execute_pool`](crate::sql::UpdaterPool::execute_pool);
+/// or [`ExecError::Query`] with `QueryError::UnknownField` when `col`
+/// does not match any model field.
 pub async fn increment_one_pool<T>(
     pk_field: &'static str,
     this_pk: SqlValue,
@@ -173,8 +173,8 @@ where
 /// - `all = true`  → returns every row (vacuous AND is TRUE).
 ///
 /// # Errors
-/// As [`FetcherPool::fetch`]; or
-/// [`ExecError::Query(QueryError::UnknownField)`] when any
+/// As [`FetcherPool::fetch`](crate::sql::FetcherPool::fetch); or
+/// [`ExecError::Query`] with `QueryError::UnknownField` when any
 /// column is not declared on the model.
 pub async fn where_multi_pool<T>(
     cols: &[&str],

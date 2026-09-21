@@ -1,9 +1,9 @@
-//! Django-shape request lifecycle signals — `request_started`,
-//! `request_finished`, `got_request_exception`. Issue #53.
+//! Request lifecycle signals, in Django's shape: `request_started`,
+//! `request_finished` and `got_request_exception`.
 //!
-//! Receivers register globally (not per-type — there's no `Model` here)
-//! and run sequentially in registration order around every HTTP request
-//! that passes through [`RequestSignalsLayer`].
+//! There is no model here, so receivers register globally. They run
+//! one at a time, in registration order, around every request that
+//! passes through [`RequestSignalsLayer`].
 //!
 //! ## Quick start
 //!
@@ -22,30 +22,25 @@
 //!     tracing::info!(status = ctx.status, ms = ctx.elapsed_ms, "request finished");
 //! }));
 //!
-//! // Wire the layer onto the app — order matters: outermost layer sees
-//! // the request first / response last, which is what we want for
-//! // around-the-handler signals.
+//! // Mount it outermost, so it sees the request first and the
+//! // response last.
 //! let app: Router = Router::new()
 //!     // ... routes ...
 //!     .layer(RequestSignalsLayer::new());
 //! ```
 //!
-//! ## Semantics
+//! ## Rules
 //!
-//! - Receivers run **sequentially** in registration order, awaited one
-//!   at a time. For parallel fanout, wrap a body in `tokio::spawn`.
-//! - A panicking receiver aborts the dispatch chain and propagates;
-//!   wrap in `tokio::spawn` if you need isolation.
-//! - `request_started` fires before the inner service is called.
-//! - `request_finished` fires after the inner service returns a
-//!   response — for every status code (2xx / 4xx / 5xx).
-//! - `got_request_exception` fires when the inner service returns an
-//!   error (the `S::Error` channel). Today axum services use
-//!   `Infallible`, so the practical trigger is a downstream layer that
-//!   short-circuits with an error — rare but supported. Panics inside
-//!   the handler do **not** fire this signal in axum (tower-http
-//!   captures them at a different layer); the layer's job is signal
-//!   plumbing, not panic catching.
+//! - Receivers run one at a time, in registration order. For
+//!   parallel work, or to keep a panic from stopping the rest of the
+//!   chain, run the body in `tokio::spawn`.
+//! - `request_started` runs before the inner service.
+//! - `request_finished` runs after it returns, whatever the status.
+//! - `got_request_exception` runs on a 5xx response, and on an error
+//!   from the inner service. The second case is rare, since axum
+//!   services are `Infallible`; it needs a layer that short-circuits
+//!   with an error. A panic in a handler does **not** send this
+//!   signal: axum catches those in another layer.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -61,64 +56,55 @@ use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use tower::Service;
 
-/// Future returned by request-signal receivers. `'static` because the
-/// receiver is stored as `Arc<dyn ...>` and may run after the caller
+/// The future a receiver returns. It is `'static` because the
+/// receiver is stored behind an `Arc` and may run after the caller
 /// has returned.
 pub type ReceiverFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// Opaque identifier returned by `connect_*` for later use with
-/// `disconnect_*`.
+/// Handle returned by `connect_*`, for a later `disconnect_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReceiverId(u64);
 
 // ---------------------------------------------------------------- Context types
 
-/// Payload delivered to `request_started` receivers.
+/// What a `request_started` receiver gets.
 #[derive(Debug, Clone)]
 pub struct RequestStartedContext {
-    /// HTTP method (e.g. `"GET"`, `"POST"`).
+    /// HTTP method, such as `"GET"` or `"POST"`.
     pub method: String,
     /// Request path, without the query string.
     pub path: String,
-    /// Raw query string if present, empty otherwise.
+    /// Raw query string, or empty when there is none.
     pub query: String,
 }
 
-/// Payload delivered to `request_finished` receivers.
+/// What a `request_finished` receiver gets.
 #[derive(Debug, Clone)]
 pub struct RequestFinishedContext {
     pub method: String,
     pub path: String,
-    /// HTTP status code emitted by the handler.
+    /// The status code the handler returned.
     pub status: u16,
-    /// Elapsed time from layer entry to response — milliseconds with
-    /// fractional precision.
+    /// Milliseconds from entering the layer to the response, with a
+    /// fractional part.
     pub elapsed_ms: f64,
 }
 
-/// Payload delivered to `got_request_exception` receivers — the
-/// handler stack produced an exceptional outcome.
+/// What a `got_request_exception` receiver gets.
 ///
-/// The layer fires this signal under two conditions:
-/// 1. Inner service returned `Err` (rare — axum's `Service::Error` is
-///    `Infallible`; only fires when a downstream layer short-circuits).
-/// 2. Inner service returned a response with status `5xx` (#413). Maps
-///    closely to Django's `got_request_exception` semantics —
-///    "something went wrong while processing the request".
+/// The layer sends this signal in two cases: a 5xx response, or an
+/// `Err` from the inner service. The second is rare, since axum's
+/// `Service::Error` is `Infallible`; it needs a layer that
+/// short-circuits.
 ///
-/// `error` carries either the stringified service error or a
-/// `"http <code>"` token for the 5xx path; `status` is `None` for
-/// service-error firings and `Some(code)` for 5xx firings, so audit
-/// receivers can pivot on which case they're handling.
+/// Use `status` to tell the two apart.
 #[derive(Debug, Clone)]
 pub struct RequestExceptionContext {
     pub method: String,
     pub path: String,
-    /// Stringified error from the inner service, or `"http <code>"`
-    /// when the trigger was a 5xx response.
+    /// The service error as text, or `"http <code>"` for a 5xx.
     pub error: String,
-    /// `Some(code)` when fired on a 5xx response; `None` when the
-    /// trigger was a service-level error (Service::Error).
+    /// `Some(code)` for a 5xx response, `None` for a service error.
     pub status: Option<u16>,
 }
 
@@ -161,8 +147,8 @@ fn remove_receiver(kind: SignalKind, id: ReceiverId) -> bool {
     bag.len() != before
 }
 
-/// Snapshot the receivers for `kind` into a `Vec<R>` so dispatch can
-/// release the registry lock before awaiting any receiver future.
+/// Copy the receivers for `kind` out of the registry, so the lock is
+/// released before any of them is awaited.
 fn snapshot<R: Any + Send + Sync + Clone>(kind: SignalKind) -> Vec<R> {
     let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     let Some(bag) = reg.get(&kind) else {
@@ -181,8 +167,8 @@ type ExceptionReceiver = Arc<dyn Fn(RequestExceptionContext) -> ReceiverFuture +
 
 // ---------------------------------------------------------------- request_started
 
-/// Register a `request_started` receiver. Fires before each request
-/// reaches the inner service. Returns a [`ReceiverId`] for later
+/// Register a `request_started` receiver. It runs before the request
+/// reaches the inner service. Returns an id for
 /// [`disconnect_request_started`].
 pub fn connect_request_started<F, Fut>(receiver: F) -> ReceiverId
 where
@@ -193,15 +179,14 @@ where
     insert_receiver(SignalKind::Started, boxed)
 }
 
-/// Remove a previously-connected `request_started` receiver. Returns
-/// `true` when an entry was removed.
+/// Remove a `request_started` receiver. `true` when one was removed.
 pub fn disconnect_request_started(id: ReceiverId) -> bool {
     remove_receiver(SignalKind::Started, id)
 }
 
-/// Fire `request_started` for `ctx`. Awaits every connected receiver
-/// in registration order. Exposed for tests / custom dispatch — the
-/// [`RequestSignalsLayer`] calls it for you in normal use.
+/// Send `request_started`, awaiting each receiver in registration
+/// order. [`RequestSignalsLayer`] calls this for you; it is public
+/// for tests and custom dispatch.
 pub async fn send_request_started(ctx: RequestStartedContext) {
     let receivers: Vec<StartedReceiver> = snapshot(SignalKind::Started);
     for r in receivers {
@@ -211,8 +196,8 @@ pub async fn send_request_started(ctx: RequestStartedContext) {
 
 // ---------------------------------------------------------------- request_finished
 
-/// Register a `request_finished` receiver. Fires after every response
-/// the inner service returns (any status code).
+/// Register a `request_finished` receiver. It runs after every
+/// response, whatever the status code.
 pub fn connect_request_finished<F, Fut>(receiver: F) -> ReceiverId
 where
     F: Fn(RequestFinishedContext) -> Fut + Send + Sync + 'static,
@@ -222,12 +207,12 @@ where
     insert_receiver(SignalKind::Finished, boxed)
 }
 
-/// Remove a previously-connected `request_finished` receiver.
+/// Remove a `request_finished` receiver.
 pub fn disconnect_request_finished(id: ReceiverId) -> bool {
     remove_receiver(SignalKind::Finished, id)
 }
 
-/// Fire `request_finished` for `ctx`.
+/// Send `request_finished` for `ctx`.
 pub async fn send_request_finished(ctx: RequestFinishedContext) {
     let receivers: Vec<FinishedReceiver> = snapshot(SignalKind::Finished);
     for r in receivers {
@@ -237,8 +222,8 @@ pub async fn send_request_finished(ctx: RequestFinishedContext) {
 
 // ---------------------------------------------------------------- got_request_exception
 
-/// Register a `got_request_exception` receiver. Fires when the inner
-/// service returns an error rather than a response.
+/// Register a `got_request_exception` receiver. It runs on a 5xx
+/// response, and when the inner service returns an error.
 pub fn connect_got_request_exception<F, Fut>(receiver: F) -> ReceiverId
 where
     F: Fn(RequestExceptionContext) -> Fut + Send + Sync + 'static,
@@ -248,12 +233,12 @@ where
     insert_receiver(SignalKind::Exception, boxed)
 }
 
-/// Remove a previously-connected `got_request_exception` receiver.
+/// Remove a `got_request_exception` receiver.
 pub fn disconnect_got_request_exception(id: ReceiverId) -> bool {
     remove_receiver(SignalKind::Exception, id)
 }
 
-/// Fire `got_request_exception` for `ctx`.
+/// Send `got_request_exception` for `ctx`.
 pub async fn send_got_request_exception(ctx: RequestExceptionContext) {
     let receivers: Vec<ExceptionReceiver> = snapshot(SignalKind::Exception);
     for r in receivers {
@@ -263,8 +248,8 @@ pub async fn send_got_request_exception(ctx: RequestExceptionContext) {
 
 // ---------------------------------------------------------------- Maintenance
 
-/// Remove **all** request-signal receivers. Useful in tests to reset
-/// registry state between cases.
+/// Remove every request-signal receiver. Mostly for resetting state
+/// between tests.
 pub fn clear_all() {
     registry()
         .write()
@@ -272,8 +257,8 @@ pub fn clear_all() {
         .clear();
 }
 
-/// Total receivers currently registered across all three request
-/// signals. Useful in tests.
+/// How many receivers are registered across the three request
+/// signals. Mostly useful in tests.
 #[must_use]
 pub fn receiver_count() -> usize {
     let reg = registry().read().unwrap_or_else(|e| e.into_inner());
@@ -289,13 +274,12 @@ pub fn receiver_count() -> usize {
 
 // ---------------------------------------------------------------- Axum layer
 
-/// Tower layer / axum middleware that fires `request_started` /
-/// `request_finished` / `got_request_exception` around every request.
+/// Tower layer that sends `request_started`, `request_finished` and
+/// `got_request_exception` around every request.
 ///
-/// Mount it as the **outermost** layer of your `Router` so it sees the
-/// request first and the response last — that way every other layer's
-/// work counts toward `elapsed_ms`, and other layers' bodies aren't
-/// surfaced as exceptions.
+/// Mount it as the **outermost** layer of your `Router`, so it sees
+/// the request first and the response last. Then every other layer's
+/// work counts toward `elapsed_ms`.
 #[derive(Clone, Default, Debug)]
 pub struct RequestSignalsLayer;
 
@@ -337,9 +321,8 @@ where
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        // tower's call/clone pattern: clone the readied service into
-        // the future, swap the local `inner` with the unreadied clone.
-        // (Mirrors what axum::middleware::from_fn generates internally.)
+        // The usual tower pattern: move the readied service into the
+        // future and keep the fresh clone here.
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
@@ -356,22 +339,17 @@ where
             })
             .await;
 
-            // S::Error is Infallible — `call` can't return Err. We still
-            // pattern-match for future-proofing: if the bound is ever
-            // widened, dispatching `got_request_exception` is wired up.
+            // `S::Error` is `Infallible`, so `call` cannot return
+            // `Err`. Match anyway: if the bound ever widens, the
+            // exception signal is already wired.
             match inner.call(req).await {
                 Ok(resp) => {
                     let elapsed_ms = (started_at.elapsed().as_micros() as f64) / 1000.0;
                     let status = resp.status().as_u16();
-                    // #413 — Django-shape `got_request_exception` also
-                    // fires on 5xx responses, not just service-error
-                    // panics. axum's Service::Error is Infallible in
-                    // practice, so without this branch the signal would
-                    // never fire on real failures. Audit / SIEM
-                    // receivers want to know about 500s; the
-                    // `status: Some(code)` field lets them tell the
-                    // 5xx-response case apart from the (rare)
-                    // service-error case below.
+                    // Send the exception signal on a 5xx too. Axum's
+                    // `Service::Error` is `Infallible` in practice,
+                    // so without this branch the signal would never
+                    // fire on a real failure.
                     if (500..600).contains(&status) {
                         send_got_request_exception(RequestExceptionContext {
                             method: method.clone(),
@@ -391,10 +369,9 @@ where
                     Ok(resp)
                 }
                 Err(_unreachable) => {
-                    // Infallible — this arm is dead code today but
-                    // documents the intended dispatch. When S::Error
-                    // widens (e.g. user wraps with a fallible layer),
-                    // the exception receiver fires here.
+                    // Unreachable while `S::Error` is `Infallible`.
+                    // Kept so the signal already fires if a fallible
+                    // layer widens that bound.
                     #[allow(unreachable_code)]
                     {
                         send_got_request_exception(RequestExceptionContext {

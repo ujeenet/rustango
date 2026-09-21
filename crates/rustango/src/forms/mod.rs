@@ -6,7 +6,7 @@
 //! | Type | When to use |
 //! |---|---|
 //! | [`Form`] + `#[derive(Form)]` | Typed struct with declared fields and compile-time validators |
-//! | [`ModelForm`] | Any [`Model`] table — parse + validate + save without a dedicated struct |
+//! | [`ModelForm`] | Any [`Model`](crate::core::Model) table — parse + validate + save without a dedicated struct |
 //! | [`DynamicForm`] | Runtime JSON-schema forms (surveys, intake, admin-configurable) |
 //!
 //! ## `#[derive(Form)]` usage
@@ -553,7 +553,8 @@ pub enum ModelFormError {
     Database(#[from] crate::sql::ExecError),
 }
 
-/// Schema-driven form that can insert or update any [`Model`] row.
+/// Schema-driven form that can insert or update any
+/// [`Model`](crate::core::Model) row.
 ///
 /// `ModelForm` reads the model's [`ModelSchema`] to know which fields
 /// to parse and validate — no separate struct required.

@@ -1,47 +1,32 @@
-//! Shared HMAC-SHA256 / SHA-256 / hex-encoding primitives.
+//! Shared HMAC-SHA256, SHA-256 and hex helpers.
 //!
-//! Three private copies of these helpers used to live in
-//! [`crate::hmac_auth`], [`crate::storage::s3`], and [`crate::jwt`].
-//! Each copy was character-identical, which is the kind of code we
-//! *must* keep in one place — diverging crypto helpers are a known
-//! source of CWE-694-class bugs (one path patches a constant-time
-//! issue, the other doesn't, and you get a working-on-paper-but-
-//! exploitable signature primitive).
+//! Every crypto helper in the crate lives here, and only here. Copies
+//! of crypto code drift: one copy gets a fix, the other does not, and
+//! the unfixed path stays exploitable while looking correct.
 //!
-//! This module is `pub(crate)` — the helpers are intentionally not
-//! part of the public API; users who want raw HMAC should pull in
-//! `hmac` + `sha2` themselves so the framework isn't on the hook
-//! for crypto-API stability.
+//! Most helpers are `pub(crate)`. If you want raw HMAC, depend on
+//! `hmac` and `sha2` directly, so the framework does not have to keep
+//! a crypto API stable for you.
 //!
-//! Feature gate: any feature that uses HMAC-SHA256 enables this
-//! module. Keeping the gate on `crate::crypto` rather than every
-//! call site means the crypto code disappears entirely from a build
-//! that only enables (e.g.) `postgres` + `manage`.
-//!
-//! Test coverage: RFC 4231 known-good HMAC-SHA256 test vectors,
-//! NIST SHA-256 zero-length input, hex-encode round-trip + edge
-//! cases (empty, all-zero, all-`0xff`).
+//! The whole module is feature-gated. A build without any HMAC user
+//! leaves this code out completely.
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
-/// Hex-encode a byte slice using lowercase digits. Delegates to
-/// [`crate::hex::hex_encode`] so there's a single canonical
-/// implementation shared with the always-on call sites (`pagination`,
-/// `row_to_json`). Kept here so HMAC callers don't need to rewrite
-/// their import paths.
-// Conditionally used: the callers (storage::s3, hmac_auth) are
-// feature-gated, so this is dead in a build that pulls in `crypto` but
-// none of its consumers. Allow rather than delete — it's live elsewhere.
+/// Hex-encode bytes with lowercase digits. Re-exports
+/// [`crate::hex::hex_encode`] so HMAC callers keep one import path.
+// Its callers are feature-gated, so this is dead in some builds. Keep
+// the allow: the function is live elsewhere.
 #[allow(dead_code)]
 #[must_use]
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     crate::hex::hex_encode(bytes)
 }
 
-/// `SHA-256(bytes)` rendered as a lowercase hex string. Used by the
-/// SigV4 canonical-request hash and HMAC auth body hash.
-#[allow(dead_code)] // see `hex_encode` above — live under s3/hmac, dead otherwise
+/// `SHA-256(bytes)` as a lowercase hex string. Used by the SigV4
+/// canonical-request hash and the HMAC auth body hash.
+#[allow(dead_code)] // see `hex_encode` above
 #[must_use]
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -49,13 +34,10 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex_encode(&h.finalize())
 }
 
-/// `HMAC-SHA256(key, data)` returning the raw 32-byte tag. The
-/// `new_from_slice` constructor cannot fail for SHA-256 (it accepts
-/// any key length) — the `expect` is for documentation only.
-// see `hex_encode` above. #1535 widened this module's cfg to `csrf` /
-// `totp`, which reach only `constant_time_compare` — so a build like
-// `postgres,manage,admin` now compiles the module with no HMAC caller
-// at all, and CI runs `-D warnings`.
+/// `HMAC-SHA256(key, data)`, returning the raw 32-byte tag. The
+/// `expect` never fires: SHA-256 HMAC accepts a key of any length.
+// Some builds enable this module only for `constant_time_compare` and
+// so have no HMAC caller. CI runs `-D warnings`, so keep the allow.
 #[allow(dead_code)]
 #[must_use]
 pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
@@ -66,35 +48,22 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 
 /// Django-parity
 /// [`django.utils.crypto.constant_time_compare(val1, val2)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) —
-/// compare two byte sequences in time that depends only on the
-/// length of the inputs, not on their content. Used to compare
-/// HMAC tags / CSRF tokens / session signatures / TOTP codes —
-/// anywhere a timing leak could let an attacker recover the secret
-/// one byte at a time.
+/// compare two byte strings in time that depends on their length but
+/// not on their content. Use it for HMAC tags, CSRF tokens, session
+/// signatures and TOTP codes. A normal `==` returns early on the
+/// first differing byte, which lets an attacker guess a secret one
+/// byte at a time.
 ///
-/// Length-mismatch short-circuits to `false` (Django shape — Django
-/// `constant_time_compare("abc", "ab")` is `False`). The
-/// length-mismatch path itself is NOT constant-time, but that's
-/// acceptable: leaking the comparison length is harmless when the
-/// caller already knows the expected length (HMAC tags are
-/// fixed-size, etc.).
+/// Different lengths return `false` right away, like Django. That
+/// path is not constant-time, but the length of an HMAC tag or a
+/// token is not a secret.
 ///
-/// This is where constant-time comparison belongs: it MUST live in
-/// one place, because subtle branches added to "fix" something on one
-/// side can let attackers recover secrets on the other.
-///
-/// The consolidation is done as of #1535. `totp::constant_time_eq` and
-/// `forms::csrf::constant_time_eq` are gone and their callers come
-/// here, and this function delegates to `subtle::ConstantTimeEq`
-/// rather than hand-rolling the XOR loop.
-///
-/// The loop was not obviously wrong — on current rustc it is likely to
-/// compile branch-free. But nothing in safe Rust stops LLVM
-/// vectorising it or introducing an early exit, which is the entire
-/// reason `subtle` exists. Three copies of a guarantee that cannot be
-/// expressed in the language is how the next refactor introduces a
-/// real timing oracle, and the module had already written that rule
-/// down for itself without holding to it (#1543, #1606 review).
+/// **This must stay the only such function in the crate.** It calls
+/// `subtle::ConstantTimeEq` instead of a hand-written XOR loop,
+/// because nothing in safe Rust stops the compiler from vectorising
+/// such a loop or adding an early exit. A second copy is how a real
+/// timing leak gets introduced: one copy gets the careful treatment
+/// and the other quietly does not.
 ///
 /// ```ignore
 /// use rustango::crypto::constant_time_compare;
@@ -116,23 +85,16 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
 /// Django-parity
 /// [`django.utils.crypto.salted_hmac(key_salt, value, secret=None,
 /// algorithm='sha1')`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.salted_hmac) —
-/// derive a per-purpose HMAC key from `secret + key_salt` via
-/// SHA-256 (Django defaults to SHA-1, but SHA-256 is stronger
-/// and `crate::crypto` already ships it), then HMAC the `value`
-/// under that derived key.
+/// compute `HMAC(SHA256(secret || key_salt), value)` and return the
+/// raw 32-byte tag. Django uses SHA-1 by default; this uses SHA-256.
 ///
-/// The shape: `HMAC(SHA256(secret || key_salt), value)`. Used by
-/// Django's `signing` module to scope a single `SECRET_KEY` across
-/// many independent signed-value purposes — `key_salt =
-/// "django.core.signing.Signer"` for generic signing,
-/// `"django.contrib.sessions.backends.signed_cookies"` for session
-/// cookies, etc. Tampering one purpose's signed value can't be
-/// used to forge another purpose's, because each purpose has a
-/// derived key.
+/// The salt gives each purpose its own derived key from one shared
+/// secret. A value signed for sessions then cannot be replayed as a
+/// value signed for, say, password reset.
 ///
-/// Returns the raw 32-byte HMAC tag. Pair with
+/// To put the tag on the wire, use
 /// [`hex_encode`](crate::hex::hex_encode) or
-/// [`crate::url_codec::urlsafe_base64_encode`] for a wire format.
+/// [`crate::url_codec::urlsafe_base64_encode`].
 ///
 /// ```ignore
 /// use rustango::crypto::salted_hmac;
@@ -145,14 +107,11 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
 /// let tag3 = salted_hmac(b"other-purpose", b"user-id=42", b"app-secret-key");
 /// assert_ne!(tag, tag3);
 /// ```
-// see `hmac_sha256` — dead in a build that pulls `crypto` in for
-// `constant_time_compare` alone.
+// see `hmac_sha256` above
 #[allow(dead_code)]
 #[must_use]
 pub fn salted_hmac(key_salt: &[u8], value: &[u8], secret: &[u8]) -> Vec<u8> {
-    // Derive purpose-specific key: SHA256(secret || key_salt). This is
-    // the modern shape (Django changed from SHA-1 to SHA-256 in 4.x
-    // for new signers).
+    // Per-purpose key: SHA256(secret || key_salt).
     let mut hasher = Sha256::new();
     hasher.update(secret);
     hasher.update(key_salt);

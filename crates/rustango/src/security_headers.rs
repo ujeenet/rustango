@@ -1,9 +1,8 @@
 //! Security headers middleware — HSTS, X-Frame-Options, X-Content-Type-Options,
 //! Referrer-Policy, Cross-Origin-Opener-Policy, and a Content-Security-Policy builder.
 //!
-//! Django ships these by default via `SecurityMiddleware`. Rocket auto-attaches a
-//! `Shield` fairing. This is rustango's equivalent — **must be explicitly added**
-//! to your router but presets cover the common cases.
+//! Django adds these by default. Here you **must add the layer
+//! yourself**, but the presets cover the common cases.
 //!
 //! ## Quick start
 //!
@@ -17,11 +16,10 @@
 //!
 //! ## Presets
 //!
-//! - [`SecurityHeadersLayer::strict`] — production: HSTS 1y + preload, XFO=DENY,
-//!   nosniff, Referrer-Policy=no-referrer, COOP=same-origin, Permissions-Policy locked down
-//! - [`SecurityHeadersLayer::relaxed`] — embeddable: HSTS 1y, XFO=SAMEORIGIN,
-//!   nosniff, Referrer-Policy=strict-origin-when-cross-origin
-//! - [`SecurityHeadersLayer::dev`] — local: nosniff only (HSTS would lock you to https forever)
+//! - [`SecurityHeadersLayer::strict`]: for production.
+//! - [`SecurityHeadersLayer::relaxed`]: allows same-origin framing.
+//! - [`SecurityHeadersLayer::dev`]: `nosniff` only. HSTS is left out
+//!   so you do not pin your dev machine to HTTPS.
 //!
 //! ## Custom CSP
 //!
@@ -35,6 +33,10 @@
 //!
 //! let layer = SecurityHeadersLayer::strict().csp(csp);
 //! ```
+//!
+//! [`SecurityHeadersLayer::strict`]: crate::security_headers::SecurityHeadersLayer::strict
+//! [`SecurityHeadersLayer::relaxed`]: crate::security_headers::SecurityHeadersLayer::relaxed
+//! [`SecurityHeadersLayer::dev`]: crate::security_headers::SecurityHeadersLayer::dev
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -83,7 +85,7 @@ impl SecurityHeadersLayer {
         }
     }
 
-    /// Production preset — strict defaults.
+    /// Production preset.
     ///
     /// - HSTS: `max-age=31536000; includeSubDomains; preload`
     /// - X-Frame-Options: `DENY`
@@ -106,7 +108,7 @@ impl SecurityHeadersLayer {
         }
     }
 
-    /// Embeddable preset — allows same-origin framing.
+    /// Preset that allows same-origin framing.
     ///
     /// - HSTS: 1 year (no preload, no subdomains)
     /// - X-Frame-Options: `SAMEORIGIN`
@@ -127,8 +129,8 @@ impl SecurityHeadersLayer {
         }
     }
 
-    /// Development preset — `nosniff` only. HSTS deliberately omitted so
-    /// you don't lock your local dev box into HTTPS-forever.
+    /// Development preset: `nosniff` only. HSTS is left out on
+    /// purpose, so you do not pin your dev machine to HTTPS.
     #[must_use]
     pub fn dev() -> Self {
         Self {
@@ -173,13 +175,11 @@ impl SecurityHeadersLayer {
         self
     }
 
-    /// Set the `report-uri` directive on the CSP header — the browser
-    /// will POST violation reports here. Pair with [`csp_report_router`]
-    /// to receive them.
+    /// Set the CSP `report-uri`. The browser POSTs violation reports
+    /// there. Use [`csp_report_router`] to receive them.
     ///
-    /// Note: `report-uri` is deprecated in favor of `report-to` (which
-    /// requires a `Report-To` HTTP header pointing at a named endpoint
-    /// group). This method appends to the existing CSP string.
+    /// `report-uri` is deprecated in favour of `report-to`, which also
+    /// needs a `Report-To` header naming an endpoint group.
     #[must_use]
     pub fn csp_report_uri(mut self, uri: &str) -> Self {
         if let Some(existing) = self.csp.as_mut() {
@@ -197,15 +197,17 @@ impl SecurityHeadersLayer {
         self
     }
 
-    /// Build the layer from a preset name (#87 wiring). Maps to:
+    /// Build the layer from a preset name:
     ///
-    /// | name              | preset          |
-    /// |-------------------|-----------------|
+    /// | name              | preset            |
+    /// |-------------------|-------------------|
     /// | `"strict"`        | [`Self::strict`]  |
     /// | `"relaxed"`       | [`Self::relaxed`] |
     /// | `"dev"`           | [`Self::dev`]     |
     /// | `"none"`/`"empty"`| [`Self::empty`]   |
-    /// | anything else     | [`Self::strict`]  (fail-safe — unknown preset names shouldn't strip security headers) |
+    ///
+    /// Any other name gives [`Self::strict`]. A typo must not strip
+    /// the security headers.
     #[must_use]
     pub fn from_preset(name: &str) -> Self {
         match name {
@@ -213,23 +215,20 @@ impl SecurityHeadersLayer {
             "relaxed" => Self::relaxed(),
             "dev" => Self::dev(),
             "none" | "empty" => Self::empty(),
-            // Fail-safe: unknown preset names get strict headers
-            // rather than silently stripping protection. Mismatches
-            // surface via `manage check --deploy` if they happen in
-            // prod tier.
+            // Unknown names get strict headers, never no headers.
+            // `manage check --deploy` warns about the typo separately.
             _ => Self::strict(),
         }
     }
 
-    /// Build the layer from a loaded [`crate::config::SecuritySettings`]
-    /// section (#87 wiring, v0.29). Picks the preset first via
-    /// [`Self::from_preset`] (`strict` if `headers_preset` is unset),
-    /// then layers per-field overrides:
+    /// Build the layer from a [`crate::config::SecuritySettings`]
+    /// section. It starts from [`Self::from_preset`], using `strict`
+    /// when `headers_preset` is unset, then applies overrides:
     ///
-    /// - `csp` → sets the Content-Security-Policy header verbatim
-    /// - `hsts_max_age_secs = 0` → disables HSTS entirely
-    /// - `hsts_max_age_secs > 0` → rebuilds the HSTS header with the
-    ///   configured age (preserves `; includeSubDomains; preload`)
+    /// - `csp` sets the Content-Security-Policy header as given.
+    /// - `hsts_max_age_secs = 0` turns HSTS off.
+    /// - A larger value rebuilds HSTS with that age and keeps
+    ///   `includeSubDomains` and `preload`.
     ///
     /// ```ignore
     /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -334,10 +333,10 @@ async fn handle(cfg: Arc<SecurityHeadersLayer>, req: Request<Body>, next: Next) 
 
 // ------------------------------------------------------------------ CSP report endpoint
 
-/// Build a router exposing a CSP-violation report endpoint at `path`
-/// (typically `/__csp-report`). The browser POSTs JSON reports here when
-/// a CSP directive is violated; this handler logs them via `tracing::warn!`
-/// so they show up in your normal log pipeline.
+/// Build a router with a CSP-violation report endpoint at `path`,
+/// usually `/__csp-report`. The browser POSTs a JSON report there
+/// when a directive is violated, and the handler logs it with
+/// `tracing::warn!`.
 ///
 /// ## Quick start
 ///
@@ -479,7 +478,7 @@ impl CspBuilder {
         self
     }
 
-    /// Add an arbitrary directive (for things not covered by named methods).
+    /// Add any other directive that has no named method here.
     #[must_use]
     pub fn directive(mut self, name: impl Into<String>, sources: &[&str]) -> Self {
         let name = name.into();
@@ -629,7 +628,7 @@ mod tests {
         assert!(csp.contains("report-uri"));
     }
 
-    // ---- #87 wiring: from_preset + from_settings ----
+    // ---- from_preset + from_settings ----
 
     #[test]
     fn from_preset_maps_known_names() {
@@ -642,9 +641,8 @@ mod tests {
         assert!(!SecurityHeadersLayer::from_preset("none").nosniff);
     }
 
-    /// Unknown preset names fail-safe to `strict()` — a typo in
-    /// the TOML shouldn't silently strip security headers in prod.
-    /// (`manage check --deploy` warns separately.)
+    /// An unknown preset name falls back to `strict()`. A typo in the
+    /// TOML must not strip security headers in production.
     #[test]
     fn from_preset_unknown_name_fails_safe_to_strict() {
         let l = SecurityHeadersLayer::from_preset("strixt"); // typo
@@ -675,9 +673,8 @@ mod tests {
         assert!(l.hsts.is_none());
     }
 
-    /// `hsts_max_age_secs = 0` disables HSTS even when the preset
-    /// would have set it. Useful for staging tiers behind self-signed
-    /// certs where pinning HSTS would brick repeated rebinds.
+    /// `hsts_max_age_secs = 0` turns HSTS off even if the preset set
+    /// it. Useful on a staging tier with a self-signed certificate.
     #[cfg(feature = "config")]
     #[test]
     fn from_settings_zero_hsts_disables_header() {

@@ -1,9 +1,8 @@
-//! Trailing-slash redirect middleware — canonicalize URL paths.
+//! Trailing-slash redirect middleware: one canonical form per URL.
 //!
-//! Returns `301 Moved Permanently` (or `308`, configurable) to the
-//! canonical form of the URL when the request path doesn't match it.
-//! Same shape as Django's `APPEND_SLASH` and Rails' `trailing_slash`
-//! routing.
+//! When the path is not in canonical form, the request is redirected to
+//! it with a `301` (or a `308`, if you set one). Same idea as Django's
+//! `APPEND_SLASH`.
 //!
 //! ## Quick start
 //!
@@ -21,14 +20,15 @@
 //!     .trailing_slash(TrailingSlashLayer::new(SlashStyle::Strip));
 //! ```
 //!
-//! ## What's NOT touched
+//! ## What is left alone
 //!
-//! - The root path `/` is always preserved.
-//! - Non-GET / non-HEAD requests pass through (a 308 from a POST is
-//!   technically allowed but most clients don't replay the body
-//!   reliably — better to surface a 405 from the routing layer).
-//! - Paths that already match the canonical form pass through.
-//! - Query strings are preserved on the redirect target.
+//! - The root path `/`.
+//! - Anything that is not GET or HEAD. A 308 on a POST is legal, but
+//!   many clients do not resend the body, so a 405 from routing is the
+//!   clearer answer.
+//! - Paths that are already canonical.
+//!
+//! The query string is kept on the redirect target.
 
 use std::sync::Arc;
 
@@ -49,9 +49,9 @@ pub enum SlashStyle {
 #[derive(Clone, Debug)]
 pub struct TrailingSlashLayer {
     pub style: SlashStyle,
-    /// 301 (default — caches the redirect, ideal for SEO) or 308
-    /// (preserves the method + body — only matters for POST/PUT, but
-    /// we don't redirect those by default anyway).
+    /// 301 by default: caches well and is good for SEO. Use 308 to keep
+    /// the method and body, which only matters if you also redirect
+    /// POST or PUT.
     pub status: StatusCode,
     /// Methods that get redirected. Default: `[GET, HEAD]`.
     pub methods: Vec<Method>,
@@ -73,8 +73,7 @@ impl TrailingSlashLayer {
         self
     }
 
-    /// Override the methods that get redirected. Pass an empty vec to
-    /// redirect every method.
+    /// Choose which methods get redirected. An empty vec means all.
     #[must_use]
     pub fn methods(mut self, m: Vec<Method>) -> Self {
         self.methods = m;
@@ -114,8 +113,8 @@ async fn handle(cfg: Arc<TrailingSlashLayer>, req: Request<Body>, next: Next) ->
     redirect(cfg.status, &location)
 }
 
-/// Returns `Some(canonical)` when `path` differs from canonical form,
-/// `None` when it's already canonical.
+/// `Some(canonical)` when `path` needs a redirect, `None` when it is
+/// already canonical.
 fn canonical_path(path: &str, style: SlashStyle) -> Option<String> {
     match style {
         SlashStyle::Append => {

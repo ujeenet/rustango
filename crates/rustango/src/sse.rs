@@ -1,11 +1,9 @@
-//! Broadcast event bus — fan one message out to every connected
-//! subscriber. The foundation for Server-Sent Events (SSE) and other
-//! real-time push patterns.
+//! A broadcast bus that sends one message to every subscriber. Use
+//! it for Server-Sent Events and other push patterns.
 //!
-//! Wraps `tokio::sync::broadcast` with rustango-shape conveniences.
-//! For the SSE wire format, pair this with `axum::response::sse::Sse`
-//! and the futures-util crate in your handler — the bus stays
-//! transport-agnostic so you can also use it for WebSocket fan-out.
+//! It wraps `tokio::sync::broadcast`. The bus knows nothing about
+//! the transport, so pair it with `axum::response::sse::Sse` for
+//! SSE, or use it for WebSocket fan-out.
 //!
 //! ## Quick start
 //!
@@ -37,41 +35,38 @@
 //! //       .keep_alive(KeepAlive::new())
 //! ```
 //!
-//! Add `async-stream = "0.3"` and `futures = "0.3"` to your project
-//! Cargo.toml when you wire up the SSE handler — those crates aren't
-//! pulled into rustango itself to keep the dep tree small.
+//! rustango does not depend on `async-stream` or `futures`, so add
+//! them to your own Cargo.toml when you write the SSE handler.
 
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-/// Broadcast bus — fan one message out to every connected subscriber.
+/// Sends one message to every subscriber.
 ///
-/// Slow consumers that fall behind the buffer get a `RecvError::Lagged`
-/// and skip messages — they don't block other subscribers. The default
-/// buffer size is 100 messages.
+/// A slow subscriber that falls behind the buffer gets a
+/// `RecvError::Lagged` and misses messages. It never blocks the
+/// others.
 pub struct EventBus<T: Clone + Send + 'static> {
     tx: Arc<broadcast::Sender<T>>,
 }
 
 impl<T: Clone + Send + 'static> EventBus<T> {
-    /// New bus with the given buffer capacity. Higher = more tolerance
-    /// for slow consumers; lower = less memory pressure under heavy fan-out.
-    /// Capacity floors at 1.
+    /// New bus with this buffer size. A bigger buffer tolerates
+    /// slower subscribers but uses more memory. The minimum is 1.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity.max(1));
         Self { tx: Arc::new(tx) }
     }
 
-    /// Send a message to every active subscriber. Returns the number of
-    /// subscribers who received it (zero is fine — no-op when no clients
-    /// are connected).
+    /// Send a message to every subscriber and return how many got
+    /// it. Zero is normal when nobody is connected.
     pub fn send(&self, event: T) -> usize {
         self.tx.send(event).unwrap_or(0)
     }
 
-    /// Number of currently active subscribers.
+    /// How many subscribers are connected.
     #[must_use]
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()

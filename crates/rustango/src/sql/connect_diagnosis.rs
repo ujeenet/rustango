@@ -33,7 +33,8 @@
 //! ## Credentials never appear
 //!
 //! A connection URL has a password in it, and these strings end up in
-//! terminals, logs and HTTP responses. [`redact`] is applied to every
+//! terminals, logs and HTTP responses.
+//! [`redact`](crate::sql::connect_diagnosis::redact) is applied to every
 //! endpoint this module renders.
 
 use std::fmt;

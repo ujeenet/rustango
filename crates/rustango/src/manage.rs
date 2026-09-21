@@ -24,6 +24,8 @@
 //!
 //! The dispatcher owns the `cargo run` vs `cargo run -- migrate` split
 //! so users have one binary instead of two.
+//!
+//! [`Cli::tenancy`]: crate::manage::Cli::tenancy
 
 use std::future::Future;
 use std::path::PathBuf;

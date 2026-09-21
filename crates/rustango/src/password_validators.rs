@@ -1,11 +1,11 @@
 //! Pluggable password validator chain — Django's
 //! `AUTH_PASSWORD_VALIDATORS = [...]` setting.
 //!
-//! Plug an ordered list of [`PasswordValidator`]s into a
-//! [`PasswordValidatorChain`]; call [`PasswordValidatorChain::validate`]
-//! at signup / password-change time. The chain runs *every*
-//! validator and accumulates errors so the user sees the full
-//! problem list in one round-trip, not one failure at a time.
+//! Put an ordered list of [`PasswordValidator`]s into a
+//! [`PasswordValidatorChain`] and call
+//! [`PasswordValidatorChain::validate`] at signup and password change.
+//! The chain runs every validator and collects the errors, so the user
+//! sees the whole problem list at once.
 //!
 //! ```ignore
 //! use rustango::password_validators::{
@@ -22,31 +22,35 @@
 //! ```
 //!
 //! ## Built-in validators
-//! - [`MinimumLengthValidator`] — Django's `MinimumLengthValidator`.
-//! - [`MaximumLengthValidator`] — extra rustango safeguard; some
-//!   password hashers cap input length, so the validator surfaces
-//!   "too long" before the hasher does.
-//! - [`NumericPasswordValidator`] — Django's same-named validator.
-//! - [`UserAttributeSimilarityValidator`] — Django's same. Rejects
-//!   passwords that contain (or are too similar to) a value from
-//!   the user attributes bag.
-//! - [`CommonPasswordValidator`] — small built-in top-N list. The
-//!   real Django uses ~20k entries; this ship the top-100 to keep
-//!   the binary lean. Pass `with_list(...)` for a longer list.
+//! - [`MinimumLengthValidator`]
+//! - [`MaximumLengthValidator`] — extra in rustango. Some hashers cap
+//!   input length, so this reports "too long" before the hasher does.
+//! - [`NumericPasswordValidator`]
+//! - [`UserAttributeSimilarityValidator`] — rejects a password that
+//!   contains, or is close to, one of the user's attributes.
+//! - [`CommonPasswordValidator`] — bundles a short top-100 list
+//!   (Django ships ~20k). Pass a longer one to `with_list(...)`.
 //!
-//! Custom validators implement [`PasswordValidator`] (one method).
+//! Write your own by implementing [`PasswordValidator`] (one method).
 //!
-//! Issue #54 — second piece of [`crate::auth_backends`].
+//! [`PasswordValidator`]: crate::password_validators::PasswordValidator
+//! [`PasswordValidatorChain`]: crate::password_validators::PasswordValidatorChain
+//! [`PasswordValidatorChain::validate`]: crate::password_validators::PasswordValidatorChain::validate
+//! [`MinimumLengthValidator`]: crate::password_validators::MinimumLengthValidator
+//! [`MaximumLengthValidator`]: crate::password_validators::MaximumLengthValidator
+//! [`NumericPasswordValidator`]: crate::password_validators::NumericPasswordValidator
+//! [`UserAttributeSimilarityValidator`]: crate::password_validators::UserAttributeSimilarityValidator
+//! [`CommonPasswordValidator`]: crate::password_validators::CommonPasswordValidator
 
 use std::collections::HashMap;
 use std::fmt;
 
 // ------------------------------------------------------------------ UserAttributes
 
-/// Per-user bag of attribute values that
-/// [`UserAttributeSimilarityValidator`] checks the password against.
-/// Typically `username` + `email` + display name — anything an
-/// attacker is likely to guess from the user's public profile.
+/// The user's attribute values that
+/// [`UserAttributeSimilarityValidator`] checks a password against.
+/// Usually username, email and display name: anything an attacker can
+/// read off a public profile and try.
 #[derive(Debug, Default, Clone)]
 pub struct UserAttributes {
     pub values: HashMap<String, String>,
@@ -72,8 +76,8 @@ impl UserAttributes {
 
 // ------------------------------------------------------------------ ValidationError
 
-/// One validator's complaint. Each entry has a stable `code` (for
-/// programmatic checks / template branches) and a human `message`.
+/// One validator's complaint: a stable `code` to branch on and a
+/// `message` to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
     pub code: &'static str,
@@ -95,8 +99,8 @@ impl fmt::Display for ValidationError {
     }
 }
 
-/// Accumulated errors from the chain. Use [`Self::is_empty`] to gate
-/// the success path; iterate `errors` to render every complaint.
+/// Errors collected by the chain. Gate the success path on
+/// [`Self::is_empty`]; iterate `errors` to show them all.
 #[derive(Debug, Default, Clone)]
 pub struct ValidationErrors {
     pub errors: Vec<ValidationError>,
@@ -145,21 +149,19 @@ impl std::error::Error for ValidationErrors {}
 
 // ------------------------------------------------------------------ PasswordValidator
 
-/// One link in the chain. `validate` returns `Ok(())` on pass; one
-/// [`ValidationError`] on failure. The chain runs every validator
-/// and collects errors (not short-circuit) so users see the full
-/// problem set per round-trip.
+/// One link in the chain. `validate` returns `Ok(())` on pass, or one
+/// [`ValidationError`] on failure. The chain does not stop at the
+/// first failure.
 pub trait PasswordValidator: Send + Sync {
-    /// Stable identifier (`"length"`, `"numeric"`, …). Useful for
-    /// docs, tests, and template branches.
+    /// Stable identifier (`"length"`, `"numeric"`, …) to branch on.
     fn code(&self) -> &'static str;
 
     /// Validate `password` against `user_attrs`. Implementations
     /// SHOULD NOT log or store the password.
     fn validate(&self, password: &str, user_attrs: &UserAttributes) -> Result<(), ValidationError>;
 
-    /// Help text the UI shows next to the password field. Default
-    /// empty — override to surface the validator's requirement.
+    /// Help text shown next to the password field. Empty by default;
+    /// override it to state the rule.
     fn help_text(&self) -> String {
         String::new()
     }
@@ -196,8 +198,8 @@ impl PasswordValidatorChain {
         self.validators.is_empty()
     }
 
-    /// Run every validator. Returns `Ok(())` only when ALL pass.
-    /// On any failure, returns the full accumulated error list.
+    /// Run every validator. `Ok(())` only when all pass; otherwise
+    /// the full list of errors.
     pub fn validate(
         &self,
         password: &str,
@@ -216,8 +218,7 @@ impl PasswordValidatorChain {
         }
     }
 
-    /// Concatenated help text from every validator (for rendering
-    /// in the signup form).
+    /// Help text from every validator, for the signup form.
     #[must_use]
     pub fn help_text(&self) -> Vec<String> {
         self.validators
@@ -270,9 +271,9 @@ impl PasswordValidator for MinimumLengthValidator {
 
 // ------------------------------------------------------------------ MaximumLengthValidator
 
-/// Reject passwords longer than `max_length` characters. Pairs with
-/// hasher input limits (Argon2 has no hard cap but stash-anywhere
-/// patterns benefit from one).
+/// Reject passwords longer than `max_length` characters. Argon2 has
+/// no hard cap, but a limit keeps a huge input from reaching the
+/// hasher at all.
 pub struct MaximumLengthValidator {
     pub max_length: usize,
 }
@@ -311,10 +312,9 @@ impl PasswordValidator for MaximumLengthValidator {
 
 // ------------------------------------------------------------------ NumericPasswordValidator
 
-/// Reject passwords made entirely of digits (`"12345678"`). Django
-/// rationale: pure-digit passwords are trivially brute-forceable
-/// even at long lengths, and users default to them when forced into
-/// "must be 8 chars" without a complexity rule.
+/// Reject passwords made only of digits (`"12345678"`). Users fall
+/// back to these under a bare length rule, and a digits-only space is
+/// small enough to brute-force even when it is long.
 pub struct NumericPasswordValidator;
 
 impl PasswordValidator for NumericPasswordValidator {
@@ -338,13 +338,13 @@ impl PasswordValidator for NumericPasswordValidator {
 
 // ------------------------------------------------------------------ UserAttributeSimilarityValidator
 
-/// Reject passwords that contain (case-insensitive) one of the user's
-/// attributes — username, email local-part, display name — as a
-/// substring of length ≥ `threshold` chars. Defaults: `threshold=4`,
-/// checks every attribute.
+/// Reject a password that contains one of the user's attributes —
+/// username, email local-part, display name — as a piece of
+/// `threshold` characters or more. Case-insensitive. By default
+/// `threshold` is 4 and every attribute is checked.
 pub struct UserAttributeSimilarityValidator {
-    /// Minimum overlap length to reject. Below this is too short to
-    /// signal "the user reused their username".
+    /// Shortest overlap that counts. Anything shorter is too weak a
+    /// signal that the user reused their own name.
     pub threshold: usize,
     /// Only check these attribute keys. Empty = check every attribute.
     pub user_attributes: Vec<String>,
@@ -389,9 +389,9 @@ impl PasswordValidator for UserAttributeSimilarityValidator {
     fn validate(&self, password: &str, user_attrs: &UserAttributes) -> Result<(), ValidationError> {
         let lower_password = password.to_lowercase();
         for (_, value) in self.attrs(user_attrs) {
-            // Check both whole attribute + each splittable chunk
-            // (so `john.doe@example.com` rejects both `john.doe`,
-            // `john`, `doe`, and `example`).
+            // Check the whole attribute and each chunk, so
+            // `john.doe@example.com` also rejects `john`, `doe` and
+            // `example`.
             let lower = value.to_lowercase();
             for piece in std::iter::once(lower.as_str())
                 .chain(lower.split(|c: char| !c.is_alphanumeric()))
@@ -415,18 +415,17 @@ impl PasswordValidator for UserAttributeSimilarityValidator {
 
 // ------------------------------------------------------------------ CommonPasswordValidator
 
-/// Reject passwords from a stash list. Ships with the [top 100
+/// Reject passwords on a known-bad list. Bundles the [top 100
 /// most-common passwords](https://en.wikipedia.org/wiki/List_of_the_most_common_passwords);
-/// real deployments pass a longer list via [`Self::with_list`].
+/// pass a longer list in production with [`Self::with_list`].
 pub struct CommonPasswordValidator {
     list: Vec<String>,
 }
 
 impl Default for CommonPasswordValidator {
     fn default() -> Self {
-        // Curated subset of the top-100 globally (case-insensitive).
-        // Real Django uses a 20k-entry list; ship the most-likely
-        // here and let callers swap in a longer one.
+        // Subset of the global top-100, matched case-insensitively.
+        // Django ships 20k; callers can swap in a longer list.
         let list = [
             "123456",
             "123456789",
@@ -524,14 +523,14 @@ impl Default for CommonPasswordValidator {
 }
 
 impl CommonPasswordValidator {
-    /// Use the bundled top-N list. Same as `Default::default()`.
+    /// Use the bundled list. Same as `Default::default()`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Use a caller-provided list. Entries are matched case-
-    /// insensitively after trimming whitespace.
+    /// Use your own list. Entries are trimmed and matched without
+    /// regard to case.
     #[must_use]
     pub fn with_list<I, S>(entries: I) -> Self
     where
@@ -606,8 +605,8 @@ mod tests {
         let v = NumericPasswordValidator;
         assert!(v.validate("12345678", &UserAttributes::new()).is_err());
         assert!(v.validate("12345abc", &UserAttributes::new()).is_ok());
-        // Empty string is the "no password supplied" case — let the
-        // min-length validator complain about that.
+        // An empty string means "no password supplied"; that is the
+        // min-length validator's complaint, not this one's.
         assert!(v.validate("", &UserAttributes::new()).is_ok());
     }
 
@@ -654,8 +653,7 @@ mod tests {
             .with("display_name", "Alice Smith");
         // username check rejects.
         assert!(v.validate("alice-pw", &attrs).is_err());
-        // display_name is NOT in the only-list, so a password with
-        // "smith" doesn't trip the validator.
+        // display_name is not on the only-list, so "smith" passes.
         assert!(v.validate("smith-pw", &attrs).is_ok());
     }
 
@@ -721,8 +719,8 @@ mod tests {
     fn empty_chain_always_passes() {
         let chain = PasswordValidatorChain::new();
         assert!(chain.is_empty());
-        // Even a `""` empty password passes when there are no
-        // validators registered — the chain is purely additive.
+        // With no validators registered even `""` passes: the chain
+        // only adds rules, it has none of its own.
         assert!(chain.validate("", &UserAttributes::new()).is_ok());
     }
 

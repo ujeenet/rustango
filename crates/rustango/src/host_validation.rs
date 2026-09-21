@@ -1,12 +1,15 @@
-//! Host-header allowlist middleware — Django parity for the
-//! `ALLOWED_HOSTS` setting + the host-validation step
-//! `SecurityMiddleware` runs implicitly before every view.
+//! Host-header allowlist middleware — Django's `ALLOWED_HOSTS`.
 //!
-//! Django gate: when `ALLOWED_HOSTS` is set, any request whose
-//! `Host:` header isn't in the list is rejected with a 400. The
-//! list supports exact-host entries (`example.com`), dot-prefix
-//! subdomain wildcards (`.example.com` matches `api.example.com`
-//! AND `example.com` itself), and the lone catch-all `*`.
+//! The client sends the `Host:` header, so it is only a claim. Code
+//! that builds absolute URLs, reset links or cache keys from it trusts
+//! whoever called. This layer is the check: a request whose `Host` is
+//! not on the list is rejected with a 400. It is an allowlist, not a
+//! blocklist, so a host you never named is refused without you having
+//! to predict it.
+//!
+//! Entries may be exact hosts (`example.com`), dot-prefix subdomain
+//! wildcards (`.example.com` matches `api.example.com` and
+//! `example.com` itself), or the catch-all `*`.
 //!
 //! ## Quick start
 //!
@@ -22,19 +25,18 @@
 //!     ]));
 //! ```
 //!
-//! Requests with a missing or non-matching `Host` header receive a
-//! `400 Bad Request` body that mirrors Django's `DisallowedHost`
-//! message; the exact host echoes back to ease ops debugging without
-//! leaking which hosts are allowed.
+//! A missing or unlisted `Host` gets a `400 Bad Request` worded like
+//! Django's `DisallowedHost`. The body echoes the rejected host to
+//! help ops, but never the allowed list.
 //!
 //! ## Settings wiring
 //!
-//! `Settings.security.allowed_hosts: Vec<String>` (already parsed by
-//! `env::list("ALLOWED_HOSTS")`) feeds the layer via
-//! [`AllowedHostsLayer::from_settings_list`]. Empty list disables
-//! validation — matches Django's "DEBUG=True allows all" behavior
-//! by convention, but rustango doesn't have a DEBUG flag so the
-//! operator must opt in explicitly.
+//! `Settings.security.allowed_hosts: Vec<String>` (parsed by
+//! `env::list("ALLOWED_HOSTS")`) feeds
+//! [`AllowedHostsLayer::from_settings_list`]. An empty list turns the
+//! check off, so the operator has to opt in.
+//!
+//! [`AllowedHostsLayer::from_settings_list`]: crate::host_validation::AllowedHostsLayer::from_settings_list
 
 use std::sync::Arc;
 
@@ -44,17 +46,17 @@ use axum::http::{Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 
-/// One allowed-host entry. Owns the comparison logic so the
-/// matching loop stays cheap (no per-request allocation).
+/// One allowed-host entry, pre-parsed so matching allocates nothing
+/// per request.
 #[derive(Clone, Debug)]
 enum Pattern {
-    /// Catch-all `*` — every host matches. Use sparingly.
+    /// Catch-all `*`: every host matches, which switches the check
+    /// off. Dangerous in production — name your hosts instead.
     Wildcard,
-    /// Exact match: `Host` header (lowercased) equals this string.
+    /// Exact match against the lowercased `Host` header.
     Exact(String),
-    /// Dot-prefix wildcard `.example.com` — matches `example.com`
-    /// itself plus any subdomain (`api.example.com`,
-    /// `a.b.example.com`). The stored string omits the leading dot.
+    /// Dot-prefix wildcard `.example.com`: matches `example.com` and
+    /// any subdomain. Stored without the leading dot.
     Subdomain(String),
 }
 
@@ -81,10 +83,9 @@ impl Pattern {
             Self::Wildcard => true,
             Self::Exact(h) => host == h,
             Self::Subdomain(tail) => {
-                // `tail` does not include the leading dot. Match
-                // `tail` itself (the base domain) or any host whose
-                // suffix is `.<tail>` (avoids matching
-                // `eviltail.com` against `.tail.com`).
+                // Match the base domain itself, or a host ending in
+                // `.<tail>`. The dot matters: without it
+                // `eviltail.com` would match `.tail.com`.
                 host == tail
                     || host
                         .strip_suffix(tail)
@@ -94,18 +95,17 @@ impl Pattern {
     }
 }
 
-/// Tower-layer-equivalent configuration. Holds the parsed pattern
-/// list; applied via [`AllowedHostsRouterExt::allowed_hosts`].
+/// The parsed pattern list. Apply it with
+/// [`AllowedHostsRouterExt::allowed_hosts`].
 #[derive(Clone)]
 pub struct AllowedHostsLayer {
     patterns: Arc<Vec<Pattern>>,
 }
 
 impl AllowedHostsLayer {
-    /// Build a layer from a list of allowed-host entries. Entries
-    /// support exact-match hostnames, `.example.com` subdomain
-    /// wildcards, and the lone catch-all `*`. Empty / whitespace
-    /// entries are silently dropped.
+    /// Build a layer from allowed-host entries: exact hostnames,
+    /// `.example.com` subdomain wildcards, or the catch-all `*`.
+    /// Blank entries are dropped.
     #[must_use]
     pub fn new<I, S>(entries: I) -> Self
     where
@@ -121,10 +121,8 @@ impl AllowedHostsLayer {
         }
     }
 
-    /// Convenience: wire from `Settings.security.allowed_hosts`. An
-    /// empty list disables the layer (every host passes) — matches
-    /// the "no ALLOWED_HOSTS configured → no enforcement" shape
-    /// Django uses with `DEBUG=True`.
+    /// Wire from `Settings.security.allowed_hosts`. An empty list
+    /// disables the layer and every host passes.
     #[must_use]
     pub fn from_settings_list<I, S>(entries: I) -> Self
     where
@@ -134,9 +132,8 @@ impl AllowedHostsLayer {
         Self::new(entries)
     }
 
-    /// `true` when the configured list permits this host header.
-    /// Empty list passes every host (operator opted out of
-    /// validation by leaving the setting empty).
+    /// `true` when the list permits this host header. An empty list
+    /// passes every host: the operator opted out.
     #[must_use]
     pub fn permits(&self, host: &str) -> bool {
         if self.patterns.is_empty() {
@@ -147,12 +144,12 @@ impl AllowedHostsLayer {
     }
 }
 
-/// Strip a trailing `:<port>` from a Host-header value so the
-/// allowlist comparison ignores it. Returns the input untouched if
-/// no port is present. Handles bracketed IPv6 literals too.
+/// Drop a trailing `:<port>` so the allowlist compares host names
+/// only. Returns the input unchanged when there is no port. Handles
+/// bracketed IPv6 literals.
 fn strip_port(host: &str) -> &str {
     if let Some(rest) = host.strip_prefix('[') {
-        // IPv6 literal: `[::1]:8080` → strip from the closing bracket.
+        // IPv6 literal: `[::1]:8080` → cut at the closing bracket.
         if let Some(end) = rest.find(']') {
             return &host[..end + 2.min(host.len())];
         }
@@ -164,7 +161,7 @@ fn strip_port(host: &str) -> &str {
     }
 }
 
-/// Router extension trait — `.allowed_hosts(layer)`.
+/// Router extension: `.allowed_hosts(layer)`.
 pub trait AllowedHostsRouterExt {
     #[must_use]
     fn allowed_hosts(self, layer: AllowedHostsLayer) -> Self;
@@ -226,10 +223,8 @@ mod tests {
         assert!(layer.permits("example.com"));
         assert!(layer.permits("api.example.com"));
         assert!(layer.permits("a.b.example.com"));
-        // Tricky case Django gets right: an unrelated host that
-        // *ends with* "example.com" but isn't a subdomain shouldn't
-        // match. `evilexample.com` ends with `example.com` but the
-        // boundary char isn't a dot.
+        // `evilexample.com` ends with "example.com" but is not a
+        // subdomain: the boundary character is not a dot.
         assert!(!layer.permits("evilexample.com"));
     }
 
@@ -256,8 +251,7 @@ mod tests {
     #[test]
     fn whitespace_entries_are_ignored() {
         let layer = AllowedHostsLayer::new(["", "   ", "example.com"]);
-        // Only the real entry counts; non-matching hosts still get
-        // rejected.
+        // Only the real entry counts; other hosts are still rejected.
         assert!(layer.permits("example.com"));
         assert!(!layer.permits("attacker.com"));
     }

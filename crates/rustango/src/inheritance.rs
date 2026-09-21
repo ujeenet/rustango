@@ -1,35 +1,13 @@
-//! Model-inheritance patterns — Django's `Meta.abstract`, multi-table,
-//! and proxy shapes adapted to Rust. Issue #51.
+//! Model-inheritance patterns: how to get Django's abstract,
+//! multi-table and proxy models in Rust.
 //!
-//! Django ships three flavors of model inheritance:
+//! Rust has no class inheritance, but each Django shape has a
+//! counterpart the framework already supports.
 //!
-//! 1. **Abstract base classes** (`Meta.abstract = True`) — share
-//!    fields + methods across child models. The base has no DB
-//!    table; every child gets its own table with the base's fields
-//!    physically copied in.
-//! 2. **Multi-table inheritance** — child gets its OWN table with an
-//!    implicit `OneToOne` FK back to the parent. Queries against the
-//!    child JOIN to the parent.
-//! 3. **Proxy models** (`Meta.proxy = True`) — same table as the
-//!    parent, but a different Manager / Meta / methods.
+//! ### 1. Abstract base classes → traits
 //!
-//! ## Rust mappings
-//!
-//! Rust doesn't have class inheritance, but every Django use case
-//! for model inheritance has a clean Rust-idiomatic counterpart
-//! that the framework already supports today:
-//!
-//! ### 1. Abstract base classes → traits + composition
-//!
-//! Django's abstract base is about sharing *behavior* (methods)
-//! and *fields* (schema). In Rust:
-//!
-//! - **Share behavior**: define a trait with the shared methods,
-//!   `impl` it on each model.
-//! - **Share fields**: not natively possible without a proc-macro.
-//!   The pragmatic shape is to either (a) `derive` a helper proc-macro
-//!   per shared block, or (b) accept the duplication on the field
-//!   declarations and share the BEHAVIOR via trait.
+//! Put the shared methods in a trait and `impl` it on each model.
+//! Rust cannot share field declarations, so repeat those per model.
 //!
 //! ```ignore
 //! use chrono::{DateTime, Utc};
@@ -57,15 +35,12 @@
 //! }
 //! ```
 //!
-//! The field declarations live on each model (Rust requirement),
-//! but every shared helper / query method that takes `<T: Timestamped>`
-//! works polymorphically — same dispatch shape Django gets from the
-//! abstract base class.
+//! Any helper that takes `<T: Timestamped>` then works for every
+//! model that implements it.
 //!
-//! ### 2. Multi-table inheritance → explicit OneToOne FK
+//! ### 2. Multi-table inheritance → an explicit one-to-one FK
 //!
-//! Already supported. `#[rustango(o2o = "ParentTable", on = "parent_id")]`
-//! declares an implicit-OneToOne FK to the parent table:
+//! Use `#[rustango(o2o = "parent_table", on = "parent_id")]`:
 //!
 //! ```ignore
 //! #[derive(rustango::Model)]
@@ -90,18 +65,14 @@
 //! }
 //! ```
 //!
-//! Django's `Restaurant.objects.all()` returns rows with both place
-//! and restaurant fields joined; in rustango the equivalent is
-//! `Restaurant::objects().select_related("place_id")` (or fetch
-//! the parent rows separately via `place_ids = restaurants.iter().map(|r| r.place_id)`).
+//! To read parent and child fields together, use
+//! `Restaurant::objects().select_related("place_id")`.
 //!
 //! ### 3. Proxy models → extension trait
 //!
-//! Django's proxy is "different Manager / Meta on the same table."
-//! The Rust shape is an extension trait on `QuerySet<T>` that adds
-//! domain-specific shortcuts — fully documented in the
-//! [`crate::manager`] module. Same physical table, multiple
-//! "personalities."
+//! A proxy is one table with several sets of helper methods. In Rust
+//! that is an extension trait on `QuerySet<T>`. See [`crate::manager`]
+//! for the full pattern.
 //!
 //! ```ignore
 //! pub trait PublishedArticleExt: Sized {
@@ -118,26 +89,17 @@
 //! Article::objects().only_published().fetch(&pool).await?;
 //! ```
 //!
-//! ## Summary table
+//! ## Summary
 //!
-//! | Django shape | Rust idiom | Framework support |
-//! |--------------|-----------|-------------------|
-//! | Abstract base class | trait + per-model field declarations | trait dispatch (Rust built-in) |
-//! | Multi-table inheritance | explicit `#[rustango(o2o)]` FK | shipped |
-//! | Proxy model | extension trait on `QuerySet<T>` | see [`crate::manager`] |
+//! | Django shape | Rust idiom |
+//! |--------------|-----------|
+//! | Abstract base class | trait, plus the fields on each model |
+//! | Multi-table inheritance | explicit `#[rustango(o2o)]` FK |
+//! | Proxy model | extension trait on `QuerySet<T>` |
 //!
-//! ## Why no `#[rustango(abstract)]` proc-macro attribute?
-//!
-//! True field-inlining (parent fields physically copied into child
-//! at macro time) would need the `Model` derive to consult a
-//! parent struct's field list. Doable but a substantial
-//! proc-macro lift, and the trait-based "share behavior" approach
-//! is strictly more flexible — multiple traits can layer onto
-//! one struct, where a single abstract parent can't.
-//!
-//! File a follow-up if your project repeatedly hand-copies the
-//! same 5+ fields across N models — at that point a proc-macro
-//! pays for itself.
+//! There is no `#[rustango(abstract)]` attribute. Copying parent
+//! fields at macro time would need the `Model` derive to read another
+//! struct, and traits are more flexible: a model can implement many
+//! of them, but could only have one abstract parent.
 
-// Doc-only module; the patterns this documents are exercised in
-// `tests/inheritance_patterns.rs`.
+// Doc-only module; the patterns live in `tests/inheritance_patterns.rs`.

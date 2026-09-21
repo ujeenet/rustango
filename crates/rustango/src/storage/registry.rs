@@ -1,10 +1,9 @@
-//! Named-disk storage registry — resolve a disk by name, optionally
-//! through a CDN, with a default disk for code that doesn't care.
+//! A registry of named storage disks. Look one up by name, get its
+//! URL through a CDN if it has one, or fall back to a default disk.
 //!
-//! Mirrors Laravel's "filesystem disks" / Django's per-FileField
-//! `storage` argument: the same app can have several named storages
-//! (e.g. `"avatars"` on S3 with a CDN, `"docs"` on a private S3
-//! bucket, `"cache"` on local disk) and reach any of them by name.
+//! One app can hold several storages at once: `"avatars"` on S3
+//! behind a CDN, `"docs"` in a private bucket, `"cache"` on local
+//! disk. Laravel calls these filesystem disks.
 //!
 //! ## Quick start
 //!
@@ -33,8 +32,8 @@
 //! // Or use the default:
 //! registry.default_disk().unwrap().save("k", b"v").await?;
 //!
-//! // CDN-aware URL — falls back to the backend's own url() when no
-//! // CDN prefix is configured for that disk.
+//! // Uses the CDN prefix when the disk has one, else the backend's
+//! // own url().
 //! let url = registry.cdn_url("avatars", "alice.png");
 //! //  -> "https://cdn.example.com/avatars/alice.png"
 //! ```
@@ -44,8 +43,8 @@ use std::sync::Arc;
 
 use super::BoxedStorage;
 
-/// Registry of named storage disks. Cheap to clone — internal state
-/// is `Arc`-shared.
+/// Named storage disks. Cheap to clone; the state is behind an
+/// `Arc`.
 #[derive(Clone, Default)]
 pub struct StorageRegistry {
     inner: Arc<RegistryInner>,
@@ -64,8 +63,8 @@ impl StorageRegistry {
         Self::default()
     }
 
-    /// Register `storage` under `name`. If `name` was already
-    /// registered, the previous binding is replaced.
+    /// Register `storage` under `name`, replacing any disk already
+    /// registered there.
     #[must_use]
     pub fn set(self, name: impl Into<String>, storage: BoxedStorage) -> Self {
         let mut inner = (*self.inner).rebuild();
@@ -75,10 +74,8 @@ impl StorageRegistry {
         }
     }
 
-    /// Set the CDN base URL for a disk. The URL is joined with `/` +
-    /// the storage key when `cdn_url(disk, key)` is called.
-    ///
-    /// Trailing slashes on `base` are tolerated.
+    /// Set the CDN base URL for a disk. `cdn_url(disk, key)` then
+    /// joins it with the key. A trailing slash on `base` is fine.
     #[must_use]
     pub fn cdn(self, disk: impl Into<String>, base: impl Into<String>) -> Self {
         let mut inner = (*self.inner).rebuild();
@@ -89,10 +86,9 @@ impl StorageRegistry {
         }
     }
 
-    /// Mark `name` as the default disk. `default_disk()` returns it +
-    /// handler-side helpers fall back to it when no disk is named.
-    /// Renamed away from `default` to avoid clashing with the
-    /// `Default::default()` constructor.
+    /// Mark `name` as the default disk, which `default_disk` returns
+    /// and helpers use when no disk is named. It is not called
+    /// `default`, to avoid clashing with `Default::default`.
     #[must_use]
     pub fn with_default(self, name: impl Into<String>) -> Self {
         let mut inner = (*self.inner).rebuild();
@@ -102,14 +98,14 @@ impl StorageRegistry {
         }
     }
 
-    /// Resolve a disk by name. Returns `None` for unknown names.
+    /// Look up a disk by name.
     #[must_use]
     pub fn disk(&self, name: &str) -> Option<BoxedStorage> {
         self.inner.disks.get(name).cloned()
     }
 
-    /// Resolve the disk marked as default. Returns `None` if no
-    /// default was set OR the named default was never registered.
+    /// The default disk. `None` when no default was set, or when the
+    /// name it points at was never registered.
     #[must_use]
     pub fn default_disk(&self) -> Option<BoxedStorage> {
         self.inner
@@ -138,11 +134,9 @@ impl StorageRegistry {
         self.inner.disks.contains_key(name)
     }
 
-    /// Build the public-facing URL for a key on a disk:
-    /// 1. Use the configured CDN base when present (`{cdn}/{key}`).
-    /// 2. Fall back to the backend's `url(key)` otherwise.
-    /// 3. Returns `None` when neither is available (unknown disk OR
-    ///    backend doesn't expose URLs).
+    /// The public URL for a key: the disk's CDN base when it has one,
+    /// else the backend's own `url(key)`. `None` when the disk is
+    /// unknown or the backend has no URLs.
     #[must_use]
     pub fn cdn_url(&self, disk: &str, key: &str) -> Option<String> {
         if let Some(base) = self.inner.cdns.get(disk) {
@@ -151,10 +145,9 @@ impl StorageRegistry {
         self.inner.disks.get(disk).and_then(|s| s.url(key))
     }
 
-    /// Same shape as `cdn_url` but always returns the backend's
-    /// origin URL — bypasses any configured CDN. Useful when a CDN
-    /// shouldn't be in the loop (e.g. internal-tool downloads,
-    /// admin-only resources).
+    /// Like `cdn_url`, but always the backend's own URL, skipping
+    /// any CDN. Use it when the CDN should not be involved, such as
+    /// an admin-only download.
     #[must_use]
     pub fn origin_url(&self, disk: &str, key: &str) -> Option<String> {
         self.inner.disks.get(disk).and_then(|s| s.url(key))
@@ -168,10 +161,8 @@ impl StorageRegistry {
 }
 
 impl RegistryInner {
-    /// Cheap clone of the inner state — we want copy-on-write
-    /// semantics so the builder methods can be called on a shared
-    /// `Arc<RegistryInner>` without forcing every caller to clone the
-    /// whole map first.
+    /// Copy the inner state, so a builder method can run on a shared
+    /// `Arc` without every caller cloning the maps first.
     fn rebuild(&self) -> Self {
         Self {
             disks: self.disks.clone(),
@@ -234,7 +225,7 @@ mod tests {
         let r = StorageRegistry::new()
             .set("k", s1.clone())
             .set("k", s2.clone());
-        // Same name, different backend pointer — second wins.
+        // Same name, different backend: the second one wins.
         let resolved = r.disk("k").unwrap();
         assert!(StdArc::ptr_eq(&resolved, &s2));
         assert!(!StdArc::ptr_eq(&resolved, &s1));
@@ -252,8 +243,8 @@ mod tests {
 
     #[test]
     fn default_disk_returns_none_when_target_unregistered() {
-        // Marking a default that doesn't exist isn't an error at
-        // build time — it just resolves to None at lookup time.
+        // Naming a default that does not exist is not an error when
+        // building; the lookup just returns None.
         let r = StorageRegistry::new().with_default("missing");
         assert_eq!(r.default_name(), Some("missing"));
         assert!(r.default_disk().is_none());
@@ -294,8 +285,8 @@ mod tests {
 
     #[test]
     fn cdn_url_falls_back_to_backend_url_when_no_cdn() {
-        // LocalStorage::url returns None by default — so cdn_url
-        // returns None too when no CDN base is configured.
+        // LocalStorage has no URL by default, so with no CDN base
+        // cdn_url has nothing to return.
         let r = StorageRegistry::new().set("local", local());
         assert!(r.cdn_url("local", "k.txt").is_none());
     }
@@ -308,8 +299,8 @@ mod tests {
 
     #[test]
     fn origin_url_bypasses_cdn() {
-        // When a CDN is configured but a caller wants the bare
-        // backend URL (e.g. for an internal admin tool).
+        // A CDN is configured, but the caller wants the plain
+        // backend URL, as an internal admin tool would.
         let local_with_url: BoxedStorage = StdArc::new(
             LocalStorage::new(PathBuf::from("/tmp"))
                 .with_base_url("https://internal.example.com/files"),
@@ -367,7 +358,7 @@ mod tests {
     fn registry_clone_shares_arc_state() {
         let r = StorageRegistry::new().set("a", mem());
         let r2 = r.clone();
-        // Same underlying disk handle in both clones.
+        // Both clones point at the same disk.
         assert!(StdArc::ptr_eq(
             &r.disk("a").unwrap(),
             &r2.disk("a").unwrap()

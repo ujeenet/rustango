@@ -1,11 +1,10 @@
-//! Ad-hoc joins — issue #80.
+//! Ad-hoc joins.
 //!
-//! Where [`crate::core::QuerySet::select_related`] follows FK edges
-//! automatically, this module adds a SQLAlchemy-shape escape hatch
-//! for joining against an arbitrary table with an arbitrary predicate.
-//! The predicate accepts the same [`WhereExpr`] machinery that powers
-//! `WHERE` clauses, so `and()` / `or()` / `Not` / function calls /
-//! sub-conditions all compose freely inside the JOIN `ON` clause.
+//! [`crate::query::QuerySet::select_related`] follows FK edges for you.
+//! This module is the escape hatch: join any table on any predicate.
+//! The predicate is a plain [`WhereExpr`], the same type `WHERE` uses,
+//! so `and()` / `or()` / `Not` / function calls all work in the `ON`
+//! clause.
 //!
 //! [`WhereExpr`]: crate::core::WhereExpr
 //!
@@ -31,19 +30,15 @@
 //!     .fetch(&pool).await?;
 //! ```
 //!
-//! ## Column qualification inside `on`
+//! ## Naming columns inside `on`
 //!
-//! - **Bare `Filter` / `ColumnFilter` columns** resolve to the joined
-//!   alias (i.e. the `<alias>` you passed to `.join(...)`). That's
-//!   the natural reading when most of the predicate is about the
-//!   joined table.
-//! - **`aliased(alias, col)`** emits `"<alias>"."<col>"` explicitly,
-//!   for cross-references back to the outer table or to a previously
-//!   joined alias. Use the outer model's `table` name as the alias
-//!   when referring to the outer side.
-//! - **`WhereExpr::ExprCompare`** lets both sides carry their own
-//!   alias via `aliased(...)`. Use this for the column-on-column
-//!   join condition.
+//! - Bare `Filter` / `ColumnFilter` columns belong to the joined
+//!   alias, the one you passed to `.join(...)`.
+//! - `aliased(alias, col)` emits `"<alias>"."<col>"`. Use it to point
+//!   back at the outer table or at an earlier join. The outer alias is
+//!   the outer model's `table` name.
+//! - `WhereExpr::ExprCompare` takes an alias on both sides. Use it for
+//!   the column-on-column join condition.
 //!
 //! ## When to reach for ad-hoc joins
 //!
@@ -54,13 +49,11 @@
 //! | Need both joined columns AND a custom join predicate | `join(...)` |
 //! | One-shot anti-join | `not_exists(...)` |
 //!
-//! ## Dialect-portability
+//! ## Dialect support
 //!
-//! - `Inner` / `Left` — every dialect.
-//! - `Right` — PG + MySQL only. SQLite raises
-//!   [`SqlError::JoinKindNotSupported`].
-//! - `Full` — PG only. MySQL + SQLite raise
-//!   [`SqlError::JoinKindNotSupported`].
+//! `Inner` and `Left` work everywhere. `Right` is PG and MySQL only.
+//! `Full` is PG only. The others raise
+//! [`SqlError::JoinKindNotSupported`].
 //!
 //! [`SqlError::JoinKindNotSupported`]: crate::sql::SqlError::JoinKindNotSupported
 
@@ -68,32 +61,29 @@ use super::expr::Expr;
 use super::query::{Op, WhereExpr};
 use super::SqlValue;
 
-/// Shorthand for [`Expr::AliasedColumn`]. The alias can be a join's
-/// explicit alias (the second arg to `.join(...)`) or the outer
-/// model's `table` name when referring back to the outer side.
+/// Shorthand for [`Expr::AliasedColumn`]. The alias is either a join's
+/// alias (the second argument to `.join(...)`) or the outer model's
+/// `table` name.
 #[must_use]
 pub fn aliased(alias: &'static str, column: &'static str) -> Expr {
     Expr::AliasedColumn { alias, column }
 }
 
-/// Safe predicate-builder for JOIN `on` clauses: emits
-/// `"<alias>"."<col>" <op> <value>`. Use this whenever filtering
-/// inside an `on` predicate against a column whose table isn't the
-/// join's default alias.
+/// Predicate builder for JOIN `on` clauses. Emits
+/// `"<alias>"."<col>" <op> <value>`. Use it whenever the column you
+/// filter on does not belong to the join's own alias.
 ///
 /// # Why prefer this over a bare typed filter
 ///
-/// Inside an `on` predicate, the writer auto-qualifies bare
-/// `Filter` columns to the joined alias. If you write
-/// `Post::status.eq("draft").into()` — where `Post` is the *outer*
-/// model, not the joined one — the writer emits
-/// `"<joined_alias>"."status"`, **not** `"<post_table>"."status"`.
-/// The `TypedFilter<Post>` loses its model tag at the
-/// `Into<WhereExpr>` boundary, so the compiler can't catch this.
+/// Inside `on`, bare `Filter` columns are qualified with the joined
+/// alias. So `Post::status.eq("draft").into()`, where `Post` is the
+/// *outer* model, emits `"<joined_alias>"."status"`. The
+/// `TypedFilter<Post>` loses its model tag at the `Into<WhereExpr>`
+/// boundary, so the compiler cannot catch this.
 ///
-/// `col_filter` forces an explicit alias on the LHS by routing
-/// through [`Expr::AliasedColumn`] + [`WhereExpr::ExprCompare`], so
-/// the emitted SQL matches the call site verbatim:
+/// `col_filter` sets the alias itself through
+/// [`Expr::AliasedColumn`] + [`WhereExpr::ExprCompare`], so the SQL
+/// matches the call site:
 ///
 /// ```ignore
 /// use rustango::core::joins::col_filter;
@@ -111,11 +101,11 @@ pub fn aliased(alias: &'static str, column: &'static str) -> Expr {
 /// ]);
 /// ```
 ///
-/// Only binary-comparison ops (`Eq`, `Ne`, `Lt`, `Lte`, `Gt`, `Gte`)
-/// are meaningful here — other ops surface as
-/// [`SqlError::OpNotSupportedInDialect`] at emit time. For `IN` /
-/// `BETWEEN` / `IS NULL` against an aliased column, drop into a
-/// hand-rolled `WhereExpr` until a richer helper ships.
+/// Only the comparison ops (`Eq`, `Ne`, `Lt`, `Lte`, `Gt`, `Gte`) make
+/// sense here. Anything else fails with
+/// [`SqlError::OpNotSupportedInDialect`] when the SQL is written. For
+/// `IN` / `BETWEEN` / `IS NULL` on an aliased column, build the
+/// `WhereExpr` by hand.
 ///
 /// [`SqlError::OpNotSupportedInDialect`]: crate::sql::SqlError::OpNotSupportedInDialect
 #[must_use]

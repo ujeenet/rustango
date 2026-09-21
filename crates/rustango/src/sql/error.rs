@@ -29,32 +29,30 @@ pub enum SqlError {
     #[error("`Op::JsonContains` / `Op::JsonContainedBy` require `SqlValue::Json`")]
     JsonOpRequiresJson,
 
-    /// PG ArrayField operators (`@>`, `<@`, `&&`) require
-    /// [`crate::core::SqlValue::Array`]. A plain `List` would expand
-    /// to comma-separated placeholders — the wrong shape for array
-    /// comparison, which needs a single PG array parameter.
+    /// The array operators need a [`crate::core::SqlValue::Array`],
+    /// which binds as one parameter. A `List` would expand to
+    /// separate placeholders, which is the wrong shape.
     #[error(
         "`Op::ArrayContains` / `Op::ArrayContainedBy` / `Op::ArrayOverlap` require `SqlValue::Array`"
     )]
     ArrayOpRequiresArray,
 
-    /// `BulkUpdateQuery` was used on a model with no `#[rustango(primary_key)]`
-    /// field — the WHERE clause cannot be formed.
+    /// `BulkUpdateQuery` on a model with no primary key, so there is
+    /// nothing to match rows on.
     #[error("bulk UPDATE requires a primary key on the model")]
     MissingPrimaryKey,
 
-    /// A relation aggregate (`Expr::RelAggregate`, issue #830) other than
-    /// `COUNT` was emitted without a target column. The builder should
-    /// always supply one for `SUM`/`AVG`/`MAX`/`MIN`; this guards the
-    /// writer against a malformed node rather than emitting invalid SQL.
+    /// A relation aggregate other than `COUNT` arrived with no
+    /// target column. The builder always supplies one, so this
+    /// catches a hand-built node.
     #[error("relation aggregate `{kind}` requires a target column")]
     RelAggregateMissingColumn { kind: &'static str },
 
-    /// `Op::In` with an empty list — Postgres does not accept `IN ()`.
+    /// `Op::In` with an empty list; SQL has no `IN ()`.
     #[error("empty `IN` list is not supported")]
     EmptyInList,
 
-    /// `InsertQuery` had no columns — Postgres does not accept zero-column inserts.
+    /// `InsertQuery` had no columns.
     #[error("INSERT requires at least one column")]
     EmptyInsert,
 
@@ -62,39 +60,33 @@ pub enum SqlError {
     #[error("INSERT columns ({columns}) and values ({values}) length mismatch")]
     InsertShapeMismatch { columns: usize, values: usize },
 
-    /// `UpdateQuery` had no assignments — `UPDATE ... SET` requires at least one.
+    /// `UpdateQuery` had no assignments; `SET` needs at least one.
     #[error("UPDATE requires at least one assignment in `set`")]
     EmptyUpdateSet,
 
-    /// `BulkInsertQuery` had no rows — caller should short-circuit.
+    /// `BulkInsertQuery` had no rows; return early instead.
     #[error("bulk INSERT requires at least one row")]
     EmptyBulkInsert,
 
-    /// Macro-generated `Model::bulk_insert` was called with rows that
-    /// disagree on whether their `Auto<T>` PKs are `Set` or `Unset`.
-    /// Mixed-shape inserts aren't supported in v0.4 — the column list
-    /// must be consistent across the batch. Either set every PK or
-    /// leave every PK unset; for surgical mixes, call `insert` per row.
+    /// `bulk_insert` got rows that disagree on whether their
+    /// `Auto<T>` PKs are set, but one statement needs one column
+    /// list. Set every PK or none; for a mix, insert row by row.
     #[error("bulk INSERT requires every row's `Auto<T>` PKs to agree on Set vs Unset; mixed Set/Unset is not supported")]
     BulkAutoMixed,
 
-    /// `bulk_insert` returned a different number of rows than were
-    /// requested — sanity check before populating Auto fields.
+    /// `bulk_insert` returned a different number of rows than it was
+    /// given, checked before filling in the `Auto` fields.
     #[error("bulk INSERT RETURNING returned {actual} rows but {expected} were inserted")]
     BulkInsertReturningMismatch { expected: usize, actual: usize },
 
-    /// `WhereExpr::Or(vec![])` — a disjunction with no children
-    /// matches no rows. The writer rejects it so the user catches the
-    /// programming error instead of silently fetching an empty
-    /// result. (`WhereExpr::And(vec![])` is fine — represents
-    /// "no filters" and is the default.)
+    /// An `Or` with no children, which would match nothing. It is
+    /// rejected so the mistake shows up instead of an empty result.
+    /// An empty `And` is fine: that means "no filters".
     #[error("`WhereExpr::Or` with an empty branch list matches no rows; was that intentional?")]
     EmptyOrBranch,
 
-    /// `WhereExpr::Xor(vec![])` — issue #27. XOR over zero operands
-    /// is vacuously false (an empty "odd-number-of-trues" tally is
-    /// `0 % 2 = 1` → false), almost always a programming error.
-    /// Sibling to [`Self::EmptyOrBranch`].
+    /// An `Xor` with no children, which is always false. As with
+    /// [`Self::EmptyOrBranch`], that is almost always a mistake.
     #[error("`WhereExpr::Xor` with an empty branch list matches no rows; was that intentional?")]
     EmptyXorBranch,
 
@@ -106,61 +98,46 @@ pub enum SqlError {
     )]
     DialectQueryCompilationNotImplemented { dialect: &'static str },
 
-    /// A query operator is supported by the rustango IR but has no
-    /// equivalent (or no equivalent yet) in the active dialect.
-    /// Examples: `ILIKE` and the JSONB `?` / `?|` / `?&` / `@>` / `<@`
-    /// operators are Postgres-only; `IS DISTINCT FROM` is in standard
-    /// SQL but `MySQL` only ships the inverse `<=>` (null-safe equal)
-    /// — translation is on the v0.23.0-batch4 punch-list.
+    /// The IR has this operator but the active dialect has nothing
+    /// to write it as. The JSONB operators, for one, are
+    /// Postgres-only.
     #[error("operator `{op}` is not supported by the `{dialect}` dialect")]
     OperatorNotSupportedInDialect {
         op: &'static str,
         dialect: &'static str,
     },
 
-    /// An ON CONFLICT clause shape isn't expressible in the active
-    /// dialect's syntax. Postgres supports
-    /// `ON CONFLICT (col) DO UPDATE SET col = EXCLUDED.col`; `MySQL`'s
-    /// `ON DUPLICATE KEY UPDATE` doesn't take a target column list
-    /// (it triggers on any unique violation), so a `DoUpdate` with a
-    /// non-empty `target` cannot be translated 1:1.
+    /// The active dialect cannot express this `ON CONFLICT` shape.
+    /// MySQL, for one, has no target column list.
     #[error("ON CONFLICT shape `{shape}` is not supported by the `{dialect}` dialect")]
     ConflictNotSupportedInDialect {
         shape: &'static str,
         dialect: &'static str,
     },
 
-    /// A [`crate::core::BinOp`] variant has no dialect-portable
-    /// translation on this backend. Today raised only for
-    /// `BinOp::BitXor` on SQLite (SQLite has `&`, `|`, `<<`, `>>` but
-    /// no bitwise-XOR operator). Caller can either route to a different
-    /// op (e.g. `(a | b) - (a & b)`) or restrict the feature to
-    /// PG / MySQL.
+    /// A [`crate::core::BinOp`] this backend cannot write. Only
+    /// `BitXor` on SQLite so far, which has the other bitwise
+    /// operators but not that one; `(a | b) - (a & b)` is the same
+    /// thing.
     #[error("operator `{op}` is not supported by the `{dialect}` dialect")]
     OpNotSupportedInDialect {
         op: &'static str,
         dialect: &'static str,
     },
 
-    /// A Postgres-specific aggregate (`array_agg`, `string_agg`,
-    /// `jsonb_agg`, etc.) was requested on a non-PG backend. Issue #33.
-    /// MySQL has `GROUP_CONCAT` and `JSON_ARRAYAGG` that overlap
-    /// semantically but the syntax differs enough that we don't
-    /// auto-translate — caller should branch on `pool.dialect().name()`
-    /// or restrict the feature to PG-only deployments.
+    /// A Postgres-only aggregate such as `array_agg` or `jsonb_agg`
+    /// on another backend. MySQL's nearest equivalents differ enough
+    /// that they are not translated automatically, so branch on
+    /// `pool.dialect().name()` yourself.
     #[error("aggregate `{aggregate}` is not supported by the `{dialect}` dialect")]
     AggregateNotSupportedInDialect {
         aggregate: &'static str,
         dialect: &'static str,
     },
 
-    /// A scalar function (issue #2) was built with the wrong number of
-    /// arguments — e.g. `Substr` with 2 args, `NullIf` with 3, or
-    /// `Concat` with 0. The builder-side API constrains arity for
-    /// fixed-arity calls (compile error), but the IR is permissive
-    /// enough that hand-rolled `Expr::Function { args: vec![...] }`
-    /// could trip this — the emitter catches it before reaching the
-    /// database with a confusing parse error.
+    /// A scalar function with the wrong number of arguments. The
+    /// builders fix the count at compile time, so this catches a
+    /// hand-built `Expr::Function` before the database sees it.
     #[error("function `{func}` expects {expected} arg(s), got {got}")]
     FunctionArityMismatch {
         func: &'static str,
@@ -168,26 +145,20 @@ pub enum SqlError {
         got: usize,
     },
 
-    /// A `CASE WHEN … END` expression was built with no branches.
-    /// SQL requires at least one `WHEN` clause; the public builder
-    /// API ([`crate::core::case()`]) doesn't prevent zero-branch
-    /// construction, so the writer surfaces this here.
+    /// A `CASE` with no branches. SQL needs at least one `WHEN`, and
+    /// [`crate::core::case()`] does not stop you building none.
     #[error("CASE expression must have at least one WHEN branch")]
     EmptyCaseBranches,
 
-    /// A `CASE WHEN <cond> …` branch had an empty predicate (e.g.
-    /// `WhereExpr::And(vec![])`). The standard "no WHERE filter"
-    /// marker is legal at the top of an UPDATE/DELETE, but inside a
-    /// `WHEN` it would produce `WHEN  THEN …` with a hole — a parse
-    /// error on every backend. Reject it loudly here.
+    /// A `CASE` branch with an empty predicate. An empty `And` means
+    /// "no filter" at the top of an UPDATE, but inside a `WHEN` it
+    /// would leave a hole that no backend parses.
     #[error("CASE WHEN branch condition must not be empty")]
     EmptyCaseWhenCondition,
 
-    /// `Expr::OuterRef("col")` was emitted outside any subquery
-    /// scope (issue #5). `OuterRef` only makes sense inside a
-    /// correlated subquery — the writer needs at least two scope
-    /// frames on the stack (outer + subquery) to resolve the column
-    /// against the enclosing query. Programming error.
+    /// An `OuterRef` outside any subquery. It only means something
+    /// inside a correlated subquery, where there is an enclosing
+    /// query to resolve the column against.
     #[error(
         "`OuterRef(\"{column}\")` used outside of a subquery — \
          it can only appear inside Exists / NotExists / InSubquery / \
@@ -195,20 +166,13 @@ pub enum SqlError {
     )]
     OuterRefOutsideSubquery { column: &'static str },
 
-    /// `Expr::Aggregate(...)` was emitted in a SQL slot that doesn't
-    /// allow aggregate function calls (issue #88). Every dialect
-    /// (PG, MySQL, SQLite) rejects aggregates in `WHERE` /
-    /// `UPDATE SET` / `JOIN ON` / `GROUP BY` / `RETURNING` /
-    /// non-aggregate `SELECT` projections; only `HAVING`, the SELECT
-    /// list of an aggregating query, and that query's `ORDER BY`
-    /// are valid homes for an aggregate call. The writer enforces
-    /// this upfront with a clear error rather than passing the SQL
-    /// through to the database, which would surface a less
-    /// helpful "aggregate functions are not allowed in WHERE" or
-    /// equivalent. Programming error — restructure the query to
-    /// reference an aggregate annotation alias via the auto-routing
-    /// `QuerySet::filter(...)` (which goes to HAVING) or move the
-    /// aggregate to the SELECT list.
+    /// An aggregate call where SQL does not allow one. Only
+    /// `HAVING`, an aggregating query's SELECT list, and that
+    /// query's `ORDER BY` accept them.
+    ///
+    /// Filter on an annotation alias instead, which
+    /// `QuerySet::filter` routes to `HAVING`, or move the aggregate
+    /// into the SELECT list.
     #[error(
         "`Expr::Aggregate(...)` used outside of an aggregate-accepting \
          SQL slot — aggregates may only appear in SELECT projection, \
@@ -216,33 +180,24 @@ pub enum SqlError {
     )]
     AggregateOutsideAggregateContext,
 
-    /// A JOIN was constructed with an empty `on` predicate
-    /// (`WhereExpr::And(vec![])` — the legitimate "no WHERE filter"
-    /// marker at the top of an UPDATE/DELETE/SELECT). Inside a JOIN's
-    /// ON it would emit `ON ` with a literal hole, which every
-    /// backend rejects at parse. Mirror of `EmptyCaseWhenCondition`
-    /// for the JOIN-ON context.
+    /// A JOIN with an empty `on` predicate, which would leave a hole
+    /// after `ON`. [`Self::EmptyCaseWhenCondition`] for joins.
     #[error("JOIN `on` predicate must not be empty")]
     EmptyJoinOnCondition,
 
-    /// An aggregate function isn't supported by the active dialect
-    /// (issue #6). Today raised only for `StdDev` / `StdDevPop` /
-    /// `Variance` / `VariancePop` on SQLite, which has no built-in
-    /// statistical aggregates. Caller can either switch dialects,
-    /// drop the offending annotation, or compute the variance
-    /// formula in app code.
+    /// The active dialect does not have this aggregate. Only the
+    /// statistical ones on SQLite so far, which has none built in;
+    /// compute them in your own code instead.
     #[error("aggregate `{aggregate}` is not supported by the `{dialect}` dialect")]
     AggregateNotSupported {
         aggregate: &'static str,
         dialect: &'static str,
     },
 
-    /// An ill-formed `AggregateExpr` tree was passed in (issue #6) —
-    /// e.g. `Coalesced { Coalesced { … } }` or `Filtered { Filtered {
-    /// … } }`. The public [`crate::core::aggregates`] builder never
-    /// produces these, so this is a "hand-rolled IR" programmer
-    /// error. `wrapper` names the offending shape for the error
-    /// message.
+    /// A badly nested `AggregateExpr`, such as a `Coalesced` inside
+    /// a `Coalesced`. The [`crate::core::aggregates`] builders never
+    /// make one, so this catches hand-built IR. `wrapper` names the
+    /// shape.
     #[error("nested aggregate wrapper `{wrapper}` is not supported")]
     NestedAggregateWrapper { wrapper: &'static str },
 

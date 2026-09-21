@@ -1,26 +1,10 @@
-//! `MySQL` 8.4+ dialect — backtick-quoted identifiers, `?` placeholders,
-//! `BIGINT AUTO_INCREMENT` for `Auto<T>` PKs, `1`/`0` boolean literals,
-//! `GET_LOCK` / `RELEASE_LOCK` for advisory locking.
+//! The MySQL 8.4+ dialect: backtick-quoted identifiers, `?`
+//! placeholders, `BIGINT AUTO_INCREMENT` for an `Auto<T>` PK, `1` and
+//! `0` for booleans, and `GET_LOCK` for advisory locks. MySQL has no
+//! `RETURNING`.
 //!
-//! ## v0.23.0 batch status
-//!
-//! - **batch2** — identity primitives (quoting / placeholders /
-//!   serial type / boolean literals / `GET_LOCK`).
-//! - **batch3** (this batch) — hooks the IR-to-SQL writers in
-//!   [`super::writers`] up to `MySql`. SELECT / COUNT / AGGREGATE /
-//!   INSERT (no `RETURNING` — `MySQL` doesn't support it) / UPDATE /
-//!   DELETE all work. `INSERT … ON DUPLICATE KEY UPDATE` translates
-//!   from a `ConflictClause` shape `MySQL` can express.
-//! - **batch4** (planned) — translate `ILIKE` (→ `LOWER(col) LIKE
-//!   LOWER(?)`), `IS DISTINCT FROM` (→ `NOT (a <=> b)`), JSON
-//!   operators (→ `JSON_CONTAINS` / `JSON_CONTAINS_PATH`), and
-//!   `bulk_update` (→ `JOIN`-with-VALUES or `CASE WHEN`).
-//!
-//! Operators that don't have a one-shot `MySQL` translation today
-//! (`ILIKE`, `IS DISTINCT FROM`, JSONB `?` / `?|` / `?&` / `@>` /
-//! `<@`) surface a clear
-//! [`SqlError::OperatorNotSupportedInDialect`] from the writers when
-//! a query tries to use them.
+//! An operator with no MySQL translation gets
+//! [`SqlError::OperatorNotSupportedInDialect`] from the writers.
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
@@ -37,12 +21,8 @@ use super::{CompiledStatement, Dialect, SqlError};
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MySql;
 
-/// `'static` reference to the singleton [`MySql`] dialect, symmetric
-/// with [`super::postgres::DIALECT`]. Used by [`crate::sql::Pool::dialect`]
-/// to hand back a `&'static dyn Dialect` regardless of pool variant.
-///
-/// Gated where the emitter above is not: every caller is a `Pool` arm
-/// that only exists with the driver linked.
+/// The singleton [`MySql`] dialect, which
+/// [`crate::sql::Pool::dialect`] hands back for a MySQL pool.
 #[cfg(feature = "mysql")]
 pub static DIALECT: &MySql = &MySql;
 
@@ -51,56 +31,45 @@ impl Dialect for MySql {
         "mysql"
     }
 
-    /// MySQL has no native `NULLS FIRST` / `NULLS LAST` keyword.
-    /// Returning `false` makes `write_order_limit_offset` emulate
-    /// via an `<col> IS NULL` pre-sort term — issue #76.
+    /// MySQL has no `NULLS FIRST` or `NULLS LAST`, so the writer
+    /// sorts on `<col> IS NULL` first instead.
     fn supports_nulls_order(&self) -> bool {
         false
     }
 
-    /// MySQL spells the random function as `RAND()`, not `RANDOM()`.
-    /// Issue #77.
+    /// MySQL spells the random function `RAND()`.
     fn random_fn(&self) -> &'static str {
         "RAND"
     }
 
-    /// MySQL rejects `OFFSET M` without a matching `LIMIT N` — the
-    /// parser raises `ERROR 1064` (#560). Documented workaround:
-    /// pair the OFFSET with the max-`u64` literal so the runtime cap
-    /// is effectively disabled. PG + SQLite accept bare OFFSET
-    /// without LIMIT and inherit the trait default (`None`).
+    /// MySQL rejects an `OFFSET` with no `LIMIT`, so pair it with
+    /// the largest `u64` and the limit does nothing.
     fn offset_without_limit_clause(&self) -> Option<&'static str> {
         Some(" LIMIT 18446744073709551615")
     }
 
-    /// `MySQL` quotes identifiers with backticks, not double quotes.
-    /// Embedded backticks are doubled (the `MySQL` parser's escape rule)
-    /// so the output is always a valid quoted identifier even for
-    /// pathological column names.
+    /// MySQL quotes with backticks, and an embedded backtick is
+    /// doubled, so any name comes out valid.
     fn quote_ident(&self, name: &str) -> String {
         let escaped = name.replace('`', "``");
         format!("`{escaped}`")
     }
 
-    /// MySQL spells column comments inline in the CREATE TABLE column
-    /// definition (`<col> <type> [NULL/NOT NULL] [DEFAULT …] COMMENT
-    /// '<escaped>'`). Single quotes are doubled per the MySQL parser's
-    /// escape rule.
+    /// MySQL writes a column comment inline, after the rest of the
+    /// column definition. Single quotes are doubled.
     fn write_inline_column_comment(&self, comment: &str) -> Option<String> {
         let escaped = comment.replace('\'', "''");
         Some(format!(" COMMENT '{escaped}'"))
     }
 
-    /// MySQL spells table comments as a `COMMENT='<escaped>'` trailer
-    /// after the closing paren of CREATE TABLE (e.g. `CREATE TABLE
-    /// foo (...) COMMENT='blog posts'`). Single quotes are doubled.
-    /// Django parity for `Meta.db_table_comment`.
+    /// MySQL writes a table comment as a `COMMENT='…'` trailer after
+    /// the closing paren. Single quotes are doubled.
     fn write_inline_table_comment(&self, comment: &str) -> Option<String> {
         let escaped = comment.replace('\'', "''");
         Some(format!(" COMMENT='{escaped}'"))
     }
 
-    // `?`-style placeholders are the trait default — no override needed.
+    // `?` placeholders are the trait default.
 
     fn serial_type(&self, field_type: FieldType) -> &'static str {
         match field_type {
@@ -110,27 +79,21 @@ impl Dialect for MySql {
     }
 
     fn cast_aggregate_to_int(&self, expr: &str) -> String {
-        // MySQL: `CAST(<expr> AS BIGINT)` doesn't work — the integer
-        // target is `SIGNED` (or `UNSIGNED`).
+        // MySQL has no `BIGINT` cast target; it is `SIGNED`.
         format!("CAST({expr} AS SIGNED)")
     }
 
     fn cast_aggregate_to_float(&self, expr: &str) -> String {
-        // MySQL doesn't have `DOUBLE PRECISION`; `DOUBLE` is the right
-        // target for AVG widening.
+        // MySQL has no `DOUBLE PRECISION`; it is `DOUBLE`.
         format!("CAST({expr} AS DOUBLE)")
     }
 
-    /// MySQL CAST type tokens. Differs from the trait default in that:
-    /// - Integer types use `SIGNED` (8.x supports `BIGINT`/`INT` since
-    ///   8.0.17 but `SIGNED` works on 5.7 + 8.x uniformly — pick the
-    ///   widest-compatible token).
-    /// - Floats: `FLOAT`/`DOUBLE` (no `DOUBLE PRECISION` token).
-    /// - Bool: `UNSIGNED` (TINYINT(1) isn't a valid CAST target).
-    /// - String: `CHAR` (TEXT isn't a valid CAST target on MySQL).
-    /// - DateTime: `DATETIME` (no `TIMESTAMPTZ`).
-    /// - UUID / JSON / Binary: not supported as CAST targets — return
-    ///   `None`. Caller can serialize to a `CHAR` if string-shaped.
+    /// MySQL's CAST targets differ from the ANSI names: integers
+    /// cast to `SIGNED`, floats to `FLOAT` or `DOUBLE`, booleans to
+    /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME`.
+    ///
+    /// UUID, JSON and binary have no CAST target, so they return
+    /// `None`; cast a string-shaped value to `CHAR` yourself.
     fn cast_type(&self, ty: FieldType) -> Option<&'static str> {
         Some(match ty {
             FieldType::I16 | FieldType::I32 | FieldType::I64 => "SIGNED",
@@ -143,11 +106,9 @@ impl Dialect for MySql {
             FieldType::Time => "TIME",
             FieldType::Decimal => "DECIMAL(38, 10)",
             FieldType::Binary => "BINARY",
-            // MySQL has no `CAST AS JSON` form — `JSON_EXTRACT` /
-            // string parsing are the substitutes. UUID has no CAST
-            // target either (it's CHAR(36) in DDL but the user would
-            // cast to CHAR in expression form). Arrays (#341) / ranges
-            // (#343) are PG-only by language — no MySQL CAST target.
+            // MySQL has no `CAST AS JSON`; use `JSON_EXTRACT`. UUID
+            // has no target either, and the array, range and other
+            // Postgres-only types have nothing to cast to.
             FieldType::Uuid
             | FieldType::Json
             | FieldType::Array(_)
@@ -158,21 +119,17 @@ impl Dialect for MySql {
         })
     }
 
-    /// `MySQL` column types — major divergences from the ANSI / Postgres
-    /// shape:
-    /// - no native `BOOLEAN`; `BOOL`/`BOOLEAN` are aliases for `TINYINT(1)`
-    /// - no `TIMESTAMPTZ`; `DATETIME(6)` is microsecond-precision and
-    ///   timezone-naive (the framework's chrono::DateTime<Utc> binds
-    ///   into it correctly via sqlx-mysql)
-    /// - no `JSONB`; `JSON` is the JSON type (validates on write,
-    ///   stores as binary internally)
-    /// - no `UUID`; `CHAR(36)` is the canonical string form
-    /// - `TEXT` exists but unbounded `VARCHAR` doesn't — `VARCHAR`
-    ///   without a length is rejected by the parser, so an
-    ///   unbounded `String` field becomes `TEXT`
-    /// - `DOUBLE PRECISION` is `DOUBLE`; `REAL` is an alias for
-    ///   `FLOAT` in MySQL (different from Postgres' 4-byte REAL —
-    ///   close enough for the framework's f32/f64 mapping)
+    /// MySQL's column types differ from the Postgres ones in
+    /// several ways:
+    /// - no `BOOLEAN`; it is an alias for `TINYINT(1)`
+    /// - no `TIMESTAMPTZ`; `DATETIME(6)` holds microseconds but no
+    ///   timezone, and sqlx binds a `DateTime<Utc>` into it correctly
+    /// - no `JSONB`; `JSON` validates on write and stores binary
+    /// - no `UUID`; `CHAR(36)` is the usual form
+    /// - `VARCHAR` needs a length, so an unbounded `String` becomes
+    ///   `TEXT`
+    /// - no `DOUBLE PRECISION`; `DOUBLE`, and `REAL` is an alias for
+    ///   `FLOAT`
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
         match ty {
             FieldType::I16 => "SMALLINT".into(),
@@ -189,20 +146,17 @@ impl Dialect for MySql {
             FieldType::Date => "DATE".into(),
             FieldType::Uuid => "CHAR(36)".into(),
             FieldType::Json => "JSON".into(),
-            // MySQL `DECIMAL` defaults to `(10, 0)` — useless for app
-            // models. `(38, 10)` is the widest portable precision that
-            // matches `rust_decimal::Decimal`'s capacity. Per-column
-            // overrides land when we expose `precision`/`scale` attrs.
+            // A bare `DECIMAL` is `(10, 0)`, which has no fraction.
+            // `(38, 10)` is the widest that fits `rust_decimal`.
             FieldType::Decimal => "DECIMAL(38, 10)".into(),
-            // `LONGBLOB` lifts the cap to 4 GiB; `BLOB` is 64 KiB,
-            // which is too small for a generic `BinaryField`.
+            // `BLOB` caps at 64 KiB, too small here; `LONGBLOB` at
+            // 4 GiB.
             FieldType::Binary => "LONGBLOB".into(),
-            // `TIME(6)` for microsecond precision — matches the
-            // `DATETIME(6)` choice elsewhere in this writer.
+            // Microsecond precision, to match `DATETIME(6)` above.
             FieldType::Time => "TIME(6)".into(),
-            // MySQL has no native array column type — `Array<T>` (#341)
-            // is PG-only by language semantics. Degrade to `TEXT` so the
-            // DDL stays emittable; the bind / decode paths error on MySQL.
+            // These are all Postgres-only types with no MySQL
+            // equivalent, so the column is TEXT and the bind and
+            // decode paths reject them.
             FieldType::Array(_) => "TEXT".into(),
             // Ditto for PG range columns (#343).
             FieldType::Range(_) => "TEXT".into(),
@@ -215,10 +169,9 @@ impl Dialect for MySql {
         }
     }
 
-    // #344 — CITextField. MySQL ships `utf8mb4_general_ci` (or any
-    // `_ci` variant), the default collation for utf8mb4 in modern
-    // versions. Forcing it column-level guarantees case-insensitive
-    // comparison even when the table or session default differs.
+    // `utf8mb4_general_ci` is already the default collation in
+    // modern MySQL, but setting it per column keeps the comparison
+    // case-insensitive even where the table default differs.
     fn ci_text_type(&self, max_length: Option<u32>) -> String {
         match max_length {
             Some(n) => format!("VARCHAR({n}) COLLATE utf8mb4_general_ci"),
@@ -229,23 +182,16 @@ impl Dialect for MySql {
     /// Translate Postgres-native `DEFAULT` expressions to MySQL
     /// spelling.
     ///
-    /// - `now()` / `CURRENT_TIMESTAMP` → `CURRENT_TIMESTAMP(6)`. MySQL
-    ///   requires the fractional-second precision of the `DEFAULT` to
-    ///   match the column type; our `DateTime` columns render as
-    ///   `DATETIME(6)` (see [`Self::column_type`]) so the default has
-    ///   to carry `(6)` too, otherwise MySQL fails with
-    ///   `1067 (42000): Invalid default value`.
-    /// - `'<lit>'::<type>` → `'<lit>'` (strip Postgres cast).
-    /// - LOB-rendered columns: wrap the result in parens. MySQL rejects
-    ///   a literal `DEFAULT '{}'` on its no-default-allowed column
-    ///   families (`1101 (42000)`) — JSON, every TEXT/BLOB variant, and
-    ///   GEOMETRY — but the MySQL-8.0.13+ expression-default form
-    ///   `DEFAULT (<expr>)` is accepted. Per [`Self::column_type`] the
-    ///   types that land in that bucket are `Json` (→ `JSON`), `Binary`
-    ///   (→ `LONGBLOB`), and an unbounded `String` (→ `TEXT`); a bounded
-    ///   `String` renders as `VARCHAR(n)` and keeps its literal default.
-    ///   That's why `max_length` is needed: it's the only thing that
-    ///   distinguishes the `TEXT` case from the `VARCHAR` case.
+    /// - `now()` becomes `CURRENT_TIMESTAMP(6)`. MySQL wants the
+    ///   default's precision to match the column, and a `DateTime`
+    ///   column is `DATETIME(6)`; without the `(6)` it rejects the
+    ///   default outright.
+    /// - `'<lit>'::<type>` becomes `'<lit>'`.
+    /// - A JSON, TEXT or BLOB column takes no literal default, only
+    ///   MySQL 8.0.13+'s `DEFAULT (<expr>)` form, so those get
+    ///   wrapped in parens. `max_length` is what tells an unbounded
+    ///   `String`, which is TEXT, from a `VARCHAR(n)`, which keeps
+    ///   its literal default.
     /// - Everything else passes through.
     fn translate_default_expr(&self, expr: &str, ty: &str, max_length: Option<u32>) -> String {
         let mut out = expr.trim().to_owned();
@@ -270,9 +216,7 @@ impl Dialect for MySql {
             || ty.eq_ignore_ascii_case("binary")
             || (ty.eq_ignore_ascii_case("string") && max_length.is_none());
         if renders_as_lob {
-            // Skip wrapping if the caller already produced a
-            // parenthesized expression (defensive — current renderers
-            // never do this).
+            // Already an expression; do not wrap it twice.
             if !(out.starts_with('(') && out.ends_with(')')) {
                 out = format!("({out})");
             }
@@ -280,46 +224,39 @@ impl Dialect for MySql {
         out
     }
 
-    /// MySQL does not accept `CREATE INDEX IF NOT EXISTS` (as of
-    /// 8.x — parse error). The ledger already serializes migration
-    /// application so the idempotency guard is unnecessary in
-    /// practice.
-    /// MySQL accepts `USING BTREE` and `USING HASH` (the latter is
-    /// MEMORY-engine-only and silently downgraded to BTREE on
-    /// InnoDB). Any other method is a PG-ism — drop the clause and
-    /// let MySQL build a regular btree. Issue #34.
+    /// MySQL takes `USING BTREE` and `USING HASH`, the latter only
+    /// on the MEMORY engine. Any other method is Postgres-only, so
+    /// drop the clause and let MySQL build a btree.
     fn index_method_clause(&self, method: &str) -> String {
         match method {
             "hash" => " USING HASH".to_owned(),
-            // Everything else (including the explicit "btree") emits
-            // no clause — MySQL's default is already btree.
+            // Anything else, including "btree", needs no clause:
+            // MySQL's default is already a btree.
             _ => String::new(),
         }
     }
 
+    /// MySQL has no `CREATE INDEX IF NOT EXISTS`. The migration
+    /// ledger already stops a re-run, so nothing is lost.
     fn supports_create_index_if_not_exists(&self) -> bool {
         false
     }
 
-    /// MySQL has no `CREATE INDEX ... WHERE <expr>` syntax. Issue #265
-    /// / T1.3. The migration writer drops the WHERE clause + surfaces
-    /// a warning so a partial-unique declaration still creates the
-    /// underlying UNIQUE index (just without the partial filter).
-    /// Document the limitation; users requiring strict partial
-    /// uniqueness on MySQL should add an application-level check or
-    /// a CHECK constraint over a generated column.
+    /// MySQL has no `CREATE INDEX … WHERE <expr>`. The migration
+    /// writer drops the WHERE clause and warns, so the index is
+    /// still created, just without the filter. If you need a real
+    /// partial unique index, check it in the application or add a
+    /// CHECK constraint over a generated column.
     fn supports_partial_index(&self) -> bool {
         false
     }
 
-    /// MySQL spells this `DROP CHECK`, and takes no `IF EXISTS`.
+    /// MySQL spells this `DROP CHECK` and takes no `IF EXISTS`,
+    /// which is a parse error on any drop-constraint form.
     ///
-    /// `ALTER TABLE t DROP CONSTRAINT IF EXISTS c` is a parse error here
-    /// — `ERROR 1064 ... near 'IF EXISTS'` — even though plain
-    /// `DROP CONSTRAINT` is accepted from 8.0.19. Consequence worth
-    /// knowing: this is **not** idempotent. Dropping a constraint that
-    /// is already gone raises 3821, where the PostgreSQL form is a
-    /// no-op.
+    /// **So this is not idempotent.** Dropping a constraint that is
+    /// already gone is an error, where the Postgres form does
+    /// nothing.
     fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CHECK {}",
@@ -328,9 +265,8 @@ impl Dialect for MySql {
         ))
     }
 
-    /// MySQL spells this `DROP FOREIGN KEY`, and takes no `IF EXISTS`.
-    ///
-    /// Not idempotent either: dropping an absent FK raises 1091.
+    /// MySQL spells this `DROP FOREIGN KEY` and takes no
+    /// `IF EXISTS`, so it is not idempotent either.
     fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP FOREIGN KEY {}",
@@ -339,12 +275,10 @@ impl Dialect for MySql {
         ))
     }
 
-    /// MySQL has no `ON CONFLICT`. The semantic equivalent is
-    /// `ON DUPLICATE KEY UPDATE <col> = <col>` — a no-op write
-    /// against an existing row that satisfies MySQL's requirement
-    /// that the clause name at least one column assignment. Picks
-    /// the first conflict column so the SQL parses against any
-    /// unique-index shape the caller passes in.
+    /// MySQL has no `ON CONFLICT`, so this writes
+    /// `ON DUPLICATE KEY UPDATE <col> = <col>`: a no-op assignment
+    /// that satisfies its need for at least one. Any of the conflict
+    /// columns will do, so it uses the first.
     fn insert_on_conflict_skip(&self, conflict_cols: &[&str]) -> String {
         if conflict_cols.is_empty() {
             return String::new();
@@ -353,9 +287,8 @@ impl Dialect for MySql {
         format!("ON DUPLICATE KEY UPDATE {pivot} = {pivot}")
     }
 
-    /// `MySQL` has no native `BOOLEAN` (the `BOOL` keyword is just an
-    /// alias for `TINYINT(1)`). Emit `1`/`0` so `DEFAULT` clauses and
-    /// inline comparisons match the storage shape.
+    /// MySQL's `BOOLEAN` is an alias for `TINYINT(1)`, so emit `1`
+    /// and `0` to match how the value is stored.
     fn bool_literal(&self, b: bool) -> &'static str {
         if b {
             "1"
@@ -364,15 +297,13 @@ impl Dialect for MySql {
         }
     }
 
-    // `MySQL` supports every operator in the IR — batch4 ships
-    // translations for `ILIKE`, `IS DISTINCT FROM`, and the JSONB
-    // operators via the per-op `write_*` methods below. Trait default
-    // `true` is correct, no override needed.
+    // MySQL handles every operator in the IR, through the `write_*`
+    // methods below, so the `true` default is right.
 
     fn write_ilike(&self, sql: &mut String, qualified_col: &str, placeholder: &str, negated: bool) {
-        // `MySQL` has no native `ILIKE`; collation may make `LIKE`
-        // case-insensitive on `_ci` columns, but to guarantee semantics
-        // independent of column collation, lowercase both sides.
+        // MySQL has no `ILIKE`. A `_ci` collation would already make
+        // `LIKE` case-insensitive, but lowercasing both sides makes
+        // it so whatever the column's collation.
         sql.push_str("LOWER(");
         sql.push_str(qualified_col);
         sql.push_str(if negated {
@@ -384,11 +315,9 @@ impl Dialect for MySql {
         sql.push(')');
     }
 
-    /// MySQL has `REGEXP` for case-sensitive matching but no native
-    /// case-insensitive operator — column collation drives it.
-    /// To guarantee case-insensitivity independent of collation
-    /// (mirror of the ILIKE approach), lowercase both sides for the
-    /// `IRegex` / `NotIRegex` variants. Issue #26.
+    /// MySQL's `REGEXP` is case-sensitive and has no insensitive
+    /// form; the column's collation decides. As with ILIKE, the
+    /// insensitive variants lowercase both sides instead.
     fn write_regex(
         &self,
         sql: &mut String,
@@ -403,10 +332,8 @@ impl Dialect for MySql {
             sql.push_str(kw);
             sql.push_str(placeholder);
         } else {
-            // LOWER(<col>) REGEXP LOWER(<p>) — the pattern is bound
-            // as a single param, so wrapping in LOWER(...) at SQL
-            // level forces the comparison to be case-insensitive
-            // regardless of the column's collation.
+            // Lowercase both sides in the SQL, so the comparison
+            // ignores case whatever the column's collation.
             sql.push_str("LOWER(");
             sql.push_str(qualified_col);
             sql.push(')');
@@ -417,10 +344,9 @@ impl Dialect for MySql {
         }
     }
 
-    /// `pg_trgm` trigram operators are Postgres-only. MySQL has no
-    /// equivalent (text similarity via `FULLTEXT` is a different
-    /// shape). Reject at compile time so the user retargets the
-    /// query rather than discovering the gap at run time. Issue #29.
+    /// MySQL has no trigram operators; its `FULLTEXT` similarity is
+    /// a different shape. Reject the query here rather than let the
+    /// driver fail on it later.
     fn write_trigram_similar(
         &self,
         _sql: &mut String,
@@ -438,12 +364,9 @@ impl Dialect for MySql {
         })
     }
 
-    /// Postgres-shape FTS (`to_tsvector @@ plainto_tsquery`) doesn't
-    /// translate to MySQL. MySQL has its own `MATCH(col) AGAINST(?)`
-    /// shape with different semantics; the rustango FTS DSL doesn't
-    /// auto-port the lookup. Reject at compile time so the user
-    /// either retargets the backend or builds a MySQL-specific raw
-    /// `WhereExpr::Raw` predicate. Issue #28.
+    /// MySQL's full-text search is `MATCH(col) AGAINST(?)`, which
+    /// means something different from the Postgres shape, so this is
+    /// not translated. Write a raw predicate instead.
     fn write_search(
         &self,
         _sql: &mut String,
@@ -457,8 +380,7 @@ impl Dialect for MySql {
         })
     }
 
-    /// MySQL has no native array type. Reject every PG array op at
-    /// compile time. Issue #30.
+    /// MySQL has no array type, so reject every array operator.
     fn write_array_op(
         &self,
         _sql: &mut String,
@@ -473,8 +395,7 @@ impl Dialect for MySql {
         })
     }
 
-    /// MySQL has no native range type. Reject every PG range op at
-    /// compile time. Issue #31.
+    /// MySQL has no range type, so reject every range operator.
     fn write_range_op(
         &self,
         _sql: &mut String,
@@ -496,9 +417,8 @@ impl Dialect for MySql {
         placeholder: &str,
         distinct: bool,
     ) {
-        // MySQL `<=>` is null-safe equality (`NULL <=> NULL` → 1).
-        // `IS DISTINCT FROM` is the *negation* of null-safe equality,
-        // so wrap with `NOT (…)` when `distinct = true`.
+        // MySQL's `<=>` is null-safe equality, and
+        // `IS DISTINCT FROM` is its negation, so wrap it in `NOT`.
         if distinct {
             sql.push_str("NOT (");
         }
@@ -511,9 +431,9 @@ impl Dialect for MySql {
     }
 
     fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
-        // MySQL: `JSON_CONTAINS(target, candidate)` returns 1 if every
-        // value in `candidate` exists in `target`. Order matches the
-        // Postgres `target @> candidate` semantics.
+        // `JSON_CONTAINS(target, candidate)` is true when every
+        // value in the candidate is in the target, the same as
+        // Postgres' `target @> candidate`.
         sql.push_str("JSON_CONTAINS(");
         sql.push_str(qualified_col);
         sql.push_str(", ");
@@ -522,8 +442,7 @@ impl Dialect for MySql {
     }
 
     fn write_json_contained_by(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
-        // PG `target <@ candidate` ↔ `JSON_CONTAINS(candidate, target)`.
-        // Argument order is swapped compared to the contains case.
+        // The same call with the arguments the other way round.
         sql.push_str("JSON_CONTAINS(");
         sql.push_str(placeholder);
         sql.push_str(", ");
@@ -532,10 +451,9 @@ impl Dialect for MySql {
     }
 
     fn write_json_has_key(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
-        // PG `col ? 'key'` checks top-level key existence on a JSONB
-        // value. MySQL has `JSON_CONTAINS_PATH(col, 'one', '$.key')`
-        // for the same check; we assemble `'$.<key>'` at runtime via
-        // `CONCAT('$.', ?)` so the path is built from the bound value.
+        // `JSON_CONTAINS_PATH(col, 'one', '$.key')` is MySQL's
+        // top-level key check. `CONCAT('$.', ?)` builds the path
+        // from the bound value.
         sql.push_str("JSON_CONTAINS_PATH(");
         sql.push_str(qualified_col);
         sql.push_str(", 'one', CONCAT('$.', ");
@@ -561,23 +479,19 @@ impl Dialect for MySql {
         write_my_json_has_keys(sql, qualified_col, placeholders, "all");
     }
 
-    /// `MySQL`'s `INSERT … ON DUPLICATE KEY UPDATE` doesn't take a
-    /// target column list — it triggers on any unique violation —
-    /// so a `DoUpdate` with a non-empty `target` cannot be translated
-    /// 1:1 (writer surfaces a clear error). `DoUpdate` with empty
-    /// `target` translates cleanly:
+    /// MySQL's `ON DUPLICATE KEY UPDATE` takes no target column
+    /// list; it fires on any unique violation. So a `DoUpdate` with
+    /// no target translates cleanly:
     ///
     /// ```sql
     /// INSERT INTO `t` (a, b) VALUES (?, ?)
     /// ON DUPLICATE KEY UPDATE `a` = VALUES(`a`), `b` = VALUES(`b`)
     /// ```
     ///
-    /// `DoNothing` translates to `INSERT IGNORE`-equivalent
-    /// `ON DUPLICATE KEY UPDATE id = id` — the no-op assignment trick
-    /// lets the same INSERT path silently skip duplicates without
-    /// switching to the `INSERT IGNORE` keyword (which would also
-    /// swallow other recoverable errors). Caller picks the column to
-    /// reuse — typically the PK.
+    /// `DoNothing` becomes a self-assignment such as
+    /// `ON DUPLICATE KEY UPDATE id = id`, which skips the duplicate.
+    /// `INSERT IGNORE` would do that too, but it also hides every
+    /// other error.
     fn write_conflict_clause(
         &self,
         sql: &mut String,
@@ -585,23 +499,18 @@ impl Dialect for MySql {
     ) -> Result<(), SqlError> {
         match conflict {
             ConflictClause::DoNothing => {
-                // `INSERT IGNORE` would skip *all* errors (FK violations
-                // included), which we don't want; the no-op self-update
-                // trick below is the standard way to silently skip
-                // duplicates without losing other error visibility.
+                // `INSERT IGNORE` would hide every error, including
+                // FK violations. A no-op self-update skips only the
+                // duplicate.
                 sql.push_str(" ON DUPLICATE KEY UPDATE id = id");
             }
             ConflictClause::DoUpdate {
                 target,
                 update_columns,
             } => {
-                // MySQL has no conflict-target concept — `ON DUPLICATE
-                // KEY UPDATE` matches every UNIQUE index automatically.
-                // We accept a non-empty `target` for tri-dialect call-
-                // site uniformity (PG / SQLite need it) and silently
-                // ignore the value here. Issue #267 — pre-T1.5 this
-                // path errored; the bulk_upsert API now relies on the
-                // silent-ignore.
+                // MySQL has no conflict target; the clause matches
+                // every unique index. A target is accepted and
+                // ignored, so one call site works on every backend.
                 let _ = target;
                 if update_columns.is_empty() {
                     return Err(SqlError::EmptyUpdateSet);
@@ -633,8 +542,7 @@ impl Dialect for MySql {
         Some(format!("SELECT RELEASE_LOCK({})", self.placeholder(1)))
     }
 
-    // `MySQL` has no transaction-scoped advisory lock — `None` is the
-    // honest answer; the migration runner handles it in batch5.
+    // MySQL has no transaction-scoped advisory lock.
 
     // ---- compilation ----
 
@@ -681,20 +589,17 @@ impl Dialect for MySql {
     }
 
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
-        // MySQL 8.0.19+ supports `VALUES ROW(…), ROW(…)` table
-        // constructors that can be JOINed in `UPDATE … INNER JOIN
-        // (VALUES …) AS d(pk, c1, …) ON t.pk = d.pk SET t.c1 = d.c1`.
-        // Apps on older MySQL fall back to per-row `compile_update`.
+        // Needs MySQL 8.0.19+, for the `VALUES ROW(…)` table
+        // constructor. On anything older, update row by row.
         let mut b = Sql::new(self);
         write_mysql_bulk_update(&mut b, query)?;
         Ok(b.finish())
     }
 }
 
-/// Backtick-quoted identifier writer used by
-/// [`MySql::write_conflict_clause`] — the conflict clause writes
-/// directly into a `&mut String`, so we need a small helper that
-/// doesn't go through the [`Sql`] builder.
+/// Write a backtick-quoted identifier in place, for the conflict
+/// clause, which writes straight into a `String` rather than through
+/// the [`Sql`] builder.
 fn write_my_ident(sql: &mut String, name: &str) {
     sql.push('`');
     for ch in name.chars() {
@@ -729,12 +634,9 @@ fn write_my_json_has_keys(
     sql.push(')');
 }
 
-/// MySQL bulk UPDATE: rewrite Postgres' `UPDATE t SET … FROM (VALUES …)`
-/// to `UPDATE t INNER JOIN (VALUES ROW(…), ROW(…)) AS d(pk, c1, …)
-/// ON t.pk = d.pk SET t.c1 = d.c1, …` (the multi-row VALUES + JOIN
-/// shape MySQL 8.0.19+ supports). The dialect dispatches to this from
-/// `compile_bulk_update` — kept here rather than in `writers` because
-/// the syntax is MySQL-specific.
+/// MySQL's bulk UPDATE: `UPDATE t INNER JOIN (VALUES ROW(…), …) AS
+/// d(pk, c1, …) ON t.pk = d.pk SET t.c1 = d.c1`. It lives here
+/// rather than in `writers` because the syntax is MySQL's own.
 fn write_mysql_bulk_update(
     b: &mut crate::sql::writers::Sql<'_>,
     query: &crate::core::BulkUpdateQuery,
@@ -857,29 +759,25 @@ mod tests {
 
     #[test]
     fn default_on_lob_columns_uses_expression_form() {
-        // MySQL rejects a *literal* `DEFAULT` on its no-default column
-        // families — JSON, every TEXT/BLOB variant, GEOMETRY (error
-        // 1101) — but accepts the 8.0.13+ `DEFAULT (<expr>)` form. The
-        // renderer must wrap defaults for exactly those types.
-        //
-        // Regression for #315: `cms_page_log.data_json` is an unbounded
-        // `String` (→ `TEXT`, max_length = None), so its `'{}'` default
-        // failed `CREATE TABLE` on MySQL until it got wrapped.
+        // MySQL rejects a literal `DEFAULT` on JSON, TEXT, BLOB and
+        // GEOMETRY columns, but accepts the `DEFAULT (<expr>)` form,
+        // so those types must be wrapped. An unbounded `String` is
+        // one of them, since it renders as TEXT.
         assert_eq!(
             MySql.translate_default_expr("'{}'", "string", None),
             "('{}')"
         );
         assert_eq!(MySql.translate_default_expr("'{}'", "json", None), "('{}')");
         assert_eq!(MySql.translate_default_expr("''", "binary", None), "('')");
-        // A bounded String renders as VARCHAR(n) — a literal default is
-        // legal there, so it must NOT be wrapped.
+        // A bounded String is a VARCHAR(n), which takes a literal
+        // default, so it must not be wrapped.
         assert_eq!(
             MySql.translate_default_expr("''", "string", Some(500)),
             "''"
         );
         // Non-LOB scalars are never wrapped.
         assert_eq!(MySql.translate_default_expr("0", "i64", None), "0");
-        // now() still normalizes to the (6)-precision form (not a LOB).
+        // now() still becomes the (6)-precision form.
         assert_eq!(
             MySql.translate_default_expr("now()", "datetime", None),
             "CURRENT_TIMESTAMP(6)"
@@ -888,8 +786,8 @@ mod tests {
 
     #[test]
     fn supports_op_accepts_every_operator_after_batch4() {
-        // batch4 ships translations for ILIKE, IS DISTINCT FROM, and
-        // the JSONB operators; supports_op now returns true for all.
+        // ILIKE, IS DISTINCT FROM and the JSONB operators all
+        // translate, so `supports_op` is true for every one.
         use crate::core::Op;
         for op in [
             Op::Eq,
@@ -961,10 +859,8 @@ mod tests {
 
     #[test]
     fn conflict_do_update_with_target_silently_ignores_target() {
-        // Issue #267 / T1.5 — MySQL silently ignores the conflict
-        // target (it matches on every UNIQUE index automatically).
-        // Pre-T1.5 the writer errored; the bulk_upsert API needs
-        // the silent-ignore for tri-dialect call-site uniformity.
+        // The conflict target is ignored: MySQL matches on every
+        // unique index anyway.
         let mut sql = String::new();
         MySql
             .write_conflict_clause(
@@ -1288,9 +1184,8 @@ mod tests {
         assert_eq!(stmt.params.len(), 4);
     }
 
-    /// Build a model identical to `model` but with `pk_col` flipped to
-    /// `primary_key = true`. Used by `bulk_update` test since
-    /// `primary_key()` returns `None` otherwise.
+    /// Copy `model` with `pk_col` marked as the primary key, which
+    /// the `bulk_update` test needs.
     fn with_pk(
         model: &'static crate::core::ModelSchema,
         pk_col: &'static str,
@@ -1313,11 +1208,9 @@ mod tests {
         }))
     }
 
-    // -------- writers integration smoke tests --------
-    //
-    // Construct minimal IR by hand to confirm the writers + MySql
-    // dialect glue produces backticks + ? placeholders, with no
-    // `RETURNING` and no NULL casts.
+    // Hand-built IR, to confirm the writers and this dialect
+    // produce backticks and `?` placeholders, with no `RETURNING`
+    // and no NULL casts.
 
     #[test]
     fn select_emits_backticks_and_question_marks() {
@@ -1357,9 +1250,8 @@ mod tests {
 
     #[test]
     fn insert_with_returning_errors() {
-        // MySQL has no RETURNING — the writer surfaces a clear error
-        // instead of emitting Postgres-shape SQL the MySQL parser
-        // would reject.
+        // MySQL has no RETURNING, so the writer errors rather than
+        // emit SQL the parser would reject.
         use crate::core::{InsertQuery, SqlValue};
         let model = empty_model_with(
             "users",
@@ -1433,8 +1325,7 @@ mod tests {
             default_permissions: &[],
             composite_relations: &[],
             generic_relations: &[],
-            // v0.27.7 — every introspected schema is tenant-scoped
-            // (mysql introspection isn't used for registry models).
+            // Every introspected schema is tenant-scoped.
             scope: crate::core::ModelScope::Tenant,
             default_order: &[],
             is_view: false,

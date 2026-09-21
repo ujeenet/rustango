@@ -1,10 +1,9 @@
 //! Query layer for rustango.
 //!
-//! v0.1 ships a typed `QuerySet<T>` that builds an `AND`-joined `WHERE`
-//! clause and compiles to the dialect-neutral `SelectQuery` IR in
-//! `rustango-core`. `UpdateBuilder<T>` mirrors the same shape for `UPDATE`,
-//! and `QuerySet<T>` itself is the input to bulk delete. The dynamic
-//! resolver lands in week 5.
+//! `QuerySet<T>` is a typed builder for `SELECT`. It joins filters with
+//! `AND` and compiles to the dialect-neutral `SelectQuery` IR in
+//! `rustango-core`. `UpdateBuilder<T>` does the same for `UPDATE`, and
+//! `QuerySet<T>` is also the input to bulk delete.
 
 use std::marker::PhantomData;
 
@@ -19,107 +18,85 @@ pub use q::Q;
 
 /// A lazy builder for a `SELECT` over `T`.
 ///
-/// Filters are accumulated in insertion order; nothing touches the schema
+/// Filters are kept in the order you add them. Nothing touches the schema
 /// until `compile` is called, so the builder never panics on bad input.
 ///
-/// Two filter shapes are accepted and may be mixed freely:
-/// * [`Self::filter`] / [`Self::eq`] — string-keyed, validated at
-///   `compile` time.
+/// You can mix two filter shapes freely:
+/// * [`Self::filter`] / [`Self::eq`] — string keys, checked at `compile`
+///   time.
 /// * [`Self::where_`] — typed (`User::id.gt(10)`); the column is already
-///   resolved, so it bypasses the schema lookup at compile time.
+///   resolved, so `compile` skips the schema lookup.
 ///
-/// Implements `Clone` manually so a half-built queryset can be
-/// reused as a base for divergent branches — Eloquent
-/// `Builder::clone()` / `Builder::tap(fn ($q) { ... })` parity.
-/// Manual impl (rather than `#[derive(Clone)]`) avoids the
-/// auto-derive's spurious `T: Clone` bound; `T` here is a
-/// `Model` (compile-time `&'static SCHEMA` reference) and never
-/// needs to itself be cloned.
+/// `Clone` is written by hand so a half-built queryset can be the base for
+/// two different branches. The derive would add a spurious `T: Clone`
+/// bound, and `T` is only a compile-time schema reference.
 pub struct QuerySet<T: Model> {
     pending: Vec<PendingFilter>,
     limit: Option<i64>,
     offset: Option<i64>,
-    /// Django `.distinct(*fields)` — issue #264 / T1.2. `None` (default)
-    /// emits no DISTINCT clause. See [`crate::core::DistinctMode`] for
-    /// the per-mode semantics.
+    /// Django `.distinct(*fields)`. `None` emits no DISTINCT clause.
+    /// See [`crate::core::DistinctMode`] for what each mode means.
     distinct: Option<crate::core::DistinctMode>,
-    /// FK field names registered for [`Self::select_related`] — slice
-    /// 9.0d. Each name resolves to a `Join` against the FK target at
-    /// `compile()` time, so the SELECT pulls the parent rows along
-    /// with the children in a single SQL round trip.
+    /// FK field names registered by [`Self::select_related`]. Each one
+    /// becomes a `Join` against the FK target at `compile()` time, so
+    /// parents and children come back in one round trip.
     select_related: Vec<String>,
-    /// Ad-hoc joins registered via [`Self::join`] (issue #80). Stored
-    /// pre-built rather than as Rust field names because the predicate
-    /// is arbitrary; appended after `select_related` joins at compile
-    /// time so explicit user-driven joins sit alongside the automatic
-    /// FK ones in the SELECT list.
+    /// Joins added by [`Self::join`]. Stored pre-built, not as field
+    /// names, because the predicate is arbitrary. Appended after the
+    /// `select_related` joins.
     ad_hoc_joins: Vec<crate::core::Join>,
-    /// Derived-table joins registered via [`Self::join_sub`] /
-    /// [`Self::join_lateral`] (Eloquent `joinSub` / `joinLateral`, issue
-    /// #828). Carried straight onto the compiled
+    /// Derived-table joins from [`Self::join_sub`] /
+    /// [`Self::join_lateral`]. Copied straight onto the compiled
     /// [`SelectQuery::subquery_joins`].
     subquery_joins: Vec<crate::core::SubqueryJoin>,
-    /// Unified pending `ORDER BY` list (slice 9.0b + issue #76).
-    /// Carries `Field { name, desc, nulls }` entries from
-    /// `.order_by(...)` / `.order_by_with_nulls(...)` plus `Expr { … }`
-    /// entries from `.order_by_expr(...)`. Lowered at `compile()`
-    /// time in registration order so chain order is preserved
-    /// across mixed builder calls.
+    /// Pending `ORDER BY` list. Holds `Field` entries from
+    /// `.order_by(...)` / `.order_by_with_nulls(...)` and `Expr` entries
+    /// from `.order_by_expr(...)`. Lowered in registration order, so
+    /// chain order survives mixed builder calls.
     order_by: Vec<PendingOrderItem>,
-    /// Row-lock mode for `SELECT … FOR UPDATE` — Django's
-    /// `select_for_update(skip_locked=, nowait=, of=, no_key=)`.
-    /// Issue #21. `None` (default) emits no lock clause.
+    /// Row-lock mode for `SELECT … FOR UPDATE`, like Django's
+    /// `select_for_update(...)`. `None` emits no lock clause.
     lock_mode: Option<crate::core::LockMode>,
-    /// Set-algebra branches — Django's `.union(other_qs, all=)` /
-    /// `.intersection(other_qs)` / `.difference(other_qs)`. Issue #25.
-    /// Each entry is a pre-compiled [`crate::core::CompoundBranch`].
-    /// Empty (default) emits a plain SELECT.
+    /// Set-algebra branches from `.union()` / `.intersection()` /
+    /// `.difference()`. Each entry is a compiled
+    /// [`crate::core::CompoundBranch`]. Empty emits a plain SELECT.
     compound: Vec<crate::core::CompoundBranch>,
-    /// #1034 — head-branch `ORDER BY` frozen at the first `.union()` /
-    /// `.intersection()` / `.difference()` call. `order_by` / `limit` /
-    /// `offset` set BEFORE the first set-op scope to the FIRST
-    /// queryset (Django 4.0+ component-queryset slicing); the freeze
-    /// snapshots them here so clauses chained AFTER the set-op
-    /// accumulate fresh in the live slots and apply to the combined
-    /// result. Empty until the first set-op call.
+    /// Head-branch `ORDER BY`, frozen at the first set-op call.
+    /// `order_by` / `limit` / `offset` set BEFORE the first set-op belong
+    /// to the first queryset only (Django 4.0+ component slicing).
+    /// Freezing them here lets anything chained after the set-op apply
+    /// to the combined result. Empty until the first set-op call.
     head_order_by: Vec<PendingOrderItem>,
-    /// #1034 — head-branch `LIMIT` frozen at the first set-op call.
+    /// Head-branch `LIMIT`, frozen at the first set-op call.
     /// See [`Self::head_order_by`].
     head_limit: Option<i64>,
-    /// #1034 — head-branch `OFFSET` frozen at the first set-op call.
+    /// Head-branch `OFFSET`, frozen at the first set-op call.
     /// See [`Self::head_order_by`].
     head_offset: Option<i64>,
-    /// Django `.none()` short-circuit — issue #331. When `true`, every
-    /// terminal op compiles to a guaranteed-empty SQL statement: SELECT
-    /// gets `LIMIT 0`, UPDATE / DELETE gain an `IS NULL` predicate
-    /// against the (NOT NULL) primary key so no row matches. Builders
-    /// chained after `.none()` keep accumulating filters / orderings,
-    /// matching Django's "an immutable empty queryset" semantic.
+    /// Django `.none()` short-circuit. When `true`, every terminal op
+    /// compiles to a statement that matches nothing: SELECT gets
+    /// `LIMIT 0`; UPDATE / DELETE get an `IS NULL` test against the
+    /// NOT NULL primary key. Later calls still accumulate filters and
+    /// orderings, like Django's immutable empty queryset.
     is_none: bool,
-    /// Issue #820 — Eloquent `withoutGlobalScope($name)`. Names from
-    /// `T::SCHEMA.global_scopes` whose auto-applied filters should be
-    /// skipped on this queryset. Empty (default) keeps every scope
-    /// active. Populated by [`Self::without_global_scope`]. When
-    /// [`Self::disable_all_global_scopes`] is also set, this list is
-    /// ignored (the wholesale opt-out wins).
+    /// Scope names from `T::SCHEMA.global_scopes` to skip on this
+    /// queryset (Eloquent `withoutGlobalScope($name)`). Empty keeps every
+    /// scope active. Populated by [`Self::without_global_scope`], and
+    /// ignored when [`Self::disable_all_global_scopes`] is set.
     disabled_global_scopes: Vec<&'static str>,
-    /// Issue #820 — Eloquent `withoutGlobalScopes()`. When `true`,
-    /// every scope on `T::SCHEMA.global_scopes` is skipped (this
-    /// queryset behaves like the model carries no scopes). Set by
-    /// [`Self::without_global_scopes`]. Once true the
-    /// [`Self::disabled_global_scopes`] per-name list becomes
-    /// redundant — left intact so re-chaining `without_global_scope`
-    /// after `without_global_scopes` doesn't surprise the caller.
+    /// When `true`, skip every scope on `T::SCHEMA.global_scopes`
+    /// (Eloquent `withoutGlobalScopes()`). Set by
+    /// [`Self::without_global_scopes`]. The
+    /// [`Self::disabled_global_scopes`] list is then unused, but stays
+    /// intact so adding a name afterwards is not surprising.
     disable_all_global_scopes: bool,
     _model: PhantomData<fn() -> T>,
 }
 
-/// Issue #76: order-by entry in the QuerySet's unified pending list.
-/// `Field` carries a string field name resolved against the schema
-/// at `compile()` time (sugar shared between `.order_by(...)` and
-/// `.order_by_with_nulls(...)`). `Expr` wraps an already-built
-/// expression for `.order_by_expr(...)`. The list preserves
-/// registration order so mixed builder chains compose predictably.
+/// One entry in the QuerySet's pending `ORDER BY` list. `Field` holds a
+/// field name resolved against the schema at `compile()` time; `Expr`
+/// holds an already-built expression. The list keeps registration order,
+/// so mixed builder chains compose predictably.
 #[derive(Debug, Clone)]
 enum PendingOrderItem {
     Field {
@@ -132,48 +109,44 @@ enum PendingOrderItem {
         desc: bool,
         nulls: crate::core::NullsOrder,
     },
-    /// `ORDER BY RANDOM()` / `RAND()` — issue #77. No fields; the
-    /// writer picks the dialect-specific token at emit time.
+    /// `ORDER BY RANDOM()` / `RAND()`. The writer picks the dialect
+    /// token at emit time.
     Random,
 }
 
-/// Filter accumulator entry — keeps insertion order across string-keyed and
-/// typed filter calls. Each entry contributes one node to the final
+/// Filter accumulator entry. Keeps insertion order across string-keyed and
+/// typed filter calls. Each entry adds one node to the final
 /// `WhereExpr::And` clause.
 #[derive(Clone)]
 enum PendingFilter {
     /// String-keyed; resolved against the schema at `compile` time.
     Raw(RawFilter),
-    /// Date-part transform lookup (`created__year__gte`, issue #829).
-    /// The column reference is wrapped in the named scalar fn
-    /// (`ExtractYear` / `TruncDate` / …) at resolve time, then
-    /// compared against `value` using `op`. Composed via
-    /// `WhereExpr::ExprCompare` so the same writer that handles JOIN
-    /// `ON` predicates renders it.
+    /// Date-part transform lookup, such as `created__year__gte`. At
+    /// resolve time the column is wrapped in the named scalar fn
+    /// (`ExtractYear`, `TruncDate`, …) and compared with `value` using
+    /// `op`.
     DateTransform(DateTransformFilter),
     /// Already resolved by a typed [`Column`](crate::core::Column).
     Resolved(Filter),
-    /// Typed sub-expression (built via `.and()` / `.or()` on the
-    /// typed-column API). Already validated; contributes a whole
-    /// sub-tree to the WHERE clause.
+    /// Typed sub-expression built with `.and()` / `.or()` on the
+    /// typed-column API. Already validated; adds a whole sub-tree to the
+    /// WHERE clause.
     Expr(WhereExpr),
-    /// Negated predicate — `NOT (<inner>)`. Backs
-    /// [`QuerySet::exclude`] (#1030). The inner entry is resolved
-    /// recursively then wrapped in [`WhereExpr::Not`], so `exclude`
-    /// inherits the full lookup grammar (`__gt`, `__icontains`, …).
+    /// Negated predicate, `NOT (<inner>)`. Backs [`QuerySet::exclude`].
+    /// The inner entry resolves first, then gets wrapped in
+    /// [`WhereExpr::Not`], so `exclude` supports the full lookup grammar
+    /// (`__gt`, `__icontains`, …).
     Negated(Box<PendingFilter>),
-    /// Relation-spanning lookup deferred from [`parse_lookup`] (#1031) —
-    /// `author__name`, `author__profile__bio__icontains`. Resolved by a
-    /// pre-pass in [`QuerySet::compile`] that converts it to a
-    /// [`PendingFilter::Expr`] (an aliased `ExprCompare`) and registers
-    /// the FK-chain JOINs. Reaching [`resolve_one_pending`] still as a
-    /// `RelationSpan` means a non-SELECT path (update / delete /
-    /// aggregate) — unsupported there in P1, so it errors clearly.
+    /// Relation-spanning lookup deferred from [`parse_lookup`], such as
+    /// `author__profile__bio__icontains`. A pre-pass in
+    /// [`QuerySet::compile`] turns it into a [`PendingFilter::Expr`] and
+    /// registers the FK-chain JOINs. If one still reaches
+    /// [`resolve_one_pending`], the caller is on an update, delete or
+    /// aggregate path, where it is not supported, so it errors.
     RelationSpan { raw_key: String, value: SqlValue },
-    /// Deferred error surfaced at `compile()` time. Used by
-    /// [`QuerySet::filter`] (issue #71) when the lookup-suffix
-    /// parser fails — keeps the builder API non-Result while
-    /// surfacing the cause at the natural error-checking point.
+    /// Error held back until `compile()`. [`QuerySet::filter`] uses it
+    /// when the lookup-suffix parser fails, so the builder API stays
+    /// non-`Result` and the cause still surfaces.
     Error(QueryError),
 }
 
@@ -198,11 +171,11 @@ struct RawAssignment {
     value: SqlValue,
 }
 
-/// Staged `field = <expression>` assignment for the [`F()`]-shaped
-/// SET path. `field` is the Rust-side name resolved against the
-/// schema at `compile()` time; `value` is an [`crate::core::Expr`]
-/// tree that may contain column refs + arithmetic. Resolves to
-/// [`crate::core::Assignment`] in `resolve_assignment_expr`.
+/// Staged `field = <expression>` assignment for the [`F()`] SET path.
+/// `field` is the Rust-side name, resolved against the schema at
+/// `compile()` time. `value` is an [`crate::core::Expr`] tree that may
+/// hold column refs and arithmetic. Resolves to
+/// [`crate::core::Assignment`].
 ///
 /// [`F()`]: crate::core::F
 #[derive(Debug, Clone)]
@@ -265,16 +238,12 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Issue #820 — Eloquent `Model::query()->withoutGlobalScope($name)`.
-    /// Suppress one named entry from
+    /// Eloquent `withoutGlobalScope($name)`. Skip one named entry from
     /// [`crate::core::ModelSchema::global_scopes`] on this queryset.
-    /// Repeated calls accumulate — pass each name to suppress.
+    /// Repeated calls add up.
     ///
-    /// Unknown names are silently ignored (matches Eloquent + lets
-    /// downstream code add scopes without breaking call sites that
-    /// pre-emptively opt out of names that don't exist yet).
-    ///
-    /// No-op when the model declares no global scopes.
+    /// Unknown names are ignored, like Eloquent, so a call site can opt
+    /// out of a scope that does not exist yet.
     #[must_use]
     pub fn without_global_scope(mut self, name: &'static str) -> Self {
         if !self.disabled_global_scopes.contains(&name) {
@@ -283,35 +252,27 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Issue #820 — Eloquent `Model::query()->withoutGlobalScopes()`.
-    /// Suppress *every* scope from
-    /// [`crate::core::ModelSchema::global_scopes`] on this queryset
-    /// — useful for admin or migration code paths that need to see
-    /// soft-deleted / unpublished / cross-tenant rows the application
-    /// hides by default.
+    /// Eloquent `withoutGlobalScopes()`. Skip *every* scope from
+    /// [`crate::core::ModelSchema::global_scopes`]. Useful for admin or
+    /// migration code that must see soft-deleted, unpublished or
+    /// cross-tenant rows the app normally hides.
     ///
-    /// Composes with later [`Self::without_global_scope`] calls
-    /// without changing the wholesale opt-out (once disabled,
-    /// everything stays disabled on that queryset).
+    /// Once set, later [`Self::without_global_scope`] calls change
+    /// nothing: everything stays disabled on this queryset.
     #[must_use]
     pub fn without_global_scopes(mut self) -> Self {
         self.disable_all_global_scopes = true;
         self
     }
 
-    /// Issue #820 — fold the schema-declared global scopes into the
-    /// pending filter list, respecting per-queryset opt-outs. Called
-    /// at the top of every `compile*` entry point so the WHERE walks
-    /// the scope expressions through the same resolver as any other
-    /// typed filter.
+    /// Fold the schema's global scopes into the pending filter list,
+    /// honouring the per-queryset opt-outs. Called at the top of every
+    /// `compile*` entry point, so scope expressions go through the same
+    /// resolver as any other typed filter.
     ///
-    /// The method **prepends** scope filters in declared order so the
-    /// final WHERE reads `scope_a AND scope_b AND <user filters>`.
-    /// `AND` is commutative; the order matters only for predicate-
-    /// trace readability in `EXPLAIN`.
-    ///
-    /// No-op when the model carries no scopes or when
-    /// `disable_all_global_scopes` is set.
+    /// Scope filters are **prepended** in declared order, so the WHERE
+    /// reads `scope_a AND scope_b AND <user filters>`. `AND` is
+    /// commutative, so this only affects how an `EXPLAIN` trace reads.
     fn apply_global_scopes(&mut self) {
         if self.disable_all_global_scopes {
             return;
@@ -334,90 +295,74 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Django `.none()` — return a queryset guaranteed to match zero
-    /// rows. Useful as a safe base for conditional filters
-    /// (`if !user.has_perm: qs = qs.none()`) and for typed pipelines
-    /// that must return an empty result deterministically.
+    /// Django `.none()` — a queryset that matches zero rows. Handy as a
+    /// safe base for conditional filters, such as
+    /// `if !user.has_perm { qs = qs.none() }`.
     ///
-    /// SELECTs compile to `LIMIT 0`; UPDATE / DELETE add an `IS NULL`
-    /// predicate against the (NOT NULL) primary key so the DB rejects
-    /// every row. Issue #331.
+    /// SELECT compiles to `LIMIT 0`. UPDATE / DELETE add an `IS NULL`
+    /// test against the NOT NULL primary key, so no row matches.
     #[must_use]
     pub fn none(mut self) -> Self {
         self.is_none = true;
         self
     }
 
-    /// Django `.distinct()` — emit `SELECT DISTINCT ...`. Works on
-    /// every dialect identically. Pair with `.order_by(...)` to
-    /// disambiguate which row survives among duplicates (DB doesn't
-    /// guarantee an order otherwise).
+    /// Django `.distinct()` — emit `SELECT DISTINCT ...`. Behaves the
+    /// same on every dialect. Add `.order_by(...)` to decide which row
+    /// of a duplicate group survives; without it the order is undefined.
     ///
-    /// For PG-shape "DISTINCT ON (cols)" (latest-per-group), use
-    /// [`Self::distinct_on`] which is portable across all three
-    /// backends via a window-function fallback.
-    ///
-    /// Issue #264 / T1.2.
+    /// For "first row per group", use [`Self::distinct_on`].
     #[must_use]
     pub fn distinct(mut self) -> Self {
         self.distinct = Some(crate::core::DistinctMode::All);
         self
     }
 
-    /// Django `.distinct(*fields)` — emit `SELECT DISTINCT ON (col1, col2)`
-    /// on PG natively; lower to a `ROW_NUMBER() OVER (PARTITION BY cols
-    /// ORDER BY <existing order_by>)` subquery wrapper on MySQL / SQLite.
-    /// In all three the result is "first row per group", where "first"
-    /// is determined by the queryset's `ORDER BY`.
+    /// Django `.distinct(*fields)`. Emits `DISTINCT ON (col1, col2)` on
+    /// Postgres. On MySQL / SQLite it lowers to a `ROW_NUMBER() OVER
+    /// (PARTITION BY cols ORDER BY <order_by>)` subquery. All three give
+    /// "first row per group", and the queryset's `ORDER BY` decides
+    /// which row is first.
     ///
-    /// **Constraint**: the columns passed must appear at the head of
-    /// `.order_by(...)` (matches Django's runtime check). `.compile()`
-    /// returns [`QueryError::DistinctOnOrderBy`] otherwise — the order
-    /// is what makes the "first row" deterministic.
-    ///
-    /// Empty `fields` is rejected (would degenerate to `.distinct()`).
-    ///
-    /// Issue #264 / T1.2.
+    /// The columns must come first in `.order_by(...)`, as in Django.
+    /// Otherwise `.compile()` returns
+    /// [`QueryError::DistinctOnOrderByMismatch`]. Empty `fields`
+    /// returns [`QueryError::DistinctOnEmpty`]; use
+    /// [`Self::distinct`] for that instead.
     #[must_use]
     pub fn distinct_on(mut self, fields: &[&'static str]) -> Self {
         self.distinct = Some(crate::core::DistinctMode::On(fields.to_vec()));
         self
     }
 
-    /// Issue #21 — Django's `QuerySet.select_for_update(skip_locked=,
-    /// nowait=, of=, no_key=)`. Emits `SELECT … FOR UPDATE` (PG /
-    /// MySQL 8+) or no-ops (SQLite has no row-lock syntax;
-    /// transactions hold an implicit write lock for the whole DB).
+    /// Django's `select_for_update(...)`. Emits `SELECT … FOR UPDATE` on
+    /// Postgres and MySQL 8+. SQLite has no row-lock syntax, so it is a
+    /// no-op there; a SQLite transaction locks the whole database.
     ///
-    /// Must run inside a transaction — `FOR UPDATE` outside a tx is
-    /// a no-op on PG and an error on MySQL. Acquire one via
-    /// [`crate::sql::transaction`] / [`crate::sql::transaction_pg`]
-    /// and call `.fetch_on(&mut *tx)` or `.fetch(&mut *tx)`.
+    /// Run it inside a transaction. `FOR UPDATE` outside one does
+    /// nothing on Postgres and errors on MySQL. Open one with
+    /// [`crate::sql::transaction_pool`], then call
+    /// `.fetch_on(&mut *tx)`.
     ///
-    /// Default options ([`crate::core::LockMode::default`]) emit
-    /// plain `FOR UPDATE`. Use the chained variants below to set
-    /// individual flags.
+    /// The defaults ([`crate::core::LockMode::default`]) emit plain
+    /// `FOR UPDATE`. Use the methods below to set individual flags.
     #[must_use]
     pub fn select_for_update(mut self) -> Self {
         self.lock_mode = Some(crate::core::LockMode::default());
         self
     }
 
-    /// Eloquent `Builder::lockForUpdate()` — bare-name alias of
-    /// [`Self::select_for_update`] matching Laravel muscle memory.
-    /// Same `FOR UPDATE` semantics: must run inside a transaction
-    /// (PG / MySQL); SQLite no-ops because it has no row-level lock
-    /// syntax.
+    /// Eloquent `Builder::lockForUpdate()`. Alias of
+    /// [`Self::select_for_update`], with the same rules.
     #[must_use]
     pub fn lock_for_update(self) -> Self {
         self.select_for_update()
     }
 
-    /// PG / MySQL 8+: append `SKIP LOCKED` to the lock clause —
-    /// "claim next available row" pattern. Rows currently locked by
-    /// another transaction are silently filtered out instead of
+    /// PG / MySQL 8+: add `SKIP LOCKED` — the "claim the next free row"
+    /// pattern. Rows another transaction holds are skipped instead of
     /// blocking. No effect on SQLite. Implies
-    /// [`Self::select_for_update`] if not already set.
+    /// [`Self::select_for_update`].
     #[must_use]
     pub fn skip_locked(mut self) -> Self {
         let mut lock = self.lock_mode.take().unwrap_or_default();
@@ -426,11 +371,10 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// PG / MySQL 8+: append `NOWAIT` — return a driver error
-    /// immediately if any matching row is currently locked. Mutually
-    /// exclusive with `skip_locked` at the database; the writer
-    /// emits `SKIP LOCKED` (the more permissive option) when both
-    /// are set. Implies [`Self::select_for_update`] if not already set.
+    /// PG / MySQL 8+: add `NOWAIT` — return a driver error at once if
+    /// any matching row is locked. The database forbids it together
+    /// with `SKIP LOCKED`, so if both are set the writer emits
+    /// `SKIP LOCKED`. Implies [`Self::select_for_update`].
     #[must_use]
     pub fn nowait(mut self) -> Self {
         let mut lock = self.lock_mode.take().unwrap_or_default();
@@ -439,12 +383,11 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// PG 9.3+: `FOR NO KEY UPDATE` instead of `FOR UPDATE` — weaker
-    /// lock that doesn't block other writers that aren't touching
-    /// the row's PK / unique columns. Useful for high-concurrency
-    /// update paths where the surrounding `UPDATE` doesn't change
-    /// indexed columns. MySQL has no equivalent; the writer falls
-    /// back to `FOR UPDATE` (the stricter lock).
+    /// PG 9.3+: `FOR NO KEY UPDATE` instead of `FOR UPDATE`. A weaker
+    /// lock that does not block writers leaving the row's PK and unique
+    /// columns alone. Good for busy update paths that never change
+    /// indexed columns. MySQL has no equivalent, so the writer falls
+    /// back to `FOR UPDATE`.
     #[must_use]
     pub fn no_key(mut self) -> Self {
         let mut lock = self.lock_mode.take().unwrap_or_default();
@@ -453,13 +396,12 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// PG 9.3+ / MySQL 8.0.1+: `FOR UPDATE OF table1, table2, …` —
-    /// restrict the row lock to the named tables / aliases when the
-    /// query JOINs. Without `OF` the lock applies to every row of
-    /// every joined table the result references. SQLite no-op.
+    /// PG 9.3+ / MySQL 8.0.1+: `FOR UPDATE OF table1, table2, …` — lock
+    /// only the named tables when the query joins. Without `OF` the
+    /// lock covers every joined table the result touches. No-op on
+    /// SQLite.
     ///
-    /// Each call appends. Pass either base table names or join
-    /// aliases.
+    /// Each call appends. Pass base table names or join aliases.
     #[must_use]
     pub fn of(mut self, tables: &[&'static str]) -> Self {
         let mut lock = self.lock_mode.take().unwrap_or_default();
@@ -468,18 +410,14 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Suppress the SQLite-no-locking warning emitted by the writer
-    /// when this queryset's lock modifiers land against a SQLite pool.
-    /// Issue #290 / T2.9.
+    /// Stop the writer from warning that SQLite has no row locks.
     ///
-    /// SQLite has no `FOR UPDATE` row-level lock syntax — locks are
-    /// silently dropped, and the writer logs `tracing::warn!` by
-    /// default so users debugging concurrency bugs against a sqlite-
-    /// backed test fixture see the no-op. Call this on querysets
-    /// where you know the SQLite global writer lock is sufficient
-    /// (single-writer apps, test fixtures).
+    /// SQLite has no `FOR UPDATE` syntax, so the lock modifiers are
+    /// dropped. The writer logs a `tracing::warn!` by default, so nobody
+    /// chases a phantom concurrency bug on a SQLite fixture. Call this
+    /// when SQLite's single global write lock is enough for you.
     ///
-    /// No effect on PG / MySQL — locks emit normally there.
+    /// No effect on PG / MySQL; locks emit normally there.
     #[must_use]
     pub fn silent_on_sqlite(mut self) -> Self {
         let mut lock = self.lock_mode.take().unwrap_or_default();
@@ -488,42 +426,36 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Issue #25 — Django's `QuerySet.union(other_qs)`. Combines this
-    /// queryset with `other` via SQL `UNION` (deduplicates). Both
-    /// querysets must target the same model `T`; the column shape is
-    /// guaranteed identical at compile time by the generic bound.
+    /// Django's `union(other_qs)`. Combines this queryset with `other`
+    /// using SQL `UNION`, which removes duplicates. Both target model
+    /// `T`, so the column shape always matches.
     ///
-    /// Multiple `.union()` / `.union_all()` calls accumulate — every
-    /// call appends a new branch. Mixing `union` with `intersection`
-    /// or `difference` on the same chain is allowed but unusual; SQL
-    /// evaluates them left-to-right.
+    /// Every `.union()` / `.union_all()` call appends another branch.
+    /// Mixing in `intersection` or `difference` is allowed; SQL
+    /// evaluates the chain left to right.
     ///
-    /// `.order_by()` / `.limit()` / `.offset()` set AFTER `.union()`
-    /// apply to the COMBINED result (the merged resultset); the same
-    /// methods called BEFORE `.union()` scope to the FIRST queryset —
-    /// Django 4.0+ component-queryset slicing (#1034). Each argument
-    /// branch likewise keeps its own per-branch ORDER BY / LIMIT. Every
-    /// such component wraps in an aliased derived table
-    /// (`SELECT * FROM (…) AS __rustango_bN`) so the clauses stay local
-    /// on all three backends.
+    /// `.order_by()` / `.limit()` / `.offset()` called AFTER `.union()`
+    /// apply to the combined result. The same calls BEFORE it apply to
+    /// the first queryset only (Django 4.0+ component slicing). Each
+    /// branch keeps its own clauses, because every component is wrapped
+    /// in an aliased derived table (`SELECT * FROM (…) AS
+    /// __rustango_bN`) on all three backends.
     ///
-    /// Tri-dialect availability: every supported backend.
+    /// Works on every supported backend.
     ///
     /// # Panics
-    /// If `other.compile()` fails (typo'd column on the branch's
-    /// WHERE / ORDER BY, schema validation, etc.). Same posture as
-    /// `.where_()` on the typed path — a malformed branch is a
-    /// programmer error, not a runtime data condition. For fallible
-    /// composition that surfaces the branch error as a `Result`,
-    /// pre-compile and pass via [`Self::with_compound`].
+    /// If `other.compile()` fails, for example on a typo'd column in
+    /// the branch. A malformed branch is a programmer error. To get a
+    /// `Result` instead, pre-compile the branch and pass it to
+    /// [`Self::with_compound`].
     #[must_use]
     pub fn union(self, other: QuerySet<T>) -> Self {
         self.add_compound(crate::core::SetOp::Union, other)
     }
 
-    /// `UNION ALL` — combine without deduplicating. Cheaper than
-    /// `union` because the DB skips the DISTINCT pass; useful when
-    /// you know the branches don't overlap.
+    /// `UNION ALL` — combine without removing duplicates. Cheaper than
+    /// [`Self::union`] because the database skips the DISTINCT pass.
+    /// Use it when you know the branches do not overlap.
     ///
     /// # Panics
     /// As [`Self::union`].
@@ -532,9 +464,8 @@ impl<T: Model> QuerySet<T> {
         self.add_compound(crate::core::SetOp::UnionAll, other)
     }
 
-    /// Issue #25 — Django's `QuerySet.intersection(other_qs)`. Rows
-    /// present in BOTH this queryset and `other`. Tri-dialect:
-    /// Postgres, SQLite, MySQL 8.0.31+.
+    /// Django's `intersection(other_qs)`. Rows present in BOTH
+    /// querysets. Postgres, SQLite and MySQL 8.0.31+.
     ///
     /// # Panics
     /// As [`Self::union`].
@@ -543,9 +474,8 @@ impl<T: Model> QuerySet<T> {
         self.add_compound(crate::core::SetOp::Intersection, other)
     }
 
-    /// Issue #25 — Django's `QuerySet.difference(other_qs)`. Emits
-    /// `EXCEPT`: rows in this queryset but NOT in `other`.
-    /// Tri-dialect: Postgres, SQLite, MySQL 8.0.31+.
+    /// Django's `difference(other_qs)`. Emits `EXCEPT`: rows in this
+    /// queryset but not in `other`. Postgres, SQLite and MySQL 8.0.31+.
     ///
     /// # Panics
     /// As [`Self::union`].
@@ -554,13 +484,10 @@ impl<T: Model> QuerySet<T> {
         self.add_compound(crate::core::SetOp::Difference, other)
     }
 
-    /// Fallible set-algebra entry point: takes a pre-compiled
-    /// `SelectQuery` as the branch instead of a fresh `QuerySet`.
-    /// Useful when the branch construction may fail (its `.compile()`
-    /// returns `Result`) and the caller wants to surface the error
-    /// before chaining. Generic over the operator — covers `union` /
-    /// `union_all` / `intersection` / `difference` with one entry
-    /// point. Issue #25.
+    /// Set-algebra entry point that takes an already-compiled
+    /// `SelectQuery` branch. Use it when building the branch may fail
+    /// and you want to handle that error yourself. The operator
+    /// argument covers union, union_all, intersection and difference.
     ///
     /// ```ignore
     /// // Caller wants to handle the branch's compile error explicitly:
@@ -576,11 +503,11 @@ impl<T: Model> QuerySet<T> {
         self.add_compound_compiled(op, branch)
     }
 
-    /// Shared lowering for [`Self::union`] / [`Self::union_all`] /
-    /// [`Self::intersection`] / [`Self::difference`] — compiles the
-    /// branch eagerly and appends a `CompoundBranch` to
-    /// `self.compound`. Panics on branch compile error; for fallible
-    /// composition use [`Self::with_compound`].
+    /// Shared lowering for [`Self::union`], [`Self::union_all`],
+    /// [`Self::intersection`] and [`Self::difference`]. Compiles the
+    /// branch and appends a `CompoundBranch`. Panics if the branch
+    /// fails to compile; use [`Self::with_compound`] for the fallible
+    /// form.
     fn add_compound(self, op: crate::core::SetOp, other: QuerySet<T>) -> Self {
         match other.compile() {
             Ok(branch) => self.add_compound_compiled(op, branch),
@@ -597,13 +524,11 @@ impl<T: Model> QuerySet<T> {
         op: crate::core::SetOp,
         branch: crate::core::SelectQuery,
     ) -> Self {
-        // #1034 — the FIRST set-op call freezes the pre-union
-        // `ORDER BY` / `LIMIT` / `OFFSET` into the head-branch slots
-        // (those clauses scope to the first queryset, Django 4.0+
-        // component-slicing). Clearing the live slots means anything
-        // chained AFTER this point accumulates fresh and applies to
-        // the combined result. Subsequent set-op calls leave the
-        // already-frozen head untouched.
+        // The first set-op call freezes the pre-union ORDER BY / LIMIT /
+        // OFFSET into the head slots: those clauses belong to the first
+        // queryset. Clearing the live slots means anything chained after
+        // this point applies to the combined result. Later set-op calls
+        // leave the frozen head alone.
         if self.compound.is_empty() {
             self.head_order_by = std::mem::take(&mut self.order_by);
             self.head_limit = self.limit.take();
@@ -616,13 +541,11 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Append `ORDER BY` columns. Slice 9.0b.
+    /// Append `ORDER BY` columns.
     ///
-    /// Each entry is a `(field_name, desc)` pair where `field_name`
-    /// is a Rust-side field on the model — schema validation runs at
-    /// `compile()` time. Multiple `.order_by(...)` calls compose;
-    /// subsequent calls append after earlier ones (left-to-right
-    /// precedence).
+    /// Each entry is a `(field_name, desc)` pair naming a Rust-side
+    /// field on the model. The schema check runs at `compile()` time.
+    /// Calls compose: later ones append after earlier ones.
     ///
     /// ```ignore
     /// let posts = Post::objects()
@@ -648,9 +571,9 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Eloquent `Builder::reorder([col, asc?])` — **replace** the
-    /// accumulated `ORDER BY` list (instead of appending like
-    /// [`Self::order_by`]). Useful when overriding a default
-    /// ordering inherited from a base queryset / manager:
+    /// accumulated `ORDER BY` list instead of appending to it like
+    /// [`Self::order_by`]. Use it to override a default ordering that
+    /// came from a base queryset or manager:
     ///
     /// ```ignore
     /// let qs = Post::objects()
@@ -658,10 +581,8 @@ impl<T: Model> QuerySet<T> {
     ///     .reorder(&[("created_at", true)]);             // wipes default
     /// ```
     ///
-    /// Equivalent to `.clear_order_by().order_by(items)`.
-    /// Eloquent's `Builder::reorder()` with no args clears every
-    /// sort key — call with an empty slice for the same shape:
-    /// `.reorder(&[])`.
+    /// Pass an empty slice, `.reorder(&[])`, to clear every sort key,
+    /// like Eloquent's `reorder()` with no arguments.
     #[must_use]
     pub fn reorder(mut self, items: &[(&str, bool)]) -> Self {
         self.order_by.clear();
@@ -675,12 +596,12 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Single-column shortcut for `ORDER BY <col> DESC`. Appends to the
-    /// existing ORDER BY list (use [`Self::reorder`] first to replace).
+    /// Shortcut for `ORDER BY <col> DESC`. Appends to the existing
+    /// list; call [`Self::reorder`] first to replace it.
     ///
-    /// Eloquent ships this as `Builder::latest($column)` but rustango's
-    /// [`Self::latest`] is the Django-style async fetcher — so the
-    /// chainable form lives here under the explicit name.
+    /// Eloquent calls this `Builder::latest($column)`, but rustango's
+    /// [`Self::latest`] is the async fetcher, so the chainable form
+    /// uses this name.
     ///
     /// ```ignore
     /// Post::objects().order_by_desc("created_at").fetch(&pool).await?;
@@ -706,20 +627,17 @@ impl<T: Model> QuerySet<T> {
         self.order_by(&[(column, false)])
     }
 
-    /// Apply the schema-declared `default_order` for `T`. Issue #291
-    /// / T2.5. Each entry from `#[rustango(default_order = "...")]`
-    /// gets pre-pended to the queryset's pending ORDER BY list, so a
-    /// later `.order_by(...)` call appends secondary sort keys.
+    /// Apply the schema's `default_order` for `T`. Each entry from
+    /// `#[rustango(default_order = "...")]` is prepended to the pending
+    /// ORDER BY list, so a later `.order_by(...)` adds secondary keys.
     ///
-    /// **Per-query opt-in by design** — unlike Django's
-    /// `Meta.ordering`, the default ordering is NOT applied
-    /// automatically. Every queryset starts unsorted; chain
-    /// `.with_default_order()` when you want the schema default. This
-    /// avoids the Django footgun where `.count()` / `.exists()` /
-    /// `.delete()` pay for a sort they don't need.
+    /// **You must opt in per query.** Unlike Django's `Meta.ordering`,
+    /// the default order is not applied on its own; every queryset
+    /// starts unsorted. This keeps `.count()`, `.exists()` and
+    /// `.delete()` from paying for a sort they do not need.
     ///
-    /// No-op when the model carries no `default_order`. Idempotent
-    /// (calling it twice doesn't duplicate the entries).
+    /// A no-op when the model has no `default_order`, and calling it
+    /// twice does not duplicate the entries.
     #[must_use]
     pub fn with_default_order(mut self) -> Self {
         let model = T::SCHEMA;
@@ -764,22 +682,19 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Clear every accumulated `ORDER BY` entry on this queryset.
-    /// Issue #291 / T2.5. Resets both legacy `.order_by(...)` columns
-    /// and `.order_by_expr(...)` / `.with_default_order()` entries
-    /// from earlier in the chain. Useful for explicitly bypassing a
-    /// queryset's default order when re-borrowing from a builder
-    /// helper that already chained `.with_default_order()`.
+    /// Clear every accumulated `ORDER BY` entry, whatever added it
+    /// (`.order_by(...)`, `.order_by_expr(...)`,
+    /// `.with_default_order()`). Use it to drop the default order of a
+    /// queryset you got from a builder helper.
     #[must_use]
     pub fn unordered(mut self) -> Self {
         self.order_by.clear();
         self
     }
 
-    /// Append `ORDER BY` columns with explicit `NULLS FIRST|LAST`
-    /// control. Issue #76. PG + SQLite emit the `NULLS …` keyword
-    /// natively; MySQL emulates via `<col> IS NULL` pre-sort
-    /// because it has no `NULLS …` syntax.
+    /// Append `ORDER BY` columns and say where NULLs go. PG and SQLite
+    /// emit the `NULLS …` keyword. MySQL has no such syntax, so it
+    /// sorts by `<col> IS NULL` first instead.
     ///
     /// ```ignore
     /// use rustango::core::NullsOrder;
@@ -788,10 +703,8 @@ impl<T: Model> QuerySet<T> {
     ///     .fetch(&pool).await?;
     /// ```
     ///
-    /// Composes with `.order_by(...)` — legacy `(name, desc)` entries
-    /// Composes with `.order_by(...)` — entries from both methods
-    /// appear in the SQL `ORDER BY` clause in **registration order**
-    /// across the chain.
+    /// Composes with `.order_by(...)`: entries from both methods appear
+    /// in the `ORDER BY` clause in **registration order**.
     #[must_use]
     pub fn order_by_with_nulls(
         mut self,
@@ -807,12 +720,11 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Append an `ORDER BY` item whose target is an arbitrary
-    /// [`Expr`] — `lower(F("title"))`, `case(...)`, `F("a") + F("b")`,
-    /// any builder result that lowers to `Expr`. Issue #76.
+    /// Append an `ORDER BY` item over any [`Expr`], such as
+    /// `lower(F("title"))`, `case(...)` or `F("a") + F("b")`.
     ///
-    /// `desc = true` → `DESC`; defaults to the dialect's native
-    /// NULL ordering (use [`Self::order_by_expr_with_nulls`] to pin).
+    /// `desc = true` gives `DESC`. NULL placement follows the dialect
+    /// default; use [`Self::order_by_expr_with_nulls`] to pin it.
     ///
     /// [`Expr`]: crate::core::Expr
     #[must_use]
@@ -825,18 +737,15 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Order rows by pgvector similarity to `query` over the `column`
-    /// vector column — Eloquent 13's `whereVectorSimilarTo(...)` auto-
-    /// ordering (#824). Ascending distance, so the **nearest** rows come
-    /// first (pgvector's `<#>` returns the negative inner product, so
-    /// ascending ranks most-similar first for every metric).
+    /// Order rows by pgvector distance from `query` to the `column`
+    /// vector. Distance ascends, so the **nearest** rows come first for
+    /// every metric.
     ///
-    /// Emits `ORDER BY <column> <op> $vec` where `<op>` is the pgvector
-    /// distance operator for `metric` (`<->` / `<=>` / `<#>`). **PG-only**
-    /// — the writer raises `OpNotSupportedInDialect` on MySQL / SQLite.
-    /// Pair with `.limit(k)` (or use [`Self::k_nearest`]) for a k-NN
-    /// query. The column should be a [`crate::sql::Vector`] /
-    /// `#[rustango(vector(dims = N))]` field.
+    /// Emits `ORDER BY <column> <op> $vec`, where `<op>` is the pgvector
+    /// operator for `metric` (`<->`, `<=>`, `<#>`). **PG only**: the
+    /// writer raises `OpNotSupportedInDialect` on MySQL / SQLite. Add
+    /// `.limit(k)`, or use [`Self::k_nearest`], for a k-NN query. The
+    /// column should be a [`crate::sql::Vector`] field.
     ///
     /// ```ignore
     /// use rustango::core::VectorMetric;
@@ -861,9 +770,9 @@ impl<T: Model> QuerySet<T> {
         self.order_by_expr(expr, /*desc=*/ false)
     }
 
-    /// k-nearest-neighbour shortcut: [`Self::order_by_distance`] followed
-    /// by `.limit(k)` — the `k` rows closest to `query` under `metric`.
-    /// Issue #824, **PG-only**.
+    /// k-nearest-neighbour shortcut: [`Self::order_by_distance`] plus
+    /// `.limit(k)`. Returns the `k` rows closest to `query` under
+    /// `metric`. **PG only.**
     ///
     /// ```ignore
     /// use rustango::core::VectorMetric;
@@ -882,11 +791,11 @@ impl<T: Model> QuerySet<T> {
         self.order_by_distance(column, query, metric).limit(k)
     }
 
-    /// PostGIS nearest-first ordering (#58): `ORDER BY
-    /// ST_Distance(<column>, <point>)` ascending. Pair with `.limit(k)`
-    /// for a k-nearest query. `column` should be a `geometry(Point, …)`
-    /// / `#[rustango(geometry(...))]` field. **PG/PostGIS-only** — emits
-    /// `OpNotSupportedInDialect` at compile time on MySQL / SQLite.
+    /// PostGIS nearest-first ordering: `ORDER BY ST_Distance(<column>,
+    /// <point>)` ascending. Add `.limit(k)` for a k-nearest query.
+    /// `column` should be a `#[rustango(geometry(...))]` field.
+    /// **PG / PostGIS only**: MySQL and SQLite raise
+    /// `OpNotSupportedInDialect` at compile time.
     ///
     /// ```ignore
     /// // The 5 places nearest to `here`.
@@ -901,10 +810,10 @@ impl<T: Model> QuerySet<T> {
         self.order_by_expr(expr, /*desc=*/ false)
     }
 
-    /// PostGIS "within radius" filter (#58): `WHERE ST_DWithin(<column>,
-    /// <point>, <distance>)`. `distance` is in the column's SRID units
-    /// (degrees for SRID 4326 — cast to `::geography` in raw SQL when you
-    /// need metres). **PG/PostGIS-only.**
+    /// PostGIS "within radius" filter: `WHERE ST_DWithin(<column>,
+    /// <point>, <distance>)`. `distance` uses the column's SRID units,
+    /// which is degrees for SRID 4326. For metres, cast to
+    /// `::geography` in raw SQL. **PG / PostGIS only.**
     ///
     /// ```ignore
     /// // Places within ~1km (in degrees) of `here`.
@@ -931,8 +840,8 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(pred)
     }
 
-    /// Same as [`Self::order_by_expr`] but with an explicit
-    /// `NullsOrder`. Issue #76.
+    /// Same as [`Self::order_by_expr`], but with an explicit
+    /// `NullsOrder`.
     #[must_use]
     pub fn order_by_expr_with_nulls(
         mut self,
@@ -948,10 +857,9 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()` (MySQL)
-    /// — Django's `.order_by('?')`. Useful for "random N rows" UI
-    /// patterns like banner rotation, sample selection, A/B-test
-    /// bucket assignment. Issue #77.
+    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()` (MySQL),
+    /// like Django's `.order_by('?')`. Good for "random N rows" needs
+    /// such as banner rotation or sampling.
     ///
     /// ```ignore
     /// // Three random posts.
@@ -961,25 +869,22 @@ impl<T: Model> QuerySet<T> {
     ///     .fetch(&pool).await?;
     /// ```
     ///
-    /// **Performance caveat**: random ordering forces a full table
-    /// scan + in-memory sort by a per-row random key. The query
-    /// planner can't use an index. For tables much larger than memory,
-    /// prefer the `WHERE pk >= <random_offset> LIMIT N` pattern
-    /// (which can range-scan an index) and accept that adjacency in
-    /// the result rows mirrors PK adjacency.
+    /// **Cost**: this forces a full table scan and an in-memory sort on
+    /// a random key per row. No index can help. On tables much larger
+    /// than memory, use `WHERE pk >= <random_offset> LIMIT N` instead,
+    /// which can range-scan an index, and accept that the rows come out
+    /// next to each other by primary key.
     ///
-    /// Composes with other `.order_by*` calls — the random key sorts
-    /// rows whose preceding sort columns tied. Most callers want a
-    /// `.replace_order_by`-style reset first.
+    /// It composes with other `.order_by*` calls: the random key only
+    /// breaks ties. Most callers want [`Self::replace_order_by`] first.
     #[must_use]
     pub fn order_random(mut self) -> Self {
         self.order_by.push(PendingOrderItem::Random);
         self
     }
 
-    /// Eloquent `Builder::inRandomOrder()` alias for
-    /// [`Self::order_random`] — appends a per-row random sort key.
-    /// Same performance caveat (full scan + sort, no index use).
+    /// Eloquent `Builder::inRandomOrder()`. Alias of
+    /// [`Self::order_random`], with the same cost.
     ///
     /// ```ignore
     /// // Eloquent: Post::query()->inRandomOrder()->take(5)->get();
@@ -993,24 +898,19 @@ impl<T: Model> QuerySet<T> {
         self.order_random()
     }
 
-    /// v0.45 — discard any previously-set `order_by` and apply
-    /// `items` as the new ordering. Used by `earliest` and
-    /// `latest` which declare their own sort. Clears every
-    /// pending item (legacy + `_with_nulls` + `_expr`).
+    /// Drop every pending `ORDER BY` item and use `items` instead.
+    /// Used by `earliest` and `latest`, which set their own sort.
     #[must_use]
     pub fn replace_order_by(mut self, items: &[(&str, bool)]) -> Self {
         self.order_by.clear();
         self.order_by(items)
     }
 
-    /// Django-shape `QuerySet.reverse()` — flip the direction of every
-    /// pending `ORDER BY` clause. Each `Field { desc, .. }` and
-    /// `Expr { desc, .. }` has its `desc` flag toggled; `Random` is
-    /// untouched (no direction to invert). Issue #325.
+    /// Django's `QuerySet.reverse()`. Flips the direction of every
+    /// pending `ORDER BY` entry. `Random` has no direction, so it stays
+    /// as it is.
     ///
-    /// No-op when no ordering is set — Django's `reverse()` likewise
-    /// does nothing in that case (the resulting iteration order is
-    /// implementation-defined either way).
+    /// No-op when no ordering is set, just like Django.
     ///
     /// ```ignore
     /// // newest first
@@ -1032,12 +932,11 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// v0.45 — flip every ordering direction in place. Used by
-    /// `last` to invert the queryset's natural sort and take
-    /// the first row from the reversed sequence — avoids OFFSET +
-    /// COUNT(*) and works on every dialect. Issue #76: also swaps
-    /// `NullsOrder::First` ↔ `NullsOrder::Last` so the "NULLs at the
-    /// same logical end as before" semantic survives an inversion.
+    /// Flip every ordering direction in place. `last` uses it to take
+    /// the first row of the reversed sort, which avoids `OFFSET` plus
+    /// `COUNT(*)` and works on every dialect. It also swaps
+    /// `NullsOrder::First` and `NullsOrder::Last`, so NULLs stay at the
+    /// same logical end.
     #[must_use]
     pub fn flip_order_by(mut self) -> Self {
         for entry in &mut self.order_by {
@@ -1051,30 +950,26 @@ impl<T: Model> QuerySet<T> {
                         crate::core::NullsOrder::Default => crate::core::NullsOrder::Default,
                     };
                 }
-                // Random has no direction or NULLS clause — nothing
-                // to flip. Issue #77.
+                // Random has no direction or NULLS clause to flip.
                 PendingOrderItem::Random => {}
             }
         }
         self
     }
 
-    /// v0.45 — count of registered `ORDER BY` items. Used by
-    /// `ensure_pk_ordering` (executor) to detect "no ordering set"
-    /// without inspecting the variant types. Issue #76 dropped the
-    /// `order_by_clauses() -> &[(String, bool)]` getter because the
-    /// unified pending list now carries `Expr` items that can't
-    /// flatten to that shape.
+    /// Whether any `ORDER BY` item is registered. The executor's
+    /// `ensure_pk_ordering` uses it to spot "no ordering set" without
+    /// looking at the entry variants.
     #[must_use]
     pub fn has_order_by(&self) -> bool {
         !self.order_by.is_empty()
     }
 
-    /// Eagerly load a `ForeignKey<Parent>` field via a `LEFT JOIN` —
-    /// Django's `select_related`. Pass the field name on `T` (not the
-    /// FK column or the parent table); subsequent `fetch_on` returns
-    /// rows where each `ForeignKey<Parent>` is `Loaded` after a
-    /// **single** SQL query, no N+1.
+    /// Load a `ForeignKey<Parent>` field with a `LEFT JOIN`, like
+    /// Django's `select_related`. Pass the field name on `T`, not the
+    /// FK column or the parent table. `fetch_on` then returns rows
+    /// whose `ForeignKey<Parent>` is already `Loaded`, from a single
+    /// query, with no N+1.
     ///
     /// ```ignore
     /// let posts: Vec<Post> = Post::objects()
@@ -1083,27 +978,24 @@ impl<T: Model> QuerySet<T> {
     /// // post.author is ForeignKey::Loaded { pk, value }
     /// ```
     ///
-    /// Multiple `.select_related()` calls compose: each adds another
-    /// `LEFT JOIN` to the same SELECT. Schema validation (the field
-    /// exists, is an FK, has a primary-key target) happens at
-    /// `compile()` time.
+    /// Calls compose: each adds another `LEFT JOIN` to the same SELECT.
+    /// The schema check — field exists, is an FK, target has a primary
+    /// key — runs at `compile()` time.
     #[must_use]
     pub fn select_related(mut self, field: impl Into<String>) -> Self {
         self.select_related.push(field.into());
         self
     }
 
-    /// Ad-hoc JOIN — issue #80. Append a fully specified
-    /// [`crate::core::Join`] to the queryset. Unlike [`select_related`]
-    /// (which auto-builds joins from FK metadata), this gives the
-    /// caller full control over the JOIN kind, alias, predicate, and
-    /// projected columns. The predicate is an arbitrary [`WhereExpr`];
-    /// columns inside it qualify against the joined alias by default
-    /// and against arbitrary aliases via [`crate::core::Expr::AliasedColumn`].
+    /// Append a fully specified [`crate::core::Join`]. Unlike
+    /// [`select_related`], which builds joins from FK metadata, you
+    /// choose the join kind, alias, predicate and projected columns.
+    /// The predicate is any [`WhereExpr`]; its columns qualify against
+    /// the joined alias by default, or against another alias via
+    /// [`crate::core::Expr::AliasedColumn`].
     ///
-    /// Multiple `.join(...)` calls compose; each appends another JOIN
-    /// after the FK-driven `select_related` ones. Aliases must be
-    /// unique within the queryset.
+    /// Calls compose; each JOIN lands after the `select_related` ones.
+    /// Aliases must be unique within the queryset.
     ///
     /// ```ignore
     /// use rustango::core::joins::aliased;
@@ -1137,16 +1029,14 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// `INNER JOIN (<subquery>) AS <alias> ON <on>` — join against a
-    /// **derived table**. Eloquent's `joinSub`. Issue #828.
+    /// `INNER JOIN (<subquery>) AS <alias> ON <on>` — join a **derived
+    /// table**, like Eloquent's `joinSub`.
     ///
-    /// `sub` is a compiled `SelectQuery` (`Other::objects().….compile()?`).
-    /// `on` references the derived table as `"<alias>"."<col>"` and the
-    /// outer table by its own name — both via
-    /// [`crate::core::joins::aliased`]. The derived table contributes no
+    /// `sub` is a compiled `SelectQuery`. In `on`, name the derived
+    /// table's columns and the outer table's columns with
+    /// [`crate::core::joins::aliased`]. The derived table adds no
     /// columns to the SELECT, so a typed fetch still returns the base
-    /// model (this is a filtering / relating join). Portable across
-    /// PG / MySQL / SQLite.
+    /// model. Works on PG, MySQL and SQLite.
     ///
     /// ```ignore
     /// use rustango::core::joins::aliased;
@@ -1180,8 +1070,8 @@ impl<T: Model> QuerySet<T> {
         )
     }
 
-    /// `LEFT JOIN (<subquery>) AS <alias> ON <on>` — left-join counterpart
-    /// of [`Self::join_sub`] (Eloquent `leftJoinSub`). Issue #828.
+    /// `LEFT JOIN (<subquery>) AS <alias> ON <on>` — the left-join form
+    /// of [`Self::join_sub`] (Eloquent `leftJoinSub`).
     #[must_use]
     pub fn left_join_sub(
         self,
@@ -1199,15 +1089,15 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// `INNER JOIN LATERAL (<subquery>) AS <alias> ON <on>` — Eloquent
-    /// `joinLateral`. Issue #828. The subquery may reference columns from
-    /// the outer query (the "top-N rows per group" shape); put that
-    /// correlation in the subquery's own `WHERE` (via
-    /// [`crate::core::joins::aliased`] against the outer table) and pass
-    /// `WhereExpr::And(vec![])` as `on` to emit `ON true`.
+    /// `joinLateral`. The subquery may read columns from the outer
+    /// query, which is how you get "top-N rows per group". Put that
+    /// correlation in the subquery's own `WHERE`, using
+    /// [`crate::core::joins::aliased`] against the outer table, and
+    /// pass `WhereExpr::And(vec![])` as `on` to emit `ON true`.
     ///
-    /// **PostgreSQL / MySQL ≥ 8.0.14 only** — SQLite has no `LATERAL` and
-    /// the writer raises [`crate::sql::SqlError::LateralJoinNotSupported`]
-    /// at compile time.
+    /// **PostgreSQL and MySQL 8.0.14+ only.** SQLite has no `LATERAL`,
+    /// so the writer raises
+    /// [`crate::sql::SqlError::LateralJoinNotSupported`].
     #[must_use]
     pub fn join_lateral(
         self,
@@ -1224,11 +1114,11 @@ impl<T: Model> QuerySet<T> {
         )
     }
 
-    /// `LEFT JOIN LATERAL (<subquery>) AS <alias> ON <on>` — left-join
-    /// counterpart of [`Self::join_lateral`] (Eloquent `leftJoinLateral`).
-    /// Keeps every outer row even when the lateral subquery yields none
-    /// (the natural shape for "latest order per customer, customers
-    /// without orders included"). **PG / MySQL only.** Issue #828.
+    /// `LEFT JOIN LATERAL (<subquery>) AS <alias> ON <on>` — the
+    /// left-join form of [`Self::join_lateral`] (Eloquent
+    /// `leftJoinLateral`). Keeps every outer row even when the lateral
+    /// subquery returns none, as in "latest order per customer,
+    /// including customers with no orders". **PG / MySQL only.**
     #[must_use]
     pub fn left_join_lateral(
         self,
@@ -1265,7 +1155,7 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Cap the number of returned rows. `None` removes any previously set limit.
+    /// Cap the number of returned rows. A later call replaces the cap.
     #[must_use]
     pub fn limit(mut self, n: i64) -> Self {
         self.limit = Some(n);
@@ -1287,21 +1177,17 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Eloquent `Builder::skip($n)` — alias of [`Self::offset`].
-    /// Skip the first `n` matching rows. Pair with `.take(...)` /
-    /// `.limit(...)` for manual paging.
     #[must_use]
     pub fn skip(self, n: i64) -> Self {
         self.offset(n)
     }
 
-    /// Append a `WHERE field <op> value` predicate using the
-    /// **explicit-op** shape. This is the lower-level form used by
-    /// callers that already know which `Op` they want; for the
-    /// Django muscle-memory `filter("field__lookup", value)` shape
-    /// see [`Self::filter`] (issue #71).
+    /// Append a `WHERE field <op> value` predicate with an explicit
+    /// `Op`. Use it when you already know the operator; for the Django
+    /// `filter("field__lookup", value)` shape see [`Self::filter`].
     ///
-    /// `field` is the Rust-side field name; the column is looked up
-    /// from the schema at compile time.
+    /// `field` is the Rust-side field name. The column is looked up in
+    /// the schema at compile time.
     #[must_use]
     pub fn filter_op(
         mut self,
@@ -1317,9 +1203,8 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Django-shape `filter()` — parses a `"field"` or
-    /// `"field__lookup"` key and dispatches to the matching `Op`.
-    /// Issue #71.
+    /// Django-shape `filter()`. Parses a `"field"` or
+    /// `"field__lookup"` key and picks the matching `Op`.
     ///
     /// | Suffix | SQL | Value treatment |
     /// |---|---|---|
@@ -1339,7 +1224,7 @@ impl<T: Model> QuerySet<T> {
     /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
     /// | `__between` / `__range` | `<col> BETWEEN ? AND ?` | value must be 2-element `SqlValue::List` |
     /// | `__not_between` / `__not_range` | `<col> NOT BETWEEN ? AND ?` | value must be 2-element `SqlValue::List`. Eloquent `whereNotBetween` parity. |
-    /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part (issue #829). Composes with trailing `__gte` / `__lt` / etc. `__quarter` is cross-dialect (SQLite synthesizes it from the month, #1037); `__week` numbering differs per backend. |
+    /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part. Composes with a trailing `__gte` / `__lt` / etc. `__quarter` works on every dialect; SQLite derives it from the month. `__week` numbering differs per backend. |
     /// | `__date` | `DATE(<col>) = ?` | value is a `chrono::NaiveDate`; strips the time component before comparison. |
     ///
     /// ```ignore
@@ -1353,13 +1238,13 @@ impl<T: Model> QuerySet<T> {
     /// ```
     ///
     /// Unknown suffixes surface as [`QueryError::UnknownLookup`] at
-    /// `compile()`. Value-shape mismatches (e.g. `__in` with a
-    /// non-list value) surface as
-    /// [`QueryError::InvalidLookupValue`].
+    /// `compile()`. A wrong value shape, such as `__in` with a non-list
+    /// value, surfaces as [`QueryError::InvalidLookupValue`].
     ///
-    /// **Chained lookups** (`author__name__icontains`) are out of
-    /// scope — that's join-traversal territory (`select_related` /
-    /// `prefetch_related`). v1 supports single-table fields only.
+    /// Relation-spanning keys such as `author__name__icontains` work on
+    /// the SELECT path: `compile()` adds the FK-chain JOINs for you.
+    /// They are not supported on update, delete or aggregate paths,
+    /// which error instead.
     #[must_use]
     pub fn filter(mut self, key: &str, value: impl Into<SqlValue>) -> Self {
         self.pending.push(parse_to_pending(key, value.into()));
@@ -1367,10 +1252,9 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Django `.exclude(key, value)` — the negation of [`Self::filter`].
-    /// Each `exclude` call wraps **its own** predicate in `NOT (…)`;
-    /// chained excludes AND together (identical to Django for
-    /// single-kwarg excludes). The full `__lookup` suffix grammar works
-    /// through `exclude` exactly as through `filter` (shared parser).
+    /// Each call wraps **its own** predicate in `NOT (…)`, and chained
+    /// excludes AND together, like Django's single-kwarg excludes. The
+    /// full `__lookup` grammar works here too.
     ///
     /// ```ignore
     /// // Django: Post.objects.exclude(status="draft")
@@ -1379,10 +1263,10 @@ impl<T: Model> QuerySet<T> {
     /// Post::objects().exclude("views__lt", 100_i64)
     /// ```
     ///
-    /// **NULL semantics:** `NOT (col = v)` excludes rows where `col IS
-    /// NULL` (SQL three-valued logic) — matching Django's emission for
-    /// the same shape. For Django's multi-kwarg `exclude(a=1, b=2)` (one
-    /// `NOT` over the whole group), compose `where_raw(!Q(...))`.
+    /// **NULLs:** `NOT (col = v)` also drops rows where `col IS NULL`,
+    /// because of SQL three-valued logic. Django emits the same.
+    /// For Django's multi-kwarg `exclude(a=1, b=2)`, which puts one
+    /// `NOT` over the whole group, use `where_raw(!Q(...))`.
     #[must_use]
     pub fn exclude(mut self, key: &str, value: impl Into<SqlValue>) -> Self {
         self.pending
@@ -1396,23 +1280,20 @@ impl<T: Model> QuerySet<T> {
     /// Stash a builder-time error to surface at `compile()` time.
     /// Used by [`Self::filter`] when the lookup-suffix parser fails.
     fn with_pending_error(mut self, e: QueryError) -> Self {
-        // Add a `PendingFilter::Error` so `compile()`'s
-        // `resolve_pending` walk surfaces it. Mirrors the deferred-
-        // error pattern in `AggregateBuilder` for `HavingOpNotSupported`.
+        // `compile()`'s `resolve_pending` walk surfaces the error.
         self.pending.push(PendingFilter::Error(e));
         self
     }
 
-    /// Sugar for `filter_op(field, Op::Eq, value)`. Kept for
-    /// backward compatibility with the per-op shorthand surface.
+    /// Shorthand for `filter_op(field, Op::Eq, value)`.
     #[must_use]
     pub fn eq(self, field: impl Into<String>, value: impl Into<SqlValue>) -> Self {
         self.filter_op(field, Op::Eq, value)
     }
 
-    /// Eloquent `Builder::whereKey($pk)` — filter on the model's
-    /// primary-key column without spelling its name. Reads the PK
-    /// field from `T::SCHEMA.primary_key()`.
+    /// Eloquent `Builder::whereKey($pk)`. Filter on the model's
+    /// primary key without naming the column; it comes from
+    /// `T::SCHEMA.primary_key()`.
     ///
     /// ```ignore
     /// // Eloquent: Post::query()->whereKey(42)->first();
@@ -1435,8 +1316,8 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Eloquent `Builder::whereKeyNot($pk)` — opposite of
-    /// [`Self::where_key`]; matches every row whose PK ≠ `pk`.
+    /// Eloquent `Builder::whereKeyNot($pk)`. The opposite of
+    /// [`Self::where_key`]: matches every row whose PK is not `pk`.
     ///
     /// ```ignore
     /// // Eloquent: Post::query()->whereKeyNot(1)->get();
@@ -1457,14 +1338,14 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Eloquent `Builder::whereExists($closure)` — AND-join an
+    /// Eloquent `Builder::whereExists($closure)`. ANDs an
     /// `EXISTS (subquery)` predicate onto this queryset's WHERE.
     ///
-    /// `subquery` is an already-compiled [`SelectQuery`] — build it
-    /// with the inner model's `objects()` chain and call `.compile()`
-    /// to propagate any column-typo errors at the inner queryset.
-    /// Use [`crate::core::subquery::outer_ref`] to correlate against
-    /// columns of the outer model.
+    /// `subquery` is an already-compiled [`SelectQuery`]. Build it from
+    /// the inner model's `objects()` chain and call `.compile()`, so a
+    /// column typo surfaces there. Use
+    /// [`crate::core::subquery::outer_ref`] to refer to columns of the
+    /// outer model.
     ///
     /// ```ignore
     /// use rustango::core::Column as _;
@@ -1485,10 +1366,10 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(crate::core::subquery::exists(subquery))
     }
 
-    /// Eloquent `Builder::whereNotExists($closure)` — AND-join a
-    /// `NOT EXISTS (subquery)` predicate. Inverse of
-    /// [`Self::where_exists`]; canonical "find rows in A with no
-    /// related row in B" shape.
+    /// Eloquent `Builder::whereNotExists($closure)`. ANDs a
+    /// `NOT EXISTS (subquery)` predicate. The inverse of
+    /// [`Self::where_exists`], and the usual way to find rows in A with
+    /// no related row in B.
     ///
     /// ```ignore
     /// let no_books = Book::objects()
@@ -1503,14 +1384,11 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(crate::core::subquery::not_exists(subquery))
     }
 
-    /// Eloquent `Builder::whereIn($column, $closure)` with a
-    /// subquery rather than an inline value list — emits
-    /// `<column> IN (subquery)`.
+    /// Eloquent `Builder::whereIn($column, $closure)` with a subquery
+    /// instead of a value list. Emits `<column> IN (subquery)`.
     ///
     /// `subquery` is an already-compiled [`SelectQuery`] that should
-    /// project a single column whose values are matched against
-    /// `column` on the outer model. Sugar over
-    /// `self.where_raw(subquery::in_subquery(col, subquery))`.
+    /// project one column, matched against `column` on the outer model.
     ///
     /// ```ignore
     /// let public_cat_ids = Category::objects()
@@ -1526,34 +1404,30 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(crate::core::subquery::in_subquery(column, subquery))
     }
 
-    /// Eloquent `Builder::whereNotIn($column, $closure)` — inverse of
-    /// [`Self::where_in_subquery`]. Emits `<column> NOT IN (subquery)`.
+    /// Eloquent `Builder::whereNotIn($column, $closure)`. The inverse
+    /// of [`Self::where_in_subquery`]; emits
+    /// `<column> NOT IN (subquery)`.
     #[must_use]
     pub fn where_not_in_subquery(self, column: &'static str, subquery: SelectQuery) -> Self {
         self.where_raw(crate::core::subquery::not_in_subquery(column, subquery))
     }
 
-    /// Filter to rows that have at least one related row via the
-    /// relation named `name` — Eloquent `has($rel)` / Django
-    /// `filter(<rel>__isnull=False)`. Issue #830.
+    /// Keep rows that have at least one related row through the
+    /// relation named `name`. Eloquent `has($rel)`, Django
+    /// `filter(<rel>__isnull=False)`.
     ///
-    /// `name` is resolved across all three relation kinds (in this
-    /// order), so the same call works regardless of how the relation is
-    /// declared on `T`:
-    /// - **reverse-FK** — `#[rustango(reverse_has(name, child,
-    ///   child_fk_column))]` → `EXISTS (SELECT 1 FROM <child> WHERE
+    /// `name` is looked up in three relation kinds, in this order, so
+    /// the same call works however the relation is declared on `T`:
+    /// - **reverse-FK** — `EXISTS (SELECT 1 FROM <child> WHERE
     ///   <child_fk> = <outer>.<pk>)`.
-    /// - **many-to-many** — `#[rustango(m2m(name, to, through, src,
-    ///   dst))]` → `EXISTS (SELECT 1 FROM <through> WHERE <src> =
-    ///   <outer>.<pk>)` over the junction table.
-    /// - **generic-FK** — `#[rustango(generic_has(name, child,
-    ///   ct_column, pk_column))]` → the same `EXISTS` over the
-    ///   polymorphic child, AND-ed with a content-type discriminator so
-    ///   only children pointing at *this* model match.
+    /// - **many-to-many** — the same `EXISTS` over the junction table.
+    /// - **generic-FK** — the same `EXISTS` over the polymorphic child,
+    ///   AND-ed with a content-type check so only children pointing at
+    ///   *this* model match.
     ///
-    /// All three lower identically across PG / MySQL / SQLite (the
-    /// writer's scope stack threads the correlation). Unknown relation
-    /// names surface as [`QueryError::UnknownField`] at `compile()` time.
+    /// All three emit the same way on PG, MySQL and SQLite. An unknown
+    /// relation name surfaces as [`QueryError::UnknownField`] at
+    /// `compile()` time.
     ///
     /// ```ignore
     /// // Authors with at least one book (reverse-FK relation "books").
@@ -1578,12 +1452,11 @@ impl<T: Model> QuerySet<T> {
         T::SCHEMA.primary_key().map_or("id", |f| f.column)
     }
 
-    /// Resolve a relation `name` — reverse-FK, many-to-many, or
-    /// generic-FK — into a correlated `[NOT ]EXISTS` predicate (issue
-    /// #830). Returns `None` when the name matches no declared relation,
-    /// so callers can surface a [`QueryError::UnknownField`]. Resolution
-    /// order is reverse-FK → M2M → GFK; relation names are expected to
-    /// be unique across the three within a model.
+    /// Turn a relation `name` (reverse-FK, many-to-many or generic-FK)
+    /// into a correlated `[NOT ]EXISTS` predicate. Returns `None` when
+    /// no relation matches, so callers can raise
+    /// [`QueryError::UnknownField`]. Lookup order is reverse-FK, M2M,
+    /// then GFK; names should be unique across the three.
     fn resolve_rel_exists(name: &str, negated: bool) -> Option<WhereExpr> {
         use crate::core::subquery;
         if let Some(rel) = T::reverse_relations().iter().find(|r| r.name == name) {
@@ -1609,9 +1482,9 @@ impl<T: Model> QuerySet<T> {
         None
     }
 
-    /// Resolve a relation `name` into a correlated scalar `COUNT`
-    /// [`Expr`] (the left-hand side of a `has($rel, op, n)` comparison),
-    /// across reverse-FK / M2M / GFK. `None` if unknown. Issue #830.
+    /// Turn a relation `name` into a correlated scalar `COUNT` [`Expr`],
+    /// the left side of a `has($rel, op, n)` comparison. Covers
+    /// reverse-FK, M2M and GFK. `None` if the name is unknown.
     fn resolve_rel_count(name: &str) -> Option<Expr> {
         use crate::core::{subquery, RelAggKind};
         if let Some(rel) = T::reverse_relations().iter().find(|r| r.name == name) {
@@ -1639,10 +1512,9 @@ impl<T: Model> QuerySet<T> {
         None
     }
 
-    /// Opposite of [`Self::where_has`] — filter to rows that have
-    /// **no** related row via the named reverse-FK relation. Emits
-    /// `NOT EXISTS (subquery)`. Same relation-resolution semantics +
-    /// error shape.
+    /// The opposite of [`Self::where_has`]: keep rows that have **no**
+    /// related row. Emits `NOT EXISTS (subquery)`. Same relation lookup
+    /// and same errors.
     ///
     /// ```ignore
     /// // Authors with zero books.
@@ -1661,21 +1533,17 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Filter to rows that have at least one related row via the
-    /// named reverse-FK relation **AND** the related row matches the
-    /// caller-supplied inner predicate. Eloquent
-    /// `Builder::whereHas($rel, fn ($q) => …)` parity — issue #830
-    /// slice 2.
+    /// Keep rows with at least one related row through the named
+    /// reverse-FK relation **and** matching your inner predicate.
+    /// Eloquent `Builder::whereHas($rel, fn ($q) => …)`.
     ///
-    /// `inner` is a fully-compiled `SelectQuery` on the child model
-    /// (typically built via `Child::objects().filter(...).compile()?`).
-    /// The method extracts its `WHERE` clause, AND-joins the
-    /// correlated `<child_fk_column> = <outer>.<self_pk_column>`
-    /// predicate, and wraps the result in `EXISTS (…)`.
+    /// `inner` is a compiled `SelectQuery` on the child model, usually
+    /// `Child::objects().filter(...).compile()?`. Its `WHERE` is ANDed
+    /// with the correlation `<child_fk_column> = <outer>.<self_pk>`,
+    /// and the result is wrapped in `EXISTS (…)`.
     ///
-    /// Schema validation: `inner.model` must point at the same
-    /// `ModelSchema` as the relation's `child_schema`. Mismatches
-    /// surface as [`QueryError::UnknownField`] at compile time.
+    /// `inner.model` must be the relation's child model. A mismatch
+    /// surfaces as [`QueryError::UnknownField`] at compile time.
     ///
     /// ```ignore
     /// // Eloquent: Author::whereHas('books', fn ($q) => $q->where('published', true))->get();
@@ -1689,10 +1557,9 @@ impl<T: Model> QuerySet<T> {
         self.where_has_filter_impl(name, inner, /*negated=*/ false)
     }
 
-    /// `whereDoesntHave($rel, fn ($q) => …)` counterpart of
-    /// [`Self::where_has_filter`] — filter to rows that have **no**
-    /// related row matching the inner predicate. Emits
-    /// `NOT EXISTS (…)` over the same correlated inner SELECT.
+    /// `whereDoesntHave($rel, fn ($q) => …)`, the counterpart of
+    /// [`Self::where_has_filter`]. Keeps rows with **no** related row
+    /// matching the inner predicate, using `NOT EXISTS (…)`.
     #[must_use]
     pub fn where_doesnt_have_filter(self, name: &str, inner: SelectQuery) -> Self {
         self.where_has_filter_impl(name, inner, /*negated=*/ true)
@@ -1711,12 +1578,11 @@ impl<T: Model> QuerySet<T> {
                 });
             }
         };
-        // The user might pass an inner queryset built on the wrong
-        // child model — guard against silently producing wrong SQL.
-        // `Model::SCHEMA` is a `const &'static ModelSchema` (not a
-        // `static`), so each use-site can get its own promoted
-        // address — pointer equality is unreliable. Compare by
-        // model name (unique within the crate per `#[derive(Model)]`).
+        // Guard against an inner queryset built on the wrong child
+        // model, which would silently produce wrong SQL. `Model::SCHEMA`
+        // is a `const`, so each use site may get its own address and
+        // pointer equality is unreliable. Compare by model name, which
+        // is unique within the crate.
         if inner.model.name != rel.child_schema.name {
             return self.with_pending_error(QueryError::UnknownField {
                 model: T::SCHEMA.name,
@@ -1732,10 +1598,8 @@ impl<T: Model> QuerySet<T> {
             op: Op::Eq,
             rhs: crate::core::Expr::OuterRef(rel.self_pk_column),
         };
-        // AND the correlation predicate with whatever the user
-        // already put on the inner SelectQuery. Flatten when the
-        // user's predicate is itself an `And` to keep the tree
-        // shallow.
+        // AND the correlation onto whatever is already on the inner
+        // SelectQuery. Flatten a nested `And` to keep the tree shallow.
         inner.where_clause =
             match std::mem::replace(&mut inner.where_clause, WhereExpr::And(Vec::new())) {
                 WhereExpr::And(mut v) => {
@@ -1752,27 +1616,23 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(wrapped)
     }
 
-    /// Filter to rows whose **count** of related rows (via the
-    /// reverse-FK relation named `name`) satisfies `<count> <op> n` —
-    /// Eloquent `has($rel, $op, $n)` / Django
-    /// `.annotate(c=Count(<rel>)).filter(c__<op>=n)`. Issue #830
-    /// slice 3.
+    /// Keep rows whose **count** of related rows satisfies
+    /// `<count> <op> n`. Eloquent `has($rel, $op, $n)`, Django
+    /// `.annotate(c=Count(<rel>)).filter(c__<op>=n)`.
     ///
-    /// Emits a correlated scalar-aggregate subquery in the WHERE
-    /// clause: `(SELECT COUNT(*) FROM <child> WHERE <child_fk> =
-    /// <outer>.<self_pk>) <op> n`. The subquery's `OuterRef` is rewritten
-    /// to the parent's table qualifier by the writer's scope stack, so
-    /// the SQL is portable across PG / MySQL / SQLite.
+    /// Emits a correlated aggregate subquery in the WHERE clause:
+    /// `(SELECT COUNT(*) FROM <child> WHERE <child_fk> =
+    /// <outer>.<self_pk>) <op> n`. It runs the same on PG, MySQL and
+    /// SQLite.
     ///
-    /// `op` is one of the binary comparison operators
-    /// ([`Op::Eq`] / [`Op::Ne`] / [`Op::Lt`] / [`Op::Lte`] /
-    /// [`Op::Gt`] / [`Op::Gte`]); other operators emit a dialect error
-    /// at compile time. For the common "has at least one" / "has none"
-    /// cases prefer [`Self::where_has`] / [`Self::where_doesnt_have`],
-    /// which emit a cheaper `EXISTS` / `NOT EXISTS`.
+    /// `op` must be a comparison: [`Op::Eq`], [`Op::Ne`], [`Op::Lt`],
+    /// [`Op::Lte`], [`Op::Gt`] or [`Op::Gte`]. Anything else errors at
+    /// compile time. For "has at least one" or "has none", prefer
+    /// [`Self::where_has`] / [`Self::where_doesnt_have`], which emit a
+    /// cheaper `EXISTS`.
     ///
-    /// Unknown relation names surface as [`QueryError::UnknownField`]
-    /// at compile time, identically to [`Self::where_has`].
+    /// An unknown relation name surfaces as
+    /// [`QueryError::UnknownField`], as in [`Self::where_has`].
     ///
     /// ```ignore
     /// // Eloquent: Author::has('books', '>', 3)->get();
@@ -1795,25 +1655,21 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Eager-aggregate the **count** of related rows via the reverse-FK
-    /// relation named `name`, projected as a `<name>_count` column —
-    /// Eloquent `withCount('comments')` / Django
-    /// `.annotate(comments_count=Count('comments'))`. Issue #830 slice 4.
+    /// Add the **count** of related rows as a `<name>_count` column.
+    /// Eloquent `withCount('comments')`, Django
+    /// `.annotate(comments_count=Count('comments'))`.
     ///
-    /// Promotes the queryset to an [`AggregateBuilder`] whose result rows
-    /// are `Vec<HashMap<String, SqlValue>>` (same untyped shape as every
-    /// other [`QuerySet::annotate`] path — a typed `T` has no field to
-    /// land the derived column in). Each row carries every scalar column
-    /// of `T` plus the `<name>_count` key.
+    /// This turns the queryset into an [`AggregateBuilder`], whose rows
+    /// are `Vec<HashMap<String, SqlValue>>`, like every other
+    /// [`QuerySet::annotate`] path: a typed `T` has no field for the
+    /// derived column. Each row carries every scalar column of `T` plus
+    /// the `<name>_count` key.
     ///
-    /// The count comes from a **correlated subquery**
-    /// (`(SELECT COUNT(*) FROM <child> WHERE <child_fk> = <outer>.<pk>)`),
-    /// not a `JOIN`, so it never double-counts and emits no N+1 — the same
-    /// portable lowering [`Self::where_has_count`] uses across PG / MySQL /
-    /// SQLite.
+    /// The count comes from a correlated subquery, not a `JOIN`, so it
+    /// never double-counts and causes no N+1.
     ///
-    /// Unknown relation names surface as [`QueryError::UnknownField`] at
-    /// `compile()` time.
+    /// An unknown relation name surfaces as
+    /// [`QueryError::UnknownField`] at `compile()` time.
     ///
     /// ```ignore
     /// // Eloquent: Author::withCount('books')->get();
@@ -1827,57 +1683,52 @@ impl<T: Model> QuerySet<T> {
         self.annotate_relation_aggregate(name, None, AggregateExpr::Count(None), "count")
     }
 
-    /// Eager-aggregate `SUM(<column>)` over related rows via the
-    /// reverse-FK relation `name`, projected as `<name>_sum_<column>` —
-    /// Eloquent `withSum('orders', 'total')`. `column` is a column on the
-    /// **child** model (validated against the child schema at
-    /// `compile()` time). See [`Self::annotate_count`] for the return
-    /// shape and correlated-subquery semantics.
+    /// Add `SUM(<column>)` over related rows as `<name>_sum_<column>`.
+    /// Eloquent `withSum('orders', 'total')`. `column` belongs to the
+    /// **child** model and is checked at `compile()` time. See
+    /// [`Self::annotate_count`] for the return shape.
     #[must_use]
     pub fn annotate_sum(self, name: &str, column: &'static str) -> AggregateBuilder<T> {
         self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Sum(column), "sum")
     }
 
-    /// Eager-aggregate `AVG(<column>)` over related rows — Eloquent
-    /// `withAvg('orders', 'total')`, projected as `<name>_avg_<column>`.
-    /// See [`Self::annotate_sum`].
+    /// Add `AVG(<column>)` over related rows as `<name>_avg_<column>`.
+    /// Eloquent `withAvg('orders', 'total')`. See
+    /// [`Self::annotate_sum`].
     #[must_use]
     pub fn annotate_avg(self, name: &str, column: &'static str) -> AggregateBuilder<T> {
         self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Avg(column), "avg")
     }
 
-    /// Eager-aggregate `MAX(<column>)` over related rows — Eloquent
-    /// `withMax('orders', 'total')`, projected as `<name>_max_<column>`.
-    /// See [`Self::annotate_sum`].
+    /// Add `MAX(<column>)` over related rows as `<name>_max_<column>`.
+    /// Eloquent `withMax('orders', 'total')`. See
+    /// [`Self::annotate_sum`].
     #[must_use]
     pub fn annotate_max(self, name: &str, column: &'static str) -> AggregateBuilder<T> {
         self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Max(column), "max")
     }
 
-    /// Eager-aggregate `MIN(<column>)` over related rows — Eloquent
-    /// `withMin('orders', 'total')`, projected as `<name>_min_<column>`.
-    /// See [`Self::annotate_sum`].
+    /// Add `MIN(<column>)` over related rows as `<name>_min_<column>`.
+    /// Eloquent `withMin('orders', 'total')`. See
+    /// [`Self::annotate_sum`].
     #[must_use]
     pub fn annotate_min(self, name: &str, column: &'static str) -> AggregateBuilder<T> {
         self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Min(column), "min")
     }
 
-    /// Eager-annotate whether **any** related row exists via the
-    /// reverse-FK relation `name`, projected as a `<name>_exists` column
-    /// — Eloquent `withExists('comments')` / Django
-    /// `.annotate(has_comments=Exists(...))`. Issue #830 slice 5.
+    /// Add a `<name>_exists` column saying whether **any** related row
+    /// exists. Eloquent `withExists('comments')`, Django
+    /// `.annotate(has_comments=Exists(...))`.
     ///
-    /// Emits `CASE WHEN EXISTS (SELECT 1 FROM <child> WHERE <child_fk> =
-    /// <outer>.<pk>) THEN 1 ELSE 0 END` — cheaper than
-    /// [`Self::annotate_count`] when you only need presence (`EXISTS`
-    /// short-circuits on the first matching child row). The column
-    /// decodes as `SqlValue::I64(1)` / `I64(0)` on all three backends
-    /// (integer literals are used rather than a native boolean so the
-    /// dict-row value doesn't vary by dialect). See
-    /// [`Self::annotate_count`] for the return shape.
+    /// Emits `CASE WHEN EXISTS (…) THEN 1 ELSE 0 END`, which is cheaper
+    /// than [`Self::annotate_count`] when you only need presence,
+    /// because `EXISTS` stops at the first matching child row. The
+    /// column decodes as `SqlValue::I64(1)` or `I64(0)` on all three
+    /// backends; integer literals keep the value the same everywhere.
+    /// See [`Self::annotate_count`] for the return shape.
     ///
-    /// Unknown relation names surface as [`QueryError::UnknownField`] at
-    /// `compile()` time.
+    /// An unknown relation name surfaces as
+    /// [`QueryError::UnknownField`] at `compile()` time.
     #[must_use]
     pub fn annotate_exists(self, name: &str) -> AggregateBuilder<T> {
         let mut builder = self.aggregate();
@@ -1885,17 +1736,15 @@ impl<T: Model> QuerySet<T> {
         builder
     }
 
-    /// Shared worker for the `annotate_{count,sum,avg,max,min}` family
-    /// (issue #830). Resolves the reverse relation, auto-names the
-    /// projected column (`<name>_count` or `<name>_<suffix>_<column>`),
-    /// wraps the correlated subquery in an
-    /// [`AggregateExpr::RelatedAggregate`], and stages it on a fresh
-    /// [`AggregateBuilder`].
+    /// Shared worker for the `annotate_{count,sum,avg,max,min}` family.
+    /// Resolves the reverse relation, names the projected column
+    /// (`<name>_count` or `<name>_<suffix>_<column>`), wraps the
+    /// correlated subquery in an [`AggregateExpr::RelatedAggregate`],
+    /// and stages it on a fresh [`AggregateBuilder`].
     ///
-    /// Errors are deferred onto the builder so they surface from
-    /// `compile()` (mirroring the queryset-level deferred-error path):
-    /// an unknown relation name → [`QueryError::UnknownField`] on `T`; a
-    /// `column` that isn't a field of the child model → the same error
+    /// Errors are held on the builder and surface from `compile()`: an
+    /// unknown relation name gives [`QueryError::UnknownField`] on `T`,
+    /// and a `column` that is not a child field gives the same error
     /// keyed on the child schema.
     fn annotate_relation_aggregate(
         self,
@@ -1904,23 +1753,22 @@ impl<T: Model> QuerySet<T> {
         agg: AggregateExpr,
         suffix: &str,
     ) -> AggregateBuilder<T> {
-        // #1038 — the resolve-and-push worker lives on `AggregateBuilder`
-        // so it can be chained more than once (two relation aggregates in
-        // one query). QuerySet entry just opens a builder and delegates.
+        // The resolve-and-push worker lives on `AggregateBuilder` so a
+        // query can chain more than one relation aggregate. Here we
+        // just open a builder and delegate.
         let mut builder = self.aggregate();
         builder.push_relation_aggregate(name, column, agg, suffix);
         builder
     }
 
-    /// Eloquent `Builder::whereColumn($col1, $col2)` — emits
-    /// `<col1> = <col2>`, comparing two columns instead of column
-    /// vs literal. Equality is the overwhelming majority of uses;
-    /// for any other comparison, see [`Self::where_column_op`].
+    /// Eloquent `Builder::whereColumn($col1, $col2)`. Emits
+    /// `<col1> = <col2>`, comparing two columns instead of a column
+    /// and a literal. For any other operator, see
+    /// [`Self::where_column_op`].
     ///
-    /// Both column names are validated by the schema at
-    /// `compile()`-time via the existing
-    /// [`WhereExpr::ExprCompare`](crate::core::WhereExpr::ExprCompare)
-    /// path.
+    /// Both column names are checked against the schema at
+    /// `compile()` time, through
+    /// [`WhereExpr::ExprCompare`](crate::core::WhereExpr::ExprCompare).
     ///
     /// ```ignore
     /// // Eloquent: User::whereColumn('first_name', 'last_name');
@@ -1933,9 +1781,9 @@ impl<T: Model> QuerySet<T> {
         self.where_column_op(col1, Op::Eq, col2)
     }
 
-    /// Eloquent `Builder::whereColumn($col1, $op, $col2)` — column-
-    /// vs-column comparison with an explicit operator. Use the
-    /// shorter [`Self::where_column`] when the op is `Eq`.
+    /// Eloquent `Builder::whereColumn($col1, $op, $col2)`. Compares
+    /// two columns with an explicit operator. Use the shorter
+    /// [`Self::where_column`] when the operator is `Eq`.
     ///
     /// ```ignore
     /// use rustango::core::Op;
@@ -1954,29 +1802,25 @@ impl<T: Model> QuerySet<T> {
         })
     }
 
-    /// Append a typed predicate or boolean expression built via the
-    /// [`Column`](crate::core::Column) API. Accepts either a single
-    /// [`TypedFilter`](crate::core::TypedFilter) (`User::id.gt(10)`)
-    /// AND-join a raw [`WhereExpr`] into the accumulated WHERE clause.
-    /// Useful when the model doesn't have typed columns derived (so
-    /// [`Self::where_`] isn't available) and the caller needs to
-    /// express OR / NOT / nested predicates that the string-keyed
-    /// [`Self::filter`] can't reach.
+    /// AND a raw [`WhereExpr`] into the accumulated WHERE clause. Use
+    /// it when the model has no derived typed columns, so
+    /// [`Self::where_`] is unavailable, and you need OR / NOT / nested
+    /// predicates that the string-keyed [`Self::filter`] cannot reach.
     ///
-    /// The expression is fully validated against `T::SCHEMA` at
-    /// `compile()` time — passing an unknown column or a wrong-typed
-    /// value returns [`QueryError::UnknownField`] /
-    /// [`QueryError::TypeMismatch`] just like the typed paths.
+    /// The expression is checked against `T::SCHEMA` at `compile()`
+    /// time. An unknown column or a wrong-typed value returns
+    /// [`QueryError::UnknownField`] or [`QueryError::TypeMismatch`],
+    /// as on the typed paths.
     #[must_use]
     pub fn where_raw(mut self, expr: WhereExpr) -> Self {
         self.pending.push(PendingFilter::Expr(expr));
         self
     }
 
-    /// Eloquent `Builder::when($condition, $callback)` — apply
-    /// `f` to `self` only when `condition` is `true`, otherwise
-    /// return `self` unchanged. Sugars the otherwise-noisy
-    /// "conditionally compose a filter" pattern:
+    /// Eloquent `Builder::when($condition, $callback)`. Applies `f` to
+    /// `self` only when `condition` is `true`, and otherwise returns
+    /// `self` unchanged. It keeps a conditional filter inside the
+    /// chain:
     ///
     /// ```ignore
     /// let qs = Post::objects()
@@ -1994,9 +1838,8 @@ impl<T: Model> QuerySet<T> {
     /// if let Some(id) = category_id { qs = qs.filter("category_id", id); }
     /// ```
     ///
-    /// The closure form preserves builder-style chaining when the
-    /// condition isn't a simple `bool` but the result of an
-    /// in-line predicate. Issue [#830](https://github.com/ujeenet/rustango/issues/830) follow-up.
+    /// The closure form keeps the chain readable when the condition is
+    /// an inline expression rather than a plain `bool`.
     #[must_use]
     pub fn when<F>(self, condition: bool, f: F) -> Self
     where
@@ -2009,12 +1852,10 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Eloquent `Builder::unless($condition, $callback)` — inverse
-    /// of [`Self::when`]. Apply `f` only when `condition` is
-    /// `false`. Mirrors Eloquent's twin helper so `.unless(...)`
-    /// reads naturally in code that's clearer when the guard is
-    /// stated negatively (e.g. `qs.unless(is_admin, |q|
-    /// q.filter("public", true))`).
+    /// Eloquent `Builder::unless($condition, $callback)`. The inverse
+    /// of [`Self::when`]: applies `f` only when `condition` is `false`.
+    /// Use it when the guard reads better stated negatively, such as
+    /// `qs.unless(is_admin, |q| q.filter("public", true))`.
     #[must_use]
     pub fn unless<F>(self, condition: bool, f: F) -> Self
     where
@@ -2027,10 +1868,9 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Eloquent `Builder::tap($callback)` — run a side-effecting
-    /// callback against the queryset and return it unchanged. Lets
-    /// you slot logging / metrics / debug-print into a builder
-    /// chain without breaking the fluent shape:
+    /// Eloquent `Builder::tap($callback)`. Runs a callback against the
+    /// queryset and returns it unchanged, so you can add logging,
+    /// metrics or a debug print without breaking the chain:
     ///
     /// ```ignore
     /// let rows = Post::objects()
@@ -2047,16 +1887,13 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Filter to only rows that have NOT been soft-deleted.
+    /// Keep only rows that are NOT soft-deleted.
     ///
-    /// When `T` carries `#[rustango(soft_delete)]` on a nullable
-    /// `DateTime<Utc>` column, AND-joins `<col> IS NULL` into the
-    /// queryset's accumulated WHERE clause. When the model has no
-    /// soft-delete column, the call is a no-op (matches
-    /// [`crate::soft_delete::active_filter`]'s `None` shape — keeps
-    /// templated code that wraps every fetch in `.active()`
-    /// compiling regardless of whether a particular model is
-    /// soft-delete-enabled). Issue #821.
+    /// When `T` has `#[rustango(soft_delete)]` on a nullable
+    /// `DateTime<Utc>` column, this ANDs `<col> IS NULL` into the WHERE
+    /// clause. Models without a soft-delete column get a no-op, so
+    /// generic code can call `.active()` on any model. See
+    /// [`crate::soft_delete::active_filter`].
     #[must_use]
     pub fn active(self) -> Self {
         match crate::soft_delete::active_filter(T::SCHEMA) {
@@ -2065,10 +1902,9 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Filter to ONLY soft-deleted rows. Mirror of [`Self::active`]
-    /// — useful for "Trash" admin pages, restore flows, etc.
-    /// When the model has no soft-delete column the call is a
-    /// no-op. Eloquent `onlyTrashed`. Issue #821.
+    /// Keep ONLY soft-deleted rows — the mirror of [`Self::active`],
+    /// for trash pages and restore flows. A no-op when the model has
+    /// no soft-delete column. Eloquent `onlyTrashed`.
     #[must_use]
     pub fn only_trashed(self) -> Self {
         match crate::soft_delete::trashed_filter(T::SCHEMA) {
@@ -2077,27 +1913,25 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Explicit "include both active and trashed rows" no-op
-    /// marker. Today every `QuerySet` defaults to including trashed
-    /// rows (auto-scoping a.k.a. global-scope tracking is sibling
-    /// issue [#820](https://github.com/ujeenet/rustango/issues/820));
-    /// `with_trashed()` exists as forward-compat for code that wants
-    /// to declare intent now and stay correct when auto-scoping
-    /// lands. Eloquent `withTrashed`. Issue #821.
+    /// Eloquent `withTrashed`. A no-op marker that states intent: a
+    /// `QuerySet` already includes trashed rows unless you call
+    /// [`Self::active`] or the model declares a global scope that
+    /// filters them out.
     #[must_use]
     pub fn with_trashed(self) -> Self {
         self
     }
 
-    /// or a composed [`TypedExpr`] (`User::id.eq(1).or(User::id.eq(2))`).
-    /// Every `.where_()` call AND-joins its argument into the
-    /// queryset's accumulated WHERE clause.
+    /// Append a typed predicate or boolean expression built with the
+    /// [`Column`](crate::core::Column) API. Takes a single
+    /// [`TypedFilter`](crate::core::TypedFilter) (`User::id.gt(10)`) or
+    /// a composed [`TypedExpr`] (`User::id.eq(1).or(User::id.eq(2))`).
+    /// Every call ANDs its argument into the WHERE clause.
     #[must_use]
     pub fn where_<E: Into<TypedExpr<T>>>(mut self, predicate: E) -> Self {
         let expr = predicate.into().into_expr();
-        // Hoist a bare predicate into the legacy `Resolved` slot so
-        // the resulting WhereExpr stays a flat AND-of-predicates for
-        // simple chains — preserves the v0.6 `as_flat_and()` shape.
+        // Put a bare predicate in the `Resolved` slot so a simple chain
+        // stays a flat AND-of-predicates, which `as_flat_and()` needs.
         match expr {
             WhereExpr::Predicate(filter) => {
                 self.pending.push(PendingFilter::Resolved(filter));
@@ -2117,39 +1951,32 @@ impl<T: Model> QuerySet<T> {
     /// present on the model, and [`QueryError::TypeMismatch`] if the bound
     /// value's type does not match the field's declared type.
     pub fn compile(mut self) -> Result<SelectQuery, QueryError> {
-        // Issue #820 — Eloquent global scopes. Fold the schema-declared
-        // auto-applied filters into the pending list (respecting any
-        // `without_global_scope` / `without_global_scopes` opt-outs)
-        // BEFORE we hand `self.pending` to the resolver. From here on
-        // the resolver doesn't know or care which filters were scopes
-        // and which were user-provided.
+        // Fold the schema's global scopes into the pending list, minus
+        // any opt-outs, before the resolver sees it. After this the
+        // resolver cannot tell a scope filter from a user filter.
         self.apply_global_scopes();
         let model: &'static ModelSchema = T::SCHEMA;
-        // #1031 — lower relation-spanning lookups (`author__name`) into
-        // aliased predicates + their FK-chain JOINs before the WHERE is
-        // resolved. The JOINs merge into the select_related set below,
-        // deduped by alias.
+        // Lower relation-spanning lookups (`author__name`) into aliased
+        // predicates plus their FK-chain JOINs before resolving the
+        // WHERE. Those JOINs merge into the select_related set below.
         let (pending, span_joins) = lower_relation_spans(model, self.pending)?;
         let where_clause = resolve_pending(model, pending)?;
         let mut joins = lower_select_related(model, &self.select_related)?;
-        // Ad-hoc joins (issue #80) come AFTER FK-driven select_related
-        // joins in the SELECT — preserves the existing column ordering
-        // for legacy callers, and keeps user-driven joins next to the
-        // user-driven WHERE.
+        // Ad-hoc joins come after the FK-driven select_related ones, so
+        // column order stays stable and user joins sit next to the user
+        // WHERE.
         joins.extend(self.ad_hoc_joins);
-        // Relation-span JOINs (#1031) — skip any alias already present
-        // (a span over the same path as a `select_related` emits once).
+        // Skip a span JOIN whose alias is already here, so a span over
+        // the same path as a select_related emits only once.
         for j in span_joins {
             if !joins.iter().any(|e| e.alias == j.alias) {
                 joins.push(j);
             }
         }
-        // #1034 — split head-branch clauses from combined-result
-        // clauses. With a compound, the head-branch `ORDER BY` /
-        // `LIMIT` / `OFFSET` were frozen at the first set-op call
-        // (`head_*`); the live slots hold whatever was chained AFTER
-        // and apply to the merged result. Without a compound, the
-        // live slots are the query's own and `head_*` are empty.
+        // Split head-branch clauses from combined-result clauses. With
+        // a compound, `head_*` holds what was frozen at the first
+        // set-op call and the live slots apply to the merged result.
+        // Without one, the live slots are the query's own.
         let has_compound = !self.compound.is_empty();
         let (head_pending, head_limit, head_offset, comb_pending, comb_limit, comb_offset) =
             if has_compound {
@@ -2171,26 +1998,22 @@ impl<T: Model> QuerySet<T> {
                     None,
                 )
             };
-        // Lower the unified pending list to OrderItems. Insertion
-        // order is preserved across legacy `.order_by(...)` and
-        // issue-#76 `.order_by_with_nulls(...)` / `.order_by_expr(...)`
-        // calls so a mixed chain emits in the order it was written.
-        // `order_by` is the head-branch (or sole) ordering; the
-        // combined-result ordering lowers separately below.
+        // Lower the pending list to OrderItems, keeping insertion order
+        // across all the `.order_by*` variants so a mixed chain emits
+        // as written. `order_by` is the head (or only) ordering; the
+        // combined-result ordering lowers on the next line.
         let (order_by, order_joins) = lower_order_items(model, head_pending)?;
         let (compound_order_by, comb_order_joins) = lower_order_items(model, comb_pending)?;
-        // #1031 P2 — merge relation-span `order_by` JOINs into the SELECT
-        // join set, deduped by alias against the select_related / ad-hoc /
-        // filter-span joins already assembled above.
+        // Merge relation-span `order_by` JOINs into the join set,
+        // skipping aliases already added above.
         for j in order_joins.into_iter().chain(comb_order_joins) {
             if !joins.iter().any(|e| e.alias == j.alias) {
                 joins.push(j);
             }
         }
-        // Issue #264 / T1.2 — `.distinct_on(&[...])` requires the
-        // listed columns to head the ORDER BY (Django enforces this
-        // at runtime; we catch it at builder time). Empty list is
-        // rejected because it would degenerate to `.distinct()`.
+        // `.distinct_on(&[...])` needs its columns at the head of the
+        // ORDER BY. Django checks this at runtime; we catch it here.
+        // An empty list is rejected: it would just mean `.distinct()`.
         if let Some(crate::core::DistinctMode::On(cols)) = &self.distinct {
             if cols.is_empty() {
                 return Err(QueryError::DistinctOnEmpty);
@@ -2203,9 +2026,9 @@ impl<T: Model> QuerySet<T> {
                     });
                 }
             }
-            // First `cols.len()` order_by items must be the distinct-on
-            // columns in the same order. Bare `OrderItem::Column` only;
-            // expressions / random can't be DISTINCT-ON keys.
+            // The first `cols.len()` order_by items must be those
+            // columns, in order. Only bare `OrderItem::Column` counts;
+            // an expression or random cannot be a DISTINCT ON key.
             if order_by.len() < cols.len() {
                 return Err(QueryError::DistinctOnOrderByMismatch {
                     distinct_on: cols.iter().map(|s| (*s).to_owned()).collect(),
@@ -2230,13 +2053,11 @@ impl<T: Model> QuerySet<T> {
                 }
             }
         }
-        // #331 — `.none()` forces an always-empty result via `LIMIT 0`.
-        // Cheap on every dialect (PG/MySQL/SQLite skip plan
-        // materialization), and the other terminal ops (count, exists,
-        // first) read off the same SelectQuery so they see the same
-        // empty result without further special-casing. The `LIMIT 0`
-        // pins to the OUTERMOST slot — the combined result when a
-        // compound is present, else the head/sole query.
+        // `.none()` forces an empty result with `LIMIT 0`. It is cheap
+        // on every dialect, and count / exists / first read the same
+        // SelectQuery, so they need no special case. The `LIMIT 0` goes
+        // on the outermost slot: the combined result when a compound is
+        // present, otherwise the single query.
         let (limit, compound_limit) = if self.is_none {
             if has_compound {
                 (head_limit, Some(0))
@@ -2265,22 +2086,19 @@ impl<T: Model> QuerySet<T> {
         })
     }
 
-    /// Project to `Vec<HashMap<String, SqlValue>>` — Django's
-    /// `.values('id', 'name')`. Issue #22. Returns a
-    /// [`ValuesQuerySet`] whose terminal `.fetch(&pool)` decodes
-    /// rows into a `HashMap` keyed by column name.
+    /// Project to `Vec<HashMap<String, SqlValue>>`, like Django's
+    /// `.values('id', 'name')`. Returns a [`ValuesQuerySet`] whose
+    /// `.fetch(&pool)` decodes rows into a `HashMap` keyed by column
+    /// name.
     ///
-    /// Skips the typed `Model` decode — useful when you only need a
-    /// few fields off a wide table, or when the result feeds
-    /// downstream code that wants dynamic column access (templates,
-    /// JSON serialization, CSV export). The existing
-    /// [`QuerySet::values`] method (which promotes to
-    /// [`AggregateBuilder`] for GROUP BY) is unchanged; this is a
-    /// separate, pure-projection entry point.
+    /// It skips the typed `Model` decode. Use it for a few fields off
+    /// a wide table, or when the result feeds code that wants dynamic
+    /// column access, such as templates, JSON or CSV export. For
+    /// GROUP BY, use [`QuerySet::values`] instead, which promotes to
+    /// [`AggregateBuilder`].
     ///
-    /// Columns are validated against the model schema at `.compile()`
-    /// time — typo'd column names surface
-    /// [`QueryError::UnknownField`]. Empty `cols` surfaces
+    /// Columns are checked against the schema at `.compile()` time. A
+    /// typo gives [`QueryError::UnknownField`], and empty `cols` gives
     /// [`QueryError::EmptyValuesProjection`].
     #[must_use]
     pub fn values_dict(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
@@ -2290,11 +2108,10 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Project to `Vec<Vec<SqlValue>>` — Django's
-    /// `.values_list('id', 'name')`. Issue #22. Same projection as
-    /// [`Self::values_dict`] but each row comes back as an
-    /// ordered `Vec<SqlValue>` (cell ordering matches the `cols`
-    /// argument), not a `HashMap`.
+    /// Project to `Vec<Vec<SqlValue>>`, like Django's
+    /// `.values_list('id', 'name')`. Same as [`Self::values_dict`],
+    /// but each row is an ordered `Vec<SqlValue>` matching the `cols`
+    /// order instead of a `HashMap`.
     #[must_use]
     pub fn values_list(self, cols: &[&'static str]) -> ValuesListQuerySet<T> {
         ValuesListQuerySet {
@@ -2303,53 +2120,44 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Single-column flat projection — Django's
-    /// `.values_list('id', flat=True)`. Issue #22. Returns
-    /// [`ValuesFlatQuerySet`] whose terminal `.fetch::<U>(&pool)`
-    /// decodes the single column into `Vec<U>` directly via sqlx's
-    /// typed `query_scalar` path.
+    /// Single-column projection, like Django's
+    /// `.values_list('id', flat=True)`. Returns a
+    /// [`ValuesFlatQuerySet`] whose `.fetch::<U>(&pool)` decodes the
+    /// column into `Vec<U>` through sqlx's `query_scalar`.
     ///
-    /// `U` must be decodable from the column's SQL type on every
-    /// dialect the binary targets. Common picks: `i64` / `i32` /
-    /// `String` / `bool` / `f64`.
+    /// `U` must decode from the column's SQL type on every dialect the
+    /// binary targets. Usually `i64`, `i32`, `String`, `bool` or `f64`.
     #[must_use]
     pub fn values_list_flat(self, col: &'static str) -> ValuesFlatQuerySet<T> {
         ValuesFlatQuerySet { qs: self, col }
     }
 
-    /// Project only the listed columns — Django's `.only('id', 'name')`.
-    /// Issue #20. Equivalent to [`Self::values_dict`] semantically — the
-    /// SQL is `SELECT cols FROM …` and the result is
-    /// `Vec<HashMap<String, SqlValue>>` keyed by column name. The
-    /// distinct entry point preserves Django muscle-memory at the
-    /// chain site.
+    /// Project only the listed columns, like Django's
+    /// `.only('id', 'name')`. Same behaviour as [`Self::values_dict`]:
+    /// the SQL is `SELECT cols FROM …` and each row is a
+    /// `HashMap<String, SqlValue>` keyed by column name. The separate
+    /// name just reads better at the call site.
     ///
-    /// Columns are validated at `.compile()` time — typos surface as
-    /// [`QueryError::UnknownField`]; an empty list surfaces
+    /// Columns are checked at `.compile()` time. A typo gives
+    /// [`QueryError::UnknownField`], and an empty list gives
     /// [`QueryError::EmptyValuesProjection`].
     ///
-    /// Note: unlike Django's `.only()`, the return shape is a
-    /// `HashMap`, not a partially-hydrated `Model` instance — rustango
-    /// has no equivalent of Django's lazy-attribute descriptor magic.
-    /// Typed partial-row decode is queued for a future slice.
+    /// Unlike Django, you get a `HashMap` rather than a partly filled
+    /// `Model`; rustango has no lazy-attribute descriptors.
     #[must_use]
     pub fn only(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
         self.values_dict(cols)
     }
 
-    /// Project every scalar column EXCEPT the listed ones — Django's
-    /// `.defer('big_field', 'huge_blob')`. Issue #20. Compute the
-    /// complement against the model schema; the resulting SELECT
-    /// omits the named columns, saving IO on wide tables.
+    /// Project every scalar column EXCEPT the listed ones, like
+    /// Django's `.defer('big_field', 'huge_blob')`. The SELECT leaves
+    /// out the named columns, which saves IO on wide tables.
     ///
-    /// Same return shape as [`Self::only`] (`Vec<HashMap<String, SqlValue>>`)
-    /// with the same Django parity caveat.
+    /// Same return shape as [`Self::only`].
     ///
-    /// Typo'd defer columns surface as [`QueryError::UnknownField`]
-    /// at `.compile()` time (any column the caller named that doesn't
-    /// exist on the model is rejected just like an `.only(...)` typo).
-    /// Empty defer list returns every scalar column on the model —
-    /// semantically a no-op vs. `.values_dict(all_cols)`.
+    /// A column that does not exist on the model gives
+    /// [`QueryError::UnknownField`] at `.compile()` time, as it would
+    /// in `.only(...)`. An empty list returns every scalar column.
     #[must_use]
     pub fn defer(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
         let model = T::SCHEMA;
@@ -2359,8 +2167,8 @@ impl<T: Model> QuerySet<T> {
             .filter(|f| !exclude.contains(f.column))
             .map(|f| f.column)
             .collect();
-        // Typo'd defer cols get forwarded into the projection so
-        // `values_dict`'s `UnknownField` check rejects them at compile.
+        // Pass unknown defer columns into the projection so
+        // `values_dict`'s `UnknownField` check rejects them.
         for &col in cols {
             if model.field_by_column(col).is_none() {
                 projection.push(col);
@@ -2374,17 +2182,14 @@ impl<T: Model> QuerySet<T> {
     /// # Errors
     /// As [`QuerySet::compile`].
     pub fn compile_delete(mut self) -> Result<DeleteQuery, QueryError> {
-        // Issue #820 — fold global scopes into the WHERE so a
-        // `Post.objects().delete_pool(&pool)` honors the same
-        // auto-applied filter that `Post.objects().fetch(&pool)`
-        // does (e.g. a `published_only` scope means a wholesale delete
-        // still won't reach unpublished rows).
+        // Fold global scopes into the WHERE, so a bulk delete honours
+        // the same filters as a fetch. A `published_only` scope means
+        // a wholesale delete still cannot reach unpublished rows.
         self.apply_global_scopes();
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
-        // #331 — `.none().delete()` is a guaranteed no-op. Append an
-        // `IS NULL` predicate against the (NOT NULL) primary key so
-        // the DB refuses to match any row.
+        // `.none().delete()` must delete nothing. An `IS NULL` test on
+        // the NOT NULL primary key makes sure no row matches.
         let where_clause = if self.is_none {
             never_match_clause(model, where_clause)?
         } else {
@@ -2424,17 +2229,15 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Django-shape `.values(&[...]).annotate(...)` projection — issue #75.
+    /// Django-shape `.values(&[...]).annotate(...)` projection.
     ///
-    /// Switches the queryset into aggregate mode and records the projection
-    /// columns. When followed by `.annotate("alias", aggregate)`, the writer
-    /// emits `SELECT cols, AGGR(...) FROM t GROUP BY cols` — GROUP BY is
-    /// inferred from the values list.
+    /// Switches the queryset into aggregate mode and records the
+    /// projection columns. Followed by `.annotate("alias", aggregate)`,
+    /// it emits `SELECT cols, AGGR(...) FROM t GROUP BY cols`; the
+    /// GROUP BY comes from the values list.
     ///
-    /// This is **Django Shape 2** (`.values(cols).annotate(agg)` →
-    /// `GROUP BY cols`). The same IR compiles to structurally-equivalent
-    /// SQL on Postgres, MySQL, and SQLite; see
-    /// `tests/values_annotate_parity.rs` for the cross-dialect parity pins.
+    /// This is **Django Shape 2**. The same IR gives equivalent SQL on
+    /// Postgres, MySQL and SQLite.
     ///
     /// ```ignore
     /// // "Posts per author" — Django's canonical example.
@@ -2476,16 +2279,13 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Django-shape `.annotate(...)` without explicit `.aggregate()` — issue #75.
+    /// Django-shape `.annotate(...)` without calling `.aggregate()`.
     ///
-    /// Promotes to an [`AggregateBuilder`]. If the annotation aggregates rows
-    /// (`Count`, `Sum`, `Avg`, …) and `.values()` wasn't called, `compile()`
-    /// auto-populates GROUP BY with every non-aggregate scalar column on the
-    /// model — this is **Django Shape 3** ("each row + a derived aggregate
-    /// over its children").
-    ///
-    /// The same IR compiles to structurally-equivalent SQL on Postgres,
-    /// MySQL, and SQLite; see `tests/values_annotate_parity.rs`.
+    /// Promotes to an [`AggregateBuilder`]. If the annotation
+    /// aggregates rows (`Count`, `Sum`, `Avg`, …) and you did not call
+    /// `.values()`, `compile()` fills GROUP BY with every
+    /// non-aggregate scalar column. This is **Django Shape 3**: each
+    /// row plus a derived aggregate over its children.
     ///
     /// ```ignore
     /// // "Each author + their post count" — every column of `Author`
@@ -2508,11 +2308,11 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Project a correlated scalar subquery under `alias`, promoting to
-    /// an [`AggregateBuilder`] — Django's
-    /// `annotate(newest=Subquery(...))` (#1036). Sugar over
-    /// [`Self::annotate`] with [`crate::core::subquery::scalar_subquery`];
-    /// shape `inner` to one column × ≤1 row (see that function's caller
-    /// contract). Correlate via [`crate::core::subquery::outer_ref`].
+    /// an [`AggregateBuilder`]. Django's `annotate(newest=Subquery(…))`.
+    /// Shorthand for [`Self::annotate`] with
+    /// [`crate::core::subquery::scalar_subquery`]. `inner` must return
+    /// one column and at most one row. Correlate it with
+    /// [`crate::core::subquery::outer_ref`].
     #[must_use]
     pub fn annotate_subquery(
         self,
@@ -2595,9 +2395,8 @@ impl<T: Model> UpdateBuilder<T> {
     /// unknown field, and [`QueryError::TypeMismatch`] if any bound value's
     /// type doesn't match the field's declared type.
     pub fn compile(mut self) -> Result<UpdateQuery, QueryError> {
-        // Issue #820 — same rationale as the SELECT / DELETE paths:
-        // an `.update().set(...)` shouldn't escape the model's global
-        // scopes any more than a plain `.fetch` would.
+        // As on the SELECT and DELETE paths: an `.update().set(...)`
+        // must not escape the model's global scopes.
         self.qs.apply_global_scopes();
         let model: &'static ModelSchema = T::SCHEMA;
 
@@ -2612,9 +2411,8 @@ impl<T: Model> UpdateBuilder<T> {
             .collect::<Result<Vec<_>, _>>()?;
 
         let where_clause = resolve_pending(model, self.qs.pending)?;
-        // #331 — `.none().update().set(...)` is a no-op for the same
-        // reason `.none().delete()` is: the never-match predicate
-        // forces zero affected rows.
+        // `.none().update().set(...)` affects nothing, for the same
+        // reason `.none().delete()` does.
         let where_clause = if self.qs.is_none {
             never_match_clause(model, where_clause)?
         } else {
@@ -2629,15 +2427,10 @@ impl<T: Model> UpdateBuilder<T> {
     }
 }
 
-/// Issue #76: lower the unified pending order-by list to a
-/// `Vec<OrderItem>` at `compile()` time. `Field` variants resolve
-/// the field name against the model schema; `Expr` variants pass
-/// through verbatim (the writer surfaces DB-side errors for typos
-/// inside expressions, matching the existing `set_expr` posture).
-/// Render the column-only view of an `order_by` list for error
-/// reporting (`DistinctOnOrderByMismatch`). `Expr` / `Random` entries
-/// render as `<expr>` / `RANDOM` so the error message still locates
-/// where the mismatch begins.
+/// Render the column-only view of an `order_by` list for the
+/// `DistinctOnOrderByMismatch` error. `Expr` and `Random` entries
+/// render as `<expr>` and `RANDOM`, so the message still shows where
+/// the mismatch starts.
 fn order_by_column_names(order_by: &[crate::core::OrderItem]) -> Vec<String> {
     order_by
         .iter()
@@ -2649,6 +2442,10 @@ fn order_by_column_names(order_by: &[crate::core::OrderItem]) -> Vec<String> {
         .collect()
 }
 
+/// Lower the pending order-by list to `Vec<OrderItem>` at `compile()`
+/// time. `Field` entries resolve their name against the model schema.
+/// `Expr` entries pass through as they are, so a typo inside an
+/// expression surfaces as a database error, like `set_expr`.
 fn lower_order_items(
     model: &'static ModelSchema,
     items: Vec<PendingOrderItem>,
@@ -2665,11 +2462,11 @@ fn lower_order_items(
                         nulls,
                     ));
                 }
-                // #1031 P2 — `order_by("author__name")` relation span:
-                // resolve the FK chain into LEFT JOINs + an aliased ORDER
-                // BY term, reusing the same walk as the `filter()` path.
-                // `order_by` has no lookup-suffix grammar, so a segment
-                // trailing the terminal column is a malformed key.
+                // Relation span, such as `order_by("author__name")`:
+                // resolve the FK chain into LEFT JOINs plus an aliased
+                // ORDER BY term, reusing the `filter()` walk. `order_by`
+                // has no lookup suffixes, so anything after the terminal
+                // column makes the key invalid.
                 None if name.contains("__") => {
                     let segs: Vec<&str> = name.split("__").collect();
                     let (jns, prev_alias, current, term_i) = resolve_span_chain(model, &name)?;
@@ -2686,10 +2483,9 @@ fn lower_order_items(
                                 model: current.name,
                                 field: segs[term_i].to_owned(),
                             })?;
-                    // Dedupe joins by alias (a span over a path already
-                    // joined via `select_related` / a filter span emits
-                    // once); the compile() caller dedupes again against
-                    // the full join set.
+                    // Dedupe by alias, so a path already joined by
+                    // `select_related` or a filter span emits once.
+                    // `compile()` dedupes again against the full set.
                     for j in jns {
                         if !joins.iter().any(|e| e.alias == j.alias) {
                             joins.push(j);
@@ -2722,36 +2518,22 @@ fn lower_order_items(
     Ok((out, joins))
 }
 
-/// Convert `select_related` field names into `Join`s — slice 9.0d,
-/// extended for multi-hop chains in issue #297 / T2.2.
+/// Convert `select_related` field names into `Join`s.
 ///
-/// **Single hop** (e.g. `"author"`): look up the field on `model`,
-/// verify it's a `Relation::Fk` / `Relation::O2O`, find the target
-/// schema in inventory, build a LEFT `Join` projecting all of the
+/// **Single hop**, such as `"author"`: look up the field on `model`,
+/// check it is a `Relation::Fk` or `Relation::O2O`, find the target
+/// schema in inventory, and build a LEFT `Join` projecting all the
 /// target's columns.
 ///
-/// **Multi-hop** (e.g. `"author__profile__country"`): split on `__`,
-/// resolve each hop against the previous hop's target schema.
-/// Successive hops use the **previous join's alias** as the LHS of
-/// their `ON` predicate so the FK chain stitches in SQL. The
-/// emitted join alias is the full dotted path (`"author__profile"`,
-/// `"author__profile__country"`) — globally unique and
-/// composition-safe even when two different roots share a tail name.
+/// **Multi-hop**, such as `"author__profile__country"`: split on `__`
+/// and resolve each hop against the previous hop's target schema. Each
+/// hop uses the previous join's alias on the left of its `ON`
+/// predicate, so the FK chain stitches together in SQL. The join alias
+/// is the full dotted path, which stays unique even when two roots
+/// share a tail name.
 ///
-/// Errors out on any unresolvable hop with a clear
-/// `SelectRelatedInvalid` reason, including the position in the
-/// chain.
-///
-/// **Decoder caveat (T2.2 partial-ship note):** the LoadRelated
-/// dispatcher in `crate::sql::executor` currently stitches single-
-/// hop FKs only. Multi-hop chains emit the JOIN + projection
-/// correctly, so callers can `.filter()` / `.where_raw()` against
-/// deep columns via `Expr::AliasedColumn`, but the lazy
-/// `post.author.profile` field stitching across the chain is
-/// follow-up work (the macro-generated `__rustango_load_related` on
-/// the parent only knows about its own model's FKs; recursive
-/// dispatch on the loaded child instance needs additional macro +
-/// executor wiring).
+/// Any hop that does not resolve returns `SelectRelatedInvalid` naming
+/// its position in the chain.
 fn lower_select_related(
     model: &'static ModelSchema,
     names: &[String],
@@ -2815,21 +2597,14 @@ fn lower_select_related(
                         current.name
                     ),
                 })?;
-            // Per-hop alias: the full dotted path up to and including
-            // this hop. For single-hop chains this is just `field.name`
-            // (matches pre-T2.2 behavior bit-identically). For multi-
-            // hop, the alias accumulates: `author`, then
-            // `author__profile`, then `author__profile__country`.
+            // Per-hop alias: the dotted path up to this hop. A single
+            // hop is just `field.name`; a chain accumulates `author`,
+            // `author__profile`, `author__profile__country`.
             //
-            // Joins-alias names live for the lifetime of the QuerySet
-            // compile, but the writer needs `&'static str`. For
-            // single-hop we already have `field.name` (a `&'static
-            // str` from the schema). For multi-hop, we leak the
-            // composite alias intentionally: the count is small
-            // (depth ≤ ~5 in practice) and bounded by the user's
-            // schema, so this is a tiny one-time cost paid at
-            // compile() time. Same trick `Join::alias` accepts a
-            // `&'static str` elsewhere.
+            // The writer needs `&'static str`. Single-hop already has
+            // one from the schema. For a chain we leak the composite
+            // alias on purpose: depth is small and bounded by the
+            // user's schema, so it is a tiny one-time cost.
             let alias: &'static str = if hops.len() == 1 {
                 field.name
             } else {
@@ -2865,22 +2640,9 @@ fn lower_select_related(
     Ok(out)
 }
 
-/// Parse a Django-shape `"field"` or `"field__suffix"` key + raw
-/// value into the matching `(field, Op, transformed_value)` triple.
-/// Issue #71.
-///
-/// The suffix table is documented on [`QuerySet::filter`]. Failures:
-///
-/// - Unknown `__suffix` → [`QueryError::UnknownLookup`].
-/// - Value-shape mismatch for `__in` / `__isnull` / `__between` /
-///   `__range` → [`QueryError::InvalidLookupValue`].
-///
-/// Chained lookups (`a__b__icontains`) are NOT decomposed in v1 — the
-/// FIRST `__` splits field from suffix, anything after stays as part
-/// of the suffix and errors as `UnknownLookup`.
-/// Result of [`parse_lookup`] — either a plain field/op/value triple
-/// (existing v1 shape) or a date-transform wrapper that the resolver
-/// re-renders as `EXTRACT(…) <op> ?` (issue #829).
+/// Result of [`parse_lookup`]: a plain field/op/value triple, a
+/// date-transform wrapper the resolver re-renders as
+/// `EXTRACT(…) <op> ?`, or a relation span for the resolver to walk.
 enum ParsedLookup {
     Raw {
         field: String,
@@ -2893,20 +2655,19 @@ enum ParsedLookup {
         op: Op,
         value: SqlValue,
     },
-    /// Relation-spanning lookup — `author__name`, `author__name__icontains`,
-    /// `author__profile__bio` (#1031). The key carries at least one
-    /// `__`-separated FK hop before the terminal column + optional
-    /// lookup suffix. Schema-agnostic at parse time: `parse_lookup`
-    /// can't tell an FK hop from a scalar field, so it defers the whole
-    /// key here and the resolver (`resolve_span`) walks it against the
-    /// schema — building the JOINs and the aliased predicate, or
-    /// surfacing the original `UnknownLookup` if no FK chain resolves.
+    /// Relation-spanning lookup such as `author__name` or
+    /// `author__profile__bio__icontains`: one or more FK hops before
+    /// the terminal column, with an optional lookup suffix.
+    /// `parse_lookup` cannot tell an FK hop from a scalar field, so it
+    /// defers the whole key here. `resolve_span` walks it against the
+    /// schema and builds the JOINs and the aliased predicate, or
+    /// reports the original `UnknownLookup` if no FK chain matches.
     RelationSpan { raw_key: String, value: SqlValue },
 }
 
-/// Map a date-transform suffix token to its corresponding scalar fn.
-/// `None` means "this isn't a date transform" — caller falls through
-/// to the existing comparison-suffix table.
+/// Map a date-transform suffix token to its scalar fn. `None` means
+/// the token is not a date transform, so the caller falls through to
+/// the comparison-suffix table.
 fn date_transform_fn(token: &str) -> Option<ScalarFn> {
     match token {
         "year" => Some(ScalarFn::ExtractYear),
@@ -2924,9 +2685,9 @@ fn date_transform_fn(token: &str) -> Option<ScalarFn> {
 }
 
 /// Map a trailing comparison suffix (`gte`, `lt`, …) to an `Op` for
-/// date-transform lookups. The set is intentionally a strict subset
-/// of the full lookup grammar — LIKE / ILIKE / IN / IS-NULL / regex
-/// don't apply to scalar-extracted ints / dates.
+/// date-transform lookups. This is a small subset of the full lookup
+/// grammar on purpose: LIKE, IN, IS NULL and regex make no sense on an
+/// extracted integer or date.
 fn date_compare_op(suffix: &str) -> Option<Op> {
     match suffix {
         "exact" => Some(Op::Eq),
@@ -2939,6 +2700,13 @@ fn date_compare_op(suffix: &str) -> Option<Op> {
     }
 }
 
+/// Parse a Django-shape `"field"` or `"field__suffix"` key and its
+/// value into a [`ParsedLookup`]. The suffix table lives on
+/// [`QuerySet::filter`].
+///
+/// An unknown `__suffix` gives [`QueryError::UnknownLookup`]. A wrong
+/// value shape for `__in`, `__isnull`, `__between` or `__range` gives
+/// [`QueryError::InvalidLookupValue`].
 fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> {
     // Bare field (no `__`) → exact match.
     let Some(split_at) = key.find("__") else {
@@ -2951,10 +2719,10 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
     let field = key[..split_at].to_owned();
     let suffix = &key[split_at + 2..];
 
-    // Date-transform suffixes (issue #829) — `__year`, `__year__gte`,
-    // `__date`, etc. Split the suffix into (transform-token, optional
-    // trailing comparison op). When the token doesn't match a date
-    // transform, fall through to the legacy comparison-suffix table.
+    // Date-transform suffixes: `__year`, `__year__gte`, `__date` and
+    // so on. Split the suffix into a transform token and an optional
+    // trailing comparison. If the token is not a date transform, fall
+    // through to the comparison-suffix table.
     let (transform_token, trailing) = match suffix.find("__") {
         Some(at) => (&suffix[..at], Some(&suffix[at + 2..])),
         None => (suffix, None),
@@ -2984,9 +2752,9 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
         "lt" => Ok(pair(field, Op::Lt, value)),
         "lte" => Ok(pair(field, Op::Lte, value)),
         "iexact" => {
-            // Case-insensitive EQUALITY, not a pattern: escape the
-            // value so `%` / `_` match themselves (#1257) — otherwise
-            // `email__iexact` with `%` matched every row.
+            // Case-insensitive equality, not a pattern. Escape the
+            // value so `%` and `_` match themselves; otherwise
+            // `email__iexact` with a `%` would match every row.
             let v = wrap_like(&value, "", "", &field, suffix)?;
             Ok(pair(field, Op::ILikeEscaped, v))
         }
@@ -3014,12 +2782,10 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             let v = wrap_like(&value, "%", "", &field, suffix)?;
             Ok(pair(field, Op::ILikeEscaped, v))
         }
-        // Raw LIKE / ILIKE / NOT LIKE / NOT ILIKE — Eloquent
-        // `whereLike` / `whereNotLike` parity. Unlike `__contains` /
-        // `__startswith` / `__endswith` the value is bound verbatim
-        // — the caller is responsible for `%` and `_` placement. Use
-        // when you need a non-anchored pattern (`'%foo%bar%'`,
-        // `'_o_'`, etc.) that the auto-wrap helpers can't express.
+        // Raw LIKE / ILIKE / NOT LIKE / NOT ILIKE. Unlike
+        // `__contains` and friends, the value is bound as given, so
+        // the caller places `%` and `_`. Use it for patterns the
+        // auto-wrapping suffixes cannot express, like `'%foo%bar%'`.
         "like" | "ilike" | "not_like" | "not_ilike" => {
             if !matches!(value, SqlValue::String(_)) {
                 return Err(QueryError::InvalidLookupValue {
@@ -3039,10 +2805,6 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             Ok(pair(field, op, value))
         }
         "in" | "not_in" => {
-            // Eloquent `whereNotIn` parity. `viewset::build_lookup_filter`
-            // has accepted `__not_in` for URL-bound query params since
-            // v0.30; this arm closes the drift on the Rust-side
-            // `.filter("field__not_in", SqlValue::List(...))` shape.
             if !matches!(value, SqlValue::List(_)) {
                 return Err(QueryError::InvalidLookupValue {
                     field,
@@ -3089,8 +2851,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
                     });
                 }
             }
-            // Eloquent `whereNotBetween` parity — `__not_between` /
-            // `__not_range` flip the predicate to `NOT BETWEEN`.
+            // `__not_between` / `__not_range` flip it to `NOT BETWEEN`.
             let op = if matches!(suffix, "not_between" | "not_range") {
                 Op::NotBetween
             } else {
@@ -3141,26 +2902,22 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             }
             Ok(pair(field, Op::Search, value))
         }
-        // PG array operators (issue #30). The Django shape uses
-        // `__contains` / `__contained_by` / `__overlap` on
-        // ArrayField columns, but rustango can't dispatch by
-        // field-type from the parser (the field-type info isn't
-        // threaded through `.filter()`). We use explicit
-        // `__array_*` suffixes to keep them disjoint from text
-        // `__contains`; the typed-IR `Column::array_*` methods are
-        // the preferred call site.
+        // Django spells the array operators `__contains` /
+        // `__contained_by` / `__overlap`, but the parser has no field
+        // type to dispatch on, so rustango uses explicit `__array_*`
+        // suffixes that cannot collide with text `__contains`. Prefer
+        // the typed `Column::array_*` methods where you can.
         "range_contains"
         | "range_contained_by"
         | "range_overlap"
         | "range_strictly_left"
         | "range_strictly_right"
         | "range_adjacent" => {
-            // PG range operators. The bound value is a range literal
-            // string (e.g. `"[1, 10)"`); PG implicit-casts to the
-            // column's range type. Accept either a plain
-            // `SqlValue::String` (auto-wrapped into `RangeLiteral`)
-            // or a `SqlValue::RangeLiteral` from the typed-IR Column
-            // helpers — both produce the same emit shape.
+            // PG range operators. The value is a range literal string
+            // such as `"[1, 10)"`, which PG casts to the column's
+            // range type. A plain `SqlValue::String` is wrapped into a
+            // `RangeLiteral`; a `RangeLiteral` from the typed helpers
+            // is taken as is. Both emit the same SQL.
             let literal = match value {
                 SqlValue::String(s) => s,
                 SqlValue::RangeLiteral(s) => s,
@@ -3185,9 +2942,9 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             Ok(pair(field, op, SqlValue::RangeLiteral(literal)))
         }
         "array_contains" | "array_contained_by" | "array_overlap" => {
-            // The bound value must be a list-of-elements; we
-            // promote `SqlValue::List` to `SqlValue::Array` so the
-            // writer binds it as a single PG array parameter.
+            // The value must be a list of elements. Promote
+            // `SqlValue::List` to `SqlValue::Array` so the writer
+            // binds it as one PG array parameter.
             let SqlValue::List(elems) = value else {
                 return Err(QueryError::InvalidLookupValue {
                     field,
@@ -3204,13 +2961,11 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             };
             Ok(pair(field, op, SqlValue::Array(elems)))
         }
-        // Unknown suffix — but the key may be a relation-spanning
-        // lookup (`author__name`, `author__name__icontains`). We can't
-        // tell here (no schema), so defer the whole key to the resolver.
-        // It walks the FK chain against the schema; if the first segment
-        // isn't an FK (a genuinely unknown suffix on a scalar field, e.g.
-        // `pages__bogus`) it re-surfaces this exact `UnknownLookup`.
-        // #1031.
+        // Unknown suffix — but the key may be a relation span such as
+        // `author__name__icontains`. There is no schema here to tell,
+        // so defer the whole key to the resolver. It walks the FK
+        // chain, and if the first segment is not an FK (a real typo
+        // like `pages__bogus`) it raises `UnknownLookup`.
         _ => Ok(ParsedLookup::RelationSpan {
             raw_key: key.to_owned(),
             value,
@@ -3218,12 +2973,11 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
     }
 }
 
-/// Wrap a `SqlValue::String` with leading/trailing wildcard tokens
-/// for `__contains` / `__startswith` / `__endswith` and their `i*`
-/// case-insensitive variants. Issue #71.
+/// Wrap a `SqlValue::String` with leading and trailing wildcards for
+/// `__contains` / `__startswith` / `__endswith` and their `i*` forms.
 ///
-/// Non-string values are rejected with [`QueryError::InvalidLookupValue`]
-/// — LIKE patterns require text input.
+/// A non-string value is rejected with
+/// [`QueryError::InvalidLookupValue`]: LIKE needs text.
 fn wrap_like(
     value: &SqlValue,
     prefix: &str,
@@ -3242,16 +2996,16 @@ fn wrap_like(
             });
         }
     };
-    // Escape LIKE metacharacters in the user value so `%` / `_` match
-    // literally (#1257) — the wrapping wildcards `prefix`/`suffix_char`
-    // are added AFTER escaping so they keep their pattern meaning. The
-    // resulting value is only correct under `ESCAPE '!'`, so every
-    // caller pairs it with `Op::LikeEscaped` / `Op::ILikeEscaped`.
+    // Escape LIKE metacharacters in the user value so `%` and `_`
+    // match literally. The wrapping wildcards go on after escaping, so
+    // they keep their pattern meaning. The result is only correct
+    // under `ESCAPE '!'`, so every caller pairs it with
+    // `Op::LikeEscaped` or `Op::ILikeEscaped`.
     let escaped = crate::core::escape_like(s);
     Ok(SqlValue::String(format!("{prefix}{escaped}{suffix_char}")))
 }
 
-/// Human-readable shape name for an `SqlValue` — used in
+/// Readable shape name for an `SqlValue`, used in
 /// [`QueryError::InvalidLookupValue`] messages.
 fn sql_value_shape_name(v: &SqlValue) -> &'static str {
     match v {
@@ -3268,14 +3022,13 @@ fn sql_value_shape_name(v: &SqlValue) -> &'static str {
     }
 }
 
-/// #331 — append an always-false predicate onto `base` so the
-/// surrounding statement (UPDATE / DELETE) cannot match any row.
-/// Uses `<primary_key> IS NULL`: every Django/rustango model declares a
-/// NOT NULL primary key, so this predicate is unsatisfiable across
-/// every backend and every row. We deliberately don't try `1 = 0` /
-/// `FALSE` literal predicates — those need raw-SQL escape hatches our
-/// IR doesn't expose today, and the IS NULL trick lives entirely in
-/// existing `Op::IsNull` machinery.
+/// Add an always-false predicate to `base` so the surrounding UPDATE
+/// or DELETE matches no row.
+///
+/// It uses `<primary_key> IS NULL`. Every model declares a NOT NULL
+/// primary key, so that can never be true, on any backend. A `1 = 0`
+/// literal would need a raw-SQL escape hatch the IR does not expose,
+/// while `IS NULL` reuses the existing `Op::IsNull` path.
 fn never_match_clause(
     model: &'static ModelSchema,
     base: WhereExpr,
@@ -3292,8 +3045,8 @@ fn never_match_clause(
         value: SqlValue::Bool(true),
     });
     Ok(match base {
-        // Vacuously-true `And(vec![])` collapses to just the never-match
-        // predicate — keeps the emitted WHERE clean (single column ref).
+        // An empty `And` collapses to the never-match predicate alone,
+        // which keeps the emitted WHERE to a single column reference.
         WhereExpr::And(nodes) if nodes.is_empty() => never,
         WhereExpr::And(mut nodes) => {
             nodes.push(never);
@@ -3303,10 +3056,10 @@ fn never_match_clause(
     })
 }
 
-/// Parse a `key`/`value` pair through the lookup grammar into a single
+/// Parse a `key`/`value` pair through the lookup grammar into one
 /// [`PendingFilter`]. Shared by [`QuerySet::filter`] and
-/// [`QuerySet::exclude`] (#1030) so the `__lookup` suffix grammar can
-/// never drift between the two.
+/// [`QuerySet::exclude`], so the `__lookup` grammar cannot drift
+/// between them.
 fn parse_to_pending(key: &str, value: SqlValue) -> PendingFilter {
     match parse_lookup(key, value) {
         Ok(ParsedLookup::Raw { field, op, value }) => {
@@ -3342,8 +3095,8 @@ fn resolve_pending(
 }
 
 /// Lower a single [`PendingFilter`] to a [`WhereExpr`]. Split out of
-/// [`resolve_pending`]'s loop so [`PendingFilter::Negated`] can resolve
-/// its inner entry recursively (#1030).
+/// [`resolve_pending`]'s loop so [`PendingFilter::Negated`] can
+/// resolve its inner entry recursively.
 fn resolve_one_pending(
     model: &'static ModelSchema,
     entry: PendingFilter,
@@ -3356,22 +3109,19 @@ fn resolve_one_pending(
         PendingFilter::Negated(inner) => {
             WhereExpr::Not(Box::new(resolve_one_pending(model, *inner)?))
         }
-        // #1031 — relation spans are lowered to `Expr` + JOINs by the
-        // SELECT compile() pre-pass (`lower_relation_spans`). Reaching
-        // here still as a span means a context without join support
-        // (update / delete / aggregate). Resolve first to distinguish a
-        // genuine bad suffix (`status__bogus` → first segment isn't an
-        // FK → `resolve_span` returns the original `UnknownLookup`,
-        // which we preserve) from a real relation span (resolves OK, but
-        // the JOIN can't be carried here → clear error).
+        // `lower_relation_spans` turns spans into `Expr` plus JOINs on
+        // the SELECT path. One arriving here means update / delete /
+        // aggregate, which cannot carry a JOIN. Resolve it first to
+        // tell a real span (resolves, so report "unsupported here")
+        // from a bad suffix like `status__bogus` (whose first segment
+        // is not an FK, so keep the original `UnknownLookup`).
         PendingFilter::RelationSpan { raw_key, value } => {
             return match resolve_span(model, &raw_key, value) {
                 Ok(_) => Err(QueryError::RelationSpanUnsupportedHere { key: raw_key }),
                 Err(e) => Err(e),
             }
         }
-        // Issue #71 — bubble the deferred lookup-parse error up at the
-        // natural `compile()` checkpoint.
+        // Surface the deferred lookup-parse error at `compile()`.
         PendingFilter::Error(e) => return Err(e),
     })
 }
@@ -3384,9 +3134,9 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
             field: raw.field.clone(),
         })?;
 
-    // `IsNull` carries a Bool sentinel (true = IS NULL, false = IS NOT NULL),
-    // not a value to compare against the field — skip the type check.
-    // `In` carries a List; element-by-element checking is a follow-up.
+    // `IsNull` carries a Bool flag, not a value to compare with the
+    // field, so skip the type check. `In` carries a List, whose
+    // elements are not checked one by one.
     let skip_type_check = matches!(raw.op, Op::IsNull | Op::In);
 
     if !skip_type_check {
@@ -3409,21 +3159,19 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
     })
 }
 
-/// #1031 — resolve a relation-spanning lookup key into its FK-chain
-/// LEFT JOINs plus an aliased `ExprCompare` predicate.
+/// Resolve a relation-spanning lookup key into its FK-chain LEFT JOINs
+/// plus an aliased `ExprCompare` predicate.
 ///
-/// `author__name` / `author__profile__bio__icontains` / `author__profile`
-/// all decompose as: leading segments that name an FK/O2O field are
-/// JOIN hops; the first non-FK (or the final) segment is the terminal
-/// column; any remaining segments are a lookup suffix re-parsed through
-/// the normal grammar ([`parse_lookup`]) and re-targeted onto the
-/// aliased column. The terminal `ExprCompare` carries `rhs:
-/// Expr::Literal(value)` for every op the [`write_expr_compare`] writer
-/// supports (binary / LIKE / ILIKE / IN / BETWEEN / IS NULL).
+/// A key such as `author__profile__bio__icontains` splits into three
+/// parts. Leading segments naming an FK or O2O field are JOIN hops.
+/// The first non-FK segment, or the last one, is the terminal column.
+/// Anything after that is a lookup suffix, re-parsed through
+/// [`parse_lookup`] and applied to the aliased column.
 ///
-/// When the first segment isn't an FK the key isn't a relation span at
-/// all (e.g. `pages__bogus`) — we re-surface the original
-/// [`QueryError::UnknownLookup`] so existing errors are unchanged.
+/// If the first segment is not an FK, the key is not a span at all,
+/// for example `pages__bogus`. The original
+/// [`QueryError::UnknownLookup`] is returned so the error stays the
+/// same as before.
 fn resolve_span(
     model: &'static ModelSchema,
     raw_key: &str,
@@ -3431,7 +3179,7 @@ fn resolve_span(
 ) -> Result<(Vec<crate::core::Join>, WhereExpr), QueryError> {
     use crate::core::Expr;
     let segs: Vec<&str> = raw_key.split("__").collect();
-    // FK-chain walk is shared with the `order_by` path (#1031 P2).
+    // The FK-chain walk is shared with the `order_by` path.
     let (joins, prev_alias, current, term_i) = resolve_span_chain(model, raw_key)?;
 
     let term_field = current
@@ -3456,8 +3204,8 @@ fn resolve_span(
                 value,
                 ..
             }) => (op, value, Some(transform)),
-            // A trailing suffix that's still unknown is a genuine bad
-            // lookup on the terminal field.
+            // A trailing suffix still unknown here is a real typo on
+            // the terminal field.
             Ok(ParsedLookup::RelationSpan { .. }) => {
                 return Err(QueryError::UnknownLookup {
                     field: term_field.name.to_owned(),
@@ -3486,20 +3234,18 @@ fn resolve_span(
     Ok((joins, predicate))
 }
 
-/// #1031 — walk a relation-span path's FK / O2O hops into LEFT JOINs.
-/// Shared by [`resolve_span`] (the `filter()` predicate path) and
-/// [`lower_order_items`] (the `order_by()` path) so the two can't drift.
+/// Walk a relation-span path's FK / O2O hops into LEFT JOINs. Shared
+/// by [`resolve_span`] (the `filter()` path) and [`lower_order_items`]
+/// (the `order_by()` path), so the two cannot drift.
 ///
-/// Returns the accumulated JOINs, the alias of the table that holds the
-/// terminal column (`prev_alias`), the schema that table belongs to
-/// (`current`), and the index of the terminal segment (first non-FK, or
-/// the final segment) in the `__`-split key. The terminal column itself
-/// is `current.field(segs[term_i])` — the callers shape it into either a
-/// predicate or an `OrderItem`.
+/// Returns the JOINs, the alias of the table holding the terminal
+/// column, that table's schema, and the index of the terminal segment
+/// in the `__`-split key. The terminal column is
+/// `current.field(segs[term_i])`; callers turn it into a predicate or
+/// an `OrderItem`.
 ///
-/// Errors with the original [`QueryError::UnknownLookup`] when the first
-/// segment isn't an FK at all (so non-span unknown keys keep their
-/// existing error).
+/// Returns the original [`QueryError::UnknownLookup`] when the first
+/// segment is not an FK, so non-span keys keep their existing error.
 fn resolve_span_chain(
     model: &'static ModelSchema,
     raw_key: &str,
@@ -3542,10 +3288,11 @@ fn resolve_span_chain(
                 } else {
                     format!("{alias_path}__{seg}")
                 };
-                // Leak the cumulative dotted alias — bounded by the
-                // user's schema depth, paid once at compile() time;
-                // matches `lower_select_related`'s alias scheme so a
-                // span + `select_related` over the same path dedupe.
+                // Leak the dotted alias: depth is bounded by the
+                // schema and the cost is paid once at compile() time.
+                // It matches `lower_select_related`'s scheme, so a
+                // span and a `select_related` over the same path
+                // dedupe against each other.
                 let alias: &'static str = Box::leak(alias_path.clone().into_boxed_str());
                 let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
                 joins.push(Join {
@@ -3572,9 +3319,9 @@ fn resolve_span_chain(
         }
     }
 
-    // No hop consumed → the first segment isn't an FK, so this is a
-    // plain unknown suffix on a scalar field — re-surface the original
-    // error (`pages__bogus` → UnknownLookup{ pages, bogus }).
+    // No hop consumed means the first segment is not an FK, so this is
+    // an unknown suffix on a scalar field. Return the original error:
+    // `pages__bogus` gives `UnknownLookup { pages, bogus }`.
     if joins.is_empty() {
         let suffix = raw_key.splitn(2, "__").nth(1).unwrap_or("").to_owned();
         return Err(QueryError::UnknownLookup {
@@ -3586,12 +3333,11 @@ fn resolve_span_chain(
     Ok((joins, prev_alias, current, term_i))
 }
 
-/// #1031 — pre-pass over the pending filters that lowers every
-/// relation-spanning lookup ([`PendingFilter::RelationSpan`], including
-/// inside [`PendingFilter::Negated`] from `exclude`) into a resolved
-/// `Expr` predicate, accumulating the FK-chain JOINs. Returns the
-/// rewritten pending list plus the JOINs to merge (deduped by alias) on
-/// the SELECT path.
+/// Pre-pass over the pending filters. Lowers every
+/// [`PendingFilter::RelationSpan`], including ones nested in a
+/// [`PendingFilter::Negated`] from `exclude`, into a resolved `Expr`
+/// predicate and collects the FK-chain JOINs. Returns the rewritten
+/// pending list and the JOINs for the SELECT path to merge by alias.
 fn lower_relation_spans(
     model: &'static ModelSchema,
     pending: Vec<PendingFilter>,
@@ -3626,15 +3372,13 @@ fn convert_relation_span(
     })
 }
 
-/// Resolve a [`DateTransformFilter`] into a `WhereExpr::ExprCompare`
-/// node — the field is looked up against the schema and wrapped in
-/// the corresponding [`ScalarFn`] (`EXTRACT(YEAR FROM …)`, etc.) on
-/// the LHS; the bound value lands as a literal on the RHS. Issue #829.
+/// Resolve a [`DateTransformFilter`] into a `WhereExpr::ExprCompare`.
+/// The field is looked up in the schema and wrapped in its
+/// [`ScalarFn`], such as `EXTRACT(YEAR FROM …)`, on the left. The
+/// bound value becomes a literal on the right.
 ///
-/// Skips the value/column type-equality check that
-/// [`resolve_filter`] applies — date-transform LHS values are scalar
-/// ints / dates rather than the column's native type, so the literal
-/// shape isn't expected to match the field type.
+/// This skips the type check [`resolve_filter`] does: the extracted
+/// value is an integer or date, not the column's own type.
 fn resolve_date_transform(
     model: &'static ModelSchema,
     dt: DateTransformFilter,
@@ -3684,11 +3428,11 @@ fn resolve_assignment(
 }
 
 /// Resolve a [`RawExprAssignment`] (the `F()` SET path) against the
-/// schema. Field name + every column reference inside the expression
-/// tree are validated; the literal type-check that
-/// [`resolve_assignment`] does for [`SqlValue`] doesn't apply because
-/// the RHS may be a column ref or arithmetic, both of which only have
-/// a resolved type at the row level.
+/// schema. The field name and every column reference in the
+/// expression tree are checked. The literal type check that
+/// [`resolve_assignment`] does for [`SqlValue`] is skipped: the right
+/// side may be a column reference or arithmetic, whose type is only
+/// known per row.
 fn resolve_assignment_expr(
     model: &'static ModelSchema,
     raw: RawExprAssignment,
@@ -3706,11 +3450,10 @@ fn resolve_assignment_expr(
     })
 }
 
-/// Walk an [`crate::core::Expr`] and confirm every `Column`
-/// reference resolves on `model`. Mirrors the same check that
-/// `core::query::WhereExpr::validate` does for `ColumnCompare` —
-/// duplicated here so the `UpdateBuilder` path catches typos at
-/// `compile()` time rather than at the database.
+/// Walk an [`crate::core::Expr`] and check every `Column` reference
+/// resolves on `model`. Same check `core::query::WhereExpr::validate`
+/// does for `ColumnCompare`, repeated here so the `UpdateBuilder` path
+/// catches a typo at `compile()` time instead of at the database.
 fn validate_expr_columns_in_model(
     model: &'static ModelSchema,
     expr: &crate::core::Expr,
@@ -3749,23 +3492,19 @@ fn validate_expr_columns_in_model(
             }
             Ok(())
         }
-        // Subqueries validate against their own model at the time
-        // they were compiled via QuerySet::compile(); OuterRef
-        // names an outer column resolved when this Expr is embedded
-        // in the outer queryset (the caller already validated it
-        // there). `AliasedColumn` (issue #80) carries its own table
-        // alias and is validated by the JOIN writer at emit time.
-        // `AggregateSubquery` (issue #830) validates against its own
-        // child model at construction; nothing resolves against this one.
+        // None of these resolve against this model. A subquery was
+        // already checked by its own `compile()`. An `OuterRef` was
+        // checked by the outer queryset. An `AliasedColumn` belongs to
+        // a joined alias and is checked by the JOIN writer.
+        // `AggregateSubquery` and `RelAggregate` resolve against the
+        // child model or relation table.
         Expr::Subquery(_)
         | Expr::AggregateSubquery(_)
         | Expr::OuterRef(_)
-        // `RelAggregate` (issue #830) aggregates a raw relation table;
-        // its columns resolve there, not on this model.
         | Expr::RelAggregate { .. }
         | Expr::AliasedColumn { .. } => Ok(()),
-        // Window (issue #7) — partition_by + order_by + arg columns
-        // reference the model. Walk them.
+        // A window's partition_by, order_by and arg columns do belong
+        // to this model, so walk them.
         Expr::Window(w) => {
             for col in &w.partition_by {
                 if model.field_by_column(col).is_none() {
@@ -3788,14 +3527,12 @@ fn validate_expr_columns_in_model(
             }
             Ok(())
         }
-        // Aggregate (issue #74) — flat variants hold raw column
-        // names that this validator doesn't traverse; pre-existing
-        // gap. Window-shaped aggregates are validated via the
-        // dedicated walker in `validate_aggregate_expr_columns`.
+        // The flat aggregate variants hold raw column names this
+        // walker does not visit — a known gap. Window-shaped
+        // aggregates go through `validate_aggregate_expr_columns`.
         Expr::Aggregate(_) => Ok(()),
-        // JsonPath (issue #296 / T2.3) — the `source` is a column
-        // expression to validate; the path steps are JSON-pointer
-        // keys/indices and don't reference model columns themselves.
+        // Only a JSON path's `source` is a column expression; the
+        // steps are keys and indices, not model columns.
         Expr::JsonPath { source, .. } => validate_expr_columns_in_model(model, source),
     }
 }
@@ -3807,51 +3544,43 @@ pub struct AggregateBuilder<T: Model> {
     qs: QuerySet<T>,
     group_by: Vec<&'static str>,
     aggregates: Vec<(std::borrow::Cow<'static, str>, AggregateExpr)>,
-    /// Django 3.2 `.alias()` — non-projected annotations. Resolvable in
-    /// `.filter(name, …)` and `.order_by([(name, …)])` (the builder lifts
-    /// the expression into the predicate/ORDER item at `compile()` time),
-    /// but never emitted in the SELECT list. Issue #268.
+    /// Django 3.2 `.alias()`: annotations you can use in
+    /// `.filter(name, …)` and `.order_by([(name, …)])`, but that never
+    /// appear in the SELECT list. `compile()` lifts the expression
+    /// into the predicate or ORDER item.
     aliases: Vec<(std::borrow::Cow<'static, str>, AggregateExpr)>,
     having: Option<WhereExpr>,
     order_by: Vec<(&'static str, bool)>,
     limit: Option<i64>,
     offset: Option<i64>,
-    /// Issue #74 — deferred error surfacing for builder-time
-    /// validation failures (e.g. `.filter(alias, Op::JsonContains, …)`
-    /// against an annotation alias, which the auto-routing rejects
-    /// because the JSON-op family + null-safe equality need
-    /// dialect-specific writers that don't compose against an
-    /// aggregate LHS). Stored on first error; subsequent builder
-    /// calls are no-ops so the original cause isn't masked. Surfaced
-    /// from `compile()`. (Issue #87 widened the supported op set to
-    /// include `IN`/`BETWEEN`/`IS NULL`/`LIKE`/`ILIKE` + negated
-    /// variants.)
+    /// First builder-time validation error, surfaced from `compile()`.
+    /// An example is `.filter(alias, Op::JsonContains, …)` on an
+    /// annotation alias: the JSON ops need dialect-specific writers
+    /// that do not work against an aggregate on the left. Only the
+    /// first error is kept, so later calls cannot mask the cause.
     deferred_error: Option<crate::core::QueryError>,
-    /// Issue #75 — projection columns set via [`Self::values`] (or
-    /// [`QuerySet::values`]). When `Some(cols)` and the user hasn't
-    /// called `.group_by(...)` explicitly, `compile()` derives
-    /// `GROUP BY cols`. When `None` and an aggregating annotation is
-    /// present, `compile()` falls back to Django Shape 3 — `GROUP BY`
-    /// every non-aggregate scalar column on the model.
+    /// Projection columns from [`Self::values`] or [`QuerySet::values`].
+    /// With `Some(cols)` and no explicit `.group_by(...)`, `compile()`
+    /// derives `GROUP BY cols`. With `None` and an aggregating
+    /// annotation, it groups by every non-aggregate scalar column
+    /// (Django Shape 3).
     values: Option<Vec<&'static str>>,
 }
 
 impl<T: Model> AggregateBuilder<T> {
     /// Add a `GROUP BY` column. Call multiple times to group by multiple columns.
     ///
-    /// Explicit `.group_by(...)` calls always win — when paired with
-    /// [`Self::values`] / [`QuerySet::values`], the explicit list is what
-    /// reaches the writer; the values list still drives the projection
-    /// SELECT list (issue #75).
+    /// An explicit `.group_by(...)` always wins. Paired with
+    /// [`Self::values`], the explicit list reaches the writer while
+    /// the values list still drives the SELECT projection.
     #[must_use]
     pub fn group_by(mut self, column: &'static str) -> Self {
         self.group_by.push(column);
         self
     }
 
-    /// Set the projection column list — same semantic as
-    /// [`QuerySet::values`] but available mid-chain when you started
-    /// from `.aggregate()` rather than `.values(...)`. Issue #75.
+    /// Set the projection column list. Same as [`QuerySet::values`],
+    /// but usable mid-chain when you started from `.aggregate()`.
     #[must_use]
     pub fn values(mut self, columns: &[&'static str]) -> Self {
         self.values = Some(columns.to_vec());
@@ -3866,20 +3595,20 @@ impl<T: Model> AggregateBuilder<T> {
         self
     }
 
-    /// Project a correlated scalar subquery under `alias` — Django's
-    /// `annotate(x=Subquery(...))` (#1036). Sugar over [`Self::annotate`]
-    /// with [`crate::core::subquery::scalar_subquery`]; shape `inner` to
-    /// one column × ≤1 row (see that function's caller contract).
+    /// Project a correlated scalar subquery under `alias`. Django's
+    /// `annotate(x=Subquery(…))`. Shorthand for [`Self::annotate`]
+    /// with [`crate::core::subquery::scalar_subquery`]. `inner` must
+    /// return one column and at most one row.
     #[must_use]
     pub fn annotate_subquery(self, alias: &'static str, inner: crate::core::SelectQuery) -> Self {
         self.annotate(alias, crate::core::subquery::scalar_subquery(inner))
     }
 
-    /// #1038 — resolve a relation `name` (reverse-FK / M2M / generic-FK)
-    /// into a correlated `RelatedAggregate` and stage it on this builder.
-    /// Shared with [`QuerySet::annotate_count`] & co. so a relation
-    /// aggregate can be chained more than once in a single query. Errors
-    /// are deferred onto `self.deferred_error` to surface from `compile()`.
+    /// Resolve a relation `name` (reverse-FK, M2M or generic-FK) into
+    /// a correlated `RelatedAggregate` and stage it on this builder.
+    /// Shared with [`QuerySet::annotate_count`] and friends, so a
+    /// query can chain several relation aggregates. Errors go to
+    /// `self.deferred_error` and surface from `compile()`.
     fn push_relation_aggregate(
         &mut self,
         name: &str,
@@ -3919,10 +3648,10 @@ impl<T: Model> AggregateBuilder<T> {
             return;
         }
 
-        // Many-to-many — `Count` over the junction; `Sum`/`Avg`/`Max`/
-        // `Min` over a target column reached through the junction. The
-        // target table has no `ModelSchema`, so `column` can't be
-        // validated here (a bad column surfaces at the database).
+        // Many-to-many: `Count` over the junction table, and the other
+        // aggregates over a target column reached through it. The
+        // target table has no `ModelSchema` here, so a bad `column`
+        // only surfaces at the database.
         if let Some(m2m) = T::SCHEMA.m2m.iter().find(|m| m.name == name) {
             let pk = T::SCHEMA.primary_key().map_or("id", |f| f.column);
             let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::m2m_has_aggregate(
@@ -3966,10 +3695,11 @@ impl<T: Model> AggregateBuilder<T> {
         });
     }
 
-    /// #1038 — `<name>_exists` companion of [`Self::push_relation_aggregate`]
-    /// (the `CASE WHEN EXISTS(...) THEN 1 ELSE 0` projection). Reuses the
-    /// `QuerySet` existence resolver so the reverse-FK / M2M / GFK logic
-    /// lives in one place.
+    /// The `<name>_exists` companion of
+    /// [`Self::push_relation_aggregate`], projecting
+    /// `CASE WHEN EXISTS(...) THEN 1 ELSE 0`. It reuses the `QuerySet`
+    /// resolver, so the reverse-FK / M2M / GFK logic lives in one
+    /// place.
     fn push_relation_exists(&mut self, name: &str) {
         match QuerySet::<T>::resolve_rel_exists(name, /*negated=*/ false) {
             Some(exists) => {
@@ -3988,9 +3718,9 @@ impl<T: Model> AggregateBuilder<T> {
         }
     }
 
-    /// Chain a relation `COUNT` onto an existing aggregate builder
-    /// (#1038) — mirrors [`QuerySet::annotate_count`] so two relation
-    /// counts compose in ONE query:
+    /// Chain a relation `COUNT` onto an existing aggregate builder,
+    /// like [`QuerySet::annotate_count`], so two relation counts fit in
+    /// one query:
     /// `Post::objects().annotate_count("comments").annotate_count("likes")`.
     #[must_use]
     pub fn annotate_count(mut self, name: &str) -> Self {
@@ -3998,35 +3728,35 @@ impl<T: Model> AggregateBuilder<T> {
         self
     }
 
-    /// Chain a relation `SUM(<column>)` (#1038). See [`QuerySet::annotate_sum`].
+    /// Chain a relation `SUM(<column>)`. See [`QuerySet::annotate_sum`].
     #[must_use]
     pub fn annotate_sum(mut self, name: &str, column: &'static str) -> Self {
         self.push_relation_aggregate(name, Some(column), AggregateExpr::Sum(column), "sum");
         self
     }
 
-    /// Chain a relation `AVG(<column>)` (#1038). See [`QuerySet::annotate_avg`].
+    /// Chain a relation `AVG(<column>)`. See [`QuerySet::annotate_avg`].
     #[must_use]
     pub fn annotate_avg(mut self, name: &str, column: &'static str) -> Self {
         self.push_relation_aggregate(name, Some(column), AggregateExpr::Avg(column), "avg");
         self
     }
 
-    /// Chain a relation `MAX(<column>)` (#1038). See [`QuerySet::annotate_max`].
+    /// Chain a relation `MAX(<column>)`. See [`QuerySet::annotate_max`].
     #[must_use]
     pub fn annotate_max(mut self, name: &str, column: &'static str) -> Self {
         self.push_relation_aggregate(name, Some(column), AggregateExpr::Max(column), "max");
         self
     }
 
-    /// Chain a relation `MIN(<column>)` (#1038). See [`QuerySet::annotate_min`].
+    /// Chain a relation `MIN(<column>)`. See [`QuerySet::annotate_min`].
     #[must_use]
     pub fn annotate_min(mut self, name: &str, column: &'static str) -> Self {
         self.push_relation_aggregate(name, Some(column), AggregateExpr::Min(column), "min");
         self
     }
 
-    /// Chain a relation `<name>_exists` projection (#1038). See
+    /// Chain a relation `<name>_exists` projection. See
     /// [`QuerySet::annotate_exists`].
     #[must_use]
     pub fn annotate_exists(mut self, name: &str) -> Self {
@@ -4034,13 +3764,13 @@ impl<T: Model> AggregateBuilder<T> {
         self
     }
 
-    /// Django 3.2 `.alias()` — annotate without projecting. The expression
-    /// is registered under `name` and resolvable in [`Self::filter`] /
-    /// [`Self::order_by`] (the builder lifts it in-place at compile time),
-    /// but the writer **omits it from the SELECT list**. Issue #268.
+    /// Django 3.2 `.alias()` — annotate without projecting. The
+    /// expression is registered under `name` and usable in
+    /// [`Self::filter`] and [`Self::order_by`], but the writer
+    /// **leaves it out of the SELECT list**.
     ///
-    /// Use this when you want to filter or order by a derived aggregate
-    /// without paying the column-decode cost on every row:
+    /// Use it to filter or order by a derived aggregate without
+    /// decoding that column on every row:
     ///
     /// ```ignore
     /// // Authors with > 5 posts, ordered by post count desc — but no post
@@ -4058,12 +3788,11 @@ impl<T: Model> AggregateBuilder<T> {
     /// // ORDER BY COUNT(*) DESC
     /// ```
     ///
-    /// **Chain ordering matters** — same caveat as [`Self::annotate`]: call
-    /// `.alias(name, ...)` BEFORE the corresponding `.filter(name, ...)` /
-    /// `.order_by([(name, ...)])` so the registry lookup sees it.
+    /// **Order matters**, as with [`Self::annotate`]: call
+    /// `.alias(name, ...)` BEFORE the matching `.filter(name, ...)` or
+    /// `.order_by([(name, ...)])`, so the lookup can find it.
     ///
-    /// When `name` collides with an existing annotate alias, the existing
-    /// annotate wins (it's projected; semantics-preserving).
+    /// If `name` clashes with an annotate alias, the annotate wins.
     #[must_use]
     pub fn alias(mut self, name: &'static str, expr: AggregateExpr) -> Self {
         self.aliases.push((std::borrow::Cow::Borrowed(name), expr));
@@ -4081,12 +3810,11 @@ impl<T: Model> AggregateBuilder<T> {
         self
     }
 
-    /// String-keyed filter with WHERE/HAVING auto-routing — issue #74.
-    /// Django's `.filter()` semantic on an aggregating queryset: if
-    /// `field` matches an annotation alias added via [`Self::annotate`],
-    /// the predicate lands in `HAVING` (alongside any explicit
-    /// [`Self::having`] calls). Otherwise it forwards to the WHERE
-    /// path on the underlying `QuerySet`.
+    /// String-keyed filter that routes itself to WHERE or HAVING, like
+    /// Django's `.filter()` on an aggregating queryset. If `field`
+    /// matches an annotation alias from [`Self::annotate`], the
+    /// predicate joins `HAVING`. Otherwise it goes to the WHERE path
+    /// on the underlying `QuerySet`.
     ///
     /// ```ignore
     /// // Authors with > 10 published posts:
@@ -4099,17 +3827,14 @@ impl<T: Model> AggregateBuilder<T> {
     ///     .compile()?;
     /// ```
     ///
-    /// **Chain ordering matters**: `.annotate(alias, ...)` must come
-    /// BEFORE the corresponding `.filter(alias, ...)` so the
-    /// alias-registry lookup sees it. (Django defers this resolution
-    /// to query construction; rustango v1 resolves at call time —
-    /// reordering may land in a future slice.)
+    /// **Order matters**: `.annotate(alias, ...)` must come BEFORE the
+    /// matching `.filter(alias, ...)`, because rustango resolves the
+    /// alias at call time. Django resolves it later.
     ///
-    /// **Validator gap**: alias-routed HAVING predicates skip the
-    /// model-schema column walk (the alias isn't a real column).
-    /// Typo'd aliases surface at the DB, not at `compile()`.
-    /// WHERE-routed predicates still go through `resolve_pending`'s
-    /// schema validation.
+    /// **Gap**: an alias-routed HAVING predicate skips the schema
+    /// column check, because the alias is not a real column, so a
+    /// typo surfaces at the database rather than at `compile()`.
+    /// WHERE-routed predicates are still checked.
     #[must_use]
     pub fn filter(
         mut self,
@@ -4117,20 +3842,17 @@ impl<T: Model> AggregateBuilder<T> {
         op: crate::core::Op,
         value: impl Into<crate::core::SqlValue>,
     ) -> Self {
-        // Once we've recorded a deferred error, swallow subsequent
-        // builder calls so the original cause isn't masked by a
-        // downstream complaint.
+        // Once an error is recorded, ignore later builder calls so the
+        // original cause is not masked.
         if self.deferred_error.is_some() {
             return self;
         }
-        // Look up the AggregateExpr behind the alias if one exists.
-        // PG strictly disallows SELECT-list aliases in HAVING (only
-        // MySQL + SQLite allow it), so we LIFT the aggregate
-        // expression into the predicate rather than passing the
-        // alias by name — `HAVING COUNT(*) > $1` emits uniformly on
-        // every backend.
-        // Issue #268 — `.alias()` annotations also register as lift-able
-        // names. Annotate wins on collision (projected entry first).
+        // Find the AggregateExpr behind the alias. PG forbids
+        // SELECT-list aliases in HAVING, so lift the whole expression
+        // into the predicate instead of naming the alias:
+        // `HAVING COUNT(*) > $1` works on every backend.
+        // `.alias()` entries are lift-able too; annotate wins a clash
+        // because it comes first.
         let agg = self
             .aggregates
             .iter()
@@ -4138,14 +3860,11 @@ impl<T: Model> AggregateBuilder<T> {
             .find(|(alias, _)| *alias == field)
             .map(|(_, expr)| expr.clone());
         if let Some(agg) = agg {
-            // Issue #87 — `write_expr_compare` now handles the SQL-92
-            // standard predicates that compose against an aggregate
-            // LHS (`IN` / `NOT IN` / `BETWEEN` / `IS NULL` / `LIKE` /
-            // `NOT LIKE` / `ILIKE` / `NOT ILIKE`) in addition to the
-            // binary-comparison set. JSON ops and null-safe equality
-            // (`IS DISTINCT FROM` / `IS NOT DISTINCT FROM`) still
-            // need dialect-specific writers that take a `&str` for
-            // the LHS, so they keep rejecting with the targeted error.
+            // `write_expr_compare` handles the comparison operators
+            // plus IN, BETWEEN, IS NULL, LIKE and ILIKE against an
+            // aggregate on the left. JSON ops and null-safe equality
+            // still need dialect-specific writers that take a `&str`
+            // left side, so they are rejected here.
             if matches!(
                 op,
                 crate::core::Op::JsonContains
@@ -4172,9 +3891,8 @@ impl<T: Model> AggregateBuilder<T> {
                 Some(ref mut existing) => existing.push_and(pred),
             }
         } else {
-            // Forward to the underlying QuerySet's WHERE path. Same
-            // schema-validation rules apply at `resolve_pending` time
-            // — typo'd model columns get caught at `compile()`.
+            // Forward to the QuerySet's WHERE path, where
+            // `resolve_pending` catches a typo'd column at compile().
             self.qs = self.qs.filter_op(field, op, value);
         }
         self
@@ -4208,10 +3926,9 @@ impl<T: Model> AggregateBuilder<T> {
     /// unknown field, or if `.values()` was called without a
     /// subsequent aggregating `.annotate(...)`.
     ///
-    /// # GROUP BY inference (issue #75)
+    /// # GROUP BY inference
     ///
-    /// When the user hasn't called `.group_by(...)` explicitly, the
-    /// builder fills it in:
+    /// Without an explicit `.group_by(...)`, the builder fills it in:
     ///
     /// * `.values(cols).annotate(agg)` → `GROUP BY cols` (Django Shape 2).
     /// * `.annotate(agg)` (no values) → `GROUP BY` every non-aggregate
@@ -4221,37 +3938,33 @@ impl<T: Model> AggregateBuilder<T> {
     ///
     /// Explicit `.group_by(...)` always wins.
     pub fn compile(mut self) -> Result<AggregateQuery, QueryError> {
-        // Surface any builder-time deferred error first (e.g. an
-        // `Op::In` against an annotation alias) so the user sees the
-        // real cause rather than a downstream compile failure.
+        // Report any deferred builder error first, so the user sees
+        // the real cause and not a later compile failure.
         if let Some(e) = self.deferred_error {
             return Err(e);
         }
-        // Issue #820 — fold global scopes into the WHERE so aggregates
-        // honor the same auto-applied filter (e.g. `.count()`
-        // against a `published_only`-scoped model counts published
-        // rows only, not the table's full row count).
+        // Fold global scopes into the WHERE so aggregates honour them
+        // too: `.count()` on a `published_only` model counts published
+        // rows, not the whole table.
         self.qs.apply_global_scopes();
-        // #1040 — carry the QuerySet's ad-hoc JOINs into the aggregate so
-        // it can group by a related column (`group_by("author.name")`).
-        // Empty for the common single-table aggregate.
+        // Carry the QuerySet's ad-hoc JOINs over so the aggregate can
+        // group by a related column, as in `group_by("author.name")`.
+        // Empty for a plain single-table aggregate.
         let joins = std::mem::take(&mut self.qs.ad_hoc_joins);
         let model = T::SCHEMA;
         let where_clause = resolve_pending(model, self.qs.pending)?;
-        // Walk each AggregateExpr for column-name typos. Today this
-        // catches partition_by / order_by / args inside an
-        // `AggregateExpr::Window` (issue #7) — the older `Sum("col")` /
-        // `Count(Some("col"))` shapes don't validate yet; that's a
-        // pre-existing gap orthogonal to this slice.
+        // Check each AggregateExpr for column typos. This covers the
+        // partition_by, order_by and args of a window aggregate. The
+        // flat `Sum("col")` / `Count(Some("col"))` shapes are a known
+        // gap and are not checked.
         for (_alias, expr) in self.aggregates.iter().chain(self.aliases.iter()) {
             validate_aggregate_expr_columns(model, expr)?;
         }
-        // Issue #268 — `.order_by((name, desc))` resolves against the same
-        // alias registry as `.filter(name, ...)`. If the name matches an
-        // annotate OR alias entry, we lift the aggregate expression so the
-        // emitted `ORDER BY` references the full expression — required when
-        // the name belongs to `.alias()` (not in SELECT) but also harmless
-        // for `.annotate()` (the writer compares structurally).
+        // `.order_by((name, desc))` uses the same alias registry as
+        // `.filter(name, ...)`. On a match, lift the whole aggregate
+        // expression into the `ORDER BY`. That is required for an
+        // `.alias()` name, which is not in the SELECT, and harmless
+        // for an `.annotate()` one.
         let alias_for = |name: &str| -> Option<crate::core::AggregateExpr> {
             self.aggregates
                 .iter()
@@ -4270,22 +3983,20 @@ impl<T: Model> AggregateBuilder<T> {
             })
             .collect();
 
-        // Issue #75 — GROUP BY auto-inference. `.alias()` annotations
-        // (issue #268) participate in this check: a pure `.alias(...,
-        // Count(...))` still needs GROUP BY even though nothing is
-        // projected.
+        // GROUP BY inference. `.alias()` entries count here too: an
+        // `.alias("c", Count(...))` still needs a GROUP BY even
+        // though nothing is projected.
         let has_aggregating = self
             .aggregates
             .iter()
             .chain(self.aliases.iter())
             .any(|(_, e)| e.is_aggregating());
         let group_by = if !self.group_by.is_empty() {
-            // Explicit `.group_by(...)` always wins. Validate columns
-            // belong to the model (caught early — typos otherwise
-            // surface at the DB).
+            // An explicit `.group_by(...)` always wins. Check the
+            // columns now, or a typo would only surface at the DB.
             for col in &self.group_by {
-                // #1040 — a dotted `alias.col` references a JOINed table,
-                // validated by the JOIN's presence, not the base model.
+                // A dotted `alias.col` names a joined table, so the
+                // JOIN validates it, not the base model.
                 if !col.contains('.') && model.field_by_column(col).is_none() {
                     return Err(QueryError::UnknownField {
                         model: model.name,
@@ -4312,21 +4023,19 @@ impl<T: Model> AggregateBuilder<T> {
             }
             cols.clone()
         } else if has_aggregating {
-            // Shape 3 — group by every scalar column on the model.
-            // Mirrors Django's "implicit GROUP BY all selected
-            // non-aggregate columns".
+            // Shape 3: group by every scalar column, like Django's
+            // implicit GROUP BY over all non-aggregate columns.
             model.scalar_fields().map(|f| f.column).collect()
         } else {
-            // No aggregating annotation, no values — pure window
-            // annotation path (issue #7) or empty builder. No GROUP BY.
+            // No aggregating annotation and no values: a pure window
+            // annotation or an empty builder. No GROUP BY.
             Vec::new()
         };
 
-        // #331 — `.none().count()` / `.none().aggregate(...)` must
-        // return zero / empty result without scanning any row. Apply
-        // the same never-match guard the UPDATE / DELETE path uses;
-        // also clamp `LIMIT 0` so the executor short-circuits even if
-        // group-by would produce rows from non-matched buckets.
+        // `.none().count()` must return zero without scanning a row.
+        // Use the same never-match guard as UPDATE / DELETE, and add
+        // `LIMIT 0` so the executor stops early even when a GROUP BY
+        // could otherwise produce rows.
         let (where_clause, limit) = if self.qs.is_none {
             (never_match_clause(model, where_clause)?, Some(0))
         } else {
@@ -4348,13 +4057,11 @@ impl<T: Model> AggregateBuilder<T> {
     }
 }
 
-/// Walk an [`AggregateExpr`] for column references that should
-/// resolve against `model`. Today only `AggregateExpr::Window`
-/// (issue #7) carries non-trivial column refs the schema can check —
-/// partition_by + order_by columns + any `Expr::Column` arg. The
-/// flat aggregate variants (`Sum("col")`, etc.) hold raw `&'static str`
-/// column names that the existing validator chain doesn't visit; that
-/// gap is orthogonal to this walk and worth a follow-up.
+/// Walk an [`AggregateExpr`] for column references that must resolve
+/// against `model`. Only `AggregateExpr::Window` carries columns this
+/// can check: its `partition_by`, `order_by` and any `Expr::Column`
+/// argument. The flat variants such as `Sum("col")` hold a bare
+/// `&'static str` that no validator visits — a known gap.
 ///
 /// [`AggregateExpr`]: crate::core::AggregateExpr
 fn validate_aggregate_expr_columns(
@@ -4390,40 +4097,38 @@ fn validate_aggregate_expr_columns(
             }
             Ok(())
         }
-        // Flat aggregate variants (Count/Sum/Avg/Max/Min/CountDistinct/
-        // StdDev*/Variance*) — the column they reference is a bare
-        // `&'static str` not currently part of the validation chain.
-        // Schema typos surface at execution. Pre-existing gap.
+        // The flat variants (Count, Sum, Avg, Max, Min, CountDistinct,
+        // StdDev*, Variance*) name their column with a bare
+        // `&'static str` that nothing here checks, so a typo only
+        // surfaces at execution. Known gap.
         _ => Ok(()),
     }
 }
 
 // ====================================================================
-// Pure projection — Django `.values()` / `.values_list()` (issue #22)
+// Pure projection — Django `.values()` / `.values_list()`
 // ====================================================================
 
 /// Pure-projection queryset returned by [`QuerySet::values_dict`].
 /// Compiles to a `SELECT <cols> FROM …` with the WHERE / ORDER BY /
 /// LIMIT / OFFSET / set-algebra branches of the underlying queryset
-/// preserved. Terminal `fetch` lives in
-/// [`crate::sql::fetch_values_dict_pool`].
+/// preserved. The terminal is [`Self::fetch`], added by the executor.
 pub struct ValuesQuerySet<T: Model> {
     pub(crate) qs: QuerySet<T>,
     pub(crate) cols: Vec<&'static str>,
 }
 
 /// Pure-projection queryset returned by [`QuerySet::values_list`].
-/// Same shape as [`ValuesQuerySet`] but the terminal fetch yields
-/// `Vec<Vec<SqlValue>>` (cells ordered to match `cols`) instead of a
-/// `HashMap`.
+/// Like [`ValuesQuerySet`], but the fetch yields `Vec<Vec<SqlValue>>`
+/// with cells in `cols` order instead of a `HashMap`.
 pub struct ValuesListQuerySet<T: Model> {
     pub(crate) qs: QuerySet<T>,
     pub(crate) cols: Vec<&'static str>,
 }
 
-/// Single-column flat-projection queryset returned by
-/// [`QuerySet::values_list_flat`]. Terminal fetch decodes the column
-/// directly into `Vec<U>` via sqlx's typed scalar path.
+/// Single-column projection queryset returned by
+/// [`QuerySet::values_list_flat`]. The fetch decodes the column into
+/// `Vec<U>` through sqlx's typed scalar path.
 pub struct ValuesFlatQuerySet<T: Model> {
     pub(crate) qs: QuerySet<T>,
     pub(crate) col: &'static str,
@@ -4442,8 +4147,8 @@ impl<T: Model> ValuesQuerySet<T> {
         compile_values_select(self.qs, self.cols)
     }
 
-    /// The validated column list — exposed so the terminal fetch in
-    /// [`crate::sql`] can pass it to the row decoder.
+    /// The validated column list, so the fetch in [`crate::sql`] can
+    /// pass it to the row decoder.
     #[must_use]
     pub fn columns(&self) -> &[&'static str] {
         &self.cols
@@ -4459,7 +4164,7 @@ impl<T: Model> ValuesListQuerySet<T> {
         compile_values_select(self.qs, self.cols)
     }
 
-    /// The validated column list — exposed for the terminal fetch.
+    /// The validated column list, for the terminal fetch.
     #[must_use]
     pub fn columns(&self) -> &[&'static str] {
         &self.cols
@@ -4480,11 +4185,11 @@ impl<T: Model> ValuesFlatQuerySet<T> {
 }
 
 // ====================================================================
-// Django `.dates(field, kind)` — distinct truncated dates (issue #327)
+// Django `.dates(field, kind)` — distinct truncated dates
 // ====================================================================
 
 /// Truncation granularity for [`QuerySet::dates`] / [`QuerySet::datetimes`].
-/// Mirrors Django's `'year' | 'month' | 'day'` shape. Issue #327 / #328.
+/// Mirrors Django's `'year' | 'month' | 'day'` shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateKind {
     Year,
@@ -4515,9 +4220,8 @@ impl DateKind {
                 format!("date(strftime('%Y-%m-01', {col_quoted}))")
             }
             ("sqlite", DateKind::Day) => format!("date({col_quoted})"),
-            // Unknown dialect — fall back to PG-shape DATE_TRUNC; the
-            // driver will surface a clear syntax error if the dialect
-            // doesn't support it.
+            // Unknown dialect: fall back to PG-shape DATE_TRUNC. The
+            // driver reports a clear syntax error if it is unsupported.
             (_, DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})"),
             (_, DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})"),
             (_, DateKind::Day) => format!("DATE({col_quoted})"),
@@ -4525,11 +4229,11 @@ impl DateKind {
     }
 }
 
-/// Builder returned by [`QuerySet::dates`]. The terminal
-/// [`fetch`](Self::fetch) emits
-/// `SELECT DISTINCT <trunc(col)> AS d FROM (<inner-query>) sub ORDER BY d`
-/// — the wrap inherits the underlying queryset's WHERE / JOINs / LIMIT
-/// / ORDER BY so filters on the QuerySet pass through to `.dates()`.
+/// Builder returned by [`QuerySet::dates`]. Run it with
+/// [`crate::sql::fetch_dates_pool`], which emits
+/// `SELECT DISTINCT <trunc(col)> AS d FROM (<inner-query>) sub ORDER BY d`.
+/// The wrapper keeps the queryset's WHERE, JOINs, LIMIT and ORDER BY,
+/// so filters set before `.dates()` still apply.
 pub struct DatesQuerySet<T: Model> {
     pub(crate) qs: QuerySet<T>,
     pub(crate) field: &'static str,
@@ -4538,16 +4242,20 @@ pub struct DatesQuerySet<T: Model> {
 }
 
 impl<T: Model> DatesQuerySet<T> {
-    /// Reverse the ORDER BY direction. Default ascending (oldest
-    /// first), matching Django.
+    /// Reverse the ORDER BY direction. The default is ascending,
+    /// oldest first, as in Django.
     #[must_use]
     pub fn order_desc(mut self, desc: bool) -> Self {
         self.descending = desc;
         self
     }
 
-    /// Validate the field + return the column name resolved on the
-    /// model schema.
+    /// Check the field and return its column name from the schema.
+    ///
+    /// # Errors
+    /// [`QueryError::UnknownField`] when the model has no such field,
+    /// and [`QueryError::TypeMismatch`] when it is not a date or
+    /// datetime column.
     pub fn resolve_column(&self) -> Result<&'static str, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
         let field = model
@@ -4556,9 +4264,9 @@ impl<T: Model> DatesQuerySet<T> {
                 model: model.name,
                 field: self.field.to_owned(),
             })?;
-        // Field must be a Date or DateTime — operators expect the
-        // truncation to be meaningful. Other types (i64, String, etc.)
-        // would silently produce garbage on some backends.
+        // The field must be a Date or DateTime, or the truncation
+        // means nothing. Other types would quietly produce garbage on
+        // some backends.
         if !matches!(
             field.ty,
             crate::core::FieldType::Date | crate::core::FieldType::DateTime
@@ -4566,10 +4274,9 @@ impl<T: Model> DatesQuerySet<T> {
             return Err(QueryError::TypeMismatch {
                 model: model.name,
                 field: self.field.to_owned(),
-                // `.dates()` requires a Date or DateTime column; the
-                // shape uses `expected: DateTime` as the canonical
-                // representative since the truncation always produces
-                // a Date regardless of input.
+                // Either Date or DateTime is fine; report DateTime as
+                // the representative, since truncation always yields
+                // a Date whatever the input.
                 expected: crate::core::FieldType::DateTime,
                 actual: field.ty,
             });
@@ -4579,15 +4286,14 @@ impl<T: Model> DatesQuerySet<T> {
 }
 
 impl<T: Model> QuerySet<T> {
-    /// Django `.dates(field, kind)` — return the distinct date values
-    /// of `field` truncated to `kind`. Issue #327.
+    /// Django `.dates(field, kind)` — the distinct date values of
+    /// `field`, truncated to `kind`.
     ///
-    /// Output order is ascending by default (oldest first). Chain
-    /// [`DatesQuerySet::order_desc(true)`] for newest-first.
+    /// Output is ascending by default, oldest first. Chain
+    /// [`DatesQuerySet::order_desc`] for newest first.
     ///
-    /// Filters / joins / limits set on the underlying queryset pass
-    /// through to the truncation pipeline — `.filter(...).dates(...)`
-    /// only considers matching rows.
+    /// Filters, joins and limits on the queryset still apply, so
+    /// `.filter(...).dates(...)` only sees matching rows.
     #[must_use]
     pub fn dates(self, field: &'static str, kind: DateKind) -> DatesQuerySet<T> {
         DatesQuerySet {
@@ -4598,12 +4304,12 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
-    /// Django `.datetimes(field, kind)` — return the distinct datetime
-    /// values of `field` truncated to `kind`. Issue #328.
+    /// Django `.datetimes(field, kind)` — the distinct datetime values
+    /// of `field`, truncated to `kind`.
     ///
-    /// Supports finer granularity than [`Self::dates`]: in addition to
-    /// `Year` / `Month` / `Day`, accepts `Hour` / `Minute` / `Second`.
-    /// Returns `DateTime<Utc>` at the truncated instant.
+    /// Finer than [`Self::dates`]: as well as `Year`, `Month` and
+    /// `Day`, it takes `Hour`, `Minute` and `Second`. Each value is a
+    /// `DateTime<Utc>` at the truncated instant.
     #[must_use]
     pub fn datetimes(self, field: &'static str, kind: DateTimeKind) -> DateTimesQuerySet<T> {
         DateTimesQuerySet {
@@ -4617,7 +4323,6 @@ impl<T: Model> QuerySet<T> {
 
 /// Truncation granularity for [`QuerySet::datetimes`]. Mirrors
 /// Django's `'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'`.
-/// Issue #328.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateTimeKind {
     Year,
@@ -4654,13 +4359,13 @@ impl DateTimeKind {
                     DateTimeKind::Minute => "%Y-%m-%d %H:%i:00",
                     DateTimeKind::Second => "%Y-%m-%d %H:%i:%s",
                 };
-                // CAST back to DATETIME so the decoder sees the right type.
+                // CAST back to DATETIME so the decoder sees the right
+                // type.
                 format!("CAST(DATE_FORMAT({col_quoted}, '{fmt}') AS DATETIME)")
             }
             _ => {
-                // SQLite (and any other dialect): use strftime to
-                // format, then re-parse via datetime() so the value
-                // round-trips to the standard ISO-8601 shape.
+                // SQLite and anything else: format with strftime so
+                // the value comes back in the standard ISO-8601 shape.
                 let fmt = match self {
                     DateTimeKind::Year => "%Y-01-01 00:00:00",
                     DateTimeKind::Month => "%Y-%m-01 00:00:00",
@@ -4675,9 +4380,9 @@ impl DateTimeKind {
     }
 }
 
-/// Builder returned by [`QuerySet::datetimes`]. Issue #328 — sibling
-/// to [`DatesQuerySet`] with finer granularity + `DateTime<Utc>`
-/// return type.
+/// Builder returned by [`QuerySet::datetimes`]. Like
+/// [`DatesQuerySet`], but with finer granularity and a
+/// `DateTime<Utc>` return type.
 pub struct DateTimesQuerySet<T: Model> {
     pub(crate) qs: QuerySet<T>,
     pub(crate) field: &'static str,

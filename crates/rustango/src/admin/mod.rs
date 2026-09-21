@@ -1,7 +1,7 @@
 //! Auto-generated CRUD admin for rustango models.
 //!
-//! Walks the `inventory` registry every `#[derive(Model)]` populates and
-//! serves an axum [`axum::Router`] over it — no per-model code required.
+//! Reads the `inventory` registry that every `#[derive(Model)]` fills
+//! and serves an axum [`axum::Router`] over it. No per-model code.
 //!
 //! ```ignore
 //! use rustango::{migrate, admin};
@@ -19,25 +19,25 @@
 //! }
 //! ```
 //!
-//! Routes:
-//! * `GET  /`                          — list every registered model
-//! * `GET  /<table>`                   — list rows
-//! * `GET  /__admin/<table>/new`        — create form
-//! * `POST /<table>`                   — submit create
-//! * `GET  /<table>/<pk>`              — detail view
-//! * `GET  /<table>/<pk>/edit`         — edit form (PK readonly)
-//! * `POST /<table>/<pk>`              — submit edit
-//! * `POST /<table>/<pk>/delete`       — submit delete
+//! Routes, all under the configured admin prefix:
+//! * `GET  /`                    list every registered model
+//! * `GET  /<table>`             list rows
+//! * `GET  /<table>/new`         create form
+//! * `POST /<table>`             submit create
+//! * `GET  /<table>/<pk>`        detail view
+//! * `GET  /<table>/<pk>/edit`   edit form, with a read-only PK
+//! * `POST /<table>/<pk>`        submit edit
+//! * `POST /<table>/<pk>/delete` submit delete
 //!
-//! ## Crate layout (Django-shape)
+//! ## Module layout
 //!
-//! - [`urls`] — `router(pool)`, `Builder`, `Config`, `AppState` (route table).
-//! - [`views`] — one async fn per route; consumes the inventory registry.
-//! - [`helpers`] — model lookup, FK joins, render_cell, render_form, pager.
-//! - [`templates`] — bundled Tera registry + render entry-point.
-//! - [`errors`] — `AdminError` and its `IntoResponse` impl.
-//! - `forms`, `render`, `auth` — value parsing, HTML rendering primitives,
-//!   HTTP Basic auth middleware.
+//! - [`urls`]: `router(pool)`, `Builder`, `Config`, `AppState`.
+//! - [`views`]: one async fn per route.
+//! - [`helpers`]: model lookup, FK joins, cell and form rendering, pager.
+//! - [`templates`]: the bundled Tera registry and the render entry point.
+//! - [`errors`]: `AdminError` and its `IntoResponse` impl.
+//! - `forms`, `render`, `auth`: value parsing, HTML rendering, HTTP
+//!   Basic auth middleware.
 
 mod audit;
 mod auth;
@@ -56,24 +56,23 @@ mod manage_admin;
 pub mod object_permissions;
 pub mod queryset_hooks;
 pub mod session;
-/// SSO (OpenID Connect / social OAuth) login for the admin — issue-driven
-/// by the `admin-sso` feature. Shared core reused by the bare admin and
-/// the tenant admin; access is link-to-existing (no auto-provisioning).
+/// OpenID Connect and social-OAuth login for the admin. The core is
+/// shared with the tenant admin. Access is link-to-existing: SSO never
+/// creates an account.
 #[cfg(feature = "admin-sso")]
 pub mod sso;
-/// `SsoProvider` model — one configurable OIDC/social provider per row,
-/// managed from the admin UI. Replaces the flat `Org.sso_*` columns.
+/// `SsoProvider` model: one OIDC or social provider per row, managed
+/// from the admin UI.
 #[cfg(feature = "admin-sso")]
 pub mod sso_provider;
-/// Admin TOTP (two-factor) device persistence — issue #367. Gated on
-/// the `totp` feature; admin builds without it have no 2FA challenge.
+/// Storage for admin TOTP (two-factor) devices. Without the `totp`
+/// feature there is no 2FA challenge.
 #[cfg(feature = "totp")]
 pub mod totp_store;
 pub mod user;
-// `pub(crate)` so the operator console can reuse `render_input` /
-// `render_value_for_input` for its `/orgs/{slug}/edit` form. Stays
-// non-public outside the crate — the helpers' signatures are still
-// internal-only.
+// `pub(crate)` so the operator console can reuse `render_input` and
+// `render_value_for_input` for its `/orgs/{slug}/edit` form. The
+// signatures stay internal to the crate.
 pub(crate) mod render;
 mod templates;
 mod urls;

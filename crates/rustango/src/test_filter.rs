@@ -1,10 +1,7 @@
-//! Tag-based test filtering — Django's `@tag('slow', 'core')` +
-//! `manage test --tag fast --exclude-tag slow`. Issue #45.
+//! Run tests by tag, like Django's `@tag('slow', 'core')`.
 //!
-//! Rust has no built-in per-test tag mechanism (`cargo test` only
-//! filters on substring match against the test name). This module
-//! provides a thin convention that works with stock `#[test]` /
-//! `#[tokio::test]`:
+//! `cargo test` can only filter on the test name. This module adds
+//! tags that work with plain `#[test]` and `#[tokio::test]`:
 //!
 //! ```ignore
 //! use rustango::test_filter::tags;
@@ -16,22 +13,19 @@
 //! }
 //! ```
 //!
-//! The [`tags!`] macro reads the `RUSTANGO_TEST_TAGS` (CSV, include
-//! list) and `RUSTANGO_TEST_EXCLUDE_TAGS` (CSV, exclude list) env
-//! vars and early-returns from the test if filtered out. The test
-//! still shows as `ok` in `cargo test` output — that's the same
-//! shape `#[ignore]` would give, just gated on runtime env instead
-//! of source-time attribute.
+//! The [`tags!`] macro reads two comma-separated env vars,
+//! `RUSTANGO_TEST_TAGS` to include and `RUSTANGO_TEST_EXCLUDE_TAGS`
+//! to exclude, and returns early when the test is filtered out. A
+//! skipped test still prints as `ok`.
 //!
-//! ## Semantics
+//! ## Rules
 //!
-//! - Include list **empty** (env unset) → include everything.
-//! - Include list **non-empty** → run only tests whose tag set
-//!   intersects the include list.
-//! - Exclude list always wins: any tag in the exclude list filters
-//!   the test out.
-//! - Tags are case-sensitive and trimmed; empty CSV tokens are
-//!   ignored.
+//! - No include list: run everything.
+//! - With an include list: run a test only if one of its tags is on
+//!   that list.
+//! - The exclude list always wins.
+//! - Tags are case-sensitive. Spaces around them are trimmed and
+//!   empty entries are ignored.
 //!
 //! ## Examples
 //!
@@ -49,26 +43,22 @@
 //! RUSTANGO_TEST_TAGS=core RUSTANGO_TEST_EXCLUDE_TAGS=flaky cargo test
 //! ```
 
-/// Environment variable name for the CSV include list.
+/// Env var holding the include list.
 pub const ENV_INCLUDE: &str = "RUSTANGO_TEST_TAGS";
 
-/// Environment variable name for the CSV exclude list.
+/// Env var holding the exclude list.
 pub const ENV_EXCLUDE: &str = "RUSTANGO_TEST_EXCLUDE_TAGS";
 
-/// Decide whether a test marked with `tags` should execute.
-///
-/// Reads `RUSTANGO_TEST_TAGS` / `RUSTANGO_TEST_EXCLUDE_TAGS` at call
-/// time. Returns `true` to run; `false` to skip.
+/// `true` if a test with these tags should run. Reads both env vars
+/// each time it is called.
 #[must_use]
 pub fn should_run(tags: &[&str]) -> bool {
     should_run_with(tags, |name| std::env::var(name).ok())
 }
 
-/// Same as [`should_run`] but reads env vars through an injectable
-/// resolver. The standard `should_run` is a thin wrapper that passes
-/// `std::env::var(...).ok()`; this variant lets tests inject a fake
-/// resolver without touching process-global env (which is unsafe to
-/// mutate under `forbid(unsafe_code)` on Rust 2024+).
+/// Like [`should_run`], but you supply the env lookup. Tests use
+/// this to fake the vars instead of changing the process
+/// environment, which is unsafe in Rust 2024.
 #[must_use]
 pub fn should_run_with(tags: &[&str], env_get: impl Fn(&str) -> Option<String>) -> bool {
     let include = env_get(ENV_INCLUDE).unwrap_or_default();
@@ -76,24 +66,19 @@ pub fn should_run_with(tags: &[&str], env_get: impl Fn(&str) -> Option<String>) 
     decide(tags, &include, &exclude)
 }
 
-/// Pure decision function — same logic as [`should_run`] but with
-/// explicit `include`/`exclude` CSV strings. Useful for unit-testing
-/// the policy without env-var fiddling.
+/// The filter rule itself, with the two lists passed in directly.
 #[must_use]
 pub fn decide(tags: &[&str], include_csv: &str, exclude_csv: &str) -> bool {
     let include: Vec<&str> = csv(include_csv);
     let exclude: Vec<&str> = csv(exclude_csv);
 
-    // Exclude wins: any overlap with the exclude list filters out.
+    // Exclude wins over everything else.
     if tags.iter().any(|t| exclude.contains(t)) {
         return false;
     }
-    // Empty include list = run everything.
     if include.is_empty() {
         return true;
     }
-    // Non-empty include: at least one of the test's tags must
-    // appear in the include list.
     tags.iter().any(|t| include.contains(t))
 }
 
@@ -104,11 +89,8 @@ fn csv(s: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Declare this test's tags and early-return if the current
-/// `RUSTANGO_TEST_TAGS` / `RUSTANGO_TEST_EXCLUDE_TAGS` env vars
-/// say it shouldn't run. Place at the top of the test body —
-/// before any setup that you don't want to run for filtered-out
-/// tests.
+/// Declare this test's tags and return early if the env vars filter
+/// it out. Put it at the top of the test body, before any setup.
 ///
 /// ```ignore
 /// #[tokio::test]
@@ -157,8 +139,7 @@ mod tests {
 
     #[test]
     fn exclude_wins_over_include() {
-        // tagged with both — include says yes, exclude says no →
-        // exclude wins.
+        // Include says yes, exclude says no, so the test is skipped.
         assert!(!decide(&["core", "flaky"], "core", "flaky"));
     }
 
@@ -171,19 +152,16 @@ mod tests {
 
     #[test]
     fn case_sensitive_tags() {
-        // Tags are case-sensitive — `Slow` and `slow` are distinct.
+        // `Slow` and `slow` are different tags.
         assert!(!decide(&["Slow"], "slow", ""));
         assert!(decide(&["slow"], "slow", ""));
     }
 
     #[test]
     fn macro_compiles_with_one_tag() {
-        // We can't easily test the early-return without spawning a
-        // child process, but we *can* verify the macro expands and
-        // type-checks. This test always runs (the include list is
-        // empty under normal cargo test invocation).
+        // Checks that the macro expands and type-checks. With no
+        // include list set, it never filters this test out.
         crate::tags!("compile-check");
-        // If we got here, the macro didn't filter us out.
         let _ = 1 + 1;
     }
 

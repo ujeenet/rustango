@@ -1,19 +1,13 @@
-//! Postgres full-text search builder — closes #295 / T2.4.
+//! Postgres full-text search builder.
 //!
-//! Composable wrapper over the `to_tsvector` / `*_tsquery` / `ts_rank` /
-//! `ts_headline` scalar functions added in #266 / T1.4. Replaces the
-//! hand-rolled `Expr::Function { kind: ScalarFn::ToTsVector, … }`
-//! incantation with a discoverable builder shape that matches Django's
+//! Wraps the `to_tsvector`, `*_tsquery`, `ts_rank` and `ts_headline`
+//! functions in a builder shaped like Django's
 //! `django.contrib.postgres.search` API.
 //!
-//! **Postgres-only by language semantics.** MySQL's `MATCH … AGAINST`
-//! requires a `FULLTEXT INDEX` on the column and only matches against
-//! the indexed columns; SQLite's FTS5 virtual tables require a
-//! separate `CREATE VIRTUAL TABLE` and don't compose against bare
-//! columns. Neither shape maps onto this builder's "build a tsvector
-//! from arbitrary expressions, match it against a tsquery" semantics,
-//! so the writer emits [`crate::sql::SqlError::OpNotSupportedInDialect`]
-//! on non-PG.
+//! **Postgres only.** MySQL needs a `FULLTEXT INDEX` and SQLite needs
+//! an FTS5 virtual table, so neither can build a vector from arbitrary
+//! expressions. On those backends the writer returns
+//! [`crate::sql::SqlError::OpNotSupportedInDialect`].
 //!
 //! ## Usage
 //!
@@ -32,28 +26,23 @@
 //!     .fetch(&pool).await?;
 //! ```
 //!
-//! ## API surface
+//! ## What is here
 //!
-//! - [`Weight`] — A / B / C / D weighting class (Django parity).
-//! - [`SearchVector::single`] / [`SearchVector::weighted`] — tsvector LHS.
-//! - [`SearchQuery::plain`] / [`::phrase`] / [`::websearch`] / [`::raw`] —
-//!   tsquery RHS, mapping onto the four PG parsers
-//!   (`plainto_tsquery`, `phraseto_tsquery`, `websearch_to_tsquery`,
-//!   `to_tsquery`).
-//! - [`SearchVector::matches`] — composes a
+//! - [`Weight`] — the A / B / C / D weight classes.
+//! - [`SearchVector`] — the tsvector side of the match.
+//! - [`SearchQuery`] — the tsquery side, one constructor per PG parser.
+//! - [`SearchVector::matches`] — builds a
 //!   [`WhereExpr`](crate::core::WhereExpr) for `.where_raw(...)`.
-//! - [`SearchRank::new`] / [`SearchHeadline::new`] — `Expr`-returning
-//!   annotations.
+//! - [`SearchRank`] / [`SearchHeadline`] — ranking and snippets.
 
 use super::expr::{Expr, ScalarFn};
 use super::query::{Op, WhereExpr};
 use super::value::SqlValue;
 
-/// Postgres tsvector weight class — Django parity.
+/// Weight class for one part of a tsvector.
 ///
-/// Weights bias `ts_rank` so matches in higher-weighted positions
-/// outrank lower-weighted ones. Customary use is A for title, B for
-/// summary, C for body, D for tags / metadata.
+/// `ts_rank` scores a match in a higher class above one in a lower
+/// class. A is usually the title, B the summary, C the body, D tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Weight {
     /// Highest priority. `setweight(..., 'A')`.
@@ -80,21 +69,18 @@ impl Weight {
 
 /// A Postgres `tsvector` — the searchable side of a `@@` match.
 ///
-/// Built from one or more text expressions. Construct via
-/// [`SearchVector::single`] (single column / expression) or
-/// [`SearchVector::weighted`] (multi-column with per-column weighting).
+/// Build it with [`SearchVector::single`] for one expression, or
+/// [`SearchVector::weighted`] to weight several.
 #[derive(Debug, Clone)]
 pub struct SearchVector {
-    /// The compiled tsvector expression. For `single` this is
-    /// `to_tsvector(<col>)`; for `weighted` it's `(setweight(...) ||
-    /// setweight(...) || …)`.
+    /// The built tsvector: `to_tsvector(<col>)`, or a chain of
+    /// `setweight(…) || setweight(…)` when weighted.
     expr: Expr,
 }
 
 impl SearchVector {
-    /// `to_tsvector(<expr>)` — single-column vector. The expression is
-    /// typically a column reference via `F("title")`, but any text-
-    /// returning expression works.
+    /// `to_tsvector(<expr>)`. Pass a column with `F("title")`, or any
+    /// expression that returns text.
     #[must_use]
     pub fn single(text: impl Into<Expr>) -> Self {
         Self {
@@ -105,15 +91,10 @@ impl SearchVector {
         }
     }
 
-    /// `setweight(to_tsvector(c1), 'A') || setweight(to_tsvector(c2),
-    /// 'B') || …` — weighted multi-column vector. Each `(expr, weight)`
-    /// pair becomes one `setweight(to_tsvector(...))` clause; the
-    /// emitter concatenates them with the PG `||` operator.
-    ///
-    /// Returns a vector that matches Django's
-    /// `SearchVector('title', weight='A') + SearchVector('body',
-    /// weight='B')` shape. Empty input is rejected at write time with
-    /// a clear error.
+    /// A vector over several expressions, each with its own weight.
+    /// Every `(expr, weight)` pair becomes one
+    /// `setweight(to_tsvector(...))`, joined with the PG `||` operator.
+    /// Empty input is rejected when the SQL is written.
     #[must_use]
     pub fn weighted<I, E>(pairs: I) -> Self
     where
@@ -133,10 +114,9 @@ impl SearchVector {
                 ],
             })
             .collect();
-        // Single-column weighted case: emit one setweight, no TsConcat
-        // wrapper (the wrapper's arity gate would reject a 1-arg input).
+        // One pair: emit the bare setweight. The TsConcat wrapper
+        // needs at least two arguments.
         let expr = if weighted.len() == 1 {
-            // Take the only element out of the Vec by index.
             weighted.into_iter().next().expect("weighted.len() == 1")
         } else {
             Expr::Function {
@@ -147,17 +127,14 @@ impl SearchVector {
         Self { expr }
     }
 
-    /// Borrow the underlying [`Expr`]. Useful for compositional callers
-    /// that want to inject the vector into a larger expression tree.
+    /// Borrow the underlying [`Expr`] to nest it in a larger tree.
     #[must_use]
     pub fn as_expr(&self) -> &Expr {
         &self.expr
     }
 
-    /// Produce a [`WhereExpr`] that matches this vector against the
-    /// supplied [`SearchQuery`]: `<vector> @@ <query>`.
-    ///
-    /// Chain into `.where_raw(...)` on a [`QuerySet`](crate::query::QuerySet).
+    /// Build `<vector> @@ <query>` as a [`WhereExpr`]. Pass it to
+    /// `.where_raw(...)` on a [`QuerySet`](crate::query::QuerySet).
     #[must_use]
     pub fn matches(&self, query: &SearchQuery) -> WhereExpr {
         WhereExpr::ExprCompare {
@@ -170,18 +147,14 @@ impl SearchVector {
 
 /// A Postgres `tsquery` — the search-term side of a `@@` match.
 ///
-/// Built from a free-form query string via one of the four PG query
-/// parsers. Each variant maps onto a different syntax flavor:
+/// Pick the constructor that matches the syntax of your input:
 ///
-/// - [`SearchQuery::plain`] — `plainto_tsquery`: user-facing keyword
-///   list, AND semantics, no operator characters.
-/// - [`SearchQuery::phrase`] — `phraseto_tsquery`: word-order
-///   preserving (`'rust orm'` → `'rust' <-> 'orm'`).
-/// - [`SearchQuery::websearch`] — `websearch_to_tsquery`: Google-style
-///   syntax (quoted "exact phrase", `-exclude`, the literal `OR`).
-/// - [`SearchQuery::raw`] — `to_tsquery`: low-level pre-parsed syntax
-///   (`'rust & orm'`, `'rust | python'`, `'rust & !python'`). Caller
-///   is responsible for valid tsquery syntax.
+/// - [`SearchQuery::plain`] — plain keywords, joined with AND.
+/// - [`SearchQuery::phrase`] — keeps the word order.
+/// - [`SearchQuery::websearch`] — Google style: `"exact phrase"`,
+///   `-exclude`, `OR`.
+/// - [`SearchQuery::raw`] — real tsquery syntax such as
+///   `'rust & !python'`. You must pass something valid.
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
     expr: Expr,
@@ -206,9 +179,8 @@ impl SearchQuery {
         Self::from_parser(ScalarFn::WebsearchToTsQuery, text)
     }
 
-    /// `to_tsquery(<text>)` — pre-parsed `tsquery` syntax. Caller must
-    /// produce a valid query (`'rust & orm'`, `'rust | python'`,
-    /// `'rust & !python'`).
+    /// `to_tsquery(<text>)`. You must pass valid tsquery syntax, such
+    /// as `'rust & orm'`, `'rust | python'` or `'rust & !python'`.
     #[must_use]
     pub fn raw(text: impl Into<String>) -> Self {
         Self::from_parser(ScalarFn::ToTsQuery, text)
@@ -230,9 +202,8 @@ impl SearchQuery {
     }
 }
 
-/// `ts_rank(<vector>, <query>)` — relevance score (`real` between
-/// 0.0 and 1.0). Annotate via `.annotate("rank", SearchRank::new(...))`
-/// and sort by it via `.order_by_expr(..., true)` for "best first".
+/// `ts_rank(<vector>, <query>)` — a relevance score between 0.0 and
+/// 1.0. Sort by it with `.order_by_expr(..., true)` for best first.
 #[derive(Debug, Clone)]
 pub struct SearchRank;
 
@@ -246,8 +217,8 @@ impl SearchRank {
         }
     }
 
-    /// Build `ts_rank_cd(<vector>, <query>)` — cover-density variant,
-    /// better for short documents.
+    /// Build `ts_rank_cd(<vector>, <query>)`, the cover-density
+    /// variant. Better for short documents.
     #[must_use]
     pub fn cover_density(vector: &SearchVector, query: &SearchQuery) -> Expr {
         Expr::Function {
@@ -257,12 +228,10 @@ impl SearchRank {
     }
 }
 
-/// `ts_headline(<doc>, <query> [, <options>])` — Postgres FTS snippet
-/// generator. Returns the document with matching terms wrapped in
-/// highlight markers (`<b>…</b>` by default).
-///
-/// `doc` is the text to highlight (typically `F("body")`); `query` is
-/// the same `SearchQuery` you passed to `SearchRank` / `matches`.
+/// `ts_headline(<doc>, <query> [, <options>])` — a snippet of `doc`
+/// with the matched terms wrapped in markers (`<b>…</b>` by default).
+/// `doc` is the text to highlight, often `F("body")`. Pass the same
+/// `SearchQuery` you used for the match.
 #[derive(Debug, Clone)]
 pub struct SearchHeadline;
 
@@ -276,8 +245,8 @@ impl SearchHeadline {
         }
     }
 
-    /// `ts_headline(<doc>, <query>, <options>)` — override the highlight
-    /// markers and fragment count via PG's options-string syntax, e.g.
+    /// `ts_headline(<doc>, <query>, <options>)`. The options string
+    /// sets the markers and the fragment count, e.g.
     /// `"StartSel='<mark>', StopSel='</mark>', MaxFragments=1"`.
     #[must_use]
     pub fn with_options(

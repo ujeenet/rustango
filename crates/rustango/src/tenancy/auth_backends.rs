@@ -424,7 +424,9 @@ impl JwtBackend {
 
     /// Enforce revocation on this backend (#1402).
     ///
-    /// Pass the **same** store the issuing [`JwtLifecycle`] holds. Without
+    /// Pass the **same** store the issuing
+    /// [`JwtLifecycle`](crate::tenancy::jwt_lifecycle::JwtLifecycle)
+    /// holds. Without
     /// this, `revoke()` and `/api/auth/logout` write to a blacklist that
     /// nothing on the authentication path reads — a revoked token keeps
     /// authenticating until it expires, and a deployment can watch a

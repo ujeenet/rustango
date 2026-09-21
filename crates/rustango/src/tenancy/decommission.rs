@@ -16,6 +16,9 @@
 //! unrecoverable, and `purge_database` has to be passed explicitly for
 //! a database-mode tenant: dropping a whole database is a bigger act
 //! than dropping a schema, and the caller should have to say so.
+//!
+//! [`Action::Deactivate`]: crate::tenancy::decommission::Action::Deactivate
+//! [`Action::Purge`]: crate::tenancy::decommission::Action::Purge
 
 use sqlx::Database;
 

@@ -1,14 +1,9 @@
-//! Django-shape base36 integer encoding —
-//! [`int_to_base36`](int_to_base36) / [`base36_to_int`](base36_to_int).
+//! Base36 integer encoding: [`int_to_base36`] / [`base36_to_int`].
 //!
-//! Django uses base36 in the password-reset URL shape
-//! `/reset/<uidb36>/<token>/` to encode the user PK as a compact
-//! URL-friendly string. The 36-char alphabet is `[0-9a-z]` — no
-//! shift key + no URL-encoding overhead, so deeply integer-heavy
-//! IDs end up half the length of their decimal form (`100000000`
-//! is `1njchs` in base36).
-//!
-//! Mirrors `django.utils.http.{int_to_base36,base36_to_int}`.
+//! Django uses base36 in password-reset URLs
+//! (`/reset/<uidb36>/<token>/`) to write the user PK as a short,
+//! URL-safe string. The alphabet is `[0-9a-z]`, so `100000000`
+//! becomes `1njchs`.
 //!
 //! ```ignore
 //! use rustango::base36::{int_to_base36, base36_to_int};
@@ -28,35 +23,33 @@
 //! assert!(base36_to_int("FOO").is_err()); // uppercase rejected (Django shape)
 //! ```
 //!
-//! Negative integers are rejected on the encode side — base36 is
-//! used only for non-negative IDs in Django; negative encoding has
-//! no canonical shape. The decode side is strict-lowercase to
-//! preserve injectivity (Django accepts only lowercase too;
-//! mixed-case would let `1A` and `1a` collide).
+//! Only non-negative integers encode. Decoding accepts lowercase
+//! only, so `1A` and `1a` can never map to the same number.
+//!
+//! [`int_to_base36`]: crate::base36::int_to_base36
+//! [`base36_to_int`]: crate::base36::base36_to_int
 
-/// Base36 digit alphabet — `[0-9a-z]`. Position 0 is `'0'`,
-/// position 35 is `'z'`.
+/// Base36 digits, `[0-9a-z]`.
 const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 /// Errors from [`base36_to_int`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Base36Error {
-    /// Empty string — no canonical decoding.
+    /// Empty string.
     #[error("base36_to_int: empty input")]
     Empty,
 
-    /// Character outside `[0-9a-z]`. Uppercase letters and any
-    /// non-alphanumeric input rejected.
+    /// Character outside `[0-9a-z]`. Uppercase is also rejected.
     #[error("base36_to_int: invalid character `{0}` (allowed: 0-9, a-z)")]
     InvalidChar(char),
 
-    /// Numeric overflow — value doesn't fit in `u64`.
+    /// The value does not fit in `u64`.
     #[error("base36_to_int: value overflows u64")]
     Overflow,
 }
 
-/// Encode a non-negative integer as a base36 string. Matches Django's
-/// `int_to_base36(n)` output exactly:
+/// Encode a non-negative integer as a lowercase base36 string.
+/// Output matches Django's `int_to_base36(n)`.
 ///
 /// ```ignore
 /// use rustango::base36::int_to_base36;
@@ -67,9 +60,6 @@ pub enum Base36Error {
 /// assert_eq!(int_to_base36(1295), "zz");
 /// assert_eq!(int_to_base36(1296), "100");
 /// ```
-///
-/// Always lowercase (Django shape — uppercase wouldn't round-trip
-/// through Django decoders).
 #[must_use]
 pub fn int_to_base36(mut n: u64) -> String {
     if n == 0 {
@@ -85,9 +75,9 @@ pub fn int_to_base36(mut n: u64) -> String {
     String::from_utf8(buf).expect("base36 alphabet is ASCII")
 }
 
-/// Decode a base36 string into a `u64`. Strict: only `[0-9a-z]`
-/// accepted; uppercase letters / whitespace / leading `-` rejected.
-/// Matches Django's `base36_to_int(s)` strictness.
+/// Decode a base36 string into a `u64`. Only `[0-9a-z]` is allowed.
+/// Uppercase, whitespace and a leading `-` are all rejected, like
+/// Django's `base36_to_int(s)`.
 ///
 /// # Errors
 /// * [`Base36Error::Empty`] — empty string.
@@ -149,10 +139,9 @@ mod tests {
 
     #[test]
     fn encode_u64_max_doesnt_panic() {
-        // u64::MAX = 18446744073709551615 — encodable, 13 base36 digits.
+        // u64::MAX needs 13 base36 digits.
         let s = int_to_base36(u64::MAX);
         assert_eq!(s.len(), 13);
-        // Every char is in alphabet.
         assert!(s
             .chars()
             .all(|c| c.is_ascii_alphanumeric() && !c.is_ascii_uppercase()));
@@ -160,8 +149,7 @@ mod tests {
 
     #[test]
     fn encode_is_always_lowercase() {
-        // Spot-check that every encoded value is lowercase — important
-        // for Django round-trip (decoder rejects uppercase).
+        // Decoders reject uppercase, so the encoder must never emit it.
         for n in [10u64, 100, 1000, 12345, 999_999_999_999] {
             let s = int_to_base36(n);
             assert!(
@@ -199,14 +187,14 @@ mod tests {
 
     #[test]
     fn decode_rejects_uppercase() {
-        // Django shape: uppercase rejected (would silently alias `1a` and `1A`).
+        // Accepting it would alias `1a` and `1A`.
         let err = base36_to_int("FOO").unwrap_err();
         assert!(matches!(err, Base36Error::InvalidChar('F')));
     }
 
     #[test]
     fn decode_rejects_leading_dash() {
-        // `-1` rejected — base36 is unsigned in Django.
+        // base36 here is unsigned.
         let err = base36_to_int("-1").unwrap_err();
         assert!(matches!(err, Base36Error::InvalidChar('-')));
     }

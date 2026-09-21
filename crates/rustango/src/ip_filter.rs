@@ -1,5 +1,9 @@
 //! IP allowlist / blocklist middleware — gate routes by client IP.
 //!
+//! Prefer `allow_only` for anything sensitive. An allowlist refuses
+//! every address you did not name; a blocklist only stops the ones you
+//! already know about, so a new address walks straight in.
+//!
 //! ## Quick start
 //!
 //! ```ignore
@@ -16,9 +20,17 @@
 //!     .ip_filter(IpFilterLayer::block(vec!["203.0.113.42"])?);
 //! ```
 //!
-//! Requires `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())`
-//! to populate `ConnectInfo` — without that, every request matches the
-//! `<no-ip>` fallback (see `default_decision`).
+//! The address comes from `ConnectInfo`, the real TCP peer. Serve with
+//! `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())`.
+//! Without it there is no address at all, and every request takes the
+//! `allow_no_ip` path.
+//!
+//! Behind a proxy the peer is the proxy, not the client, so this
+//! filter gates the proxy's address. A forwarded header is only a
+//! claim that any client can forge; believe one only when a proxy you
+//! trust sets it. This filter never reads such a header — the
+//! `real_ip` middleware does, and it publishes the result in the
+//! request extensions rather than in `ConnectInfo`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -48,8 +60,8 @@ enum Mode {
 #[derive(Clone)]
 pub struct IpFilterLayer {
     mode: Mode,
-    /// What to do when the request has no `ConnectInfo`. Default `false`
-    /// (deny — fail closed for AllowOnly, allow for Block).
+    /// What to do when the request has no `ConnectInfo`. `false`
+    /// (the default for `allow_only`) denies; `block` sets it `true`.
     pub allow_no_ip: bool,
 }
 
@@ -86,9 +98,9 @@ impl IpFilterLayer {
         })
     }
 
-    /// When `true`, requests without `ConnectInfo` are allowed through.
-    /// When `false`, they're rejected for AllowOnly and allowed for Block.
-    /// Default `false` (fail-closed).
+    /// When `true`, requests with no `ConnectInfo` pass. When `false`
+    /// they are rejected. `allow_only` defaults to `false`, so it
+    /// fails closed.
     #[must_use]
     pub fn allow_no_ip(mut self, yes: bool) -> Self {
         self.allow_no_ip = yes;

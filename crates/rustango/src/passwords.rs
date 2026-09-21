@@ -1,9 +1,8 @@
 //! Generic password hashing + strength checking.
 //!
-//! For the tenancy-integrated user-password helpers, see
-//! [`crate::tenancy::password`]. This module is the lower-level standalone
-//! version — argon2id hashing + a minimal strength heuristic that doesn't
-//! require importing tenancy types.
+//! argon2id hashing plus a small strength heuristic, with no tenancy
+//! types involved. For the tenancy-integrated helpers see
+//! [`crate::tenancy::password`].
 //!
 //! ## Quick start
 //!
@@ -33,7 +32,12 @@ pub enum PasswordError {
     Verify(String),
 }
 
-/// Hash a password with argon2id. Returns the standard PHC string format.
+/// Hash a password with argon2id. Returns a standard PHC string.
+///
+/// argon2id is deliberately slow and memory-hungry, and every hash
+/// gets a fresh random salt, so a stolen table cannot be attacked with
+/// precomputed or shared work — each password must be guessed on its
+/// own, slowly. Never store a plain or fast hash instead.
 ///
 /// # Errors
 /// [`PasswordError::Hash`] on argon2 failures.
@@ -48,7 +52,9 @@ pub fn hash(password: &str) -> Result<String, PasswordError> {
         .map_err(|e| PasswordError::Hash(e.to_string()))
 }
 
-/// Verify a password against an argon2 PHC hash.
+/// Verify a password against an argon2 PHC hash. The comparison is
+/// constant time, so timing does not reveal how much of the hash the
+/// guess got right.
 ///
 /// # Errors
 /// [`PasswordError::Verify`] when `stored_hash` isn't a valid PHC string.
@@ -63,9 +69,9 @@ pub fn verify(password: &str, stored_hash: &str) -> Result<bool, PasswordError> 
         .is_ok())
 }
 
-/// A valid Argon2id PHC hash of a fixed throwaway password, computed
-/// once on first use (same `Argon2::default()` cost as a real stored
-/// hash). Backs [`verify_dummy`].
+/// A valid argon2id hash of a fixed throwaway password, built once on
+/// first use at the same cost as a real stored hash. Backs
+/// [`verify_dummy`].
 fn dummy_hash() -> &'static str {
     use std::sync::OnceLock;
     static DUMMY: OnceLock<String> = OnceLock::new();
@@ -77,13 +83,12 @@ fn dummy_hash() -> &'static str {
         .as_str()
 }
 
-/// Spend a password-verification's worth of work and discard the
-/// result. Call this on the **user-not-found** (and inactive) branch of
-/// a login flow so a request takes roughly the same time whether or not
-/// the username exists. Without it, an unknown user returns before the
-/// expensive Argon2 verify while a real user pays for it — a timing
-/// side-channel that lets an attacker enumerate valid accounts
-/// (audit H1).
+/// Do one verification's worth of work and throw the result away.
+///
+/// Call this on the **user-not-found** and inactive branches of a
+/// login. Without it an unknown user answers fast while a real one
+/// pays for argon2, and that difference in response time tells an
+/// attacker which accounts exist.
 pub fn verify_dummy(password: &str) {
     let _ = verify(password, dummy_hash());
 }
@@ -103,14 +108,14 @@ pub enum StrengthIssue {
     KnownWeak,
 }
 
-/// Score a candidate password. Returns an empty `Vec` when strong enough.
+/// Score a candidate password. An empty `Vec` means no issue found.
 ///
-/// Heuristics (intentionally simple — encourage users without being a
-/// hard policy gate; pair with HIBP / pwned-passwords for serious deployments):
+/// The rules are deliberately simple — nudges, not a policy gate. Pair
+/// them with HIBP / pwned-passwords for a real deployment.
 /// - Length < 12 → [`StrengthIssue::TooShort`]
-/// - All-letter (no digit/symbol) → [`StrengthIssue::NoDigitsOrSymbols`]
-/// - All-lowercase letters → [`StrengthIssue::NoVariety`]
-/// - In the small built-in weak-password list → [`StrengthIssue::KnownWeak`]
+/// - No digit or symbol → [`StrengthIssue::NoDigitsOrSymbols`]
+/// - Lowercase letters only → [`StrengthIssue::NoVariety`]
+/// - On the built-in weak list → [`StrengthIssue::KnownWeak`]
 #[must_use]
 pub fn strength_score(password: &str) -> Vec<StrengthIssue> {
     let mut issues = Vec::new();
@@ -141,8 +146,8 @@ pub fn strength_score(password: &str) -> Vec<StrengthIssue> {
     issues
 }
 
-/// Top weak passwords from public breach lists. Intentionally tiny —
-/// real apps should pair with HIBP's pwned-passwords API.
+/// Top weak passwords from public breach lists. Tiny on purpose; real
+/// apps should also check HIBP's pwned-passwords API.
 const KNOWN_WEAK: &[&str] = &[
     "password",
     "password1",
@@ -188,12 +193,11 @@ mod tests {
 
     #[test]
     fn dummy_hash_is_valid_and_verify_dummy_does_real_work() {
-        // Audit H1 — the dummy hash must be a valid PHC string, else
-        // verify() would early-return Err and skip the argon2 cost,
-        // defeating the timing equalization. A real verify against it
-        // rejects arbitrary input (random salt over a fixed secret).
+        // The dummy hash must be a valid PHC string. Otherwise
+        // verify() returns Err early, skips the argon2 work, and the
+        // timing gap it exists to close comes back.
         assert!(!verify("whatever-an-attacker-types", dummy_hash()).unwrap());
-        // Smoke: the public entry point never panics.
+        // The public entry point never panics.
         verify_dummy("whatever-an-attacker-types");
     }
 

@@ -20,6 +20,8 @@
 //!   assertion time).
 //!
 //! Gated behind the `passkey` feature; builds without it are unchanged.
+//!
+//! [`ensure_table`]: crate::passkey::ensure_table
 
 pub mod ceremony;
 pub mod error;
@@ -72,7 +74,7 @@ pub struct WebauthnCredential {
 /// active backend.
 ///
 /// Drift-free: the DDL (+ the `credential_id` UNIQUE and the `user_id`
-/// index) is rendered from [`WebauthnCredential::SCHEMA`] through the
+/// index) is rendered from `WebauthnCredential::SCHEMA` through the
 /// migration engine's dialect emitter — the same path
 /// `makemigrations`/`migrate` use — instead of hand-written per-dialect
 /// strings. The model is `managed = false` (deliberately ensure-based,

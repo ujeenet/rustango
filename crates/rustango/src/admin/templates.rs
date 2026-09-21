@@ -1,12 +1,12 @@
-//! Tera template registry baked into the binary at compile time.
+//! Tera template registry, baked into the binary.
 //!
-//! Five small templates (`base`, `index`, `list`, `detail`, `form`) are
-//! pulled in via `include_str!` so the admin has no runtime filesystem
-//! dependency. Lazily-initialized on first render via `OnceLock`.
+//! Every admin template is pulled in with `include_str!`, so the admin
+//! needs no files at runtime. The registry is built on first render
+//! and held in a `OnceLock`.
 
 use std::sync::OnceLock;
 
-/// Lazily-initialized Tera registry holding the bundled templates.
+/// The bundled templates, built on first use.
 fn templates() -> &'static tera::Tera {
     static T: OnceLock<tera::Tera> = OnceLock::new();
     T.get_or_init(|| {
@@ -41,7 +41,6 @@ fn templates() -> &'static tera::Tera {
             ),
             ("audit_log.html", include_str!("templates/audit_log.html")),
             ("docs.html", include_str!("templates/docs.html")),
-            // Issue #367 — TOTP two-factor enrollment page.
             (
                 "totp_enroll.html",
                 include_str!("templates/totp_enroll.html"),
@@ -52,9 +51,11 @@ fn templates() -> &'static tera::Tera {
     })
 }
 
-/// Render a bundled template with a serde-serializable context. Panics
-/// if the template is missing or the context fails to serialize — both
-/// are programmer bugs caught in tests.
+/// Render a bundled template with a serializable context.
+///
+/// # Panics
+/// If the template is missing or the context does not serialize. Both
+/// are bugs the tests catch.
 pub(crate) fn render_template(template: &str, ctx: &serde_json::Value) -> String {
     let tera_ctx = tera::Context::from_serialize(ctx).expect("admin context serializes");
     templates()
@@ -62,10 +63,9 @@ pub(crate) fn render_template(template: &str, ctx: &serde_json::Value) -> String
         .expect("admin template renders")
 }
 
-/// Render with a render-time supplement context — the supplement is
-/// merged into the base context just before render. Used by view code
-/// to layer sidebar / chrome data onto a per-view context without each
-/// caller having to remember the keys.
+/// Render with extra chrome variables merged into `ctx` just before
+/// the render. Views use it to add the sidebar and chrome data without
+/// having to know the keys. An existing key in `ctx` wins.
 pub(crate) fn render_with_chrome(
     template: &str,
     ctx: &mut serde_json::Value,

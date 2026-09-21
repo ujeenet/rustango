@@ -41,7 +41,7 @@
 //! ## v1 scope / trims
 //!
 //! * The `provision` closure hook is intentionally **not** exposed —
-//!   v1 uses the built-in default provisioning in [`provision_member`].
+//!   v1 uses the built-in default provisioning in `provision_member`.
 //! * Providers are resolved from the tenant's own [`SsoProvider`] rows
 //!   only; the registry-wide shared-provider merge
 //!   ([`crate::tenancy::sso::SharedSsoProvider`]) is a follow-up.

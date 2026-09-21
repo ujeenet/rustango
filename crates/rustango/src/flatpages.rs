@@ -1,11 +1,9 @@
 //! Static "flat pages" — `django.contrib.flatpages`.
 //!
-//! Build a [`FlatPageMap`] (path → `FlatPage { title, body }`) and
-//! mount [`flatpages_middleware`] on your axum router; matching
-//! requests are served directly with `200 OK + text/html`, returning
-//! the rendered HTML body. Non-matching requests pass through to the
-//! rest of the router untouched. Pairs with
-//! [`crate::redirects`] — the same axum-`from_fn_with_state` shape.
+//! Build a [`FlatPageMap`] (path → `FlatPage { title, body }`) and mount
+//! [`flatpages_middleware`] on your axum router. A matching request is
+//! answered with `200 OK` and the page body as `text/html`; everything
+//! else passes through. Same shape as [`crate::redirects`].
 //!
 //! ```ignore
 //! use axum::Router;
@@ -26,17 +24,17 @@
 //!
 //! ## Body is pre-rendered HTML
 //!
-//! Each [`FlatPage`] holds a fully-rendered HTML body. The
-//! flatpages middleware does NO Tera wrapping — bring your own
-//! base template by pre-rendering through Tera and storing the
-//! result. Keeps the middleware Tera-free (no Arc<Tera> state
-//! plumbing).
+//! A [`FlatPage`] body is sent to the browser as-is. Nothing is
+//! escaped here, so never put text from a user in it without escaping
+//! that text first, or you ship a cross-site scripting hole.
 //!
-//! Per-page `<title>` is exposed via [`FlatPage::title`] so callers
-//! can opt into wrapping via a custom handler that reads the
-//! `FlatPageMap` directly.
+//! There is no Tera wrapping either: render through your base template
+//! first and store the result. Each page keeps its `title`, so a custom
+//! handler can read the `FlatPageMap` and wrap pages itself.
 //!
-//! Issue #57 (smaller contrib apps).
+//! [`FlatPage`]: crate::flatpages::FlatPage
+//! [`FlatPageMap`]: crate::flatpages::FlatPageMap
+//! [`flatpages_middleware`]: crate::flatpages::flatpages_middleware
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -50,7 +48,8 @@ use axum::response::{IntoResponse, Response};
 
 // ------------------------------------------------------------------ FlatPage
 
-/// One static page. Body is pre-rendered HTML.
+/// One static page. The body is pre-rendered HTML and is served
+/// unescaped, so keep untrusted text out of it.
 #[derive(Debug, Clone)]
 pub struct FlatPage {
     pub title: String,
@@ -81,7 +80,7 @@ impl FlatPage {
 
 // ------------------------------------------------------------------ FlatPageMap
 
-/// Path → [`FlatPage`] map. Cheaply clonable; share via `Arc` when
+/// Path → [`FlatPage`] map. Cheap to clone; share it as `Arc` when
 /// mounted as middleware state.
 #[derive(Debug, Default, Clone)]
 pub struct FlatPageMap {
@@ -116,8 +115,7 @@ impl FlatPageMap {
         self.pages.is_empty()
     }
 
-    /// Iterate `(path, &FlatPage)` for every page. Handy for
-    /// callers that want to render a sitemap of every flat page.
+    /// Iterate `(path, &FlatPage)` — useful for building a sitemap.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &FlatPage)> {
         self.pages.iter().map(|(k, v)| (k.as_str(), v))
     }
@@ -139,9 +137,8 @@ pub fn build_flatpage_response(page: &FlatPage) -> Response {
     response
 }
 
-/// axum middleware that consults the [`FlatPageMap`] and short-
-/// circuits matching requests with the page body. Mount via
-/// `from_fn_with_state(Arc<FlatPageMap>, flatpages_middleware)`.
+/// axum middleware that answers a matching request with the page body.
+/// Mount with `from_fn_with_state(Arc<FlatPageMap>, flatpages_middleware)`.
 pub async fn flatpages_middleware(
     State(pages): State<Arc<FlatPageMap>>,
     req: Request<Body>,
@@ -310,8 +307,8 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_query_string_does_not_match_bare_path() {
-        // `/about?ref=email` should match `/about` (the query is
-        // separate from the path component in axum's URI parser).
+        // `/about?ref=email` matches `/about`: the query is not part
+        // of the path.
         let pages = Arc::new(FlatPageMap::new().add("/about", FlatPage::new("About", "X")));
         let app = app(pages);
         let r = req(&app, "/about?ref=email").await;

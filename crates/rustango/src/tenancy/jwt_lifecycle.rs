@@ -64,8 +64,8 @@ pub struct JwtClaims {
     /// Token type — `"access"` or `"refresh"`.
     pub typ: String,
     /// Custom claims set via [`JwtLifecycle::issue_pair_with`] or
-    /// [`JwtLifecycle::issue_token_with`]. Empty for tokens issued via
-    /// the no-custom variants.
+    /// [`JwtLifecycle::issue_access_with`]. Empty for tokens issued
+    /// via the no-custom variants.
     pub custom: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -90,8 +90,8 @@ impl JwtClaims {
     }
 }
 
-/// Reserved claim names — caller-supplied custom payloads cannot use these.
-/// Returned by [`reserved_claims`] for inspection.
+/// Reserved claim names — caller-supplied custom payloads cannot use
+/// these.
 pub const RESERVED_CLAIM_NAMES: &[&str] = &["sub", "exp", "jti", "typ"];
 
 /// Returned by [`JwtLifecycle::issue_pair_with`] when the custom payload

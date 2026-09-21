@@ -1,26 +1,22 @@
-//! `AdminUser` — credential store for the bare admin's session-auth
-//! layer. Issue #253 slice A.
+//! `AdminUser`: the credential store for the bare admin's session
+//! auth.
 //!
-//! Single-table user store, deliberately tiny — username, password
-//! hash, superuser flag, active flag, created-at timestamp. Holds the
-//! bare minimum to support `POST /login` against
-//! [`crate::passwords::verify`] and a sidebar visibility check.
+//! One small table: username, password hash, superuser flag, active
+//! flag and a created-at timestamp. Just enough for `POST /login` via
+//! [`crate::passwords::verify`] and the sidebar's visibility check.
 //!
-//! Apps that need richer user shapes (roles, permissions, profile
-//! data) layer those on top in their own tables, or graduate to the
-//! `tenancy` feature where the full `tenancy::User` lives.
+//! An app that needs roles, permissions or profile data adds its own
+//! tables, or moves to the `tenancy` feature and its `tenancy::User`.
 
 use crate::sql::Auto;
 use crate::Model;
 
-/// Admin operator account. The table is created on bootstrap by
-/// [`crate::admin::Builder::with_session_auth`] when the schema
-/// isn't already present (mirrors the bootstrap helper
-/// `crate::server::AppBuilder::bootstrap` shape).
+/// Admin operator account. [`crate::admin::Builder::with_session_auth`]
+/// creates the table at bootstrap if it is missing.
 ///
-/// `username` is the natural login key; the table-level UNIQUE
-/// index enforces no duplicates. `password_hash` is whatever
-/// [`crate::passwords::hash`] produces (argon2id PHC string).
+/// `username` is the login key and a UNIQUE index keeps it unique.
+/// `password_hash` is the argon2id PHC string from
+/// [`crate::passwords::hash`].
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rustango_admin_users",
@@ -40,32 +36,29 @@ pub struct AdminUser {
     /// argon2id PHC string from [`crate::passwords::hash`].
     #[rustango(max_length = 200)]
     pub password_hash: String,
-    /// Email used to link an external SSO identity (OIDC / social
-    /// OAuth) to this account. The `admin-sso` login matches the IdP's
-    /// verified email against this column; `None` means the account
-    /// can't sign in via SSO. Unique, but multiple `NULL`s are allowed.
+    /// Email that links an external SSO identity to this account. The
+    /// `admin-sso` login matches the IdP's **verified** email against
+    /// this column. `None` means the account cannot use SSO. Unique,
+    /// though several rows may be `NULL`.
     ///
-    /// `#[cfg(feature = "admin-sso")]`-gated — the column exists only
-    /// when SSO is compiled in, so enabling/disabling the feature
-    /// generates an Add/DropColumn migration.
+    /// The column exists only with the `admin-sso` feature, so turning
+    /// the feature on or off produces an Add/DropColumn migration.
     #[cfg(feature = "admin-sso")]
     #[rustango(max_length = 254, unique)]
     pub email: Option<String>,
-    /// `true` = full admin access. `false` = future-slice's
-    /// filtered-model view; today honored only by the sidebar.
+    /// `true` grants full admin access. The bare admin's gate is set
+    /// to superuser-only by default, so a `false` session gets a 403.
     #[rustango(default = "false")]
     pub is_superuser: bool,
-    /// Soft-disable flag — set to `false` to lock out without
-    /// deleting. The login handler rejects inactive users.
+    /// Soft-disable flag. Set it to `false` to lock the account out
+    /// without deleting it. The login handler rejects inactive users.
     #[rustango(default = "true")]
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl AdminUser {
-    /// Hash the password and build a fresh `AdminUser` ready for
-    /// `.insert(pool)`. Returns the propagated `crate::passwords::Error`
-    /// when hashing fails.
+    /// Hash the password and build an `AdminUser` ready to insert.
     ///
     /// # Errors
     /// [`crate::passwords::PasswordError`] from `passwords::hash`.

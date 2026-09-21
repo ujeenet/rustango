@@ -1,10 +1,10 @@
-//! XML sitemap rendering — Django's `django.contrib.sitemaps`.
+//! XML sitemaps, like `django.contrib.sitemaps`.
 //!
-//! Generates `sitemap.xml` and `sitemap_index.xml` payloads conforming
-//! to the [sitemaps.org protocol](https://www.sitemaps.org/protocol.html).
-//! Wire-up is the caller's job: register a handler at `/sitemap.xml`
-//! that calls [`render_sitemap`] / [`render_sitemap_index`] and
-//! returns the result with `Content-Type: application/xml`.
+//! Builds `sitemap.xml` and `sitemap_index.xml` bodies that follow the
+//! [sitemaps.org protocol](https://www.sitemaps.org/protocol.html).
+//! Adding the route is up to you: serve the string from
+//! [`render_sitemap`] or [`render_sitemap_index`] with
+//! `Content-Type: application/xml`.
 //!
 //! ## Quick start
 //!
@@ -29,8 +29,8 @@
 //!
 //! ## Sitemap index
 //!
-//! Large sites split the sitemap across multiple files. [`render_sitemap_index`]
-//! produces the index XML that points at child sitemap files:
+//! A big site splits its sitemap across files.
+//! [`render_sitemap_index`] writes the index that points at them:
 //!
 //! ```ignore
 //! use rustango::sitemaps::{render_sitemap_index, SitemapIndexEntry};
@@ -41,14 +41,15 @@
 //! ]);
 //! ```
 //!
-//! Issue #57 (smaller contrib apps).
+//! [`render_sitemap`]: crate::sitemaps::render_sitemap
+//! [`render_sitemap_index`]: crate::sitemaps::render_sitemap_index
 
 use chrono::{DateTime, Utc};
 
 // ------------------------------------------------------------------ ChangeFreq
 
-/// `<changefreq>` values per sitemaps.org. Renders lower-cased as the
-/// protocol requires.
+/// The `<changefreq>` values sitemaps.org allows. They render in
+/// lower case, as the protocol requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeFreq {
     Always,
@@ -61,7 +62,7 @@ pub enum ChangeFreq {
 }
 
 impl ChangeFreq {
-    /// Protocol-conformant lower-cased token.
+    /// The lower-case token the protocol expects.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -81,20 +82,20 @@ impl ChangeFreq {
 /// One `<url>` element in a sitemap.
 #[derive(Debug, Clone)]
 pub struct SitemapEntry {
-    /// Absolute `<loc>` URL. The protocol requires this be a full URL
-    /// (scheme + host + path); relative paths render as-is but
-    /// crawlers will reject them.
+    /// The `<loc>` URL. The protocol needs a full URL with scheme and
+    /// host. A relative path is written as given, but crawlers will
+    /// reject it.
     pub loc: String,
     pub lastmod: Option<DateTime<Utc>>,
     pub changefreq: Option<ChangeFreq>,
-    /// `<priority>` ∈ [0.0, 1.0]. Out-of-range values clamp at render
-    /// time.
+    /// `<priority>` from 0.0 to 1.0. Other values are clamped when
+    /// rendered.
     pub priority: Option<f64>,
 }
 
 impl SitemapEntry {
-    /// Build an entry with just the URL. Add lastmod / changefreq /
-    /// priority via the `with_*` setters.
+    /// Build an entry from the URL alone. The `with_*` methods add
+    /// the rest.
     #[must_use]
     pub fn new(loc: impl Into<String>) -> Self {
         Self {
@@ -117,8 +118,7 @@ impl SitemapEntry {
         self
     }
 
-    /// Clamps to `[0.0, 1.0]` on render — pass any `f64`, render handles
-    /// the bound.
+    /// Any `f64` is fine; rendering clamps it to 0.0..=1.0.
     #[must_use]
     pub fn with_priority(mut self, p: f64) -> Self {
         self.priority = Some(p);
@@ -153,14 +153,14 @@ impl SitemapIndexEntry {
 
 // ------------------------------------------------------------------ Sitemap
 
-/// One sitemap source. Implementations return a fresh list of
-/// entries on each call — caching is the caller's responsibility.
+/// One sitemap source. Each call builds the list again, so cache it
+/// yourself if that is expensive.
 pub trait Sitemap: Send + Sync {
     fn entries(&self) -> Vec<SitemapEntry>;
 }
 
-// Blanket impl: `Vec<SitemapEntry>` is itself a sitemap source so
-// callers don't have to declare a struct for one-off cases.
+// A plain `Vec<SitemapEntry>` is a source too, so a one-off sitemap
+// needs no struct.
 impl Sitemap for Vec<SitemapEntry> {
     fn entries(&self) -> Vec<SitemapEntry> {
         self.clone()
@@ -169,10 +169,9 @@ impl Sitemap for Vec<SitemapEntry> {
 
 // ------------------------------------------------------------------ render
 
-/// Render a `<urlset>` document. Output is well-formed XML 1.0 with
-/// the sitemaps.org schema. Each `<url>` element emits `<loc>` (always),
-/// `<lastmod>` (when set; ISO-8601 UTC), `<changefreq>` (when set), and
-/// `<priority>` (when set; clamped to `[0.0, 1.0]`, 1-decimal).
+/// Render a `<urlset>` document using the sitemaps.org schema. Every
+/// `<url>` has a `<loc>`; `<lastmod>`, `<changefreq>` and `<priority>`
+/// appear only when set.
 #[must_use]
 pub fn render_sitemap<S: Sitemap + ?Sized>(s: &S) -> String {
     let entries = s.entries();
@@ -198,8 +197,7 @@ pub fn render_sitemap<S: Sitemap + ?Sized>(s: &S) -> String {
     out
 }
 
-/// Render a `<sitemapindex>` document — points crawlers at multiple
-/// child sitemaps.
+/// Render a `<sitemapindex>` document pointing at child sitemaps.
 #[must_use]
 pub fn render_sitemap_index(entries: &[SitemapIndexEntry]) -> String {
     let mut out = String::with_capacity(256 + entries.len() * 96);
@@ -233,9 +231,8 @@ fn push_text_element(out: &mut String, name: &str, text: &str, indent: usize) {
     out.push_str(">\n");
 }
 
-/// Sitemap loc URLs occasionally include `&` (query strings), `<`/`>`/
-/// `"` (escaped HTML in pathological cases), and `'` (path components).
-/// Escape the XML5 set so the document remains well-formed.
+/// Escape the five XML characters, so a URL with `&` or a quote in it
+/// still leaves the document well-formed.
 fn escape_xml_text(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
@@ -249,9 +246,8 @@ fn escape_xml_text(out: &mut String, s: &str) {
     }
 }
 
-/// `YYYY-MM-DDTHH:MM:SS+00:00` — the sitemaps.org-recommended format
-/// (W3C Date and Time Formats, full datetime). Chrono's default
-/// `to_rfc3339` already produces this shape; we just call it.
+/// `YYYY-MM-DDTHH:MM:SSZ`, the full W3C datetime sitemaps.org asks
+/// for.
 fn format_iso8601(ts: DateTime<Utc>) -> String {
     ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -337,7 +333,7 @@ mod tests {
             xml.contains("https://example.com/search?q=rust&amp;lang=en&amp;t=&lt;all&gt;"),
             "expected escaped &, <, >: {xml}"
         );
-        // Raw & must NOT appear in the document body.
+        // A bare & must not reach the document body.
         assert!(
             !xml.contains("q=rust&lang"),
             "unescaped ampersand in: {xml}"
@@ -405,9 +401,8 @@ mod tests {
 
     #[test]
     fn iso8601_format_uses_z_for_utc() {
-        // Sitemaps.org accepts the W3C subset. Chrono's
-        // `to_rfc3339_opts(..., true)` emits `Z` for UTC zero offset
-        // rather than `+00:00`. Pin the shape.
+        // sitemaps.org takes the W3C subset, and chrono writes UTC as
+        // `Z` rather than `+00:00`. Pin that shape.
         let s = format_iso8601(ts(2025, 1, 2));
         assert_eq!(s, "2025-01-02T12:00:00Z");
     }

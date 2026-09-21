@@ -4,7 +4,8 @@
 //! pagination shape is small and depends on nothing else from the
 //! executor's internals, so it lives in its own file.
 
-/// Result of [`QuerySet::fetch_paginated_on`] — a slice of rows
+/// Result of [`QuerySet::fetch_paginated_on`](crate::query::QuerySet)
+/// — a slice of rows
 /// alongside the total count of matching rows in the underlying
 /// query (i.e. the count *before* LIMIT/OFFSET).
 ///

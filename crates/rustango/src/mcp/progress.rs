@@ -1,18 +1,18 @@
-//! Progress + cancellation for long-running `tools/call` (epic #1013,
-//! follow-up #1090).
+//! Progress reports and cancellation for a slow `tools/call`.
 //!
-//! * **Progress** — when a `tools/call` carries `params._meta.progressToken`,
-//!   the handler gets a live [`ProgressReporter`] on its [`McpContext`];
-//!   each `report(..)` emits a `notifications/progress` over the SSE bus.
-//! * **Cancellation** — an inbound `notifications/cancelled { requestId }`
-//!   trips a process-global [`CancelToken`] keyed by
-//!   `(tenant, agent_id, request_id)` (so one agent can't cancel another's
-//!   call, #1095); the handler observes it cooperatively via
-//!   `ctx.cancel.is_cancelled()` and bails out. Registration is RAII
-//!   ([`CancelGuard`]) so a panicking handler never leaks an entry.
+//! **Progress.** When a call carries `params._meta.progressToken`,
+//! the handler gets a live [`ProgressReporter`], and each `report`
+//! sends a `notifications/progress` over the SSE bus.
 //!
-//! Both ride the same in-process model as #1087 (the bus + registry are
-//! process-local); cross-process cancellation is out of scope.
+//! **Cancellation.** An inbound `notifications/cancelled
+//! { requestId }` trips a [`CancelToken`] keyed by tenant, agent and
+//! request id, so no agent can cancel another's call. The handler
+//! has to cooperate: poll `ctx.cancel.is_cancelled()` and return
+//! early. A guard removes the registry entry on drop, so a handler
+//! that panics leaks nothing.
+//!
+//! The bus and the registry both live in one process, so
+//! cancellation does not cross process boundaries.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{json, Value};
 
-/// Emits `notifications/progress` for a call's `progressToken`, scoped to the
-/// calling agent so frames never leak to other agents/tenants (#1092). A
-/// reporter with no token (the default) is a silent no-op.
+/// Sends `notifications/progress` for one call's `progressToken`,
+/// scoped to the calling agent so no other agent sees the frames. A
+/// reporter with no token, which is the default, does nothing.
 #[derive(Clone, Default)]
 pub struct ProgressReporter {
     token: Option<Value>,
@@ -31,14 +31,15 @@ pub struct ProgressReporter {
 }
 
 impl ProgressReporter {
-    /// A no-op reporter (the call carried no `progressToken`).
+    /// A reporter that does nothing, for a call with no token.
     #[must_use]
     pub fn disabled() -> Self {
         Self::default()
     }
 
-    /// A reporter bound to the calling agent. `token` is the call's
-    /// `_meta.progressToken` (`None` ⇒ no-op).
+    /// A reporter for one agent. `token` is the call's
+    /// `_meta.progressToken`; `None` gives a reporter that does
+    /// nothing.
     pub(crate) fn for_agent(token: Option<Value>, tenant: String, agent_id: i64) -> Self {
         Self {
             token,
@@ -47,14 +48,14 @@ impl ProgressReporter {
         }
     }
 
-    /// `true` if the caller requested progress (a token is present).
+    /// Whether the caller asked for progress, that is, sent a token.
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.token.is_some()
     }
 
-    /// Emit one progress update. No-op when there's no token. The frame is
-    /// scoped to the calling agent (only that agent's SSE stream sees it).
+    /// Send one progress update, or nothing when there is no token.
+    /// Only the calling agent's stream sees it.
     pub fn report(&self, progress: f64, total: Option<f64>, message: Option<&str>) {
         let Some(token) = &self.token else { return };
         let mut params = json!({ "progressToken": token, "progress": progress });
@@ -78,7 +79,7 @@ impl ProgressReporter {
     }
 }
 
-/// A cooperative cancellation flag observed by a running tool handler.
+/// A flag a running tool handler is expected to poll.
 #[derive(Clone)]
 pub struct CancelToken {
     flag: Arc<AtomicBool>,
@@ -91,8 +92,8 @@ impl Default for CancelToken {
 }
 
 impl CancelToken {
-    /// A token that is never cancelled (the default for calls that aren't
-    /// registered for cancellation).
+    /// A token that is never cancelled. This is the default for a
+    /// call that is not registered for cancellation.
     #[must_use]
     pub fn never() -> Self {
         Self {
@@ -100,8 +101,8 @@ impl CancelToken {
         }
     }
 
-    /// A token that is already cancelled — useful for tests and for callers
-    /// that want to pre-empt a call before dispatch.
+    /// A token that is already cancelled. Useful in tests, and to
+    /// stop a call before it is dispatched.
     #[must_use]
     pub fn cancelled() -> Self {
         let t = Self::never();
@@ -109,8 +110,8 @@ impl CancelToken {
         t
     }
 
-    /// `true` once the call has been cancelled. Handlers should poll this
-    /// at await points and return early.
+    /// Whether the call was cancelled. Poll it at every await point
+    /// and return early when it is true.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
@@ -121,10 +122,9 @@ impl CancelToken {
     }
 }
 
-/// Registry key — a request id is only unique *within* an agent, and numeric
-/// JSON-RPC ids collide trivially across agents. Keying by
-/// `(tenant, agent_id, request_id)` stops agent A cancelling agent B's call
-/// (#1095).
+/// The registry key. A request id is only unique within one agent,
+/// and numeric ids collide across agents at once, so the key takes
+/// the tenant and agent too.
 type CancelKey = (String, i64, String);
 
 fn registry() -> &'static Mutex<HashMap<CancelKey, CancelToken>> {
@@ -132,24 +132,23 @@ fn registry() -> &'static Mutex<HashMap<CancelKey, CancelToken>> {
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Lock the registry, recovering from a poisoned mutex rather than panicking
-/// (a tool handler that panicked mid-lock must not wedge cancellation for the
-/// whole process). #1095.
+/// Lock the registry, recovering a poisoned mutex instead of
+/// panicking. One handler that panicked while holding the lock must
+/// not break cancellation for the whole process.
 fn registry_lock() -> std::sync::MutexGuard<'static, HashMap<CancelKey, CancelToken>> {
     registry().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// RAII registration of an in-flight call's [`CancelToken`], scoped to the
-/// calling agent. The entry is removed on `Drop` — so a handler that returns
-/// early, errors, or **panics** never leaks a registry entry (#1095). Replaces
-/// the old manual `register`/`deregister` pair.
+/// Holds a call's [`CancelToken`] in the registry, and removes it on
+/// drop. A handler that returns early, errors, or panics therefore
+/// leaks no entry.
 pub(crate) struct CancelGuard {
     key: CancelKey,
     token: CancelToken,
 }
 
 impl CancelGuard {
-    /// Register a fresh token for `(tenant, agent_id, request_id)`.
+    /// Register a new token for this tenant, agent and request.
     pub(crate) fn register(tenant: &str, agent_id: i64, request_id: &str) -> Self {
         let key = (tenant.to_owned(), agent_id, request_id.to_owned());
         let token = CancelToken::never();
@@ -157,7 +156,7 @@ impl CancelGuard {
         Self { key, token }
     }
 
-    /// The cooperative cancel token to hand the running handler.
+    /// The token to hand to the running handler.
     pub(crate) fn token(&self) -> CancelToken {
         self.token.clone()
     }
@@ -169,9 +168,9 @@ impl Drop for CancelGuard {
     }
 }
 
-/// Cancel an in-flight request — invoked from a `notifications/cancelled`,
-/// scoped to the requesting agent so it can only cancel **its own** calls.
-/// No-op if no matching call is (still) in-flight.
+/// Cancel a call in flight, from a `notifications/cancelled`. An
+/// agent can only cancel **its own** calls. Does nothing when no
+/// matching call is still running.
 pub fn cancel(tenant: &str, agent_id: i64, request_id: &str) {
     let key = (tenant.to_owned(), agent_id, request_id.to_owned());
     if let Some(token) = registry_lock().get(&key) {
@@ -179,7 +178,7 @@ pub fn cancel(tenant: &str, agent_id: i64, request_id: &str) {
     }
 }
 
-/// Extract a `progressToken` from a `tools/call` params `_meta`, if present.
+/// Read the `progressToken` out of a call's `_meta`, if it has one.
 pub(crate) fn progress_token(params: &Value) -> Option<Value> {
     params
         .get("_meta")
@@ -200,8 +199,8 @@ mod tests {
             Some(1.0),
             Some("half"),
         );
-        // The notification bus is process-global; parallel tests share it, so
-        // scan for *our* frame rather than assuming it's first.
+        // Tests in parallel share the bus, so look for our own frame
+        // instead of taking the first one.
         for _ in 0..200 {
             let Ok(frame) = rx.recv().await else { continue };
             let v: Value = serde_json::from_str(&frame.body).unwrap();
@@ -222,16 +221,18 @@ mod tests {
         let token = guard.token();
         assert!(!token.is_cancelled());
 
-        // Same request id, different agent / tenant → must NOT trip it (#1095).
+        // The same request id under another agent or tenant must not
+        // trip this token.
         cancel("acme", 2, "req-42");
         cancel("evil", 1, "req-42");
         assert!(!token.is_cancelled());
 
-        // The matching (tenant, agent_id, request_id) cancels.
+        // A full key match does cancel it.
         cancel("acme", 1, "req-42");
         assert!(token.is_cancelled());
 
-        // Dropping the guard removes the entry; cancelling again is a no-op.
+        // Dropping the guard removes the entry, so a second cancel
+        // does nothing.
         drop(guard);
         cancel("acme", 1, "req-42");
     }

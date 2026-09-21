@@ -1,11 +1,9 @@
-//! Conditional aggregates + StdDev/Variance builders — issue #6.
+//! Aggregate builders with an optional `FILTER` clause and default.
 //!
-//! Sixth slice of the ORM Expression DSL epic. Closes the Django gap
-//! around `Count("id", filter=Q(...))` / `Sum("price", default=0)` and
-//! adds the `StdDev` + `Variance` families. Builds directly on the
-//! `Expr::Case` machinery from #4 (the non-PG `FILTER (WHERE …)`
-//! fallback is `CASE WHEN`) and on the `WhereExpr` predicate machinery
-//! end-to-end.
+//! Gives the Django shapes `Count("id", filter=Q(...))` and
+//! `Sum("price", default=0)`, plus the `StdDev` and `Variance`
+//! families. On MySQL the `FILTER (WHERE …)` clause is rewritten as
+//! `CASE WHEN`.
 //!
 //! ```ignore
 //! use rustango::core::aggregates::{count, sum, avg};
@@ -23,15 +21,13 @@
 //!     .compute(&pool).await?;
 //! ```
 //!
-//! ## Build order
+//! ## Wrap order
 //!
-//! Call `.filter(...)` first, then `.default(...)` — the builder wraps
-//! `Filtered` *inside* `Coalesced` so the emitted SQL is
-//! `COALESCE(SUM(col) FILTER (WHERE pred), default)`. Calling them in
-//! the opposite order on the chain produces the same IR (the builder
-//! stores both fields flat and lowers on `.build()`).
+//! `Filtered` always sits inside `Coalesced`, so the SQL is
+//! `COALESCE(SUM(col) FILTER (WHERE pred), default)`. Chain order does
+//! not matter; `.build()` lowers both fields.
 //!
-//! ## Dialect support matrix
+//! ## Dialect support
 //!
 //! | Aggregate / wrapper | PG | MySQL | SQLite |
 //! |---|---|---|---|
@@ -45,10 +41,9 @@
 use super::query::{AggregateExpr, WhereExpr};
 use super::SqlValue;
 
-/// Fluent wrapper around an [`AggregateExpr`]. Built via the free
-/// functions in this module ([`count`], [`sum`], …); finalize by
-/// passing into anything that takes `impl Into<AggregateExpr>` (e.g.
-/// `QuerySet::aggregate`).
+/// Builder for an [`AggregateExpr`]. Start from a free function in
+/// this module ([`count`], [`sum`], …) and pass the result to anything
+/// taking `impl Into<AggregateExpr>`, such as `QuerySet::aggregate`.
 #[must_use]
 pub struct AggregateBuilder {
     kind: AggregateExpr,
@@ -65,13 +60,10 @@ impl AggregateBuilder {
         }
     }
 
-    /// Attach a `FILTER (WHERE predicate)` clause to this aggregate.
-    /// The writer emits the SQL-standard `FILTER` form on PG + SQLite
-    /// (3.30+) and rewrites to `<agg>(CASE WHEN predicate THEN <arg>
-    /// END)` on MySQL.
-    ///
-    /// Composes with `.and()` / `.or()` / `WhereExpr` like a regular
-    /// WHERE clause:
+    /// Count only the rows matching `predicate`. PG and SQLite 3.30+
+    /// get `FILTER (WHERE …)`; MySQL gets
+    /// `<agg>(CASE WHEN … THEN <arg> END)`. The predicate takes the
+    /// same shape as a `where_()` clause.
     ///
     /// ```ignore
     /// count("id").filter(Post::status.eq("published").and(Post::pages.gt(100)))
@@ -81,9 +73,8 @@ impl AggregateBuilder {
         self
     }
 
-    /// Attach a `COALESCE(<aggregate>, default)` empty-result fallback.
-    /// On a queryset that returns zero rows, the aggregate would
-    /// otherwise be `NULL`; this rewrites to a typed scalar.
+    /// Fall back to `value` when the queryset matches no rows and the
+    /// aggregate would be `NULL`. Emits `COALESCE`.
     ///
     /// ```ignore
     /// sum("price").default(0_i64)
@@ -94,13 +85,9 @@ impl AggregateBuilder {
         self
     }
 
-    /// Finalize to an [`AggregateExpr`]. Same as `Into<AggregateExpr>`
-    /// — provided as a method when type inference would otherwise
-    /// need help.
-    ///
-    /// Wrap order: `Filtered` is always *inside* `Coalesced` when
-    /// both are set, so the emitted SQL is
-    /// `COALESCE(<agg> FILTER (WHERE …), default)`.
+    /// Finalize to an [`AggregateExpr`]. Same as `Into<AggregateExpr>`,
+    /// but a method helps when type inference needs it. With both set,
+    /// `Filtered` goes inside `Coalesced`.
     #[must_use]
     pub fn build(self) -> AggregateExpr {
         let mut out = self.kind;
@@ -170,41 +157,39 @@ pub fn min(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::Min(column))
 }
 
-/// `ANY_VALUE(column)` — an arbitrary value from the group's non-null
-/// inputs (new in Django 6.0, #1025). Projects a functionally-dependent
-/// column without adding it to GROUP BY. PG 16+ `any_value()`, MySQL
-/// `ANY_VALUE()`, SQLite `min()` fallback. PG < 16 has no `any_value()`
-/// and the server errors at execution. Composes with `.filter()` /
-/// `.default()` via the existing wrappers.
+/// `ANY_VALUE(column)` — any one value from the group. Use it to
+/// select a column that is not in GROUP BY. Emits `any_value()` on PG
+/// 16+, `ANY_VALUE()` on MySQL and `min()` on SQLite. PG below 16 has
+/// no `any_value()`, so the server errors at run time.
 #[must_use]
 pub fn any_value(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::AnyValue(column))
 }
 
-/// `STDDEV_SAMP(column)` — sample standard deviation. Native on PG
-/// and MySQL 8+; SQLite has no built-in stddev and the writer raises
-/// `SqlError::AggregateNotSupported` (matches Django behavior).
+/// `STDDEV_SAMP(column)` — sample standard deviation. Works on PG and
+/// MySQL 8+. SQLite has no stddev, so the writer returns
+/// `SqlError::AggregateNotSupported`.
 #[must_use]
 pub fn stddev(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::StdDev(column))
 }
 
-/// `STDDEV_POP(column)` — population standard deviation. Same
-/// dialect-support story as [`stddev`].
+/// `STDDEV_POP(column)` — population standard deviation. Same dialect
+/// support as [`stddev`].
 #[must_use]
 pub fn stddev_pop(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::StdDevPop(column))
 }
 
-/// `VAR_SAMP(column)` — sample variance. Same dialect-support
-/// story as [`stddev`].
+/// `VAR_SAMP(column)` — sample variance. Same dialect support as
+/// [`stddev`].
 #[must_use]
 pub fn variance(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::Variance(column))
 }
 
-/// `VAR_POP(column)` — population variance. Same dialect-support
-/// story as [`stddev`].
+/// `VAR_POP(column)` — population variance. Same dialect support as
+/// [`stddev`].
 #[must_use]
 pub fn variance_pop(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::VariancePop(column))
@@ -266,8 +251,7 @@ mod tests {
 
     #[test]
     fn default_then_filter_still_wraps_coalesced_outside_filtered() {
-        // Builder normalizes regardless of chain order — both fields
-        // are stored flat and lowered on `.build()`.
+        // Chain order does not matter; `.build()` lowers both fields.
         let e: AggregateExpr = sum("price")
             .default(0_i64)
             .filter(predicate("active"))

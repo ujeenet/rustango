@@ -1,25 +1,23 @@
-//! Django-shape `date_hierarchy` — clickable year/month/day drill-down
-//! strip above the admin list view. Issue #355.
+//! `date_hierarchy`: a clickable year/month/day strip above the admin
+//! list view.
 //!
 //! When a model declares `#[rustango(admin(date_hierarchy = "<field>"))]`,
 //! the list view:
 //!
 //! 1. Reads `?year=YYYY` `&month=MM` `&day=DD` from the query string.
-//! 2. Injects two filters (`>= lo`, `< hi`) on the named column, where
-//!    `[lo, hi)` is the half-open range implied by the selection.
-//! 3. Computes the child buckets at the *current* drill level — years
-//!    when nothing is selected, months when only year is, days when
-//!    year+month are — via one tri-dialect `GROUP BY` query.
-//! 4. Renders a breadcrumb + clickable child list above the table.
+//! 2. Adds two filters (`>= lo`, `< hi`) on the named column, for the
+//!    half-open range `[lo, hi)` the selection implies.
+//! 3. Counts the child buckets at the current level with one `GROUP BY`
+//!    query: years when nothing is selected, then months, then days.
+//! 4. Renders a breadcrumb and the child list above the table.
 //!
-//! The bucket query is dialect-routed:
+//! The bucket query is per dialect: `EXTRACT(YEAR FROM <col>)` on
+//! Postgres and MySQL, `CAST(strftime('%Y', <col>) AS INTEGER)` on
+//! SQLite.
 //!
-//! - Postgres / MySQL: `EXTRACT(YEAR FROM <col>)` etc.
-//! - SQLite:           `CAST(strftime('%Y', <col>) AS INTEGER)` etc.
-//!
-//! Date range comparison binds two `SqlValue::DateTime` (or `Date`)
-//! parameters — no string literals in the SQL — so naive query
-//! params can never become an injection vector.
+//! The range comparison binds two `SqlValue::Date` or `DateTime`
+//! params. No query value is ever put into the SQL text, so it cannot
+//! become an injection vector.
 
 use chrono::{NaiveDate, TimeZone, Utc};
 
@@ -56,8 +54,8 @@ impl DateSelection {
     }
 }
 
-/// Half-open `[lo, hi)` range implied by the selection. Returns `None`
-/// when no year is set (i.e. no narrowing required).
+/// Half-open `[lo, hi)` range for the selection. `None` when no year is
+/// set, which means there is nothing to narrow.
 pub(crate) fn range(sel: DateSelection) -> Option<(NaiveDate, NaiveDate)> {
     let year = sel.year?;
     let lo = NaiveDate::from_ymd_opt(year, sel.month.unwrap_or(1), sel.day.unwrap_or(1))?;
@@ -76,9 +74,9 @@ pub(crate) fn range(sel: DateSelection) -> Option<(NaiveDate, NaiveDate)> {
     Some((lo, hi))
 }
 
-/// Build the two predicates that narrow the list view to the selected
-/// date range. Returns an empty Vec when no selection is active or the
-/// field isn't a Date/DateTime.
+/// The two predicates that narrow the list view to the selected date
+/// range. Empty when nothing is selected, or when the field is not a
+/// `Date` or `DateTime`.
 pub(crate) fn predicates(
     model: &'static ModelSchema,
     field_name: &str,
@@ -106,8 +104,7 @@ pub(crate) fn predicates(
             ]
         }
         FieldType::DateTime => {
-            // Anchor at UTC midnight — the standard Django reading of
-            // a date-hierarchy bucket boundary.
+            // Bucket boundaries sit at UTC midnight.
             let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
             let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
             vec![
@@ -141,12 +138,12 @@ impl DrillLevel {
             (None, _, _) => Some(Self::Year),
             (Some(_), None, _) => Some(Self::Month),
             (Some(_), Some(_), None) => Some(Self::Day),
-            (Some(_), Some(_), Some(_)) => None, // terminal — no children
+            (Some(_), Some(_), Some(_)) => None, // a day has no children
         }
     }
 
-    /// Dialect-routed SQL fragment that extracts the bucket value as an
-    /// integer for this level. `col` must already be quoted.
+    /// Per-dialect SQL fragment that reads this level's bucket value as
+    /// an integer. `col_quoted` must already be quoted.
     pub(crate) fn bucket_expr(self, dialect: &dyn crate::sql::Dialect, col_quoted: &str) -> String {
         let part = match self {
             Self::Year => "YEAR",
@@ -211,7 +208,7 @@ mod tests {
 
     #[test]
     fn parse_drops_partial_selections() {
-        // `?month=03` with no year is ignored — month/day require parent.
+        // `?month=03` with no year is ignored: month and day need one.
         let mut p = std::collections::HashMap::new();
         p.insert("month".into(), "3".into());
         let s = DateSelection::parse(&p);

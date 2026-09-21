@@ -1,18 +1,17 @@
-//! Layered TOML configuration (slice 8.3).
+//! Layered TOML configuration.
 //!
-//! `Settings::load("local")` reads, in order:
+//! `Settings::load("local")` reads three layers, in order:
 //!
-//! 1. `config/default.toml` — committed defaults shared by every env.
-//! 2. `config/{env}.toml` — env-specific overrides (`local`, `staging`,
-//!    `prod`, …). Missing file is fine — the load skips it.
-//! 3. Environment variables — anything matching `RUSTANGO__SECTION__KEY`
-//!    overrides the corresponding nested TOML key. Double-underscore
-//!    is the path separator. `RUSTANGO__DATABASE__URL=postgres://…`
-//!    overrides `[database] url = "…"`.
+//! 1. `config/default.toml`: committed defaults for every env.
+//! 2. `config/{env}.toml`: per-env overrides (`local`, `staging`,
+//!    `prod`, …). A missing file is fine and is skipped.
+//! 3. Environment variables named `RUSTANGO__SECTION__KEY`. The double
+//!    underscore separates path parts, so
+//!    `RUSTANGO__DATABASE__URL=postgres://…` overrides
+//!    `[database] url`.
 //!
-//! The pipeline returns a typed [`Settings`] struct with sections
-//! for `database`, `secret_key`, `admin`, `tenancy`, `cache`, `jobs`,
-//! `mail`. Unknown keys in the TOML are ignored (forward-compat).
+//! The result is a typed [`Settings`] struct. Unknown TOML keys are
+//! ignored, so an older binary still reads a newer config file.
 //!
 //! # Example
 //!
@@ -34,9 +33,8 @@
 //! assert_eq!(cfg.database.pool_max_size, 50);
 //! ```
 //!
-//! Gated by the `config` feature (in `default`). Drop with
-//! `default-features = false` if you want a bare ORM dep without
-//! `toml` pulled in.
+//! Behind the `config` feature, which is on by default. Turn it off
+//! with `default-features = false` to use the ORM without `toml`.
 
 mod loader;
 mod sections;
@@ -49,27 +47,22 @@ pub use sections::{
 };
 
 impl Settings {
-    /// Load + merge `config/default.toml`, `config/{env}_settings.toml`
-    /// (or the legacy `config/{env}.toml`), and `RUSTANGO__*` env-var
-    /// overrides. Returns the typed settings struct.
-    ///
-    /// Since v0.29 (#87) the tier convention `<env>_settings.toml` is
-    /// preferred — the loader checks both filenames and prefers the
-    /// `_settings` variant.
+    /// Merge `config/default.toml`, `config/{env}_settings.toml` (or
+    /// the older `config/{env}.toml`), and `RUSTANGO__*` env vars.
+    /// The loader checks both filenames and prefers `_settings`.
     ///
     /// # Errors
-    /// * [`ConfigError::Io`] — `config/default.toml` is missing or
-    ///   unreadable. The env-specific overlay is *optional* (skipped
-    ///   silently if missing) — `default.toml` is the contract.
-    /// * [`ConfigError::Parse`] — TOML syntax error.
-    /// * [`ConfigError::EnvOverride`] — a `RUSTANGO__*` env var
-    ///   couldn't be parsed into the target field's type.
+    /// * [`ConfigError::Io`] when `config/default.toml` is missing or
+    ///   unreadable. The per-env file is optional.
+    /// * [`ConfigError::Parse`] on a TOML syntax error.
+    /// * [`ConfigError::EnvOverride`] when a `RUSTANGO__*` var does
+    ///   not parse into the field's type.
     pub fn load(env: &str) -> Result<Self, ConfigError> {
         loader::load_with_root(std::path::Path::new("config"), env)
     }
 
-    /// Load with an explicit `config/` directory — used in tests so
-    /// fixtures don't have to sit at the project root.
+    /// Load from a given `config/` directory. Tests use this so
+    /// fixtures need not sit at the project root.
     ///
     /// # Errors
     /// As [`Settings::load`].
@@ -77,19 +70,12 @@ impl Settings {
         loader::load_with_root(root, env)
     }
 
-    /// Convenience entry point that picks the env tier from the
-    /// `RUSTANGO_ENV` environment variable (#87, v0.29). Falls back
-    /// to `"dev"` when the var is unset / empty so a fresh
-    /// `cargo run` Just Works without explicit config.
+    /// Like [`Self::load`], but takes the tier from the `RUSTANGO_ENV`
+    /// variable. Falls back to `"dev"` when it is unset or empty, so a
+    /// fresh `cargo run` works with no config.
     ///
-    /// Loads `config/default.toml` + `config/<RUSTANGO_ENV>_settings.toml`
-    /// (or the legacy `config/<RUSTANGO_ENV>.toml`) + `RUSTANGO__*`
-    /// env-var overrides — the same pipeline as [`Self::load`], just
-    /// with the env tier chosen for you.
-    ///
-    /// Production deployments set `RUSTANGO_ENV=prod`; staging sets
-    /// `RUSTANGO_ENV=staging`; local dev leaves it unset (or sets it
-    /// to `dev` explicitly to make the choice visible).
+    /// Set `RUSTANGO_ENV=prod` in production and `staging` in
+    /// staging. Local dev can leave it unset.
     ///
     /// # Errors
     /// As [`Self::load`].
@@ -98,10 +84,9 @@ impl Settings {
         loader::load_with_root(std::path::Path::new("config"), &env)
     }
 
-    /// The tier this process should load — reads `RUSTANGO_ENV`,
-    /// defaults to `"dev"`. Public so deployment-audit tooling
-    /// (`manage check --deploy`) can compare the resolved tier
-    /// against the loaded settings without re-reading the env var.
+    /// The tier this process loads: `RUSTANGO_ENV`, or `"dev"`.
+    /// Public so `manage check --deploy` can compare the tier with
+    /// the loaded settings without reading the env var again.
     #[must_use]
     pub fn current_env_tier() -> String {
         current_env_tier()
@@ -119,15 +104,14 @@ fn current_env_tier() -> String {
 mod tier_tests {
     use super::*;
 
-    /// Default tier is `dev` when `RUSTANGO_ENV` is unset (or empty).
-    /// Test deliberately uses no env-mutation — the workspace bans
-    /// `unsafe std::env::set_var`, so we only cover the unset path
-    /// here. The set-path is exercised end-to-end by the integration
-    /// suite that spawns subprocesses with overridden envs.
+    /// The tier is `dev` when `RUSTANGO_ENV` is unset or empty. This
+    /// test sets no env var, because the workspace bans
+    /// `std::env::set_var`. The set path is covered by the
+    /// integration suite, which spawns subprocesses.
     #[test]
     fn current_env_tier_defaults_to_dev_when_unset() {
-        // Best effort — only meaningful when the test runner didn't
-        // set RUSTANGO_ENV. Most CI runs leave it unset.
+        // Only meaningful when the runner left RUSTANGO_ENV unset,
+        // which most CI runs do.
         if std::env::var("RUSTANGO_ENV").is_err() {
             assert_eq!(Settings::current_env_tier(), "dev");
         }

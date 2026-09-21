@@ -1,20 +1,16 @@
-//! `FieldType` — the dialect-neutral classification of a column.
+//! `FieldType` — the dialect-neutral kind of a column.
 //!
-//! The query layer uses this to decide which lookups apply, and the SQL
-//! layer uses it to drive type-aware coercion. It does not encode
-//! length/precision; those are dialect-specific concerns expressed via
-//! attributes that ride alongside the schema.
+//! The query layer uses it to pick the lookups that apply. The SQL layer
+//! uses it to coerce values. It carries no length or precision; those
+//! are dialect-specific and come from schema attributes.
 
 /// Kind of value stored in a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FieldType {
-    /// `i16` — Postgres `SMALLINT` / MySQL `SMALLINT`. 2 bytes signed,
-    /// range `-32768..=32767`. Smallest portable integer width — both
-    /// backends support it natively, no CHECK-constraint emulation. We
-    /// don't ship `i8` because Postgres has no 1-byte signed integer
-    /// type (its `"char"` type is not a portable signed scalar), so an
-    /// `i8` field would silently store as 2 bytes on PG and 1 byte on
-    /// MySQL — the kind of cross-dialect skew rustango avoids.
+    /// `i16` — `SMALLINT` on Postgres and MySQL, range
+    /// `-32768..=32767`. This is the smallest portable integer width.
+    /// There is no `i8`: Postgres has no 1-byte signed type, so such a
+    /// field would use a different width on each backend.
     I16,
     I32,
     I64,
@@ -26,59 +22,49 @@ pub enum FieldType {
     Date,
     Uuid,
     Json,
-    /// Fixed-point exact decimal — Django's `DecimalField`. Postgres
-    /// `NUMERIC` (arbitrary precision), MySQL `DECIMAL(38, 10)`
-    /// (default precision/scale; override at schema level via attrs
-    /// once we expose them), SQLite `NUMERIC` (text affinity, exact
-    /// arithmetic via the `decimal` module of `sqlx-sqlite`). Rust
-    /// type: `rust_decimal::Decimal`. Use for money / metric data
-    /// where `f64` rounding would be unacceptable.
+    /// Exact fixed-point decimal, like Django's `DecimalField`.
+    /// Postgres `NUMERIC`, MySQL `DECIMAL(38, 10)`, SQLite `NUMERIC`.
+    /// Rust type: `rust_decimal::Decimal`. Use it for money and other
+    /// data where `f64` rounding would be wrong.
     Decimal,
-    /// Binary blob — Django's `BinaryField`. Postgres `BYTEA`, MySQL
-    /// `LONGBLOB`, SQLite `BLOB`. Rust type: `Vec<u8>`. No length cap
-    /// at the type level; deployments add CHECK constraints if needed.
+    /// Binary blob, like Django's `BinaryField`. Postgres `BYTEA`,
+    /// MySQL `LONGBLOB`, SQLite `BLOB`. Rust type: `Vec<u8>`. There is
+    /// no length cap; add a CHECK constraint if you need one.
     Binary,
-    /// Time of day, no date component — Django's `TimeField`. Postgres
-    /// `TIME`, MySQL `TIME(6)`, SQLite `TIME` (text affinity, `HH:MM:SS`
-    /// shape). Rust type: `chrono::NaiveTime`.
+    /// Time of day with no date, like Django's `TimeField`. Postgres
+    /// `TIME`, MySQL `TIME(6)`, SQLite `TIME` (text, `HH:MM:SS`). Rust
+    /// type: `chrono::NaiveTime`.
     Time,
-    /// Native PostgreSQL array — Django's `ArrayField` (#341). Rust type:
-    /// [`crate::sql::Array<T>`]. The element kind selects the column type
-    /// (`text[]` / `integer[]` / `bigint[]`). **PG-only by language
-    /// semantics**: MySQL / SQLite have no array column type, so the DDL
-    /// writer degrades to `TEXT` and the bind / decode paths error there.
+    /// Postgres array, like Django's `ArrayField`. Rust type:
+    /// [`crate::sql::Array<T>`]. The element kind picks the column type
+    /// (`text[]` / `integer[]` / `bigint[]`). **Postgres only**: MySQL
+    /// and SQLite have no array type, so the DDL falls back to `TEXT`
+    /// and the bind and decode paths fail there.
     Array(ArrayElem),
-    /// Native PostgreSQL range — Django's `RangeField` family (#343).
-    /// Rust type: [`crate::sql::Range<T>`]. The element kind selects the
-    /// column type (`int4range` / `int8range` / `numrange` / `daterange`
-    /// / `tstzrange`). **PG-only by language semantics** like
-    /// [`Self::Array`]: MySQL / SQLite degrade to `TEXT` and the decode
-    /// path errors there.
+    /// Postgres range, like Django's `RangeField` family. Rust type:
+    /// [`crate::sql::Range<T>`]. The element kind picks the column type
+    /// (`int4range` / `int8range` / `numrange` / `daterange` /
+    /// `tstzrange`). **Postgres only**, like [`Self::Array`].
     Range(RangeElem),
-    /// Native PostgreSQL `hstore` — Django's `HStoreField` (#342). A flat
-    /// string→string map. Rust type: [`crate::sql::HStore`]. **PG-only by
-    /// language semantics** like [`Self::Array`] / [`Self::Range`]; MySQL
-    /// / SQLite degrade to `TEXT` and the decode path errors there.
-    /// Requires the `hstore` extension on the database.
+    /// Postgres `hstore`, like Django's `HStoreField`: a flat
+    /// string-to-string map. Rust type: [`crate::sql::HStore`].
+    /// **Postgres only**, like [`Self::Array`] / [`Self::Range`].
+    /// Needs the `hstore` extension.
     HStore,
-    /// Native pgvector `vector(N)` embedding column — Eloquent 13's
-    /// `vector(...)` (#824). `N` is the dimension; `0` means
-    /// unconstrained (`vector`). Rust type: [`crate::sql::Vector`].
-    /// **PG-only by language semantics** like [`Self::Array`]: MySQL /
-    /// SQLite degrade to `TEXT`, and the decode path + distance
-    /// operators error there. Requires the `vector` extension.
+    /// pgvector `vector(N)` embedding column. `N` is the dimension; `0`
+    /// means no fixed dimension. Rust type: [`crate::sql::Vector`].
+    /// **Postgres only**, like [`Self::Array`]; the distance operators
+    /// fail elsewhere. Needs the `vector` extension.
     Vector(u32),
-    /// Native PostGIS `geometry(Point, SRID)` column — GeoDjango
-    /// `gis.geos` geometry types (#443). The `u32` is the SRID (4326 =
-    /// WGS 84). Rust type: [`crate::sql::Point`]. **PG/PostGIS-only by
-    /// language semantics** like [`Self::Vector`]: MySQL / SQLite degrade
-    /// to `TEXT` and the decode path errors there. Requires the `postgis`
-    /// extension. (Slice 1 supports the `Point` subtype only.)
+    /// PostGIS `geometry(Point, SRID)` column. The `u32` is the SRID
+    /// (4326 = WGS 84). Rust type: [`crate::sql::Point`]. **PostGIS
+    /// only**, like [`Self::Vector`]. Only the `Point` subtype is
+    /// supported.
     Geometry(u32),
 }
 
-/// Element type of a [`FieldType::Range`] column (#343). Selects the
-/// PostgreSQL range column type emitted by the migration writer.
+/// Element type of a [`FieldType::Range`] column. Picks the Postgres
+/// range type the migration writer emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RangeElem {
     /// `int4range` — element `i32` ([`crate::sql::Range<i32>`]).
@@ -109,9 +95,9 @@ impl RangeElem {
     }
 }
 
-/// Element type of a [`FieldType::Array`] column (#341). Selects the
-/// PostgreSQL array column type emitted by the migration writer. Kept a
-/// small `Copy` enum so [`FieldType`] stays `Copy`.
+/// Element type of a [`FieldType::Array`] column. Picks the Postgres
+/// array type the migration writer emits. Kept a small `Copy` enum so
+/// [`FieldType`] stays `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArrayElem {
     /// `text[]` — element type `String` ([`crate::sql::Array<String>`]).

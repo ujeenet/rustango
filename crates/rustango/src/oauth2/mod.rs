@@ -53,6 +53,10 @@
 //! [`OAuth2Provider::from_discovery`] fetches `.well-known/openid-configuration`
 //! and populates `auth_url`, `token_url`, `userinfo_url` automatically. Use it
 //! for any conformant OIDC provider — Keycloak, Auth0, Okta, etc.
+//!
+//! [`OAuth2Registry`]: crate::oauth2::OAuth2Registry
+//! [`OAuth2Provider`]: crate::oauth2::OAuth2Provider
+//! [`OAuth2Provider::from_discovery`]: crate::oauth2::OAuth2Provider::from_discovery
 
 use std::collections::HashMap;
 use std::sync::Arc;

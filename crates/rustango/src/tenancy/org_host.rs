@@ -1,21 +1,14 @@
 //! Additional hostnames a tenant answers on.
 //!
-//! [`Org::host_pattern`](super::Org) is the tenant's **base** host — the one
-//! `create-tenant` writes and every existing deployment already resolves
-//! through. This table holds the *extra* hosts an operator or a CMS adds
+//! [`Org::host_pattern`](super::Org) holds the tenant's base host, the
+//! one `create-tenant` writes. This table holds the extra hosts added
 //! later, so one tenant can serve several domains.
 //!
-//! ## Why the base host is not a row here
-//!
-//! It would be tidier to migrate `host_pattern` into this table and mark it
-//! `is_primary`, and that is exactly what makes it fragile: the guard
-//! against deleting the base becomes a runtime `if` that one careless
-//! `DELETE … WHERE org_id = ?` walks straight past, leaving a tenant no
-//! host at all and no obvious way back.
-//!
-//! Keeping the base in `Org.host_pattern` makes it *structurally*
-//! undeletable through this table — there is no row to remove. Listing
-//! unions the two and flags which is which, so callers still see one list.
+//! The base host is deliberately not a row here. If it were, only a
+//! runtime check would stop a `DELETE ... WHERE org_id = ?` from
+//! leaving a tenant with no host at all. Keeping it on `Org` means
+//! there is no row to delete. Listing joins the two and marks which is
+//! which, so callers still see one list.
 
 use serde::Serialize;
 
@@ -74,9 +67,8 @@ pub enum HostError {
     Taken(String),
     /// Removing the base host, which this table cannot represent.
     IsBaseHost(String),
-    /// No tenant by that slug. Distinct from [`Self::NotFound`], which is
-    /// about a hostname: one `NotFound` for both sent a mistyped slug
-    /// looking at the host table (#1356).
+    /// No tenant by that slug. Separate from [`Self::NotFound`], which
+    /// is about a hostname, so a mistyped slug says so.
     NoSuchOrg(String),
     /// No such hostname on a tenant that does exist.
     NotFound,
@@ -108,10 +100,10 @@ impl From<crate::sql::ExecError> for HostError {
 
 /// Normalize and validate a hostname.
 ///
-/// Rejects rather than repairs anything that is not a bare host, because
-/// the value is compared byte-for-byte against the `Host` header: a stored
-/// `https://x.com/` or `x.com:443` would simply never match, and would look
-/// like a routing bug rather than a bad input.
+/// Anything that is not a bare host is rejected, not repaired. The
+/// value is compared byte for byte with the `Host` header, so a stored
+/// `https://x.com/` would never match and would look like a routing
+/// bug instead of bad input.
 ///
 /// # Errors
 /// [`HostError::Invalid`] when the value is empty, over-long, or carries a
@@ -193,9 +185,9 @@ pub async fn add_host(
     else {
         return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
-    // Claimed as some tenant's BASE host? The unique index below cannot see
-    // `rustango_orgs.host_pattern`, so without this a host could be added
-    // here that silently never wins — `SubdomainResolver` runs first.
+    // Is it some tenant's base host? The unique index cannot see
+    // `rustango_orgs.host_pattern`, and `SubdomainResolver` runs first,
+    // so a row added here would never win.
     let base_clash: Vec<super::Org> = super::Org::objects()
         .where_(super::Org::host_pattern.eq(Some(host.clone())))
         .fetch(registry)
@@ -295,68 +287,43 @@ pub async fn set_host_enabled(
     Ok(())
 }
 
-/// A cheap fingerprint of the whole host table, used to detect a change
-/// made by **another process**.
+/// A cheap fingerprint of the host table, used to spot a change made by
+/// **another process**.
 ///
-/// `invalidate_host_cache` only clears the pod that called it. Behind a
-/// load balancer the others would keep serving a stale answer until their
-/// TTL expired — a host added on one pod 404ing on the rest, which is
-/// exactly the kind of thing that gets diagnosed as "DNS hasn't
-/// propagated". Each pod re-reads this fingerprint periodically and drops
-/// its cache when it moves.
+/// `invalidate_host_cache` clears only the pod that called it. Behind a
+/// load balancer the other pods would serve a stale answer until their
+/// TTL ran out. Each pod re-reads this fingerprint and drops its cache
+/// when the value moves.
 ///
-/// ## Why `(count, enabled, max_id)` and not a timestamp
+/// The terms are `(count, enabled, enabled_id_sum, max_id)`, which need
+/// no clock and no new column. They cover every mutation here:
 ///
-/// The obvious fingerprint is `max(updated_at)`, and it is wrong here for
-/// two independent reasons.
-///
-/// It is not monotonic across pods. An `auto_now` column takes its value
-/// from the *database* clock on INSERT (the column default) but from the
-/// *writing process* clock on UPDATE. A pod whose clock lags the registry
-/// can disable a host and write a timestamp older than the current max,
-/// leaving the fingerprint unmoved — silently failing at exactly the job
-/// it exists to do.
-///
-/// It also needs a new `NOT NULL` column, and adding one to a populated
-/// table is rejected outright by SQLite: `ALTER TABLE … ADD COLUMN …
-/// DEFAULT CURRENT_TIMESTAMP NOT NULL` fails with `Cannot add a column
-/// with non-constant default`. Every existing registry would be unable to
-/// migrate.
-///
-/// These counters need no clock and no new column, and cover every
-/// mutation this module can perform:
-///
-/// | mutation             | what moves              |
-/// |----------------------|-------------------------|
-/// | [`add_host`]         | `count`, `max_id`       |
-/// | [`remove_host`]      | `count`                 |
+/// | mutation             | what moves                  |
+/// |----------------------|-----------------------------|
+/// | [`add_host`]         | `count`, `max_id`           |
+/// | [`remove_host`]      | `count`                     |
 /// | [`set_host_enabled`] | `enabled`, `enabled_id_sum` |
 ///
-/// ## Why `enabled_id_sum` and not just the enabled count
+/// `max(updated_at)` would be the obvious choice and is wrong twice
+/// over. It is not monotonic across pods, because `auto_now` takes the
+/// database clock on INSERT but the writer's clock on UPDATE, so a pod
+/// with a slow clock can write a timestamp below the current max. It
+/// also needs a new `NOT NULL` column, which SQLite refuses to add to a
+/// populated table.
 ///
-/// A count cancels. Disable one host and enable another inside the same
-/// poll interval — an operator swapping which domain is live, which is a
-/// perfectly ordinary admin action — and `enabled` goes −1 then +1 while
-/// `count` and `max_id` never move. The fingerprint would sit still and
-/// neither change would reach the other pods.
+/// `enabled_id_sum` is there because a plain enabled count cancels out:
+/// disable one host and enable another in the same interval and the
+/// count returns to where it started. Summing the ids of enabled rows
+/// says *which* rows are on. `SUM` is cast to `bigint`, so it decodes
+/// as `i64` on all three backends.
 ///
-/// Summing the ids of the enabled rows distinguishes *which* rows are on,
-/// not just how many, so that swap moves the term. It stays clock-free
-/// and rides in the same query. `SUM` is cast to `bigint` by the
-/// aggregate writer, so it decodes as `i64` on all three backends rather
-/// than Postgres' native `numeric`.
+/// Two id sets with equal sums, swapped in one interval, still collide;
+/// the 30s `HOST_CACHE` TTL catches that, so the cost is slower
+/// convergence, never permanent staleness.
 ///
-/// Residual: two disjoint id-sets with equal sums toggled in opposite
-/// directions in one interval still collide. That needs a simultaneous
-/// multi-host swap with arithmetically matching ids, and the 30s
-/// `HOST_CACHE` TTL still backstops it — the cost is 30s convergence
-/// instead of 5s, never permanent staleness.
-///
-/// **Invariant for future work:** a mutation that edits a row in place
-/// without changing the row count or the enabled set — renaming a
-/// hostname, say — would not move any of these. There is deliberately no
-/// such path today. Add one and this fingerprint must grow a term with
-/// it, or cross-pod invalidation will silently miss it.
+/// **If you add a mutation** that edits a row in place without changing
+/// the row count or the enabled set — renaming a hostname, say — add a
+/// term here too, or other pods will miss the change.
 ///
 /// # Errors
 /// Driver / query failures.
@@ -365,9 +332,7 @@ pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
     use crate::core::{AggregateQuery, Model as _, WhereExpr};
     use crate::sql::fetch_aggregate_pool;
 
-    // One round trip, four scalars, no rows decoded. The previous
-    // implementation fetched and deserialized the entire table on every
-    // pod every interval, which is the cost this cache exists to avoid.
+    // One round trip, four scalars, no rows decoded.
     let q = AggregateQuery {
         model: OrgHost::SCHEMA,
         joins: Vec::new(),
@@ -391,9 +356,8 @@ pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
         limit: None,
         offset: None,
     };
-    // Every term is NULL-able on an empty table (`MAX` / `SUM` of no
-    // rows), so each decodes as `Option` and folds to 0 — an empty
-    // registry has a stable fingerprint rather than an error.
+    // `MAX` and `SUM` are NULL on an empty table, so decode as `Option`
+    // and fold to 0. An empty registry gets a stable fingerprint.
     let rows: Vec<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
         fetch_aggregate_pool(registry, &q).await?;
     let (n, n_on, max_id, on_id_sum) = rows.into_iter().next().unwrap_or((None, None, None, None));
@@ -405,22 +369,19 @@ pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
     })
 }
 
-/// The fingerprint [`generation`] returns. A plain tuple would work, but
-/// four same-typed `i64`s in a row are trivial to transpose at a call
-/// site and the compiler would not notice.
+/// The fingerprint [`generation`] returns. A named struct, not a tuple,
+/// because four `i64`s in a row are easy to transpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Generation {
-    /// Total rows — moves on add and remove.
+    /// Total rows. Moves on add and remove.
     pub count: i64,
-    /// Rows with `enabled = true` — moves on a toggle, which is the
-    /// mutation a count-and-max-id fingerprint would otherwise miss.
+    /// Rows with `enabled = true`. Moves on a toggle.
     pub enabled: i64,
-    /// Largest row id — distinguishes an add-plus-remove in the same
-    /// interval, which leaves `count` unchanged.
+    /// Largest row id. Catches an add plus a remove in one interval,
+    /// which leaves `count` unchanged.
     pub max_id: i64,
-    /// Sum of the ids of the enabled rows — identifies *which* rows are
-    /// on, not just how many, so a disable-one/enable-another swap in a
-    /// single interval still moves the fingerprint. See [`generation`].
+    /// Sum of the enabled rows' ids. Says which rows are on, so
+    /// swapping one for another still moves the fingerprint.
     pub enabled_id_sum: i64,
 }
 

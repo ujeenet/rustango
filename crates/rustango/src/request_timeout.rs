@@ -1,19 +1,16 @@
-//! Per-request timeout middleware. Wraps an axum router so any
-//! handler that takes longer than the configured duration gets
-//! killed and the client receives `504 Gateway Timeout` instead
-//! of a hung connection.
+//! Cut off a request that runs too long. The handler is dropped and
+//! the client gets `504 Gateway Timeout` instead of a hung
+//! connection.
 //!
 //! ## When to use
 //!
-//! Production deployments behind a load balancer. A wedged DB
-//! query / external HTTP call holding a worker hostage can
-//! exhaust the pool's request slots and stall every other client.
-//! A modest 30s timeout caps the blast radius — slow requests
-//! visible as 504s in metrics rather than mysterious hangs.
+//! In production. One stuck database query or outbound HTTP call
+//! can hold a worker forever, and enough of them starve every other
+//! client. A timeout turns that into 504s you can see in metrics.
 //!
-//! Wired from `Settings.server.request_timeout_secs` automatically
-//! by `Cli::with_settings_from_env()`. Mount manually for projects
-//! that build their server outside `Cli`:
+//! `Cli::with_settings_from_env()` mounts this from
+//! `Settings.server.request_timeout_secs`. Mount it yourself if you
+//! build the server without `Cli`:
 //!
 //! ```ignore
 //! use rustango::request_timeout::{RequestTimeoutLayer, RequestTimeoutRouterExt as _};
@@ -24,11 +21,10 @@
 //!     .request_timeout(RequestTimeoutLayer::new(Duration::from_secs(30)));
 //! ```
 //!
-//! ## What it doesn't do
+//! ## What not to wrap
 //!
-//! Streaming responses (SSE, websocket upgrades) shouldn't be
-//! wrapped by a request timeout — they're long-lived by design.
-//! Mount this on your API router slice, not the entire app.
+//! Long-lived responses such as SSE streams and WebSocket upgrades.
+//! Mount this on your API routes, not on the whole app.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,25 +36,23 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::Router;
 
-/// Configuration for the request-timeout middleware.
+/// How long a request may run.
 #[derive(Clone, Debug)]
 pub struct RequestTimeoutLayer {
     pub timeout: Duration,
 }
 
 impl RequestTimeoutLayer {
-    /// Build the layer with the given total handler timeout.
-    /// Production-typical value is 30s; raise to 60s for routes
-    /// that legitimately need longer (file uploads, batch ops).
+    /// Set the timeout. 30s suits most routes; give slower ones,
+    /// such as uploads or batch jobs, more.
     #[must_use]
     pub fn new(timeout: Duration) -> Self {
         Self { timeout }
     }
 
-    /// Build from a loaded `Settings.server` section. Returns
-    /// `None` when `request_timeout_secs` is unset — opt-in
-    /// behavior, since production sets it but local dev usually
-    /// doesn't.
+    /// Read the timeout from settings. `None` when
+    /// `request_timeout_secs` is unset or zero, so the timeout
+    /// stays opt-in.
     #[cfg(feature = "config")]
     #[must_use]
     pub fn from_settings(s: &crate::config::ServerSettings) -> Option<Self> {
@@ -70,7 +64,7 @@ impl RequestTimeoutLayer {
     }
 }
 
-/// Extension trait for `Router::request_timeout(layer)`.
+/// Adds `.request_timeout(layer)` to a router.
 pub trait RequestTimeoutRouterExt {
     #[must_use]
     fn request_timeout(self, layer: RequestTimeoutLayer) -> Self;
@@ -114,14 +108,12 @@ mod tests {
     use axum::body::to_bytes;
     use axum::routing::get;
 
-    /// Default constructor stores the timeout verbatim.
     #[test]
     fn new_stores_timeout() {
         let l = RequestTimeoutLayer::new(Duration::from_secs(30));
         assert_eq!(l.timeout.as_secs(), 30);
     }
 
-    /// `from_settings` returns `None` for unset / zero values.
     #[cfg(feature = "config")]
     #[test]
     fn from_settings_unset_returns_none() {
@@ -146,7 +138,6 @@ mod tests {
         assert_eq!(l.timeout.as_secs(), 30);
     }
 
-    /// Fast handler: passes through unchanged.
     #[tokio::test]
     async fn fast_handler_passes_through() {
         let app = Router::new()
@@ -166,7 +157,6 @@ mod tests {
         assert_eq!(&body[..], b"ok");
     }
 
-    /// Slow handler that exceeds the timeout: 504.
     #[tokio::test]
     async fn slow_handler_504s() {
         let app = Router::new()

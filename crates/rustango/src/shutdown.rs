@@ -1,36 +1,27 @@
-//! Graceful-shutdown signal handling.
-//!
-//! One implementation of "the process has been asked to stop", used by
-//! every serve path so they cannot disagree (#1409).
+//! Graceful-shutdown signal handling. Every serve path uses this
+//! one function, so they cannot disagree.
 //!
 //! ## Why `ctrl_c()` alone is not enough
 //!
-//! `tokio::signal::ctrl_c()` is **SIGINT only** on Unix. It never
-//! resolves for SIGTERM — and SIGTERM is how every orchestrator asks a
-//! process to stop: Kubernetes before its grace period, `docker stop`,
-//! systemd, most supervisors. SIGTERM's default disposition kills the
-//! process outright, so a server waiting on `ctrl_c()` is simply gone.
-//!
-//! That put the drain in exactly the environment where losing work does
-//! not matter — a developer's laptop — and never in the one where it
-//! does. Every deploy and every pod eviction dropped whatever was in
-//! flight, and the failure was invisible: exit 0, nothing logged.
+//! On Unix `tokio::signal::ctrl_c()` waits for SIGINT only. But
+//! Kubernetes, `docker stop` and systemd all send SIGTERM, which
+//! kills the process by default. A server waiting on `ctrl_c()`
+//! therefore drains on a laptop and dies mid-request in
+//! production, with exit code 0 and nothing in the log.
 
-/// Resolves when the process is asked to stop: Ctrl-C (SIGINT) or
-/// SIGTERM.
+/// Waits until the process is asked to stop, by Ctrl-C (SIGINT) or
+/// SIGTERM. Off Unix, only Ctrl-C.
 ///
-/// On non-Unix targets only Ctrl-C exists, and that is what this waits
-/// for.
-///
-/// Pass it to `axum::serve(..).with_graceful_shutdown(..)`, which then
-/// stops accepting connections and lets in-flight requests finish.
+/// Pass it to `axum::serve(..).with_graceful_shutdown(..)`. The
+/// server then stops accepting connections and lets the requests
+/// already running finish.
 pub async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
 
-        // A failed handler registration must not mean "never shut
-        // down": fall back to the other signal rather than hanging.
+        // If we cannot install the handler, fall back to Ctrl-C.
+        // Hanging forever would be worse.
         let mut term = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {

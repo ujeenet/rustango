@@ -60,7 +60,7 @@ const CSRF_HEADER: &str = "X-CSRF-Token";
 /// `csrfmiddlewaretoken` semantics, renamed for rustango.
 pub const CSRF_FORM_FIELD: &str = "_csrf";
 
-/// Create the CSRF middleware as a tower [`Layer`].
+/// Create the CSRF middleware as a [`tower::Layer`].
 ///
 /// Defaults are sensible: 32-byte tokens, Lax SameSite, HttpOnly
 /// off (the SPA must read the cookie). Override via [`CsrfConfig`]
@@ -342,7 +342,7 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
     false
 }
 
-/// The tower [`Layer`] implementation. Wraps inner services with
+/// The [`tower::Layer`] implementation. Wraps inner services with
 /// [`CsrfService`].
 #[derive(Clone)]
 pub struct CsrfLayer {

@@ -1,10 +1,9 @@
-//! RSS 2.0 + Atom 1.0 feed rendering — `django.contrib.syndication`.
+//! RSS 2.0 and Atom 1.0 feeds, like `django.contrib.syndication`.
 //!
-//! Build a [`Feed`] (channel metadata + a `Vec<FeedItem>`) and call
-//! [`render_rss`] for an RSS 2.0 document or [`render_atom`] for an
-//! Atom 1.0 document. Wire-up is the caller's job: register a handler
-//! at `/feed.rss` (or `/feed.atom`) and return the result with
-//! `Content-Type: application/rss+xml` (or `application/atom+xml`).
+//! Build a [`Feed`] and call [`render_rss`] or [`render_atom`]. Adding
+//! the route is up to you: serve the RSS string with
+//! `Content-Type: application/rss+xml`, the Atom one with
+//! `application/atom+xml`.
 //!
 //! ```ignore
 //! use rustango::syndication::{Feed, FeedItem, render_rss};
@@ -25,23 +24,25 @@
 //! let xml = render_rss(&feed);
 //! ```
 //!
-//! Issue #57 (smaller contrib apps).
+//! [`Feed`]: crate::syndication::Feed
+//! [`render_rss`]: crate::syndication::render_rss
+//! [`render_atom`]: crate::syndication::render_atom
 
 use chrono::{DateTime, Utc};
 
 // ------------------------------------------------------------------ Feed / FeedItem
 
-/// Channel-level metadata for a feed.
+/// Feed-level metadata.
 #[derive(Debug, Clone)]
 pub struct Feed {
     pub title: String,
-    /// Canonical site URL — RSS `<link>`, Atom self link.
+    /// The site URL: RSS `<link>`, Atom self link.
     pub link: String,
     pub description: String,
-    /// ISO-639-1 language tag (e.g. `"en"`, `"fr"`). RSS-only.
+    /// ISO-639-1 language tag such as `"en"`. RSS only.
     pub language: Option<String>,
-    /// Most-recent update timestamp. Defaults to the latest
-    /// `FeedItem::pub_date` at render time when `None`.
+    /// When the feed last changed. If `None`, rendering uses the
+    /// newest `FeedItem::pub_date`.
     pub last_build_date: Option<DateTime<Utc>>,
     pub items: Vec<FeedItem>,
 }
@@ -50,20 +51,18 @@ pub struct Feed {
 #[derive(Debug, Clone)]
 pub struct FeedItem {
     pub title: String,
-    /// Per-item URL — RSS `<link>` / `<guid>`, Atom `<id>`.
+    /// The item URL: RSS `<link>` and `<guid>`, Atom `<id>`.
     pub link: String,
     pub description: Option<String>,
     pub pub_date: Option<DateTime<Utc>>,
-    /// Free-form author identifier. RSS: an email address per spec;
-    /// Atom: any string (rendered as `<author><name>...</name></author>`).
+    /// The author. RSS wants an email address; Atom takes any string.
     pub author: Option<String>,
-    /// Optional override for the per-item `<guid>` (RSS) / `<id>`
-    /// (Atom). Defaults to `link` when unset.
+    /// Overrides the `<guid>` or `<id>`. Defaults to `link`.
     pub guid: Option<String>,
 }
 
 impl FeedItem {
-    /// Build an item with the two required fields (title + link).
+    /// Build an item from the two required fields.
     #[must_use]
     pub fn new(title: impl Into<String>, link: impl Into<String>) -> Self {
         Self {
@@ -103,8 +102,8 @@ impl FeedItem {
 
 // ------------------------------------------------------------------ render_rss
 
-/// Render an RSS 2.0 document. Per spec: `<rss version="2.0">` with a
-/// single `<channel>` containing channel metadata + `<item>` children.
+/// Render an RSS 2.0 document: one `<channel>` holding the metadata
+/// and the `<item>` elements.
 #[must_use]
 pub fn render_rss(feed: &Feed) -> String {
     let mut out = String::with_capacity(512 + feed.items.len() * 256);
@@ -147,11 +146,11 @@ pub fn render_rss(feed: &Feed) -> String {
 
 // ------------------------------------------------------------------ render_atom
 
-/// Render an Atom 1.0 document. The Atom spec mandates `<id>` /
-/// `<title>` / `<updated>` on both the feed and each entry; we fill
-/// in `feed.link` for `<id>`, the max `pub_date` (or `Utc::now()`)
-/// for `<updated>` when not set, and per-item `link`/`pub_date`
-/// similarly.
+/// Render an Atom 1.0 document.
+///
+/// Atom requires `<id>`, `<title>` and `<updated>` on the feed and on
+/// every entry. Missing values are filled in: `feed.link` for the
+/// feed `<id>`, and the newest `pub_date`, or now, for `<updated>`.
 #[must_use]
 pub fn render_atom(feed: &Feed) -> String {
     let mut out = String::with_capacity(512 + feed.items.len() * 256);
@@ -159,7 +158,7 @@ pub fn render_atom(feed: &Feed) -> String {
     out.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
     push_text_element(&mut out, "title", &feed.title, 2);
     push_text_element(&mut out, "id", &feed.link, 2);
-    // `<link rel="alternate" href="..."/>` per Atom convention.
+    // Atom uses `<link rel="alternate" href="..."/>`.
     out.push_str("  <link href=\"");
     let mut esc_link = String::new();
     escape_xml_text(&mut esc_link, &feed.link);
@@ -225,14 +224,13 @@ fn escape_xml_text(out: &mut String, s: &str) {
     }
 }
 
-/// RFC 822 (= RFC 2822) date format required by RSS 2.0 `<pubDate>`
-/// / `<lastBuildDate>`. Chrono provides this directly.
+/// The RFC 2822 date RSS 2.0 wants in `<pubDate>` and
+/// `<lastBuildDate>`.
 fn format_rfc822(ts: DateTime<Utc>) -> String {
     ts.to_rfc2822()
 }
 
-/// ISO-8601 / RFC 3339 — Atom 1.0 `<updated>` shape. UTC zero offset
-/// renders as `Z`.
+/// The RFC 3339 date Atom wants in `<updated>`. UTC renders as `Z`.
 fn format_iso8601(ts: DateTime<Utc>) -> String {
     ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -352,10 +350,9 @@ mod tests {
         let xml = render_rss(&f);
         assert!(!xml.contains("<language>"));
         assert!(!xml.contains("<lastBuildDate>"));
-        // Channel <description> is REQUIRED by RSS 2.0 — it stays.
-        // Items without their own description should still omit the
-        // tag from the <item> block; assert only the channel one
-        // appears (count == 1).
+        // RSS 2.0 requires the channel <description>, so it stays. An
+        // item with no description leaves the tag out, so only the
+        // channel one appears.
         assert_eq!(
             xml.matches("<description>").count(),
             1,
@@ -397,7 +394,7 @@ mod tests {
     #[test]
     fn atom_renders_entries() {
         let xml = render_atom(&sample_feed());
-        // Each item → <entry> with title, id (= link by default), link.
+        // Each item becomes an <entry> with title, id and link.
         assert!(xml.contains("<entry>"));
         assert!(xml.contains("<title>First post</title>"));
         assert!(xml.contains("<id>https://example.com/articles/first</id>"));
@@ -435,8 +432,7 @@ mod tests {
         f.last_build_date = Some(ts(2025, 6, 1));
         let xml = render_atom(&f);
         let expected = format_iso8601(ts(2025, 6, 1));
-        // Both the feed `<updated>` and every entry's `<updated>`
-        // should carry this timestamp.
+        // The feed and every entry carry this timestamp.
         let count = xml
             .matches(&format!("<updated>{expected}</updated>"))
             .count();

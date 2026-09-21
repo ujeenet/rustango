@@ -692,7 +692,7 @@ impl Translator {
         Ok(t)
     }
 
-    /// Build a `Translator` from a [`crate::config::sections::I18nSettings`]
+    /// Build a `Translator` from a [`crate::config::I18nSettings`]
     /// — Django-shape `LANGUAGE_CODE` / `LANGUAGES` / `LOCALE_PATHS`
     /// (#403). Reads each `locale_paths` entry as a directory of
     ///

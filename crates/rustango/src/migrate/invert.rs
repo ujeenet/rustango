@@ -1,26 +1,16 @@
 //! Invert a forward operation list into its rollback form.
 //!
-//! Pure (no I/O). The runner's `unapply` calls [`invert`] to compute
-//! the inverse op list, then executes it the same way the forward
-//! runner does.
+//! No I/O. The runner's `unapply` calls [`invert`], then executes the
+//! result the same way it executes a forward list.
 //!
-//! Schema inversions:
-//! * `CreateTable(t) → DropTable(t)`
-//! * `DropTable(t) → CreateTable(t)` — needs `t` in `prev` snapshot
-//! * `AddColumn{table, column} → DropColumn{...}`
-//! * `DropColumn{table, column} → AddColumn{...}` — needs `(table,
-//!   column)` in `prev` snapshot to recover field metadata at render
-//!   time.
+//! Each schema op flips to its opposite: create becomes drop, add
+//! becomes remove, a rename swaps its two names. The drop-shaped ones
+//! need the dropped thing in the `prev` snapshot, because that is where
+//! the metadata to recreate it comes from.
 //!
-//! Data inversions:
-//! * `Data { sql, reverse_sql: Some(rs), reversible: true }`
-//!   becomes `Data { sql: rs, reverse_sql: None, reversible: false }`
-//!   — the inverted op is itself one-way; rolling-back-the-rollback
-//!   would need a separate forward-applied migration.
-//! * `Data { reversible: false }` → fail-fast with a clear error
-//!   naming the offending op. **Never silently no-op**, which is one
-//!   of Django's classic footguns: irreversible migrations should
-//!   stop a `downgrade` cold so the operator can intervene.
+//! A data op inverts to its `reverse_sql`, and the result is itself
+//! one-way. A data op with `reversible: false` is an error, never a
+//! silent no-op: a `downgrade` must stop so the operator can step in.
 
 use super::diff::SchemaChange;
 use super::error::MigrateError;
@@ -29,18 +19,16 @@ use super::snapshot::SchemaSnapshot;
 
 /// Compute the rollback form of a forward operation list.
 ///
-/// Walks `forward` **in reverse** — the last op applied is the first
-/// op rolled back. `prev` is the schema state **before** the
-/// migration was applied (i.e. the predecessor migration's snapshot,
-/// or empty for the very first migration).
+/// Walks `forward` **in reverse**: the last op applied is the first op
+/// rolled back. `prev` is the schema **before** the migration ran, so
+/// the predecessor's snapshot, or empty for the first migration.
 ///
 /// # Errors
 /// Returns [`MigrateError::Validation`] if:
-/// * Any data op has `reversible: false` (cannot be rolled back).
-/// * A data op has `reversible: true` but no `reverse_sql`
-///   (corrupt — `file::load` should already have rejected this).
-/// * A `DropTable`/`DropColumn` references something missing from
-///   `prev`, meaning the predecessor snapshot was tampered with.
+/// * A data op has `reversible: false`, so it cannot be rolled back.
+/// * A data op claims to be reversible but has no `reverse_sql`.
+/// * A drop op names something missing from `prev`, so the metadata
+///   needed to recreate it is gone.
 pub fn invert(
     forward: &[Operation],
     prev: &SchemaSnapshot,
@@ -172,21 +160,17 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             }))
         }
         Operation::Schema(SchemaChange::AddExclusionConstraint { name, table, .. }) => {
-            // Inverse of Add is Drop. We don't carry the full
-            // definition into the down migration because PG
-            // doesn't need it for a Drop.
+            // PG needs only the name to drop it, so the full
+            // definition is not carried over.
             Ok(Operation::Schema(SchemaChange::DropExclusionConstraint {
                 name: name.clone(),
                 table: table.clone(),
             }))
         }
         Operation::Schema(SchemaChange::DropExclusionConstraint { name, table }) => {
-            // We can't reconstruct the AddExclusionConstraint
-            // payload from a snapshot today (exclusion constraints
-            // aren't tracked in `SchemaSnapshot` yet). Surface a
-            // clear error so the user can hand-write the inverse
-            // — same shape as `DropCheckConstraint` errors when
-            // the constraint isn't in the predecessor snapshot.
+            // `SchemaSnapshot` does not track exclusion constraints,
+            // so the Add payload cannot be rebuilt. Fail with a clear
+            // message instead.
             Err(MigrateError::Validation(format!(
                 "cannot invert DropExclusionConstraint(`{name}` on `{table}`): exclusion constraints aren't tracked in SchemaSnapshot; write the inverse `AddExclusionConstraint` by hand. Issue #32.",
             )))
@@ -194,10 +178,8 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
         Operation::Schema(SchemaChange::CreateIndex { name, table, .. }) => {
             Ok(Operation::Schema(SchemaChange::DropIndex {
                 name: name.clone(),
-                // Carried so the inverse is appliable on MySQL, which
-                // needs `DROP INDEX <name> ON <table>` (#1588). Before
-                // this, rolling back a CreateIndex produced an op the
-                // MySQL renderer refused.
+                // MySQL needs `DROP INDEX <name> ON <table>`, so the
+                // table must travel with the inverse op.
                 table: table.clone(),
             }))
         }

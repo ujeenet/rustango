@@ -1,19 +1,15 @@
-//! Pluggable bulk actions for the auto-admin.
+//! Pluggable bulk actions for the auto-admin — Django's `actions = [...]`
+//! dropdown.
 //!
-//! Bulk-action runner that lifts Django's `actions = [...]` dropdown.
-//! Each `BulkAction` knows its codename, label, and how to run on a
-//! list of selected primary keys. The admin's "Action" dropdown is
-//! populated from a [`BulkActionRegistry`] mounted on the
-//! [`crate::server::Builder`] (or constructed directly for unit
-//! tests).
+//! A [`BulkAction`](crate::bulk_actions::BulkAction) has a codename, a
+//! label, and a `run` that acts on the selected primary keys. The admin's
+//! "Action" dropdown is built from a
+//! [`BulkActionRegistry`](crate::bulk_actions::BulkActionRegistry) mounted
+//! on the [`crate::server::Builder`].
 //!
-//! v0.38 — lifted from `&PgPool` to the tri-dialect `&Pool` enum so
-//! built-in actions work on PG / MySQL / SQLite. Identifier quoting
-//! routes through `dialect.quote_ident()` (`"foo"` on PG/SQLite,
-//! `` `foo` `` on MySQL) and IN-lists are expanded inline rather
-//! than bound via PG-only `= ANY($N::bigint[])`. Timestamps use
-//! `chrono::Utc::now()` bound as parameters, dodging the per-dialect
-//! `NOW()` / `CURRENT_TIMESTAMP` difference.
+//! Actions work on PG, MySQL and SQLite: quoting goes through
+//! `dialect.quote_ident()`, IN-lists are expanded inline, and timestamps
+//! are bound as values instead of `NOW()`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -139,9 +135,8 @@ pub(crate) fn validate_ident(name: &str) -> Result<(), BulkActionError> {
     Ok(())
 }
 
-/// Render `({p1}, {p2}, ..., {pN})` for an IN-list of `n` placeholders
-/// using `dialect.placeholder(i)`. PG emits `$1, $2, …`, MySQL/SQLite
-/// emit `?, ?, …`.
+/// Render an IN-list of `n` placeholders: `($1, $2, …)` on PG,
+/// `(?, ?, …)` on MySQL and SQLite.
 fn placeholders_for(dialect: &dyn crate::sql::Dialect, n: usize) -> String {
     let mut s = String::with_capacity(n * 4 + 2);
     s.push('(');
@@ -236,8 +231,7 @@ impl BulkAction for BulkSoftDeleteAction {
         let table_q = dialect.quote_ident(table);
         let col_q = dialect.quote_ident(self.column);
         let id_col = dialect.quote_ident("id");
-        // Placeholder $1 / ? for the timestamp value, then IN-list
-        // for the pk binds starting at index 2.
+        // Bind the timestamp first, then the pks, in text order.
         let ts_ph = dialect.placeholder(1);
         let mut binds: Vec<SqlValue> = Vec::with_capacity(pks.len() + 1);
         binds.push(SqlValue::DateTime(chrono::Utc::now()));
@@ -433,8 +427,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn unknown_action_returns_error() {
-        // Lazy SQLite in-memory pool — the action lookup fails before
-        // any SQL fires, so the connection never matters.
+        // Lazy pool: the lookup fails before any SQL runs.
         let sq = crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
         let pool: Pool = sq.into();
         let r = BulkActionRegistry::new();

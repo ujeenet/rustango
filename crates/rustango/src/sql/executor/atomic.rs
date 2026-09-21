@@ -46,7 +46,8 @@ tokio::task_local! {
 /// The `Box::pin(async move { … })` wrapping is the cost of an async
 /// closure that borrows `tx` mutably across `await` points on stable
 /// Rust — `&mut PoolTx<'_>` is lifetime-invariant, and `Pin<Box<dyn
-/// Future>>` is the standard escape hatch. The [`atomic!`] macro
+/// Future>>` is the standard escape hatch. The
+/// [`atomic!`](crate::atomic) macro
 /// hides the ceremony if you prefer:
 ///
 /// ```ignore
