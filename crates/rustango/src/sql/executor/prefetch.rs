@@ -1,6 +1,5 @@
 //! Tri-dialect `prefetch_related` helpers — `fetch_with_prefetch_pool`
-//! and `fetch_with_prefetch_filtered` (Django's `Prefetch(queryset=...)`
-//! shape, issue #298 / T2.1).
+//! and `fetch_with_prefetch_filtered` (issue #298 / T2.1).
 //!
 //! Extracted from `executor/mod.rs` as part of #116 step 6. The PG-only
 //! `_on` variants (`annotate_count_children`, `annotate_count_children_on`,
@@ -114,8 +113,7 @@ where
 }
 
 /// `fetch_with_prefetch_pool` with a user-supplied **filtered** child
-/// queryset — Django's `Prefetch(queryset=...)` shape. Issue #298 /
-/// T2.1.
+/// queryset. Issue #298 / T2.1.
 ///
 /// Drop-in replacement for [`fetch_with_prefetch_pool`] when the
 /// caller wants to **filter / order / limit** the child fetch:
@@ -141,9 +139,8 @@ where
 /// # Caveat — global vs. per-parent `LIMIT`
 ///
 /// `child_qs.limit(N)` applies **globally** across the joined fetch,
-/// not per parent. Django's per-parent slice on prefetch (`.filter(
-/// post_set__lt=...)` semantics + LATERAL JOIN on PG, `ROW_NUMBER()
-/// OVER (PARTITION BY ...)` elsewhere) is a follow-up.
+/// not per parent. A per-parent slice (LATERAL JOIN on PG,
+/// `ROW_NUMBER() OVER (PARTITION BY ...)` elsewhere) is a follow-up.
 ///
 /// # Errors
 /// As [`fetch_with_prefetch_pool`].

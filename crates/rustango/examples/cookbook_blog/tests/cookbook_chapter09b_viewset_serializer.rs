@@ -43,7 +43,7 @@ async fn fresh_author_table(pool: &sqlx::PgPool) {
     ).execute(pool).await.unwrap();
 }
 
-/// Custom serializer with shape-shifting overrides — DRF parity hit list.
+/// Custom serializer exercising every field override at once.
 #[derive(Serializer, serde::Deserialize, Default, Debug)]
 #[serializer(model = Author)]
 pub struct AuthorPublic {
@@ -209,7 +209,7 @@ async fn create_response_uses_serializer_when_set() {
 #[allow(dead_code)]
 fn _smoke_serializer_writable_fields() {
     // Compile-only check that AuthorPublic exposes name + contact_email +
-    // admin_secret as writable (DRF parity smoke).
+    // admin_secret as writable.
     let writable = AuthorPublic::writable_fields();
     assert!(writable.contains(&"name"));
     assert!(writable.contains(&"contact_email"));

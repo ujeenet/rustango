@@ -1,12 +1,11 @@
-//! Response compression middleware — gzip + deflate.
+//! Response compression middleware: gzip and deflate.
 //!
-//! Compresses 2xx response bodies when:
-//! 1. The client's `Accept-Encoding` lists a supported encoding, AND
-//! 2. The response is large enough to be worth compressing
-//!    (`min_size_bytes`, default 1 KiB), AND
-//! 3. The response isn't already encoded (`Content-Encoding` absent), AND
-//! 4. The Content-Type isn't already-compressed binary (image/, video/,
-//!    audio/, application/zip, application/octet-stream, ...).
+//! A 2xx body is compressed only if all of these hold:
+//! 1. `Accept-Encoding` lists an encoding we support.
+//! 2. The body is at least `min_size_bytes` (default 1 KiB).
+//! 3. The response has no `Content-Encoding` yet.
+//! 4. The content type is not already-compressed binary (image, video,
+//!    audio, zip, octet-stream, and so on).
 //!
 //! ## Quick start
 //!
@@ -18,19 +17,23 @@
 //!     .compression(CompressionLayer::default());
 //! ```
 //!
-//! Pair with [`crate::etag::EtagLayer`] — order matters: install ETag
-//! first (closer to your handlers) so the hash is computed on the
-//! uncompressed body. Otherwise the hash will change every time the
-//! compressor's output bytes shift.
+//! Install [`crate::etag::EtagLayer`] first (closer to your handlers) so
+//! the hash covers the uncompressed body. Otherwise it changes whenever
+//! the compressor's output shifts.
 //!
-//! ## What's NOT compressed
+//! ## Security
 //!
-//! - Streaming responses are buffered then compressed; if you serve a
-//!   really large file you should disable compression for that route
-//!   (skip the layer or check the body type yourself before sending).
-//! - The middleware honors response `Cache-Control: no-transform`.
-//! - SSE streams (`text/event-stream`) are skipped — compressing them
-//!   defeats live-streaming because compressors buffer.
+//! Compressing a response that mixes a secret (CSRF token, session id)
+//! with attacker-controlled text leaks the secret through body size:
+//! the BREACH/CRIME attack. Skip this layer on such responses, or send
+//! `Cache-Control: no-transform`.
+//!
+//! ## Not compressed
+//!
+//! - `Cache-Control: no-transform` responses.
+//! - SSE (`text/event-stream`) — the compressor buffers, which breaks
+//!   live streaming.
+//! - Bodies over `max_body_bytes`, since we buffer the whole body.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -70,8 +73,7 @@ pub struct CompressionLayer {
     pub max_body_bytes: usize,
     /// Encodings we'll offer, in preference order. Default: `[Gzip, Deflate]`.
     pub encodings: Vec<Encoding>,
-    /// Compression level 0..=9. Default: 4 (a CPU/ratio sweet spot;
-    /// flate2's "fast" is 1, "best" is 9, "default" is 6).
+    /// Compression level 0..=9. Default: 4. Higher costs more CPU.
     pub level: u32,
 }
 
@@ -117,7 +119,7 @@ impl CompressionLayer {
     }
 }
 
-/// Extension trait — `.compression(layer)` ergonomics on `Router`.
+/// Adds `.compression(layer)` to `Router`.
 pub trait CompressionRouterExt {
     #[must_use]
     fn compression(self, layer: CompressionLayer) -> Self;
@@ -170,8 +172,8 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
     let (mut parts, body) = response.into_parts();
     let bytes = match to_bytes(body, cfg.max_body_bytes).await {
         Ok(b) => b,
-        // body too large or stream error — pass through with empty body
-        // since we already consumed the original.
+        // Body too large, or the stream failed. We already consumed the
+        // original, so all we can send is an empty body.
         Err(_) => {
             let mut resp = Response::from_parts(parts, Body::empty());
             ensure_vary_in_place(resp.headers_mut());
@@ -187,7 +189,7 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
     let compressed = match encode(encoding, &bytes, cfg.level) {
         Ok(c) => c,
         Err(_) => {
-            // Compressor failed — return uncompressed (we still have the bytes).
+            // Compressor failed; we still hold the bytes, so send them raw.
             let mut resp = Response::from_parts(parts, Body::from(bytes));
             ensure_vary_in_place(resp.headers_mut());
             return resp;
@@ -203,18 +205,13 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
     Response::from_parts(parts, Body::from(compressed))
 }
 
-/// Django-parity `django.utils.text.compress_string(s)` — gzip-compress
-/// raw bytes at the default zlib level (6). Used by Django's cache
-/// machinery to compress large session/cache payloads before storage.
+/// Gzip raw bytes at zlib's default level (6).
 ///
-/// Takes a `&[u8]` rather than `&str` so binary payloads (cache
-/// blobs, signed cookies) work too — caller passes
-/// `s.as_bytes()` for the Python-shape "string" call.
+/// Takes bytes, not `&str`, so binary payloads work too.
 ///
 /// # Errors
-/// Returns `std::io::Error` if `flate2`'s encoder rejects the
-/// input — in practice only on systems where the allocator can't
-/// satisfy the output buffer.
+/// Returns `std::io::Error` if the encoder fails, in practice only when
+/// the output buffer cannot be allocated.
 ///
 /// ```ignore
 /// use rustango::compression::{compress_string, decompress_string};
@@ -227,25 +224,12 @@ pub fn compress_string(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     encode(Encoding::Gzip, bytes, 6)
 }
 
-/// Variant of [`compress_string`] that takes an explicit
-/// compression level `0..=9` (zlib convention: `0` = no
-/// compression, `1` = fastest / largest, `9` = slowest / smallest;
-/// `6` = the default the bare `compress_string` uses).
+/// [`compress_string`] with an explicit level `0..=9`: `0` means no
+/// compression, `1` is fastest and largest, `9` is slowest and smallest.
 ///
-/// Use when the caller has a specific time-vs-size tradeoff in
-/// mind:
-///
-/// * **Static asset pipeline**: `9` for shipped tarballs / pre-
-///   compressed responses cached on disk — the few extra ms at
-///   build time saves bytes on every request.
-/// * **Hot request path**: `1`–`3` for log payloads / outbound
-///   WebSocket frames where wall-clock matters more than wire
-///   size.
-/// * **Mid-tier batch jobs**: `6` (the default — what
-///   `compress_string` itself uses).
-///
-/// Levels above `9` are clamped by the underlying `flate2` crate;
-/// the function never panics on out-of-range input.
+/// Pick `9` for assets you compress once and serve many times, `1`–`3`
+/// on a hot request path, `6` otherwise. Values above `9` are clamped,
+/// so out-of-range input never panics.
 ///
 /// ```
 /// use rustango::compression::{compress_string_with_level, decompress_string};
@@ -266,14 +250,11 @@ pub fn compress_string_with_level(bytes: &[u8], level: u32) -> std::io::Result<V
     encode(Encoding::Gzip, bytes, level.min(9))
 }
 
-/// Django-parity inverse of [`compress_string`] — gunzip a buffer.
-/// Symmetric helper not in Django's `utils.text` (Django decompresses
-/// inline via `gzip.decompress`) but pairs cleanly with the encode
-/// side here.
+/// Gunzip a buffer. The inverse of [`compress_string`].
 ///
 /// # Errors
-/// Returns `std::io::Error` for any malformed gzip input — truncated
-/// streams, bad magic bytes, checksum mismatch, etc.
+/// Returns `std::io::Error` for malformed gzip input: a truncated
+/// stream, bad magic bytes, or a checksum mismatch.
 pub fn decompress_string(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     use flate2::read::GzDecoder;
     use std::io::Read as _;
@@ -300,10 +281,8 @@ fn encode(enc: Encoding, bytes: &[u8], level: u32) -> std::io::Result<Vec<u8>> {
 }
 
 fn pick_encoding(accept_encoding: &str, supported: &[Encoding]) -> Option<Encoding> {
-    // Parse `Accept-Encoding: gzip, deflate;q=0.5, br;q=0.9` into
-    // (token, q) pairs and pick the first server-supported encoding
-    // whose q > 0. We don't fully implement RFC 7231 q-value sorting
-    // — server-side preference order wins on equal q.
+    // Pick the first encoding we support whose q > 0. This is not full
+    // RFC 7231 q sorting: our own preference order wins.
     let mut acceptable = Vec::new();
     for raw in accept_encoding.split(',') {
         let raw = raw.trim();
@@ -352,13 +331,13 @@ fn is_uncompressible(content_type: &str) -> bool {
         .unwrap_or(content_type)
         .to_ascii_lowercase();
 
-    // SSE: compressors buffer, defeating streaming.
+    // SSE: the compressor buffers, which breaks streaming.
     if main == "text/event-stream" {
         return true;
     }
-    // Already-compressed media. Conservative — let JSON, CSS, JS, HTML, plain text through.
+    // Already-compressed media. JSON, CSS, JS, HTML and text still pass.
     if main.starts_with("image/") {
-        // SVG is text; everything else is bitmaps / already compressed.
+        // SVG is text; the rest are bitmaps or already compressed.
         return main != "image/svg+xml";
     }
     if main.starts_with("video/") || main.starts_with("audio/") || main.starts_with("font/") {
@@ -388,8 +367,8 @@ fn ensure_vary(mut response: Response<Body>) -> Response<Body> {
 }
 
 fn ensure_vary_in_place(headers: &mut axum::http::HeaderMap) {
-    // Append "Accept-Encoding" to Vary so caches don't conflate
-    // compressed and uncompressed responses.
+    // Vary on Accept-Encoding so caches keep compressed and
+    // uncompressed responses apart.
     let needs_append = match headers.get(VARY).and_then(|v| v.to_str().ok()) {
         Some(existing) => !existing
             .split(',')
@@ -423,8 +402,7 @@ mod tests {
             .route(
                 "/big",
                 get(|| async {
-                    // 2 KiB of repetitive JSON — well over min_size + super
-                    // compressible.
+                    // 2 KiB of repetitive JSON: over min_size and easy to shrink.
                     let body =
                         serde_json::to_string(&(0..200).map(|i| ("k", i)).collect::<Vec<_>>())
                             .unwrap();
@@ -488,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_preference_wins_on_equal_q() {
-        // Both supported — server prefers gzip over deflate (default order).
+        // Both supported; the default order prefers gzip.
         let resp = req(big_json_app(), Some("deflate, gzip"), "/big").await;
         assert_eq!(resp.headers().get(CONTENT_ENCODING).unwrap(), "gzip");
     }
@@ -595,7 +573,7 @@ mod tests {
             )
             .compression(CompressionLayer::default());
         let resp = req(app, Some("gzip"), "/pre").await;
-        // Original encoding stays — we shouldn't double-compress.
+        // The original encoding stays; no double compression.
         assert_eq!(resp.headers().get(CONTENT_ENCODING).unwrap(), "br");
     }
 
@@ -670,7 +648,7 @@ mod tests {
         assert_eq!(layer.level, 9);
     }
 
-    // -------- compress_string / decompress_string (Django parity) --------
+    // -------- compress_string / decompress_string --------
 
     #[test]
     fn compress_decompress_round_trip_simple() {
@@ -728,8 +706,8 @@ mod tests {
         let full = compress_string(b"the quick brown fox").unwrap();
         let truncated = &full[..full.len() / 2];
         let err = decompress_string(truncated).unwrap_err();
-        // Either InvalidInput (truncated header) or UnexpectedEof (truncated body)
-        // — both surface the corruption rather than returning partial data.
+        // InvalidInput (truncated header) or UnexpectedEof (truncated body).
+        // Both report the corruption instead of returning partial data.
         assert!(
             matches!(
                 err.kind(),
@@ -742,9 +720,7 @@ mod tests {
 
     #[test]
     fn compress_string_handles_binary_input() {
-        // Django uses `compress_string(s.encode())` — binary input
-        // must round-trip cleanly. Use bytes including NUL + high
-        // bytes to verify nothing assumes UTF-8.
+        // NUL and high bytes prove nothing here assumes UTF-8.
         let original: Vec<u8> = (0u8..=255).collect();
         let compressed = compress_string(&original).unwrap();
         let restored = decompress_string(&compressed).unwrap();
@@ -765,8 +741,7 @@ mod tests {
 
     #[test]
     fn compress_string_with_level_higher_levels_are_at_least_as_small() {
-        // Highly compressible input — repeated string makes the
-        // size difference between fast and best clearly observable.
+        // Very repetitive input makes the fast-vs-best gap visible.
         let payload = b"a".repeat(10_000);
         let fast = compress_string_with_level(&payload, 1).unwrap();
         let best = compress_string_with_level(&payload, 9).unwrap();
@@ -789,9 +764,7 @@ mod tests {
 
     #[test]
     fn compress_string_with_level_matches_default_at_level_6() {
-        // Default `compress_string` uses level 6. Calling
-        // `compress_string_with_level(..., 6)` should produce
-        // identical output.
+        // `compress_string` is level 6, so output must match exactly.
         let payload = b"hello world repeated content".repeat(10);
         let default = compress_string(&payload).unwrap();
         let explicit = compress_string_with_level(&payload, 6).unwrap();

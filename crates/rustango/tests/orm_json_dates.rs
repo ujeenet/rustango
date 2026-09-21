@@ -1,15 +1,15 @@
-//! Django 6.0 ORM parity — execution-based verification.
-//! Scenario groups G (JSONField lookups) + H (date transforms,
+//! ORM JSON + date behaviour — execution-based verification.
+//! Scenario groups G (JSON-column lookups) + H (date transforms,
 //! `.dates()` / `.datetimes()`).
 //!
-//! Django scenarios covered (docs.djangoproject.com/en/6.0):
-//! - `filter(data__meta__kind="post")` nested key traversal
-//! - `filter(data__items__0__name="x")` key + array-index traversal
+//! Scenarios covered:
+//! - `data__meta__kind` nested key traversal
+//! - `data__items__0__name` key + array-index traversal
 //! - JSON array length lookup (`tags__len__gte` shape)
 //! - negative array indexing — PG (native) + SQLite (`$[#-1]` anchor,
-//!   Django 6.0 + #1027); MySQL's `$[N]` path syntax genuinely can't
-//!   express it upstream (documented rejection)
-//! - `filter(created__year__gte=...)` / `__month` / `__quarter`
+//!   #1027); MySQL's `$[N]` path syntax genuinely can't express it
+//!   (documented rejection)
+//! - `created__year__gte` / `__month` / `__quarter`
 //!   date-transform chains
 //! - `.dates("created", "month")` / `.datetimes("created", "hour")`
 //!   truncation querysets
@@ -51,7 +51,7 @@ mod scenarios {
         ids
     }
 
-    /// Django `filter(data__meta__kind="post")` — nested object keys,
+    /// `data__meta__kind = "post"` — nested object keys,
     /// compared as text (`->>` / `JSON_UNQUOTE(JSON_EXTRACT(...))` /
     /// `json_extract`).
     pub async fn check_nested_key_traversal(pool: &Pool) {
@@ -67,7 +67,7 @@ mod scenarios {
         assert_eq!(ids(rows), vec![1, 3]);
     }
 
-    /// Django `filter(data__items__0__name="x")` — key + array index.
+    /// `data__items__0__name = "x"` — key + array index.
     pub async fn check_key_index_traversal(pool: &Pool) {
         let rows: Vec<Doc> = Doc::objects()
             .where_raw(WhereExpr::ExprCompare {
@@ -104,7 +104,7 @@ mod scenarios {
     }
 
     /// Negative array index (`data__tags__-1`). PG (native `-> -1`) and
-    /// SQLite (the `$[#-1]` from-the-end anchor, Django 6.0 + #1027) both
+    /// SQLite (the `$[#-1]` from-the-end anchor, #1027) both
     /// resolve it; MySQL's `$[N]` path grammar has no negative form, so
     /// it stays a documented rejection.
     pub async fn check_negative_index_dialect_matrix(pool: &Pool) {
@@ -146,8 +146,8 @@ mod scenarios {
         }
     }
 
-    /// Django `filter(created__year__gte=2025)` and
-    /// `filter(created__month=3)` — date-transform lookups with and
+    /// `created__year__gte = 2025` and
+    /// `created__month = 3` — date-transform lookups with and
     /// without trailing comparisons.
     pub async fn check_date_transform_chains(pool: &Pool) {
         let rows: Vec<Doc> = Doc::objects()
@@ -167,7 +167,7 @@ mod scenarios {
 
     /// `filter(created__quarter=N)` across all three dialects. PG/MySQL
     /// have native QUARTER extraction; SQLite synthesizes it from the
-    /// month (`((month + 2) / 3)`), matching Django. Issue #1037 — was a
+    /// month (`((month + 2) / 3)`). Issue #1037 — was a
     /// SQLite gap-pin, now uniform.
     pub async fn check_quarter_dialect_matrix(pool: &Pool) {
         // March (rows 1+2) is Q1 on every backend.
@@ -188,7 +188,7 @@ mod scenarios {
         assert_eq!(ids(q3), vec![3], "July is Q3");
     }
 
-    /// Django `.dates("created", "month")` — distinct truncated
+    /// `.dates("created", "month")` — distinct truncated
     /// dates, ascending, plus `order_desc` reversal.
     pub async fn check_dates_truncation(pool: &Pool) {
         let months = fetch_dates_pool(pool, Doc::objects().dates("created", DateKind::Month))
@@ -209,7 +209,7 @@ mod scenarios {
         assert_eq!(rendered_desc, vec!["2025-07-01", "2024-03-01"]);
     }
 
-    /// Django `.datetimes("created", "hour")` — distinct truncated
+    /// `.datetimes("created", "hour")` — distinct truncated
     /// timestamps.
     pub async fn check_datetimes_truncation(pool: &Pool) {
         let hours = fetch_datetimes_pool(
@@ -273,7 +273,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;
@@ -381,7 +381,7 @@ mod mysql_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("MYSQL_TEST_URL unset — skipping MySQL django6 test");
+                    eprintln!("MYSQL_TEST_URL unset — skipping the MySQL arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;

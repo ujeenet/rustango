@@ -1,4 +1,4 @@
-//! Django-parity #356 — admin `prepopulated_fields`.
+//! Issue #356 — admin `prepopulated_fields`.
 //!
 //! Verifies the macro-emitted attr, schema shape, and the
 //! client-side JS hookup on the change-form.

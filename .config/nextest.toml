@@ -1,0 +1,51 @@
+# cargo-nextest configuration.
+#
+# `cargo test` builds one binary per integration-test file and runs them
+# **one binary at a time**, threading only within each. With ~570 test
+# targets that leaves most cores idle: measured on this workspace,
+# `--features sqlite,tenancy` takes 49.7s at 266% CPU. nextest runs every
+# test as its own process across all cores — same suite, 18.1s at 882%.
+#
+#   cargo nextest run -p rustango --no-default-features --features sqlite,tenancy
+#
+# Doctests are the one gap: nextest cannot run them, so `cargo test --doc`
+# still has to run separately.
+
+[profile.default]
+# Surface a hang as a hang. A stalled test otherwise looks identical to a
+# slow one until the whole job times out — which is exactly what happened
+# to a review agent here, ten minutes of silence with no signal.
+slow-timeout = { period = "30s", terminate-after = 8 }
+
+# Never retry. A flake that passes on attempt two is a defect this repo
+# wants to see, not smooth over — several real bugs here began as
+# "intermittent". If something is genuinely order-dependent, fix the
+# isolation rather than buying a second roll.
+retries = 0
+
+# Report every failure in one run rather than stopping at the first.
+fail-fast = false
+
+# Print the slowest tests. Useful because process-per-test makes a slow
+# test obvious in a way a shared binary does not.
+status-level = "fail"
+final-status-level = "slow"
+
+[profile.ci]
+# CI wants the whole picture in one go, and a little more patience for a
+# cold or loaded runner.
+slow-timeout = { period = "60s", terminate-after = 10 }
+fail-fast = false
+failure-output = "immediate-final"
+status-level = "retry"
+
+# A note worth keeping with the config rather than in a commit message:
+#
+# nextest runs each test in **its own process**, so process-global state
+# is isolated per test rather than shared within a binary. That removes a
+# whole class of flake this repo has hit repeatedly — the ContentType
+# cache, the signals registry, `OnceLock` singletons, environment
+# variables. The suite-wide `tokio::sync::Mutex` guards that exist for
+# those remain correct and harmless under nextest, and are still required
+# for `cargo test`, which stays the fallback. Do not remove them on the
+# strength of nextest alone.

@@ -34,7 +34,7 @@ impl PostManagerExt for QuerySet<Post> {
     // on the impl block here just provides the chainable shortcuts.
 }
 
-// Inherent impl on `QuerySet<Post>` carries the Django-shape shortcuts.
+// Extension trait on `QuerySet<Post>` carries the chainable shortcuts.
 trait PostShortcuts: Sized {
     fn published(self) -> Self;
     fn by_author(self, author_id: i64) -> Self;
@@ -59,7 +59,7 @@ fn emitted_trait_is_in_scope_and_usable() {
 
 #[test]
 fn chained_shortcuts_compose_with_framework_methods() {
-    // Same chain Django users write: `Post.objects.published().by_author(7)`.
+    // Two custom shortcuts and a built-in method in one chain.
     let qs = Post::objects().published().by_author(7_i64);
     let q = qs.compile().unwrap();
     let sql = Postgres.compile_select(&q).unwrap().sql;

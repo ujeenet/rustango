@@ -1,15 +1,17 @@
-//! Tool registry + `tools/list` / `tools/call` (epic #1013, Slice 3 / #1016).
+//! The tool registry, plus `tools/list` and `tools/call`.
 //!
-//! Tools are registered at compile time with [`register_mcp_tool!`], which
-//! submits an [`McpTool`] into an `inventory` collection — the same
-//! const-constructible fn-pointer pattern as `register_admin_view!`
-//! (handlers are bare `fn`s wrapped in a non-capturing inner fn, since
-//! `inventory::submit!` storage can't hold captures).
+//! [`register_mcp_tool!`] registers a tool at compile time by
+//! submitting an [`McpTool`] into an `inventory` collection, the same
+//! way `register_admin_view!` works. A handler is a bare `fn` wrapped
+//! in a non-capturing inner one, because `inventory` cannot store a
+//! closure that captures.
 //!
-//! Each tool declares a typed input (`T: OpenApiSchema + DeserializeOwned`):
-//! `OpenApiSchema` produces the MCP `inputSchema`, and incoming JSON args
-//! are validated by deserializing into `T` before the handler runs — a
-//! malformed call is rejected and the handler never executes.
+//! Every tool names an input type. Its `OpenApiSchema` impl produces
+//! the MCP `inputSchema`, and incoming arguments are checked by
+//! deserializing into that type first. A malformed call is refused
+//! and the handler never runs.
+//!
+//! [`register_mcp_tool!`]: crate::register_mcp_tool
 
 use std::future::Future;
 use std::pin::Pin;
@@ -24,22 +26,20 @@ use super::types::{codes, JsonRpcError};
 #[doc(hidden)]
 pub type JsonValue = Value;
 
-/// Per-request context handed to every tool handler: the resolved tenant
-/// pool + the authenticated agent principal.
+/// What every tool handler gets for its call.
 pub struct McpContext {
     /// The request's tenant pool.
     pub pool: Pool,
-    /// The verified, tenant-pinned agent making the call.
+    /// The agent making the call, verified and pinned to one tenant.
     pub agent: McpAgent,
-    /// Progress sink for this call (active only when the caller sent a
-    /// `progressToken`). Follow-up #1090.
+    /// Where to report progress. Active only when the caller sent a
+    /// `progressToken`.
     pub progress: super::progress::ProgressReporter,
-    /// Cooperative cancellation flag — poll `is_cancelled()` at await
-    /// points. Follow-up #1090.
+    /// The cancellation flag. Poll `is_cancelled()` at await points.
     pub cancel: super::progress::CancelToken,
 }
 
-/// Error a tool handler may return. Converts to a JSON-RPC error response.
+/// What a tool handler can fail with. It becomes a JSON-RPC error.
 #[derive(Debug)]
 pub struct McpError {
     pub code: i64,
@@ -54,12 +54,12 @@ impl McpError {
             message: message.into(),
         }
     }
-    /// Bad/invalid tool arguments (`-32602`).
+    /// The arguments were wrong.
     #[must_use]
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self::new(codes::INVALID_PARAMS, message)
     }
-    /// A tool-side internal failure (`-32603`).
+    /// Something went wrong inside the tool.
     #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(codes::INTERNAL_ERROR, message)
@@ -76,36 +76,36 @@ impl std::fmt::Display for McpError {
 }
 impl std::error::Error for McpError {}
 
-/// DB errors inside a handler surface as internal tool errors.
+/// A database error inside a handler becomes an internal error.
 impl From<crate::sql::ExecError> for McpError {
     fn from(e: crate::sql::ExecError) -> Self {
         Self::internal(e.to_string())
     }
 }
 
-/// Boxed future a tool handler returns.
+/// The future a tool handler returns.
 pub type McpToolFuture = Pin<Box<dyn Future<Output = Result<Value, McpError>> + Send + 'static>>;
 
-/// Stored handler — a bare `fn` pointer (const-constructible for
-/// `inventory::submit!`); [`register_mcp_tool!`] wraps the user's closure.
+/// A stored handler. It is a plain `fn` pointer, because `inventory`
+/// needs something it can build in a const.
 pub type McpToolHandler = fn(McpContext, Value) -> McpToolFuture;
 
-/// A compile-time-registered MCP tool.
+/// One registered tool.
 pub struct McpTool {
-    /// Unique tool name (the `tools/call` `name`).
+    /// The name `tools/call` looks up. It must be unique.
     pub name: &'static str,
-    /// Human-readable description shown in `tools/list`.
+    /// The description `tools/list` shows.
     pub description: &'static str,
-    /// Produces the JSON-Schema `inputSchema` (from the tool's typed input).
+    /// Builds the `inputSchema` from the tool's input type.
     pub input_schema: fn() -> Value,
-    /// The (arg-validating) handler.
+    /// The handler, which checks its arguments first.
     pub handler: McpToolHandler,
 }
 
 inventory::collect!(McpTool);
 
-// Hidden helpers the macro calls so its expansion never has to name
-// `serde_json` / `OpenApiSchema` directly (works in any downstream crate).
+// The macro calls these, so its expansion never has to name
+// `serde_json` or `OpenApiSchema`. That way it works in any crate.
 #[doc(hidden)]
 pub fn __schema_of<T: crate::openapi::OpenApiSchema>() -> Value {
     serde_json::to_value(T::openapi_schema()).unwrap_or_else(|_| json!({ "type": "object" }))
@@ -117,7 +117,7 @@ pub fn __deserialize_args<T: serde::de::DeserializeOwned>(raw: Value) -> Result<
         .map_err(|e| McpError::invalid_params(format!("invalid arguments: {e}")))
 }
 
-/// Look up a registered tool by name.
+/// Find a registered tool by name.
 #[must_use]
 pub(crate) fn find_tool(name: &str) -> Option<&'static McpTool> {
     inventory::iter::<McpTool>
@@ -125,9 +125,8 @@ pub(crate) fn find_tool(name: &str) -> Option<&'static McpTool> {
         .find(|t| t.name == name)
 }
 
-/// `tools/list` result — `{ "tools": [ {name, description, inputSchema} ] }`.
-/// Fail-closed (Slice 4): only the tools in the agent's granted set are
-/// listed. An agent with no grants sees an empty list.
+/// The `tools/list` result. It names only the tools this agent was
+/// granted, so an agent with no grants sees an empty list.
 #[must_use]
 pub fn list_tools(agent: &McpAgent) -> Value {
     let tools: Vec<Value> = inventory::iter::<McpTool>
@@ -144,20 +143,20 @@ pub fn list_tools(agent: &McpAgent) -> Value {
     json!({ "tools": tools })
 }
 
-/// `tools/call` — find the tool, authorize it for the agent (fail-closed),
-/// validate args (inside the handler), run it, and wrap the result as an
-/// MCP `CallToolResult`. Records a best-effort audit entry.
+/// `tools/call`: find the tool, check the agent may use it, check
+/// the arguments, run it, and wrap the result as a `CallToolResult`.
+/// It also writes an audit entry, best effort.
 ///
 /// # Errors
-/// JSON-RPC errors for a missing/forbidden tool or invalid arguments; the
-/// tool never executes in those cases.
+/// A JSON-RPC error when the tool is unknown or not granted, or the
+/// arguments are wrong. In those cases the tool never runs.
 pub async fn call_tool(ctx: McpContext, params: Value) -> Result<Value, JsonRpcError> {
     call_tool_with(ctx, params, None).await
 }
 
-/// [`call_tool`] plus the JSON-RPC `request_id`, used by the dispatcher to
-/// register the call for cancellation (`notifications/cancelled`) and to
-/// wire the `progressToken`. Follow-up #1090.
+/// [`call_tool`] plus the JSON-RPC `request_id`. The dispatcher
+/// passes that id so the call can be cancelled, and so the
+/// `progressToken` reaches the handler.
 pub(crate) async fn call_tool_with(
     mut ctx: McpContext,
     params: Value,
@@ -176,9 +175,9 @@ pub(crate) async fn call_tool_with(
     let tool = find_tool(&name)
         .ok_or_else(|| JsonRpcError::new(codes::TOOL_NOT_FOUND, format!("unknown tool: {name}")))?;
 
-    // Fail-closed authorization: the agent's granted tool set (resolved from
-    // its skills at token-issue) is authoritative. A tool outside it — or any
-    // tool for an agent with no grants — is refused and never executed.
+    // The granted set, resolved from the agent's skills when its
+    // token was issued, decides. Anything outside it is refused and
+    // never runs, and an agent with no grants can call nothing.
     if !ctx.agent.tools.iter().any(|n| n == &name) {
         return Err(JsonRpcError::new(
             codes::TOOL_FORBIDDEN,
@@ -186,15 +185,16 @@ pub(crate) async fn call_tool_with(
         ));
     }
 
-    // Keep what we need (audit + scoping) before `ctx` moves into the tool.
+    // Copy what the audit and the scoping need, before `ctx` moves
+    // into the tool.
     let pool = ctx.pool.clone();
     let tenant = ctx.agent.tenant.clone();
     let agent_id = ctx.agent.agent_id;
 
-    // Wire progress (from `_meta.progressToken`) + cancellation, both scoped to
-    // the calling agent. The cancel registration is RAII (`CancelGuard`) keyed
-    // by `(tenant, agent_id, request_id)`, so it can't be tripped by another
-    // agent and is removed on drop even if the handler panics (#1095).
+    // Set up progress, from `_meta.progressToken`, and cancellation.
+    // Both are scoped to the calling agent, so no other agent can
+    // touch them, and the guard clears the registry entry on drop
+    // even when the handler panics.
     ctx.progress = super::progress::ProgressReporter::for_agent(
         super::progress::progress_token(&params),
         tenant.clone(),
@@ -207,20 +207,18 @@ pub(crate) async fn call_tool_with(
         _cancel_guard = Some(guard);
     }
 
-    // Run the handler under a panic guard (#1096): a buggy `register_mcp_tool!`
-    // handler that panics must not unwind into the transport (dropping the
-    // connection / DoS). The `_cancel_guard` still deregisters when this fn
-    // returns.
+    // Catch a panic here. A buggy handler must not unwind into the
+    // transport, which would drop the connection.
     let outcome = catch_unwind((tool.handler)(ctx, args.clone())).await;
 
-    // Audit every executed call (arguments redacted, #1097) — success or failure.
+    // Audit every call that ran, whether it worked or not, with the
+    // arguments redacted.
     audit_tool_call(&pool, agent_id, &name, &args).await;
 
-    // MCP `isError` semantics (#1099): a tool that *ran and failed* (returned
-    // `Err`) yields a successful `CallToolResult` with `isError: true` so the
-    // client can surface/retry it. Protocol-level rejections (bad args,
-    // unknown/forbidden tool) stay JSON-RPC errors; a panic is an unhandled
-    // internal fault → JSON-RPC internal error.
+    // A tool that ran and failed returns a successful
+    // `CallToolResult` with `isError: true`, so the client can show
+    // or retry it. A rejection before the tool ran stays a JSON-RPC
+    // error, and so does a panic.
     match outcome {
         Ok(Ok(value)) => Ok(call_tool_result(value)),
         Ok(Err(e)) if is_protocol_error(e.code) => Err(e.into_jsonrpc()),
@@ -235,10 +233,9 @@ pub(crate) async fn call_tool_with(
     }
 }
 
-/// Poll `fut` to completion, catching a panic from any individual `poll` and
-/// returning it as `Err`. A dependency-free async `catch_unwind` (we don't pull
-/// in `futures` just for this); the tool future is `Send + 'static`, and a
-/// caught panic surfaces as a `std::thread::Result::Err`. (#1096)
+/// Drive `fut` to completion, turning a panic in any single `poll`
+/// into an `Err`. This is `catch_unwind` for a future, written here
+/// so the crate need not depend on `futures` for it alone.
 async fn catch_unwind<F: Future>(fut: F) -> std::thread::Result<F::Output> {
     use std::task::Poll;
     let mut fut = Box::pin(fut);
@@ -252,9 +249,9 @@ async fn catch_unwind<F: Future>(fut: F) -> std::thread::Result<F::Output> {
     .await
 }
 
-/// Wrap a handler's JSON result in an MCP `CallToolResult`. The value is
-/// rendered both as a text content block (spec-required) and as
-/// `structuredContent` for clients that consume it directly.
+/// Wrap a handler's JSON in a `CallToolResult`. The value appears
+/// twice: as a text block, which the spec requires, and as
+/// `structuredContent` for a client that can read it directly.
 fn call_tool_result(value: Value) -> Value {
     let text = match &value {
         Value::String(s) => s.clone(),
@@ -267,10 +264,10 @@ fn call_tool_result(value: Value) -> Value {
     })
 }
 
-/// An MCP `CallToolResult` for a tool that ran but failed: the error message as
-/// a text content block + `isError: true`. This is a *successful* JSON-RPC
-/// response (the protocol call worked; the tool reported an error), per the MCP
-/// convention (#1099).
+/// A `CallToolResult` for a tool that ran but failed: the message as
+/// a text block, plus `isError: true`. The JSON-RPC response itself
+/// is a success, because the call worked and the tool reported the
+/// failure.
 fn call_tool_error_result(message: &str) -> Value {
     json!({
         "content": [{ "type": "text", "text": message }],
@@ -278,10 +275,9 @@ fn call_tool_error_result(message: &str) -> Value {
     })
 }
 
-/// JSON-RPC / MCP protocol-level error codes — the *request* was rejected (bad
-/// args, unknown/forbidden tool, …) and the tool never produced a result, so
-/// these stay JSON-RPC errors. Any other handler error means the tool ran and
-/// failed → an `isError: true` result (#1099).
+/// The codes that mean the request itself was rejected, so the tool
+/// produced no result. These stay JSON-RPC errors. Any other error
+/// means the tool ran and failed, which becomes an `isError` result.
 fn is_protocol_error(code: i64) -> bool {
     matches!(
         code,
@@ -294,10 +290,10 @@ fn is_protocol_error(code: i64) -> bool {
     )
 }
 
-/// Key names whose values are scrubbed before a tool call's arguments are
-/// written to the audit log — secrets must never land in the audit table
-/// (#1097). Mirrors the framework's access-log redaction set
-/// (`access_log::default_redact_params`) plus a few MCP-relevant names.
+/// Argument names whose values are scrubbed before a call is
+/// audited, so no secret reaches the audit table. It is the
+/// access-log list, `access_log::default_redact_params`, plus a few
+/// names that matter here.
 const SENSITIVE_ARG_KEYS: &[&str] = &[
     "password",
     "passwd",
@@ -314,9 +310,9 @@ const SENSITIVE_ARG_KEYS: &[&str] = &[
     "private_key",
 ];
 
-/// Recursively redact the values of sensitive keys in `value`, returning a
-/// scrubbed clone. Key matching is case-insensitive and exact (so `token_count`
-/// is *not* redacted); a matched key's entire value becomes `"[redacted]"`.
+/// Return a copy of `value` with every sensitive key's value
+/// replaced by `"[redacted]"`, at any depth. A key matches whole and
+/// ignoring case, so `token_count` is left alone.
 fn redact_json(value: &Value) -> Value {
     fn is_sensitive(key: &str) -> bool {
         let k = key.to_ascii_lowercase();
@@ -339,9 +335,9 @@ fn redact_json(value: &Value) -> Value {
     }
 }
 
-/// Best-effort audit of a tool invocation (never fails the call). Arguments are
-/// redacted (#1097) so a tool taking a `password`/`token`/… never leaks it into
-/// the audit table.
+/// Audit a tool call, best effort: a failure here never fails the
+/// call. Arguments are redacted, so a tool that takes a `password`
+/// or a `token` cannot leak it into the audit table.
 async fn audit_tool_call(pool: &Pool, agent_id: i64, tool: &str, args: &Value) {
     let entry = crate::audit::PendingEntry {
         entity_table: "rustango_agents",

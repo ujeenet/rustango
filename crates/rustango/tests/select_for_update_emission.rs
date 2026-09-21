@@ -1,5 +1,5 @@
 //! Tri-dialect SQL-emission tests for `QuerySet::select_for_update`
-//! (issue #21). Django's `SELECT … FOR UPDATE [NO KEY] [OF …]
+//! (issue #21) — the `SELECT … FOR UPDATE [NO KEY] [OF …]
 //! [SKIP LOCKED | NOWAIT]` shapes. PG supports the full set; MySQL
 //! 8.0.1+ supports most (no `NO KEY`); SQLite has no row-lock
 //! syntax and emits no clause at all.
@@ -250,7 +250,7 @@ fn select_for_update_emits_no_lock_clause_on_sqlite() {
 #[test]
 fn chained_flag_calls_imply_select_for_update() {
     // Calling `.skip_locked()` without prior `.select_for_update()`
-    // implicitly sets the lock — Django-style ergonomics.
+    // implicitly sets the lock, so the flag is never a silent no-op.
     let q = Job::objects().skip_locked().compile().unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
     assert!(

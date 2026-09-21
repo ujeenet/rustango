@@ -1,4 +1,4 @@
-//! `#[rustango(blank)]` field attribute (Django parity #445).
+//! `#[rustango(blank)]` field attribute (#445).
 //!
 //! Covers:
 //! - macro threads the value through to `FieldSchema::blank`

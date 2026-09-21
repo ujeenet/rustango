@@ -56,11 +56,11 @@ pub const CSRF_COOKIE: &str = "rustango_csrf";
 const CSRF_HEADER: &str = "X-CSRF-Token";
 
 /// Form-field name the middleware looks for on
-/// `application/x-www-form-urlencoded` bodies. Matches Django's
-/// `csrfmiddlewaretoken` semantics, renamed for rustango.
+/// `application/x-www-form-urlencoded` bodies. Templates render it as
+/// a hidden input carrying the same token as the cookie.
 pub const CSRF_FORM_FIELD: &str = "_csrf";
 
-/// Create the CSRF middleware as a tower [`Layer`].
+/// Create the CSRF middleware as a [`tower::Layer`].
 ///
 /// Defaults are sensible: 32-byte tokens, Lax SameSite, HttpOnly
 /// off (the SPA must read the cookie). Override via [`CsrfConfig`]
@@ -101,10 +101,10 @@ pub struct CsrfConfig {
     /// `manage check --deploy` continues to warn when this is `false`
     /// on a prod tier.
     pub secure: bool,
-    /// Django-parity `CSRF_TRUSTED_ORIGINS` — extra origins that may
-    /// submit cross-origin POSTs without being rejected by the
-    /// Origin-header check. Each entry is a scheme+host (optionally
-    /// with port), e.g. `"https://app.example.com"` or
+    /// Extra origins that may submit cross-origin POSTs without being
+    /// rejected by the Origin-header check. Each entry is a
+    /// scheme+host (optionally with port), e.g.
+    /// `"https://app.example.com"` or
     /// `"https://*.example.com"` for a wildcard subdomain.
     ///
     /// Default `[]` (empty) — disables the Origin-header check
@@ -174,8 +174,7 @@ impl CsrfConfig {
     }
 
     /// Builder — append a trusted origin (scheme+host, optionally
-    /// `*.` wildcard subdomain). Django-parity for
-    /// `CSRF_TRUSTED_ORIGINS`.
+    /// `*.` wildcard subdomain) to [`Self::trusted_origins`].
     #[must_use]
     pub fn trust_origin(mut self, origin: impl Into<String>) -> Self {
         self.trusted_origins.push(origin.into());
@@ -342,7 +341,7 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
     false
 }
 
-/// The tower [`Layer`] implementation. Wraps inner services with
+/// The [`tower::Layer`] implementation. Wraps inner services with
 /// [`CsrfService`].
 #[derive(Clone)]
 pub struct CsrfLayer {
@@ -417,7 +416,7 @@ where
                 if let Some(h) = header_value {
                     // Header path — short-circuit, no body buffering.
                     let token_match = match &cookie_value {
-                        Some(c) => constant_time_eq(c.as_bytes(), h.as_bytes()),
+                        Some(c) => crate::crypto::constant_time_compare(c.as_bytes(), h.as_bytes()),
                         None => false,
                     };
                     if !token_match {
@@ -438,7 +437,9 @@ where
                     };
                     let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
                     let token_match = match (&cookie_value, &form_token) {
-                        (Some(c), Some(f)) => constant_time_eq(c.as_bytes(), f.as_bytes()),
+                        (Some(c), Some(f)) => {
+                            crate::crypto::constant_time_compare(c.as_bytes(), f.as_bytes())
+                        }
                         _ => false,
                     };
                     if !token_match {
@@ -690,23 +691,11 @@ pub fn verify_form_token(headers: &axum::http::HeaderMap, submitted: Option<&str
         read_csrf_cookie_from_headers(headers, CSRF_COOKIE),
         submitted,
     ) {
-        (Some(cookie), Some(form)) => constant_time_eq(cookie.as_bytes(), form.as_bytes()),
+        (Some(cookie), Some(form)) => {
+            crate::crypto::constant_time_compare(cookie.as_bytes(), form.as_bytes())
+        }
         _ => false,
     }
-}
-
-/// Constant-time byte-slice equality. Avoids a leaky `==` even
-/// though the bodies of the comparison aren't really secret in this
-/// scheme — best practice.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 fn forbid_response(detail: &'static str) -> Response<Body> {
@@ -894,10 +883,10 @@ mod tests {
 
     #[test]
     fn ct_eq_matches_eq() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-        assert!(constant_time_eq(b"", b""));
+        assert!(crate::crypto::constant_time_compare(b"abc", b"abc"));
+        assert!(!crate::crypto::constant_time_compare(b"abc", b"abd"));
+        assert!(!crate::crypto::constant_time_compare(b"abc", b"abcd"));
+        assert!(crate::crypto::constant_time_compare(b"", b""));
     }
 
     #[test]

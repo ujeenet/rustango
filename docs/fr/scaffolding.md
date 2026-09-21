@@ -1,6 +1,6 @@
 # Scaffolding
 
-**Rustango** dispose de deux niveaux de génération de code, tous deux inspirés des générateurs que vous connaissez déjà avec Django et Laravel — de sorte que vous n'avez presque jamais à câbler de code répétitif à la main :
+**Rustango** dispose de deux niveaux de génération de code — de sorte que vous n'avez presque jamais à câbler de code répétitif à la main :
 
 1. **Le générateur de projet** — `cargo rustango new` crée un tout nouveau projet à partir d'un template.
 2. **Les générateurs internes au projet** — `manage startapp` et la famille `manage make:*` ajoutent des apps, des vues, des sérialiseurs, des jobs, et bien plus au sein d'un projet existant.
@@ -26,7 +26,7 @@
 cargo install cargo-rustango
 ```
 
-Cela place un binaire `cargo-rustango` sur votre `PATH` ; Cargo l'expose alors comme `cargo rustango` (de la même manière que `django-admin` ou l'installeur `laravel` vous donnent une commande globale).
+Cela place un binaire `cargo-rustango` sur votre `PATH` ; Cargo l'expose alors comme `cargo rustango` — une commande globale disponible partout, même en dehors d'un projet.
 
 ### La version du générateur est celle que votre projet obtient
 
@@ -202,7 +202,7 @@ En quoi les templates diffèrent à l'intérieur de `main.rs` / `urls.rs` :
 
 - **api** — pas d'admin ; `urls::api()` se contente d'agréger vos propres routes.
 - **fullstack** — le même `urls.rs`, plus la fonctionnalité admin compilée dedans. L'admin n'est **pas** câblé pour vous : rien de ce qui est généré ne l'appellerait, donc le générateur n'émet aucun `admin_router`. Ajoutez-en un vous-même et imbriquez-le — [Prise en main, étape 11](getting-started.md#étape-11--activer-ladministration-automatique) l'explique en détail. Prenez un `rustango::sql::Pool` pour que l'assistant ne nomme aucun pilote.
-- **tenant** — `main.rs` ajoute `.tenancy()`, servant la console opérateur sur le domaine apex et chaque tenant sous son propre sous-domaine. Les propres tables du framework sont générées dans un dossier **`system/migrations/`** à partir des modèles compilés (à la manière de Django) lors du premier `cargo run -- migrate` — aucun JSON de bootstrap livré à la main, donc le tout premier migrate fonctionne sans configuration supplémentaire.
+- **tenant** — `main.rs` ajoute `.tenancy()`, servant la console opérateur sur le domaine apex et chaque tenant sous son propre sous-domaine. Les propres tables du framework sont générées dans un dossier **`system/migrations/`** à partir des modèles compilés lors du premier `cargo run -- migrate` — aucun JSON de bootstrap livré à la main, donc le tout premier migrate fonctionne sans configuration supplémentaire.
 
 ### Configuration en couches
 
@@ -223,7 +223,7 @@ cargo run -- --help         # see every manage verb
 
 ## Ajouter un module fonctionnel : `manage startapp`
 
-C'est l'équivalent du `startapp` de Django — il échafaude un module autonome regroupant des modèles, des vues et des routes liés entre eux :
+Il échafaude un module autonome regroupant des modèles, des vues et des routes liés entre eux :
 
 ```sh
 cargo run -- startapp blog
@@ -242,16 +242,16 @@ Options :
 
 Au sein d'un projet, les verbes `make:*` échafaudent un fichier à la fois. La référence complète, drapeau par drapeau, se trouve dans la [référence CLI manage](manage.md) ; les formes les plus courantes sont :
 
-| Commande | Génère | Comparable à |
-|---|---|---|
-| `make:viewset <Name> [--model <M>]` | Un ViewSet CRUD façon DRF | DRF `ViewSet` |
-| `make:serializer <Name> [--model <M>]` | Un sérialiseur pour la mise en forme des requêtes/réponses | Sérialiseur DRF |
-| `make:api_routes <app>` | Un agrégateur de routes API pour une app | — |
-| `make:form <Name>` | Un formulaire HTML avec validation | `Form` Django |
-| `make:job <Name>` | Un gestionnaire de job en arrière-plan | Job Laravel / Celery |
-| `make:notification <Name>` | Une notification multi-canal | Notification Laravel |
-| `make:middleware <Name>` | Un squelette de middleware | Middleware Django / Laravel |
-| `make:test <Name>` | Un module de test utilisant le client de test in-process | — |
+| Commande | Génère |
+|---|---|
+| `make:viewset <Name> [--model <M>]` | Un ViewSet CRUD |
+| `make:serializer <Name> [--model <M>]` | Un sérialiseur pour la mise en forme des requêtes/réponses |
+| `make:api_routes <app>` | Un agrégateur de routes API pour une app |
+| `make:form <Name>` | Un formulaire HTML avec validation |
+| `make:job <Name>` | Un gestionnaire de job en arrière-plan |
+| `make:notification <Name>` | Une notification multi-canal |
+| `make:middleware <Name>` | Un squelette de middleware |
+| `make:test <Name>` | Un module de test utilisant le client de test in-process |
 
 ```sh
 cargo run -- make:viewset PostViewSet --model Post

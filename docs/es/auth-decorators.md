@@ -1,7 +1,7 @@
 # Decoradores de acceso
 
 Una vez que un usuario está autenticado, restringes rutas. **Rustango** entrega
-la familia `@login_required` de Django como **capas** de axum componibles: adjunta
+para ello una familia de **capas** de axum componibles: adjunta
 una a un router y las peticiones anónimas son rechazadas — redirigidas con 302 a
 tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 (flujo de API) — antes de que lleguen siquiera al handler.

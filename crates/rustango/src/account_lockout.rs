@@ -1,9 +1,9 @@
-//! Per-account login lockout — defends against credential stuffing /
-//! brute-force attacks that bypass per-IP rate limits.
+//! Per-account login lockout. Stops credential stuffing and brute
+//! force that gets past per-IP rate limits.
 //!
 //! Backed by the cache layer (in-memory or Redis). Each failed login
-//! increments a counter; once it crosses the threshold, the account is
-//! locked for a configurable duration. Successful logins clear the counter.
+//! increments a counter. At the threshold the account locks for a set
+//! time. A successful login clears the counter.
 //!
 //! ## Quick start
 //!
@@ -34,12 +34,12 @@
 //! issue_session(username).await
 //! ```
 //!
-//! ## Why per-account, not per-IP?
+//! ## Per-account, not per-IP
 //!
-//! Per-IP rate limiting (`RateLimitLayer::per_ip`) catches one attacker
-//! pounding one endpoint. Per-account lockout catches a botnet trying
-//! the same username from thousands of IPs — the *account* is the rate
-//! axis. Both belong in your stack.
+//! Per-IP limiting (`RateLimitLayer::per_ip`) catches one attacker
+//! hitting one endpoint. Per-account lockout catches a botnet trying
+//! the same username from thousands of IPs, where the account is the
+//! only axis they all share. Run both.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -116,46 +116,30 @@ impl Lockout {
     }
 
     /// Record a failed login attempt. Returns the new attempt count.
-    /// When the count reaches `max_attempts`, the account is locked
-    /// for `lockout_duration`.
+    /// At `max_attempts` the account locks for `lockout_duration`.
     ///
-    /// # Security note (v0.43)
+    /// # Security note
     ///
-    /// `account` is used as a cache key. If you pass attacker-controlled
-    /// input directly (e.g. the username from a login form) without
-    /// resolving it against the user table first, an attacker can
-    /// **lock out arbitrary users by spamming failed-login attempts
-    /// with their username** — a form of denial of service.
-    ///
-    /// Pair this with one of:
-    /// - Look up the user by username, take their `id`, and pass
-    ///   `&format!("uid:{}", user.id)` only when the user exists.
-    /// - Use [`Self::record_failure_by_id`] which enforces a typed
-    ///   user id and prefixes the key for you.
-    /// - Or apply per-IP rate limiting upstream so the lockout key
-    ///   only fires for users who actually exist + are being attacked.
+    /// `account` becomes the cache key. If you pass the raw username
+    /// from a login form, **an attacker can lock any user out** by
+    /// sending failed logins for that name — a denial of service. Key
+    /// on something the attacker cannot pick:
+    /// - [`Self::record_failure_by_id`], which takes a resolved user id.
+    /// - Or your own `uid:{id}` key, built only when the user exists.
+    /// - Plus per-IP rate limiting upstream.
     pub async fn record_failure(&self, account: &str) -> u32 {
         let counter_key = self.counter_key(account);
-        // Atomic increment, not get-parse-set (#1253). Under concurrent
-        // failed logins a read-modify-write loses updates — several
-        // attempts read the same value and each write back the same
-        // `+1`, so N parallel guesses record far fewer than N and the
-        // threshold can be out-run by parallelising. `incr` is atomic on
-        // `RedisCache` (native `INCRBY`) and now on `InMemoryCache` (it
-        // holds its write lock across the read-modify-write). The one
-        // remaining racy backend is `DatabaseCache`, whose default
-        // `incr` is still get+set — acceptable for single-process use,
-        // and the multi-replica deploy that needs cross-process
-        // atomicity is on Redis anyway.
+        // Atomic increment, never get-parse-set. A read-modify-write
+        // loses updates under concurrent failed logins: several
+        // attempts read the same value and write back the same `+1`,
+        // so parallel guesses can out-run the threshold. `incr` is
+        // atomic on `RedisCache` and `InMemoryCache`; `DatabaseCache`
+        // still does get+set, which is fine for a single process.
         //
-        // A cache failure here means the attempt is NOT counted, so
-        // lockout silently stops engaging — the failure mode that let
-        // #1280 (Redis 6 + `EXPIRE … NX`) disable brute-force protection
-        // on every call with no signal at all. Keep failing open (a cache
-        // outage locking every account out is its own denial of service,
-        // and it matches `rate_limit_cache::take`'s documented policy)
-        // but make it loud, so "lockout isn't working" is diagnosable
-        // from the logs instead of invisible.
+        // A cache failure means this attempt is NOT counted and
+        // lockout quietly stops engaging, so log it loudly. Failing
+        // open is deliberate: a cache outage that locks every account
+        // is its own denial of service.
         let counted = match self
             .cache
             .incr(&counter_key, 1, Some(self.counter_ttl))
@@ -174,7 +158,7 @@ impl Lockout {
         };
         let next = u32::try_from(counted).unwrap_or(u32::MAX);
         if next >= self.max_attempts {
-            // Set the lock flag with TTL = lockout_duration
+            // Lock flag with TTL = lockout_duration.
             let _ = self
                 .cache
                 .set(&self.lock_key(account), "1", Some(self.lockout_duration))
@@ -209,25 +193,24 @@ impl Lockout {
             .await;
     }
 
-    // v0.43 — typed-user-id siblings. These prefix the key with
-    // `uid:` so an attacker who submits a username matching one of
-    // these prefixed forms can't collide with a real user-id record,
-    // and so a future migration can target one namespace without
-    // touching the other.
+    // Typed-user-id variants. They stamp a `uid:` prefix on the key,
+    // so id counters group together. The prefix is not an isolation
+    // barrier: a caller who passes the literal username `uid:42` to
+    // `record_failure` still hits the same key.
 
-    /// Typed-user-id variant of [`Self::record_failure`]. Recommended
-    /// for production: the caller must have already resolved a real
-    /// user, so attackers can't lock out arbitrary names. v0.43.
+    /// User-id variant of [`Self::record_failure`]. Prefer this in
+    /// production: the caller has already resolved a real user, so an
+    /// attacker cannot lock out a name of their choosing.
     pub async fn record_failure_by_id(&self, user_id: i64) -> u32 {
         self.record_failure(&format!("uid:{user_id}")).await
     }
 
-    /// Typed-user-id variant of [`Self::is_locked`]. v0.43.
+    /// User-id variant of [`Self::is_locked`].
     pub async fn is_locked_by_id(&self, user_id: i64) -> bool {
         self.is_locked(&format!("uid:{user_id}")).await
     }
 
-    /// Typed-user-id variant of [`Self::clear`]. v0.43.
+    /// User-id variant of [`Self::clear`].
     pub async fn clear_by_id(&self, user_id: i64) {
         self.clear(&format!("uid:{user_id}")).await
     }
@@ -245,25 +228,23 @@ impl Lockout {
 /// tracker with the default policy (5 attempts → 15-min lock).
 static SHARED_LOCKOUT: std::sync::OnceLock<Lockout> = std::sync::OnceLock::new();
 
-/// The framework's built-in login flows (admin / operator / tenant /
-/// JWT API) consult this so per-account brute-force protection is
-/// **on by default** (audit M1) without the app wiring anything.
+/// The built-in login flows (admin, operator, tenant, JWT API) use
+/// this, so per-account brute-force protection is on by default with
+/// no wiring.
 ///
-/// Backed by an in-memory cache, so it protects a **single process**.
-/// For a horizontally-scaled deployment, install a shared-cache
-/// (Redis / DB) tracker at boot via [`configure_shared`] — same
-/// single-instance caveat as the in-memory JTI blacklist + rate
-/// limiter.
+/// It uses an in-memory cache, so it guards **one process only**: with
+/// N replicas an attacker gets N times the attempts. For a scaled
+/// deployment install a shared-cache (Redis / DB) tracker at boot with
+/// [`configure_shared`].
 #[must_use]
 pub fn shared() -> &'static Lockout {
     SHARED_LOCKOUT.get_or_init(|| Lockout::new(Arc::new(crate::cache::InMemoryCache::new())))
 }
 
-/// Install the process-wide [`shared`] lockout (first call wins).
-/// Call once at boot to back it with a shared cache and/or apply a
-/// policy from `[auth]` settings. Returns `false` if [`shared`] was
-/// already initialized (e.g. a login fired first), mirroring the
-/// first-wins semantics of the JWT lifecycle singleton.
+/// Install the process-wide [`shared`] lockout. Call it once at boot
+/// to back the lockout with a shared cache or a different policy.
+/// First call wins: returns `false` when [`shared`] was already built,
+/// for example because a login ran first.
 pub fn configure_shared(lockout: Lockout) -> bool {
     SHARED_LOCKOUT.set(lockout).is_ok()
 }
@@ -374,17 +355,14 @@ mod tests {
         );
     }
 
-    // ---- v0.43 — typed-user-id siblings ----
+    // ---- typed-user-id variants ----
 
     #[tokio::test]
     async fn by_id_namespace_is_isolated_from_username() {
-        // An attacker who spams the literal name "uid:42" should not
-        // be able to lock user 42 — both go through `record_failure`,
-        // but the by_id variants stamp the prefix unconditionally.
-        // Today the cache keys would collide (both produce
-        // `lockout:attempts:uid:42`), so this test documents the
-        // expected behavior + acts as the regression net if the
-        // implementation later adds a stronger isolation prefix.
+        // The by_id variants always stamp the `uid:` prefix. Today a
+        // literal username of `uid:42` produces the same key
+        // (`lockout:attempts:uid:42`); this test pins the behaviour
+        // and would catch a real isolation prefix being added later.
         let l = lockout(3);
         l.record_failure_by_id(42).await;
         l.record_failure_by_id(42).await;
@@ -406,8 +384,8 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_keys_isolate_domains_and_tenants() {
-        // The built-in login handlers (M1) use scoped string keys so the
-        // same numeric id in different domains/tenants never collides.
+        // The built-in login handlers use scoped string keys, so the
+        // same numeric id in two domains or tenants never collides.
         let l = lockout(2);
         l.record_failure("tenant:acme:5").await;
         l.record_failure("tenant:acme:5").await;
@@ -428,16 +406,14 @@ mod tests {
 
     #[tokio::test]
     async fn shared_default_is_usable() {
-        // Smoke: the process-global default exists and answers. Unique
-        // key so parallel tests can't perturb the assertion.
+        // The process-global default exists and answers. Unique key so
+        // parallel tests cannot disturb the assertion.
         assert!(!shared().is_locked("smoke:unique-unused-key").await);
     }
 
-    /// #1253 — concurrent failed attempts must each count. The old
-    /// get-parse-set lost updates under contention, letting the
-    /// threshold be out-run by parallelising guesses. With an atomic
-    /// `incr` (now overridden on `InMemoryCache`) 50 racing failures
-    /// record exactly 50.
+    /// Concurrent failed attempts must each count, or an attacker can
+    /// out-run the threshold by guessing in parallel. With an atomic
+    /// `incr`, 50 racing failures record exactly 50.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_failures_all_count() {
         let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());

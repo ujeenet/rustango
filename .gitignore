@@ -27,15 +27,9 @@ crates/rustango/examples/*/target/
 # These files accumulate absolute paths, per-machine command allowlists,
 # and session state; they are not part of the project.
 #
-# `.claude/skills/` is the exception: a skill is project knowledge — the
-# same thing a CONTRIBUTING section would be, addressed to an agent — and
-# carries no machine-local state. Track those; ignore the rest.
-# (Listing `.claude/*` rather than `.claude/` matters: git does not descend
-# into an excluded directory, so a negation under `.claude/` would never
-# be reached.)
-.claude/*
-!.claude/skills/
-!.claude/review/
+# Nothing under `.claude/` is tracked, skills and the review bus included:
+# they are personal tooling that each developer keeps locally.
+.claude/
 CLAUDE.md
 AGENTS.md
 .mcp.json

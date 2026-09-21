@@ -1,9 +1,9 @@
-//! Static file serving — read files from a directory and ship them
-//! with sensible `Content-Type`, `Cache-Control`, and `Last-Modified`
-//! headers, plus `If-Modified-Since` 304 support.
+//! Static file serving: read files from a directory and send them with
+//! `Content-Type`, `Cache-Control` and `Last-Modified`, and answer 304
+//! to `If-Modified-Since`.
 //!
-//! Pair with [`crate::etag::EtagLayer`] for body-hash-based revalidation
-//! on top of timestamp-based revalidation.
+//! Add [`crate::etag::EtagLayer`] to revalidate on a body hash as well
+//! as on the timestamp.
 //!
 //! ## Quick start
 //!
@@ -17,24 +17,25 @@
 //!
 //! ## Security
 //!
-//! - Path traversal (`..` segments) is rejected with 404 — there's no
-//!   way to read above the configured root, even with URL-encoded
-//!   trickery, because the path is normalized BEFORE joining.
-//! - Symlinks pointing outside the root are followed by std::fs but
-//!   the canonical-path check catches them on read; if the resolved
-//!   file is outside `root`, return 404. (Disable canonicalization
-//!   with [`StaticFiles::no_canonicalize`] if you intentionally
-//!   serve symlinks pointing into the root from outside.)
-//! - Hidden files (those whose name starts with `.`) get 404 by
-//!   default — toggle via [`StaticFiles::serve_hidden`].
+//! - Path traversal gets a 404. The path is normalised before it is
+//!   joined to the root, so a `..` segment cannot read above the root,
+//!   URL-encoded or not.
+//! - A symlink out of the root gets a 404 too: the resolved path is
+//!   checked against the root. [`StaticFiles::no_canonicalize`] turns
+//!   that check off, so use it only on a directory layout you trust.
+//! - A name starting with `.` gets a 404 unless
+//!   [`StaticFiles::serve_hidden`] is on.
 //!
 //! ## Caching
 //!
-//! - Default `Cache-Control`: `public, max-age=3600` (1 hour).
-//!   Override with [`StaticFiles::cache_control`].
-//! - `Last-Modified` is set from the file's mtime when available.
-//! - When the request carries `If-Modified-Since: <mtime-or-newer>`,
-//!   the response is `304 Not Modified` with no body.
+//! `Cache-Control` defaults to `public, max-age=3600`; change it with
+//! [`StaticFiles::cache_control`]. `Last-Modified` comes from the
+//! file's mtime, and a matching `If-Modified-Since` gets a 304 with no
+//! body.
+//!
+//! [`StaticFiles::no_canonicalize`]: crate::static_files::StaticFiles::no_canonicalize
+//! [`StaticFiles::serve_hidden`]: crate::static_files::StaticFiles::serve_hidden
+//! [`StaticFiles::cache_control`]: crate::static_files::StaticFiles::cache_control
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -57,7 +58,7 @@ pub struct StaticFiles {
 }
 
 impl StaticFiles {
-    /// New server rooted at `dir`. Default cache: `public, max-age=3600`.
+    /// New server rooted at `dir`, caching `public, max-age=3600`.
     #[must_use]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -75,25 +76,24 @@ impl StaticFiles {
         self
     }
 
-    /// Convenience: `Cache-Control: public, max-age=<secs>, immutable`
-    /// — the right setting for hashed asset filenames (e.g.
-    /// `app.a3f8b2.js`) where the URL changes whenever the content
-    /// changes.
+    /// Set `Cache-Control: public, max-age=<secs>, immutable`. Use it
+    /// for hashed file names like `app.a3f8b2.js`, where new content
+    /// always means a new URL.
     #[must_use]
     pub fn immutable(mut self, max_age: Duration) -> Self {
         self.cache_control = format!("public, max-age={}, immutable", max_age.as_secs());
         self
     }
 
-    /// Permit dotfiles (default: 404).
+    /// Allow files whose name starts with `.`. Off by default.
     #[must_use]
     pub fn serve_hidden(mut self, on: bool) -> Self {
         self.serve_hidden = on;
         self
     }
 
-    /// Skip the canonical-path check that prevents symlink escapes
-    /// from `root`. Use only when you've vetted the directory layout.
+    /// Turn off the check that stops a symlink leading out of `root`.
+    /// Only do this on a directory layout you have checked yourself.
     #[must_use]
     pub fn no_canonicalize(mut self) -> Self {
         self.canonicalize = false;
@@ -101,8 +101,8 @@ impl StaticFiles {
     }
 }
 
-/// Build a router that serves every path under the given prefix from
-/// `files.root`. Mount with `.nest("/static", static_router(...))`.
+/// Router that serves everything under `files.root`. Mount it with
+/// `.nest("/static", static_router(...))`.
 #[must_use]
 pub fn static_router(files: StaticFiles) -> Router {
     Router::new()
@@ -173,13 +173,14 @@ async fn serve(
 }
 
 fn resolve_path(files: &StaticFiles, rel: &str) -> Option<PathBuf> {
-    // 1. Reject empty / dotfile-rooted paths upfront.
+    // 1. An empty path is never valid.
     if rel.is_empty() {
         return None;
     }
     let rel_path = Path::new(rel);
 
-    // 2. Normalize: drop CurDir, reject ParentDir, reject prefix/RootDir.
+    // 2. Normalise before joining: drop `.`, and reject `..`, a root or a
+    //    drive prefix. This is what blocks path traversal.
     let mut normalized = PathBuf::new();
     for c in rel_path.components() {
         match c {
@@ -203,7 +204,7 @@ fn resolve_path(files: &StaticFiles, rel: &str) -> Option<PathBuf> {
 
     let joined = files.root.join(&normalized);
 
-    // 3. Optional canonicalization to catch symlink escapes.
+    // 3. Resolve the real path, so a symlink cannot lead out of the root.
     if files.canonicalize {
         let canon = std::fs::canonicalize(&joined).ok()?;
         let root_canon = std::fs::canonicalize(&files.root).ok()?;
@@ -240,8 +241,7 @@ fn not_modified(mtime_secs: u64, cache_control: &str) -> Response {
     resp
 }
 
-/// Map a file extension to a MIME type. Conservative — falls back to
-/// `application/octet-stream`.
+/// MIME type for a file extension, or `application/octet-stream`.
 fn mime_for(path: &Path) -> HeaderValue {
     let ext = path
         .extension()
@@ -278,21 +278,18 @@ fn mime_for(path: &Path) -> HeaderValue {
     HeaderValue::from_static(s)
 }
 
-/// Format `secs` (unix-seconds) into an IMF-fixdate (RFC 7231) string
-/// — the canonical HTTP date format. Hand-rolled so we don't pull a
-/// date-formatting dep into the always-on path.
+/// Format unix seconds as an IMF-fixdate (RFC 7231), the HTTP date
+/// format.
 fn format_http_date(secs: u64) -> String {
-    // chrono is already a workspace dep, lean on it for date math.
     let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(i64::try_from(secs).unwrap_or(0), 0)
         .unwrap_or_else(chrono::Utc::now);
-    // chrono's RFC 2822 format is "Wed, 02 May 2026 12:34:56 +0000" —
-    // we want "Wed, 02 May 2026 12:34:56 GMT". Same shape, swap the
-    // timezone tag.
+    // chrono's RFC 2822 output ends in "+0000"; HTTP wants "GMT". Same
+    // shape otherwise, so write the format out by hand.
     dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
 }
 
-/// Parse an IMF-fixdate string back into unix-seconds. Returns `None`
-/// for any unrecognized format (we don't try heroic recovery).
+/// Parse an IMF-fixdate back into unix seconds. Any other format
+/// gives `None`.
 fn parse_http_date(s: &str) -> Option<u64> {
     let dt = chrono::DateTime::parse_from_rfc2822(s)
         .or_else(|_| {
@@ -312,7 +309,7 @@ fn parse_http_date(s: &str) -> Option<u64> {
     }
 }
 
-// silence unused-import warning when SystemTime isn't used elsewhere
+// Keeps the `SystemTime` import used, so `-D warnings` stays happy.
 const _: fn() = || {
     let _ = SystemTime::UNIX_EPOCH;
 };
@@ -433,7 +430,7 @@ mod tests {
             .oneshot(Request::builder().uri("/sub").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        // Directory listing is intentionally NOT supported — 404.
+        // Directory listing is not supported, so 404.
         assert_eq!(resp.status(), 404);
     }
 
@@ -461,7 +458,7 @@ mod tests {
             .unwrap()
             .to_owned();
 
-        // Second request with If-Modified-Since: <Last-Modified> -> 304.
+        // Sending that value back as If-Modified-Since gives a 304.
         let r2 = server(&dir)
             .oneshot(
                 Request::builder()

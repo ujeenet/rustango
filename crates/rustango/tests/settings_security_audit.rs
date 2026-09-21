@@ -1,4 +1,4 @@
-//! Django parity — `Settings.security` deploy-audit warnings for
+//! `Settings.security` deploy-audit warnings for
 //! `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`, `SECURE_SSL_REDIRECT`,
 //! `SECURE_PROXY_SSL_HEADER`. `manage check --deploy` on the prod
 //! tier walks the new fields + emits warnings when ops left them at

@@ -1,4 +1,4 @@
-//! Django-parity #410 — `m2m_changed` signal fires from
+//! Issue #410 — `m2m_changed` signal fires from
 //! `M2MManager::{add_pool, remove_pool, set_pool, clear_pool}`
 //! against a live SQLite junction table.
 

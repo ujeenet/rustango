@@ -4,7 +4,8 @@
 //! `create-user`) but with structured argument types and direct return
 //! values — for use from `Builder::seed_with` closures and any other
 //! in-process caller. CLI-style verb dispatch via
-//! [`super::run_with_writer`] is unchanged for shell consumers.
+//! [`run_with_writer`](crate::tenancy::manage::run_with_writer) is
+//! unchanged for shell consumers.
 //!
 //! Every function suffixed `_if_missing` is **idempotent** — if a row
 //! with the requested key already exists, the existing row is

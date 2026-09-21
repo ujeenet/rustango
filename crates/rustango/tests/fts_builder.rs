@@ -119,7 +119,7 @@ fn search_query_phrase_emits_phraseto_tsquery() {
 
 #[test]
 fn search_query_websearch_emits_websearch_to_tsquery() {
-    let q = SearchQuery::websearch(r#""rust orm" -django"#);
+    let q = SearchQuery::websearch(r#""rust orm" -python"#);
     let pg = pg(q.as_expr()).unwrap();
     assert!(pg.contains("websearch_to_tsquery("), "PG websearch: {pg}");
 }

@@ -32,10 +32,12 @@ use crate::Model;
 /// locale.
 ///
 /// `managed = false`: created by [`ensure_table_pool`], not the
-/// migration graph. The table also carries DB-defaulted `created_at` /
-/// `updated_at` columns for the Slice 2 audit trail; they're not mapped
-/// here because the ORM only `SELECT`s declared columns, so the extra
-/// columns are harmless to this model.
+/// migration graph.
+///
+/// `created_at` / `updated_at` carry the Slice 2 audit trail. Mapped
+/// onto the model as of #1464 so the ORM writes them: left DB-defaulted
+/// they arrived legacy-shaped forever on an upgraded SQLite file, whose
+/// `CURRENT_TIMESTAMP` default `ALTER TABLE` cannot replace.
 #[derive(Model, Debug, Clone, serde::Serialize)]
 #[rustango(table = "rustango_translations", managed = false)]
 pub struct Translation {
@@ -48,46 +50,71 @@ pub struct Translation {
     pub value: String,
     #[rustango(max_length = 200, default = "")]
     pub updated_by: String,
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(auto_now)]
+    pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
-const DDL_PG: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_translations" (
-    "id"         BIGSERIAL PRIMARY KEY,
-    "locale"     VARCHAR(16) NOT NULL,
-    "key"        VARCHAR(200) NOT NULL,
-    "value"      TEXT NOT NULL,
-    "updated_by" VARCHAR(200) NOT NULL DEFAULT '',
-    "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
-);
-"#;
-
-const DDL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_translations" (
-    "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
-    "locale"     TEXT NOT NULL,
-    "key"        TEXT NOT NULL,
-    "value"      TEXT NOT NULL,
-    "updated_by" TEXT NOT NULL DEFAULT '',
-    "created_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
-);
-"#;
-
-const DDL_MYSQL: &str = r"
+/// The `CREATE TABLE` for this dialect.
+///
+/// Both timestamp columns take type *and* `DEFAULT` from
+/// [`crate::sql::Dialect::timestamp_now_column`]. That also moves MySQL
+/// off `TIMESTAMP` (whole seconds) onto `DATETIME(6)`, now that the ORM
+/// binds microseconds into them — but `IF NOT EXISTS` leaves an
+/// existing MySQL table truncating, which needs a migration.
+///
+/// **No `--` comments inside the returned string.** Its newlines
+/// collapse before the driver sees it, so a `--` swallows the rest of
+/// the statement and SQLite rejects it with `incomplete input`.
+fn ddl(dialect: &dyn crate::sql::Dialect) -> String {
+    let ts = dialect.timestamp_now_column();
+    match dialect.name() {
+        "mysql" => format!(
+            r"
 CREATE TABLE IF NOT EXISTS `rustango_translations` (
     `id`         BIGINT AUTO_INCREMENT PRIMARY KEY,
     `locale`     VARCHAR(16) NOT NULL,
     `key`        VARCHAR(200) NOT NULL,
     `value`      TEXT NOT NULL,
     `updated_by` VARCHAR(200) NOT NULL DEFAULT '',
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `created_at` {ts},
+    `updated_at` {ts},
     CONSTRAINT `rustango_translations_locale_key_uq` UNIQUE (`locale`, `key`)
 );
-";
+"
+        ),
+        "sqlite" => format!(
+            r#"
+CREATE TABLE IF NOT EXISTS "rustango_translations" (
+    "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
+    "locale"     TEXT NOT NULL,
+    "key"        TEXT NOT NULL,
+    "value"      TEXT NOT NULL,
+    "updated_by" TEXT NOT NULL DEFAULT '',
+    "created_at" {ts},
+    "updated_at" {ts},
+    CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
+);
+"#
+        ),
+        // Postgres + any future dialect: the standard `"`-quoted DDL.
+        _ => format!(
+            r#"
+CREATE TABLE IF NOT EXISTS "rustango_translations" (
+    "id"         BIGSERIAL PRIMARY KEY,
+    "locale"     VARCHAR(16) NOT NULL,
+    "key"        VARCHAR(200) NOT NULL,
+    "value"      TEXT NOT NULL,
+    "updated_by" VARCHAR(200) NOT NULL DEFAULT '',
+    "created_at" {ts},
+    "updated_at" {ts},
+    CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
+);
+"#
+        ),
+    }
+}
 
 /// Create `rustango_translations` if absent — idempotent, dispatched per
 /// dialect. Call once at startup (and the Slice 2 `seed-translations`
@@ -97,13 +124,7 @@ CREATE TABLE IF NOT EXISTS `rustango_translations` (
 /// Driver / SQL failures other than the duplicate-object errors that
 /// [`crate::sql::run_ddl_idempotent`] swallows.
 pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "mysql" => DDL_MYSQL,
-        "sqlite" => DDL_SQLITE,
-        // Postgres + any future dialect: the standard `"`-quoted DDL.
-        _ => DDL_PG,
-    };
-    crate::sql::run_ddl_idempotent(pool, ddl).await
+    crate::sql::run_ddl_idempotent(pool, &ddl(pool.dialect())).await
 }
 
 /// Every override row, for the admin list view / [`refresh_overrides_pool`].
@@ -134,8 +155,19 @@ pub async fn upsert_pool(
         key: key.to_owned(),
         value: value.to_owned(),
         updated_by: updated_by.to_owned(),
+        created_at: Auto::Unset,
+        updated_at: Auto::Unset,
     };
-    Translation::bulk_upsert_pool(&[row], &["locale", "key"], &["value", "updated_by"], pool).await
+    // `updated_at` is in the DO UPDATE list: an upsert that lands on
+    // the conflict branch is an edit, and the audit trail is the point
+    // of the column.
+    Translation::bulk_upsert_pool(
+        &[row],
+        &["locale", "key"],
+        &["value", "updated_by", "updated_at"],
+        pool,
+    )
+    .await
 }
 
 /// Seed the DB layer from a [`Translator`]'s file catalogs. Existing
@@ -163,6 +195,8 @@ pub async fn seed_from_translator_pool(
             key,
             value,
             updated_by: String::new(),
+            created_at: Auto::Unset,
+            updated_at: Auto::Unset,
         })
         .collect();
     let n = rows.len();

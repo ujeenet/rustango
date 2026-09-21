@@ -8,8 +8,8 @@
 //! * [`migrate`] applies pending migration files from a directory,
 //!   using the `__rustango_migrations__` ledger table to skip files
 //!   that have already been applied. Each file runs in its own
-//!   transaction by default (Django-style — partial progress across
-//!   files is recoverable).
+//!   transaction by default, so partial progress across files is
+//!   recoverable.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -253,7 +253,7 @@ pub fn registered_models() -> Vec<&'static ModelSchema> {
 
 /// The subset of [`registered_models`] the inventory-walk bootstrap
 /// (`apply_all*` / `drop_all*`) should touch: framework-managed tables
-/// only. Django `Meta.managed = False` (#321) means the framework
+/// only. A model marked `managed = false` means the framework
 /// neither creates nor drops the table — the snapshot / migration path
 /// already filters these (see `snapshot.rs`), and the bootstrap walk
 /// must match. Otherwise a `managed = false` model (e.g.
@@ -367,7 +367,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
         }
     }
-    // Django Meta.db_table_comment — same shape as column-level:
+    // `db_table_comment` — same shape as column-level:
     // PG emits a post-hoc `COMMENT ON TABLE`, MySQL inlined it in
     // CREATE TABLE, SQLite emits nothing.
     for model in &models {
@@ -657,7 +657,8 @@ async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateErr
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {ledger} (\
          name TEXT PRIMARY KEY, \
-         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+         applied_at {})",
+        dialect.timestamp_now_column()
     );
     sqlx::query(&create_sql).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -720,7 +721,7 @@ async fn migrate_dry_run_with_ledger(
     Ok(out)
 }
 
-/// Django-shape `sqlmigrate <name>` — Compute the SQL the named
+/// `sqlmigrate <name>` — compute the SQL the named
 /// migration would emit when applied, without touching the database.
 /// Pure file I/O + render — no ledger read required.
 ///
@@ -786,8 +787,11 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
         }
     }
     statements.extend(deferred_fks);
+    // The preview shows the column list the runners actually write,
+    // `applied_at` included — a plan that omits a column the apply then
+    // writes is a plan of a different statement.
     statements.push(format!(
-        "INSERT INTO {ledger} (name) VALUES ('{}')",
+        "INSERT INTO {ledger} (name, applied_at) VALUES ('{}', <now>)",
         mig.name.replace('\'', "''")
     ));
     if mig.atomic {
@@ -832,8 +836,9 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
     for stmt in deferred_fks {
         sqlx::query(&stmt).execute(&mut *tx).await?;
     }
-    sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
+    sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
         .bind(&mig.name)
+        .bind(chrono::Utc::now())
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1369,8 +1374,9 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
     for stmt in deferred_fks {
         sqlx::query(&stmt).execute(pool).await?;
     }
-    sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
+    sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
         .bind(&mig.name)
+        .bind(chrono::Utc::now())
         .execute(pool)
         .await?;
     Ok(())
@@ -1416,24 +1422,11 @@ pub async fn ensure_ledger_pool_with_ledger(
     pool: &crate::sql::Pool,
     ledger: &str,
 ) -> Result<(), MigrateError> {
-    let dialect_name = pool.dialect().name();
-    let timestamp_col = match dialect_name {
-        "postgres" => "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-        "mysql" => "DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
-        // SQLite has no native TIMESTAMP type — TEXT with affinity
-        // and `CURRENT_TIMESTAMP` (UTC, ISO-8601 to second precision)
-        // is the conventional shape. Sufficient for ledger ordering.
-        "sqlite" => "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
-        // Future dialects: a `Dialect::current_timestamp_default()` +
-        // `Dialect::timestamp_type()` pair would let this branch go
-        // away. For now the runner only knows the backends rustango
-        // ships against.
-        other => {
-            return Err(MigrateError::Validation(format!(
-                "ensure_ledger_pool: unrecognized dialect `{other}`"
-            )));
-        }
-    };
+    // Was a three-arm match on the dialect name with a hand-written
+    // type + DEFAULT each, whose SQLite arm carried a copy of #1464's
+    // canonical `strftime`. `Dialect` answers both halves now, so the
+    // unreachable "unrecognized dialect" error goes too.
+    let timestamp_col = pool.dialect().timestamp_now_column();
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {ledger} (\
          name VARCHAR(255) PRIMARY KEY, \
@@ -1441,6 +1434,18 @@ pub async fn ensure_ledger_pool_with_ledger(
     );
     crate::sql::raw_execute_pool(pool, &create_sql, ::std::vec::Vec::new()).await?;
     Ok(())
+}
+
+/// The statement that records a migration as applied — one column list
+/// for the five runners that write it.
+///
+/// `applied_at` is bound, not defaulted (#1464): a defaulted write on
+/// an upgraded SQLite file puts the legacy spelling back into a column
+/// `migrate`'s own sweep has just normalised. Nothing compares the
+/// column today, so this is housekeeping, not a live defect.
+fn ledger_insert_sql(dialect: &dyn crate::sql::Dialect, ledger: &str) -> String {
+    let (p1, p2) = (dialect.placeholder(1), dialect.placeholder(2));
+    format!("INSERT INTO {ledger} (name, applied_at) VALUES ({p1}, {p2})")
 }
 
 /// Set of migration names already recorded in the default ledger
@@ -1703,7 +1708,7 @@ enum ReconcileAction {
 ///   history it must not re-run:
 ///   - every replaced migration present in the ledger → [`Fake`] (same-ledger)
 ///   - none present, but all the tables it creates already exist → [`Fake`]
-///     (cross-ledger, Django's `--fake-initial`)
+///     (cross-ledger, the guarded fake-initial reconcile)
 ///   - a *partial* match either way → **error**, because the database is in
 ///     a state no automatic choice can safely resolve
 ///   - otherwise (fresh database) → [`Run`]
@@ -1859,8 +1864,8 @@ pub(crate) fn without_tables(mig: &Migration, existing: &[String]) -> Migration 
 /// Beyond the obvious "not in the ledger" filter, this drops anything that an
 /// **applied squash** declares it `replaces`. Once a squash is recorded, its
 /// predecessors' ledger rows are tombstoned, but their *files* usually remain
-/// on disk for a release or two (Django keeps them so older deployments can
-/// still migrate forward). Without this filter those files would look pending
+/// on disk for a release or two, so older deployments can still migrate
+/// forward. Without this filter those files would look pending
 /// on the very next run and try to recreate tables that already exist.
 fn pending_migrations(all: Vec<Migration>, applied: &HashSet<String>) -> Vec<Migration> {
     let superseded: HashSet<&str> = all
@@ -2167,8 +2172,9 @@ async fn apply_atomic_pool(
             for stmt in deferred_fks {
                 sqlx::query(&stmt).execute(&mut *tx).await?;
             }
-            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
+            sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
                 .bind(&mig.name)
+                .bind(chrono::Utc::now())
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -2193,9 +2199,8 @@ async fn apply_atomic_pool(
             // have to manually un-do the partially-applied DDL OR fix
             // the migration to be re-runnable from where it failed.
             //
-            // This is a MySQL engine limitation, not a rustango bug,
-            // and matches Django's `migrate` behavior against MySQL
-            // (Django docs note the same caveat). Tracked in #559.
+            // This is a MySQL engine limitation, not a rustango bug:
+            // MySQL does not roll back DDL. Tracked in #559.
             // The runner emits a `tracing::warn!` so operators see
             // the caveat in logs when they invoke `atomic: true` on
             // MySQL.
@@ -2280,8 +2285,9 @@ async fn apply_atomic_pool(
                     .await
                     .map_err(|e| stuck!(e))?;
             }
-            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES (?)"))
+            sqlx::query(&ledger_insert_sql(&crate::sql::MySql, ledger))
                 .bind(&mig.name)
+                .bind(chrono::Utc::now())
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| stuck!(e))?;
@@ -2319,8 +2325,15 @@ async fn apply_atomic_pool(
             for stmt in deferred_fks {
                 sqlx::query(&stmt).execute(&mut *tx).await?;
             }
-            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES (?)"))
+            // `encode_datetime`, not a bare `DateTime<Utc>`: sqlx-sqlite
+            // has its own RFC3339 formatter with a variable-width
+            // fraction, which is a second spelling of the same instant.
+            // Everything else in the crate reaches this encoder through
+            // the executor's binders; a typed `sqlx::query` here has to
+            // name it.
+            sqlx::query(&ledger_insert_sql(&crate::sql::Sqlite, ledger))
                 .bind(&mig.name)
+                .bind(crate::sql::encode_datetime(chrono::Utc::now()))
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -2365,12 +2378,14 @@ async fn apply_nonatomic_pool(
     for stmt in deferred_fks {
         crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
     }
-    let placeholder = pool.dialect().placeholder(1);
-    let insert_sql = format!("INSERT INTO {ledger} (name) VALUES ({placeholder})");
+    let insert_sql = ledger_insert_sql(pool.dialect(), ledger);
     crate::sql::raw_execute_pool(
         pool,
         &insert_sql,
-        ::std::vec![crate::core::SqlValue::String(mig.name.clone())],
+        ::std::vec![
+            crate::core::SqlValue::String(mig.name.clone()),
+            crate::core::SqlValue::DateTime(chrono::Utc::now()),
+        ],
     )
     .await?;
     Ok(())

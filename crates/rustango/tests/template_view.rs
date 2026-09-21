@@ -1,4 +1,4 @@
-//! Django-parity #377 — `TemplateView` class-based view.
+//! Issue #377 — the `TemplateView` generic view.
 //!
 //! Verifies `template_views::TemplateView` renders a Tera template
 //! with caller-supplied context and mounts as an axum router on the

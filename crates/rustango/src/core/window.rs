@@ -1,10 +1,9 @@
-//! Window functions — issue #7.
+//! Window functions: `OVER (…)` with partition, order and frame
+//! clauses.
 //!
-//! Seventh and final slice of the ORM Expression DSL epic. Closes the
-//! Django `Window(expression, partition_by=, order_by=, frame=)` gap
-//! with 8 function variants + ROWS/RANGE frame clauses. Tri-dialect
-//! uniform — every backend rustango supports (PG ≥ 9.0, MySQL ≥ 8.0,
-//! SQLite ≥ 3.25) ships native `OVER (…)` syntax.
+//! Every backend rustango supports has native window syntax
+//! (PG 9.0+, MySQL 8.0+, SQLite 3.25+), so the SQL is the same on all
+//! three.
 //!
 //! ```ignore
 //! use rustango::core::window::{rank, row_number, lag};
@@ -37,54 +36,35 @@
 //!     .compile()?;
 //! ```
 //!
-//! ## Where window functions can appear
+//! ## Where they are allowed
 //!
-//! Every backend rustango supports (PG, MySQL 8+, SQLite 3.25+)
-//! restricts window functions to the **SELECT list** and the
-//! **ORDER BY clause** of a query. They are **not allowed in**:
+//! SQL allows a window function only in the **SELECT list** and in
+//! **ORDER BY**. It is rejected in `WHERE`, `HAVING`, `GROUP BY`,
+//! `UPDATE SET`, `JOIN ON` and `RETURNING`.
 //!
-//! - `WHERE` predicates,
-//! - `HAVING` predicates,
-//! - `GROUP BY` clauses,
-//! - `UPDATE SET` assignments,
-//! - `JOIN ON` predicates,
-//! - the projection of a `RETURNING` clause.
-//!
-//! The IR + writer don't gate emission on this — `set_expr(...,
-//! row_number())` compiles cleanly but fails at execute. Build window
-//! expressions through [`crate::query::AggregateBuilder::annotate`]
-//! (the only legitimate channel today). To use a window result inside
-//! an `UPDATE` or filter, wrap the windowed select in a subquery and
-//! join/filter against that.
+//! The IR does not check this, so `set_expr(..., row_number())`
+//! compiles but fails when it runs. Build window expressions with
+//! [`crate::query::AggregateBuilder::annotate`]. To filter on a window
+//! result, wrap the windowed select in a subquery and filter that.
 //!
 //! ## Builder shape
 //!
-//! Each constructor (`row_number`, `rank`, `dense_rank`, `lag`,
-//! `lead`, `first_value`, `last_value`, `ntile`) returns a
+//! Each constructor ([`row_number`], [`rank`], [`lag`], …) returns a
 //! [`WindowBuilder`] with three chainable modifiers:
 //!
-//! - `.partition_by(col)` — append a `PARTITION BY` column. Call
-//!   multiple times for multi-column partitioning.
-//! - `.order_by(&[("col", desc)])` — append `ORDER BY` columns.
-//! - `.frame(WindowFrame { … })` — set the optional `ROWS`/`RANGE`
-//!   frame clause.
+//! - `.partition_by(col)` — add a `PARTITION BY` column; call it again
+//!   for more columns.
+//! - `.order_by(&[("col", desc)])` — add `ORDER BY` columns.
+//! - `.frame(WindowFrame { … })` — set the `ROWS`/`RANGE` frame.
 //!
-//! The builder lowers via `Into<AggregateExpr>` so window functions
-//! compose with `annotate()`. `Into<Expr>` is also implemented to
-//! keep the IR composable (window-in-Case/Coalesce/Subquery), but
-//! emitting one in a slot the DB rejects (see list above) is a
-//! programmer error.
-//!
-//! ## Tri-dialect emission
-//!
-//! `<fn>(args) OVER (PARTITION BY … ORDER BY … [frame])` is SQL-standard
-//! syntax. Identical SQL across PG / MySQL 8+ / SQLite 3.25+.
+//! The builder lowers through `Into<AggregateExpr>` for `annotate()`,
+//! and `Into<Expr>` for the rest of the IR.
 
 use super::expr::Expr;
 use super::query::{AggregateExpr, OrderClause};
 use super::SqlValue;
 
-/// Window function kind. The eight v1 variants from Django's epic.
+/// Which window function to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowFn {
     /// `ROW_NUMBER()` — sequential row index within the partition.
@@ -107,8 +87,7 @@ pub enum WindowFn {
     /// `LAST_VALUE(expr)` — value from the last row in the
     /// partition/frame.
     LastValue,
-    /// `SUM(expr)` used as a window — running / partitioned total
-    /// (Django 6.0 `Window(Sum(...))`, #1035).
+    /// `SUM(expr)` used as a window — running / partitioned total.
     Sum,
     /// `AVG(expr)` used as a window — partitioned / running mean.
     Avg,
@@ -167,10 +146,10 @@ pub struct WindowExpr {
     pub frame: Option<WindowFrame>,
 }
 
-/// Fluent wrapper around a [`WindowExpr`]. Built via the free
-/// functions in this module ([`row_number`], [`rank`], …); finalize
-/// by passing into anything that takes `impl Into<Expr>` or
-/// `impl Into<AggregateExpr>`.
+/// Fluent wrapper around a [`WindowExpr`]. Build one with the free
+/// functions in this module ([`row_number`], [`rank`], …), then pass
+/// it where `impl Into<Expr>` or `impl Into<AggregateExpr>` is
+/// expected.
 #[must_use]
 pub struct WindowBuilder {
     inner: WindowExpr,
@@ -189,15 +168,15 @@ impl WindowBuilder {
         }
     }
 
-    /// Append a `PARTITION BY` column. Call multiple times to
-    /// partition by multiple columns (left-to-right precedence).
+    /// Add a `PARTITION BY` column. Call it again for more columns;
+    /// they keep call order.
     pub fn partition_by(mut self, column: &'static str) -> Self {
         self.inner.partition_by.push(column);
         self
     }
 
-    /// Append `ORDER BY` columns. `desc = true` → `DESC`. Multiple
-    /// calls compose; subsequent ones append after earlier ones.
+    /// Add `ORDER BY` columns. `desc = true` emits `DESC`. Later
+    /// calls append after earlier ones.
     pub fn order_by(mut self, items: &[(&'static str, bool)]) -> Self {
         for (col, desc) in items {
             self.inner.order_by.push(OrderClause {
@@ -214,8 +193,8 @@ impl WindowBuilder {
         self
     }
 
-    /// Finalize to an [`Expr`]. Equivalent to `Into<Expr>::into(b)` —
-    /// provided when type inference needs help.
+    /// Finish and return an [`Expr`]. Same as `Into<Expr>::into(b)`,
+    /// for when type inference needs help.
     #[must_use]
     pub fn build(self) -> Expr {
         Expr::Window(Box::new(self.inner))
@@ -265,12 +244,9 @@ pub fn ntile(buckets: i64) -> WindowBuilder {
 }
 
 /// `LAG(<column>, <offset>, <default>) OVER (…)` — value from the
-/// row `offset` rows before the current row, with `default`
-/// substituted when out of range.
-///
-/// Pass `offset = 1` for "previous row," `offset = N` for further
-/// back. `default = None` produces `LAG(col, offset)` (omits the
-/// default arg — NULL is returned for out-of-range positions).
+/// row `offset` rows before the current one. Use `offset = 1` for the
+/// previous row. `default = None` omits the third argument, so an
+/// out-of-range row gives NULL.
 #[must_use]
 pub fn lag(column: &'static str, offset: i64, default: Option<SqlValue>) -> WindowBuilder {
     let mut args = vec![Expr::Column(column), Expr::Literal(SqlValue::I64(offset))];
@@ -305,13 +281,12 @@ pub fn last_value(column: &'static str) -> WindowBuilder {
     WindowBuilder::new(WindowFn::LastValue, vec![Expr::Column(column)])
 }
 
-/// `SUM(<column>) OVER (…)` — aggregate used as a window function
-/// (Django 6.0 `Window(Sum("points"), …)`, #1035). With an `ORDER BY`
-/// and no explicit [`WindowBuilder::frame`], SQL defaults to `RANGE
-/// UNBOUNDED PRECEDING .. CURRENT ROW` — a running total where peer
-/// rows (equal ORDER BY keys) share the cumulative value. Add
-/// `.frame(...)` for `ROWS` framing. Tri-dialect native (PG / MySQL 8+
-/// / SQLite 3.25+); no dialect fork.
+/// `SUM(<column>) OVER (…)` — a running or partitioned total.
+///
+/// With an `ORDER BY` and no [`WindowBuilder::frame`], SQL defaults to
+/// `RANGE UNBOUNDED PRECEDING .. CURRENT ROW`, so rows with equal
+/// ORDER BY keys share the same total. Add `.frame(...)` to get `ROWS`
+/// framing instead.
 #[must_use]
 pub fn sum_over(column: &'static str) -> WindowBuilder {
     WindowBuilder::new(WindowFn::Sum, vec![Expr::Column(column)])

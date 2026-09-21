@@ -1,5 +1,5 @@
 //! v0.45 — live SQLite coverage for `get_or_create` and
-//! `update_or_create` (Django-style atomic-ish helpers).
+//! `update_or_create` (atomic-ish fetch-or-write helpers).
 //!
 //! Atomicity caveat: the helpers run SELECT then INSERT/UPDATE in
 //! two statements; another writer could race between the two. For

@@ -1,7 +1,7 @@
-//! Django-parity #337 — `GenericIPAddressField` equivalent via
+//! Issue #337 — an IP-address field via
 //! `#[rustango(validators = "ip_address")]`. The validator accepts
-//! either IPv4 or IPv6 strings; the alias `genericipaddress`
-//! exists for callers translating verbatim from a Django field.
+//! either IPv4 or IPv6 strings; `genericipaddress` is an accepted
+//! alias for the same validator.
 //!
 //! IPv4-only / IPv6-only protocols are covered by the existing
 //! `validate_ipv4` / `validate_ipv6` validators that shipped with #447.
@@ -16,7 +16,7 @@ pub struct Host {
     #[rustango(primary_key)]
     pub id: i64,
 
-    /// Both families — Django's default `GenericIPAddressField`.
+    /// Both families — IPv4 or IPv6.
     #[rustango(max_length = 45, validators = "ip_address")]
     pub addr: String,
 
@@ -28,7 +28,7 @@ pub struct Host {
     #[rustango(max_length = 45, validators = "ipv6")]
     pub v6_only: String,
 
-    /// Alias for Django-translated callers.
+    /// The `genericipaddress` alias resolves to the same validator.
     #[rustango(max_length = 45, validators = "genericipaddress")]
     pub via_alias: String,
 }

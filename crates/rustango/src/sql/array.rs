@@ -1,5 +1,4 @@
-//! `Array<T>` — typed PostgreSQL array column wrapper (Django's
-//! `ArrayField`, issue #341).
+//! `Array<T>` — typed PostgreSQL array column wrapper (issue #341).
 //!
 //! Declare a native PG array column on a model:
 //!

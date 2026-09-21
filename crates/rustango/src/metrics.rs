@@ -1,9 +1,9 @@
-//! Prometheus-format metrics — counters + histograms exposed at
-//! `/metrics`.
+//! Metrics in the Prometheus text format: counters and histograms,
+//! served at `/metrics`.
 //!
-//! Pure-Rust, no Prometheus client crate. Sufficient for the 90%
-//! case: a few labeled counters + a fixed-bucket histogram per
-//! endpoint, scraped every 10–60 s.
+//! No Prometheus client crate. This covers the common case: a few
+//! labelled counters and one fixed-bucket histogram per endpoint,
+//! scraped every 10 to 60 seconds.
 //!
 //! ## Quick start
 //!
@@ -26,26 +26,23 @@
 //!    .observe(0.024);
 //! ```
 //!
-//! ## What's NOT here
+//! ## Not included
 //!
-//! - Gauges that decrement over time (use a Counter and report the
-//!   delta).
-//! - Summary type. Histograms are nicer for aggregation across
-//!   replicas; if you need quantiles, render them client-side.
-//! - Push gateway. Prometheus pulls; we expose the endpoint.
+//! No gauges that go down: use a counter and report the change. No
+//! summary type: histograms add up better across replicas, so compute
+//! quantiles at query time. No push gateway, since Prometheus pulls.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-/// Default histogram bucket boundaries (seconds). Matches the
-/// Prometheus convention for HTTP latency: covers 5 ms → 10 s with
-/// reasonable resolution.
+/// Default bucket edges in seconds, 5 ms to 10 s. This is the usual
+/// Prometheus set for HTTP latency.
 pub const DEFAULT_BUCKETS_S: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
-/// Shared registry of metrics. Cheap to clone — internal `Arc<RwLock>`.
+/// Shared registry of metrics. Cheap to clone.
 #[derive(Clone, Default)]
 pub struct MetricsRegistry {
     inner: Arc<RwLock<Inner>>,
@@ -76,9 +73,8 @@ impl MetricKey {
         }
     }
 
-    /// Render `name{k="v",k="v"}` for the text format. Labels are
-    /// already sorted (by MetricKey::new). Bare metrics with no
-    /// labels render without `{}`.
+    /// Render `name{k="v",k="v"}`, or just `name` when there are no
+    /// labels. `MetricKey::new` already sorted them.
     fn render(&self) -> String {
         if self.labels.is_empty() {
             self.name.clone()
@@ -105,7 +101,7 @@ impl MetricKey {
 }
 
 fn escape_label_value(v: &str) -> String {
-    // Prometheus escapes: `\` → `\\`, `"` → `\"`, newline → `\n`.
+    // Prometheus escapes backslash, double quote and newline.
     let mut out = String::with_capacity(v.len());
     for c in v.chars() {
         match c {
@@ -124,7 +120,7 @@ impl MetricsRegistry {
         Self::default()
     }
 
-    /// Get-or-create a counter. Cheap to call on every request.
+    /// Find or create a counter. Cheap enough to call per request.
     pub fn counter(&self, name: &str, labels: &[(&str, &str)]) -> Counter {
         let key = MetricKey::new(name, labels);
         let inner = {
@@ -143,14 +139,13 @@ impl MetricsRegistry {
         Counter { inner: i }
     }
 
-    /// Get-or-create a histogram with the default buckets.
+    /// Find or create a histogram using the default buckets.
     pub fn histogram(&self, name: &str, labels: &[(&str, &str)]) -> Histogram {
         self.histogram_with_buckets(name, labels, DEFAULT_BUCKETS_S)
     }
 
-    /// Get-or-create a histogram with custom bucket upper bounds (in
-    /// units that match what you `observe`). Buckets must be sorted
-    /// ascending; unsorted input is sorted before use.
+    /// Find or create a histogram with your own bucket upper bounds,
+    /// in the same unit you pass to `observe`. They are sorted for you.
     pub fn histogram_with_buckets(
         &self,
         name: &str,
@@ -174,14 +169,14 @@ impl MetricsRegistry {
         Histogram { inner: i }
     }
 
-    /// Render every metric in the Prometheus text exposition format.
+    /// Render every metric in the Prometheus text format.
     #[must_use]
     pub fn render(&self) -> String {
         let r = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let mut out = String::new();
 
-        // Counters first, then histograms. Both groups: write a single
-        // `# TYPE` line per metric name (NOT per labelset).
+        // Counters, then histograms. One `# TYPE` line per metric name,
+        // not per label set.
         let mut emitted_types = std::collections::HashSet::new();
 
         for (key, c) in &r.counters {
@@ -267,11 +262,10 @@ impl Counter {
 struct HistogramInner {
     buckets: Vec<f64>,
     counts: Vec<AtomicU64>,
-    /// Total observation count (matches the +Inf bucket per the
-    /// Prometheus spec).
+    /// How many values were observed. This is also the +Inf bucket.
     total: AtomicU64,
-    /// Sum of observed values, scaled by 1e6 to sit in u64 atomics.
-    /// We expose it back as f64 in render().
+    /// Sum of observed values times 1e6, so it fits a u64 atomic.
+    /// `render()` turns it back into an f64.
     sum_micro: AtomicU64,
 }
 
@@ -289,8 +283,8 @@ impl HistogramInner {
     }
 
     fn observe(&self, v: f64) {
-        // Cumulative buckets (Prometheus convention): increment every
-        // bucket whose `le` is >= v.
+        // Prometheus buckets are cumulative: bump every bucket whose
+        // upper bound is at least `v`.
         for (i, &le) in self.buckets.iter().enumerate() {
             if v <= le {
                 self.counts[i].fetch_add(1, Ordering::Relaxed);
@@ -324,7 +318,7 @@ impl Histogram {
     pub fn observe(&self, v: f64) {
         self.inner.observe(v);
     }
-    /// Time the closure and observe its duration in seconds.
+    /// Run the closure and observe how long it took, in seconds.
     pub fn time<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
@@ -416,7 +410,7 @@ mod tests {
         h.observe(0.05); // bucket 0 + 1 + 2
         h.observe(0.5); //  bucket 1 + 2
         h.observe(5.0); //  bucket 2
-        h.observe(20.0); // none — only +Inf
+        h.observe(20.0); // no bucket, only +Inf
         assert_eq!(h.inner.total_count(), 4);
         let counts = h.inner.bucket_counts();
         assert_eq!(counts, vec![1, 2, 3]);
@@ -428,7 +422,7 @@ mod tests {
         let h = r.histogram_with_buckets("dur", &[], &[0.1, 1.0, 10.0]);
         h.observe(0.5);
         h.observe(0.75);
-        // 0.5 + 0.75 = 1.25 (within the 1e-3 floor of micro precision)
+        // 0.5 + 0.75 = 1.25, within the micro-scaling precision.
         assert!((h.inner.sum() - 1.25).abs() < 0.001);
     }
 
@@ -463,8 +457,7 @@ mod tests {
         assert!(s.contains("# TYPE requests_total counter"));
         assert!(s.contains(r#"requests_total{status="200"} 3"#));
         assert!(s.contains(r#"requests_total{status="500"} 1"#));
-        // Only ONE `# TYPE` line per metric name even with multiple
-        // labelsets.
+        // One `# TYPE` line per name, even with several label sets.
         assert_eq!(s.matches("# TYPE requests_total").count(), 1);
     }
 

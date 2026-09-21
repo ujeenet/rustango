@@ -1,8 +1,8 @@
 # The admin
 
-**Rustango** generates a complete admin UI from your models — the same idea as
-Django's admin or a Laravel Nova/Filament panel, but with **zero per-model
-boilerplate**. Add `#[derive(Model)]`, mount the admin once, and every model gets
+**Rustango** generates a complete admin UI from your models — a ready-made
+back-office for your data, with **zero per-model boilerplate**. Add
+`#[derive(Model)]`, mount the admin once, and every model gets
 a list view with search, filters, sorting, pagination and bulk actions; a
 create/edit form grouped into fieldsets; inline child editing; a per-row audit
 trail; and a live model reference. Everything below is configured declaratively
@@ -230,8 +230,8 @@ escaped text on the form instead of inputs.
 
 ## Inlines
 
-Inlines show a child model's rows on the parent's page (Django inlines).
-Register one at module scope:
+Inlines show a child model's rows on the parent's page. Register one at module
+scope:
 
 ```rust
 rustango::register_admin_inline!(
@@ -355,7 +355,7 @@ rustango::register_admin_list_filter!(
 
 ## Custom views, querysets and permissions
 
-Three more registration macros mirror Django's `ModelAdmin` hooks:
+Three more registration macros hook into a model's admin pages:
 
 - **Custom admin pages** —
   `register_admin_view!("posts", "duplicate", Method::POST, "Duplicate", handler)`
@@ -499,7 +499,7 @@ Custom routes registered with `register_admin_view!` mount at
 
 ## The model reference
 
-Every admin ships a live model reference (Django's admindocs) at
+Every admin ships a live model reference at
 `<prefix>/__docs` — a read-only catalogue of every registered model with its
 fields, columns, types, flags (PK, unique, …) and relations. Nothing to
 configure; it's generated from your models, so it never drifts from the schema.

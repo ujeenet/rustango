@@ -1,19 +1,14 @@
-//! Domain event bus — typed pub-sub for application-level events
-//! decoupled from the ORM. Closes future-backlog item #45 ("internal
-//! event bus / domain event dispatch decoupled from ORM signals").
+//! Domain event bus: typed pub-sub for application events, separate
+//! from the ORM.
 //!
-//! ## When to use this vs `crate::signals`
+//! ## This or `crate::signals`?
 //!
-//! - **`signals`** — per-`Model` lifecycle hooks (pre/post save,
-//!   pre/post delete). Tied to ORM write paths. Use when you need
-//!   "every time row X changes, do Y."
-//! - **`events`** — arbitrary application events not tied to a
-//!   specific Model. Use when you need "publish that an order was
-//!   placed and let mail / billing / audit each react in their own
-//!   subscriber." Decouples cross-component fanout.
+//! - **`signals`** hook a `Model` lifecycle (pre/post save, pre/post
+//!   delete). Use them for "whenever row X changes, do Y".
+//! - **`events`** are not tied to a model. Use them for "an order was
+//!   placed", where mail, billing and audit each react on their own.
 //!
-//! Same shape (typed, async, multi-subscriber, sequential dispatch);
-//! different intent.
+//! Both are typed, async, multi-subscriber and dispatch in order.
 //!
 //! ## Quick start
 //!
@@ -37,16 +32,14 @@
 //!
 //! ## Semantics
 //!
-//! - Subscribers run **sequentially**, in subscription order, awaited
-//!   one at a time. (For parallel fanout, wrap a subscriber body in
-//!   `tokio::spawn`.)
-//! - The event is `Clone`d once per subscriber so each receives an
-//!   owned value. `E: Clone + Send + Sync + 'static` is required.
-//! - A panicking subscriber aborts the dispatch chain and propagates
-//!   to the caller of `publish`. Use `tokio::spawn` for isolation if
-//!   that's a concern.
-//! - The bus is cheap to clone — internal state is `Arc`-shared.
-//!   Pass clones into axum State, services, etc.
+//! - Subscribers run one at a time, in subscription order. For
+//!   parallel fan-out, `tokio::spawn` inside the subscriber.
+//! - The event is cloned once per subscriber, so `E` must be
+//!   `Clone + Send + Sync + 'static`.
+//! - If a subscriber panics, the rest do not run and the panic reaches
+//!   the caller of `publish`. `tokio::spawn` isolates it.
+//! - The bus is cheap to clone; state is shared. Pass clones into axum
+//!   state or your services.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -67,44 +60,37 @@ pub struct SubscriberId(u64);
 
 type AnyHandler = Arc<dyn Any + Send + Sync>;
 
-/// Sized wrapper around the type-erased handler. `Arc<dyn Any>::downcast`
-/// requires the inner type to be `Sized`, which `dyn Fn(E) -> _` isn't —
-/// so we store a struct that owns the boxed closure instead and
-/// downcast back through this wrapper.
+/// Sized wrapper around a handler. `Arc<dyn Any>::downcast` needs a
+/// `Sized` inner type, and `dyn Fn(E) -> _` is not one, so the closure
+/// lives in this struct and we downcast to the struct.
 struct TypedHandler<E: 'static> {
     f: Arc<dyn Fn(E) -> HandlerFuture + Send + Sync>,
 }
 
 #[derive(Default)]
 struct Inner {
-    /// Per-event-type vector of `(id, handler)` pairs. The handler
-    /// is `Arc<dyn Fn(E) -> HandlerFuture + Send + Sync>` boxed into
-    /// `dyn Any` so the registry stays heterogeneous.
+    /// `(id, handler)` pairs per event type. Handlers are stored as
+    /// `dyn Any` so one map can hold every event type.
     bags: HashMap<TypeId, Vec<(SubscriberId, AnyHandler)>>,
     next_id: u64,
 }
 
-/// In-process domain event bus. Cheap to clone — internal state is
-/// `Arc`-shared.
+/// In-process domain event bus. Cheap to clone; clones share state.
 #[derive(Default, Clone)]
 pub struct EventBus {
     inner: Arc<Mutex<Inner>>,
 }
 
 impl EventBus {
-    /// Create a new, empty bus. Cheap (no allocation beyond the
-    /// `Arc<Mutex<...>>` shell).
+    /// A new, empty bus.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Register `handler` to fire on every [`Self::publish`] of
-    /// events of type `E`. Returns a [`SubscriberId`] that can be
-    /// passed to [`Self::unsubscribe`] to stop receiving events.
-    ///
-    /// Handlers run sequentially — see the module rustdoc for the
-    /// dispatch contract.
+    /// Run `handler` on every [`Self::publish`] of an event of type
+    /// `E`. The returned [`SubscriberId`] goes to
+    /// [`Self::unsubscribe`] when you want to stop.
     pub async fn subscribe<E, F>(&self, handler: F) -> SubscriberId
     where
         E: Clone + Send + Sync + 'static,
@@ -125,8 +111,7 @@ impl EventBus {
         id
     }
 
-    /// Stop receiving events for the given subscriber. No-op if
-    /// `id` was never registered or was already removed.
+    /// Remove a subscriber. Does nothing if `id` is unknown.
     pub async fn unsubscribe(&self, id: SubscriberId) {
         let mut inner = self.inner.lock().await;
         for bag in inner.bags.values_mut() {
@@ -134,19 +119,15 @@ impl EventBus {
         }
     }
 
-    /// Publish `event` — runs every subscriber registered for type
-    /// `E`, sequentially, awaiting each in turn. Subscribers
-    /// registered for OTHER event types are not invoked. No-op when
-    /// no subscribers are registered for `E`.
+    /// Run every subscriber for type `E`, one at a time. Subscribers
+    /// for other types are not called.
     pub async fn publish<E>(&self, event: E)
     where
         E: Clone + Send + Sync + 'static,
     {
-        // Snapshot the handler list while holding the lock so a
-        // subscriber can call back into `publish`/`subscribe` from
-        // its body without deadlocking. Subscribers added during
-        // dispatch don't fire for the in-flight event (consistent
-        // with the canonical Django signals semantics).
+        // Copy the handler list, then drop the lock, so a subscriber
+        // can call `publish` or `subscribe` without a deadlock. A
+        // subscriber added during dispatch misses this event.
         let handlers: Vec<AnyHandler> = {
             let inner = self.inner.lock().await;
             inner
@@ -156,10 +137,8 @@ impl EventBus {
                 .unwrap_or_default()
         };
         for any in handlers {
-            // Downcast the type-erased `Arc<dyn Any>` back into
-            // `Arc<TypedHandler<E>>` and call the inner closure.
-            // Safe by construction — we only insert handlers under
-            // the matching TypeId.
+            // The downcast always succeeds: handlers are only ever
+            // stored under their own TypeId.
             if let Ok(wrapper) = any.downcast::<TypedHandler<E>>() {
                 let fut = (wrapper.f)(event.clone());
                 fut.await;
@@ -167,8 +146,7 @@ impl EventBus {
         }
     }
 
-    /// Number of subscribers currently registered for type `E`.
-    /// Useful for tests + diagnostics.
+    /// How many subscribers are registered for type `E`.
     pub async fn subscriber_count<E>(&self) -> usize
     where
         E: 'static,
@@ -190,7 +168,7 @@ mod tests {
     struct PingEvent(i32);
 
     #[derive(Clone, Debug)]
-    #[allow(dead_code)] // payload is intentional — test exercises type-keyed routing, not the value.
+    #[allow(dead_code)] // the payload is never read; the test checks routing by type.
     struct PongEvent(String);
 
     #[tokio::test]
@@ -246,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_subscribers_run_sequentially() {
         let bus = EventBus::new();
-        // Use a Vec to record the ORDER subscribers run in, not just a count.
+        // Record the order subscribers run in, not just a count.
         let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
 
         let o1 = order.clone();
@@ -296,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn publish_with_no_subscribers_is_noop() {
         let bus = EventBus::new();
-        // No panic, no error — just nothing happens.
+        // Nothing happens, and nothing panics.
         bus.publish(PingEvent(123)).await;
         assert_eq!(bus.subscriber_count::<PingEvent>().await, 0);
     }
@@ -314,7 +292,7 @@ mod tests {
             })
         })
         .await;
-        // Publish via the OTHER handle — same underlying state.
+        // Publish from the other handle: same state.
         bus2.publish(PingEvent(0)).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }

@@ -3,9 +3,9 @@
 //!
 //! `QUERY /posts` returns the same filtered / ordered / paginated list as
 //! `GET /posts?…`, but with the criteria in the request body — urlencoded
-//! (identical to the querystring path) or JSON (arrays for `__in`). This
-//! is the DRF-beyond capability: complex search criteria that outgrow a
-//! querystring travel in a safe, idempotent request body.
+//! (identical to the querystring path) or JSON (arrays for `__in`), so
+//! complex search criteria that outgrow a querystring travel in a safe,
+//! idempotent request body instead.
 
 #![cfg(all(
     feature = "admin",

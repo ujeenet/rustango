@@ -1,5 +1,4 @@
-//! HTTP content negotiation — pick the best response format from the
-//! client's `Accept` header.
+//! Pick a response format from the client's `Accept` header.
 //!
 //! ## Quick start
 //!
@@ -17,33 +16,30 @@
 //! }
 //! ```
 //!
-//! Parses RFC 7231 `Accept` (with `q=` quality values) and picks the
-//! highest-priority format that the server can produce.
+//! It reads RFC 7231 `Accept` headers, including `q=` values.
 
-/// Pick the best media type the server can produce, given the client's
-/// `Accept` header value and the list of types the server supports.
+/// Choose the media type to send back.
 ///
-/// `accept` is the raw header value (e.g. `"application/json,text/html;q=0.9,*/*;q=0.5"`).
-/// `available` is the ordered list of types the server can serve.
+/// `accept` is the raw header, such as
+/// `"application/json,text/html;q=0.9,*/*;q=0.5"`. `available` is
+/// what your handler can produce, best first.
 ///
-/// Matching rules:
-/// - Exact match wins over wildcard match
-/// - Higher q-value wins over lower
-/// - Server's `available` order breaks ties at equal q
-/// - Returns `None` only when `available` is empty or no client preference matches
-///   (a `*/*` client preference will always match the first available type)
+/// The rules: a higher `q` wins; at the same `q` an exact type beats
+/// a wildcard; after that the order of `available` decides. Returns
+/// `None` when `available` is empty or nothing the client asked for
+/// is on offer.
 #[must_use]
 pub fn negotiate<'a, S: AsRef<str>>(accept: &str, available: &'a [S]) -> Option<&'a str> {
     if available.is_empty() {
         return None;
     }
     if accept.trim().is_empty() {
-        // No Accept header → first available
+        // No Accept header, so take our own first choice.
         return Some(available[0].as_ref());
     }
 
     let prefs = parse_accept(accept);
-    let mut best: Option<(usize, f32)> = None; // (server-index, score)
+    let mut best: Option<(usize, f32)> = None; // (server index, score)
 
     for (idx, srv) in available.iter().enumerate() {
         let srv_str = srv.as_ref();
@@ -57,7 +53,7 @@ pub fn negotiate<'a, S: AsRef<str>>(accept: &str, available: &'a [S]) -> Option<
                 if beats {
                     best = Some((idx, s));
                 }
-                break; // server's order matters at equal q — stop at first match
+                break; // first match only, so `available` order decides ties
             }
         }
     }
@@ -96,7 +92,7 @@ fn parse_accept(header: &str) -> Vec<AcceptPref> {
         .collect()
 }
 
-/// Return the q-value of the match, or `None` if `pref` doesn't match `srv_type`.
+/// The match score, or `None` when `pref` does not match `srv_type`.
 fn match_score(pref: &AcceptPref, srv_type: &str) -> Option<f32> {
     let (s_type, s_subtype) = srv_type.split_once('/')?;
     let s_type = s_type.to_ascii_lowercase();
@@ -106,8 +102,8 @@ fn match_score(pref: &AcceptPref, srv_type: &str) -> Option<f32> {
     let subtype_matches = pref.subtype == "*" || pref.subtype == s_subtype;
 
     if type_matches && subtype_matches {
-        // Slight bonus for exact (non-wildcard) matches so `text/html`
-        // beats `*/*` at the same q-value.
+        // A small bonus for exact matches, so `text/html` beats
+        // `*/*` at the same q.
         let exact_bonus = match (pref.type_ == "*", pref.subtype == "*") {
             (false, false) => 0.0001, // most specific
             (false, true) => 0.00005,
@@ -191,7 +187,7 @@ mod tests {
     #[test]
     fn complex_real_world_browser_accept() {
         let header = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
-        // Server prefers JSON, falls back to HTML
+        // We list JSON first, but the browser asks for HTML at q=1.
         assert_eq!(
             negotiate(header, &["application/json", "text/html"]),
             Some("text/html"),
@@ -200,7 +196,7 @@ mod tests {
 
     #[test]
     fn exact_type_beats_wildcard_at_same_q() {
-        // "text/html" (q=1.0 exact) should beat "*/*" (q=1.0 wildcard)
+        // Exact `text/html` beats `*/*`, both at q=1.0.
         assert_eq!(
             negotiate("text/html,*/*", &["application/json", "text/html"]),
             Some("text/html"),

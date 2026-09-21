@@ -133,6 +133,18 @@ pub mod __macro_internals {
     };
 }
 
+/// The per-dialect `SqlValue` binders, so nothing outside `executor`
+/// has to hand-copy what `bind_match_*!` expands to.
+///
+/// `audit` carried 116 lines of exactly that copy across three
+/// dialects, and the SQLite one silently missed #1464's encoding change
+/// because a copy cannot track the macro it was copied from.
+#[cfg(feature = "postgres")]
+pub(crate) use executor::bind_query;
+#[cfg(feature = "mysql")]
+pub(crate) use executor::bind_query_my;
+#[cfg(feature = "sqlite")]
+pub(crate) use executor::bind_query_sqlite;
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
@@ -142,7 +154,24 @@ pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;
 pub use pool::{configure_pools, Pool, PoolError, PoolTuning};
 pub use postgres::Postgres;
+/// The canonical `SQLite` timestamp encoder. Gated because its only
+/// caller is the `SQLite` bind path, which needs the driver linked.
+#[cfg(feature = "sqlite")]
+pub(crate) use sqlite::encode_datetime;
 pub use sqlite::Sqlite;
+/// The sweep's "already canonical?" shape test. Gated with its only
+/// reader, which needs a live `SQLite` pool.
+#[cfg(feature = "sqlite")]
+pub(crate) use sqlite::SQLITE_CANONICAL_GLOB;
+/// The one text shape a `SQLite` datetime column may hold.
+/// `pub(crate)` because the migration sweep and `audit`'s retention
+/// DELETE need it and `sql::sqlite` is a private module — an internal
+/// contract between the writers and those two readers, not API.
+///
+/// Ungated, matching the dialect emitters above: the retention DELETE
+/// builds its `SQLite` branch through `Dialect`, and that renderer
+/// compiles in every build whether or not the driver is linked.
+pub(crate) use sqlite::SQLITE_DATETIME_FORMAT;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without
 /// requiring downstream crates to add their own dependency on it.

@@ -1,7 +1,7 @@
-//! Redis cache backend — [`RedisCache`].
+//! Redis cache backend: [`RedisCache`].
 //!
-//! Backed by `redis::aio::ConnectionManager` which maintains a single
-//! multiplexed async connection and transparently reconnects on failure.
+//! Built on `redis::aio::ConnectionManager`, which keeps one
+//! multiplexed async connection and reconnects on its own.
 //!
 //! ## Usage
 //!
@@ -24,10 +24,10 @@ use redis::AsyncCommands;
 
 use super::{Cache, CacheError};
 
-/// Redis-backed async cache using a multiplexed connection manager.
+/// Async cache backed by Redis.
 ///
-/// Stores all values as UTF-8 strings (raw or JSON-encoded via [`super::set_json`]).
-/// TTL maps directly to Redis `SETEX` / `SET EX`.
+/// Values are UTF-8 strings, either raw or JSON from
+/// [`super::set_json`]. A TTL becomes `SET EX`.
 pub struct RedisCache {
     conn: redis::aio::ConnectionManager,
     default_ttl: Option<Duration>,
@@ -87,11 +87,10 @@ impl Cache for RedisCache {
         }
     }
 
-    /// Atomic set-if-absent via `SET key value NX [EX secs]` (#1254).
-    /// The default `add` is a racy `exists` + `set`; `NX` makes the
-    /// server do the test-and-set in one round trip, which is what makes
-    /// `DistributedLock` safe across replicas. Returns `true` when this
-    /// call created the key.
+    /// Atomic set-if-absent via `SET key value NX [EX secs]`. `NX`
+    /// makes the server do the test-and-set in one round trip, which
+    /// is what makes `DistributedLock` safe across replicas. Returns
+    /// `true` when this call created the key.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         let mut conn = self.conn.clone();
         let mut cmd = redis::cmd("SET");
@@ -99,9 +98,8 @@ impl Cache for RedisCache {
         if let Some(secs) = self.effective_ttl(ttl) {
             cmd.arg("EX").arg(secs);
         }
-        // `SET ... NX` replies with the string "OK" on success and a nil
-        // bulk on a no-op (key already existed). `Option<String>`
-        // decodes that as `Some("OK")` / `None`.
+        // `SET … NX` replies "OK" on success and nil when the key
+        // already existed, which decodes as `Some`/`None`.
         let reply: Option<String> = cmd
             .query_async(&mut conn)
             .await
@@ -131,27 +129,17 @@ impl Cache for RedisCache {
             .map_err(|e| CacheError::Connection(e.to_string()))
     }
 
-    /// `SCAN MATCH <prefix>*` + `DEL`, in cursor batches.
+    /// `SCAN MATCH <prefix>*` then `DEL`, batch by batch.
     ///
-    /// **This override is load-bearing.** Without it the trait default
-    /// falls through to [`Self::clear`], which is `FLUSHDB` — so a
-    /// single tenant's [`ScopedCache::clear`](super::ScopedCache) would
-    /// wipe every other tenant's entries, every rate-limit counter, and
-    /// every `lock:*` key (letting two replicas both take a
-    /// "once per cluster" lock). Redis can enumerate, so the trait
-    /// default's "cannot enumerate, so over-delete" bargain does not
-    /// apply here (#1227).
+    /// `SCAN` is cursor-based and does not block the server on a large
+    /// keyspace, unlike `KEYS`. In exchange it gives no snapshot: a
+    /// key created during the sweep may be missed. That is the right
+    /// trade for cache invalidation, since a missed key still expires
+    /// on its own TTL.
     ///
-    /// `SCAN` is non-blocking and cursor-based, unlike `KEYS`: it will
-    /// not stall the server on a large keyspace. The trade-off is that
-    /// it gives no snapshot guarantee — keys created *during* the sweep
-    /// may be missed. That is the right trade for cache invalidation
-    /// (a missed key is a stale entry that still expires on its TTL,
-    /// and the alternative blocks every other client).
-    ///
-    /// `MATCH` takes a glob, not a literal, so `*`, `?`, `[`, `]` and
-    /// `\` in the prefix are escaped — otherwise a prefix containing one
-    /// would match beyond its own namespace.
+    /// `MATCH` takes a glob, so `*`, `?`, `[`, `]` and `\` in the
+    /// prefix are escaped. Otherwise a prefix holding one of them
+    /// would match outside its namespace.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         let mut conn = self.conn.clone();
         let mut pattern = String::with_capacity(prefix.len() + 1);
@@ -183,9 +171,8 @@ impl Cache for RedisCache {
                     .map_err(|e| CacheError::Connection(format!("del: {e}")))?;
             }
 
-            // A zero cursor means the iteration completed. It is only
-            // valid to stop here — a non-empty batch does not imply
-            // more, and an empty one does not imply done.
+            // Only a zero cursor means the scan is finished. An empty
+            // batch does not, and a full one does not mean more.
             if next == 0 {
                 return Ok(());
             }
@@ -195,28 +182,18 @@ impl Cache for RedisCache {
 
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let mut conn = self.conn.clone();
-        // Increment and set the TTL *only if the key has none*, in one
+        // Increment, and set the TTL only if the key has none, in one
         // atomic server-side step.
         //
-        // Setting the TTL on first creation only is what makes a
-        // fixed-window rate limiter work: an unconditional EXPIRE on
-        // every tick would slide the window forward forever and the
-        // limit would never be reached.
+        // Setting the TTL only when the key is created is what makes a
+        // fixed-window rate limiter work. An EXPIRE on every tick
+        // would slide the window forward and the limit would never be
+        // reached.
         //
-        // This was `INCRBY` followed by `EXPIRE key secs NX` (#1280).
-        // The `NX` flag on EXPIRE is Redis **7.0+**; on 6.x the server
-        // answers `ERR wrong number of arguments for 'expire' command`,
-        // so `incr` returned `Err` on every call — and both callers fail
-        // open, silently disabling rate limiting
-        // (`rate_limit_cache::take`) and account lockout
-        // (`account_lockout`). Worse, the INCRBY had already landed, so
-        // each counter was created with no TTL at all and never expired.
-        //
-        // `EVAL` is Redis 2.6+, so the Lua form is portable to every
-        // version we could plausibly meet (and to ElastiCache /
-        // Cosmos / DocumentDB). `TTL` returns -1 for "exists, no
-        // expiry" and -2 for "missing"; after the INCRBY the key
-        // always exists, so `< 0` means "no expiry set".
+        // Lua rather than `EXPIRE … NX`, which needs Redis 7.0. `EVAL`
+        // works from 2.6, so this also runs on ElastiCache and other
+        // Redis-compatible servers. After the INCRBY the key always
+        // exists, so a `TTL` below 0 means no expiry is set.
         let script = redis::Script::new(
             r"local n = redis.call('INCRBY', KEYS[1], ARGV[1])
               if tonumber(ARGV[2]) > 0 and redis.call('TTL', KEYS[1]) < 0 then

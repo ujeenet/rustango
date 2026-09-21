@@ -1,18 +1,15 @@
-//! Feature flags / killswitches backed by the [`Cache`](crate::cache::Cache) trait.
+//! Feature flags backed by the [`Cache`](crate::cache::Cache) trait.
 //!
-//! Three resolution modes:
+//! A flag can be resolved three ways:
 //!
-//! - **Boolean killswitch** — `flags.is_enabled("new_checkout").await`
-//!   reads a single bool from the cache.
-//! - **Per-user override** — `flags.is_enabled_for("new_checkout",
-//!   "user-42").await` checks for a per-user enable record on top of
-//!   the global flag.
-//! - **Percentage rollout** — `flags.set_percentage("new_checkout",
-//!   25).await` enables the flag for a stable 25% of user IDs (hashed
-//!   so the same id always falls in or out, avoiding flicker between
-//!   requests).
+//! - Global on/off, with `is_enabled("new_checkout")`.
+//! - A per-user override, with `is_enabled_for("new_checkout", "u-42")`.
+//! - A percentage rollout, with `set_percentage("new_checkout", 25)`.
+//!   The user id is hashed, so the same user always lands on the same
+//!   side and does not flicker between requests.
 //!
-//! Pair with [`crate::cache::RedisCache`] for cross-replica visibility.
+//! Use [`RedisCache`](crate::cache::redis_backend::RedisCache) if every
+//! replica must see the same flag state.
 //!
 //! ## Quick start
 //!
@@ -35,15 +32,17 @@
 //! }
 //! ```
 //!
-//! ## Cache key shape
+//! ## Cache keys
 //!
-//! - `flag:<name>` — global on/off (`"on"` / `"off"` / absent)
-//! - `flag:<name>:user:<user_id>` — explicit per-user override
-//! - `flag:<name>:pct` — rollout percentage 0..=100
+//! - `flag:<name>` — global on/off (`"on"`, `"off"` or absent)
+//! - `flag:<name>:user:<user_id>` — per-user override
+//! - `flag:<name>:pct` — rollout percentage, 0..=100
 //!
-//! All entries are stored with a 1 hour TTL by default so writes
-//! propagate within an hour even without active invalidation. Override
-//! with [`FeatureFlags::ttl`].
+//! Entries get a 1 hour TTL by default, so a write reaches every replica
+//! within an hour even with no invalidation. Change it with
+//! [`FeatureFlags::ttl`].
+//!
+//! [`FeatureFlags::ttl`]: crate::feature_flags::FeatureFlags::ttl
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,8 +67,9 @@ impl FeatureFlags {
         }
     }
 
-    /// Override the per-entry TTL. Lower = faster propagation across
-    /// replicas; higher = less cache load. Default 1 hour.
+    /// Set the per-entry TTL. A lower value spreads changes to other
+    /// replicas faster; a higher one costs less cache traffic. Default
+    /// is 1 hour.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Arc::new(ttl);
@@ -96,8 +96,9 @@ impl FeatureFlags {
             .await;
     }
 
-    /// Globally disable the flag for everyone (overrides per-user
-    /// enables for the killswitch effect).
+    /// Globally disable the flag. This beats any rollout percentage,
+    /// but not a per-user override: to kill a flag for a user who has
+    /// one, also call [`Self::disable_for_user`].
     pub async fn disable(&self, name: &str) {
         let _ = self
             .cache
@@ -105,10 +106,9 @@ impl FeatureFlags {
             .await;
     }
 
-    /// Drop every record for `name` — global state, percentage, and
-    /// known per-user overrides for the supplied list. (We can't
-    /// enumerate keys generically through the `Cache` trait, so callers
-    /// supply any user ids they want to scrub.)
+    /// Drop the global state, the percentage and the overrides of the
+    /// listed users. The `Cache` trait cannot list keys, so the caller
+    /// names the users to clear.
     pub async fn clear(&self, name: &str, known_user_ids: &[&str]) {
         let _ = self.cache.delete(&self.global_key(name)).await;
         let _ = self.cache.delete(&self.pct_key(name)).await;
@@ -117,10 +117,9 @@ impl FeatureFlags {
         }
     }
 
-    /// Set a rollout percentage 0..=100. The flag returns `true` for a
-    /// stable, hashed slice of user ids — the same id falls inside the
-    /// percentage on every check, so a user doesn't flicker between
-    /// requests.
+    /// Set a rollout percentage, 0..=100. Values above 100 are clamped.
+    /// The user id is hashed, so the same user gets the same answer on
+    /// every check.
     pub async fn set_percentage(&self, name: &str, percent: u8) {
         let p = percent.min(100);
         let _ = self
@@ -129,8 +128,8 @@ impl FeatureFlags {
             .await;
     }
 
-    /// Force-enable the flag for a specific user, regardless of global
-    /// state. Useful for QA / staff dogfood.
+    /// Turn the flag on for one user, whatever the global state says.
+    /// Handy for QA and staff testing.
     pub async fn enable_for_user(&self, name: &str, user_id: &str) {
         let _ = self
             .cache
@@ -138,7 +137,7 @@ impl FeatureFlags {
             .await;
     }
 
-    /// Force-disable the flag for a specific user.
+    /// Turn the flag off for one user.
     pub async fn disable_for_user(&self, name: &str, user_id: &str) {
         let _ = self
             .cache
@@ -146,12 +145,9 @@ impl FeatureFlags {
             .await;
     }
 
-    /// Resolve the flag globally — no per-user awareness. Returns
-    /// `false` when:
-    ///
-    /// - the flag was explicitly disabled, OR
-    /// - the cache is empty and there's no rollout percentage record
-    ///   (i.e. the flag has never been touched).
+    /// Read the global state only. Returns `false` when the flag is off
+    /// or was never set. Per-user overrides and the rollout percentage
+    /// are ignored here; use [`Self::is_enabled_for`] for those.
     pub async fn is_enabled(&self, name: &str) -> bool {
         match self.cache.get(&self.global_key(name)).await.ok().flatten() {
             Some(v) if v == "on" => true,
@@ -160,16 +156,12 @@ impl FeatureFlags {
         }
     }
 
-    /// Resolve the flag for a specific user, considering all three
-    /// modes in this order:
+    /// Resolve the flag for one user. The first rule that applies wins:
     ///
-    /// 1. Per-user override (`enable_for_user` / `disable_for_user`).
-    ///    Whichever wins.
-    /// 2. Global state (`enable` / `disable`). If the global state is
-    ///    `off`, that's the answer (killswitch wins).
-    /// 3. Percentage rollout — if set and `> 0`, hash the user id and
-    ///    return `true` when it falls inside the percentage.
-    /// 4. Default `false`.
+    /// 1. A per-user override.
+    /// 2. The global state.
+    /// 3. The rollout percentage, if above 0.
+    /// 4. Otherwise `false`.
     pub async fn is_enabled_for(&self, name: &str, user_id: &str) -> bool {
         // 1. Per-user override.
         match self
@@ -184,7 +176,7 @@ impl FeatureFlags {
             Some(_) => return false,
             None => {}
         }
-        // 2. Global state. `off` is a killswitch (overrides any %).
+        // 2. Global state. `off` here also cancels any percentage.
         match self
             .cache
             .get(&self.global_key(name))
@@ -216,10 +208,9 @@ impl FeatureFlags {
     }
 }
 
-/// Stable hash bucket 0..=99 for `(flag_name, user_id)`. Same input →
-/// same bucket, so a user that's "in the 25%" stays in across requests.
-/// FNV-1a 64-bit, seeded with the flag name so a user can be in one
-/// flag's rollout but not another.
+/// Stable bucket 0..=99 for `(flag_name, user_id)`. Same input, same
+/// bucket, so a user stays in or out of a rollout. FNV-1a 64-bit seeded
+/// with the flag name, so one user can be in flag A but not flag B.
 fn bucket_for(name: &str, user_id: &str) -> u8 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in name.as_bytes() {
@@ -267,13 +258,13 @@ mod tests {
         let f = flags();
         f.enable_for_user("new", "alice").await;
         assert!(f.is_enabled_for("new", "alice").await);
-        // Per-user override is checked FIRST so it should still win.
+        // The per-user override is checked first, so it still wins.
         f.disable("new").await;
         assert!(
             f.is_enabled_for("new", "alice").await,
             "per-user override beats global"
         );
-        // Use the killswitch the right way: kill the per-user override too.
+        // To kill it fully, clear the per-user override as well.
         f.disable_for_user("new", "alice").await;
         assert!(!f.is_enabled_for("new", "alice").await);
     }
@@ -340,7 +331,7 @@ mod tests {
                 on += 1;
             }
         }
-        // 30% of 1000 = 300 ± a generous tolerance for hash quality.
+        // 30% of 1000 = 300, with a wide tolerance for hash spread.
         let pct = on * 100 / total;
         assert!(
             (20..=40).contains(&pct),
@@ -350,9 +341,8 @@ mod tests {
 
     #[tokio::test]
     async fn different_flag_names_get_different_buckets() {
-        // The bucket is keyed on (flag, user) so a user might be in
-        // 50% for flag A but out of 50% for flag B. Prove it: pick a
-        // user that flips between two flag names.
+        // The bucket is keyed on (flag, user), so a user can be inside
+        // flag A's 50% and outside flag B's.
         let f = flags();
         f.set_percentage("alpha", 50).await;
         f.set_percentage("beta", 50).await;
@@ -380,7 +370,7 @@ mod tests {
         f.clear("new", &["alice"]).await;
         assert!(!f.is_enabled("new").await);
         assert!(!f.is_enabled_for("new", "alice").await);
-        // Bob's state was never set so clear had nothing to do for him.
+        // Bob had no state, so clear had nothing to do for him.
         assert!(!f.is_enabled_for("new", "bob").await);
     }
 

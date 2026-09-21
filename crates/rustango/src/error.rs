@@ -1,12 +1,11 @@
-//! Top-level `RustangoError` — single error type for app-level handlers.
+//! `RustangoError`: one error type for handler code.
 //!
-//! Each module ships its own granular error type (`ExecError`, `MigrateError`,
-//! `CacheError`, `JwtIssueError`, etc.). Those are the right shape inside the
-//! framework where you want to know *which* layer failed.
+//! Each module has its own error type, such as `ExecError` or
+//! `CacheError`. Those tell you which layer failed, which is what you
+//! want inside the framework.
 //!
-//! At the **handler boundary**, you usually don't care — you want one
-//! `?`-friendly type to bubble all of them up to `IntoResponse`. That's
-//! what `RustangoError` is for.
+//! At the handler boundary you usually just want one type that `?`
+//! accepts and that turns into a response. That is this one.
 //!
 //! ## Quick start
 //!
@@ -22,32 +21,26 @@
 //! }
 //! ```
 //!
-//! No manual `From` impls in your code — every framework error type already
-//! has the conversion.
+//! You write no `From` impls: every framework error already has one.
 //!
-//! ## When to use it vs. granular errors
+//! ## Which one to use
 //!
-//! - **Library / module code:** use the granular per-module error
-//!   (`Result<T, CacheError>`). Exposes the right surface for callers.
-//! - **HTTP handlers / request lifecycle:** use `RustangoError`. The
-//!   `IntoResponse` impl maps each variant to a sensible HTTP status code,
-//!   and the `?` operator does the conversion automatically.
-//! - **Mixing:** `RustangoError::other(msg)` and `RustangoError::other_from(e)`
-//!   wrap arbitrary `std::error::Error + Send + Sync + 'static` types when
-//!   you've got a third-party crate's error to bubble up.
+//! - **In a module or library:** the module's own error, such as
+//!   `Result<T, CacheError>`. It tells the caller more.
+//! - **In an HTTP handler:** `RustangoError`. `?` converts for you,
+//!   and `IntoResponse` picks a status code per variant.
+//! - **For a third-party error:** `RustangoError::other(msg)` or
+//!   `RustangoError::other_from(e)`.
 
 use std::fmt;
 
-/// Fixed body text for a 5xx whose real cause must not be published.
+/// Fixed body text for a 5xx whose real cause must stay private.
 ///
-/// The 5xx family's only callers are the ViewSet (`admin` /
-/// `tenancy`) and `into_response` (`admin`), so a build without
-/// either has none. Compiled anyway — rather than `#[cfg]`-ed away —
-/// so widening a caller's gate cannot turn this into a missing-item
-/// error; same shape as `extractors::tenant::TenantConnCell::Deferred`.
-/// Ungated, these tripped `-D warnings` on the bare `sqlite`,
-/// `postgres` and `mysql` rows of `feature_combos`, a gated job that
-/// does not run on an unlabelled PR (#1604 review, dialects-004).
+/// Only the ViewSet and `into_response` use the 5xx helpers, so a
+/// build without `admin` or `tenancy` has no caller. The item stays
+/// compiled rather than `#[cfg]`-ed away, so widening a caller's gate
+/// cannot turn it into a missing item; the `allow` keeps
+/// `-D warnings` green in those builds.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) const OPAQUE_SERVER_ERROR: &str = "internal server error";
 
@@ -55,19 +48,15 @@ pub(crate) const OPAQUE_SERVER_ERROR: &str = "internal server error";
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) const DISCLOSE_ENV: &str = "RUSTANGO_DISCLOSE_ERRORS";
 
-/// `true` when a 5xx response body may carry the underlying error text.
+/// `true` when a 5xx body may carry the real error text.
 ///
-/// **Defaults to `false`.** Only an explicit truthy
-/// `RUSTANGO_DISCLOSE_ERRORS` turns disclosure on.
+/// **Defaults to `false`.** Only a truthy `RUSTANGO_DISCLOSE_ERRORS`
+/// turns it on.
 ///
-/// This deliberately does *not* reuse
-/// [`crate::template_debug::enabled`], which answers a different
-/// question — "should I render the dev error overlay" — and defaults
-/// to *on* outside prod, which is right for a local overlay and wrong
-/// for what an unauthenticated client is handed. Routing the 5xx body
-/// through that tier made the sanitiser inert on every deployment that
-/// had not set `RUSTANGO_ENV=prod`, which is the default, and the
-/// original tests hid it by pinning the variable (#1525).
+/// It must stay separate from `debug_details_enabled`, which asks
+/// whether to draw the dev error overlay and is on by default outside
+/// prod. That is fine for a local overlay and wrong for what an
+/// unauthenticated client receives.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) fn disclose_server_errors() -> bool {
     matches!(
@@ -80,13 +69,13 @@ pub(crate) fn disclose_server_errors() -> bool {
     )
 }
 
-/// `true` when the current process should serve the dev template-error
-/// overlay: `RUSTANGO_TEMPLATE_DEBUG` if set, else `RUSTANGO_ENV` is
-/// not prod.
+/// `true` when this process should serve the dev template-error
+/// overlay: `RUSTANGO_TEMPLATE_DEBUG` if set, else whenever
+/// `RUSTANGO_ENV` is not prod.
 ///
-/// Held here rather than in `template_debug` because that module is
-/// gated on `_tera` while the decision is about env vars alone.
-/// **Not** the 5xx-body decision — see [`disclose_server_errors`].
+/// It lives here, not in `template_debug`, because that module is
+/// gated on `_tera` and this reads env vars only. It does **not**
+/// decide the 5xx body; see [`disclose_server_errors`] for that.
 #[cfg_attr(
     not(any(feature = "admin", feature = "tenancy", feature = "_tera")),
     allow(dead_code)
@@ -96,7 +85,7 @@ pub(crate) fn debug_details_enabled() -> bool {
         match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => return true,
             "0" | "false" | "no" | "off" => return false,
-            // Any other value — ignore and fall through to env-tier.
+            // Any other value: fall through to `RUSTANGO_ENV`.
             _ => {}
         }
     }
@@ -107,14 +96,14 @@ pub(crate) fn debug_details_enabled() -> bool {
     )
 }
 
-/// Shared harness for tests that mutate the tier env vars. Lives
-/// here, ungated, because `error` and `template_debug` both read
-/// them and cargo builds the lib tests as one binary — a second
-/// lock in the other module would serialize nothing.
+/// Test harness for the env vars above. It lives here, ungated,
+/// because `error` and `template_debug` both read them and the lib
+/// tests are one binary, so a second lock elsewhere would serialize
+/// nothing.
 #[cfg(test)]
 pub(crate) mod test_env {
-    /// Suite-wide lock. Env is process-global, so every test that
-    /// sets `RUSTANGO_ENV` / `RUSTANGO_TEMPLATE_DEBUG` takes it.
+    /// Suite-wide lock. Env vars are process-global, so every test
+    /// that sets one takes this first.
     pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
         use std::sync::{Mutex, OnceLock};
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -123,10 +112,9 @@ pub(crate) mod test_env {
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Set `key` for the duration of `f`, then restore it. Edition
-    /// 2021 still permits bare `set_var`/`remove_var`; the workspace
-    /// `unsafe_code = "forbid"` lint blocks the edition-2024 unsafe
-    /// form, so these stay bare.
+    /// Set `key` while `f` runs, then put it back. The calls stay
+    /// bare because the workspace forbids `unsafe`, which the
+    /// edition-2024 form of these needs.
     pub(crate) fn with<F: FnOnce()>(key: &str, val: Option<&str>, f: F) {
         let prev = std::env::var(key).ok();
         match val {
@@ -141,14 +129,13 @@ pub(crate) mod test_env {
     }
 }
 
-/// Body text for a 5xx: always log `e`, publish it only on a debug
-/// tier.
+/// Body text for a 5xx. It always logs `e`, and returns the text to
+/// the client only when [`disclose_server_errors`] says so.
 ///
-/// Driver errors carry table names, constraint names, column lists
-/// and often the database host. Returning `e.to_string()` to an
-/// unauthenticated client hands all of that over on any 500 (#1525).
-/// The operator still gets the full text — from the log, which is
-/// where it was always meant to be read.
+/// A driver error names tables, constraints, columns and often the
+/// database host. Handing that to an unauthenticated client on every
+/// 500 leaks the schema. The operator still reads the full text, in
+/// the log.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) fn server_error_body(context: &str, e: &dyn fmt::Display) -> String {
     tracing::error!(target: "rustango::error", context, error = %e, "server error");
@@ -159,18 +146,14 @@ pub(crate) fn server_error_body(context: &str, e: &dyn fmt::Display) -> String {
     }
 }
 
-/// Body text for a rejection the **client** caused.
+/// Body text for a request the **client** got wrong. It withholds
+/// the cause the same way [`server_error_body`] does.
 ///
-/// Same withholding rule as [`server_error_body`], but logged at
-/// `warn` and attributed to the caller: a client can drive these at
-/// will, and an `ERROR` line per bad request is a log-volume lever
-/// pointed at the operator (#1604 review, performance-003).
-///
-/// `client_caused` decides the level, and the caller must decide it
-/// honestly. A constraint violation is the client's doing; a pool
-/// timeout on the same code path is not, and silently logging that at
-/// `warn` loses the only record an operator has of an outage (#1604
-/// review, correctness-003). When in doubt, pass `false`.
+/// `client_caused` picks the log level, and you must pick it
+/// honestly. A constraint violation is the client's doing, so `true`
+/// logs at `warn` and keeps a flood of bad requests out of the error
+/// log. A pool timeout on the same path is not, and logging it at
+/// `warn` would hide an outage. **When in doubt pass `false`.**
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) fn client_error_body(
     context: &str,
@@ -189,25 +172,25 @@ pub(crate) fn client_error_body(
     }
 }
 
-/// Fixed body text for a 4xx. Distinct from [`OPAQUE_SERVER_ERROR`]
-/// because "internal server error" on a 400 is simply false.
+/// Fixed body text for a 4xx. Separate from [`OPAQUE_SERVER_ERROR`]
+/// because "internal server error" on a 400 would be untrue.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) const OPAQUE_CLIENT_ERROR: &str = "request rejected";
 
 // ------------------------------------------------------------------ enum
 
-/// Unified error type for app-level code. `From` impls cover every module
-/// in the framework so `?` Just Works in handlers.
+/// One error type for app code. Every framework error has a `From`
+/// impl into it, so `?` works in a handler.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RustangoError {
-    /// SQL execution / driver error.
+    /// SQL execution or driver error.
     Sql(crate::sql::ExecError),
 
-    /// Migration runner / file / diff error.
+    /// Migration runner, file or diff error.
     Migrate(crate::migrate::MigrateError),
 
-    /// Form parsing / validation error.
+    /// Form parsing or validation error.
     #[cfg(feature = "forms")]
     Forms(crate::forms::FormErrors),
 
@@ -223,11 +206,11 @@ pub enum RustangoError {
     #[cfg(feature = "storage")]
     Storage(crate::storage::StorageError),
 
-    /// Auth backend / login failure.
+    /// Auth backend or login failure.
     #[cfg(feature = "tenancy")]
     Auth(crate::tenancy::auth_backends::AuthError),
 
-    /// JWT issuance error (reserved-claim conflict, malformed payload).
+    /// JWT issuance failed, such as a reserved claim.
     #[cfg(feature = "tenancy")]
     JwtIssue(crate::tenancy::jwt_lifecycle::JwtIssueError),
 
@@ -235,15 +218,15 @@ pub enum RustangoError {
     #[cfg(feature = "passwords")]
     Password(crate::passwords::PasswordError),
 
-    /// API-key generation / verification error.
+    /// API key could not be made or verified.
     #[cfg(feature = "api_keys")]
     ApiKey(crate::api_keys::ApiKeyError),
 
-    /// Signed-URL parse / verify error.
+    /// Signed URL could not be parsed or verified.
     #[cfg(feature = "signed_url")]
     SignedUrl(crate::signed_url::SignedUrlError),
 
-    /// Pre-built auth-flow error (password reset, email verify, magic link).
+    /// Auth flow error: password reset, email verify, magic link.
     #[cfg(feature = "auth_flows")]
     AuthFlow(crate::auth_flows::AuthFlowError),
 
@@ -251,7 +234,7 @@ pub enum RustangoError {
     #[cfg(feature = "tenancy")]
     BulkAction(crate::bulk_actions::BulkActionError),
 
-    /// IP filter parse error (invalid CIDR).
+    /// IP filter could not be parsed, such as a bad CIDR.
     #[cfg(feature = "admin")]
     IpFilter(crate::ip_filter::IpFilterError),
 
@@ -259,36 +242,36 @@ pub enum RustangoError {
     #[cfg(feature = "jobs")]
     Job(crate::jobs::JobError),
 
-    /// Test fixture loader error.
+    /// Fixture loader error.
     Fixture(crate::fixtures::FixtureError),
 
-    /// i18n translation loader error.
+    /// Translation loader error.
     I18n(crate::i18n::I18nError),
 
-    /// Env-variable read / parse error.
+    /// Env variable missing or unparseable.
     Env(crate::env::EnvError),
 
     /// Secrets backend error.
     #[cfg(feature = "secrets")]
     Secrets(crate::secrets::SecretsError),
 
-    /// I/O (file / network / etc.).
+    /// File, network or other I/O.
     Io(std::io::Error),
 
-    /// JSON encode / decode.
+    /// JSON encode or decode.
     Serde(serde_json::Error),
 
-    /// Catch-all for third-party errors and ad-hoc bail-outs.
+    /// Anything else: a third-party error or an ad-hoc bail-out.
     Other(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 impl RustangoError {
-    /// Construct from any `std::error::Error + Send + Sync + 'static`.
+    /// Wrap any `std::error::Error + Send + Sync + 'static`.
     pub fn other_from<E: std::error::Error + Send + Sync + 'static>(e: E) -> Self {
         Self::Other(Box::new(e))
     }
 
-    /// Construct from a static string — for ad-hoc validation messages.
+    /// Build one from a message, for an ad-hoc bail-out.
     pub fn other(msg: impl Into<String>) -> Self {
         let s: Box<dyn std::error::Error + Send + Sync + 'static> =
             Box::<dyn std::error::Error + Send + Sync + 'static>::from(msg.into());
@@ -384,7 +367,7 @@ impl std::error::Error for RustangoError {
     }
 }
 
-/// Standard alias.
+/// `Result` with [`RustangoError`] as the error type.
 pub type RustangoResult<T> = Result<T, RustangoError>;
 
 // ------------------------------------------------------------------ From impls
@@ -544,9 +527,8 @@ mod into_response {
         }
     }
 
-    /// Map a `RustangoError` to a sensible HTTP status + JSON shape.
-    /// Validation-style errors → 422, auth → 401, missing resource → 404,
-    /// permission → 403, rate limit → 429, everything else → 500.
+    /// Pick an HTTP status and JSON body for an error: 422 for
+    /// validation, 401 for auth, 400 for bad input, 500 for the rest.
     fn map_to_api_error(err: RustangoError) -> ApiError {
         let msg = err.to_string();
         match err {
@@ -700,15 +682,14 @@ mod tests {
          \"tenant_billing_accounts\" violates unique constraint \
          \"uq_billing_stripe_customer\" (db=pg-prod-01.internal:5432)";
 
-    /// Assert `body` carries none of the four separate disclosures in
-    /// `DRIVER_ERROR`. Each is checked on its own: a single
-    /// `!= DRIVER_ERROR` passes on a body that leaked only the host.
-    /// Each entry is a marker asserted **absent** — a fragment of the
-    /// fixture string above, not a credential. Named `marker` rather
-    /// than `secret` because CodeQL's `rust/cleartext-logging` keys on
-    /// the identifier and flagged the assertion message as a cleartext
-    /// disclosure, which it is not: nothing is logged, and the values
-    /// are invented.
+    /// Check `body` leaks none of the four details in `DRIVER_ERROR`.
+    /// Each is checked on its own, because a body that leaked only
+    /// the host would still differ from the whole string.
+    ///
+    /// The loop variable must stay named `marker`, not `secret`:
+    /// CodeQL's `rust/cleartext-logging` keys on the name and flagged
+    /// the assertion message. These are invented fixture fragments
+    /// asserted absent, and nothing here is logged.
     fn assert_withholds(body: &str, what: &str) {
         for marker in [
             "tenant_billing_accounts",
@@ -720,11 +701,9 @@ mod tests {
         }
     }
 
-    /// The test that matters: **nothing set**. The first version of
-    /// this pinned `RUSTANGO_ENV=prod`, so it asserted the one
-    /// configuration in which the fix was active and never exercised
-    /// the default every deployment actually runs in — where the old
-    /// tier answered "disclose" (#1525, found in review of #1604).
+    /// The case that matters: **no env var set**. That is what most
+    /// deployments run, and it must withhold. Do not pin
+    /// `RUSTANGO_ENV` here; that would test a different state.
     #[test]
     fn server_error_body_withholds_by_default_with_no_env_set() {
         let _g = test_env::lock();
@@ -739,9 +718,9 @@ mod tests {
         });
     }
 
-    /// The dev-overlay tier must not decide this one. `RUSTANGO_ENV`
-    /// unset *and* `RUSTANGO_TEMPLATE_DEBUG=1` is exactly the state
-    /// that used to disclose.
+    /// The dev-overlay switch must not open the 5xx body. Unset
+    /// `RUSTANGO_ENV` with `RUSTANGO_TEMPLATE_DEBUG=1` is the state
+    /// where that mistake would show.
     #[test]
     fn the_template_debug_tier_does_not_open_the_5xx_body() {
         let _g = test_env::lock();
@@ -789,11 +768,9 @@ mod tests {
 
     #[test]
     fn an_explicit_opt_in_still_shows_the_cause() {
-        // The control. Without it, a `server_error_body` that always
-        // returned the fixed string would pass every test above while
-        // making a 500 undebuggable for an operator who asked to see
-        // it. Opting in is now its own variable, not a side effect of
-        // the dev-overlay tier.
+        // The control: a `server_error_body` that always returned
+        // the fixed string would pass every test above, and leave an
+        // operator who opted in with nothing to debug.
         let _g = test_env::lock();
         test_env::with(DISCLOSE_ENV, Some("1"), || {
             test_env::with("RUSTANGO_TEMPLATE_DEBUG", None, || {

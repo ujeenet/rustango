@@ -4,6 +4,137 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.11] — 2026-09-21
+
+Two unrelated threads. The last of the `auto_now_add` timestamp bugs,
+and a documentation pass that stops explaining rustango in terms of
+another framework.
+
+**Breaking:** `Translation` gained two required fields. Details in the
+second entry below.
+
+### Fixed — schema-driven writers stamp their own timestamps too (#1464)
+
+The entry below fixed the writers that go through `#[derive(Model)]`.
+Six more do not: they build an `InsertQuery` from [`ModelSchema`] and
+the client payload, and a server-assigned timestamp is in no payload —
+so the column was omitted and the database default fired.
+
+- `ViewSet` create and bulk-create — the REST API.
+- The admin's create view, and inline formsets.
+- `ModelForm::save` / `PreparedSave::commit_pool`.
+- The generic `template_views` create handlers, plain and tenant.
+
+All six now call `forms::stamp_auto_timestamps`. **INSERT only**: the
+UPDATE paths deliberately do not, because `auto_now_add` is immutable
+after insert and `FieldSchema` cannot tell it from `auto_now`.
+
+`FieldSchema::is_auto_timestamp()` is how they know. It is inferred
+rather than stored — the macro rejects a non-PK `Auto<T>` field unless
+it carries `auto_uuid`, `default_uuid_v7`, `auto_now_add` or
+`auto_now`, and only the last two may be `DateTime` — which kept 57
+literal `FieldSchema` constructions across the test suite from having
+to grow a field.
+
+Found by the commerce soak, not by a unit test. 7572 tests passed on a
+tree where `ViewSet`-created rows still stored
+`2026-09-20 21:13:34`, and cursor pagination on SQLite still served
+page one forever. The soak's `KNOWN-GAP` excuse for that leg is gone
+with the bug.
+
+### Fixed — no writer reads its timestamp from a column default (#1464)
+
+A column default is a backstop for hand-written SQL. Every framework
+writer now stamps its own timestamps, on all three dialects.
+
+The reason is SQLite-shaped but the rule is not. SQLite stores a
+datetime as TEXT and compares it lexicographically, so the stored
+spelling is a correctness contract — and `CURRENT_TIMESTAMP` writes
+`YYYY-MM-DD HH:MM:SS`, whose separator at index 10 is `' '` (0x20)
+against the canonical `'T'` (0x54). A database created before this fix
+still carries that default and always will: SQLite's `ALTER TABLE`
+grammar is RENAME / ADD / DROP, and none of those replaces a column
+default. So on an upgraded database the migrate sweep converted the
+rows already stored while every new row arrived in the legacy shape,
+leaving the column permanently mixed.
+
+- **`auto_now` now binds on INSERT**, not only on UPDATE. The first
+  write of an `updated_at` took the database default and every later
+  one took the clock — one column filled two different ways.
+- **`audit`** binds `occurred_at` on every emit path, single-row and
+  batch. This is what made `cleanup_keep_last_n` discard the *newest*
+  entries: it ranks with `ORDER BY occurred_at DESC`, and a
+  legacy-spelled row sorts below every canonical one whatever instant
+  it holds.
+- **`jobs::dispatch`** binds `run_at` and `created_at`. `run_at` is the
+  pickup queue's sort key, so such a row jumped ahead of every
+  correctly-stamped job — permanently, since the stale default kept
+  writing more of them.
+- **`i18n` translations** map `created_at` / `updated_at` onto the
+  model, so both go through the ORM's write path. **Breaking:**
+  `Translation` gained two required fields; a struct literal that does
+  not set them no longer compiles. Add `created_at: Auto::Unset,
+  updated_at: Auto::Unset` — the ORM fills both.
+- **The migration ledger** binds `applied_at` across all five runners.
+  Nothing reads that column today, so this is not a live defect; it is
+  the writer that would otherwise undo `migrate`'s own datetime sweep
+  once per migration.
+
+### Changed
+
+- `Dialect` gained `current_timestamp_default()` and
+  `timestamp_now_column()`. Hand-written framework DDL asks the dialect
+  for the expression instead of spelling it out — five copies of the
+  canonical SQLite `strftime` are gone, along with the ledger's
+  three-arm dialect match and its unreachable "unrecognized dialect"
+  error.
+- `rustango_translations` renders its timestamps as `DATETIME(6)` on
+  MySQL rather than `TIMESTAMP`, matching every other `DateTime` column
+  the ORM emits, now that the ORM binds microseconds into them.
+  `CREATE TABLE IF NOT EXISTS` leaves an existing MySQL table on
+  `TIMESTAMP`, still truncating to whole seconds; that needs a
+  migration.
+
+### Changed — the docs no longer explain rustango in terms of Django
+
+Around 726 references to Django and DRF are gone: doc comments across
+every crate, the guides in all four languages, the examples, the
+scaffolder templates and the tests. Someone who has never used Django
+should not meet a docstring that explains a feature by naming one.
+
+The references were reworked, not deleted, because most carried real
+information. "Host-header allowlist middleware — Django `ALLOWED_HOSTS`
+parity" now reads "refuses a request whose `Host` is not on the list",
+which is what the reader needed in the first place.
+
+Three literals keep the name, because they are wire format rather than
+prose. Each now says why:
+
+- the HMAC salts `django.core.signing.Signer` and
+  `django.core.signing.TimestampSigner` in `signing.rs` — changing a
+  salt invalidates every signature already issued, which means live
+  password-reset links and signed cookies.
+- the `django_language` cookie name — browsers of a deployed site
+  already send it, and renaming it drops everyone's language choice.
+
+Also in this pass:
+
+- The eight `django6_*` ORM suites are renamed `orm_*`; CI and
+  `testkit/matrix.rs` follow. No test body changed.
+- `assert_num_queries` panicked with the camelCase text
+  `assertNumQueries`. It now names the Rust function. Two tests pinned
+  the old string and are updated.
+- The `CEIL` docstring claimed MySQL emits `CEILING`. Nothing in the
+  tree emits it.
+- `docs/django-parity-audit-2026-05-21.md` is deleted.
+- The README says up front that Rustango runs on axum and tokio, and
+  that everything it adds is a `tower` layer or an `axum::Router`.
+
+Comparisons to Laravel, Rails and the measured Python stack in
+`benchmarks.md` stay — they place rustango for a reader without
+implying a prerequisite. Older sections of this file are untouched:
+they record what shipped, and editing them would misreport history.
+
 ## [0.57.10] — 2026-09-19
 
 A documentation release, and the first one where the docs were treated

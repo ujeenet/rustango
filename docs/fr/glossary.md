@@ -112,7 +112,7 @@ page de détail, et des formulaires de création/édition/suppression — rendue
 au lieu de JSON. La *vue HTML*. Voir [Vues HTML](html-views.md).
 
 **Template (gabarit)** — un fichier avec des espaces réservés (Rustango utilise [Tera](https://keats.github.io/tera/),
-très semblable aux templates Django ou à Jinja) que le serveur remplit de données pour produire
+très semblable à Jinja) que le serveur remplit de données pour produire
 une page HTML. `{{ post.title }}` insère une valeur ; `{% for … %}` fait une boucle.
 
 **Router / montage (mount)** — le router associe les URL entrantes au code qui les
@@ -231,14 +231,6 @@ renvoie l'erreur ».
 
 Cette documentation dit parfois « comme X » pour aider les lecteurs venant d'autres
 écosystèmes. Les comparaisons sont un bonus — vous n'en avez jamais besoin pour suivre un guide.
-
-**Django** — un framework web Python populaire. Rustango emprunte beaucoup de sa forme
-(modèles, migrations, une interface d'administration, les commandes `manage`).
-
-**DRF (Django REST Framework)** — l'extension de Django pour construire des API REST.
-Les serializers et ViewSets de Rustango en sont inspirés, donc « à la manière de DRF » signifie
-« disposé de la façon dont DRF le fait » — p. ex. des erreurs de validation renvoyées sous forme d'objet JSON
-indexé par nom de champ.
 
 **Laravel / Rails** — des frameworks web PHP et Ruby populaires, mentionnés pour la même
 raison « si vous avez utilisé ceci, cela vous semblera familier ».

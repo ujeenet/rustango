@@ -1,5 +1,5 @@
-//! Django parity — `Index(fields=[...], include=[...])` covering
-//! index. PG 11+ ships `CREATE INDEX … (key_cols) INCLUDE (non_key)`
+//! Covering indexes — index key columns plus non-key payload
+//! columns. PG 11+ ships `CREATE INDEX … (key_cols) INCLUDE (non_key)`
 //! so non-key columns travel with the index leaf for index-only
 //! scans. MySQL/SQLite have no equivalent — the migration writer
 //! drops the clause with a `tracing::warn!` so the rest of the

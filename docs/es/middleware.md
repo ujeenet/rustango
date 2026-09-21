@@ -5,9 +5,8 @@ que tu handler la vea y después de que produce una respuesta. Ahí es donde viv
 las preocupaciones transversales: logging, limitación de tasa, cabeceras de
 seguridad, CSRF, resolución de locale y zona horaria. **Rustango** incluye un
 catálogo amplio de middleware listo para usar y hace que escribir el tuyo propio
-sea cuestión de unas pocas líneas. Si vienes de Django, esto es la lista
-`MIDDLEWARE`; de Express, es `app.use()`; de Laravel, es el kernel HTTP — la
-misma idea, adjunta a tu router.
+sea cuestión de unas pocas líneas. En Express esto es `app.use()`; en Laravel,
+el kernel HTTP — la misma idea, adjunta a tu router.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)
 
@@ -178,7 +177,7 @@ Las siguientes secciones recorren en detalle las que pidió la petición.
 ## Middleware consciente del locale
 
 `LocaleMiddleware` resuelve un locale por petición y lo inyecta en la petición
-para que cualquier handler pueda leerlo. El orden de selección es el de Django:
+para que cualquier handler pueda leerlo. El orden de selección es:
 **cookie → `Accept-Language` → valor por defecto**. El primer locale que listes
 es el valor por defecto salvo que lo sobrescribas.
 
@@ -208,8 +207,8 @@ loc.direction()  // "ltr" / "rtl" — feed straight into <html dir="…">
 loc.is_rtl()     // true for ar, he, fa, …
 ```
 
-El nombre de la cookie es por defecto `django_language` (compatible con Django);
-cámbialo con `.cookie_name("my_locale".to_string())` — el parámetro es
+El nombre de la cookie es por defecto `django_language` — un nombre heredado que
+se mantiene por compatibilidad; cámbialo con `.cookie_name("my_locale".to_string())` — el parámetro es
 `impl Into<Option<String>>`, que `&str` no satisface, así que un literal pelado
 es un error de cota de trait — o pasa `None` para deshabilitar por completo la
 búsqueda por cookie. El orden de precedencia de resolución, verificado de
@@ -237,7 +236,7 @@ negociación por cabecera, monta un sub-router por locale con
 Deliberadamente **no hay layer de zona horaria**. En su lugar, el framework te da
 un offset activo task-local (`rustango::i18n::timezone`) y un decodificador de
 cabecera/cookie, y compones un middleware de una línea que lo activa — el ejemplo
-canónico de «escribe el tuyo». Esto refleja el `USE_TZ=True` de Django: almacena
+canónico de «escribe el tuyo». La postura detrás de esto: almacena
 en UTC, renderiza en el reloj local del usuario.
 
 ```rust

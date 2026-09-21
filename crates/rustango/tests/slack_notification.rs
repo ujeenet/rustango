@@ -1,4 +1,4 @@
-//! Django-parity #418 (Slack provider variant) — `notifications::slack`
+//! Issue #418 (Slack provider variant) — `notifications::slack`
 //! webhook callback round-tripped through a real HTTP server.
 //!
 //! Spins up an axum listener, plugs the callback into a

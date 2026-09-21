@@ -95,7 +95,7 @@ pub type BoxedBackend = Arc<dyn AuthBackend>;
 /// Username + password backend. Reads `Authorization: Basic <b64>` and
 /// verifies against `rustango_users` with argon2id.
 ///
-/// This is the default backend — equivalent to Django's `ModelBackend`.
+/// This is the default backend.
 pub struct ModelBackend;
 
 #[async_trait]
@@ -424,7 +424,9 @@ impl JwtBackend {
 
     /// Enforce revocation on this backend (#1402).
     ///
-    /// Pass the **same** store the issuing [`JwtLifecycle`] holds. Without
+    /// Pass the **same** store the issuing
+    /// [`JwtLifecycle`](crate::tenancy::jwt_lifecycle::JwtLifecycle)
+    /// holds. Without
     /// this, `revoke()` and `/api/auth/logout` write to a blacklist that
     /// nothing on the authentication path reads — a revoked token keeps
     /// authenticating until it expires, and a deployment can watch a

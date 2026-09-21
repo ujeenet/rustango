@@ -1,6 +1,6 @@
 # Migrations & the migration engine
 
-**Rustango** ships a Django-style migration engine: you edit your models,
+**Rustango** ships a model-driven migration engine: you edit your models,
 run `makemigrations` to generate a versioned JSON file describing the
 schema change, and `migrate` to apply it. Since **0.48** the framework
 even migrates **its own** `rustango_*` tables through the same engine —
@@ -84,7 +84,7 @@ automatic and depends entirely on what's already there:
 |---|---|
 | fresh — no history, no tables | runs the squash for real |
 | every replaced migration is in the ledger | records it, tombstones the predecessors, **no DDL** |
-| tables exist but the ledger has no history | records it, **no DDL** (Django's cross-ledger `--fake-initial`) |
+| tables exist but the ledger has no history | records it, **no DDL** (the [guarded fake-initial](#the-guarded-fake-initial-reconcile)) |
 | only *some* replaced rows / tables present | **refused** — names what's missing, tells you to resolve by hand |
 
 The **partial** case is a hard error on purpose: no automatic choice is

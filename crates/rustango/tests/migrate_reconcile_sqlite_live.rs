@@ -177,7 +177,7 @@ async fn squash_fakes_and_tombstones_when_predecessors_applied() {
     cleanup(pool, &path, &dir);
 }
 
-/// **Cross-ledger reconcile** (Django's `--fake-initial`) — the tables exist
+/// **Cross-ledger reconcile** (the `--fake-initial` case) — the tables exist
 /// but this ledger has no record of the replaced migrations (e.g. history
 /// tracked elsewhere, or tables built out-of-band). The squash must fake
 /// rather than collide.

@@ -43,7 +43,7 @@ pub trait MaybeMyFromRow {}
 #[cfg(not(feature = "mysql"))]
 impl<T> MaybeMyFromRow for T {}
 
-/// MySQL counterpart of [`LoadRelated`]. The proc-macro emits this
+/// MySQL counterpart of [`LoadRelated`](crate::sql::LoadRelated). The proc-macro emits this
 /// alongside the existing `LoadRelated` impl whenever rustango is
 /// built with the `mysql` feature, so `select_related` joins can
 /// stitch parents onto FK fields when decoding from a `MySqlRow`.
@@ -54,7 +54,7 @@ impl<T> MaybeMyFromRow for T {}
 /// config.
 #[cfg(feature = "mysql")]
 pub trait LoadRelatedMy {
-    /// Same contract as [`LoadRelated::__rustango_load_related`] —
+    /// Same contract as `LoadRelated::__rustango_load_related` —
     /// returns `Ok(true)` when `field_name` matched a known FK and
     /// the parent was decoded successfully, `Ok(false)` for unknown
     /// field names (graceful skip).
@@ -119,13 +119,14 @@ pub trait MaybeSqliteFromRow {}
 #[cfg(not(feature = "sqlite"))]
 impl<T> MaybeSqliteFromRow for T {}
 
-/// SQLite counterpart of [`LoadRelated`] / [`LoadRelatedMy`]. The
+/// SQLite counterpart of [`LoadRelated`](crate::sql::LoadRelated) /
+/// [`LoadRelatedMy`]. The
 /// proc-macro emits this alongside the Postgres + MySQL impls so
 /// `select_related` joins can stitch parents onto FK fields when
 /// decoding from a `SqliteRow`.
 #[cfg(feature = "sqlite")]
 pub trait LoadRelatedSqlite {
-    /// Same contract as [`LoadRelated::__rustango_load_related`].
+    /// Same contract as `LoadRelated::__rustango_load_related`.
     ///
     /// # Errors
     /// `sqlx::Error` from `try_get` decoding the joined columns.

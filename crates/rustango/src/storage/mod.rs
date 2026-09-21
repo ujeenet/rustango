@@ -1,4 +1,5 @@
-//! File storage backends — upload, retrieve, delete files via a pluggable trait.
+//! File storage: save, read and delete files through one trait, with
+//! a backend you choose.
 //!
 //! ## Quick start
 //!
@@ -23,13 +24,17 @@
 //!
 //! | Backend | When to use |
 //! |---------|-------------|
-//! | [`LocalStorage`] | Single-server deployments — files on local disk |
-//! | [`InMemoryStorage`] | Tests — files in a `HashMap`, never touch disk |
-//! | [`s3::S3Storage`] | AWS S3, Cloudflare R2, Backblaze B2, MinIO — any S3-compatible API. Behind the `storage-s3` feature. |
-//! | GCS / Azure Blob | Plug your own — implement `Storage` for the SDK of your choice |
+//! | [`LocalStorage`] | One server: files on local disk |
+//! | [`InMemoryStorage`] | Tests: files in a `HashMap`, never on disk |
+//! | [`s3::S3Storage`] | S3, R2, B2, MinIO, or any S3-compatible API. Behind the `storage-s3` feature. |
+//! | Anything else | Implement `Storage` over the SDK you want |
 //!
-//! All backends share the same trait — swap them via configuration at
-//! startup, code stays identical.
+//! They all share one trait, so you can pick a backend at startup
+//! without changing the code that uses it.
+//!
+//! [`LocalStorage`]: crate::storage::LocalStorage
+//! [`InMemoryStorage`]: crate::storage::InMemoryStorage
+//! [`s3::S3Storage`]: crate::storage::s3::S3Storage
 
 #[cfg(feature = "storage-s3")]
 pub mod s3;
@@ -41,13 +46,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Re-exported so implementing [`Storage`] does not need `async-trait`
-/// in your own `Cargo.toml`, and cannot drift from the version the
-/// trait was declared with.
-///
-/// `media::async_trait` is the same macro, re-exported there for
-/// `MediaAuthorizer`. That one is behind the `admin` feature, so a
-/// crate implementing only `Storage` could not reach it.
+/// Re-exported so implementing [`Storage`] needs no `async-trait`
+/// entry in your own `Cargo.toml`, and cannot end up on a different
+/// version from the one the trait was declared with.
 pub use async_trait::async_trait;
 
 // ------------------------------------------------------------------ Errors
@@ -64,47 +65,43 @@ pub enum StorageError {
 
 // ------------------------------------------------------------------ Storage trait
 
-/// Pluggable async file storage backend.
+/// An async file storage backend.
 ///
-/// `key` is a logical path within the storage root (e.g. `"avatars/alice.png"`).
-/// Backends MUST reject keys containing `..`, leading `/`, or null bytes.
+/// A `key` is a path inside the storage root, such as
+/// `"avatars/alice.png"`. Every backend must reject a key with `..`,
+/// a leading `/`, or a null byte. [`validate_key`] does that.
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
-    /// Write `data` to `key`, overwriting any existing file at that path.
+    /// Write `data` to `key`, replacing any file already there.
     async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError>;
 
-    /// Read the bytes at `key`. Returns [`StorageError::NotFound`] if absent.
+    /// Read the bytes at `key`, or [`StorageError::NotFound`].
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError>;
 
-    /// Remove the file at `key`. No-op if absent.
+    /// Delete the file at `key`. Does nothing if it is not there.
     async fn delete(&self, key: &str) -> Result<(), StorageError>;
 
-    /// `true` if a file exists at `key`.
+    /// Whether a file exists at `key`.
     async fn exists(&self, key: &str) -> Result<bool, StorageError>;
 
-    /// Return a URL where the file at `key` can be served, if the backend
-    /// supports public URLs. Returns `None` for backends that don't (e.g. tests).
+    /// A public URL for `key`, or `None` on a backend that has none.
     fn url(&self, key: &str) -> Option<String>;
 
-    /// Return a time-limited GET URL for the file at `key` (for serving
-    /// private files without proxying through your handler). Returns
-    /// `None` when the backend can't sign — `LocalStorage`,
-    /// `InMemoryStorage`. `S3Storage` overrides with SigV4 query-string
-    /// signing.
+    /// A GET URL for `key` that expires, so a private file can be
+    /// served without going through your handler. `ttl` is how long
+    /// it stays valid; AWS caps that at 7 days, and shorter is safer.
     ///
-    /// `ttl` is how long the URL stays valid. AWS caps at 7 days
-    /// (604_800 s); shorter is safer.
+    /// `None` on a backend that cannot sign, such as `LocalStorage`.
+    /// `S3Storage` signs with SigV4.
     async fn presigned_get_url(&self, _key: &str, _ttl: std::time::Duration) -> Option<String> {
         None
     }
 
-    /// Return a time-limited PUT URL the browser can upload to
-    /// directly (no proxying through your handler). When
-    /// `content_type` is `Some`, the signature is bound to it — the
-    /// browser MUST send a matching `Content-Type` header.
+    /// A PUT URL that expires, so a browser can upload straight to
+    /// the backend. With a `content_type`, the signature is tied to
+    /// it and the browser must send a matching header.
     ///
-    /// Returns `None` when the backend can't sign. `S3Storage`
-    /// overrides.
+    /// `None` on a backend that cannot sign.
     async fn presigned_put_url(
         &self,
         _key: &str,
@@ -115,12 +112,16 @@ pub trait Storage: Send + Sync + 'static {
     }
 }
 
-/// `Arc<dyn Storage>` alias.
+/// `Arc<dyn Storage>` — the standard way to share a backend.
 pub type BoxedStorage = Arc<dyn Storage>;
 
-/// Reject keys with `..`, leading `/`, or null bytes — defends against
-/// path traversal in `LocalStorage`. Backends that store keys verbatim
-/// (e.g. S3) should still call this to keep keys consistent.
+/// Reject a key that could escape the storage root: `..`, a leading
+/// `/` or `\`, a Windows drive prefix, or a null byte. Backends that
+/// store keys as given, such as S3, should still call it so keys stay
+/// consistent.
+///
+/// # Errors
+/// [`StorageError::InvalidPath`] naming what was wrong with the key.
 pub fn validate_key(key: &str) -> Result<(), StorageError> {
     if key.is_empty() {
         return Err(StorageError::InvalidPath("empty key".into()));
@@ -138,14 +139,14 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
     if key.contains('\0') {
         return Err(StorageError::InvalidPath(format!("key contains null byte")));
     }
-    // Windows-shaped absolute keys (#1285). `Path::join` **discards the
-    // root** when the argument is absolute, so `C:\secrets` or `\Windows`
-    // lands outside the storage directory instead of under it.
+    // Windows-shaped absolute keys. `Path::join` drops the root when
+    // the argument is absolute, so `C:\secrets` or `\Windows` would
+    // land outside the storage directory.
     //
-    // Checked structurally rather than with `Path::is_absolute`, which
-    // answers per-platform: on Unix it calls both of those relative, so a
-    // Unix-only guard would accept a key that escapes the moment the same
-    // service runs on Windows. The same key is rejected everywhere.
+    // The check is structural, not `Path::is_absolute`, whose answer
+    // depends on the platform: on Unix it calls these relative, so a
+    // Unix-only guard would let a key through that escapes as soon as
+    // the same service runs on Windows.
     if key.starts_with('\\') {
         // `\dir\file`, and UNC `\\server\share`.
         return Err(StorageError::InvalidPath(format!(
@@ -157,8 +158,8 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
         (chars.next(), chars.next()),
         (Some(drive), Some(':')) if drive.is_ascii_alphabetic()
     ) {
-        // `C:\file` is absolute; bare `C:file` is drive-relative, which
-        // resolves against that drive's working directory — also not ours.
+        // `C:\file` is absolute. Bare `C:file` resolves against that
+        // drive's working directory, which is not ours either.
         return Err(StorageError::InvalidPath(format!(
             "key names a drive: {key}"
         )));
@@ -168,18 +169,17 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
 
 // ------------------------------------------------------------------ LocalStorage
 
-/// Filesystem-backed storage rooted at a directory.
+/// Storage on the local filesystem, under one directory.
 ///
-/// All keys are joined onto `root` as relative paths. The validator
-/// rejects path-traversal keys (`..`, leading `/`).
+/// Keys are joined onto `root` as relative paths, and
+/// [`validate_key`] rejects anything that would escape it.
 pub struct LocalStorage {
     root: PathBuf,
     base_url: Option<String>,
 }
 
 impl LocalStorage {
-    /// Create a local storage rooted at `root`. The directory is created
-    /// on first save if it doesn't exist.
+    /// Store files under `root`, which is created on the first save.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -188,8 +188,7 @@ impl LocalStorage {
         }
     }
 
-    /// Set the public URL prefix for files served from this storage. The
-    /// resulting URL for key `k` is `{base_url}/{k}`.
+    /// Set the public URL prefix, so key `k` gets `{base_url}/{k}`.
     #[must_use]
     pub fn with_base_url(mut self, base: impl Into<String>) -> Self {
         self.base_url = Some(base.into());
@@ -253,7 +252,7 @@ impl Storage for LocalStorage {
 
 // ------------------------------------------------------------------ InMemoryStorage
 
-/// `HashMap<String, Vec<u8>>` storage — for tests. Never touches disk.
+/// Storage in a `HashMap`, for tests. It never touches disk.
 #[derive(Default)]
 pub struct InMemoryStorage {
     files: Mutex<HashMap<String, Vec<u8>>>,
@@ -350,13 +349,12 @@ mod tests {
         assert!(validate_key("file.txt").is_ok());
     }
 
-    /// #1285 — `Path::join` drops the root when the key is absolute, so
-    /// on Windows these land outside the storage directory rather than
-    /// under it.
+    /// `Path::join` drops the root for an absolute key, so on Windows
+    /// these would land outside the storage directory.
     ///
-    /// Asserted on every platform on purpose. `Path::is_absolute` calls
-    /// all of these relative on Unix, so a platform-gated guard would
-    /// pass here and leave the hole open on the one OS where it bites.
+    /// The test runs on every platform on purpose. `Path::is_absolute`
+    /// calls all of them relative on Unix, so a platform-gated guard
+    /// would pass here and still leave the hole on Windows.
     #[test]
     fn validate_rejects_windows_absolute_keys() {
         for key in [
@@ -373,8 +371,8 @@ mod tests {
         }
     }
 
-    /// A colon or backslash that is not a path prefix stays legal — the
-    /// guard targets the escape, not the characters.
+    /// A colon or backslash elsewhere in the key is still fine. The
+    /// guard is about escaping the root, not about the characters.
     #[test]
     fn validate_still_accepts_keys_that_merely_contain_those_characters() {
         assert!(validate_key("logs/2026-09-13T12:00:00Z.json").is_ok());

@@ -85,7 +85,7 @@ impl Default for Config {
 /// floor. Shorter keys — in particular the **empty** key produced when
 /// `RUSTANGO_SESSION_SECRET` is unset and no explicit `session_secret`
 /// is given — are publicly guessable and would let anyone forge tokens
-/// (audit C1 / GHSA-3g36-xq5c-8j45).
+/// (the 2026-06 authentication audit, finding C1).
 const MIN_HMAC_KEY_LEN: usize = 32;
 
 impl Config {

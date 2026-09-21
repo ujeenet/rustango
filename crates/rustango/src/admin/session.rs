@@ -1,18 +1,12 @@
-//! Signed-cookie session auth for the bare `admin` module.
+//! Signed-cookie session auth for the bare `admin` module: a `/login`
+//! form, a signed cookie and a sidebar `Logout`, without the tenancy
+//! stack.
 //!
-//! Issue #253. Gives non-tenancy projects the Django-shape admin
-//! login UX (`/login` form, signed cookie, sidebar `Logout`) without
-//! pulling in the tenancy stack.
-//!
-//! ## Reuse with `tenancy::session`
-//!
-//! The HMAC signing primitive ([`crate::session::SessionSecret`] +
-//! [`crate::session::sign`]) lives at the crate root and is shared
-//! with `tenancy::session`. Both modules layer their own payload
-//! shape on top — tenancy carries `(operator_id, exp, iat)`, admin
-//! carries `(user_id, is_superuser, exp)` — so the cookies are
-//! distinct (different name AND different shape) but the crypto is
-//! identical and lives in exactly one place.
+//! The HMAC primitive ([`crate::session::SessionSecret`] and
+//! [`crate::session::sign`]) lives at the crate root and is shared with
+//! `tenancy::session`. Each module adds its own payload on top, so the
+//! two cookies differ in name and shape while the crypto stays in one
+//! place.
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -22,76 +16,67 @@ use crate::session::sign;
 pub use crate::session::SessionSecret as AdminSessionSecret;
 
 tokio::task_local! {
-    /// Per-request session set by the `require_session` middleware
-    /// so deep-stack helpers (chrome context, audit emit, …) can
-    /// read the current user without every handler threading
-    /// `Option<Extension<AdminSession>>` through its arg list.
-    /// Cleared by tokio when the scoped future completes.
+    /// Per-request session, set by the `require_session` middleware, so
+    /// deep-stack helpers such as the chrome context can read the
+    /// current user without every handler passing it down. Tokio clears
+    /// it when the scoped future finishes.
     pub(crate) static CURRENT_SESSION: AdminSession;
 }
 
-/// Read the current request's session, if the middleware installed
-/// one. Returns `None` outside an admin request (the task-local was
-/// never scoped) or when the request is unauthenticated.
+/// The current request's session, if the middleware installed one.
+/// `None` outside an admin request, or when the request is
+/// unauthenticated.
 #[must_use]
 pub fn current() -> Option<AdminSession> {
     CURRENT_SESSION.try_with(|s| s.clone()).ok()
 }
 
 tokio::task_local! {
-    /// Per-request CSRF token, set by `csrf_context` (#1395).
+    /// Per-request CSRF token, set by `csrf_context`.
     ///
-    /// Same reasoning as `CURRENT_SESSION`: `chrome_context` is the one
-    /// place every admin template's variables come from, and it is
-    /// called from nine render sites across five files. Threading a
-    /// token through all of them — and through the helpers that render
-    /// inline panels — is a lot of signature churn for a value that is
-    /// request-scoped and read in exactly one place.
+    /// Same reasoning as `CURRENT_SESSION`: `chrome_context` builds the
+    /// variables for every admin template and is called from many
+    /// render sites. A task-local avoids threading one request-scoped
+    /// value through all of them.
     pub(crate) static CURRENT_CSRF_TOKEN: String;
 }
 
 /// The current request's CSRF token, if the admin middleware installed
 /// one.
 ///
-/// `None` outside an admin request, which is why `chrome_context`
-/// tolerates its absence: hand-rendered pages and tests call it with no
-/// request in scope, and a missing token there is correct rather than
-/// an error. Enforcement does not depend on this — `CsrfLayer` rejects
-/// an unsafe request whatever the template did.
+/// `None` outside an admin request, so `chrome_context` treats a
+/// missing token as normal: hand-rendered pages and tests run with no
+/// request in scope. This does not weaken enforcement. `CsrfLayer`
+/// still rejects an unsafe request whatever the template rendered.
 #[must_use]
 pub fn current_csrf_token() -> Option<String> {
     CURRENT_CSRF_TOKEN.try_with(Clone::clone).ok()
 }
 
-/// Default session TTL — 8 hours. Operators get re-prompted once a
-/// workday. Future slice exposes this as a knob on
-/// [`crate::admin::Builder`].
+/// Session lifetime: 8 hours, so an operator signs in once a workday.
 const DEFAULT_TTL_SECS: i64 = 8 * 60 * 60;
 
 /// Cookie name the admin session is stored under. Distinct from any
 /// `tenancy` cookies so the two layers can coexist on one host.
 pub(crate) const SESSION_COOKIE: &str = "rustango_admin_session";
 
-/// The user-facing handle the login middleware drops into the
-/// request extension on every authenticated request. Use as an
-/// extractor on admin-side handlers if you need to know who's
-/// signed in.
+/// The session the login middleware puts in the request extensions on
+/// every authenticated request. Use it as an extractor in an admin
+/// handler to see who is signed in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminSession {
     /// Primary key of the [`AdminUser`](super::user::AdminUser) row.
     pub user_id: i64,
-    /// Username of the logged-in admin, cached on the cookie so the
-    /// chrome can render "Signed in as <username>" without a DB hit
-    /// per request. Added in slice B (#253).
+    /// Username, cached on the cookie so the chrome can render
+    /// "Signed in as …" without a query per request.
     pub username: String,
-    /// `true` when the user's `is_superuser` flag was set at
-    /// login time. Cached on the cookie so the visibility check
-    /// in the chrome doesn't need a DB hit per request.
+    /// The user's `is_superuser` flag at login time, cached on the
+    /// cookie so the chrome's visibility check needs no query.
     pub is_superuser: bool,
 }
 
-/// Wire payload — sent through `sign` + base64. Wraps [`AdminSession`]
-/// with an `exp` timestamp so expired cookies fail closed.
+/// Wire payload: signed, then base64-encoded. Wraps [`AdminSession`]
+/// with an `exp` timestamp so an expired cookie fails closed.
 #[derive(Serialize, Deserialize)]
 struct CookiePayload {
     user_id: i64,
@@ -99,13 +84,11 @@ struct CookiePayload {
     is_superuser: bool,
     /// Unix timestamp the session expires at.
     exp: i64,
-    /// Audit N8 — fingerprint of the user's `password_hash` at login
-    /// (Django `get_session_auth_hash` shape). The gate recomputes it
-    /// from the *current* hash each request; a password change (or
-    /// reset) flips it, invalidating every cookie minted before the
-    /// change. `#[serde(default)]` so pre-N8 cookies still decode — they
-    /// carry `""`, which won't match the live fingerprint, so they
-    /// re-authenticate once after upgrade.
+    /// Fingerprint of the user's `password_hash` at login. The gate
+    /// recomputes it from the current hash on every request, so a
+    /// password change or reset invalidates every cookie minted before
+    /// it. `#[serde(default)]` lets older cookies decode: they carry
+    /// `""`, which never matches, so they need one fresh login.
     #[serde(default)]
     auth_hash: String,
 }
@@ -117,17 +100,17 @@ impl CookiePayload {
 }
 
 /// Fingerprint of a user's `password_hash`, bound to the signing
-/// secret (audit N8). Stored in the cookie at login and recomputed per
-/// request; changes when the password changes, so old sessions stop
-/// validating. Not reversible to the hash.
+/// secret. Stored in the cookie at login and recomputed each request.
+/// It changes with the password, so old sessions stop validating. It
+/// cannot be reversed back to the hash.
 #[must_use]
 pub(crate) fn password_fingerprint(secret: &AdminSessionSecret, password_hash: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sign(secret, password_hash.as_bytes()))
 }
 
-/// Sign a fresh session — returns the cookie value to set on the
-/// response. TTL defaults to 8 hours. `auth_hash` is the
-/// [`password_fingerprint`] of the user's current `password_hash`.
+/// Sign a fresh session and return the cookie value to set. Lasts 8
+/// hours. `auth_hash` is the [`password_fingerprint`] of the user's
+/// current `password_hash`.
 #[must_use]
 pub(crate) fn encode(
     secret: &AdminSessionSecret,
@@ -148,18 +131,18 @@ pub(crate) fn encode(
     format!("{body}.{sig_b64}")
 }
 
-/// Verify + decode a cookie value. Returns `Some(session)` only when
-/// the signature is valid AND the payload hasn't expired. Any other
-/// failure (malformed, tampered signature, expired) maps to `None`
-/// so the caller treats the request as unauthenticated.
+/// Verify and decode a cookie value. Returns `Some(session)` only when
+/// the signature is valid **and** the payload has not expired. Every
+/// other case, such as a malformed or tampered cookie, returns `None`,
+/// and the caller must treat the request as unauthenticated.
 #[must_use]
 pub(crate) fn decode(secret: &AdminSessionSecret, value: &str) -> Option<AdminSession> {
     decode_full(secret, value).map(|(session, _auth_hash)| session)
 }
 
-/// As [`decode`] but also returns the cookie's stored password
-/// fingerprint so the gate can compare it against the user's current
-/// hash (audit N8 — live password-change session invalidation).
+/// Like [`decode`], but also returns the cookie's stored password
+/// fingerprint, so the gate can compare it with the user's current
+/// hash and drop sessions from before a password change.
 #[must_use]
 pub(crate) fn decode_full(
     secret: &AdminSessionSecret,
@@ -170,8 +153,8 @@ pub(crate) fn decode_full(
     let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(sig_b64)
         .ok()?;
-    // Constant-time comparison — same primitive `tenancy::session`
-    // uses. Defends against timing-channel cookie forgery probes.
+    // Constant-time comparison, the same primitive `tenancy::session`
+    // uses. It blocks timing probes that forge a cookie byte by byte.
     if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
         return None;
     }
@@ -217,8 +200,8 @@ mod tests {
 
     #[test]
     fn auth_hash_changes_with_password_hash() {
-        // Audit N8 — the fingerprint flips when the password hash
-        // changes, so the gate's compare invalidates old cookies.
+        // The fingerprint changes with the password hash, so the
+        // gate's compare invalidates old cookies.
         let secret = AdminSessionSecret::from_bytes(vec![9u8; 32]);
         let before = password_fingerprint(&secret, "$argon2id$old");
         let after = password_fingerprint(&secret, "$argon2id$new");

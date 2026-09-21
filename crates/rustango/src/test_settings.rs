@@ -1,10 +1,9 @@
-//! Test-only Settings overlay — Django's `@override_settings` /
-//! `with self.settings(...)`. Issue #43.
+//! Override [`Settings`] for the span of one test.
 //!
-//! Runs an async closure with a task-local [`Settings`] overlay.
-//! Code that reads via [`current`] sees the override for the
-//! duration of the scope; everything outside (or code that has
-//! its own `&Settings` already in hand) is unaffected.
+//! [`with_overridden`](crate::test_settings::with_overridden) runs a
+//! future with a task-local overlay. Code
+//! that reads through [`current`] sees it; code holding its own
+//! `&Settings` does not.
 //!
 //! ## Quick start
 //!
@@ -25,25 +24,20 @@
 //! }
 //! ```
 //!
-//! ## Scope caveat
+//! ## Scope
 //!
-//! The overlay is **task-local**. Code that spawns a fresh task via
-//! `tokio::spawn` inside the scope WILL NOT see the override unless
-//! the new task is spawned through [`tokio::task::LocalSet`] or
-//! re-enters via `current()`. This matches Django's
-//! `override_settings` which works per-thread; spawning a new thread
-//! likewise drops the override.
+//! The overlay is task-local. A task started with `tokio::spawn`
+//! inside the scope does not inherit it.
 //!
-//! ## When to use vs. construct a Settings directly
+//! ## When to use it
 //!
-//! Most rustango handlers receive a `&Settings` argument explicitly
-//! — tests should build their own Settings and pass it in. Use this
-//! overlay only when:
-//! - The code path you're testing reads via a `Settings::current()`
-//!   style global (rare today; the framework prefers explicit
-//!   passing).
-//! - You're testing transitive code that doesn't accept Settings
-//!   directly but does read via the overlay.
+//! Most handlers take a `&Settings` argument, so a test should build
+//! its own and pass it in. Reach for the overlay only when the code
+//! under test reads settings through [`current`] and gives you no
+//! place to hand one in.
+//!
+//! [`Settings`]: crate::config::Settings
+//! [`current`]: crate::test_settings::current
 
 use std::sync::OnceLock;
 
@@ -53,39 +47,30 @@ tokio::task_local! {
     static OVERLAY: Settings;
 }
 
-/// The fallback Settings used by [`current`] when no overlay is
-/// active. Populated lazily on first read from `Settings::default()`,
-/// or replaced explicitly via [`install_fallback`] (typically called
-/// once during app startup with the loaded production Settings).
+/// What [`current`] returns when no overlay is active. Set it with
+/// [`install_fallback`], or get `Settings::default()`.
 static FALLBACK: OnceLock<Settings> = OnceLock::new();
 
 /// Run `future` with `overlay` as the active Settings. Inside the
-/// scope, [`current`] returns a clone of `overlay`; outside, the
-/// fallback applies.
+/// scope [`current`] returns `overlay`; outside it, the fallback.
 ///
-/// The future is `Send` so callers can use it in `tokio::test`
-/// runtimes (single-thread + multi-thread alike).
+/// A `setting_changed` signal fires on entry and on exit, so code
+/// that caches config can refresh.
 pub async fn with_overridden<F>(overlay: Settings, future: F) -> F::Output
 where
     F: std::future::Future,
 {
     use crate::signals::setting::{send_setting_changed, SettingChangedContext};
-    // #415 — fire setting_changed on scope entry. Cache-invalidation
-    // / config-derived state receivers get a chance to flush before
-    // the user's overlay-aware code runs.
+    // Let receivers flush cached config before the overlay applies.
     send_setting_changed(SettingChangedContext { enter: true }).await;
     let result = OVERLAY.scope(overlay, future).await;
-    // Fire again on scope exit so receivers can refresh against the
-    // restored fallback Settings.
+    // And again, so they refresh against the restored settings.
     send_setting_changed(SettingChangedContext { enter: false }).await;
     result
 }
 
-/// Return the active Settings: the task-local overlay when one is
-/// installed, else the registered fallback, else a fresh
-/// `Settings::default()`. **Never panics** — the worst-case return
-/// is an empty `Settings::default()` so tests that haven't set up
-/// an overlay still get a usable value.
+/// The active Settings: the task's overlay, else the fallback, else
+/// `Settings::default()`. Never panics.
 #[must_use]
 pub fn current() -> Settings {
     if let Ok(overlay) = OVERLAY.try_with(Clone::clone) {
@@ -94,22 +79,17 @@ pub fn current() -> Settings {
     FALLBACK.get().cloned().unwrap_or_default()
 }
 
-/// Install `fallback` as the Settings returned by [`current`]
-/// outside any overlay scope. Idempotent — only the first call
-/// wins. Typically invoked once during app startup so non-test
-/// code can read via `current()` and get the production
-/// configuration.
+/// Set the Settings [`current`] returns outside any overlay. Call it
+/// once at startup. Only the first call takes effect.
 ///
-/// Returns `true` when this call installed the fallback; `false`
-/// when a fallback was already registered (which is the no-op
-/// behaviour).
+/// Returns `true` if this call installed the fallback, `false` if one
+/// was already there.
 pub fn install_fallback(fallback: Settings) -> bool {
     FALLBACK.set(fallback).is_ok()
 }
 
-/// `true` when an overlay is currently active on this task. Useful
-/// for assertions / diagnostics; production code shouldn't branch
-/// on it.
+/// `true` when this task has an overlay. For assertions only; do not
+/// branch on it in production code.
 #[must_use]
 pub fn has_overlay() -> bool {
     OVERLAY.try_with(|_| ()).is_ok()
@@ -121,14 +101,9 @@ mod tests {
 
     #[tokio::test]
     async fn current_outside_overlay_returns_default() {
-        // Without any overlay, current() must return *some* Settings
-        // (the documented contract: never panic). We can't assert
-        // against `Settings::default()` because the sibling test
-        // `install_fallback_first_caller_wins` installs a process-
-        // global FALLBACK whose lifetime spans the whole test binary
-        // — once it runs the FALLBACK is permanent and `current()`
-        // returns that fallback rather than `Settings::default()`.
-        // Just pin the "no overlay active here" half of the contract.
+        // A sibling test may already have installed FALLBACK for the
+        // whole binary, so only check that current() does not panic
+        // and that no overlay is active.
         let _ = current();
         assert!(!has_overlay());
     }
@@ -153,8 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn overlay_is_scoped_per_task() {
-        // Two concurrent tasks set different overlays; neither sees
-        // the other's. Pin the per-task isolation guarantee.
+        // Two tasks, two overlays; neither sees the other's.
         let mut a = Settings::default();
         a.secret_key = Some("alpha".into());
         let mut b = Settings::default();
@@ -186,7 +160,7 @@ mod tests {
                 assert_eq!(current().secret_key.as_deref(), Some("inner"));
             })
             .await;
-            // Outer scope restored after inner exits.
+            // The outer overlay is back.
             assert_eq!(current().secret_key.as_deref(), Some("outer"));
         })
         .await;
@@ -194,19 +168,13 @@ mod tests {
 
     #[tokio::test]
     async fn install_fallback_first_caller_wins() {
-        // Use a fresh OnceLock by isolating in a separate static. The
-        // module's FALLBACK is process-global, so we test via the
-        // documented semantics — the FIRST call to install_fallback
-        // wins. We can't reset FALLBACK between tests, but we CAN
-        // verify the boolean return value follows the contract on
-        // this process. Subsequent calls return false.
+        // FALLBACK is process-global and cannot be reset, and test
+        // order is not fixed, so check only that at most one call
+        // returns true.
         let mut a = Settings::default();
         a.secret_key = Some("fallback-a".into());
         let mut b = Settings::default();
         b.secret_key = Some("fallback-b".into());
-        // Whether the FIRST call here wins depends on test ordering
-        // — assert only that AT MOST ONE call returns true across
-        // this run + every previous test (in this test binary).
         let result_a = install_fallback(a);
         let result_b = install_fallback(b);
         assert!(

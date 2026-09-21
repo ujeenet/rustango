@@ -1,57 +1,49 @@
-//! Standing up a tenant: the steps, in order, with nothing about a
-//! terminal in them.
+//! Standing up a tenant: the steps, in order, with no terminal in
+//! them.
 //!
-//! These steps used to live inside the `create-tenant` verb, welded to a
-//! CLI by three things — a `pub(super)` visibility, an `args: &[String]`
-//! it parsed itself, and a `W: Write` it reported through. Anything that
-//! is not a terminal (an HTTP handler, a webhook, a job) would have had
-//! to fake an `argv` and hand it a `Vec<u8>`.
-//!
-//! So the sequence moves here and the verb keeps what is genuinely a
-//! CLI's job: turning `argv` into a [`ProvisionRequest`], and rendering
-//! [`ProvisionEvent`]s as lines of text.
+//! The `create-tenant` verb keeps only what is a CLI's job: turning
+//! `argv` into a [`ProvisionRequest`], and printing
+//! [`ProvisionEvent`]s. An HTTP handler, a webhook or a job can drive
+//! the same sequence.
 //!
 //! ## The steps
 //!
-//! 1. [`Validate`](ProvisionStep::Validate) — slug, mode and backend
-//!    agree with each other and with this build.
-//! 2. [`CheckConnection`](ProvisionStep::CheckConnection) — reach the
-//!    tenant's database and prove this role can create tables in it,
-//!    **before** anything is written. See [`super::preflight`].
-//!    Schema-mode skips it: those tenants live in the registry's own
-//!    database, which is already connected.
-//! 3. [`ProvisionStorage`](ProvisionStep::ProvisionStorage) —
-//!    `CREATE SCHEMA` for schema-mode. Deliberately before the row
-//!    lands, so a failed `INSERT` leaves no orphan schema.
-//! 4. [`RegisterOrg`](ProvisionStep::RegisterOrg) — the `rustango_orgs`
-//!    row, written **inactive**.
-//! 5. [`Migrate`](ProvisionStep::Migrate) — the tenant's own schema,
-//!    through [`tenant_migrate::migrate_one_tenant`]: this tenant, not
-//!    the whole active batch.
-//! 6. [`Activate`](ProvisionStep::Activate) — flip `active`, after
-//!    which the tenant resolves.
+//! 1. [`Validate`][step] — slug, mode and backend agree with each
+//!    other and with this build.
+//! 2. [`CheckConnection`][step] — reach the tenant's database and
+//!    prove this role can create tables there, **before** anything is
+//!    written. See [`preflight`](crate::tenancy::preflight). Schema
+//!    mode skips it; those tenants live in the registry's own
+//!    database.
+//! 3. [`ProvisionStorage`][step] — `CREATE SCHEMA` for schema mode.
+//!    Before the row lands, so a failed `INSERT` leaves no orphan
+//!    schema.
+//! 4. [`RegisterOrg`][step] — the `rustango_orgs` row, written
+//!    **inactive**.
+//! 5. [`Migrate`][step] — this tenant's schema, via
+//!    [`tenant_migrate::migrate_one_tenant`].
+//! 6. [`Activate`][step] — set `active`, and the tenant starts
+//!    resolving.
 //!
-//! ## Inactive until ready, and what a failed run leaves
+//! ## What a failed run leaves behind
 //!
-//! The row goes in inactive and is activated last. That is the whole
-//! answer to "what does a half-provisioned tenant do": nothing, because
-//! the resolver filters on `active` and it is not set yet. There is no
-//! window in which a tenant resolves to a database with no schema.
+//! The row is written inactive and activated last, so a
+//! half-provisioned tenant serves nothing: the resolver filters on
+//! `active`. No tenant ever resolves to a database with no schema.
 //!
-//! A run that fails at the migrate step therefore leaves an **inactive
-//! `Org` row plus whatever schema landed**. The row stays on purpose:
-//! an operator needs to see what was half-made, and rolling it back is
-//! not always possible once a schema or a database exists. Nothing
-//! routes to it in the meantime.
+//! A run that fails at migrate leaves an inactive `Org` row and
+//! whatever schema was created. The row stays on purpose: an operator
+//! needs to see what was half-made, and rolling back is not always
+//! possible once a schema exists.
 //!
-//! This overloads `active`, which until now meant "suspended customer"
-//! and now also means "never finished provisioning". The two are
-//! identical to the resolver — do not serve — and the distinction that
-//! does matter is answerable from
-//! [`super::provision_store`], which is where the detail belongs. A
-//! dedicated `provisioning_state` column would be tidier and would cost
-//! a core-model change rippling through every hand-written test schema,
-//! for a distinction only the console needs.
+//! So `active = false` now means either "suspended" or "never
+//! finished". The resolver treats both the same way. To tell them
+//! apart, read [`provision_store`](crate::tenancy::provision_store).
+//!
+//! [`ProvisionRequest`]: crate::tenancy::provision::ProvisionRequest
+//! [`ProvisionEvent`]: crate::tenancy::provision::ProvisionEvent
+//! [step]: crate::tenancy::provision::ProvisionStep
+//! [`tenant_migrate::migrate_one_tenant`]: crate::tenancy::migrate::migrate_one_tenant
 
 use std::path::Path;
 
@@ -69,11 +61,9 @@ use super::preflight;
 
 /// Everything needed to stand up one tenant.
 ///
-/// The CLI's own argument struct, made public and given one rename:
-/// `no_migrate` became [`run_migrations`](Self::run_migrations). A
-/// negative flag is right for a command line, where the default is
-/// "yes" and you opt out; it is wrong for a struct field, where every
-/// reader has to hold an extra negation.
+/// The CLI's `--no-migrate` flag is
+/// [`run_migrations`](Self::run_migrations) here: a negative flag reads
+/// well on a command line and badly on a field.
 #[derive(Debug, Clone)]
 pub struct ProvisionRequest {
     /// Globally unique. Also the default schema name, display name, and
@@ -135,9 +125,8 @@ pub enum ProvisionStep {
     RegisterOrg,
     /// Apply the tenant's migrations.
     Migrate,
-    /// Flip `active`, after which the tenant resolves. Last on purpose:
-    /// it is what closes the window where a half-provisioned tenant
-    /// serves requests against a database with no schema.
+    /// Set `active`, after which the tenant resolves. Last on purpose,
+    /// so a half-provisioned tenant never serves a request.
     Activate,
 }
 
@@ -146,10 +135,8 @@ pub enum ProvisionStep {
 pub enum StepStatus {
     Started,
     Ok,
-    /// Nothing to do, and why — a database-mode tenant has no schema to
-    /// create, a caller asked for no migrations, a step is not built
-    /// yet. Distinct from `Ok` so a console can grey it out rather than
-    /// claim work that never happened.
+    /// Nothing to do, and why. Separate from `Ok` so a console can grey
+    /// the step out instead of claiming work that never happened.
     Skipped(String),
     /// The run stops here.
     Failed(String),
@@ -166,18 +153,16 @@ pub enum ProvisionEvent {
     /// `Step { RegisterOrg, Ok }` because it carries the id, which is
     /// the one thing a caller cannot compute for itself.
     Registered { org_id: i64 },
-    /// A migration-level event from the tenant's own run — forwarded
-    /// straight through, so a caller watching provisioning sees the
-    /// same per-migration detail `manage migrate` prints.
+    /// A migration event from the tenant's own run, passed straight
+    /// through, so a watcher sees what `manage migrate` prints.
     Migration(tenant_migrate::TenantMigrationEvent),
 }
 
 /// Receives [`ProvisionEvent`]s as a run progresses.
 ///
-/// Implemented for any `Fn(ProvisionEvent)`, so a closure works
-/// directly. **Must not block**: the migration events forwarded through
-/// it are emitted with the tenant's migrate lock held. See
-/// [`crate::migrate::progress`].
+/// Implemented for any `Fn(ProvisionEvent)`, so a closure works.
+/// **Must not block**: migration events reach it while the tenant's
+/// migrate lock is held. See [`crate::migrate::progress`].
 pub trait ProvisionObserver: Send + Sync {
     /// Handle one event. Must return promptly and must not panic.
     fn on_event(&self, event: ProvisionEvent);
@@ -197,13 +182,12 @@ where
 pub enum MigrationsOutcome {
     /// The caller asked for no migrations.
     Skipped,
-    /// The batch ran, but its report had no row for this tenant —
-    /// usually a migration directory with nothing tenant-scoped in it.
+    /// The batch ran but reported nothing for this tenant, usually a
+    /// migrations directory with nothing tenant-scoped in it.
     NotMatched,
     Applied(Vec<Migration>),
-    /// The tenant's chain failed. **Not** returned as an `Err`: the row
-    /// exists and the caller needs to know that, which an error return
-    /// would hide.
+    /// The tenant's migrations failed. Not an `Err`, because the org
+    /// row exists and the caller must hear about it.
     Failed(String),
 }
 
@@ -219,24 +203,16 @@ pub struct ProvisionOutcome {
 /// Where a run reports: the caller's observer, and optionally the
 /// durable store.
 ///
-/// ## Why migration events are buffered and step transitions are not
+/// Step transitions are written as they happen, with no lock held, so
+/// another pod can follow a run in progress.
 ///
-/// Step transitions happen between steps, with no lock held, so they
-/// are written as they occur — which is what makes a run readable from
-/// a second pod while it is still going.
+/// Migration events are buffered instead. They arrive from inside the
+/// migrate lock (see [`crate::migrate::progress`]), and awaiting a
+/// registry write there would hold that lock while other pods queue
+/// behind it. They are flushed when the migrate step ends.
 ///
-/// Migration events are different: they arrive **synchronously from
-/// inside the migrate lock** (see [`crate::migrate::progress`]), where
-/// an `await` on a registry write would extend a lock every other
-/// migrating pod is queued behind. So they are buffered and flushed
-/// once the migrate step ends.
-///
-/// The cost is that a watcher sees `Migrate: started`, then a pause,
-/// then the whole per-migration log at once — rather than line by line.
-/// The alternative is a bounded channel and a drain task, which trades
-/// that for dropped events when the channel fills, and a `seq` with
-/// holes in it is no use as a replay log. Worth revisiting when the
-/// console (#1322) shows whether the pause actually matters.
+/// So a watcher sees `Migrate: started`, a pause, then the whole
+/// per-migration log at once.
 pub(super) struct Reporter<'a> {
     observer: Option<&'a dyn ProvisionObserver>,
     store: Option<RunStore<'a>>,
@@ -444,17 +420,17 @@ fn render_migration(event: &tenant_migrate::TenantMigrationEvent) -> String {
 /// Stand up a tenant: validate, provision its storage, register it, and
 /// migrate it.
 ///
-/// The CLI verb is a thin wrapper over this. So is anything else that
-/// needs to create a tenant.
+/// The CLI verb is a thin wrapper over this, as is anything else that
+/// creates a tenant.
 ///
 /// # Errors
-/// Returns `Err` if the slug is taken, the request is internally
-/// inconsistent (database-mode without a URL, schema-mode on a non-PG
-/// build), the schema could not be created, or the row could not be
-/// inserted. A **migration** failure is not an error — the tenant
-/// exists at that point, so it comes back in
-/// [`ProvisionOutcome::migrations`] as
-/// [`MigrationsOutcome::Failed`].
+/// `Err` if the slug is taken, the request contradicts itself (database
+/// mode with no URL, schema mode on a non-PG build), the schema could
+/// not be created, or the row could not be inserted.
+///
+/// A migration failure is not an error: the tenant already exists, so
+/// it comes back as [`MigrationsOutcome::Failed`] in
+/// [`ProvisionOutcome::migrations`].
 pub async fn provision_tenant<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -472,14 +448,12 @@ where
 /// [`provision_tenant`], with the run persisted to
 /// [`super::provision_store`] as it goes.
 ///
-/// The durable half of the same call: step transitions are written as
-/// they happen, so a run started on one pod is readable — and
-/// replayable from the beginning — on another.
+/// Step transitions are written as they happen, so another pod can
+/// read a run, or replay it from the start.
 ///
 /// # Errors
-/// As [`provision_tenant`]. A failure to *record* the run is logged and
-/// never propagated: the bookkeeping must not be what fails a tenant
-/// creation.
+/// As [`provision_tenant`]. A failure to *record* the run is only
+/// logged: bookkeeping must not fail a tenant creation.
 pub async fn provision_tenant_recorded<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -521,11 +495,10 @@ where
 /// [`provision_tenant_recorded`] against a run somebody else already
 /// opened.
 ///
-/// The inbound webhook needs this: it opens the run **synchronously**
-/// so the caller gets an id back and so the `idempotency_key` unique
-/// constraint fires where a response can carry it, then hands the slow
-/// part to a task. Without this entry point that task would open a
-/// *second* run for the same tenant.
+/// The inbound webhook needs this. It opens the run first, so the
+/// response can carry the id and any `idempotency_key` conflict, then
+/// hands the slow part to a task. Without this the task would open a
+/// second run for the same tenant.
 ///
 /// # Errors
 /// As [`provision_tenant`]. The run is closed either way.
@@ -546,9 +519,8 @@ where
     let rep = Reporter::new(observer).persisting(&registry, run_id);
     let result = provision_reported(pools, registry_url, dir, request, &rep).await;
 
-    // Whatever happened, close the run — including on the error paths,
-    // where a run left `running` forever is exactly the ambiguity this
-    // table exists to remove.
+    // Close the run whatever happened, error paths included. A run
+    // stuck at `running` is the ambiguity this table removes.
     let (state, error) = match &result {
         Ok(outcome) => match &outcome.migrations {
             MigrationsOutcome::Failed(e) => (RunState::Failed, Some(e.clone())),
@@ -689,15 +661,10 @@ where
 
     // ---- 6. Activate ----
     //
-    // The row went in inactive (see `new_org_row`), so up to this point
-    // the tenant does not resolve. Flipping it last is what closes the
-    // window where a half-provisioned tenant serves requests against a
-    // database with no schema in it.
-    //
-    // A migration failure leaves it inactive, deliberately. The row
-    // stays — an operator needs to see what was half-made, and rolling
-    // it back is not always possible anyway once a schema or database
-    // exists — but nothing routes to it.
+    // The row went in inactive, so until now the tenant does not
+    // resolve. A migration failure leaves it that way on purpose: the
+    // row stays so an operator can see what was half-made, but nothing
+    // routes to it.
     if matches!(migrations, MigrationsOutcome::Failed(_)) {
         rep.step(
             ProvisionStep::Activate,
@@ -746,9 +713,8 @@ async fn check_connection(
                 .await;
             Ok(())
         }
-        // `Validation`, not a driver error: nothing is broken in
-        // rustango, the URL the caller supplied is wrong, and the
-        // diagnosis already says what to change.
+        // `Validation`, not a driver error: the supplied URL is wrong,
+        // and the diagnosis already says what to change.
         Err(d) => {
             rep.fail(
                 ProvisionStep::CheckConnection,
@@ -791,19 +757,12 @@ async fn provision_storage<DB: Database>(
     Ok(())
 }
 
-/// A slug becomes three things, and has to be legal in all of them.
+/// A slug becomes a database name, a schema name and a hostname label
+/// (`<slug>.<apex>`), so it must be legal as all three.
 ///
-/// It is a **database name**, a **schema name**, and a **hostname
-/// label** (`<slug>.<apex>`). The last is the strictest: RFC 1123
-/// allows only lowercase letters, digits and hyphens, not leading or
-/// trailing.
-///
-/// This lived only in the inbound webhook, so the console — the path a
-/// human uses — was the laxer of the two. `tennant 1`, with a space,
-/// produced a **live tenant** whose `host_pattern` was
-/// `tennant 1.localhost`: a hostname that cannot resolve, so the
-/// tenant could never be reached, discovered only by someone
-/// wondering why their new customer 404s.
+/// The hostname label is strictest: RFC 1123 allows lowercase letters,
+/// digits and hyphens only, and no hyphen at either end. A slug with a
+/// space would give a live tenant nobody can reach.
 fn validate_slug(slug: &str) -> Result<(), String> {
     if slug.is_empty() {
         return Err("a slug is required".into());
@@ -833,21 +792,15 @@ fn validate_slug(slug: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Check every operator-supplied field, and hand back the request with
-/// the one field that is normalized rather than refused.
+/// Check every operator-supplied field and return the request with the
+/// host pattern normalized.
 ///
 /// One function, called from the `Validate` step, so the console, the
-/// webhook and `manage create-tenant` cannot disagree about what a
-/// legal tenant is. They did: the slug rule lived in the webhook alone
-/// until a space in a console slug produced an unreachable tenant, and
-/// these four fields had no rule anywhere at all.
+/// webhook and `manage create-tenant` agree on what a legal tenant is.
 ///
-/// The shared thread is that all four feed a matcher or an identifier
-/// that is *exact*. A value that cannot be produced by the thing it is
-/// compared against is not a configuration choice with an unusual
-/// consequence — it is a tenant that is registered, active, and
-/// unreachable, discovered by whoever eventually wonders why the new
-/// customer 404s.
+/// Each field feeds an exact matcher or identifier. A value the matcher
+/// can never produce gives a tenant that is registered, active and
+/// unreachable, so it is refused here.
 fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, String> {
     validate_slug(&request.slug)?;
 
@@ -872,18 +825,13 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
 
 /// The schema a schema-mode tenant is created in.
 ///
-/// This reaches `CREATE SCHEMA` and `SET search_path` as an
-/// identifier. [`crate::sql::Dialect::quote_ident`] quotes it, so a
-/// name carrying a quote and a semicolon does **not** execute — that
-/// held when it was tried. What did not hold is everything after:
-/// nothing rejected the name, so
-/// `x"; CREATE TABLE public.pwned(i int); --` became a real schema and
-/// a live, active tenant. An identifier nobody can type again without
-/// quoting is not a tenant anybody can operate.
+/// The name reaches `CREATE SCHEMA` and `SET search_path` as an
+/// identifier. [`crate::sql::Dialect::quote_ident`] quotes it, so odd
+/// characters cannot execute, but a schema nobody can name again
+/// without quoting is a tenant nobody can operate. So reject it here.
 ///
 /// The rule is the slug's, plus underscores: a schema name is not a
-/// hostname label, so `_` — which Postgres and every naming convention
-/// allow — has no reason to be refused here.
+/// hostname label, and Postgres is happy with `_`.
 fn validate_schema_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("a schema name is required".into());
@@ -904,15 +852,14 @@ fn validate_schema_name(name: &str) -> Result<(), String> {
             bad as char
         ));
     }
-    // Not "must start with a letter": the *default* schema name is the
-    // slug, and a slug may start with a digit. Only the hyphen is
-    // refused, being the one leading character that reads as a flag.
+    // A leading digit is fine, because the default schema name is the
+    // slug and a slug may start with one. Only a leading hyphen is
+    // refused, since it reads as a flag.
     if name.starts_with('-') {
         return Err(format!("schema name `{name}` may not start with a hyphen"));
     }
-    // `pg_*` is reserved for system schemas; `CREATE SCHEMA pg_x` is
-    // refused by the server with a message about the reservation, which
-    // would surface here as a failed run rather than a validation error.
+    // `pg_*` is reserved. Catch it here so it reads as a validation
+    // error rather than a failed run.
     if name.starts_with("pg_") || name == "information_schema" {
         return Err(format!(
             "schema name `{name}` is reserved by Postgres — choose another"
@@ -923,18 +870,13 @@ fn validate_schema_name(name: &str) -> Result<(), String> {
 
 /// The `Host` header this tenant answers to.
 ///
-/// Matched **exactly**, against a header the resolver has already
-/// lowercased and stripped of its `:port` (see
-/// `resolver::host_from_parts`). Three things therefore produce a
-/// tenant that is registered, active, and unreachable forever:
-/// uppercase, a `:port` suffix, and a wildcard — none of which can ever
-/// equal the normalized header.
+/// The resolver lowercases the header and strips the port, then
+/// compares exactly. So uppercase, a `:port` suffix or a wildcard all
+/// give a tenant that can never be reached.
 ///
-/// Uppercase is normalized rather than refused, because lowercasing it
-/// is exactly what the resolver does and the operator's intent is not
-/// in doubt. The other two are refused: they mean the operator wants
-/// something this matcher does not do, and quietly storing a value that
-/// cannot match would be the worse answer.
+/// Uppercase is lowercased here, since that is what the resolver does
+/// anyway. A port or a wildcard is refused: the operator wants
+/// something this matcher cannot do.
 pub(crate) fn validate_host_pattern(pattern: &str) -> Result<String, String> {
     if pattern.contains(':') {
         return Err(format!(
@@ -1038,18 +980,13 @@ pub(crate) fn validate_port(port: i32) -> Result<(), String> {
 
 /// Refuse a tenant URL that points at the registry's own database.
 ///
-/// Nothing stopped this, and the consequence is not cosmetic:
-/// provisioning ran the **tenant** migration chain into the
-/// **registry**, creating `rustango_users`, `rustango_admin_users`,
-/// the media tables and the project's own models there — and writing
-/// `0001_initial` into the registry's project ledger, so a later
-/// legitimate migration run reads a ledger that lies about what has
-/// been applied. A project whose tenant migrations contain any
-/// destructive operation would have had it run against the registry.
+/// Otherwise provisioning runs the *tenant* migration chain into the
+/// *registry*, creating tenant tables there and writing entries into
+/// the registry's own ledger. Any destructive tenant migration would
+/// then run against the registry.
 ///
-/// Compared on endpoint identity — scheme, host, port, database —
-/// because the *credentials* may legitimately differ while still
-/// naming the same database.
+/// Compares the endpoint only — scheme, host, port, database — because
+/// two URLs may name the same database with different credentials.
 pub(crate) fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Result<(), String> {
     if endpoint_identity(tenant_url) == endpoint_identity(registry_url) {
         return Err(format!(
@@ -1064,19 +1001,12 @@ pub(crate) fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Resul
 /// Build a tenant URL on the same server as the registry, naming
 /// `database`.
 ///
-/// The overwhelmingly common deployment is "one Postgres, one database
-/// per tenant". Without this, an operator retypes the host, the port
-/// **and the password** into a web form for every tenant — which is
-/// both tedious and the single most likely way for a credential to end
-/// up somewhere it should not be.
-///
-/// Derived server-side on purpose: the caller supplies a database
-/// *name*, never a URL, so the registry password is never rendered into
-/// a page and never travels back in a form post.
+/// For the common "one Postgres, one database per tenant" setup. The
+/// caller supplies a database *name*, not a URL, so the registry
+/// password never reaches a page or a form post.
 ///
 /// Returns `None` when the registry URL has no database segment to
-/// replace — a shape this cannot reason about, where the operator
-/// should supply a URL themselves.
+/// replace; the operator should then supply a full URL.
 #[must_use]
 pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Option<String> {
     // sqlite is a file path, not a server: "same server, other
@@ -1088,14 +1018,11 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
             return None;
         }
         // A bare filename is relative to the working directory, which
-        // is exactly where the sibling belongs. `rsplit_once` alone
-        // returned `None` for it, so a `sqlite://app.db` registry
-        // derived nothing at all.
+        // is where the sibling belongs.
         let dir = path.rsplit_once('/').map_or(".", |(d, _)| d);
-        // The operator names a database, but a sqlite database is a
-        // file — so `acme` becomes `acme.db` and `acme.db` stays put.
-        // Case-insensitively: `acme.DB` is already the extension, and
-        // on a case-insensitive filesystem it is the very same file.
+        // A sqlite database is a file, so `acme` becomes `acme.db` and
+        // `acme.db` is left as-is. The check ignores case: `acme.DB` is
+        // the same file on a case-insensitive filesystem.
         let file = if std::path::Path::new(database)
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("db"))
@@ -1193,13 +1120,10 @@ fn new_org_row(request: &ProvisionRequest, schema_name: Option<String>) -> Org {
 
 /// `CREATE SCHEMA IF NOT EXISTS` on the registry.
 ///
-/// Schema-mode is Postgres-only **by language**: `CREATE SCHEMA` and
-/// `SET search_path` do not exist on `SQLite` or `MySQL`. So there are
-/// two distinct refusals, and they say different things:
-///
-/// * this build has no `postgres` feature at all, or
-/// * it does, but these `TenantPools<DB>` are not holding a PG pool —
-///   which only a runtime downcast can tell us, since `DB` is generic.
+/// Schema mode is Postgres-only: `CREATE SCHEMA` and `SET search_path`
+/// do not exist on SQLite or MySQL. There are two separate refusals:
+/// the build has no `postgres` feature, or it does but these pools are
+/// not Postgres, which only a runtime downcast can tell.
 async fn provision_schema<DB: Database>(
     pools: &TenantPools<DB>,
     schema: &str,
@@ -1217,9 +1141,8 @@ async fn provision_schema<DB: Database>(
                         .into(),
                 )
             })?;
-        // The dialect's own quoter, not a local copy: it is the
-        // canonical one, and it doubles any embedded `"` so a schema
-        // name straight from a request survives quoting intact.
+        // Use the dialect's quoter, not a local copy: it doubles any
+        // embedded `"`.
         let sql = format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
             crate::sql::Postgres.quote_ident(schema)
@@ -1257,18 +1180,16 @@ async fn activate(registry: &crate::sql::Pool, org_id: i64) -> Result<(), Tenanc
     Ok(())
 }
 
-/// Migrate the tenant that was just created — and only that one.
+/// Migrate the tenant that was just created, and only that one.
 ///
-/// Goes through [`tenant_migrate::migrate_one_tenant`] rather than the
-/// batch, for two reasons. The tenant is still inactive at this point,
-/// so the batch (which filters `active = true`) would skip the very
-/// tenant it was called for. And the batch would migrate every *other*
-/// tenant too, so creating tenant B did a pass over tenant A and an
-/// unrelated broken chain surfaced mid-provision.
+/// Uses [`tenant_migrate::migrate_one_tenant`], not the batch. The new
+/// tenant is still inactive, so the batch would skip it; and the batch
+/// would also migrate every other tenant, dragging an unrelated broken
+/// chain into this run.
 ///
-/// Never returns `Err`: by this point the `Org` row exists, and an
-/// error return would hide that from the caller. A failure comes back
-/// as [`MigrationsOutcome::Failed`].
+/// Never returns `Err`: the `Org` row already exists, and an error
+/// return would hide that. A failure comes back as
+/// [`MigrationsOutcome::Failed`].
 async fn migrate_new_tenant<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -1332,20 +1253,17 @@ pub trait TenantProvisioner: Send + Sync {
         request: &'a ProvisionRequest,
     ) -> BoxFuture<'a, ProvisionOutcome>;
 
-    /// The registry's own connection URL.
-    ///
-    /// Used to derive a tenant URL on the same server — the common
-    /// case, and the one that otherwise has an operator retyping a
-    /// password into a form field. **Never render this**: it carries
-    /// credentials. Derive, then redact for display.
-    /// Migrate one tenant (`slug`) or every active one (`None`),
+    /// Migrate one tenant, or every active one when `slug` is `None`,
     /// recording into an already-open run.
     ///
-    /// Here rather than on a trait of its own because this is the same
-    /// type erasure: the console holds `Arc<dyn TenantProvisioner>` and
-    /// has no `DB` to name.
+    /// It lives here, not on its own trait, for the same reason as the
+    /// rest: the console holds `Arc<dyn TenantProvisioner>` and has no
+    /// `DB` to name.
     fn migrate_in_run<'a>(&'a self, run_id: i64, slug: Option<&'a str>) -> BoxFuture<'a, ()>;
 
+    /// The registry's own connection URL, for deriving a tenant URL on
+    /// the same server. **Never render it**: it carries credentials.
+    /// Derive first, then redact for display.
     fn registry_url(&self) -> String;
 
     /// The registry pool, so a caller can read runs and events back.

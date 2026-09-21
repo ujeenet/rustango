@@ -1,6 +1,6 @@
-//! Django-shape `assertNumQueries` — count SQL queries executed inside
-//! a scoped async block, then assert the count matches an expectation.
-//! Django-parity #431.
+//! Count the SQL queries executed inside a scoped async block, then
+//! assert the count matches an expectation. Use it to pin down N+1
+//! regressions in a test.
 //!
 //! ## Quick start
 //!
@@ -58,8 +58,8 @@
 //! - the `_tx` counterparts of all of the above
 //!
 //! Each call increments by 1 regardless of how many rows the query
-//! returns — mirroring Django's `assertNumQueries` (one SQL statement
-//! = one count, even if it returns thousands of rows).
+//! returns: one SQL statement is one count, even when it returns
+//! thousands of rows.
 //!
 //! ## What does **not** get counted
 //!
@@ -134,11 +134,10 @@ impl QueryCounter {
 }
 
 /// Run `fut` and assert that exactly `expected` SQL queries executed
-/// during it. Panics on mismatch with a Django-shape message.
+/// during it. Panics on mismatch, printing both counts.
 ///
-/// Returns the future's output so callers can chain assertions on the
-/// produced value the same way Django's `assertNumQueries` returns a
-/// context manager that captures the wrapped code's return value.
+/// Returns the future's output, so the caller can go on to assert on
+/// the produced value.
 ///
 /// # Panics
 /// When the observed count differs from `expected`.
@@ -148,7 +147,7 @@ pub async fn assert_num_queries<F: Future>(expected: usize, fut: F) -> F::Output
         let actual = QueryCounter::current();
         assert_eq!(
             actual, expected,
-            "assertNumQueries failed: expected {expected} queries, observed {actual}"
+            "assert_num_queries failed: expected {expected} queries, observed {actual}"
         );
         result
     })
@@ -188,7 +187,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "assertNumQueries failed: expected 2 queries, observed 3")]
+    #[should_panic(expected = "assert_num_queries failed: expected 2 queries, observed 3")]
     async fn assert_num_queries_panics_with_count_in_message() {
         assert_num_queries(2, async {
             bump();

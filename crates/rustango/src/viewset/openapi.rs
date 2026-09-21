@@ -259,9 +259,9 @@ impl ViewSet {
             };
             out.push(Parameter::query("ordering", Schema::string()).description(description));
         }
-        // One filter param per filter_field. We don't enumerate all the
-        // Django-style lookups individually — the description tells the
-        // reader they're available.
+        // One filter param per filter_field. The `__`-suffixed lookups
+        // are not listed as separate params — the description names
+        // them instead.
         for f in &self.filter_fields {
             let field_schema = self
                 .schema

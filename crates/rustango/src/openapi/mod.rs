@@ -1,17 +1,17 @@
-//! OpenAPI 3.1 spec builder + optional Swagger UI router. A spec that
-//! attaches a `QUERY` operation (RFC 10008) via [`PathItem::query`] is
-//! emitted as OpenAPI 3.2.0 (which added the `query` Path Item field);
-//! specs without one stay 3.1.0.
+//! Build an OpenAPI spec, and optionally serve Swagger UI.
 //!
-//! Two flavors of usage:
+//! The output is 3.1.0. A spec with a `QUERY` operation, added
+//! through [`PathItem::query`], becomes 3.2.0, the version that added
+//! the `query` Path Item field.
 //!
-//! 1. **Hand-build** the spec with [`OpenApiSpec::new`] + the `add_*`
-//!    methods. Useful when your API is hand-rolled or you want full
-//!    control over the wire format.
-//! 2. **Generate** from [`Schema::for_serializer`] (when the
-//!    `serializer` feature is on) — pulls field metadata from any
-//!    `#[derive(Serializer)]` type. Future slice will auto-extract
-//!    paths from ViewSet too.
+//! There are three ways to fill a spec, and you can mix them:
+//!
+//! 1. By hand, with [`OpenApiSpec::new`] and the `add_*` methods.
+//! 2. From a serializer, with [`Schema::for_serializer`] behind the
+//!    `serializer` feature. It reads the field metadata from any
+//!    `#[derive(Serializer)]` type.
+//! 3. From a ViewSet, with its `openapi_paths` method, which returns
+//!    the paths and operations it routes.
 //!
 //! ## Quick start
 //!
@@ -31,10 +31,14 @@
 //!             .response("200", Response::new("OK")
 //!                 .json_content(Schema::array_of(Schema::ref_("Post"))))));
 //!
-//! // Mount /openapi.json + /docs (Swagger UI from a CDN):
+//! // Mount /openapi.json and /docs, with Swagger UI from a CDN:
 //! # #[cfg(feature = "admin")]
 //! let app = axum::Router::new().merge(rustango::openapi::router::openapi_router(spec));
 //! ```
+//!
+//! [`OpenApiSpec::new`]: crate::openapi::OpenApiSpec::new
+//! [`PathItem::query`]: crate::openapi::PathItem::query
+//! [`Schema::for_serializer`]: crate::openapi::Schema::for_serializer
 
 #[cfg(feature = "admin")]
 pub mod router;
@@ -120,9 +124,9 @@ impl OpenApiSpec {
 
     #[must_use]
     pub fn add_path(mut self, path: impl Into<String>, item: PathItem) -> Self {
-        // OpenAPI 3.2 introduced the `query` Path Item field (RFC 10008).
-        // A spec that uses one must declare 3.2.0; specs without QUERY
-        // stay 3.1.0 for maximum tooling compatibility.
+        // The `query` Path Item field arrived in OpenAPI 3.2, so a
+        // spec that uses one must say 3.2.0. Everything else stays
+        // 3.1.0, which more tools understand.
         if item.query.is_some() {
             self.openapi = "3.2.0".into();
         }
@@ -142,8 +146,8 @@ impl OpenApiSpec {
         self
     }
 
-    /// Add a global security requirement — every operation requires this
-    /// scheme unless the operation overrides with its own `security`.
+    /// Require this security scheme on every operation, unless an
+    /// operation sets its own.
     #[must_use]
     pub fn require_security(
         mut self,
@@ -165,11 +169,11 @@ impl OpenApiSpec {
         self
     }
 
-    /// Render the spec as pretty JSON.
+    /// Render the spec as indented JSON.
     ///
     /// # Panics
-    /// Panics only if the OpenAPI types have a serialization bug — none
-    /// of them do (round-tripped in tests).
+    /// Only if one of the spec types fails to serialize, which the
+    /// tests rule out.
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("OpenApiSpec serialize")
@@ -262,9 +266,8 @@ pub struct PathItem {
     pub head: Option<Operation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Operation>,
-    /// RFC 10008 `QUERY` operation — a first-class Path Item field in
-    /// OpenAPI 3.2. A spec containing one is emitted as `openapi: 3.2.0`
-    /// (see [`OpenApiSpec::add_path`]).
+    /// The `QUERY` operation from RFC 10008. It is a Path Item field
+    /// in OpenAPI 3.2, so a spec with one is emitted as 3.2.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<Operation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -308,8 +311,8 @@ impl PathItem {
         self.delete = Some(op);
         self
     }
-    /// Attach the RFC 10008 `QUERY` operation (OpenAPI 3.2). Adding this
-    /// to a spec's path bumps the emitted `openapi` version to 3.2.0.
+    /// Attach the `QUERY` operation. Any spec holding this path is
+    /// then emitted as OpenAPI 3.2.0.
     #[must_use]
     pub fn query(mut self, op: Operation) -> Self {
         self.query = Some(op);
@@ -391,7 +394,8 @@ impl Operation {
         self
     }
 
-    /// Drop global security for this operation. (Empty list = "no auth required".)
+    /// Drop the global security for this operation, marking it as
+    /// needing no auth.
     #[must_use]
     pub fn no_security(mut self) -> Self {
         self.security = Some(Vec::new());
@@ -537,10 +541,10 @@ impl RequestBody {
         }
     }
 
-    /// Add another accepted content type to an existing body.
+    /// Accept another content type on this body.
     ///
-    /// A handler that takes both JSON and urlencoded has to say so,
-    /// or a generated client picks one and the other 415s.
+    /// A handler that takes both JSON and form-encoded input has to
+    /// say so, or a generated client picks one and the other 415s.
     #[must_use]
     pub fn and_content(mut self, content_type: impl Into<String>, schema: Schema) -> Self {
         self.content.insert(
@@ -623,13 +627,14 @@ pub struct Header {
 }
 
 // =====================================================================
-// Schema (a useful subset of JSON Schema 2020-12 / OpenAPI 3.1)
+// Schema: the part of JSON Schema that OpenAPI 3.1 uses
 // =====================================================================
 
-/// A JSON Schema fragment — subset used by OpenAPI 3.1.
+/// A JSON Schema fragment, as OpenAPI 3.1 uses it.
 ///
-/// Construct via the builder methods ([`Schema::object`], [`Schema::string`],
-/// etc.) and chain modifiers (`.required(...)`, `.format(...)`).
+/// Start from a builder such as [`Schema::object`] or
+/// [`Schema::string`], then chain `.required(...)`, `.format(...)`
+/// and the rest.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Schema {
     #[serde(skip_serializing_if = "Option::is_none", rename = "$ref")]
@@ -670,7 +675,7 @@ pub struct Schema {
 }
 
 impl Schema {
-    /// Reference an existing schema in `components.schemas`.
+    /// Point at a schema already in `components.schemas`.
     #[must_use]
     pub fn ref_(name: impl AsRef<str>) -> Self {
         Self {
@@ -722,7 +727,7 @@ impl Schema {
             ..Default::default()
         }
     }
-    /// Free-form JSON object (`{}`) — no constraints.
+    /// Any JSON object, with no constraints.
     #[must_use]
     pub fn any_object() -> Self {
         Self {
@@ -749,26 +754,24 @@ impl Schema {
         s.format = Some("uuid".into());
         s
     }
-    /// Time of day. OpenAPI 3.x doesn't standardize `time`; render as
-    /// `string` with the unregistered `time` format (interoperable
-    /// with most clients).
+    /// Time of day. OpenAPI has no standard `time` format, so this is
+    /// a `string` with format `time`, which most clients accept.
     #[must_use]
     pub fn time() -> Self {
         let mut s = Self::string();
         s.format = Some("time".into());
         s
     }
-    /// Fixed-point decimal. OpenAPI conventions render as a `string`
-    /// payload (preserves precision across the JSON `number` boundary).
-    /// The `decimal` format is unregistered but widely understood.
+    /// Fixed-point decimal, sent as a `string` so no precision is
+    /// lost to a JSON `number`. The `decimal` format is not
+    /// registered, but it is widely understood.
     #[must_use]
     pub fn decimal() -> Self {
         let mut s = Self::string();
         s.format = Some("decimal".into());
         s
     }
-    /// Binary blob. Maps to OpenAPI's `string` + `format: byte`
-    /// (base64-encoded body shape).
+    /// Raw bytes: a `string` with `format: byte`, so base64.
     #[must_use]
     pub fn binary() -> Self {
         let mut s = Self::string();
@@ -841,9 +844,8 @@ impl Schema {
         self
     }
 
-    /// Set the JSON Schema `default` value. Renamed from `default()` to
-    /// avoid colliding with the `Default::default` constructor used to
-    /// build empty schemas.
+    /// Set the schema's `default` value. It is not called `default`,
+    /// to avoid clashing with `Default::default`.
     #[must_use]
     pub fn default_value(mut self, v: impl Serialize) -> Self {
         self.default = serde_json::to_value(v).ok();
@@ -876,10 +878,11 @@ impl Schema {
 // Security
 // =====================================================================
 
-/// Security scheme definition.
+/// How clients authenticate.
 ///
-/// Helpers: [`SecurityScheme::bearer`], [`SecurityScheme::api_key_header`],
-/// [`SecurityScheme::basic`], [`SecurityScheme::oauth2_authorization_code`].
+/// Build one with [`SecurityScheme::bearer`],
+/// [`SecurityScheme::api_key_header`], [`SecurityScheme::basic`] or
+/// [`SecurityScheme::oauth2_authorization_code`].
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SecurityScheme {
@@ -1014,8 +1017,7 @@ mod tests {
         let s = Schema::ref_("Post");
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["$ref"], "#/components/schemas/Post");
-        // refs MUST NOT have other fields per JSON Schema (or other fields
-        // are ignored — we still skip them when None / empty).
+        // A `$ref` must carry no other fields.
         assert!(v.get("type").is_none());
     }
 
@@ -1097,8 +1099,8 @@ mod tests {
 
     #[test]
     fn query_operation_serializes_and_bumps_version_to_3_2() {
-        // A path with a `query` operation (RFC 10008) is emitted under the
-        // `query` Path Item field and forces the spec version to 3.2.0.
+        // A `query` operation lands in the `query` Path Item field
+        // and pushes the spec version to 3.2.0.
         let spec = OpenApiSpec::new("API", "1.0")
             .add_schema("Post", Schema::object().property("title", Schema::string()))
             .add_path(
@@ -1130,7 +1132,7 @@ mod tests {
                 ["$ref"],
             "#/components/schemas/Post"
         );
-        // GET on the same path is unaffected.
+        // GET on the same path is untouched.
         assert_eq!(v["paths"]["/posts"]["get"]["summary"], "List posts");
     }
 

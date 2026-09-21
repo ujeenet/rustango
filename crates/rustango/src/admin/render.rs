@@ -186,7 +186,7 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
 
 /// Same as [`render_input`] but consults an explicit widget override.
 ///
-/// Django-shape `formfield_overrides` (#359). When `widget` is
+/// Backs per-model `formfield_overrides`. When `widget` is
 /// `Some(name)` and matches a built-in widget identifier, the
 /// emitted markup matches the override instead of the FieldType
 /// default. Unknown names log a single tracing warning and fall
@@ -235,10 +235,9 @@ pub(crate) fn render_input_with_widget(
 fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
     let name = escape(field.name);
     let val = escape(value);
-    // #445 — Django-shape `blank = true` drops the `required` HTML
-    // attribute even on NOT-NULL columns (form may submit empty
-    // even when the DB is NOT NULL — empty string is a valid
-    // non-null value for CharField).
+    // `blank = true` drops the `required` HTML attribute even on
+    // NOT-NULL columns: an empty string is still a non-null value, so
+    // the form may submit empty.
     let required = if field.nullable
         || field.ty == FieldType::Bool
         || field.auto
@@ -327,9 +326,9 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         FieldType::Json => format!(
             r#"<textarea name="{name}" id="{name}"{readonly} style="font-family:monospace">{val}</textarea>"#
         ),
-        // `step="any"` on `type="number"` matches Django's
-        // DecimalField widget. Browsers handle precision via the
-        // `step` attribute when present; we omit it for now.
+        // `step="any"` on `type="number"` lets the browser accept any
+        // number of decimal places. A tighter `step` could encode the
+        // column scale; we omit it for now.
         FieldType::Decimal => format!(
             r#"<input type="number" step="any" inputmode="decimal" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
         ),
@@ -881,8 +880,8 @@ mod tests {
     }
 
     /// `#[rustango(blank)]` drops the `required` HTML attribute even
-    /// on NOT NULL columns — Django-shape "form may submit empty even
-    /// when DB is NOT NULL" semantics (#445).
+    /// on NOT NULL columns: the form may submit empty because an empty
+    /// string is not NULL.
     #[test]
     fn render_input_blank_drops_required_on_not_null_column() {
         let mut f = field("subtitle", "subtitle", FieldType::String);

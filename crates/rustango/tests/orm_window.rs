@@ -1,29 +1,26 @@
-//! Django 6.0 ORM parity — execution-based verification.
+//! ORM window functions — execution-based verification.
 //! Scenario group C (window functions) + K (distinct_on interplay).
 //!
-//! Django scenarios covered (docs.djangoproject.com/en/6.0):
-//! - `Window(Rank(), partition_by=..., order_by=...)` (+ dense_rank,
-//!   ntile, lag-with-default, first_value with a ROWS frame)
-//! - aggregates as window expressions: `Window(Sum("points"), …)` —
-//!   partitioned running total via `sum_over` (#1035 Part A)
+//! Scenarios covered:
+//! - `rank()` over a partition + ordering (+ dense_rank, ntile,
+//!   lag-with-default, first_value with a ROWS frame)
+//! - aggregates as window expressions — partitioned running total via
+//!   `sum_over` (#1035 Part A)
 //! - `.distinct("tenant_id")` first-row-per-group (PG `DISTINCT ON`
 //!   native; MySQL/SQLite via the ROW_NUMBER fallback)
-//! - top-N-per-group: Django filters on a window annotation via an
-//!   outer queryset; rustango's equivalent is `join_lateral`
+//! - top-N-per-group via `join_lateral`
 //!   (PG + MySQL 8.0.14+ only — pinned `LateralJoinNotSupported` on
 //!   SQLite)
 //!
-//! AUDIT NOTES (compile-time API absences, no runtime pin possible):
-//! - ERGONOMICS DIVERGENCE (execution-verified): Django annotates a
-//!   window onto a plain queryset; rustango requires the explicit
-//!   `.aggregate().group_by(<every projected column>)` shape —
-//!   `.values(cols)` + window-only annotate is rejected with
+//! NOTES (compile-time API shape, no runtime pin possible):
+//! - A window annotation needs the explicit
+//!   `.aggregate().group_by(<every projected column>)` shape;
+//!   `.values(cols)` + a window-only annotate is rejected with
 //!   `QueryError::ValuesRequiresAggregate`.
-//! - A windowed query can now be re-embedded as a subquery source (#1035):
-//!   `join_sub` / `left_join_sub` accept an `AggregateQuery` (what a window
-//!   compiles to) via `impl Into<DerivedSource>`, so Django's
-//!   `qs.annotate(rank=Window(...))` then `.filter(rank__lte=N)` outer-wrap
-//!   has a direct equivalent — see
+//! - A windowed query can be re-embedded as a subquery source (#1035):
+//!   `join_sub` / `left_join_sub` accept an `AggregateQuery` (what a
+//!   window compiles to) via `impl Into<DerivedSource>`, so
+//!   "rank, then keep rank <= N" outer-wraps without a lateral — see
 //!   `subquery_join_sqlite_live::window_derived_table_yields_top_n_per_group`.
 //!   `join_lateral` remains an alternative (PG/MySQL only).
 
@@ -141,7 +138,7 @@ mod scenarios {
         assert_eq!(dense, vec![1, 2, 2, 3]);
     }
 
-    /// `Lag("points", default=0)` partitioned per player — Django's
+    /// `lag("points", default 0)` partitioned per player —
     /// previous-row navigation with an out-of-range default.
     pub async fn check_lag_with_default(pool: &Pool) {
         let rows = Score::objects()
@@ -225,8 +222,8 @@ mod scenarios {
         assert_eq!(buckets, vec![1, 1, 1, 2, 2]);
     }
 
-    /// Django 6.0 `Window(Sum("points"), partition_by="player",
-    /// order_by="day")` — a partitioned running total (#1035 Part A).
+    /// `sum_over("points")` partitioned by player, ordered by day —
+    /// a partitioned running total (#1035 Part A).
     /// Tenant 1, per player by day: the cumulative points carry the
     /// default `RANGE UNBOUNDED PRECEDING .. CURRENT ROW` frame.
     pub async fn check_sum_over_running_total(pool: &Pool) {
@@ -252,7 +249,7 @@ mod scenarios {
         assert_eq!(running, vec![30, 65, 20, 35, 10]);
     }
 
-    /// Django `.distinct("tenant_id")` + ordering — best score row per
+    /// `.distinct_on("tenant_id")` + ordering — best score row per
     /// tenant. PG runs native `DISTINCT ON`; MySQL/SQLite go through
     /// the ROW_NUMBER fallback. Identical rows on all three.
     pub async fn check_distinct_on_first_row_per_tenant(pool: &Pool) {
@@ -309,8 +306,7 @@ mod scenarios {
         );
     }
 
-    /// Django top-N-per-group (`annotate(rank=Window(...))` +
-    /// outer-filter) — rustango's equivalent is a correlated LATERAL
+    /// Top-N-per-group through a correlated LATERAL
     /// join: top-2 scores for each tenant. PG + MySQL 8.0.14+ execute;
     /// SQLite pins `LateralJoinNotSupported`.
     pub async fn check_top_n_per_group_via_lateral(pool: &Pool) {
@@ -338,7 +334,7 @@ mod scenarios {
                 }
                 other => panic!(
                     "expected LateralJoinNotSupported on sqlite, got {other:?} — \
-                     if LATERAL now works there, update the Django 6.0 parity audit"
+                     if LATERAL now works there, update the dialect support matrix"
                 ),
             }
         } else {
@@ -400,7 +396,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;
@@ -522,7 +518,7 @@ mod mysql_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("MYSQL_TEST_URL unset — skipping MySQL django6 test");
+                    eprintln!("MYSQL_TEST_URL unset — skipping the MySQL arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;

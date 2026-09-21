@@ -1,11 +1,11 @@
 //! Live integration test for the serializer **input** path on a
 //! ViewSet (tri-dialect, here on SQLite):
 //!   * the serializer's `validate()` runs on create/update → 400 with
-//!     DRF-shape `{field: [msgs]}` field errors,
+//!     `{field: [msgs]}` field errors,
 //!   * `read_only` fields a client posts are ignored, not written.
 //!
 //! Pairs with `viewset_serializer_render_sqlite_live.rs` (the output
-//! half) to cover the full DRF marriage of ViewSets + serializers.
+//! half) to cover both directions of ViewSets + serializers.
 
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "serializer"))]
 
@@ -102,7 +102,7 @@ async fn create_runs_serializer_validate_and_400s_on_failure() {
         "short name should 400"
     );
     let v = json_body(resp).await;
-    let name_errs = v["name"].as_array().expect("DRF field-error shape: {v}");
+    let name_errs = v["name"].as_array().expect("field-error shape: {v}");
     assert!(
         name_errs
             .iter()
@@ -393,7 +393,7 @@ async fn doc_router() -> axum::Router {
 #[tokio::test]
 async fn source_renamed_field_accepts_serializer_name_on_create() {
     let app = doc_router().await;
-    // Client posts the SERIALIZER field name `content` (DRF shape), not `body`.
+    // Client posts the SERIALIZER field name `content`, not the model's `body`.
     let resp = app
         .clone()
         .oneshot(post(

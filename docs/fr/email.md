@@ -5,8 +5,8 @@ applications envoient des e-mails transactionnels. **Rustango** vous offre un tr
 des backends interchangeables (console pour le développement, SMTP pour la production, un
 enregistreur en mémoire pour les tests), un builder `Email` fluide avec protection contre
 l'injection d'en-têtes, et le rendu de templates. Écrivez `mailer.send(&email)` une seule fois ;
-passez de l'impression dans votre terminal à un vrai SMTP avec un changement d'une ligne — comme le
-framework d'e-mail de Django.
+passez de l'impression dans votre terminal à un vrai SMTP avec un changement d'une ligne — sans
+toucher au code appelant.
 
 [![L'e-mail dans Rustango : un builder Email (to/subject/body/html) est validé contre l'injection d'en-têtes, puis envoyé à travers le trait Mailer — ConsoleMailer en dev, SmtpMailer en prod, InMemoryMailer en test](../img/email.png)](../img/email.png)
 
@@ -111,7 +111,7 @@ introduit subrepticement dans un en-tête est la façon dont les attaquants ajou
 // Missing recipients or an empty subject → MailError::InvalidMessage
 Email::new().subject("hi").validate()?;          // Err: no recipients
 
-// A CRLF in any header field → MailError::BadHeader (Django's BadHeaderError)
+// A CRLF in any header field → MailError::BadHeader
 Email::new()
     .to("a@example.com")
     .subject("Hello\r\nBcc: victim@example.com")  // injection attempt

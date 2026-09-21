@@ -5,8 +5,8 @@ un fragment rendu, un appel d'API tierce — afin que la requête suivante l'obt
 instantanément au lieu de le recalculer. **Rustango** vous donne un unique trait
 `Cache` avec des backends interchangeables (in-memory, Redis, base de données),
 un helper de calcul-au-miss (`get_or_set`), et des helpers JSON typés. Changez de
-backend sans toucher à un seul site d'appel — comme le framework de cache de
-Django ou la façade `Cache` de Laravel.
+backend sans toucher à un seul site d'appel : les appels restent identiques,
+seule la configuration change.
 
 [![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](../img/caching.png)](../img/caching.png)
 

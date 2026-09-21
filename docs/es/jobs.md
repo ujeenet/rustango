@@ -5,8 +5,8 @@ bienvenida, redimensionar una subida, sincronizar una API de terceros. Hacerlo e
 línea hace esperar al usuario y acopla la respuesta a una llamada externa poco
 fiable. Un **trabajo en segundo plano** mueve ese trabajo a una cola: el handler
 retorna de inmediato, y un pool de workers ejecuta el trabajo momentos después,
-con **reintentos automáticos** y una ruta **dead-letter** para los fallos. Esto
-es Django-Q / Celery / las colas de Laravel, en Rust.
+con **reintentos automáticos** y una ruta **dead-letter** para los fallos — una
+cola de tareas, íntegramente en Rust.
 
 [![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](../img/jobs.png)](../img/jobs.png)
 

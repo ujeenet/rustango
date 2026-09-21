@@ -1,15 +1,9 @@
-//! Fragment caching — Django's `{% cache %}` template tag.
+//! Fragment caching: cache one rendered piece of a page.
 //!
-//! Tera doesn't support custom block-tag extensions (only filters
-//! and functions). The classic Django shape
-//! `{% cache 500 sidebar %}…{% endcache %}` therefore can't be a
-//! 1:1 port — the rendered fragment needs to be cached at handler
-//! time, not template time.
-//!
-//! This module ships [`cached_render`], the handler-side equivalent:
-//! a small wrapper that consults the [`crate::cache::Cache`] before
-//! invoking a compute closure, stores the result, and returns the
-//! cached or freshly-computed fragment on the next call.
+//! Tera has no custom block tags, only filters and functions, so a
+//! lazy `{% cache 500 sidebar %}…{% endcache %}` block is not
+//! possible. Instead, cache the fragment in your handler with
+//! [`cached_render`] and pass the string into the template.
 //!
 //! ```ignore
 //! use std::time::Duration;
@@ -30,47 +24,34 @@
 //! }
 //! ```
 //!
-//! ## Why a handler-side helper, not a Tera tag?
+//! ## Cache errors
 //!
-//! - Tera's extension API exposes filters + functions. Filters
-//!   transform a value; functions return a value. Neither can wrap
-//!   a chunk of template source that should evaluate lazily.
-//! - Django's `{% cache %}` works because Django's template engine
-//!   compiles to a tree of nodes; the block tag stashes an unevaluated
-//!   subtree it renders only on miss. Tera's parser doesn't expose
-//!   subtree handles for user code.
-//! - The handler-side shape composes naturally with axum's response
-//!   pipeline: render the cacheable fragment in your handler, pass
-//!   it to the template as a context variable, and the template
-//!   just renders the already-cached HTML.
+//! A backend failure is treated as a miss: the closure runs and the
+//! caller still gets a value. Fragment caching is only a speed-up, so
+//! a brief Redis outage should not turn into a 500. Failures are
+//! logged with `tracing::warn`.
 //!
-//! ## Behaviour on cache errors
+//! ## Security
 //!
-//! Cache backend failures (network timeout, malformed entry) are
-//! swallowed and the compute closure runs as if it were a miss.
-//! Fragment caching is an optimization — surfacing a 500 because
-//! Redis is briefly unreachable would be the wrong default. The
-//! cache failure is logged via `tracing::warn` so operators see it.
+//! The key is yours to choose. If a fragment shows per-user or
+//! per-tenant data, put the user or tenant id in the key, or one
+//! viewer's HTML will be served to another.
 //!
-//! Issue #16.
+//! [`cached_render`]: crate::cache_fragment::cached_render
 
 use std::time::Duration;
 
 use crate::cache::Cache;
 
-/// Return the cached fragment for `key`, or compute + store it.
+/// Return the cached fragment for `key`, or compute and store it.
 ///
-/// `compute` is invoked **only on miss** (or on cache error). The
-/// returned `String` is the value to render — pass it to your
-/// template as a context variable (`{{ sidebar_html | safe }}`).
+/// `compute` runs only on a miss or a cache error. Pass the result to
+/// your template as a variable, such as `{{ sidebar_html | safe }}`.
 ///
-/// `ttl` follows the `Cache::set` convention: `None` means "no
-/// expiry" (store indefinitely), `Some(dur)` is the per-key TTL.
+/// `ttl` follows `Cache::set`: `None` stores with no expiry.
 ///
-/// Cache backend failures degrade silently — the compute closure
-/// runs and its output is returned to the caller. The failure is
-/// logged via `tracing::warn` so it's visible in production
-/// observability.
+/// A cache error is logged and treated as a miss, so the caller always
+/// gets a value.
 pub async fn cached_render<F, Fut>(
     cache: &dyn Cache,
     key: &str,
@@ -103,24 +84,18 @@ where
     computed
 }
 
-/// Django-parity
-/// [`django.core.cache.utils.make_template_fragment_key(fragment_name, vary_on=None)`](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) —
-/// derive a deterministic cache key from a fragment name + variation
-/// arguments. Used by Django's `{% cache %}` template tag to put
-/// every variation under a distinct key.
+/// Build a stable cache key from a fragment name and the values the
+/// fragment varies on.
 ///
-/// Output shape: `"template.cache.{name}.{md5(vary_on parts joined)}"`.
-/// MD5 is sufficient here since this is a cache-key derivation, not
-/// a security primitive — collisions just produce a stale cache
-/// hit, not a cross-tenant data leak.
+/// Shape: `template.cache.{name}.{hash}`. Order matters, so
+/// `["a", "b"]` and `["b", "a"]` give different keys.
 ///
-/// Pair with [`cached_render`] (or any direct `Cache::get` /
-/// `Cache::set`) for programmatic fragment invalidation:
+/// Use it with [`cached_render`] to invalidate a fragment by hand:
 ///
 /// ```ignore
 /// use rustango::cache_fragment::make_template_fragment_key;
 ///
-/// // Build the key Django's `{% cache 600 sidebar user.id %}` would use.
+/// // Build the key for the per-user sidebar fragment.
 /// let key = make_template_fragment_key("sidebar", &[&user_id.to_string()]);
 /// cache.delete(&key).await?;  // invalidate when underlying data changes
 /// ```
@@ -134,11 +109,8 @@ pub fn make_template_fragment_key(fragment_name: &str, vary_on: &[&str]) -> Stri
         }
         joined.push_str(part);
     }
-    // Django uses md5 — we use SHA-256 truncated to 32 hex chars for
-    // a stronger primitive at the same key length (md5 is broken for
-    // crypto; for cache-key derivation either is fine, but rustango
-    // doesn't pull the md5 dep just for this and SHA-256 is already
-    // wired everywhere via crate::crypto).
+    // SHA-256 cut to 32 hex chars: a short key, and no extra
+    // dependency for a weaker hash.
     let digest = Sha256::digest(joined.as_bytes());
     let hex: String = digest.iter().take(16).fold(String::new(), |mut s, b| {
         use std::fmt::Write as _;
@@ -181,12 +153,9 @@ mod fragment_key_tests {
 
     #[test]
     fn key_empty_vary_on_works() {
-        // No vary_on → just the fragment name + a hash of "" — still
-        // deterministic and round-trippable.
+        // No vary_on still gives a stable key.
         let k = make_template_fragment_key("static_block", &[]);
         assert!(k.starts_with("template.cache.static_block."));
-        // Hash component is non-empty so two different fragment names
-        // collide in the hash but not in the prefix.
     }
 
     #[test]
@@ -199,8 +168,7 @@ mod fragment_key_tests {
 
     #[test]
     fn key_order_of_vary_on_matters() {
-        // Django's shape: ["a", "b"] and ["b", "a"] produce DIFFERENT
-        // keys (vary_on is an ordered tuple, not a set).
+        // vary_on is ordered, not a set.
         let a = make_template_fragment_key("x", &["a", "b"]);
         let b = make_template_fragment_key("x", &["b", "a"]);
         assert_ne!(a, b);
@@ -230,7 +198,7 @@ mod tests {
         .await;
         assert_eq!(out, "computed");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        // Stored — confirm via direct cache get.
+        // It really landed in the cache.
         let stored = cache.get("k1").await.unwrap();
         assert_eq!(stored.as_deref(), Some("computed"));
     }
@@ -266,15 +234,14 @@ mod tests {
         .await;
         assert_eq!(cache.get("k3").await.unwrap().as_deref(), Some("with-ttl"));
         tokio::time::sleep(Duration::from_millis(30)).await;
-        // InMemoryCache honours TTL on get.
+        // InMemoryCache checks the TTL on get.
         assert!(
             cache.get("k3").await.unwrap().is_none(),
             "entry should have expired"
         );
     }
 
-    // A test cache backend whose every method errors — pin the
-    // graceful-degradation behaviour.
+    // A backend where get and set always fail.
     struct ExplodingCache;
     #[async_trait]
     impl Cache for ExplodingCache {
@@ -309,8 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_set_failure_still_returns_computed_value() {
-        // Same backend — both get and set fail. The caller still
-        // gets a usable string.
+        // Both get and set fail; the caller still gets a string.
         let cache = ExplodingCache;
         let out = cached_render(&cache, "k5", Some(Duration::from_secs(60)), || async {
             "still-fresh".to_owned()

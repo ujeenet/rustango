@@ -147,10 +147,10 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
 /// - `#[serializer(write_only)]` — `Default::default()` in `from_model`; excluded from JSON output; included in `writable_fields()`
 /// - `#[serializer(source = "field_name")]` — reads from `model.field_name` instead of `model.<field_ident>`
 /// - `#[serializer(skip)]` — `Default::default()` in `from_model`; included in JSON output; excluded from `writable_fields()` (user sets manually)
-/// - `#[serializer(method = "fn_name")]` — DRF `SerializerMethodField`: calls `Self::fn_name(&model)` for the field value; excluded from `writable_fields()`
+/// - `#[serializer(method = "fn_name")]` — computed field: calls `Self::fn_name(&model)` for the field value; excluded from `writable_fields()`
 /// - `#[serializer(nested)]` / `nested(strict)` — auto-resolves nested serializer from a loaded `ForeignKey`; excluded from `writable_fields()`
 /// - `#[serializer(many = ChildSerializer)]` — collection of nested serializers; populated via macro-emitted `set_<field>(&[Child::Model])`; excluded from `writable_fields()`
-/// - `#[serializer(slug = "name")]` — DRF `SlugRelatedField`: clones `model.<source>.value()?.name`; excluded from `writable_fields()` (v0.44)
+/// - `#[serializer(slug = "name")]` — render a relation as one of its fields: clones `model.<source>.value()?.name`; excluded from `writable_fields()` (v0.44)
 /// - `#[serializer(validate = "fn_name")]` — per-field validator surfaced by `Self::validate(&self)`
 /// - `#[serializer(max_length = N)]` / `min_length` / `min` / `max` — declarative bounds checked on
 ///   write; auto-inherit from the model's `FieldSchema` (`max_length`/`min`/`max`/`choices`) when
@@ -188,7 +188,7 @@ pub fn derive_serializer(input: TokenStream) -> TokenStream {
 /// reference must point to another migration in the same directory,
 /// and the JSON must parse. A broken chain — orphan `prev`, missing
 /// predecessor, malformed file — fails at macro-expansion time with
-/// a clear `compile_error!`. *No other Django-shape Rust framework
+/// a clear `compile_error!`. *No other Rust web framework
 /// validates migration chains at compile time*: Cot's migrations are
 /// imperative Rust code (no static chain), Loco's are SeaORM
 /// up/down (same), Rwf's are raw SQL (no chain at all).
@@ -206,8 +206,8 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `Q!()` — Django-shape filter syntax compile-time-resolved against
-/// typed columns. Issue #269 / T1.7.
+/// `Q!()` — `Model.field__lookup = value` filter syntax, resolved at
+/// compile time against typed columns. Issue #269 / T1.7.
 ///
 /// Each invocation lowers to the equivalent typed-column method call:
 ///
@@ -219,7 +219,7 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
 ///
 /// Field-name typos fail the build (the macro emits `User::no_such_field`
 /// which doesn't exist) — the headline ergonomic win of this slice over
-/// Django's stringly-typed `__lookup` filters.
+/// filters keyed by a plain string.
 ///
 /// # Supported lookup suffixes
 ///
@@ -263,7 +263,7 @@ pub fn Q(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[rustango::main]` — the Django-shape runserver entrypoint. Wraps
+/// `#[rustango::main]` — the runserver entrypoint. Wraps
 /// `#[tokio::main]` and a default `tracing_subscriber` initialisation
 /// (env-filter, falling back to `info,sqlx=warn`) so user `main`
 /// functions are zero-boilerplate:
@@ -624,10 +624,10 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
     // EXPANSION time so a misshapen migration set never compiles.
     //
     // This is the v0.4 Slice 5 distinguisher: rustango's JSON
-    // migrations + a Rust proc-macro that reads them is the unique
-    // combo nothing else in the Django-shape Rust camp can match
-    // (Cot's are imperative Rust code, Loco's are SeaORM up/down,
-    // Rwf's are raw SQL — none have a static chain to validate).
+    // migrations + a Rust proc-macro that reads them is a combo no
+    // other Rust web framework matches (Cot's are imperative Rust
+    // code, Loco's are SeaORM up/down, Rwf's are raw SQL — none have
+    // a static chain to validate).
     let mut chain_names: Vec<String> = Vec::with_capacity(entries.len());
     let mut prev_refs: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
     for (stem, path) in &entries {
@@ -1350,14 +1350,13 @@ fn reverse_helper_tokens(
     }
     // Method-name resolution per FK (issue #816 + follow-up):
     //   1. Field-level `#[rustango(related_name = "...")]` on the FK
-    //      itself — wins over everything else. Django's
-    //      `ForeignKey(related_name="...")`.
+    //      itself — wins over everything else.
     //   2. Container-level `default_related_name = "..."` on the
-    //      child — Django's `class Meta: default_related_name`.
-    //      Applies to every FK on this model that didn't override.
-    //   3. Fallback: `<child_snake>_set` — Django's `<child>_set`
-    //      convention. `Post` → `post_set`, `BlogComment` →
-    //      `blog_comment_set`. Avoids English-plural edge cases.
+    //      child. Applies to every FK on this model that didn't
+    //      override.
+    //   3. Fallback: `<child_snake>_set`. `Post` → `post_set`,
+    //      `BlogComment` → `blog_comment_set`. Avoids English-plural
+    //      edge cases.
     //
     // The PG-on-executor variant keeps the resolved name; the
     // tri-dialect `_pool` variant appends `_pool` to it (matches the
@@ -1449,7 +1448,7 @@ fn reverse_helper_tokens(
 /// Emit `{name}_pool` accessor + `set_{name}_for` setter for every
 /// `#[rustango(generic_fk(name, ct_column, pk_column))]` declaration.
 ///
-/// Closes #239 + #240 — the Django-shape `comment.content_object` /
+/// Closes #239 + #240 — `comment.content_object` /
 /// `comment.content_object = post` ergonomics on top of the existing
 /// `GenericForeignKey { content_type_id, object_pk }` primitive.
 ///
@@ -2026,7 +2025,7 @@ struct CollectedFields {
     /// #1028 — `(ident, column)` for each `generated_as` field. Drives
     /// the PG/SQLite RETURNING refresh that decodes the DB-computed value
     /// back into the struct after insert (MySQL has no RETURNING → the
-    /// field stays at its placeholder, deferred, matching Django 6.0).
+    /// field stays at its placeholder until the next read).
     generated_field_idents: Vec<(syn::Ident, String)>,
     /// Inner `T` of the first `Auto<T>` field, for the MySQL
     /// `LAST_INSERT_ID()` assignment in `AssignAutoPkPool`.
@@ -2191,7 +2190,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // (so PG/SQLite `INSERT … RETURNING` includes it) and the
             // ident is recorded so the `AssignAutoPkPool` impl decodes it
             // back into the struct. MySQL has no `INSERT … RETURNING`, so
-            // it keeps the placeholder (deferred refresh, matching Django).
+            // it keeps the placeholder until the next read.
             out.returning_cols.push(quote!(#column));
             out.generated_field_idents
                 .push((ident.clone(), info.column.clone()));
@@ -2217,7 +2216,11 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // unnecessary RETURNING column on every dialect, and (b)
             // the MySQL `LAST_INSERT_ID()` path that can only fill an
             // integer PK.
-            if !info.default_uuid_v7 {
+            // `auto_now_add` / `auto_now` join `default_uuid_v7` here
+            // for the same reason: they are filled Rust-side below and
+            // bound, so the value is already in `self` and RETURNING
+            // would be a redundant column on every dialect.
+            if !info.default_uuid_v7 && !info.auto_now_add && !info.auto_now {
                 out.returning_cols.push(quote!(#column));
                 out.auto_field_idents
                     .push((ident.clone(), info.column.clone()));
@@ -2235,6 +2238,41 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                     if matches!(&self.#ident, #root::sql::Auto::Unset) {
                         self.#ident = #root::sql::Auto::Set(
                             #root::__uuid::Uuid::now_v7(),
+                        );
+                    }
+                    if let #root::sql::Auto::Set(_v) = &self.#ident {
+                        _columns.push(#column);
+                        _values.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(_v)
+                        ));
+                    }
+                });
+            } else if info.auto_now_add || info.auto_now {
+                // Rust-side write timestamp (#1464), mirroring
+                // `default_uuid_v7` above. `auto_now` has always bound
+                // `Utc::now()` on UPDATE but not on INSERT, so the
+                // first write of an `updated_at` took the DB default
+                // while every later one took the clock — the same
+                // column, filled two different ways.
+                //
+                // The default is the problem. `CREATE TABLE IF NOT
+                // EXISTS` leaves an upgraded table's
+                // `DEFAULT CURRENT_TIMESTAMP` in place, and SQLite's
+                // ALTER TABLE grammar (RENAME/ADD/DROP) has no
+                // statement that changes it — so every insert relying
+                // on that default wrote the legacy shape forever, while
+                // the migrate sweep converted the rows around it. The
+                // column went permanently mixed and `ORDER BY` inverted
+                // the admin audit log (#1616 rework review,
+                // correctness-001 / dialects-005 / security-002).
+                //
+                // Binding it here makes the stale default unreachable
+                // rather than trying to migrate it: the timestamp comes
+                // from the application, not the database.
+                out.insert_pushes.push(quote! {
+                    if matches!(&self.#ident, #root::sql::Auto::Unset) {
+                        self.#ident = #root::sql::Auto::Set(
+                            #root::__chrono::Utc::now(),
                         );
                     }
                     if let #root::sql::Auto::Set(_v) = &self.#ident {
@@ -2262,6 +2300,28 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                     ::core::clone::Clone::clone(&_row.#ident)
                 ));
             });
+            // …except the timestamp columns, which must appear in BOTH
+            // paths (#1464). The path is chosen by the *first* Auto
+            // field — in practice the PK — so a bulk insert of rows
+            // with an unset PK took the no-auto branch and dropped the
+            // timestamp column, falling back to the DB default that
+            // this change exists to stop depending on.
+            //
+            // `rows` is borrowed immutably here, so this fills per row
+            // at push time rather than writing back into the struct. An
+            // explicitly-Set value is still honoured; only `Unset`
+            // takes the clock.
+            if info.auto_now_add || info.auto_now {
+                out.bulk_columns_no_auto.push(quote!(#column));
+                out.bulk_pushes_no_auto.push(quote! {
+                    _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                        match &_row.#ident {
+                            #root::sql::Auto::Set(_v) => ::core::clone::Clone::clone(_v),
+                            #root::sql::Auto::Unset => #root::__chrono::Utc::now(),
+                        }
+                    ));
+                });
+            }
             // Uniformity check: every row's Auto state must match the
             // first row's. Mixed Set/Unset within one bulk_insert is
             // rejected here so the column list stays consistent.
@@ -2441,8 +2501,8 @@ fn model_impl_tokens(
         .collect();
     let indexes_tokens = indexes.iter().map(|idx| {
         // When no explicit `name = "..."` was given, derive a stable,
-        // collision-free name from the table + columns (Django-shape
-        // `<table>_<col>_<col>_idx`) instead of a shared literal that
+        // collision-free name from the table + columns
+        // (`<table>_<col>_<col>_idx`) instead of a shared literal that
         // would clash the moment a model declares two unnamed indexes.
         // Capped at Postgres's 63-char identifier limit.
         let derived_name = idx.name.clone().unwrap_or_else(|| {
@@ -3307,8 +3367,7 @@ fn inherent_impl_tokens(
                         ::core::result::Result::Ok(_affected)
                     }
 
-                    /// `save_pool` narrowed to a Rust-field allowlist — issue #66
-                    /// (Django `Model.save(update_fields=[...])`).
+                    /// `save_pool` narrowed to a Rust-field allowlist — issue #66.
                     /// Audit emission shrinks to the same column set so
                     /// the audit log reflects exactly what was written.
                     ///
@@ -3469,15 +3528,13 @@ fn inherent_impl_tokens(
                 }
 
                 /// Save (UPDATE) only the listed Rust-side fields,
-                /// leaving every other column untouched. Issue #66 —
-                /// Django's `Model.save(update_fields=[...])` shape.
+                /// leaving every other column untouched. Issue #66.
                 ///
                 /// `fields` are Rust-side struct field names; the macro
                 /// resolves each to its SQL column. Unknown field
                 /// names return [`#root::core::QueryError::UnknownField`]
                 /// wrapped in `ExecError::Query`. An empty list is a
-                /// no-op (returns `Ok(())` and logs a `tracing::warn!`),
-                /// matching Django's "nothing to do" semantic.
+                /// no-op (returns `Ok(())` and logs a `tracing::warn!`).
                 ///
                 /// Use this when:
                 /// * you only mutated a couple of fields on a wide row
@@ -3542,7 +3599,7 @@ fn inherent_impl_tokens(
                         // All field names valid, but they all map to
                         // non-assignable slots (PK column, computed/
                         // virtual fields, relations without an
-                        // assignment). Same no-op semantic as Django.
+                        // assignment). Same no-op as an empty list.
                         #root::__tracing::warn!(
                             target: "rustango::save_partial",
                             model = _schema.name,
@@ -3933,7 +3990,7 @@ fn inherent_impl_tokens(
 
     // `refresh_from_db_pool(&mut self, pool)` — re-SELECT the row
     // matching this instance's PK and overwrite the in-memory state
-    // with the freshly-fetched columns. Django's `refresh_from_db`.
+    // with the freshly-fetched columns.
     // Issue #825. Only emitted when the model declares a PK; non-PK
     // models can't address a specific row.
     //
@@ -4242,7 +4299,7 @@ fn inherent_impl_tokens(
         quote! {
             /// Re-SELECT this row by its primary key and overwrite
             /// every in-memory field with the freshly-fetched value.
-            /// Django's [`Model.refresh_from_db`]. Issue #825.
+            /// Issue #825.
             ///
             /// Use this when the row may have been modified by another
             /// process / connection / job since you read it — e.g. after
@@ -4257,7 +4314,6 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch`]; also `RowNotFound` when
             /// the PK no longer exists.
             ///
-            /// [`Model.refresh_from_db`]: https://docs.djangoproject.com/en/5.1/ref/models/instances/#django.db.models.Model.refresh_from_db
             /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn refresh_from_db(
                 &mut self,
@@ -4289,9 +4345,6 @@ fn inherent_impl_tokens(
             /// Atomically increment the integer column `col` by
             /// `by` for this row. Equivalent to
             /// `UPDATE <table> SET <col> = <col> + $1 WHERE <pk> = $2`.
-            /// Eloquent `Model::increment($col, $by)` / Django
-            /// `Model.objects.filter(pk=…).update(col=F('col')+$by)`
-            /// parity.
             ///
             /// **Doesn't mutate `self`** — the in-memory copy is now
             /// stale; call [`Self::refresh_from_db_pool`] /
@@ -4499,8 +4552,7 @@ fn inherent_impl_tokens(
             /// Single-column projection — `SELECT <col> FROM
             /// <table>`. Returns `Vec<U>` where each element is the
             /// decoded value of the column. Eloquent
-            /// `Model::pluck($column)` / Django
-            /// `Model.objects.values_list('col', flat=True)` parity.
+            /// `Model::pluck($column)` parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .values_list_flat(col).fetch::<U>(pool)`. `U` must
@@ -4743,7 +4795,7 @@ fn inherent_impl_tokens(
             /// `DELETE FROM <table>` on MySQL / SQLite (which don't
             /// support `TRUNCATE` inside foreign-key constraints
             /// or — for SQLite — at all). Eloquent `Model::truncate()`
-            /// / Django `Model.objects.all().delete()` parity.
+            /// parity.
             ///
             /// **Use only in tests / fixture-reset flows.** Production
             /// writes through this would silently bypass the
@@ -4773,8 +4825,7 @@ fn inherent_impl_tokens(
             /// `pks` — `DELETE FROM <table> WHERE <pk> IN (...)`.
             /// Returns the affected row count.
             ///
-            /// Eloquent `Model::destroy([1, 2, 3])` / Django
-            /// `Model.objects.filter(pk__in=[...]).delete()` parity.
+            /// Eloquent `Model::destroy([1, 2, 3])` parity.
             /// Empty `pks` is a no-op (returns 0).
             ///
             /// Accepts any iterable whose elements are
@@ -4816,8 +4867,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch every row where `<col> = <val>`. Eloquent
-            /// `Model::where($col, $val)->get()` / Django
-            /// `Model.objects.filter(col=val).all()` parity.
+            /// `Model::where($col, $val)->get()` parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .filter(col, val).fetch(pool)`. For one row,
@@ -5231,7 +5281,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch every row where `<col>` starts with `prefix`
-            /// (auto-appends `%`). Django `__startswith` / Eloquent
+            /// (auto-appends `%`). Eloquent
             /// `whereLike("col", "$prefix%")` parity.
             ///
             /// # Errors
@@ -5258,7 +5308,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch every row where `<col>` ends with `suffix`
-            /// (auto-prepends `%`). Django `__endswith` / Eloquent
+            /// (auto-prepends `%`). Eloquent
             /// `whereLike("col", "%$suffix")` parity.
             ///
             /// # Errors
@@ -5285,7 +5335,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch every row where `<col>` contains `substr`
-            /// (auto-wraps with `%`). Django `__contains` /
+            /// (auto-wraps with `%`).
             /// Eloquent `whereLike("col", "%$substr%")` parity.
             ///
             /// # Errors
@@ -5485,7 +5535,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch up to `n` rows. Eloquent `Model::take($n)->get()`
-            /// parity / Django `Model.objects.all()[:n]`. PK-ordered
+            /// parity. PK-ordered
             /// is NOT guaranteed without an explicit `order_by` —
             /// drop into `Self::query()` for that.
             ///
@@ -5797,8 +5847,7 @@ fn inherent_impl_tokens(
 
             /// Fetch the first row where `<col> = <val>`. Returns
             /// `Ok(None)` when no row matches. Eloquent
-            /// `Model::firstWhere($col, $val)` / Django
-            /// `Model.objects.filter(col=val).first()` parity.
+            /// `Model::firstWhere($col, $val)` parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .filter(col, val).first(pool)`. Use this when you
@@ -5829,8 +5878,7 @@ fn inherent_impl_tokens(
             /// Fetch the row with the largest `field` value —
             /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
             /// `Ok(None)` for an empty table. Eloquent
-            /// `Model::latest($field)->first()` / Django
-            /// `Model.objects.latest(field)` (non-throwing) parity.
+            /// `Model::latest($field)->first()` parity.
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .latest(field, pool)`.
             ///
@@ -5856,8 +5904,7 @@ fn inherent_impl_tokens(
             /// Sibling of [`Self::latest_pool`] — fetches the row
             /// with the smallest `field` value (`ORDER BY <field>
             /// ASC LIMIT 1`). Eloquent `Model::oldest($field)
-            /// ->first()` / Django `Model.objects.earliest(field)`
-            /// parity.
+            /// ->first()` parity.
             ///
             /// # Errors
             /// As [`Self::latest_pool`].
@@ -5876,9 +5923,8 @@ fn inherent_impl_tokens(
             #count_method
 
             /// `true` when the table contains at least one row.
-            /// Eloquent `Model::query()->exists()` / Django
-            /// `Model.objects.exists()` parity. Thin wrapper over
-            /// `QuerySet::<Self>::default().exists(pool)`.
+            /// Eloquent `Model::query()->exists()` parity. Thin wrapper
+            /// over `QuerySet::<Self>::default().exists(pool)`.
             ///
             /// # Errors
             /// As [`ExistsPool::exists`].
@@ -5985,8 +6031,7 @@ fn inherent_impl_tokens(
             /// Returns the matching rows in **inventory** order — NOT
             /// the order of `pks`. Empty `pks` returns an empty
             /// `Vec`. Eloquent `Model::find([1, 2, 3])` (when called
-            /// with a list) / Django `Model.objects.filter(pk__in=[...])`
-            /// parity.
+            /// with a list) parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .filter("<pk>__in", SqlValue::List([...])).fetch(pool)`.
@@ -6028,9 +6073,8 @@ fn inherent_impl_tokens(
             }
 
             /// Look up the row whose primary key equals `pk`. Returns
-            /// `Ok(None)` when no row matches; this is the
-            /// non-throwing counterpart of Django's `.get(pk=…)`
-            /// (which raises `DoesNotExist`). Eloquent `Model::find`
+            /// `Ok(None)` when no row matches, rather than erroring.
+            /// Eloquent `Model::find`
             /// shape — accepts any value `Into<SqlValue>`.
             ///
             /// One-liner shortcut for the common
@@ -6060,9 +6104,8 @@ fn inherent_impl_tokens(
 
             /// Look up the row whose primary key equals `pk`. Errors
             /// when no row matches — the throwing counterpart of
-            /// [`Self::find_pool`]. Eloquent `Model::findOrFail` /
-            /// Django `Model.objects.get(pk=…)` (which raises
-            /// `DoesNotExist`) parity.
+            /// [`Self::find_pool`]. Eloquent `Model::findOrFail`
+            /// parity.
             ///
             /// Translates the miss into
             /// [`ExecError::Driver`]\([`sqlx::Error::RowNotFound`])\)
@@ -6627,8 +6670,8 @@ fn inherent_impl_tokens(
         Some(quote! {
             /// Insert this row if its `Auto<T>` primary key is
             /// `Unset`, otherwise update the existing row matching the
-            /// PK. Mirrors Django's `save()` — caller doesn't need to
-            /// pick `insert` vs the bulk-update path manually.
+            /// PK. The caller doesn't need to pick `insert` vs the
+            /// bulk-update path manually.
             ///
             /// On the insert branch, populates the PK from `RETURNING`
             /// (same behavior as `insert`). On the update branch,
@@ -6678,8 +6721,7 @@ fn inherent_impl_tokens(
             #executor_where
             {
                 // #1029 — INSERT writes exactly one row → 1; UPDATE returns
-                // the rows-affected count (0 when the PK no longer exists,
-                // the Django 6.0 `Model.NotUpdated` signal).
+                // the rows-affected count (0 when the PK no longer exists).
                 if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
                     return self.insert_on(#executor_passes_to_data_write).await.map(|()| 1u64);
                 }
@@ -6797,8 +6839,7 @@ fn inherent_impl_tokens(
             quote! {
                 /// Soft-delete this row by setting its
                 /// `#[rustango(soft_delete)]` column to `NOW()`.
-                /// Mirrors Django's `SoftDeleteModel.delete()` shape:
-                /// the row stays in the table; query helpers can
+                /// The row stays in the table; query helpers can
                 /// filter it out by checking the column for `IS NOT
                 /// NULL`.
                 ///
@@ -7488,9 +7529,8 @@ fn inherent_impl_tokens(
             )
         };
         quote! {
-            /// Tri-dialect `bulk_create(update_conflicts=True)` — Django's
-            /// canonical "import a batch idempotently" shape. Issue #267
-            /// / T1.5.
+            /// Tri-dialect bulk insert that updates on conflict — the
+            /// "import a batch idempotently" shape. Issue #267 / T1.5.
             ///
             /// Per-row values are extracted and lowered into a
             /// [`#root::core::BulkInsertQuery`] with
@@ -7586,8 +7626,8 @@ fn inherent_impl_tokens(
         }
     };
 
-    // Ergonomic `Model::bulk_update(objs, fields)` — Django's
-    // `QuerySet.bulk_update`. The SQL/IR/executor stack
+    // Ergonomic `Model::bulk_update(objs, fields)`.
+    // The SQL/IR/executor stack
     // (`BulkUpdateQuery` + `bulk_update_pool` + the per-dialect
     // `write_bulk_update_*` writers) already existed; what was missing
     // was the per-model constructor that maps `&[Self]` + a runtime
@@ -7618,10 +7658,9 @@ fn inherent_impl_tokens(
                 });
             }
             quote! {
-                /// Django's `QuerySet.bulk_update(objs, fields)` — write
-                /// per-row-different values for the named `fields` across
-                /// every object in `objs` in a single statement, matched
-                /// by primary key.
+                /// Write per-row-different values for the named `fields`
+                /// across every object in `objs` in a single statement,
+                /// matched by primary key.
                 ///
                 /// `fields` names the **columns** to update. The primary
                 /// key identifies each row and cannot itself be updated
@@ -7927,7 +7966,7 @@ fn inherent_impl_tokens(
 
     quote! {
         impl #struct_name {
-            /// Start a new `QuerySet` over this model. Django shape.
+            /// Start a new `QuerySet` over this model.
             #[must_use]
             pub fn objects() -> #root::query::QuerySet<#struct_name> {
                 #root::query::QuerySet::new()
@@ -7939,7 +7978,6 @@ fn inherent_impl_tokens(
             ///
             /// ```ignore
             /// // Eloquent:    Post::query()->where('published', true)
-            /// // Django:      Post.objects.filter(published=True)
             /// // rustango:    Post::query().filter("published", true)
             /// //         or:  Post::objects().filter("published", true)
             /// ```
@@ -8112,14 +8150,14 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
 struct ContainerAttrs {
     table: Option<String>,
     display: Option<(String, proc_macro2::Span)>,
-    /// Explicit Django-style app label from `#[rustango(app = "blog")]`.
+    /// Explicit app label from `#[rustango(app = "blog")]`.
     /// Recorded on the emitted `ModelSchema.app_label`. When unset,
     /// `ModelEntry::resolved_app_label()` infers from `module_path!()`
     /// at runtime — this attribute is the override for cases where
     /// the inference is wrong (e.g. a model that conceptually belongs
     /// to one app but is physically in another module).
     app: Option<String>,
-    /// Django ModelAdmin-shape per-model knobs from
+    /// Per-model admin knobs from
     /// `#[rustango(admin(...))]`. `None` when the user didn't write the
     /// attribute — the emitted `ModelSchema.admin` becomes `None` and
     /// admin code falls back to `AdminConfig::DEFAULT`.
@@ -8195,75 +8233,68 @@ struct ContainerAttrs {
     /// snapshot skips this model (its underlying SQL view is operator-
     /// managed, not rustango-managed).
     is_view: bool,
-    /// Django-shape `Meta.managed` from `#[rustango(managed = false)]`.
+    /// `#[rustango(managed = false)]` — who owns the table.
     /// Issue #321. Defaults to `true`; when explicitly set to `false`,
     /// the migration snapshot skips this model so `makemigrations` /
     /// `migrate` never emit `CREATE TABLE` / `ALTER TABLE` / `DROP
     /// TABLE` against it (operator-managed schema).
     managed: bool,
-    /// Django-shape `Meta.base_manager_name` from
+    /// Name of the model's base manager, from
     /// `#[rustango(base_manager_name = "...")]`. Threaded into
     /// `ModelSchema::base_manager_name`. Declarative-only today.
     base_manager_name: Option<String>,
-    /// Django-shape `Meta.order_with_respect_to = "parent_fk"` from
     /// `#[rustango(order_with_respect_to = "...")]`. Names the FK
     /// field this model's instances are ordered relative to.
     /// Declarative-only today; threaded onto
     /// `ModelSchema::order_with_respect_to`.
     order_with_respect_to: Option<String>,
-    /// Django-shape `Meta.proxy = True` from `#[rustango(proxy)]` /
-    /// `#[rustango(proxy = true)]`. Marks the model as a proxy that
+    /// `#[rustango(proxy)]` / `#[rustango(proxy = true)]`.
+    /// Marks the model as a proxy that
     /// shares its DB table with another struct. Threaded into
     /// `ModelSchema::proxy` so future codegen can skip table-owning
     /// behavior for proxies.
     proxy: bool,
-    /// Django-shape `Meta.required_db_features` from
     /// `#[rustango(required_db_features = "json_extract,window_functions")]`.
     /// Each comma-separated capability token surfaces on
     /// `ModelSchema::required_db_features` so `manage check --deploy`
     /// can warn when the active dialect lacks one.
     required_db_features: Vec<String>,
-    /// Django-shape `Meta.required_db_vendor` from
     /// `#[rustango(required_db_vendor = "postgres|mysql|sqlite")]`.
     /// Normalized to the dialect name `manage check --deploy`
     /// compares against `Settings.database.backend`. Aliases
     /// (`postgresql` / `pg` / `mariadb` / `sqlite3`) accepted but
     /// stored under the canonical name.
     required_db_vendor: Option<String>,
-    /// Django-shape `Meta.default_related_name` from
     /// `#[rustango(default_related_name = "...")]`. Threaded into
     /// `ModelSchema::default_related_name`. Reverse-relation accessor
     /// name to use when an FK / M2M field doesn't override it.
     /// Today rustango doesn't auto-emit reverse managers; the
     /// metadata is the foundation for that work.
     default_related_name: Option<String>,
-    /// Django-shape `Meta.db_table_comment` (4.2+) from
     /// `#[rustango(db_table_comment = "...")]`. Threaded into
     /// `ModelSchema::db_table_comment` so the DDL writer attaches the
     /// comment to the underlying table (PG: `COMMENT ON TABLE`, MySQL:
     /// inline `COMMENT='...'`, SQLite: no-op).
     db_table_comment: Option<String>,
-    /// Django-shape `Meta.get_latest_by` from
     /// `#[rustango(get_latest_by = "created_at")]` /
     /// `#[rustango(get_latest_by = "-priority")]`. Parsed into
     /// `(column, descending)` where `descending = true` when the
     /// attribute value starts with `-`. Threaded into
     /// `ModelSchema::get_latest_by`.
     get_latest_by: Option<(String, bool)>,
-    /// Django-shape `Meta.permissions = [(codename, name), ...]`
+    /// Extra `(codename, label)` permissions
     /// from `#[rustango(extra_permissions = "approve:Can approve,
     /// archive:Can archive")]`. Comma-separated `codename:label`
     /// pairs. Threaded into `ModelSchema::extra_permissions`.
     extra_permissions: Vec<(String, String)>,
-    /// Django-shape `Meta.default_permissions` — which CRUD codenames
-    /// (`"add"` / `"change"` / `"delete"` / `"view"`) the framework
-    /// auto-creates. Empty `Vec` (default) means **all four** — matches
-    /// Django's behavior when the operator omits the option. Set via
+    /// Which CRUD codenames (`"add"` / `"change"` / `"delete"` /
+    /// `"view"`) the framework
+    /// auto-creates. Empty `Vec` (default) means **all four**. Set via
     /// `#[rustango(default_permissions = "view,change")]` to opt out.
     /// Validated at parse time; unknown actions fail with a span-pointing
     /// error.
     default_permissions: Vec<String>,
-    /// `#[rustango(verbose_name = "blog post")]` — Django-shape
+    /// `#[rustango(verbose_name = "blog post")]` — the
     /// human-readable singular label for the model. Threaded into
     /// `ModelSchema::verbose_name` so admin section headers /
     /// breadcrumbs / "Add X" buttons can prefer the friendly caption
@@ -8467,9 +8498,8 @@ struct IndexAttr {
     /// T1.3. Set via `#[rustango(unique_when(columns = "...",
     /// condition = "...", name = "..."))]`. `None` for plain indexes.
     where_clause: Option<String>,
-    /// Django `Index(fields=..., include=[...])` covering-index
-    /// columns (PG 11+ `INCLUDE (...)` clause). Empty `Vec` (the
-    /// default) means "no covering columns".
+    /// Covering-index columns (PG 11+ `INCLUDE (...)` clause).
+    /// Empty `Vec` (the default) means "no covering columns".
     include: Vec<String>,
 }
 
@@ -8570,7 +8600,7 @@ struct GenericM2MAttr {
 struct AuditAttrs {
     /// Field names to capture in the `changes` JSONB. Validated
     /// against declared scalar fields at compile time. Empty means
-    /// "track every scalar field" — Django's audit-everything default.
+    /// "track every scalar field".
     track: Option<(Vec<String>, proc_macro2::Span)>,
 }
 
@@ -8593,48 +8623,48 @@ struct AdminAttrs {
     /// sections, comma-separated fields per section, optional
     /// `Title:` prefix. Empty title omits the `<legend>`.
     fieldsets: Option<(Vec<(String, Vec<String>)>, proc_macro2::Span)>,
-    /// `admin(list_display_links = "title")` — Django-shape. Names
+    /// `admin(list_display_links = "title")`. Names
     /// from `list_display` whose cells should link to detail/edit.
     /// Issue #350.
     list_display_links: Option<(Vec<String>, proc_macro2::Span)>,
-    /// `admin(search_help_text = "...")` — Django-shape. Short
+    /// `admin(search_help_text = "...")`. Short
     /// caption rendered beside the admin list view's search box.
     /// Issue #353.
     search_help_text: Option<String>,
-    /// `admin(actions_on_top = false)` — Django-shape. Hides the
+    /// `admin(actions_on_top = false)`. Hides the
     /// action-bar above the table. Default `true`. Issue #354.
     actions_on_top: Option<bool>,
-    /// `admin(actions_on_bottom = true)` — Django-shape. Renders an
+    /// `admin(actions_on_bottom = true)`. Renders an
     /// additional action-bar below the table. Default `false`.
     /// Issue #354.
     actions_on_bottom: Option<bool>,
-    /// `admin(date_hierarchy = "created_at")` — Django-shape. Name of
+    /// `admin(date_hierarchy = "created_at")`. Name of
     /// a date / datetime field whose values render as a clickable
     /// year / month / day drill-down strip above the list table.
     /// Empty / unset disables the strip. Issue #355.
     date_hierarchy: Option<String>,
-    /// `admin(prepopulated_fields = "slug:title")` — Django-shape.
+    /// `admin(prepopulated_fields = "slug:title")`.
     /// Each entry is `target:source[+source2]`; multiple entries are
     /// comma-separated, e.g. `"slug:title,short_code:section+title"`.
     /// The admin change-form emits JS that slugifies the source values
     /// into the target field on every keystroke. Issue #356.
     prepopulated_fields: Option<(Vec<(String, Vec<String>)>, proc_macro2::Span)>,
-    /// `admin(raw_id_fields = "parent, owner")` — Django-shape. Names
+    /// `admin(raw_id_fields = "parent, owner")`. Names
     /// of FK fields whose change-form widget renders a lookup link
     /// next to the input. Issue #357.
     raw_id_fields: Option<(Vec<String>, proc_macro2::Span)>,
-    /// `admin(autocomplete_fields = "author_id")` — Django-shape.
+    /// `admin(autocomplete_fields = "author_id")`.
     /// Names of FK fields whose change-form widget renders an
     /// Ajax-driven typeahead populated from a `__autocomplete`
     /// endpoint on the target model. Issue #358.
     autocomplete_fields: Option<(Vec<String>, proc_macro2::Span)>,
     /// `admin(list_select_related = "all" | "none" | "author, …")`
-    /// — Django-shape. Tunes the admin list view's FK auto-JOIN
+    /// — tunes the admin list view's FK auto-JOIN
     /// policy. Default `"all"` matches rustango's join-everything
     /// behavior; `"none"` opts out; CSV restricts. Issue #352.
     list_select_related: Option<String>,
-    /// `admin(formfield_overrides = "field:widget, field2:widget2")` —
-    /// Django-shape. Each entry is `field_name:widget_name`; multiple
+    /// `admin(formfield_overrides = "field:widget, field2:widget2")`.
+    /// Each entry is `field_name:widget_name`; multiple
     /// entries comma-separated. Empty / unset → no overrides. The
     /// list of widget names supported is documented on
     /// `AdminConfig::formfield_overrides`. Issue #359.
@@ -8857,9 +8887,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
             }
             if meta.path.is_ident("manager") {
                 // `#[rustango(manager(ext = "FooManagerExt"))]`. Issue #271 / T1.9.
-                // Stretch `from_queryset = "..."` (Django Manager.from_queryset
-                // shape) is left as a follow-up — the issue's primary
-                // acceptance is the `ext = ...` trait emission.
+                // Stretch `from_queryset = "..."` is left as a
+                // follow-up — the issue's primary acceptance is the
+                // `ext = ...` trait emission.
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("ext") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -9404,7 +9434,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("managed") {
-                // Django-shape Meta.managed. Issue #321.
+                // Who owns the table. Issue #321.
                 //   #[rustango(managed = false)]  — operator-managed table
                 //   #[rustango(managed = true)]   — rustango-managed (the default)
                 // Bare-flag form is intentionally not accepted: writing
@@ -9427,14 +9457,14 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("db_table_comment") {
-                // Django-shape `Meta.db_table_comment` (4.2+) — free-form
-                // table-level comment attached to the DB catalog.
+                // Free-form table-level comment attached to the DB
+                // catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
                 return Ok(());
             }
             if meta.path.is_ident("proxy") {
-                // Django-shape `Meta.proxy = True` — declarative flag
+                // Declarative flag
                 // marking the struct as a proxy of another model that
                 // shares its DB table. Stored on `ModelSchema::proxy`
                 // so future codegen can skip `CreateTable` emission
@@ -9451,10 +9481,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("order_with_respect_to") {
-                // Django-shape `Meta.order_with_respect_to = "parent_fk"` —
-                // the model's instances are intrinsically ordered
-                // relative to their parent FK. Django auto-generates
-                // a `_order` integer column + admin reordering UI.
+                // `order_with_respect_to = "parent_fk"` — the model's
+                // instances are intrinsically ordered relative to
+                // their parent FK.
                 //
                 // rustango stores the FK field name on
                 // `ModelSchema::order_with_respect_to`. Declarative-only
@@ -9491,9 +9520,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("required_db_features") {
-                // Django-shape `Meta.required_db_features` — capability
-                // tokens the model needs (e.g. `"json_extract"`,
-                // `"window_functions"`, `"row_security"`). Comma-separated.
+                // Capability tokens the model needs (e.g.
+                // `"json_extract"`, `"window_functions"`,
+                // `"row_security"`). Comma-separated.
                 // `manage check --deploy` walks every model and warns
                 // when the active backend doesn't advertise the
                 // capability.
@@ -9524,15 +9553,13 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("required_db_vendor") {
-                // Django-shape `Meta.required_db_vendor` — the model
-                // is only meant to run against the named DB backend.
-                // `manage check --deploy` flags a mismatch so
+                // The model is only meant to run against the named DB
+                // backend. `manage check --deploy` flags a mismatch so
                 // ops catches "I forgot to switch DATABASE_URL" at
                 // deploy time rather than runtime.
                 //
-                // Django spells it as a free-form string; rustango
-                // restricts to the three backends it ships dialects
-                // for so the check verb can compare reliably.
+                // Restricted to the three backends rustango ships
+                // dialects for so the check verb can compare reliably.
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value().to_ascii_lowercase();
                 match raw.as_str() {
@@ -9560,12 +9587,11 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("base_manager_name") {
-                // Django-shape `Meta.base_manager_name` — name of the
-                // Manager subclass that `<instance>.<relation>_set`
+                // Name of the manager that `<instance>.<relation>_set`
                 // uses when resolving reverse-relation managers.
                 // Distinct from `default_manager_name` (what
-                // `Model.objects` returns at the class level).
-                // Stored on `ModelSchema::base_manager_name`.
+                // `Self::objects()` returns). Stored on
+                // `ModelSchema::base_manager_name`.
                 //
                 // Validated as a Rust identifier so it stays safe to
                 // re-emit as code in future reverse-manager codegen.
@@ -9595,17 +9621,15 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("default_related_name") {
-                // Django-shape `Meta.default_related_name` — the name
-                // reverse-relation accessors use when callers don't
-                // override `related_name=...` on the FK / M2M field.
-                // Stored on `ModelSchema::default_related_name` so
-                // future reverse-manager codegen / DRF schema emit /
+                // The name reverse-relation accessors use when callers
+                // don't override `related_name = "..."` on the FK / M2M
+                // field. Stored on `ModelSchema::default_related_name`
+                // so future reverse-manager codegen / schema emit /
                 // admin templates can pick the right accessor name
                 // (today rustango doesn't auto-emit reverse managers;
                 // the metadata is the foundation for that work).
                 //
-                // Django requires snake_case + no `+` suffix; we
-                // enforce non-empty + ASCII identifier-shape so the
+                // Enforced non-empty + ASCII identifier-shape so the
                 // string is safe to use as a Rust ident later.
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value();
@@ -9633,7 +9657,6 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("extra_permissions") {
-                // Django-shape `Meta.permissions = [(codename, name), ...]`.
                 // Comma-separated `codename:label` pairs.
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value();
@@ -9662,11 +9685,8 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("default_permissions") {
-                // Django-shape `Meta.default_permissions = ('view',
-                // 'change')`. Comma-separated subset of the CRUD
-                // action set. Empty means all four (the framework
-                // default — matches Django when the option is
-                // omitted).
+                // Comma-separated subset of the CRUD action set.
+                // Empty means all four (the framework default).
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value();
                 let mut actions: Vec<String> = Vec::new();
@@ -9703,8 +9723,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("get_latest_by") {
-                // Django-shape `Meta.get_latest_by`. The `-` prefix
-                // selects descending order (Django muscle memory).
+                // The `-` prefix selects descending order.
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value();
                 let trimmed = raw.trim();
@@ -9725,7 +9744,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("unique_together") {
-                // Django-shape composite UNIQUE index. Two syntaxes:
+                // Composite UNIQUE index. Two syntaxes:
                 //
                 //   #[rustango(unique_together = "org_id, user_id")]                       — auto-derived name
                 //   #[rustango(unique_together(columns = "org_id, user_id", name = "x"))]  — explicit name
@@ -9745,7 +9764,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("index_together") {
-                // Django-shape composite (non-unique) index. Two syntaxes
+                // Composite (non-unique) index. Two syntaxes
                 // mirroring `unique_together`.
                 //
                 //   #[rustango(index_together = "created_at, status")]
@@ -9762,8 +9781,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("unique_when") {
-                // Django 4.0+ `UniqueConstraint(condition=Q(...))` —
-                // partial unique index. Issue #265 / T1.3.
+                // Partial unique index. Issue #265 / T1.3.
                 //
                 //   #[rustango(unique_when(
                 //       columns   = "email",
@@ -9797,8 +9815,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         return Ok(());
                     }
                     if inner.path.is_ident("include") {
-                        // Django `UniqueConstraint(include=[...])` — PG
-                        // 11+ covering-index columns. Non-key columns
+                        // PG 11+ covering-index columns. Non-key columns
                         // travel with the index leaf for index-only
                         // scans. Dropped on MySQL/SQLite by the writer.
                         let s: LitStr = inner.value()?.parse()?;
@@ -9831,8 +9848,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("index_when") {
-                // Django `Index(fields=..., condition=Q(...))` parity —
-                // non-unique partial index. Sibling of `unique_when`
+                // Non-unique partial index. Sibling of `unique_when`
                 // (which emits `CREATE UNIQUE INDEX ... WHERE ...`).
                 //
                 //   #[rustango(index_when(
@@ -9875,10 +9891,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         return Ok(());
                     }
                     if inner.path.is_ident("include") {
-                        // Django `Index(include=[...])` — PG 11+
-                        // covering-index columns; non-key columns
-                        // travel with the index leaf. Dropped on
-                        // MySQL/SQLite.
+                        // PG 11+ covering-index columns; non-key
+                        // columns travel with the index leaf. Dropped
+                        // on MySQL/SQLite.
                         let s: LitStr = inner.value()?.parse()?;
                         include = split_field_list(&s.value());
                         return Ok(());
@@ -9917,8 +9932,8 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // literal, then optional `unique` / `name = "..."` /
                 // `method = "..."` flags (a leading literal can't compose
                 // under `parse_nested_meta`, so the paren body is parsed by
-                // hand). `unique_together` / `index_together` remain the
-                // Django-shape aliases for the same feature.
+                // hand). `unique_together` / `index_together` remain
+                // aliases for the same feature.
                 let cols_lit: LitStr;
                 let mut unique = false;
                 let mut name: Option<String> = None;
@@ -10429,7 +10444,7 @@ fn parse_prepopulated_list(raw: &str) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// Parse Django-shape `formfield_overrides` — `"field:widget,field2:widget2"`
+/// Parse `formfield_overrides` — `"field:widget,field2:widget2"`
 /// into `(field_name, widget_name)` pairs. Empty entries, missing `:`,
 /// and empty halves drop silently — the macro layer only enforces shape,
 /// not field-name vs. widget-name validity (those checks happen at
@@ -10450,7 +10465,7 @@ fn parse_formfield_overrides(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Parse Django-shape ordering — `"name"` is ASC, `"-name"` is DESC.
+/// Parse an ordering list — `"name"` is ASC, `"-name"` is DESC.
 /// Returns `(field_name, desc)` pairs in the same order as the input.
 fn parse_ordering_list(raw: &str) -> Vec<(String, bool)> {
     raw.split(',')
@@ -10472,15 +10487,16 @@ struct FieldAttrs {
     o2o: Option<String>,
     on: Option<String>,
     /// `#[rustango(on_delete = "cascade" | "restrict" | "set_null" |
-    /// "set_default" | "no_action")]` — Django-shape
-    /// `ForeignKey(on_delete=…)`. Only meaningful when `fk` / `o2o` is
+    /// "set_default" | "no_action")]` — what happens to this row when
+    /// the row it points at is deleted.
+    /// Only meaningful when `fk` / `o2o` is
     /// also set; the macro errors at compile time if applied to a
     /// non-FK field. Threaded into `FieldSchema::fk_on_delete`. The
     /// DDL writer renders `ON DELETE <action>` after the constraint
     /// clause when this is `Some`; `None` falls back to the database
     /// default (NO ACTION on every backend rustango supports).
     on_delete: Option<String>,
-    /// `#[rustango(related_name = "...")]` — Django-shape per-FK
+    /// `#[rustango(related_name = "...")]` — per-FK
     /// reverse-accessor override. When set, the derive emits
     /// `Parent::<related_name>[_pool]` instead of the container-level
     /// `default_related_name` or the `<child_snake>_set[_pool]`
@@ -10550,12 +10566,12 @@ struct FieldAttrs {
     /// path, so the database always recomputes the value from
     /// `EXPR`. Backlog item #35.
     generated_as: Option<String>,
-    /// `#[rustango(help_text = "…")]` — Django-shape help text
+    /// `#[rustango(help_text = "…")]` — help text
     /// rendered below the admin form's input. Threaded into
     /// `FieldSchema::help_text` so admin / serializer / OpenAPI
     /// layers can read it.
     help_text: Option<String>,
-    /// `#[rustango(choices = "value:Label, value:Label")]` — Django-shape
+    /// `#[rustango(choices = "value:Label, value:Label")]` — the
     /// enumerated allowed values. Threaded into `FieldSchema::choices`
     /// as a `&'static [(&'static str, &'static str)]` slice. When
     /// present, the admin form renders a `<select>` instead of `<input>`
@@ -10563,35 +10579,35 @@ struct FieldAttrs {
     /// for `FieldType::String`; the macro errors at compile time if
     /// applied to a non-string field.
     choices: Option<Vec<(String, String)>>,
-    /// `#[rustango(db_comment = "…")]` — Django-shape DB-side column
+    /// `#[rustango(db_comment = "…")]` — DB-side column
     /// comment. Threaded into `FieldSchema::db_comment`. MySQL inlines
     /// the comment in CREATE TABLE; Postgres emits a separate
     /// `COMMENT ON COLUMN` statement after the table is created;
     /// SQLite silently drops the value (no native column comments).
     db_comment: Option<String>,
-    /// `#[rustango(verbose_name = "…")]` — Django-shape human-readable
+    /// `#[rustango(verbose_name = "…")]` — human-readable
     /// label for the field. Threaded into `FieldSchema::verbose_name`
     /// so admin column headers, form labels, and other display
     /// surfaces can prefer the friendly caption over the Rust
     /// identifier. `None` means renderers fall back to the field name.
     verbose_name: Option<String>,
-    /// `#[rustango(editable = false)]` — Django-shape opt-out from
+    /// `#[rustango(editable = false)]` — opt out of
     /// auto-generated form rendering. Defaults to `true` so existing
     /// fields keep their current admin / form behavior; setting
     /// `false` removes the field from the admin change-form entirely
     /// (the value is still visible on detail / list views, just not
     /// editable).
     editable: bool,
-    /// `#[rustango(blank)]` / `#[rustango(blank = true)]` — Django-shape
+    /// `#[rustango(blank)]` / `#[rustango(blank = true)]` —
     /// "form may submit empty even when DB is NOT NULL". Threaded into
     /// `FieldSchema::blank`. Defaults to `false`.
     blank: bool,
     /// `#[rustango(citext)]` / `#[rustango(citext = true)]` (#344) —
-    /// Django-shape `CITextField`. Threaded into
+    /// case-insensitive text column. Threaded into
     /// `FieldSchema::case_insensitive`. Only meaningful for `String`
     /// fields; the macro errors at derive time if applied elsewhere.
     case_insensitive: bool,
-    /// `#[rustango(validators = "email,url")]` — Django-shape
+    /// `#[rustango(validators = "email,url")]` — the
     /// model-level validator chain. Comma-separated names that
     /// dispatch to the `validators::*` family in `validate_value`.
     /// Empty by default; fires on every typed INSERT/UPDATE.
@@ -10832,7 +10848,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("citext") {
-                // Django-parity CITextField (#344). Two forms:
+                // Case-insensitive text column (#344). Two forms:
                 //   #[rustango(citext)]          — flag form, true
                 //   #[rustango(citext = true)]   — explicit
                 //   #[rustango(citext = false)]  — explicit opt-out
@@ -11823,7 +11839,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
             ));
         }
         // `Array<String>` / `Array<i32>` / `Array<i64>` → PG `text[]` /
-        // `integer[]` / `bigint[]` (Django `ArrayField`, #341).
+        // `integer[]` / `bigint[]` (#341).
         "Array" => {
             let (inner, _) = generic_pair(ty, &last.arguments, "Array")?;
             let elem = match inner {
@@ -11853,8 +11869,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         }
         // `Range<i32>` / `Range<i64>` / `Range<Decimal>` /
         // `Range<NaiveDate>` / `Range<DateTime<…>>` → PG `int4range` /
-        // `int8range` / `numrange` / `daterange` / `tstzrange` (Django
-        // `RangeField` family, #343).
+        // `int8range` / `numrange` / `daterange` / `tstzrange` (#343).
         "Range" => {
             let (inner, _) = generic_pair(ty, &last.arguments, "Range")?;
             let elem = match inner {
@@ -11898,7 +11913,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
                 fk_inner: None,
             });
         }
-        // `HStore` → PG `hstore` (Django `HStoreField`, #342). No generic
+        // `HStore` → PG `hstore` (#342). No generic
         // parameter — always a string→string map.
         "HStore" => {
             return Ok(DetectedType {
@@ -12016,7 +12031,7 @@ struct FormFieldAttrs {
     max: Option<i64>,
     min_length: Option<u32>,
     max_length: Option<u32>,
-    /// `#[form(clean = "fn_name")]` — Django-shape `clean_<field>` hook.
+    /// `#[form(clean = "fn_name")]` — per-field clean hook.
     /// The named static method on the form struct is called after the
     /// field's typed parse + length/range checks; it gets the parsed
     /// value by reference and returns `Result<<FieldType>, String>`.
@@ -12026,10 +12041,10 @@ struct FormFieldAttrs {
 }
 
 /// Container-level `#[form(...)]` attributes. Currently only the
-/// Django-shape cross-field `validate` hook (issue #373).
+/// cross-field `validate` hook (issue #373).
 #[derive(Default)]
 struct FormContainerAttrs {
-    /// `#[form(validate = "fn_name")]` — Django-shape `clean()` hook.
+    /// `#[form(validate = "fn_name")]` — whole-form clean hook.
     /// After every per-field parse succeeds, the named method on the
     /// form struct is called with `&self` and may return
     /// `Result<(), FormErrors>`. Errors merge into the field error
@@ -12102,8 +12117,8 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // #372 — append the per-field `clean_<field>` call right after
         // the parse block when the attribute is set. The clean fn
         // takes &T and returns Result<T, String>; on Err we attach
-        // the message to the field error list without aborting
-        // (matches Django's "collect all field errors" shape).
+        // the message to the field error list without aborting, so
+        // the caller sees every field error at once.
         let clean_block = if let Some(clean_fn) = &attrs.clean {
             quote! {
                 if __errors.fields().get(#name_lit).is_none() {
@@ -12128,7 +12143,7 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // #373 — after every per-field parse + clean succeeds, call the
     // cross-field validator if declared. Errors merge into the
     // outgoing FormErrors via the existing `FormErrors::merge` helper
-    // (same primitive the DRF serializer cross-field hook uses).
+    // (same primitive the serializer cross-field hook uses).
     let cross_field_call = if let Some(validate_fn) = &container.validate {
         quote! {
             if __errors.is_empty() {
@@ -12753,7 +12768,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
 
 struct SerializerContainerAttrs {
     model: syn::Path,
-    /// `#[serializer(validate = "fn_name")]` on the struct — DRF-shape
+    /// `#[serializer(validate = "fn_name")]` on the struct — the
     /// cross-field validation hook (#436). The named inherent method
     /// must take `&self` and return
     /// `Result<(), rustango::forms::FormErrors>`. The macro-emitted
@@ -12769,8 +12784,8 @@ struct SerializerFieldAttrs {
     write_only: bool,
     source: Option<String>,
     skip: bool,
-    /// `#[serializer(method = "fn_name")]` — DRF SerializerMethodField
-    /// analog. The macro emits `from_model` initializer that calls
+    /// `#[serializer(method = "fn_name")]` — computed field. The macro
+    /// emits a `from_model` initializer that calls
     /// `Self::fn_name(&model)` and stores the return value.
     method: Option<String>,
     /// `#[serializer(validate = "fn_name")]` — per-field validator
@@ -12802,7 +12817,8 @@ struct SerializerFieldAttrs {
     /// possible (the M2M / one-to-many accessor is async); callers
     /// fetch the children + call the setter post-from_model.
     many: Option<syn::Type>,
-    /// `#[serializer(slug = "name")]` — DRF `SlugRelatedField` analog.
+    /// `#[serializer(slug = "name")]` — render a relation as one of
+    /// its fields.
     /// Source field on the model must be a `ForeignKey<T>`; the
     /// macro emits `from_model` glue that walks
     /// `model.<source>.value()?.<slug>` and clones it. Field type on
@@ -12812,17 +12828,17 @@ struct SerializerFieldAttrs {
     /// `nested`. Source defaults to the field name; override with
     /// `source = "..."`. v0.44.
     slug: Option<String>,
-    /// `#[serializer(max_length = N)]` — DRF `MaxLengthValidator`. Caps
+    /// `#[serializer(max_length = N)]` — caps
     /// the character count of a string field on write. Overrides the
     /// model's `max_length`; when absent the model value is inherited.
     max_length: Option<u64>,
-    /// `#[serializer(min_length = N)]` — DRF `MinLengthValidator`.
+    /// `#[serializer(min_length = N)]` — minimum character count.
     /// Serializer-only (the model has no `min_length` column).
     min_length: Option<u64>,
-    /// `#[serializer(min = N)]` — DRF `MinValueValidator`. Inclusive
+    /// `#[serializer(min = N)]` — inclusive
     /// integer lower bound; overrides the model's `min` when given.
     min: Option<i64>,
-    /// `#[serializer(max = N)]` — DRF `MaxValueValidator`. Inclusive
+    /// `#[serializer(max = N)]` — inclusive
     /// integer upper bound; overrides the model's `max` when given.
     max: Option<i64>,
 }
@@ -12841,8 +12857,8 @@ fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<Serializ
                 return Ok(());
             }
             if meta.path.is_ident("validate") {
-                // #436 — container-level `validate = "fn_name"` for the
-                // DRF cross-field-validation shape. Field-level
+                // #436 — container-level `validate = "fn_name"` for
+                // cross-field validation. Field-level
                 // `#[serializer(validate = "...")]` on a field is
                 // parsed separately in `parse_serializer_field_attrs`.
                 let s: LitStr = meta.value()?.parse()?;
@@ -13118,7 +13134,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             && fi.attrs.slug.is_none()
     };
 
-    // Declarative field constraints (DRF `validators=[...]`): one block
+    // Declarative field constraints: one block
     // per writable field, run inside `validate()`. Each resolves its
     // bounds as the serializer attr when given (`#[serializer(max_length
     // = N)]`), else the model's `FieldSchema` (`max_length` / `min` /
@@ -13174,7 +13190,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .collect();
     let has_constraints = !constraint_blocks.is_empty();
 
-    // Per-field validators (DRF-shape `validators=[...]`). Emit a
+    // Per-field validators. Emit a
     // `validate(&self)` method that runs each user-defined validator
     // and aggregates errors into `FormErrors`.
     let validator_calls: Vec<_> = fields_info
@@ -13191,7 +13207,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             })
         })
         .collect();
-    // #436 — DRF cross-field `validate(self)` shape. If the
+    // #436 — cross-field `validate(&self)`. If the
     // container declared `#[serializer(validate = "fn_name")]`,
     // the macro-generated `validate(&self)` runs every per-field
     // validator first, then calls the user's cross-field method,

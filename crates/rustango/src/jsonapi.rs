@@ -25,7 +25,7 @@
 //! }
 //! ```
 //!
-//! Most apps wire it as a thin handler-side helper:
+//! Call it from a handler:
 //!
 //! ```ignore
 //! use rustango::jsonapi::{to_resource, to_collection};
@@ -44,15 +44,13 @@
 //! }
 //! ```
 //!
-//! ## What this does NOT cover (yet)
+//! ## Not covered here
 //!
-//! - `relationships` — the spec lets you express FKs/M2Ms inline;
-//!   for now, embed via `attributes` or use `included` (helpers
-//!   below).
-//! - Sparse fieldsets, sorting, filtering — those live in your
-//!   ViewSet / handler, not this adapter.
-//! - Errors envelope — use [`crate::problem_details`] for RFC 7807
-//!   (clean, widely-supported alternative).
+//! - `relationships`. Put foreign keys in `attributes`, or use
+//!   [`with_included`](crate::jsonapi::with_included).
+//! - Sparse fieldsets, sorting and filtering. Those belong in your
+//!   ViewSet or handler.
+//! - The errors envelope. Use [`crate::problem_details`] (RFC 7807).
 
 use serde_json::{json, Map, Value};
 
@@ -67,8 +65,8 @@ pub fn to_resource(resource_type: &str, id: &str, attributes: Value) -> Value {
     })
 }
 
-/// Wrap a collection of resources. `docs` is `[(id, attributes), ...]`.
-/// Adds `meta.count` for free so clients can size pagers.
+/// Wrap a list of resources. `docs` is `[(id, attributes), …]`. Also
+/// sets `meta.count` so a client can size its pager.
 #[must_use]
 pub fn to_collection(resource_type: &str, docs: &[(String, Value)]) -> Value {
     let arr: Vec<Value> = docs
@@ -82,8 +80,8 @@ pub fn to_collection(resource_type: &str, docs: &[(String, Value)]) -> Value {
     })
 }
 
-/// Produce the inner `{"type", "id", "attributes"}` object — useful
-/// when you're hand-building a response with `included`/`meta`/etc.
+/// Build the inner `{"type", "id", "attributes"}` object, for when
+/// you assemble a response with `included` or `meta` yourself.
 #[must_use]
 pub fn resource_object(resource_type: &str, id: &str, attributes: Value) -> Value {
     let attrs = strip_reserved(attributes);
@@ -94,10 +92,9 @@ pub fn resource_object(resource_type: &str, id: &str, attributes: Value) -> Valu
     })
 }
 
-/// Add `included` to an existing resource doc. The new doc is merged
-/// into `doc["included"]` (creating it if absent). Per the spec,
-/// `included` is an array of full resource objects — pass them
-/// already-shaped via [`resource_object`].
+/// Append to `doc["included"]`, creating the array if needed. The
+/// spec wants full resource objects there, so build each one with
+/// [`resource_object`].
 #[must_use]
 pub fn with_included(mut doc: Value, included: Vec<Value>) -> Value {
     let Some(obj) = doc.as_object_mut() else {
@@ -112,8 +109,7 @@ pub fn with_included(mut doc: Value, included: Vec<Value>) -> Value {
     doc
 }
 
-/// Add an arbitrary `meta` field merged into the existing meta object.
-/// Useful for pagination cursors, totals, ETags, etc.
+/// Merge fields into `doc["meta"]`, for cursors, totals and the like.
 #[must_use]
 pub fn with_meta(mut doc: Value, meta: Value) -> Value {
     let Some(obj) = doc.as_object_mut() else {
@@ -131,9 +127,8 @@ pub fn with_meta(mut doc: Value, meta: Value) -> Value {
     doc
 }
 
-/// Strip `id` and `type` keys from a flat attributes object — the
-/// spec says these MUST live at the top level of the resource
-/// object, not inside `attributes`. Anything else passes through.
+/// Drop `id` and `type` from the attributes. The spec keeps them at
+/// the top of the resource object. Everything else stays.
 fn strip_reserved(value: Value) -> Value {
     let Value::Object(map) = value else {
         return value;
@@ -160,7 +155,7 @@ mod tests {
         assert_eq!(doc["data"]["id"], "42");
         assert_eq!(doc["data"]["attributes"]["title"], "Hello");
         assert_eq!(doc["data"]["attributes"]["body"], "world");
-        // `id` is stripped from attributes per spec.
+        // The spec keeps `id` out of attributes.
         assert!(doc["data"]["attributes"].get("id").is_none());
     }
 
@@ -207,7 +202,7 @@ mod tests {
         assert_eq!(inner["type"], "posts");
         assert_eq!(inner["id"], "1");
         assert_eq!(inner["attributes"]["title"], "X");
-        // No "data" wrapper — the inner shape is for hand-building.
+        // No "data" wrapper: this is the inner shape.
         assert!(inner.get("data").is_none());
     }
 
@@ -231,7 +226,7 @@ mod tests {
     #[test]
     fn with_meta_merges_into_existing_meta_object() {
         let doc = to_collection("posts", &[("1".into(), json!({}))]);
-        // collection already has meta.count = 1
+        // The collection already has meta.count = 1.
         let with = with_meta(doc, json!({"page": 1, "page_size": 20}));
         assert_eq!(with["meta"]["count"], 1);
         assert_eq!(with["meta"]["page"], 1);
@@ -247,10 +242,9 @@ mod tests {
 
     #[test]
     fn non_object_attributes_pass_through_unchanged() {
-        // String / number / null aren't object-shaped, so the
-        // strip-reserved pass shouldn't touch them. (Spec actually
-        // requires attributes to be an object, but we don't enforce —
-        // the JSON:API client will reject if the shape is wrong.)
+        // A string, number or null is not an object, so nothing is
+        // stripped. The spec wants an object here, but we do not
+        // enforce it; the client will complain.
         let doc = to_resource("counts", "1", json!(42));
         assert_eq!(doc["data"]["attributes"], 42);
     }

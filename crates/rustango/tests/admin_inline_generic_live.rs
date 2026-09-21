@@ -139,7 +139,7 @@ async fn parent_detail_renders_generic_inline_panel_with_child_rows() {
         id: Auto::Unset,
         content_type_id: 0,
         object_pk: 0,
-        name: "django-parity".into(),
+        name: "tutorial".into(),
     };
     tag_b
         .set_content_object_for::<Post>(&p, post_pk)
@@ -189,7 +189,7 @@ async fn parent_detail_renders_generic_inline_panel_with_child_rows() {
     );
     // Both this-post tags visible.
     assert!(html.contains("rust"), "first tag missing: {html}");
-    assert!(html.contains("django-parity"), "second tag missing: {html}");
+    assert!(html.contains("tutorial"), "second tag missing: {html}");
     // The other-post tag must NOT appear — the WHERE pinned both
     // content_type_id and object_pk to this post.
     assert!(

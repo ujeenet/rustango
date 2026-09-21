@@ -1,8 +1,8 @@
 # L'admin
 
 **Rustango** génère une interface d'administration complète à partir de vos
-modèles — la même idée que l'admin de Django ou un panneau Laravel
-Nova/Filament, mais avec **zéro boilerplate par modèle**. Ajoutez
+modèles — un back-office prêt à l'emploi pour parcourir et modifier vos
+données, mais avec **zéro boilerplate par modèle**. Ajoutez
 `#[derive(Model)]`, montez l'admin une fois, et chaque modèle obtient une vue
 liste avec recherche, filtres, tri, pagination et actions groupées ; un
 formulaire de création/édition regroupé en fieldsets ; l'édition inline des
@@ -249,8 +249,9 @@ formulaire au lieu de saisies.
 
 ## Inlines
 
-Les inlines affichent les lignes d'un modèle enfant sur la page du parent
-(inlines Django). Enregistrez-en un au niveau du module :
+Les inlines affichent les lignes d'un modèle enfant directement sur la page du
+parent, si bien que les deux se modifient dans un seul formulaire. Enregistrez-en
+un au niveau du module :
 
 ```rust
 rustango::register_admin_inline!(
@@ -384,8 +385,8 @@ rustango::register_admin_list_filter!(
 
 ## Vues personnalisées, querysets et permissions
 
-Trois macros d'enregistrement supplémentaires reflètent les hooks
-`ModelAdmin` de Django :
+Trois macros d'enregistrement supplémentaires se greffent sur le comportement
+d'un modèle enregistré :
 
 - **Pages d'admin personnalisées** —
   `register_admin_view!("posts", "duplicate", Method::POST, "Duplicate", handler)`
@@ -539,8 +540,8 @@ montent à `/<table>/<suffix>`.
 
 ## La référence de modèle
 
-Chaque admin embarque une référence de modèle en direct (l'admindocs de
-Django) à `<prefix>/__docs` — un catalogue en lecture seule de chaque modèle
+Chaque admin embarque une référence de modèle en direct à
+`<prefix>/__docs` — un catalogue en lecture seule de chaque modèle
 enregistré avec ses champs, colonnes, types, drapeaux (PK, unique, …) et
 relations. Rien à configurer ; elle est générée à partir de vos modèles, donc
 elle ne dérive jamais du schéma.

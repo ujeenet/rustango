@@ -1,6 +1,6 @@
-//! PG `ArrayField` operators (`@>`, `<@`, `&&`) — issue #30 ops slice.
+//! PG array-column operators (`@>`, `<@`, `&&`) — issue #30 ops slice.
 //!
-//! Ships the Op variants + Column trait helpers + Django parser
+//! Ships the Op variants + Column trait helpers + string-lookup parser
 //! routes. A `FieldType::Array(elem)` declaration shape follows in a
 //! separate slice — for v1 the column is declared via raw migration
 //! SQL (`tags TEXT[]`) and referenced by the typed-IR `Column::array_*`
@@ -121,7 +121,7 @@ fn sqlite_rejects_array_overlap_with_clean_error() {
     ));
 }
 
-// ---------- Django-shape parser routes ----------
+// ---------- string-lookup parser routes ----------
 
 #[test]
 fn parser_routes_array_contains_lookup() {

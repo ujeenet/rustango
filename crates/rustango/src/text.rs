@@ -17,7 +17,7 @@
 /// ```
 /// use rustango::text::slugify;
 /// assert_eq!(slugify("Hello, World!"), "hello-world");
-/// assert_eq!(slugify("Rust  &  Django"), "rust-django");
+/// assert_eq!(slugify("Rust  &  Web"), "rust-web");
 /// assert_eq!(slugify("  --leading--  "), "leading");
 /// ```
 #[must_use]
@@ -265,8 +265,7 @@ pub fn truncate(s: &str, max_chars: usize, suffix: &str) -> String {
     out
 }
 
-/// [`django.template.defaultfilters.truncatechars`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#truncatechars) —
-/// truncate to AT MOST `count` characters total **including** the
+/// Truncate to AT MOST `count` characters total **including** the
 /// ellipsis (`…`).
 ///
 /// Distinct from [`truncate`] (which appends the suffix BEYOND
@@ -300,13 +299,11 @@ pub fn truncatechars(s: &str, count: usize) -> String {
     format!("{truncated}…")
 }
 
-/// Django-parity `Truncator(s).words(num, truncate=…)` — truncate
-/// to the first `max_words` whitespace-separated tokens, appending
-/// `suffix` when truncation actually fired.
+/// Truncate to the first `max_words` whitespace-separated tokens,
+/// appending `suffix` when truncation actually fired.
 ///
-/// Whitespace runs collapse to a single space in the output (Django
-/// keeps single spaces between preserved words — leading and
-/// trailing whitespace is trimmed in the truncated form).
+/// Whitespace runs collapse to a single space in the output, and
+/// leading and trailing whitespace is trimmed.
 ///
 /// ```
 /// use rustango::text::truncate_words;
@@ -331,10 +328,9 @@ pub fn truncate_words(s: &str, max_words: usize, suffix: &str) -> String {
     if truncated {
         out.push_str(suffix);
     }
-    // No truncation + original had no internal whitespace collapse?
-    // We still return the joined-by-single-space form to match
-    // Django shape. Callers wanting verbatim text shouldn't pass it
-    // through truncate_words at all.
+    // Even with no truncation this returns the joined-by-single-space
+    // form. Callers wanting verbatim text should not pass it through
+    // truncate_words at all.
     out
 }
 
@@ -528,8 +524,7 @@ pub fn initials(s: &str, limit: Option<usize>) -> String {
     out
 }
 
-/// [`django.template.defaultfilters.yesno`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#yesno) —
-/// three-way string mapper for an optional boolean.
+/// Three-way string mapper for an optional boolean.
 ///
 /// `choices` is a comma-separated string with 2 or 3 tokens:
 /// * `"yes,no"` — picks `yes` for `Some(true)`, `no` for
@@ -547,7 +542,7 @@ pub fn initials(s: &str, limit: Option<usize>) -> String {
 /// assert_eq!(yesno(None,        "yes,no,maybe"), "maybe");
 /// // No third token → None falls back to the "no" slot.
 /// assert_eq!(yesno(None,        "yes,no"),       "no");
-/// // Empty choices → Django default.
+/// // Empty choices → the built-in default.
 /// assert_eq!(yesno(Some(true),  ""),             "yes");
 /// ```
 #[must_use]
@@ -569,8 +564,7 @@ pub fn yesno(value: Option<bool>, choices: &str) -> String {
     pick.to_owned()
 }
 
-/// [`django.utils.html.avoid_wrapping(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.avoid_wrapping) —
-/// replace every ASCII space (`" "`) with a non-breaking space
+/// Replace every ASCII space (`" "`) with a non-breaking space
 /// (`"\u{00A0}"`) so the phrase stays on one line when rendered.
 ///
 /// Use case: short phrases that read worse when broken across a
@@ -617,13 +611,11 @@ pub fn nbsp_to_space(s: &str) -> String {
     s.replace('\u{00A0}', " ")
 }
 
-/// [`django.template.defaultfilters.cut`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#cut) —
-/// remove every occurrence of `needle` from `s`.
+/// Remove every occurrence of `needle` from `s`.
 ///
 /// Equivalent to `s.replace(needle, "")` with one extra guarantee:
-/// an empty `needle` returns `s` unchanged (avoids the empty-
-/// substring-matches-everywhere footgun that Django's filter
-/// short-circuits the same way).
+/// an empty `needle` returns `s` unchanged, instead of matching
+/// everywhere.
 ///
 /// ```
 /// use rustango::text::cut;
@@ -661,8 +653,7 @@ pub fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// [`django.template.defaultfilters.wordcount`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#wordcount) —
-/// count whitespace-separated words in a string.
+/// Count whitespace-separated words in a string.
 ///
 /// Empty string returns `0`. Multiple consecutive whitespace chars
 /// collapse to a single separator (matches `str::split_whitespace`).
@@ -678,8 +669,7 @@ pub fn wordcount(s: &str) -> usize {
     s.split_whitespace().count()
 }
 
-/// [`django.template.defaultfilters.linenumbers`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#linenumbers) —
-/// prepend each line with a 1-based line number, right-aligned to
+/// Prepend each line with a 1-based line number, right-aligned to
 /// the width of the largest line number.
 ///
 /// ```
@@ -701,8 +691,7 @@ pub fn linenumbers(s: &str) -> String {
     out
 }
 
-/// [`django.template.defaultfilters.ljust`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#ljust) —
-/// left-justify (pad right with spaces) to width `n`. Values
+/// Left-justify (pad right with spaces) to width `n`. Values
 /// already at or beyond `n` characters return as-is.
 ///
 /// ```
@@ -722,8 +711,7 @@ pub fn ljust(s: &str, n: usize) -> String {
     out
 }
 
-/// [`django.template.defaultfilters.rjust`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#rjust) —
-/// right-justify (pad left with spaces) to width `n`.
+/// Right-justify (pad left with spaces) to width `n`.
 ///
 /// ```
 /// use rustango::text::rjust;
@@ -741,10 +729,8 @@ pub fn rjust(s: &str, n: usize) -> String {
     out
 }
 
-/// [`django.template.defaultfilters.center`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#center) —
-/// center `s` in a field of width `n`. When padding doesn't split
-/// evenly the extra space goes on the right (matches Python's
-/// `str.center`).
+/// Center `s` in a field of width `n`. When padding doesn't split
+/// evenly the extra space goes on the right.
 ///
 /// ```
 /// use rustango::text::center;
@@ -767,18 +753,16 @@ pub fn center(s: &str, n: usize) -> String {
     out
 }
 
-/// [`django.template.defaultfilters.get_digit`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#get-digit) —
-/// extract the `idx`-th digit (1-indexed, from the **right**) of an
+/// Extract the `idx`-th digit (1-indexed, from the **right**) of an
 /// integer.
 ///
 /// * `get_digit(1234, 1)` → `"4"` (rightmost)
 /// * `get_digit(1234, 4)` → `"1"`
 /// * `get_digit(1234, 5)` → `"0"` (past leftmost digit)
-/// * `idx < 1` returns the full integer string (Django's
-///   passthrough-on-invalid-index shape).
+/// * `idx < 1` returns the full integer string, unchanged.
 ///
-/// Negative input uses the absolute value's digits — matches
-/// Django (`get_digit(-1234, 1) == "4"`, not `"-"`).
+/// Negative input uses the absolute value's digits, so
+/// `get_digit(-1234, 1) == "4"`, not `"-"`.
 ///
 /// ```
 /// use rustango::text::get_digit;
@@ -802,19 +786,17 @@ pub fn get_digit(n: i64, idx: i64) -> String {
     pick.to_string()
 }
 
-/// [`django.template.defaultfilters.pluralize`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#pluralize) —
-/// pick the singular or plural suffix for a count.
+/// Pick the singular or plural suffix for a count.
 ///
-/// `suffix_arg` syntax matches Django exactly:
+/// `suffix_arg` syntax:
 ///
-/// * `""` / `"s"` — empty singular / `"s"` plural (default Django
-///   shape when no arg is passed).
+/// * `""` / `"s"` — empty singular / `"s"` plural, the default.
 /// * `"<one-token>"` — empty singular / `<one-token>` plural.
 /// * `"<singular>,<plural>"` — pick whichever matches count.
 /// * 3+ comma-separated tokens: extras silently ignored.
 ///
 /// `count == 1` → singular; anything else (incl. `0` and negative)
-/// → plural. Matches Django + English-language convention.
+/// → plural, as English expects.
 ///
 /// ```
 /// use rustango::text::pluralize;
@@ -910,8 +892,8 @@ pub fn truncate_middle(s: &str, max_chars: usize, placeholder: &str) -> String {
 /// ```
 ///
 /// `count == 1` returns `singular`; every other count (zero,
-/// negative, `>1`) returns `plural` — same branching as Django's
-/// `pluralize` filter.
+/// negative, `>1`) returns `plural`, the same branching as
+/// [`pluralize`].
 ///
 /// Use this when the singular and plural differ irregularly
 /// (`mouse`/`mice`, `child`/`children`), or when call-site
@@ -934,8 +916,7 @@ pub fn pluralize_word<'a>(count: i64, singular: &'a str, plural: &'a str) -> &'a
     }
 }
 
-/// Django-parity `Truncator(s).chars(num, html=True, truncate=…)` —
-/// truncate to `max_chars` visible characters while preserving HTML
+/// Truncate to `max_chars` visible characters while preserving HTML
 /// tag structure. Open tags at the truncation point are closed in
 /// reverse order so the output is well-formed HTML.
 ///
@@ -947,8 +928,8 @@ pub fn pluralize_word<'a>(count: i64, singular: &'a str, plural: &'a str) -> &'a
 /// onto the close-stack.
 ///
 /// `suffix` is appended ONLY when truncation actually fires, and
-/// the close-tags are written AFTER the suffix to match Django's
-/// shape — so `truncate_html_chars("<p>hello world</p>", 5, "…")`
+/// the close-tags are written AFTER the suffix, so the suffix stays
+/// inside the element — `truncate_html_chars("<p>hello world</p>", 5, "…")`
 /// returns `"<p>hello…</p>"`, not `"<p>hello</p>…"`.
 ///
 /// This is **not** a sanitizer — it assumes well-formed input HTML.
@@ -975,7 +956,6 @@ pub fn truncate_html_chars(html: &str, max_chars: usize, suffix: &str) -> String
     truncate_html_visible_count(html, max_chars, suffix, /* by_words */ false)
 }
 
-/// Django-parity `Truncator(s).words(num, html=True, truncate=…)` —
 /// HTML-tag-aware version of [`truncate_words`]. Counts whitespace-
 /// separated words OUTSIDE tag brackets; preserves tag structure
 /// by closing open tags after the suffix when truncation fires.
@@ -1078,9 +1058,9 @@ fn truncate_html_visible_count(html: &str, limit: usize, suffix: &str, by_words:
         }
     }
     if by_words {
-        // Trim trailing whitespace from `out` before appending suffix —
-        // word counting consumed the boundary whitespace, but Django's
-        // shape doesn't keep it before the truncation marker.
+        // Trim trailing whitespace from `out` before appending suffix:
+        // word counting consumed the boundary whitespace, and it should
+        // not reappear before the truncation marker.
         while out.ends_with(|c: char| c.is_whitespace()) {
             out.pop();
         }
@@ -1181,8 +1161,7 @@ fn update_open_tags(stack: &mut Vec<String>, tag: &str) {
     stack.push(name);
 }
 
-/// Django-parity `django.utils.text.normalize_newlines(text)` —
-/// convert all `\r\n` / `\r` sequences to plain `\n`. Useful when
+/// Convert all `\r\n` / `\r` sequences to plain `\n`. Useful when
 /// processing `<textarea>` form input, where browsers historically
 /// submit CRLF line endings regardless of the originating platform.
 ///
@@ -1198,9 +1177,8 @@ pub fn normalize_newlines(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Django-parity `django.utils.text.capfirst(x)` — capitalize the
-/// first character of `s`, leaving the rest untouched. Distinct
-/// from `str::to_title_case` / Python `.title()` which would
+/// Capitalize the first character of `s`, leaving the rest
+/// untouched. Distinct from a title-case helper, which would
 /// capitalize every word.
 ///
 /// Empty input returns the empty string; the first non-ASCII
@@ -1223,23 +1201,19 @@ pub fn capfirst(s: &str) -> String {
     }
 }
 
-/// Django-parity `django.utils.text.get_text_list(list_, last_word='or')` —
-/// join `items` into a comma-separated grammatical list with
+/// Join `items` into a comma-separated grammatical list with
 /// `last_word` (typically `"or"` or `"and"`) as the conjunction
 /// before the final element.
 ///
-/// Examples (matching Django output exactly):
-///
 /// * `[]` → `""`
 /// * `["a"]` → `"a"`
-/// * `["a", "b"]` → `"a or b"` (no Oxford comma on two items)
+/// * `["a", "b"]` → `"a or b"`
 /// * `["a", "b", "c"]` → `"a, b or c"`
 /// * `["a", "b", "c", "d"]` → `"a, b, c or d"`
 ///
-/// Note Django's `get_text_list` does NOT emit a serial-comma
-/// before the conjunction; the existing Tera filter `oxford_join`
-/// does (that's the Oxford-comma style). Use this when the Django
-/// shape is the goal; use `oxford_join` for serial-comma style.
+/// This does NOT emit a serial comma before the conjunction. The
+/// Tera filter `oxford_join` does; use that one for Oxford-comma
+/// style.
 ///
 /// ```
 /// use rustango::text::get_text_list;
@@ -1265,14 +1239,14 @@ pub fn get_text_list<S: AsRef<str>>(items: &[S], last_word: &str) -> String {
     }
 }
 
-/// Django-parity `django.utils.text.smart_split(text)` — split
-/// `text` on whitespace, honoring double-quoted substrings as
-/// single tokens. Used by Django's admin search query parser.
+/// Split `text` on whitespace, honoring double-quoted substrings as
+/// single tokens. This is what a search box needs to treat
+/// `"exact phrase"` as one term.
 ///
-/// Quotes themselves are KEPT in the output token (Django shape) —
-/// strip them at the call site if you want bare strings. Backslash
-/// escapes are preserved verbatim (`\"` inside a quoted string is
-/// kept literal — Django does not unescape).
+/// Quotes themselves are KEPT in the output token — strip them at
+/// the call site if you want bare strings. Backslash escapes are
+/// preserved verbatim: `\"` inside a quoted string stays literal,
+/// nothing is unescaped.
 ///
 /// ```
 /// use rustango::text::smart_split;
@@ -1306,9 +1280,7 @@ pub fn smart_split(text: &str) -> Vec<String> {
     out
 }
 
-/// Django-parity
-/// [`django.utils.html.json_script(value, element_id)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.json_script) —
-/// embed a JSON-serialized `value` into a
+/// Embed a JSON-serialized `value` into a
 /// `<script type="application/json" id="..."></script>` tag for
 /// safe pass-through to client-side JavaScript.
 ///
@@ -1340,8 +1312,7 @@ pub fn smart_split(text: &str) -> Vec<String> {
 /// The `element_id` is HTML-attribute-escaped before insertion.
 /// `</script>` inside a string can't break out because `<` →
 /// `&lt;`-equivalent.
-/// [`django.utils.html.escapejs(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.escapejs) —
-/// escape a string for safe embedding inside a JavaScript string
+/// Escape a string for safe embedding inside a JavaScript string
 /// literal in HTML.
 ///
 /// Use this when you want to inject a server-side value directly
@@ -1349,8 +1320,7 @@ pub fn smart_split(text: &str) -> Vec<String> {
 /// [`json_script`] for typed JSON payloads — it sets the right
 /// MIME type and is read back via `JSON.parse(document.getElementById(…).textContent)`,
 /// which is the modern best practice. `escapejs` is the older
-/// inline-string form Django still ships for callers that need
-/// it.
+/// inline-string form, for callers that still need it.
 ///
 /// The escape set defangs both HTML-parser and JS-syntax breakage:
 ///
@@ -1358,7 +1328,7 @@ pub fn smart_split(text: &str) -> Vec<String> {
 ///   close the literal early.
 /// * Angle brackets / `&` (`<`, `>`, `&`) that would break out of
 ///   the surrounding `<script>` tag.
-/// * Selected ASCII punctuation Django defends defensively
+/// * Selected ASCII punctuation escaped defensively
 ///   (`=`, `-`, `;`) so a payload like `</script><script>alert(1)`
 ///   cannot construct an event-handler attribute.
 /// * Line terminators U+2028 / U+2029 — JS treats these as line
@@ -1399,7 +1369,7 @@ pub fn json_script<T: serde::Serialize>(
     element_id: &str,
 ) -> Result<String, serde_json::Error> {
     let raw = serde_json::to_string(value)?;
-    // Django's exact escape set: `<` `>` `&` plus U+2028 / U+2029.
+    // Escape set: `<` `>` `&` plus U+2028 / U+2029.
     // We escape via `\uXXXX` so the JSON stays valid for client-
     // side `JSON.parse`.
     let escaped = raw
@@ -1668,15 +1638,13 @@ pub fn indent(text: &str, prefix: &str) -> String {
     out
 }
 
-/// Django-parity
-/// [`django.utils.text.wrap(text, width)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.wrap) —
-/// word-wrap `text` to a column width of `width` characters,
+/// Word-wrap `text` to a column width of `width` characters,
 /// inserting newlines between words to avoid exceeding the width.
 ///
 /// Existing `\n` line breaks are preserved — each pre-existing
 /// line wraps independently, so paragraph breaks aren't re-flowed.
 /// Words longer than `width` are NOT hyphenated; they end up on a
-/// line of their own (same as Django's `textwrap`-backed behavior).
+/// line of their own.
 /// `width = 0` returns the input unchanged.
 ///
 /// rustango ships the same wrap algorithm as the Tera `|wordwrap`
@@ -1822,11 +1790,8 @@ fn wrap_one_line(line: &str, width: usize) -> String {
     out
 }
 
-/// Django-parity
-/// [`django.utils.html.strip_spaces_between_tags(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_spaces_between_tags) —
-/// remove whitespace runs sitting BETWEEN HTML tags (i.e. between
-/// a `>` and the next `<`). Used by Django's `{% spaceless %}`
-/// template tag to compact rendered HTML.
+/// Remove whitespace runs sitting BETWEEN HTML tags (i.e. between
+/// a `>` and the next `<`), to compact rendered HTML.
 ///
 /// Whitespace INSIDE text content is preserved — only the gap
 /// between two adjacent tags is stripped.
@@ -1868,18 +1833,15 @@ pub fn strip_spaces_between_tags(value: &str) -> String {
     out
 }
 
-/// Django-parity
-/// [`django.utils.text.get_valid_filename(name)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.get_valid_filename) —
-/// strip a user-supplied filename to something safe to drop on
+/// Strip a user-supplied filename to something safe to drop on
 /// disk: trim whitespace, replace internal whitespace + `/` and
 /// `\` with underscores, drop any char that isn't alphanumeric,
 /// dot, hyphen, or underscore.
 ///
-/// Returns `Err(InvalidFilename)` if the result would be empty
-/// or one of the special dot-names (`.` / `..`) — those are the
-/// Django-parity rejected cases (Django raises
-/// `SuspiciousFileOperation`; rustango surfaces as `Err` for
-/// `?`-style propagation).
+/// Returns `Err(InvalidFilename)` if the result would be empty or
+/// one of the special dot-names (`.` / `..`). Those are rejected
+/// rather than silently repaired, so a caller cannot write to a
+/// path it did not mean.
 ///
 /// ```ignore
 /// use rustango::text::get_valid_filename;
@@ -1900,8 +1862,8 @@ pub fn get_valid_filename(name: &str) -> Result<String, InvalidFilename> {
         } else if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
             out.push(c);
         }
-        // Everything else (control chars, punctuation, non-ASCII)
-        // dropped — Django shape strips them silently.
+        // Everything else (control chars, punctuation, non-ASCII) is
+        // dropped silently.
     }
     if out.is_empty() || out == "." || out == ".." {
         return Err(InvalidFilename);
@@ -1910,9 +1872,8 @@ pub fn get_valid_filename(name: &str) -> Result<String, InvalidFilename> {
 }
 
 /// Error returned by [`get_valid_filename`] when the input would
-/// reduce to an empty / `.` / `..` filename — those are
-/// path-traversal-prone shapes Django flags as
-/// `SuspiciousFileOperation`.
+/// reduce to an empty / `.` / `..` filename — the
+/// path-traversal-prone shapes.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("invalid filename: empty or special dot-name after sanitization")]
 pub struct InvalidFilename;
@@ -2044,11 +2005,9 @@ pub fn kebab_to_snake(value: &str) -> String {
     value.replace('-', "_")
 }
 
-/// Django-parity
-/// [`django.utils.text.camel_case_to_spaces(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.camel_case_to_spaces) —
-/// convert a CamelCase identifier into lowercase space-separated
-/// words. Used by Django internally to derive `verbose_name` from
-/// model class names (`BlogPost` → `"blog post"`).
+/// Convert a CamelCase identifier into lowercase space-separated
+/// words. This is how a model's display name is derived from its
+/// type name (`BlogPost` → `"blog post"`).
 ///
 /// The algorithm inserts a space before any uppercase letter that
 /// is preceded by a lowercase letter or digit (the CamelCase
@@ -2065,9 +2024,7 @@ pub fn kebab_to_snake(value: &str) -> String {
 /// ```
 #[must_use]
 pub fn camel_case_to_spaces(value: &str) -> String {
-    // Django's algorithm:
-    //   re.sub(r'(((?<=[a-z])[A-Z])|([A-Z](?=[a-z])))', r' \1', value).lower()
-    // → split before an uppercase letter that is EITHER:
+    // Split before an uppercase letter that is EITHER:
     //   (a) preceded by a lowercase/digit boundary, OR
     //   (b) followed by a lowercase letter (acronym→word transition).
     let chars: Vec<char> = value.chars().collect();
@@ -2088,7 +2045,7 @@ pub fn camel_case_to_spaces(value: &str) -> String {
             out.push(lo);
         }
     }
-    // Collapse whitespace runs (Django shape — internal spaces fold too).
+    // Collapse whitespace runs — internal spaces fold too.
     let mut collapsed = String::with_capacity(out.len());
     let mut prev_space = false;
     for c in out.chars() {
@@ -2105,18 +2062,15 @@ pub fn camel_case_to_spaces(value: &str) -> String {
     collapsed.trim().to_owned()
 }
 
-/// Django-parity
-/// [`django.utils.text.unescape_string_literal(s)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.unescape_string_literal) —
-/// strip surrounding quotes (`'` or `"`) from a quoted string
-/// literal and un-escape backslash sequences inside. Used by
-/// Django's template parser to handle quoted-string literals in
-/// custom template tags.
+/// Strip surrounding quotes (`'` or `"`) from a quoted string
+/// literal and un-escape backslash sequences inside. Useful when
+/// parsing quoted arguments out of custom template tags.
 ///
 /// `s` must be at least 2 chars long and start AND end with the
 /// same quote character (either both `'` or both `"`). Backslash
 /// escapes inside: `\\` → `\`, `\"` → `"`, `\'` → `'`. Other
-/// escape sequences (`\n`, `\t`, etc.) pass through verbatim per
-/// Django's shape (Django doesn't expand them either).
+/// escape sequences (`\n`, `\t`, etc.) pass through verbatim and
+/// are not expanded.
 ///
 /// # Errors
 /// Returns `None` when the input isn't a properly-quoted literal
@@ -2160,13 +2114,11 @@ pub fn unescape_string_literal(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// Django-parity
-/// [`django.utils.html.linebreaks(value, autoescape=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaks) —
-/// convert plain-text line breaks into HTML paragraphs and `<br>`
-/// tags. The canonical "render textarea-input as HTML preserving
-/// paragraph structure" transformation.
+/// Convert plain-text line breaks into HTML paragraphs and `<br>`
+/// tags — the "render textarea input as HTML, keeping paragraph
+/// structure" transformation.
 ///
-/// Algorithm (Django shape):
+/// Algorithm:
 /// * Normalize CRLF / CR → LF (matches [`normalize_newlines`])
 /// * Split on blank-line runs (`\n\n+`) into paragraphs
 /// * Within a paragraph, single `\n` becomes `<br>`
@@ -2175,7 +2127,7 @@ pub fn unescape_string_literal(s: &str) -> Option<String> {
 /// When `autoescape = true`, the input is `html_escape`d before
 /// the transformation so user-supplied HTML can't escape the
 /// containing element. When `false`, the input passes through
-/// verbatim (Django shape — caller has already validated).
+/// verbatim, so the caller must have validated it already.
 ///
 /// ```ignore
 /// use rustango::text::linebreaks;
@@ -2225,9 +2177,7 @@ pub fn linebreaks(value: &str, autoescape: bool) -> String {
         .join("\n\n")
 }
 
-/// Django-parity
-/// [`django.utils.html.linebreaks_br(value, autoescape=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaksbr) —
-/// convert ALL `\n` line breaks into `<br>` tags, without
+/// Convert ALL `\n` line breaks into `<br>` tags, without
 /// paragraph wrapping. Use when you want preserved newlines inside
 /// an already-`<p>`-wrapped element (e.g. a single-paragraph
 /// description field).
@@ -2252,9 +2202,7 @@ pub fn linebreaks_br(value: &str, autoescape: bool) -> String {
     safe.replace('\n', "<br>")
 }
 
-/// Django-parity
-/// [`django.utils.html.format_html(format_string, *args, **kwargs)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.format_html) —
-/// build an HTML string from a positional `{}`-style template,
+/// Build an HTML string from a positional `{}`-style template,
 /// HTML-escaping every interpolated argument. This is the safe
 /// way to construct HTML strings inline without manually calling
 /// `html_escape` on every variable.
@@ -2262,10 +2210,9 @@ pub fn linebreaks_br(value: &str, autoescape: bool) -> String {
 /// `{}` placeholders are filled positionally from `args` in order
 /// of appearance. Each value is HTML-escaped via [`html_escape`]
 /// before substitution. Literal `{` / `}` characters in the
-/// template can be escaped as `{{` / `}}` (Rust format-string
-/// convention, NOT Django's — Django uses `str.format`'s shape but
-/// rustango uses a simple positional placeholder for the same
-/// safety property without dragging in str-format syntax).
+/// template can be escaped as `{{` / `}}`, the Rust format-string
+/// convention. Placeholders are positional only — no named or
+/// indexed forms — which keeps the escaping guarantee simple.
 ///
 /// ```ignore
 /// use rustango::text::format_html;
@@ -2328,9 +2275,7 @@ pub fn format_html(template: &str, args: &[&str]) -> String {
     out
 }
 
-/// Django-parity
-/// [`django.utils.html.format_html_join(sep, format_string, args_generator)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.format_html_join) —
-/// build a joined HTML string from an iterator of argument tuples.
+/// Build a joined HTML string from an iterator of argument tuples.
 /// Same safety property as [`format_html`] — every arg HTML-escaped
 /// before substitution — but folds repetition over a list.
 ///
@@ -2360,12 +2305,10 @@ pub fn format_html_join(sep: &str, format_string: &str, args: &[Vec<&str>]) -> S
     out
 }
 
-/// Django-parity
-/// [`django.utils.html.urlize(text, trim_url_limit=None, nofollow=False, autoescape=True)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.urlize) —
-/// convert URLs and email addresses inside `text` into clickable
+/// Convert URLs and email addresses inside `text` into clickable
 /// HTML anchor tags.
 ///
-/// rustango's bounded port detects three shapes per Django:
+/// Three shapes are detected:
 ///
 /// * `http://...` and `https://...` absolute URLs → `<a href="URL">URL</a>`
 /// * `www.domain.tld[/path]` bare-www URLs → `<a href="http://www.domain.tld...">www.domain.tld...</a>`
@@ -2376,12 +2319,10 @@ pub fn format_html_join(sep: &str, format_string: &str, args: &[Vec<&str>]) -> S
 /// naturally — `"See http://x.com."` renders the period OUTSIDE
 /// the anchor.
 ///
-/// `nofollow = true` adds `rel="nofollow"` to anchors (Django parity
-/// — defends against link-farming on user-submitted text). Body
-/// text outside detected URLs passes through verbatim — caller
-/// must escape the input first if the source is untrusted (Django's
-/// `autoescape` flag handles that there; rustango leaves escape to
-/// the caller via [`html_escape`]).
+/// `nofollow = true` adds `rel="nofollow"` to anchors, which
+/// defends against link-farming on user-submitted text. Body text
+/// outside detected URLs passes through verbatim, so escape the
+/// input with [`html_escape`] first when the source is untrusted.
 ///
 /// ```ignore
 /// use rustango::text::urlize;
@@ -2449,7 +2390,7 @@ fn split_off_trailing_punct(s: &str) -> (usize, &str) {
     (idx, &s[idx..])
 }
 
-/// Detect the three Django-supported URL shapes inside `core` and
+/// Detect the three supported URL shapes inside `core` and
 /// return the rendered HTML anchor. Returns `None` for non-matches
 /// so the caller can emit the literal token instead.
 fn render_match(core: &str, rel_attr: &str) -> Option<String> {
@@ -2473,9 +2414,7 @@ fn render_match(core: &str, rel_attr: &str) -> Option<String> {
     None
 }
 
-/// Django-parity
-/// [`django.utils.html.strip_tags(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_tags) —
-/// remove HTML / XML tag markup from `s` and return the bare text
+/// Remove HTML / XML tag markup from `s` and return the bare text
 /// content.
 ///
 /// Strips anything inside `< … >` pairs, including:
@@ -2485,14 +2424,12 @@ fn render_match(core: &str, rel_attr: &str) -> Option<String> {
 /// * Comments (`<!-- secret --> visible` → ` visible`)
 /// * CDATA-style braces (`<![CDATA[…]]>` → ``)
 ///
-/// **NOT a sanitizer.** Django's docstring explicitly warns the
-/// same: this is for plain-text extraction (search indexing,
-/// `Last-Modified` body preview, etc.). For user-input HTML
+/// **NOT a sanitizer.** This is for plain-text extraction (search
+/// indexing, body previews, and so on). For user-input HTML
 /// sanitization use an actual HTML parser + allowlist.
 ///
-/// Empty `<>` (no tag name) is also stripped. Unclosed `<` at the
-/// end of input is kept literal (Django shape — Python's regex
-/// re-tries the trailing `<`).
+/// Empty `<>` (no tag name) is also stripped. An unclosed `<` at
+/// the end of input is kept literal.
 ///
 /// ```ignore
 /// use rustango::text::strip_tags;
@@ -2527,7 +2464,7 @@ pub fn strip_tags(s: &str) -> String {
     out
 }
 
-/// Django-parity `phone2numeric` — convert phone-keypad letters to
+/// Convert phone-keypad letters to
 /// the matching digit per ITU E.161 (`abc→2`, `def→3`, …, `wxyz→9`).
 /// Case-insensitive; non-letters pass through unchanged.
 ///
@@ -2571,7 +2508,7 @@ mod tests {
     #[test]
     fn slugify_strips_punctuation() {
         assert_eq!(slugify("Hello, World!"), "hello-world");
-        assert_eq!(slugify("Rust & Django"), "rust-django");
+        assert_eq!(slugify("Rust & Web"), "rust-web");
     }
 
     #[test]
@@ -2693,7 +2630,7 @@ mod tests {
         assert_eq!(result, "foo-3");
     }
 
-    // -------- truncate_words (Django parity) --------
+    // -------- truncate_words --------
 
     #[test]
     fn truncate_words_basic() {
@@ -2702,7 +2639,7 @@ mod tests {
 
     #[test]
     fn truncate_words_under_limit_passes_through_collapsed() {
-        // Django returns the input as-is (single-spaced), no suffix.
+        // Input comes back as-is (single-spaced), with no suffix.
         assert_eq!(truncate_words("short text", 5, "…"), "short text");
     }
 
@@ -2726,12 +2663,12 @@ mod tests {
 
     #[test]
     fn truncate_words_collapses_whitespace_runs() {
-        // Django shape: kept words joined by single space regardless of
-        // original whitespace shape.
+        // Kept words are joined by a single space, whatever the
+        // original whitespace was.
         assert_eq!(truncate_words("a   b\t\tc\nd", 3, "…"), "a b c…");
     }
 
-    // -------- truncatechars (Django filter parity) --------
+    // -------- truncatechars --------
 
     #[test]
     fn truncatechars_basic() {
@@ -2775,7 +2712,7 @@ mod tests {
         assert_eq!(out, "abc…");
     }
 
-    // -------- normalize_newlines (Django parity) --------
+    // -------- normalize_newlines --------
 
     #[test]
     fn normalize_newlines_crlf_to_lf() {
@@ -2809,7 +2746,7 @@ mod tests {
         assert_eq!(normalize_newlines("plain text"), "plain text");
     }
 
-    // -------- phone2numeric (Django parity) --------
+    // -------- phone2numeric --------
 
     #[test]
     fn phone2numeric_canonical() {
@@ -2844,7 +2781,7 @@ mod tests {
         assert_eq!(phone2numeric(""), "");
     }
 
-    // -------- capfirst (Django parity) --------
+    // -------- capfirst --------
 
     #[test]
     fn capfirst_simple() {
@@ -2869,18 +2806,16 @@ mod tests {
     #[test]
     fn capfirst_unicode_expanding_case() {
         // German sharp s uppercases to two chars (SS) per Unicode rules.
-        // Django's `.capitalize()` would also expand; we follow.
         assert_eq!(capfirst("ßomething"), "SSomething");
     }
 
     #[test]
     fn capfirst_does_not_touch_rest() {
-        // Django capfirst doesn't lowercase the tail (distinct from
-        // Python's `.capitalize()` which DOES). Match Django.
+        // The tail is left alone, not lowercased.
         assert_eq!(capfirst("hELLO"), "HELLO");
     }
 
-    // -------- get_text_list (Django parity) --------
+    // -------- get_text_list --------
 
     #[test]
     fn get_text_list_empty() {
@@ -2901,7 +2836,7 @@ mod tests {
 
     #[test]
     fn get_text_list_three_uses_no_serial_comma() {
-        // Django shape: "a, b or c" — no Oxford comma.
+        // "a, b or c" — no Oxford comma.
         assert_eq!(get_text_list(&["a", "b", "c"], "or"), "a, b or c");
     }
 
@@ -2917,7 +2852,7 @@ mod tests {
         assert_eq!(get_text_list(&items, "or"), "one, two or three");
     }
 
-    // -------- smart_split (Django parity) --------
+    // -------- smart_split --------
 
     #[test]
     fn smart_split_simple_whitespace() {
@@ -2941,8 +2876,8 @@ mod tests {
 
     #[test]
     fn smart_split_unmatched_quote_keeps_trailing_token() {
-        // Django shape: unmatched closing quote does NOT panic; the
-        // unfinished quoted span is kept as one trailing token.
+        // An unmatched closing quote does NOT panic; the unfinished
+        // quoted span is kept as one trailing token.
         let got = smart_split(r#"oops "no close"#);
         assert_eq!(got, vec!["oops", r#""no close"#]);
     }
@@ -2965,7 +2900,7 @@ mod tests {
         assert_eq!(got, vec!["a", "b", "c"]);
     }
 
-    // -------- strip_tags (Django parity) --------
+    // -------- strip_tags --------
 
     #[test]
     fn strip_tags_removes_basic_tags() {
@@ -2991,8 +2926,8 @@ mod tests {
 
     #[test]
     fn strip_tags_keeps_unclosed_trailing_lt() {
-        // Django regex skips an unmatched trailing `<` rather than
-        // eating to end-of-input.
+        // An unmatched trailing `<` is skipped rather than eating to
+        // end-of-input.
         assert_eq!(strip_tags("a < b"), "a < b");
     }
 
@@ -3006,9 +2941,8 @@ mod tests {
     #[test]
     fn strip_tags_handles_nested_quotes_in_attrs() {
         // The naive parser doesn't track quote balance — `<a href=">"`
-        // closes on the first `>`. This matches Django's regex
-        // behavior, which also can't track quoted attrs. The fact
-        // that we're consistent with Django is the point.
+        // closes on the first `>`. Documented here so the behaviour is
+        // deliberate rather than a surprise.
         assert_eq!(strip_tags(r#"<a href="x">link</a>"#), "link");
     }
 
@@ -3017,7 +2951,7 @@ mod tests {
         assert_eq!(strip_tags("<p>café — résumé</p>"), "café — résumé");
     }
 
-    // -------- urlize (Django parity) --------
+    // -------- urlize --------
 
     #[test]
     fn urlize_http_url_becomes_anchor() {
@@ -3101,7 +3035,7 @@ mod tests {
         assert!(out.contains(r#"<a href="https://b.com""#));
     }
 
-    // -------- format_html / format_html_join (Django parity) --------
+    // -------- format_html / format_html_join --------
 
     #[test]
     fn format_html_substitutes_and_escapes_args() {
@@ -3187,7 +3121,7 @@ mod tests {
         assert!(!out.contains("<bad>"));
     }
 
-    // -------- linebreaks / linebreaks_br (Django parity) --------
+    // -------- linebreaks / linebreaks_br --------
 
     #[test]
     fn linebreaks_blank_lines_become_paragraphs() {
@@ -3270,7 +3204,7 @@ mod tests {
         assert_eq!(linebreaks_br("", true), "");
     }
 
-    // -------- camel_case_to_spaces (Django parity) --------
+    // -------- camel_case_to_spaces --------
 
     #[test]
     fn camel_case_simple() {
@@ -3287,7 +3221,7 @@ mod tests {
 
     #[test]
     fn camel_case_acronym_word_boundary_splits() {
-        // Django's regex splits at the acronym→word transition:
+        // The acronym→word transition is a split point:
         // `HTTPRequest` becomes `"http request"` because R is uppercase
         // followed by a lowercase e.
         assert_eq!(camel_case_to_spaces("HTTPRequest"), "http request");
@@ -3323,7 +3257,7 @@ mod tests {
         assert_eq!(camel_case_to_spaces("foo  bar   baz"), "foo bar baz");
     }
 
-    // -------- unescape_string_literal (Django parity) --------
+    // -------- unescape_string_literal --------
 
     #[test]
     fn unescape_double_quoted() {
@@ -3357,9 +3291,9 @@ mod tests {
 
     #[test]
     fn unescape_passes_through_non_special_escapes() {
-        // \n / \t / \r are NOT expanded per Django shape.
+        // \n / \t / \r are NOT expanded.
         let out = unescape_string_literal(r#""line\nbreak""#).unwrap();
-        // Backslash + n preserved literally (Django doesn't expand).
+        // Backslash + n is preserved literally.
         assert_eq!(out, r"line\nbreak");
     }
 
@@ -3390,7 +3324,7 @@ mod tests {
         assert!(unescape_string_literal("(hello)").is_none());
     }
 
-    // -------- get_valid_filename (Django parity) --------
+    // -------- get_valid_filename --------
 
     #[test]
     fn valid_filename_replaces_whitespace_with_underscore() {
@@ -3402,15 +3336,8 @@ mod tests {
 
     #[test]
     fn valid_filename_strips_path_traversal_chars() {
-        // Slashes + dots survive but no separator structure.
-        // `../../../etc/passwd` → slashes become underscores, dots
-        // are valid filename chars → "..___..___..___etc_passwd"
-        // hmm that's different. Let me reconsider — Django's regex
-        // for get_valid_filename: re.sub(r'(?u)[^-\w.]', '', s)
-        // which drops non-alphanumeric + non-`-` + non-`.` + non-`_`.
-        // Whitespace becomes underscore in a SEPARATE first pass.
-        // So `../../../etc/passwd` → `../../../etcpasswd` (slashes
-        // dropped, dots preserved). Let me verify our behavior.
+        // Dots survive, separator structure does not: slashes are
+        // dropped and the remaining segments run together.
         let out = get_valid_filename("../../../etc/passwd").unwrap();
         // Slashes dropped → `..` `..` `..` `etc` `passwd` concatenated.
         // The dots in `..` stay; the result is `..........etcpasswd`.
@@ -3430,10 +3357,9 @@ mod tests {
 
     #[test]
     fn valid_filename_preserves_unicode_alphanumerics_drops_punctuation() {
-        // Django shape — alphanumerics OK, punctuation stripped.
-        // Non-ASCII alphanumerics are dropped under our `is_ascii_alphanumeric`
-        // check (Django uses regex \w which DOES match unicode word chars
-        // — we differ here, but the safer-on-disk shape is to drop them).
+        // Alphanumerics are kept, punctuation is stripped. Non-ASCII
+        // alphanumerics are dropped too, under the
+        // `is_ascii_alphanumeric` check — the safer shape on disk.
         let out = get_valid_filename("résumé.pdf").unwrap();
         assert!(out.ends_with(".pdf"));
     }
@@ -3446,21 +3372,20 @@ mod tests {
 
     #[test]
     fn valid_filename_rejects_dot_specials() {
-        // Django flags these as SuspiciousFileOperation. We surface
-        // as Err.
+        // `.` and `..` are path-traversal shapes, so they are Err.
         assert!(get_valid_filename(".").is_err());
         assert!(get_valid_filename("..").is_err());
     }
 
     #[test]
     fn valid_filename_replaces_backslash_too() {
-        // Windows-style path separator → underscore (Django shape).
+        // Windows-style path separator → underscore.
         let out = get_valid_filename(r"C:\Users\foo.txt").unwrap();
         assert!(!out.contains('\\'));
         assert!(!out.contains(':'));
     }
 
-    // -------- strip_spaces_between_tags (Django parity) --------
+    // -------- strip_spaces_between_tags --------
 
     #[test]
     fn strip_spaces_between_tags_compacts_tag_gap() {
@@ -3514,7 +3439,7 @@ mod tests {
         );
     }
 
-    // -------- wrap (Django parity) --------
+    // -------- wrap --------
 
     #[test]
     fn wrap_short_text_unchanged() {
@@ -3569,7 +3494,7 @@ mod tests {
         assert_eq!(out, "a b c");
     }
 
-    // -------- json_script (Django parity) --------
+    // -------- json_script --------
 
     #[derive(serde::Serialize)]
     struct Bootstrap {
@@ -3673,7 +3598,7 @@ mod tests {
     #[test]
     fn escapejs_escapes_html_breakout_chars() {
         // `</script>` — angle brackets are escaped; the `/` and the
-        // text "script" pass through (Django escape set excludes `/`).
+        // text "script" pass through — `/` is not in the escape set.
         let out = escapejs("</script>");
         // The literal substring `</script>` cannot appear — the `<`
         // and `>` are both escaped to `<` / `>`.
@@ -3689,7 +3614,7 @@ mod tests {
 
     #[test]
     fn escapejs_escapes_punctuation_for_event_handler_defense() {
-        // Django's defense-in-depth set includes `=`, `-`, `;` — so
+        // The defense-in-depth set includes `=`, `-`, `;` — so
         // a payload like `onerror=alert(1)` can't be assembled inside
         // a string-literal context that later flows into innerHTML.
         assert_eq!(escapejs("="), "\\u003D");
@@ -3880,7 +3805,7 @@ mod tests {
 
     #[test]
     fn avoid_wrapping_preserves_non_ascii_whitespace() {
-        // Tab, newline, CR — not replaced (Django only swaps ASCII " ").
+        // Tab, newline, CR — not replaced; only ASCII " " is swapped.
         assert_eq!(avoid_wrapping("a\tb"), "a\tb");
         assert_eq!(avoid_wrapping("a\nb"), "a\nb");
         // Already a NBSP — unchanged.
@@ -3930,7 +3855,7 @@ mod tests {
 
     #[test]
     fn pascal_to_snake_acronym_to_word_boundary() {
-        // Django shape: acronym→word transition is a split point.
+        // The acronym→word transition is a split point.
         assert_eq!(pascal_to_snake("HTTPRequest"), "http_request");
         assert_eq!(pascal_to_snake("XMLParser"), "xml_parser");
         assert_eq!(pascal_to_snake("IODriver"), "io_driver");
@@ -4271,7 +4196,7 @@ mod tests {
     fn yesno_two_token_choices() {
         assert_eq!(yesno(Some(true), "yes,no"), "yes");
         assert_eq!(yesno(Some(false), "yes,no"), "no");
-        // No third token → None falls back to the "no" slot (Django shape).
+        // No third token → None falls back to the "no" slot.
         assert_eq!(yesno(None, "yes,no"), "no");
     }
 
@@ -4284,7 +4209,7 @@ mod tests {
 
     #[test]
     fn yesno_empty_choices_defaults() {
-        // Django default is "yes,no,maybe".
+        // The default is "yes,no,maybe".
         assert_eq!(yesno(Some(true), ""), "yes");
         assert_eq!(yesno(Some(false), ""), "no");
         assert_eq!(yesno(None, ""), "maybe");
@@ -4302,8 +4227,7 @@ mod tests {
     fn yesno_extra_tokens_lump_into_third_slot() {
         // 4+ tokens: `splitn(3, ',')` keeps the first two splits;
         // everything after the second comma lumps into the third
-        // slot. Reasonable defensive behavior (Django itself raises
-        // ValueError and falls back to passthrough).
+        // slot, rather than erroring on a malformed choices string.
         assert_eq!(yesno(Some(true), "a,b,c,d"), "a");
         assert_eq!(yesno(Some(false), "a,b,c,d"), "b");
         assert_eq!(yesno(None, "a,b,c,d"), "c,d");

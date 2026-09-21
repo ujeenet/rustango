@@ -5,9 +5,9 @@ use crate::sql::sqlx;
 /// Raised while building or applying DDL, or while reading/writing
 /// migration files on disk.
 ///
-/// `#[non_exhaustive]`: end a match on this with `_ =>`. It gained
-/// [`Self::PartiallyApplied`] in 0.58, and the marker is here so the
-/// next variant is not another breaking change (#1513).
+/// `#[non_exhaustive]`, so end a match on this with `_ =>`. New
+/// variants such as [`Self::PartiallyApplied`] can then be added
+/// without a breaking change.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum MigrateError {
@@ -21,10 +21,8 @@ pub enum MigrateError {
     /// `DataOp` flagged `reversible: true` with no `reverse_sql`).
     #[error("invalid migration: {0}")]
     Validation(String),
-    /// Bubbled up from the executor — e.g. when the bi-dialect
-    /// `_pool` runner functions ([`apply_all_pool`],
-    /// [`drop_all_pool`]) dispatch through `raw_execute_pool`.
-    /// Carries the underlying SQL writer / driver error.
+    /// From the executor, for example when [`apply_all_pool`] or
+    /// [`drop_all_pool`] run SQL through `raw_execute_pool`.
     ///
     /// [`apply_all_pool`]: super::runner::apply_all_pool
     /// [`drop_all_pool`]: super::runner::drop_all_pool
@@ -32,29 +30,22 @@ pub enum MigrateError {
     Exec(#[from] crate::sql::ExecError),
 
     /// A migration failed **after** committing DDL that cannot be
-    /// rolled back, so the database moved and the ledger did not.
+    /// rolled back. The schema moved and the ledger did not.
     ///
-    /// MySQL auto-commits on every DDL statement, so the transaction
-    /// wrapping an `atomic: true` migration protects only the
-    /// `RunSQL` / `RunPython` operations between them. When operation
-    /// *k* of *n* fails and some earlier operation was DDL, the
-    /// earlier DDL stays applied while the ledger row is never
-    /// written.
+    /// MySQL commits every DDL statement at once, so the transaction
+    /// around an `atomic: true` migration only protects the data
+    /// operations between them. If an operation fails after earlier
+    /// DDL ran, that DDL stays applied and no ledger row is written.
     ///
-    /// That state does not resolve by re-running: the migration
-    /// replays from the top and fails differently, because the work it
-    /// already did is still there. Reported from a live tenant as
-    /// `DropTable` succeeding, the next operation failing, and the
-    /// re-run then reporting `1051 Unknown table` (#1588).
+    /// **Re-running does not fix this.** The migration replays from
+    /// the top and fails in a new way, because its earlier work is
+    /// still there. Recovery: compare the schema against the
+    /// migration, then run `manage migrate --fake <name>` once they
+    /// match.
     ///
-    /// The `Display` names the counts and the recovery path, because
-    /// the recovery — inspect the schema, then `migrate --fake <name>`
-    /// once it matches — is otherwise folklore.
-    ///
-    /// Raised **only** when DDL actually committed before the failure.
-    /// A migration whose failing operation is preceded solely by
-    /// `RunSQL` rolls back cleanly and surfaces its driver error
-    /// unchanged.
+    /// Raised **only** when DDL really committed. If nothing but data
+    /// operations ran before the failure, the transaction rolls back
+    /// and the driver error is returned unchanged.
     #[error(
         "migration `{migration}` failed after completing {applied} of {total} operations, \
          having already committed {ddl_applied} DDL statement(s).\n\
@@ -73,13 +64,11 @@ pub enum MigrateError {
         applied: usize,
         /// Operations in the migration.
         total: usize,
-        /// DDL **statements** committed before the failure — counted
-        /// per statement rather than per operation, because one
-        /// operation can render several and each commits on its own,
-        /// so an operation that fails halfway still leaves the earlier
-        /// statements applied. This is the number that makes the state
-        /// stuck, and it is why the variant is raised at all: at zero,
-        /// the transaction rolled back cleanly.
+        /// DDL **statements** committed before the failure. Counted
+        /// per statement, not per operation: one operation can render
+        /// several, and each commits on its own. At zero the
+        /// transaction rolled back cleanly and this variant is not
+        /// raised.
         ddl_applied: usize,
         /// The driver error that stopped it.
         source: Box<sqlx::Error>,

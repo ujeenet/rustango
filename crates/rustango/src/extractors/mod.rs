@@ -1,4 +1,4 @@
-//! Per-request extractors for handlers — tenancy-aware DI.
+//! Tenancy-aware extractors for handlers.
 //!
 //! | Extractor | What it gives you |
 //! |---|---|
@@ -6,8 +6,9 @@
 //! | [`SessionUser`] | Browser-session tenant user (`None` = anonymous) |
 //! | [`SessionOperator`] | Browser-session operator (`None` = anonymous) |
 //!
-//! All extractors read from request extensions populated by
-//! [`crate::server::Builder`], so no state wiring is required.
+//! They all read request extensions that
+//! [`crate::server::Builder`] fills in, so there is no state to wire
+//! up.
 //!
 //! ```ignore
 //! use rustango::extractors::{Tenant, SessionUser};
@@ -22,15 +23,16 @@
 //!     }
 //! }
 //! ```
+//!
+//! [`Tenant`]: crate::extractors::Tenant
+//! [`SessionUser`]: crate::extractors::SessionUser
+//! [`SessionOperator`]: crate::extractors::SessionOperator
 
 mod database_tenant;
-// v0.41 (#317) — `session_user` is now tri-dialect. Both
-// `SessionUser` and `SessionOperator` route through `FetcherPool`
-// against the tri-dialect `Pool` enum, so the module no longer
-// needs the `feature = "postgres"` gate. Schema-mode tenancy
-// remains PG-only by language (TenantPools rejects schema-mode for
-// non-PG backends at runtime), but database-mode tenants on
-// sqlite/mysql get the same browser-session extractors as PG.
+// `SessionUser` and `SessionOperator` work on every backend: they go
+// through `FetcherPool` against the `Pool` enum. Schema-mode tenancy
+// is still PG-only, but database-mode tenants on SQLite and MySQL
+// get the same extractors.
 mod session_user;
 mod tenant;
 

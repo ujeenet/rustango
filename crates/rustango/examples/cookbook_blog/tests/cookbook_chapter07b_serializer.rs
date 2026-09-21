@@ -1,4 +1,4 @@
-//! Cookbook Chapter 7b — DRF-shape serializers.
+//! Cookbook Chapter 7b — serializers.
 //!
 //! `#[derive(Serializer)]` + `#[serializer(model = Author)]` produces
 //! a typed JSON façade over the model — read-only / write-only /

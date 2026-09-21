@@ -24,6 +24,8 @@
 //!
 //! The dispatcher owns the `cargo run` vs `cargo run -- migrate` split
 //! so users have one binary instead of two.
+//!
+//! [`Cli::tenancy`]: crate::manage::Cli::tenancy
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -1496,9 +1498,9 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
     let sec = SecurityHeadersLayer::from_settings(&s.security);
     app = app.security_headers(sec);
 
-    // host_validation (#611) — Django `ALLOWED_HOSTS` parity.
-    // Mounts when the list is non-empty (empty = DEBUG-style
-    // opt-out, layer wouldn't enforce anything anyway).
+    // Host-header allowlist. Mounts when the list is non-empty; an
+    // empty list is the opt-out, and the layer would enforce
+    // nothing anyway.
     if !s.security.allowed_hosts.is_empty() {
         use crate::host_validation::{AllowedHostsLayer, AllowedHostsRouterExt as _};
         app = app.allowed_hosts(AllowedHostsLayer::from_settings_list(
@@ -1506,8 +1508,8 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
         ));
     }
 
-    // ssl_redirect (#613) — Django `SECURE_SSL_REDIRECT` +
-    // `SECURE_REDIRECT_EXEMPT` + `SECURE_PROXY_SSL_HEADER` parity.
+    // HTTP → HTTPS redirect, with exempt prefixes and a trusted
+    // proxy header.
     // Opt-in: only mounts when explicitly enabled in settings —
     // operators behind TLS-terminating LBs typically don't need
     // it, so don't surprise them.

@@ -4,7 +4,7 @@
 //! serializer field must match its model field's type exactly, and
 //! `ForeignKey<T>` implemented none of the traits the derive requires:
 //!
-//! * `pub customer_id: i64` — the spelling a DRF user reaches for
+//! * `pub customer_id: i64` — the spelling most people reach for
 //!   first — failed with `expected &i64, found &ForeignKey<Customer>`;
 //! * `pub customer_id: ForeignKey<Customer>` failed on three missing
 //!   bounds at once: `DeserializeOwned`, `Default` and `OpenApiSchema`.
@@ -93,8 +93,7 @@ fn a_foreign_key_column_reaches_the_serializer() {
 }
 
 /// It must render as the **key**, not as an object — that is what a
-/// REST client sends back, and what DRF's `PrimaryKeyRelatedField`
-/// does.
+/// REST client sends back.
 #[test]
 fn it_renders_as_the_key() {
     let s = OrderSerializer::from_model(&order());

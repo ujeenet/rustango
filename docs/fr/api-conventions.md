@@ -129,7 +129,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **Une seule exception :** les signaux ne prennent pas de pool, car ils ne touchent jamais la base de données. La règle tient : tout ce qui atteint la BDD prend le pool ; tout ce qui ne l'atteint pas, non.
 
-**Pourquoi le passer à chaque fois ?** Rust préfère les dépendances visibles à un état global caché. Django conserve la connexion dans un stockage thread-local, mais cela s'effondre dans le monde async de Rust, où une tâche peut sauter d'un thread à l'autre en plein milieu d'une requête. L'inconvénient, c'est plus de saisie ; l'avantage, c'est que vous pouvez faire un grep sur chaque endroit qui touche la base de données.
+**Pourquoi le passer à chaque fois ?** Rust préfère les dépendances visibles à un état global caché. L'alternative évidente — conserver la connexion dans un stockage thread-local — s'effondre dans le monde async de Rust, où une tâche peut sauter d'un thread à l'autre en plein milieu d'une requête. L'inconvénient, c'est plus de saisie ; l'avantage, c'est que vous pouvez faire un grep sur chaque endroit qui touche la base de données.
 
 Si vous vous retrouvez à faire transiter `&pool` à travers dix couches d'appels de fonctions, acceptez `impl Executor` une seule fois au point d'entrée public et laissez les helpers internes partager cette unique connexion.
 
@@ -152,7 +152,7 @@ Post::objects().where_(Post::author_id.eq(42));
 
 | Syntaxe | À utiliser quand |
 |---|---|
-| Requête HTTP | Endpoints d'API publics — le ViewSet les analyse pour vous, comme les backends de filtre de DRF |
+| Requête HTTP | Endpoints d'API publics — le ViewSet les analyse pour vous depuis la chaîne de requête |
 | `.filter` par clé-chaîne | Code CRUD générique ou d'admin, où les noms de champs viennent de la config et ne sont pas connus à la compilation |
 | `.where_` typé | Le code de votre application — le choix par défaut recommandé. Le compilateur vérifie que le champ existe et que les types correspondent |
 
@@ -203,7 +203,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 
 `ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement sa forme JSON : `{"error": <code machine>, "message": …, "status": …, "details": …}`.
 
-**Ce n'est pas la seule forme d'erreur que le framework émet.** Un ViewSet répond `{"error": "<message lisible>"}` pour ses propres échecs, et une map DRF indexée par champ pour la validation d'un serializer — trois enveloppes au total, et `error` porte un code machine dans l'une et une phrase dans l'autre. [ViewSets — formes de réponse en erreur](viewsets.md#formes-de-réponse-en-erreur) indique quel chemin émet laquelle.
+**Ce n'est pas la seule forme d'erreur que le framework émet.** Un ViewSet répond `{"error": "<message lisible>"}` pour ses propres échecs, et une map indexée par nom de champ pour la validation d'un serializer — trois enveloppes au total, et `error` porte un code machine dans l'une et une phrase dans l'autre. [ViewSets — formes de réponse en erreur](viewsets.md#formes-de-réponse-en-erreur) indique quel chemin émet laquelle.
 
 ---
 
@@ -264,7 +264,7 @@ let l = AccessLogLayer {
 
 ## Feature flags
 
-Une *feature* est un flag de build Cargo (le `[features]` de `Cargo.toml`) qui active ou désactive un pan du crate — comparable à la découverte de paquets de Laravel ou aux `INSTALLED_APPS` de Django, mais résolu à la compilation. Chaque module qui tire une dépendance supplémentaire se trouve derrière l'une d'elles. L'ensemble par défaut, c'est « vous en voulez presque certainement » :
+Une *feature* est un flag de build Cargo (le `[features]` de `Cargo.toml`) qui active ou désactive un pan du crate — la liste des briques installées de votre application, mais résolue à la compilation. Chaque module qui tire une dépendance supplémentaire se trouve derrière l'une d'elles. L'ensemble par défaut, c'est « vous en voulez presque certainement » :
 
 ```toml
 default = [

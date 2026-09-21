@@ -5,8 +5,8 @@ démarrer de serveur ni toucher au réseau. Le `TestClient` de **Rustango** exé
 routeur **in-process** : vous appelez `client.get("/path")`, il achemine la requête
 à travers la vraie pile (extractors, middleware, handlers) et vous renvoie la
 réponse sur laquelle faire des assertions. Ajoutez l'isolation par rollback de transaction pour les tests de base de données et
-un ensemble d'assertions de réponse, et vous obtenez le client de test de Django + `TestCase`, en
-Rust.
+un ensemble d'assertions de réponse, et vous obtenez un environnement de tests
+d'intégration complet sans quitter le processus.
 
 [![Les tests dans Rustango : TestClient enveloppe votre Router et envoie des requêtes in-process à travers la vraie pile de handlers ; la TestResponse expose le statut, le texte et le JSON sur lesquels faire des assertions — pas de socket, pas de serveur](../img/testing.png)](../img/testing.png)
 
@@ -167,7 +167,7 @@ couverture.
 
 | Variable | Suites | Ce dont elles ont besoin |
 |---|---:|---|
-| *(aucune)* | 210 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
+| *(aucune)* | 211 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
 | `DATABASE_URL` | 96 | Un serveur PostgreSQL joignable. |
 | `MYSQL_TEST_URL` | 28 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis joignable. |
@@ -211,7 +211,8 @@ la connexion, ce qui est un signal plus bruyant et plus honnête qu'un saut.
 ## Helpers d'assertion de réponse
 
 Pour les valeurs `axum::Response` brutes (par exemple issues de `tower::oneshot`), `test_assertions`
-se lit comme les `assertContains` / `assertRedirects` de Django :
+fournit des vérifications lisibles en une ligne pour le statut, le contenu, les
+redirections et les cookies :
 
 ```rust
 use rustango::test_assertions::{assert_status_2xx, assert_redirects, assert_cookie_set};

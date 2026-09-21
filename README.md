@@ -1,15 +1,17 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ujeenet/rustango/main/docs/rustango_dark.png">
-    <img src="https://raw.githubusercontent.com/ujeenet/rustango/main/docs/rustango_light.png" alt="Rustango — the Rust framework with Django spirit" width="640">
+    <img src="https://raw.githubusercontent.com/ujeenet/rustango/main/docs/rustango_light.png" alt="Rustango — the batteries-included web framework for Rust" width="640">
   </picture>
 </p>
 
 # Rustango
 
-**A Django-shaped, batteries-included web framework for Rust.**
+**A batteries-included web framework for Rust: declare a model once, and get an ORM, auto-migrations, an auto-admin, multi-tenancy, and a REST API out of it.**
 
-Rustango gives you the productivity of Django or Laravel with the speed and type-safety of Rust: a tri-dialect ORM, auto-migrations, an auto-generated admin, multi-tenancy, first-class auth, and every standard middleware — all shipped, all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** out of the box.
+**Runs on [axum](https://github.com/tokio-rs/axum) and [tokio](https://tokio.rs).** Handlers are plain axum handlers and everything Rustango adds is a `tower` layer or an `axum::Router`, so any axum extractor, middleware or crate from that ecosystem drops straight in.
+
+One `#[derive(Model)]` is the whole contract — from it Rustango emits typed queries, migration diffs, admin screens, serializers, and CRUD endpoints. A tri-dialect ORM, first-class auth, and every standard middleware ship in the box: all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** from the same source.
 
 📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
 🌍 **Also in:** [Deutsch](docs/de/) · [Español](docs/es/) · [Français](docs/fr/) — every published guide, not a subset.
@@ -77,7 +79,7 @@ The **same code** boots on Postgres with `DATABASE_URL=postgres://…` or MySQL 
 
 - **One ORM, three backends.** Models, queries, migrations, relations, and aggregates emit correct SQL for Postgres, MySQL 8+, and SQLite from the same code.
 - **Batteries included.** Auth (sessions + JWT + OAuth2/OIDC + HMAC + API keys + TOTP), an auto-admin, multi-tenancy, caching, background jobs, email, file storage, signals, i18n, an MCP server, and OpenAPI — not add-ons, in the box.
-- **Django ergonomics.** A project scaffolder (`cargo rustango new`), `make:*` generators, `manage` CLI, `#[derive(Model)]` / `#[derive(ViewSet)]` / `#[derive(Serializer)]`, and admin config blocks that feel familiar coming from Django, DRF, or Laravel.
+- **Declare it, don't wire it.** A project scaffolder (`cargo rustango new`), `make:*` generators, a `manage` CLI, `#[derive(Model)]` / `#[derive(ViewSet)]` / `#[derive(Serializer)]`, and admin config blocks — an app is described in attributes, not assembled by hand.
 - **Opt-out, not opt-in.** Everything is a cargo feature. A JSON-only API binary compiles out the admin, templates, and tenancy entirely.
 
 ---
@@ -167,7 +169,7 @@ Full walkthrough: [getting started](docs/getting-started.md) · [scaffolding](do
 
 ## The ORM
 
-`#[derive(Model)]` registers a struct in a global inventory and emits typed query, save, and `FromRow` code. The query builder is Django-shape (`.filter()`, `.exclude()`, `.order_by()`, `.annotate()`, `.select_related()`, `.prefetch_related()`), and the **same code runs on all three backends** through the `Pool` enum.
+`#[derive(Model)]` registers a struct in a global inventory and emits typed query, save, and `FromRow` code. The query builder is lazy and chainable (`.filter()`, `.exclude()`, `.order_by()`, `.annotate()`, `.select_related()`, `.prefetch_related()`) — nothing hits the database until you `.fetch()` — and the **same code runs on all three backends** through the `Pool` enum.
 
 ```rust
 // Filter, order, paginate
@@ -216,7 +218,7 @@ Also included: a token-driven **theme system** with dark mode and per-tenant bra
 
 ## APIs — ViewSets, Serializers, JWT, OpenAPI
 
-`#[derive(ViewSet)]` gives you full REST CRUD — list (page or cursor pagination), retrieve, create (incl. DRF-style bulk create), update, partial update, destroy (soft when the model opts in) — with per-action permission gates:
+`#[derive(ViewSet)]` gives you full REST CRUD — list (page or cursor pagination), retrieve, create (one row or a whole array in a single POST), update, partial update, destroy (soft when the model opts in) — with per-action permission gates:
 
 ```rust
 #[derive(ViewSet)]
@@ -234,13 +236,13 @@ pub struct PostViewSet;
 let app = Router::new().merge(PostViewSet::router("/api/posts", pool.clone()));
 ```
 
-`#[derive(Serializer)]` is a DRF-shape JSON façade (read-only / write-only / renamed / computed `method` fields, per-field `validate`, nested FK serialization, and `many` collections). JWT ships a full lifecycle (issue with custom claims, verify without a DB hit, refresh, re-check permissions, revoke/blacklist). OpenAPI 3.1 auto-derives from your serializers + viewsets, and responses follow JSON:API + RFC 7807 Problem Details. The HTTP `QUERY` method (RFC 10008) is supported for body-carrying reads.
+`#[derive(Serializer)]` is a declarative JSON façade over a model (read-only / write-only / renamed / computed `method` fields, per-field `validate`, nested FK serialization, and `many` collections). JWT ships a full lifecycle (issue with custom claims, verify without a DB hit, refresh, re-check permissions, revoke/blacklist). OpenAPI 3.1 auto-derives from your serializers + viewsets, and responses follow JSON:API + RFC 7807 Problem Details. The HTTP `QUERY` method (RFC 10008) is supported for body-carrying reads.
 
 📖 [ViewSets](docs/viewsets.md) · [serializers](docs/serializers.md) · [JWT](docs/auth-jwt-api.md) · [OpenAPI](docs/openapi.md) · [QUERY method](docs/query-method.md)
 
 ## HTML views & forms
 
-Django-shape class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. CSRF auto-mounts for form-driven views.
+Class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. CSRF auto-mounts for form-driven views.
 
 📖 [HTML views](docs/html-views.md)
 
@@ -279,12 +281,12 @@ One hardened middleware chain: request IDs, access logging, rate limiting (in-pr
 ## Signals, i18n, MCP
 
 - **Signals** — model lifecycle (`pre_save` / `post_save` / `pre_delete` / `post_delete`) and request lifecycle (`request_started` / `request_finished` / `got_request_exception`).
-- **i18n** — `Translator` is Django's `gettext` family in Rust: per-locale catalogs, base-language fallback, `{name}` placeholders, CLDR pluralization, plus a DB-override layer and live admin translation editor. [i18n](docs/i18n.md)
+- **i18n** — `Translator` is a `gettext`-style translation API: per-locale catalogs, base-language fallback, `{name}` placeholders, CLDR pluralization, plus a DB-override layer and live admin translation editor. [i18n](docs/i18n.md)
 - **MCP server** — the `mcp` feature turns an app into a Model Context Protocol server: AI agents authenticate as tenant-scoped identities and call your framework-exposed tools over JSON-RPC 2.0. [mcp](docs/mcp.md)
 
 ## The `manage` CLI
 
-`cargo run -- <cmd>` — Django's `manage.py` in Rust. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `dbshell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
+Your app's binary doubles as its admin CLI — `cargo run -- <cmd>`. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `dbshell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
 
 📖 [manage reference](docs/manage.md)
 
@@ -302,23 +304,23 @@ A `TestClient` drives the router as a tower service (no socket), a `RequestFacto
 
 ## Comparison
 
-| | Rustango | Django | Laravel | Rocket | Cot |
-|---|:-:|:-:|:-:|:-:|:-:|
-| ORM | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Auto-migrations | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Auto-admin | ✅ | ✅ | ⚠️ Filament | ❌ | ✅ |
-| Multi-tenancy | ✅ | ⚠️ ext | ⚠️ ext | ❌ | ❌ |
-| JWT lifecycle (refresh + blacklist + custom claims) | ✅ | ⚠️ ext | ⚠️ Sanctum/Passport | ❌ | ❌ |
-| TOTP / 2FA | ✅ | ⚠️ ext | ✅ Fortify | ❌ | ❌ |
-| Signals | ✅ | ✅ | ✅ Events | ❌ | ❌ |
-| Cache backends | ✅ | ✅ | ✅ | ❌ | ⚠️ optional |
-| Email backends | ✅ | ✅ | ✅ | ❌ | ❌ |
-| File storage | ✅ | ⚠️ ext | ✅ Flysystem | ❌ | ❌ |
-| Scheduled tasks | ✅ | ⚠️ Celery beat | ✅ | ❌ | ❌ |
-| Security headers | ✅ | ✅ | ⚠️ middleware | ✅ Shield | ❌ |
-| Test client | ✅ | ✅ | ✅ | ✅ Client | ✅ |
-| Project scaffolder | ✅ `cargo rustango new` | ✅ `startproject` | ✅ installer | ❌ | ✅ `cot new` |
-| File generators | ✅ `make:*` | ⚠️ ext | ✅ artisan | ❌ | ❌ |
+| | Rustango | Laravel | Rocket | Cot |
+|---|:-:|:-:|:-:|:-:|
+| ORM | ✅ | ✅ | ❌ | ✅ |
+| Auto-migrations | ✅ | ✅ | ❌ | ✅ |
+| Auto-admin | ✅ | ⚠️ Filament | ❌ | ✅ |
+| Multi-tenancy | ✅ | ⚠️ ext | ❌ | ❌ |
+| JWT lifecycle (refresh + blacklist + custom claims) | ✅ | ⚠️ Sanctum/Passport | ❌ | ❌ |
+| TOTP / 2FA | ✅ | ✅ Fortify | ❌ | ❌ |
+| Signals | ✅ | ✅ Events | ❌ | ❌ |
+| Cache backends | ✅ | ✅ | ❌ | ⚠️ optional |
+| Email backends | ✅ | ✅ | ❌ | ❌ |
+| File storage | ✅ | ✅ Flysystem | ❌ | ❌ |
+| Scheduled tasks | ✅ | ✅ | ❌ | ❌ |
+| Security headers | ✅ | ⚠️ middleware | ✅ Shield | ❌ |
+| Test client | ✅ | ✅ | ✅ Client | ✅ |
+| Project scaffolder | ✅ `cargo rustango new` | ✅ installer | ❌ | ✅ `cot new` |
+| File generators | ✅ `make:*` | ✅ artisan | ❌ | ❌ |
 
 ✅ shipped · ⚠️ partial / via extension · ❌ not shipped
 

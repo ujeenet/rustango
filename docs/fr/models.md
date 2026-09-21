@@ -2,7 +2,7 @@
 
 Un modèle est une struct Rust qui correspond à une table de base de données. Ajoutez `#[derive(Model)]`,
 annotez les champs, et **Rustango** génère le schéma, un point d'entrée de requête type-safe,
-et les méthodes `save`/`find`/`delete` — les modèles de Django ou l'Eloquent de Laravel,
+et les méthodes `save`/`find`/`delete` — un modèle façon Active Record,
 avec le compilateur qui vérifie vos colonnes. Ceci est la référence de **déclaration** :
 chaque type de champ, chaque option de clé primaire, et chaque
 attribut `#[rustango(...)]`. Pour *interroger* les modèles une fois déclarés, voir
@@ -400,7 +400,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `manager(ext = "Trait")` | chemin de trait | génère un trait d'extension de manager personnalisé |
 | `manager_fn` | `"published"` | ajoute un accesseur de manager en plus de `objects()` |
 | `get_latest_by` | `"created_at"` | colonne par défaut pour `latest()`/`earliest()` |
-| `order_with_respect_to` | `"parent"` | ordre relatif au parent, à la manière de Django |
+| `order_with_respect_to` | `"parent"` | ordre des lignes enfants relatif au parent |
 | `index(...)` | `columns`, `method`, `name` | index secondaire (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | contrainte d'unicité composite |
 | `index_together` | `"a, b"` | index composite non unique |

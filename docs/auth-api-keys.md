@@ -155,7 +155,7 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 
 let app = Router::new()
     .route("/api/data", get(handler))
-    .require_auth(backends, pool);
+    .require_auth(backends);
 ```
 
 A client then calls:

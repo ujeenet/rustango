@@ -1,4 +1,4 @@
-//! Django-shape ContentType framework — sub-slice F.1 of v0.15.0.
+//! The ContentType framework.
 //!
 //! A `ContentType` row is a runtime handle to a registered model:
 //! `(id, app_label, model_name, table)`. Lets framework features
@@ -32,15 +32,19 @@
 //! `id` (a `BIGSERIAL`) is that identifier. `(app_label, model_name)`
 //! is the natural key for human-facing wiring; numeric `id` is the
 //! foreign key everywhere else.
+//!
+//! [`ensure_seeded()`]: crate::contenttypes::ensure_seeded
+//! [`ContentType::for_model`]: crate::contenttypes::ContentType::for_model
+//! [`ContentType::all_ordered`]: crate::contenttypes::ContentType::all_ordered
+//! [`ContentType::by_id`]: crate::contenttypes::ContentType::by_id
+//! [`ContentType::by_natural_key`]: crate::contenttypes::ContentType::by_natural_key
 
 use crate::core::{inventory, Model as _, ModelEntry, SqlValue};
 use crate::sql::{Auto, ExecError, FetcherPool as _};
 use crate::Model;
 
-/// One row per registered model. The schema mirrors Django's
-/// `django_content_types` table closely enough that any code reading
-/// it (audit log front-ends, generic FKs, permissions) feels
-/// instantly familiar.
+/// One row per registered model, so audit log front-ends, generic
+/// FKs and permissions can all name a model the same way.
 ///
 /// `(app_label, model_name)` is a natural key — the migration
 /// emits a `UNIQUE` constraint on the pair so duplicate inserts
@@ -54,7 +58,7 @@ pub struct ContentType {
     /// generic FKs, audit log targets in F.2 / F.3).
     #[rustango(primary_key)]
     pub id: Auto<i64>,
-    /// Django-shape app label — `module_path!()`'s first segment
+    /// App label — `module_path!()`'s first segment
     /// after the crate root, or the explicit `#[rustango(app = "...")]`
     /// override from the model's container attr.
     #[rustango(max_length = 100)]
@@ -149,8 +153,8 @@ impl ContentType {
     /// `ContentType` rows in a **single** DB round trip, returning a
     /// `HashMap` keyed by the natural pair (cloned strings). Pairs
     /// that don't have a row in the table are simply omitted from
-    /// the map (no error — same shape Django's `get_for_models`
-    /// gives back when a model isn't migrated yet).
+    /// the map — no error, because a model that is not migrated yet
+    /// simply has no row.
     ///
     /// Implemented as `all_ordered` + a Rust-side filter — the
     /// `rustango_content_types` table is O(dozens) of rows in
@@ -224,18 +228,39 @@ impl ContentType {
 /// Process-wide cache of `(app_label, model_name) → ContentType`.
 /// Read-mostly: populated lazily by [`ContentType::get_for_model`]
 /// / [`ContentType::get_by_natural_key`], invalidated wholesale
-/// by [`clear_cache`]. The cache is keyed by the natural key, not by
-/// Rust `TypeId`, so cached entries survive across tenants /
-/// rebinds / hot-reloads — the bottleneck is the DB lookup, not the
-/// model registry walk.
+/// by [`clear_cache`].
 ///
-/// The cache stays small in practice: realistic apps have O(dozens)
-/// of ContentTypes. We don't bother with an LRU — once populated,
-/// every lookup is a `HashMap` hit, and `clear_cache()` covers the
-/// "I just migrated, force a refetch" case.
-fn cache() -> &'static std::sync::RwLock<std::collections::HashMap<(String, String), ContentType>> {
+/// # Keyed by pool scope, natural key second
+///
+/// Entries used to be keyed on `(app_label, model_name)` alone, and
+/// the doc here called surviving "across tenants" a feature. It is the
+/// bug (#1533): a `ContentType.id` is drawn from its own database's
+/// sequence, so the same natural key is a different number in every
+/// tenant. The first tenant to warm an entry decided what every other
+/// tenant was handed, and three public generic-FK entry points reach
+/// this — so it mis-typed real writes rather than sitting latent.
+///
+/// Two further reasons the id cannot be treated as global, both
+/// verified: `ensure_seeded` walks `inventory::iter::<ModelEntry>`,
+/// whose order is link-dependent and not guaranteed stable; and
+/// `migrate_tenants_db` deliberately continues past a per-tenant
+/// failure, so a tenant can legitimately not hold the row at all —
+/// where a shared entry yields an id pointing at nothing.
+///
+/// [`crate::sql::Pool::scope_key`] supplies the scope, and it includes
+/// Postgres' connect `options` so schema-mode tenants — one host, one
+/// database, told apart only by `search_path` — do not collide.
+///
+/// The cache stays small in practice: realistic apps have O(dozens) of
+/// ContentTypes. The key is now O(models × pools) rather than
+/// O(models), which is why [`clear_cache_for`] exists for tenant
+/// decommission; a whole-process [`clear_cache`] is still the blunt
+/// instrument for "I just migrated".
+type CacheKey = (u64, String, String);
+
+fn cache() -> &'static std::sync::RwLock<std::collections::HashMap<CacheKey, ContentType>> {
     static CACHE: std::sync::OnceLock<
-        std::sync::RwLock<std::collections::HashMap<(String, String), ContentType>>,
+        std::sync::RwLock<std::collections::HashMap<CacheKey, ContentType>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
 }
@@ -246,10 +271,27 @@ fn cache() -> &'static std::sync::RwLock<std::collections::HashMap<(String, Stri
 /// `None` (the negative result isn't cached, but a stale positive
 /// entry could mask a re-seeded row's new id).
 ///
-/// Issue #35 — matches Django's `ContentType.objects.clear_cache()`.
+/// Call it after re-seeding, so a stale id cannot linger.
 pub fn clear_cache() {
     let mut w = cache().write().unwrap_or_else(|e| e.into_inner());
     w.clear();
+}
+
+/// Drop just one database's [`ContentType`] entries — the tenant-scoped
+/// counterpart of [`clear_cache`] (#1533).
+///
+/// Call it when a tenant is decommissioned or re-seeded. Now that the
+/// cache is keyed per pool its size is O(models × pools), so a
+/// long-running process that provisions and retires tenants would
+/// otherwise accumulate entries for databases it will never query
+/// again.
+///
+/// Use [`clear_cache`] after a migration that changes ids everywhere;
+/// use this when the change is one tenant's.
+pub fn clear_cache_for(pool: &crate::sql::Pool) {
+    let scope = pool.scope_key();
+    let mut w = cache().write().unwrap_or_else(|e| e.into_inner());
+    w.retain(|(s, _, _), _| *s != scope);
 }
 
 impl ContentType {
@@ -266,7 +308,11 @@ impl ContentType {
         app_label: &str,
         model_name: &str,
     ) -> Result<Option<Self>, ExecError> {
-        let key = (app_label.to_owned(), model_name.to_owned());
+        let key = (
+            pool.scope_key(),
+            app_label.to_owned(),
+            model_name.to_owned(),
+        );
         // Fast path — cache hit.
         if let Some(hit) = cache()
             .read()
@@ -457,7 +503,7 @@ where
 /// activity-stream entry, or tag can point at any model. Typed FKs
 /// (`ForeignKey<User>`) are the right choice when the target type
 /// is fixed; `GenericForeignKey` is for the "could be anything"
-/// case Django's `contenttypes` framework solves.
+/// case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenericForeignKey {
     /// FK to `rustango_content_types.id`. Identifies which model
@@ -738,8 +784,8 @@ where
 /// Fetch all rows of the model described by `child_schema` whose
 /// `GenericForeignKey` pair points at `(parent_ct_id, parent_pk)`.
 ///
-/// Reverse-direction counterpart of [`GenericForeignKey::get_object`]
-/// — Django's `GenericRelation(...)` field. The polymorphic-target
+/// Reverse-direction counterpart of
+/// [`GenericForeignKey::get_object`]. The polymorphic-target
 /// child rows are returned as JSON maps (same shape as
 /// [`fetch_row_as_json`]) so callers don't have to commit to a
 /// specific typed `Child: Model + Decode<...>` here.
@@ -835,7 +881,7 @@ pub async fn reverse_generic_for<Parent: crate::core::Model>(
     fetch_reverse_generic(pool, child_schema, ct_id, parent_pk, relation_name).await
 }
 
-/// Batched reverse-generic prefetch — Django's `GenericPrefetch`.
+/// Batched reverse-generic prefetch.
 /// Given a list of parent primary keys (same model), fetches all
 /// matching child rows in a single SELECT and groups them by
 /// parent_pk. Eliminates the N+1 query pattern when rendering an

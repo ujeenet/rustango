@@ -1,4 +1,4 @@
-//! Django REST Framework–style router viewsets.
+//! Router viewsets: five REST endpoints from one model.
 //!
 //! A [`ViewSet`] wires five standard REST endpoints for any [`Model`]
 //! table in ~5 lines. No hand-written handlers, no SQL, no repetition.
@@ -43,7 +43,7 @@
 //! | `ordering` | configured default | Comma-separated field names, prefix `-` for DESC |
 //! | `search` | — | Full-text search across `search_fields` |
 //! | `{field}` | — | Exact filter for any `filter_fields` |
-//! | `{field}__{lookup}` | — | Django-style lookup (gt/gte/lt/lte/ne/in/not_in/contains/icontains/startswith/istartswith/endswith/iendswith/isnull) |
+//! | `{field}__{lookup}` | — | Lookup suffix (gt/gte/lt/lte/ne/in/not_in/contains/icontains/startswith/istartswith/endswith/iendswith/isnull) |
 //!
 //! Response: `{"count": N, "page": P, "page_size": S, "last_page": L, "results": [...]}`
 //!
@@ -62,7 +62,7 @@
 //!
 //! ### Limit/offset pagination (opt-in)
 //!
-//! Enable via `.limit_offset_pagination()`. DRF-shape `?limit=&offset=`
+//! Enable via `.limit_offset_pagination()`. `?limit=&offset=`
 //! windowing — handy for tables/grids that page by row offset rather
 //! than page number. Runs `COUNT(*)` per request (same cost as
 //! page-number).
@@ -117,7 +117,7 @@ use crate::core::{
     Assignment, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
-use crate::forms::{collect_values, parse_form_value, parse_pk_string, FormError};
+use crate::forms::{collect_insert_values, parse_form_value, parse_pk_string, FormError};
 use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
@@ -139,8 +139,7 @@ pub struct ViewSetPerms {
     pub destroy: Vec<String>,
 }
 
-/// A fixed-window throttle limit — at most `max` requests per
-/// `window_secs` (DRF `ScopedRateThrottle` shape, #1010).
+/// A fixed-window throttle: at most `max` requests per `window_secs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThrottleRule {
     /// Max requests allowed within the window.
@@ -157,12 +156,12 @@ impl ThrottleRule {
     }
 }
 
-/// Per-action request throttles for a ViewSet (DRF `throttle_classes`
-/// parity, #1010). Any action left `None` is unthrottled.
+/// Per-action request throttles for a ViewSet. Any action left `None`
+/// is unthrottled.
 ///
-/// Counters are **process-local** (per server instance) — same model as
-/// [`crate::rate_limit`]. Behind N replicas the effective limit is N×;
-/// for a shared limit, front the service with a gateway throttle.
+/// Counters are **process-local**, like [`crate::rate_limit`]. Behind
+/// N replicas the real limit is N×. For a shared limit, put a gateway
+/// throttle in front.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ViewSetThrottle {
     /// Throttle for `GET /` (list).
@@ -212,13 +211,11 @@ impl ViewSetThrottle {
 #[derive(Clone, Debug)]
 pub enum PaginationStyle {
     /// 1-based page numbering — `?page=1&page_size=20`. Returns
-    /// `count` + `page` + `last_page` in the response. Cheap when
-    /// the table is small; runs `COUNT(*)` per request.
+    /// `count`, `page` and `last_page`. Runs `COUNT(*)` per request.
     PageNumber,
-    /// Cursor-based pagination — `?cursor=<encoded>&page_size=20`.
-    /// `field` must be a stable, monotonically-ordered column
-    /// (typically the primary key). Skips the COUNT query, so it
-    /// scales to billion-row tables.
+    /// Cursor pagination — `?cursor=<encoded>&page_size=20`. `field`
+    /// must be a stable, monotonic column, usually the primary key.
+    /// Skips the COUNT query, so it scales to very large tables.
     Cursor {
         /// SQL field name used as the cursor (e.g. `"id"`).
         field: &'static str,
@@ -226,10 +223,10 @@ pub enum PaginationStyle {
         /// of `>`. Default ordering is set automatically to match.
         desc: bool,
     },
-    /// DRF-shape limit/offset windowing — `?limit=20&offset=40`. Returns
-    /// `count` + `limit` + `offset` in the response. Runs `COUNT(*)` per
-    /// request (same cost as [`PaginationStyle::PageNumber`]); pick it
-    /// when callers think in row offsets rather than page numbers.
+    /// Limit/offset windowing — `?limit=20&offset=40`.
+    /// Returns `count`, `limit` and `offset`. Costs the same as
+    /// [`PaginationStyle::PageNumber`]; pick it when callers think in
+    /// row offsets rather than page numbers.
     LimitOffset,
 }
 
@@ -252,7 +249,7 @@ impl PaginationStyle {
         Self::Cursor { field, desc: true }
     }
 
-    /// DRF-shape limit/offset pagination.
+    /// Limit/offset pagination.
     #[must_use]
     pub const fn limit_offset() -> Self {
         Self::LimitOffset
@@ -262,19 +259,18 @@ impl PaginationStyle {
 /// Type-erased bridge that lets a `dyn`-routed [`ViewSet`] render rows
 /// through a concrete [`crate::serializer::ModelSerializer`].
 ///
-/// `ViewSet` is stored without its model/serializer type (so a router
-/// can hold many of them), so it can't name `S` directly. Instead
-/// [`ViewSet::serializer`] boxes a [`Bridge<S>`] behind this trait.
-/// When set, list / retrieve / create responses route through the
-/// bridge instead of the default field-level `select_rows_as_json`
+/// `ViewSet` is stored without its model/serializer type, so a router
+/// can hold many of them, and so it cannot name `S` directly.
+/// [`ViewSet::serializer`] boxes a [`Bridge<S>`] behind this trait
+/// instead. When set, list / retrieve / create responses go through
+/// the bridge rather than the default `select_rows_as_json`
 /// projection, so `method` / `read_only` / `source` / `write_only`
-/// overrides all shape the JSON output.
+/// shape the JSON output.
 ///
-/// Tri-dialect (v0.45): the bridge fetches typed `Vec<S::Model>` via
-/// [`crate::sql::select_rows_pool_with_related`] — which decodes `T`
-/// on Postgres, MySQL **and** SQLite — then maps each model through
-/// `S::from_model` + `to_value`. The pre-v0.45 implementation was a
-/// `Fn(&PgRow) -> Value` closure, which pinned the feature to Postgres.
+/// The bridge fetches typed `Vec<S::Model>` via
+/// [`crate::sql::select_rows_pool_with_related`], which decodes on all
+/// three backends, then maps each model through `S::from_model` and
+/// `to_value`.
 trait SerializerBridge: Send + Sync {
     /// Fetch every row matching `q` and render it through the
     /// serializer (replaces the default field-level projection).
@@ -291,28 +287,26 @@ trait SerializerBridge: Send + Sync {
         q: &'a SelectQuery,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Value>, crate::sql::ExecError>> + Send + 'a>>;
 
-    /// Run the serializer's input validation against a JSON request body:
-    /// parse the writable fields (DRF read shape) then call the
-    /// serializer's `validate()` hook. `Err` carries DRF-shape field
-    /// errors for a 400 response.
+    /// Validate a JSON request body: parse the writable fields, then
+    /// call the serializer's `validate()` hook. `Err` carries
+    /// per-field errors for a 400 response.
     fn validate_body(&self, body: &Value) -> Result<(), crate::forms::FormErrors>;
 
-    /// The **model** field names the serializer accepts on write
-    /// (`source`-resolved). The write path skips every other model column
-    /// so `read_only` / computed fields can't be set by a client.
+    /// The **model** field names the serializer accepts on write,
+    /// with `source` resolved. The write path skips every other
+    /// column, so a client cannot set `read_only` or computed fields.
     fn writable_model_fields(&self) -> &'static [&'static str];
 
-    /// The **serializer** field names of the writable fields — the JSON
-    /// keys a client sends (DRF read/write shape). Parallel to
-    /// [`Self::writable_model_fields`]; the two differ only where a field
-    /// declares `#[serializer(source = "…")]`, which the write path uses
-    /// to translate the inbound key to its model column.
+    /// The **serializer** field names of the writable fields — the
+    /// JSON keys a client sends. Parallel to
+    /// [`Self::writable_model_fields`]; the two differ only where a
+    /// field declares `#[serializer(source = "…")]`.
     fn writable_field_names(&self) -> &'static [&'static str];
 }
 
-/// Zero-sized carrier that pins a concrete serializer type `S` so the
-/// type-erased [`SerializerBridge`] trait object can call back into
-/// `S::from_model` / `S::Model`'s tri-dialect row decode.
+/// Zero-sized carrier that pins a concrete serializer type `S`, so
+/// the type-erased [`SerializerBridge`] can call back into
+/// `S::from_model` and `S::Model`'s row decode.
 #[cfg(feature = "serializer")]
 struct Bridge<S>(PhantomData<S>);
 
@@ -353,8 +347,8 @@ where
     }
 
     fn validate_body(&self, body: &Value) -> Result<(), crate::forms::FormErrors> {
-        // Parse the writable fields into a partial serializer instance
-        // (surfacing per-field type errors), then run its validation hook.
+        // Parse the writable fields, surfacing per-field type errors,
+        // then run the serializer's validation hook.
         let s = S::from_writable_json(body)?;
         s.validate()
     }
@@ -368,13 +362,13 @@ where
     }
 }
 
-/// A pluggable filter backend (DRF `BaseFilterBackend` parity, #1010).
+/// A pluggable filter backend.
 ///
-/// Registered on a [`ViewSet`] via [`ViewSet::filter_backend`], a backend
-/// contributes extra `WHERE` predicates from the list request's query
-/// params. Its predicates are `AND`-ed with the built-in exact / lookup
-/// filters — use it for what the `filter_fields` surface can't express
-/// (a geo-radius, a custom `?q=` DSL, request-scoped row visibility, …).
+/// Register one with [`ViewSet::filter_backend`]. It adds `WHERE`
+/// predicates from the list request's query params, `AND`-ed with the
+/// built-in exact and lookup filters. Use it for what `filter_fields`
+/// cannot express: a geo-radius, a custom `?q=` DSL, request-scoped
+/// row visibility.
 ///
 /// Any `Fn(&HashMap<String, String>, &'static ModelSchema) -> Vec<WhereExpr>`
 /// is a backend via the blanket impl below, so a closure works directly:
@@ -398,11 +392,11 @@ where
 ///     .router_pool("/posts", pool);
 /// ```
 ///
-/// Backends run on **every** action: they narrow the list query, and they
-/// scope `retrieve` / `update` / `destroy` so a row the backend excludes is a
-/// 404 rather than someone else's data. That is DRF's `get_queryset()`
-/// contract, and without it an ownership backend would guard the collection
-/// while leaving every row reachable by id.
+/// Backends run on **every** action. They narrow the list query and
+/// they scope `retrieve` / `update` / `destroy`, so a row the backend
+/// excludes is a 404 rather than someone else's data. Without that an
+/// ownership backend would guard the collection and leave every row
+/// reachable by id.
 pub trait ViewSetFilter: Send + Sync + 'static {
     /// Return `WHERE` predicates to AND into the query for this request.
     fn filter(
@@ -413,11 +407,10 @@ pub trait ViewSetFilter: Send + Sync + 'static {
 
     /// As [`Self::filter`], with the request's [`Parts`] in hand.
     ///
-    /// The authenticated principal lives in the request extensions, not in the
-    /// query string, so "only this user's rows" cannot be written against
-    /// `filter` alone. Defaults to [`Self::filter`], so every existing backend
-    /// — including the plain closure form — keeps compiling and behaving
-    /// exactly as before.
+    /// The authenticated principal lives in the request extensions,
+    /// not the query string, so "only this user's rows" cannot be
+    /// written against [`Self::filter`] alone. Defaults to
+    /// [`Self::filter`], which is what the closure form uses.
     ///
     /// [`Parts`]: axum::http::request::Parts
     fn filter_with(
@@ -432,10 +425,10 @@ pub trait ViewSetFilter: Send + Sync + 'static {
 
 /// Scope every row to the principal that owns it.
 ///
-/// The reusable half of ownership: name the column that holds the owner and
-/// mount it. It works on any model with such a column — `owner_id`,
-/// `member_id`, `user_id`, `created_by` — and applies to every action, so the
-/// collection and the item routes cannot disagree.
+/// Name the column that holds the owner and mount it. It works on
+/// any model with such a column (`owner_id`, `member_id`, `user_id`,
+/// `created_by`) and applies to every action, so the collection and
+/// the item routes cannot disagree.
 ///
 /// ```no_run
 /// # use rustango::viewset::{OwnedBy, ViewSet};
@@ -449,15 +442,15 @@ pub trait ViewSetFilter: Send + Sync + 'static {
 /// # }
 /// ```
 ///
-/// The owner comes from [`Principal`], which every auth path populates, so the
-/// same backend covers a cookie session, a Bearer token and an agent token
-/// without knowing which one ran. It is **never** read from the query string:
-/// a client that could name its own `owner_id` is not being authorized.
+/// The owner comes from [`Principal`], which every auth path
+/// populates, so one backend covers a cookie session, a Bearer token
+/// and an agent token. It is **never** read from the query string: a
+/// client that could name its own `owner_id` is not authorized.
 ///
-/// Fails closed. No principal ⇒ a contradiction, matching nothing — an
-/// unauthenticated request sees an empty list rather than the whole table.
-/// Pair it with an auth layer that rejects those requests outright; this is
-/// the second line, not the first.
+/// Fails closed. With no principal it matches nothing, so an
+/// unauthenticated request sees an empty list rather than the whole
+/// table. This is the second line of defence, not the first — pair it
+/// with an auth layer that rejects those requests.
 ///
 /// [`Principal`]: crate::tenancy::Principal
 #[cfg(feature = "tenancy")]
@@ -480,9 +473,9 @@ impl OwnedBy {
 
     /// Let superusers read and write every row.
     ///
-    /// Off by default: "admins see everything" is a product decision. A
-    /// support tool wants it; a gym app where the owner is also a member
-    /// emphatically does not.
+    /// Off by default: "admins see everything" is a product decision.
+    /// A support tool wants it; an app where the owner is also an
+    /// ordinary member does not.
     #[must_use]
     pub const fn superuser_sees_all(self) -> Self {
         Self {
@@ -499,8 +492,8 @@ impl ViewSetFilter for OwnedBy {
         _params: &HashMap<String, String>,
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr> {
-        // Reached only when something calls the params-only path — no request
-        // in hand means no principal, and no principal means no rows.
+        // Only reached on the params-only path. No request means no
+        // principal, and no principal means no rows.
         vec![match_nothing(schema)]
     }
 
@@ -517,8 +510,8 @@ impl ViewSetFilter for OwnedBy {
             return Vec::new();
         }
         let Some(field) = schema.field(self.column) else {
-            // The column named at mount time is not on this model. Denying is
-            // the only safe reading of "scope to an owner I cannot find".
+            // The column named at mount time is not on this model.
+            // Deny: there is no owner to scope to.
             tracing::error!(
                 model = schema.table,
                 column = self.column,
@@ -536,16 +529,13 @@ impl ViewSetFilter for OwnedBy {
 
 /// A predicate no row satisfies: `col IS NULL AND col IS NOT NULL`.
 ///
-/// A contradiction rather than `1 = 0` because it binds no parameters and
-/// every dialect writes it the same way. Used wherever a scoping backend
-/// cannot determine the principal — returning *no* predicates there would
-/// widen the query to the whole table, which is the failure this exists to
-/// prevent.
+/// A contradiction rather than `1 = 0` because it binds no
+/// parameters and every dialect writes it the same way.
 ///
-/// This is the fail-closed branch of a [`ViewSetFilter`], so it is public:
-/// writing one means having somewhere to go when the principal is absent,
-/// and the obvious guess is an empty `Vec`, which is not "match nothing"
-/// but "no filter at all" (#1411).
+/// Use it in the fail-closed branch of a [`ViewSetFilter`], where the
+/// principal is missing. An empty `Vec` there does not mean "match
+/// nothing", it means "no filter at all", which widens the query to
+/// the whole table.
 ///
 /// ```ignore
 /// fn filter(&self, _p: &HashMap<String, String>, schema: &'static ModelSchema)
@@ -555,10 +545,7 @@ impl ViewSetFilter for OwnedBy {
 /// }
 /// ```
 ///
-/// Returns one `WhereExpr`, so wrap it in `vec![]` where the trait wants a
-/// list. Not gated on `tenancy`: `ViewSetFilter` is not either, and a
-/// soft-delete or date-window backend needs to fail closed just as much as
-/// an ownership one.
+/// Returns one `WhereExpr`, so wrap it in `vec![]` for the trait.
 pub fn match_nothing(schema: &'static ModelSchema) -> WhereExpr {
     let column = schema
         .primary_key()
@@ -591,7 +578,8 @@ where
     }
 }
 
-/// Builder for a set of REST CRUD endpoints over a single [`Model`] table.
+/// Builder for a set of REST CRUD endpoints over a single
+/// [`Model`](crate::core::Model) table.
 ///
 /// Call `.router(prefix, pool)` when done to get an `axum::Router`.
 #[derive(Clone)]
@@ -600,10 +588,9 @@ pub struct ViewSet {
     fields: Option<Vec<String>>,
     filter_fields: Vec<String>,
     search_fields: Vec<String>,
-    /// DRF `ordering_fields` whitelist — when non-empty, only the
-    /// listed fields are honored via `?ordering=`. Unknown names get
-    /// silently dropped. When empty (the default), any field on the
-    /// schema is sortable — the v0.30 behavior. Issue #439.
+    /// Allow-list for `?ordering=`. When non-empty, only these fields
+    /// are honored and unknown names are dropped. Empty (the default)
+    /// means any field on the schema is sortable.
     ordering_fields: Vec<String>,
     default_page_size: usize,
     default_ordering: Vec<(String, bool)>,
@@ -613,15 +600,14 @@ pub struct ViewSet {
     /// document. Off by default — see [`ViewSet::openapi_query`].
     openapi_query: bool,
     pagination: PaginationStyle,
-    /// Pluggable filter backends (#1010) — each contributes extra `WHERE`
-    /// predicates on the list action, ANDed with the built-in filters.
+    /// Each contributes extra `WHERE` predicates, ANDed with the
+    /// built-in filters.
     filter_backends: Vec<std::sync::Arc<dyn ViewSetFilter>>,
-    /// Per-action request throttles (#1010). Default: unthrottled.
+    /// Per-action request throttles. Default: unthrottled.
     throttle: ViewSetThrottle,
     /// When set, list / retrieve / create responses render each row
     /// through this serializer bridge instead of the default
-    /// field-level projection. Tri-dialect. Wired via
-    /// [`Self::serializer`].
+    /// field-level projection. Wired via [`Self::serializer`].
     serializer: Option<Arc<dyn SerializerBridge>>,
     /// Largest page a client may request via `?page_size=` / `?limit=`.
     /// Defaults to 100. See [`ViewSet::max_page_size`].
@@ -654,30 +640,18 @@ impl ViewSet {
         }
     }
 
-    /// Render list / retrieve / create responses through `S` (a
-    /// serializer derived via `#[derive(Serializer)]
-    /// #[serializer(model = T)]`) instead of the default field-level
-    /// projection.
+    /// Render list / retrieve / create responses through `S`, a
+    /// serializer from `#[derive(Serializer)]`, instead of the
+    /// default field-level projection.
     ///
-    /// Apply when you want the ViewSet's JSON shape to match a typed
-    /// serializer's `read_only` / `source` / `method` / `nested` /
-    /// `many` overrides. The serializer's `Model` associated type must
-    /// be the same model the ViewSet is built over.
+    /// Use it when the JSON shape should match a typed serializer's
+    /// `read_only` / `source` / `method` / `nested` / `many`
+    /// overrides. `S::Model` must be the model the ViewSet is built
+    /// over. Works on all three backends.
     ///
-    /// Internally boxes a [`Bridge<S>`] behind a [`SerializerBridge`]
-    /// trait object so the `ViewSet` itself stays type-erased — a
-    /// non-breaking add-on.
-    ///
-    /// Tri-dialect (v0.45): works on Postgres, MySQL and SQLite. The
-    /// render path fetches typed `Vec<S::Model>` via the tri-dialect
-    /// `select_rows_pool_with_related` rather than a PG-only
-    /// `FromRow<PgRow>` closure.
-    ///
-    /// Note: `nested` / `many` fields need the related rows a flat
-    /// fetch doesn't load unless the ViewSet's query populated them via
-    /// `select_related`; those fields render as their `Default` value
-    /// otherwise. `method` / `read_only` / `source` / `write_only`
-    /// always apply because a real typed model is in hand.
+    /// `nested` and `many` fields need related rows a flat fetch does
+    /// not load, so they render as their `Default` unless the query
+    /// used `select_related`. The other overrides always apply.
     #[cfg(feature = "serializer")]
     #[must_use]
     pub fn serializer<S>(mut self) -> Self
@@ -707,12 +681,10 @@ impl ViewSet {
     ///
     /// # Panics
     ///
-    /// If `field` is not on the model, or is of a type that cannot be a
-    /// cursor (a float, bool, json or blob). This is a programming
-    /// error and it is caught here rather than per request: until
-    /// #1459 an unusable field was accepted silently and then returned
-    /// **500 on every request**, so a misconfigured ViewSet built fine,
-    /// started fine, passed its health check, and served nothing.
+    /// If `field` is not on the model, or has a type that cannot be a
+    /// cursor (float, bool, json or blob). Caught at mount time, not
+    /// per request, so a misconfigured ViewSet fails where the
+    /// mistake is instead of returning 500 to every caller.
     #[must_use]
     pub fn cursor_pagination(mut self, field: &'static str) -> Self {
         self.assert_cursor_field(field);
@@ -731,7 +703,7 @@ impl ViewSet {
         self
     }
 
-    /// Fail where the mistake is, not once per request (#1459).
+    /// Fail where the mistake is, not once per request.
     fn assert_cursor_field(&self, field: &'static str) {
         let table = self.schema.table;
         let Some(f) = self.schema.field(field) else {
@@ -760,17 +732,13 @@ impl ViewSet {
     /// the primary key.
     ///
     /// The `next` token is built from the *rendered* row, so a
-    /// projection that drops either leaves nothing to encode — and
-    /// that is a static fact about the builder, knowable here rather
-    /// than once per request. Checked in both directions: from
-    /// `fields()` when a cursor is already set, and from
-    /// `cursor_pagination()` when the projection is.
+    /// projection that drops either leaves nothing to encode. Checked
+    /// both ways: from `fields()` when a cursor is already set, and
+    /// from `cursor_pagination()` when the projection is.
     ///
     /// Only `.fields([..])` is covered. A serializer can project the
-    /// same column away and `ModelSerializer` exposes no field list to
-    /// check against, so that case is still caught at request time —
-    /// which is how the commerce soak found `OrderSerializer` omitting
-    /// `placed_at` and 500ing on all six instances.
+    /// same column away, and `ModelSerializer` exposes no field list
+    /// to check, so that case is still caught at request time.
     fn assert_cursor_is_projected(&self, field: &str) {
         let Some(projection) = self.fields.as_ref() else {
             return; // no projection: every column is rendered
@@ -796,9 +764,9 @@ impl ViewSet {
         }
     }
 
-    /// Switch to DRF-shape limit/offset pagination — `?limit=&offset=`.
-    /// Like page-number it runs `COUNT(*)` per request, but callers
-    /// window by row offset instead of page index.
+    /// Switch to limit/offset pagination — `?limit=&offset=`. Like
+    /// page-number it runs `COUNT(*)` per request, but callers window
+    /// by row offset instead of page index.
     #[must_use]
     pub fn limit_offset_pagination(mut self) -> Self {
         self.pagination = PaginationStyle::LimitOffset;
@@ -812,10 +780,9 @@ impl ViewSet {
         self
     }
 
-    /// Register a pluggable filter backend (DRF `filter_backends` parity,
-    /// #1010). Each backend contributes extra `WHERE` predicates on the
-    /// list action, ANDed with the built-in `filter_fields`. Call
-    /// repeatedly to stack backends; any matching closure works (see
+    /// Register a filter backend. Each one adds `WHERE` predicates,
+    /// ANDed with the built-in `filter_fields`. Call it repeatedly to
+    /// stack backends; a matching closure works too (see
     /// [`ViewSetFilter`]).
     #[must_use]
     pub fn filter_backend(mut self, backend: impl ViewSetFilter) -> Self {
@@ -823,8 +790,8 @@ impl ViewSet {
         self
     }
 
-    /// Set per-action request throttles (DRF `throttle_classes` parity,
-    /// #1010). Counters are process-local — see [`ViewSetThrottle`].
+    /// Set per-action request throttles. Counters are process-local —
+    /// see [`ViewSetThrottle`].
     #[must_use]
     pub fn throttle(mut self, throttle: ViewSetThrottle) -> Self {
         self.throttle = throttle;
@@ -863,11 +830,10 @@ impl ViewSet {
         self
     }
 
-    /// DRF `ordering_fields` whitelist — when set, only the listed
-    /// field names are honored via `?ordering=`. Unknown names are
-    /// silently dropped so a hostile client can't sort on a sensitive
-    /// column. When unset (the default), any schema field is sortable.
-    /// Issue #439.
+    /// Allow-list for `?ordering=`. When set, only these names are
+    /// honored; unknown ones are dropped, so a client cannot sort on
+    /// a sensitive column. Unset (the default) means any schema field
+    /// is sortable.
     pub fn ordering_fields(mut self, fields: &[&str]) -> Self {
         self.ordering_fields = fields.iter().map(|&s| s.to_owned()).collect();
         self
@@ -875,10 +841,10 @@ impl ViewSet {
 
     /// Default page size for list responses (default: 20).
     ///
-    /// This is the size used when the client asks for none. What a client may
-    /// *request* is bounded separately by [`ViewSet::max_page_size`], and the
-    /// effective size is clamped to that bound at request time — so the order
-    /// of these two builder calls doesn't matter.
+    /// Used when the client asks for no size. What a client may
+    /// *request* is bounded by [`ViewSet::max_page_size`], clamped at
+    /// request time, so the order of the two builder calls does not
+    /// matter.
     pub fn page_size(mut self, n: usize) -> Self {
         self.default_page_size = n.max(1);
         self
@@ -887,16 +853,13 @@ impl ViewSet {
     /// Largest page a client may request via `?page_size=` / `?limit=`
     /// (default: 100).
     ///
-    /// The ceiling used to be a hard-coded 1000 with no way to lower it, so an
-    /// app that sized its serializer, joins and response budget around
-    /// `page_size(20)` could still be asked for 1000 rows by any client — a
-    /// 50× amplification. If the serializer does per-row work that touches the
-    /// database, that is an N+1 turning into a thousand queries in a single
-    /// request (#1196).
+    /// This bounds how much a single client request can amplify your
+    /// per-row work. A serializer that queries per row turns a large
+    /// page into that many queries in one request.
     ///
-    /// The default matches `template_views`' ceiling, so the framework's two
-    /// pagination surfaces now agree. Raise it deliberately when a consumer
-    /// genuinely needs bigger pages:
+    /// The default matches `template_views`' ceiling, so the two
+    /// pagination surfaces agree. Raise it when a consumer really
+    /// needs bigger pages:
     ///
     /// ```ignore
     /// ViewSet::for_model(Post::SCHEMA).page_size(20).max_page_size(500)
@@ -919,19 +882,14 @@ impl ViewSet {
         self
     }
 
-    /// Auto-fill `ViewSetPerms` with the four standard CRUD codenames
-    /// for `T` (`<table>.view` / `<table>.add` / `<table>.change` /
-    /// `<table>.delete`), routed through the v0.16.0 typed
-    /// permissions facade ([`crate::permissions::codename_for`]).
+    /// Fill `ViewSetPerms` with the four standard CRUD codenames for
+    /// `T`, via [`crate::permissions::codename_for`].
     ///
-    /// `list` + `retrieve` get `view`; `create` gets `add`; `update`
-    /// gets `change`; `destroy` gets `delete`. Mirrors Django's
-    /// `DjangoModelPermissions` shape — the convention every Django
-    /// app starts with.
+    /// `list` and `retrieve` get `view`, `create` gets `add`,
+    /// `update` gets `change`, `destroy` gets `delete`.
     ///
-    /// Use [`Self::permissions`] for fully-custom codenames or
-    /// non-CRUD actions. Requires the `tenancy` feature (the
-    /// underlying `has_perm` engine lives there).
+    /// Use [`Self::permissions`] for custom codenames or non-CRUD
+    /// actions. Needs the `tenancy` feature, where `has_perm` lives.
     #[cfg(feature = "tenancy")]
     pub fn permissions_for_model<T: crate::core::Model>(mut self) -> Self {
         let cn = |action: &str| crate::permissions::codename_for::<T>(action);
@@ -948,23 +906,21 @@ impl ViewSet {
     /// Rename the detail routes' path capture. Defaults to `pk`, i.e.
     /// `/{pk}`.
     ///
-    /// axum allows only **one** capture name per path position across a
-    /// router, so a hand-written route mounted beside a ViewSet that spells
-    /// the same position differently — `/{id}`, `/{token}` — panics at
-    /// startup, and the panic points at axum rather than at the ViewSet.
-    /// Rather than forcing every neighbouring route to adopt `pk`, match the
-    /// ViewSet to them:
+    /// axum allows only **one** capture name per path position in a
+    /// router. A hand-written route beside a ViewSet that spells the
+    /// same position `/{id}` panics at startup. Match the ViewSet to
+    /// its neighbours instead of renaming them all:
     ///
     /// ```ignore
     /// ViewSet::for_model(Post::SCHEMA).pk_param("id").router("/api/posts", pool)
     /// // detail routes become /api/posts/{id}
     /// ```
     ///
-    /// The handlers read the capture positionally, so only the route string
-    /// and the generated OpenAPI parameter change.
+    /// Handlers read the capture positionally, so only the route
+    /// string and the OpenAPI parameter change.
     ///
-    /// Note that a capture cannot share a segment with a literal, so an
-    /// AIP-style `/{token}:accept` is not expressible; use `/{token}/accept`.
+    /// A capture cannot share a segment with a literal, so
+    /// `/{token}:accept` is not expressible; use `/{token}/accept`.
     #[must_use]
     pub fn pk_param(mut self, name: impl Into<String>) -> Self {
         self.pk_param = name.into();
@@ -987,59 +943,51 @@ impl ViewSet {
     /// Describe the mounted RFC 10008 `QUERY` route in the generated
     /// OpenAPI document.
     ///
-    /// **Off by default, and the default is about tooling, not about
-    /// the route.** The route is mounted either way. `query` is a
-    /// Path Item field OpenAPI added in **3.2.0**, so a document
-    /// containing one must declare 3.2.0 — and a client pinned to
-    /// 3.1.0 rejects the whole document, including the operations it
-    /// does understand. Most generators are still 3.1.
+    /// **Off by default, and that is about tooling, not the route.**
+    /// The route is mounted either way. `query` is a Path Item field
+    /// OpenAPI added in **3.2.0**, so a document containing one must
+    /// declare 3.2.0, and a client pinned to 3.1.0 rejects the whole
+    /// document. Most generators are still 3.1.
     ///
     /// Turn it on once your toolchain reads 3.2:
     ///
     /// ```ignore
     /// ViewSet::for_model(Post::SCHEMA).openapi_query(true)
     /// ```
-    ///
-    /// #1401 emitted this unconditionally, which flipped every
-    /// ViewSet spec to 3.2.0 without asking — `getting_started_blog`'s
-    /// own test caught it. The operation being absent was the
-    /// complaint; making it describable is the fix, and choosing the
-    /// document version is the caller's.
     #[must_use]
     pub fn openapi_query(mut self, on: bool) -> Self {
         self.openapi_query = on;
         self
     }
 
-    /// Build and return an `axum::Router` mounted at `prefix`. The
-    /// pool is baked at mount time — every request uses the same
-    /// `&PgPool`. For tenancy projects use [`Self::tenant_router`]
-    /// instead so each request resolves its own tenant connection.
+    /// Build an `axum::Router` mounted at `prefix`. The pool is baked
+    /// in at mount time, so every request uses the same `PgPool`. For
+    /// tenancy projects use [`Self::tenant_router`] instead, so each
+    /// request resolves its own tenant connection.
     ///
-    /// The prefix may or may not end with `/` — both `/api/posts` and
-    /// `/api/posts/` work identically.
+    /// A trailing `/` on the prefix makes no difference.
     #[cfg(feature = "postgres")]
     pub fn router(self, prefix: &str, pool: crate::sql::sqlx::PgPool) -> Router {
         Self::router_with_source(self, prefix, PoolSource::Static(pool))
     }
 
-    /// v0.38 — tri-dialect counterpart of [`Self::router`] that
-    /// accepts the backend-erasing [`crate::sql::Pool`] enum. Sqlite/
-    /// MySQL projects use this; PG projects can still use either.
+    /// [`Self::router`], but taking the backend-erasing
+    /// [`crate::sql::Pool`] enum. SQLite and MySQL projects use this;
+    /// Postgres projects may use either.
     pub fn router_pool(self, prefix: &str, pool: crate::sql::Pool) -> Router {
         Self::router_with_source(self, prefix, PoolSource::StaticPool(pool))
     }
 
     /// Build a router that resolves the database connection per
-    /// request via the [`crate::extractors::Tenant`] extractor —
-    /// the right shape for multi-tenant projects (subdomain / schema /
-    /// per-tenant database). Each handler runs against the connection
-    /// for whichever tenant the request resolves to.
+    /// request via the [`crate::extractors::Tenant`] extractor. Use
+    /// it for multi-tenant projects (subdomain, schema or per-tenant
+    /// database): each handler runs against the connection for the
+    /// tenant the request resolves to.
     ///
-    /// Mount on the API router that the `Server::Builder` (or
-    /// `Cli::tenancy()`) wires up; both inject the
+    /// Mount it on the API router that `Server::Builder` or
+    /// `Cli::tenancy()` wires up; both inject the
     /// [`TenantContext`](crate::extractors::TenantContext) extension
-    /// the extractor reads from.
+    /// the extractor reads.
     ///
     /// ```ignore
     /// use rustango::viewset::ViewSet;
@@ -1054,20 +1002,13 @@ impl ViewSet {
     /// axum::Router::new().merge(posts_router)
     /// ```
     ///
-    /// Permission checks (when configured via [`Self::permissions`] /
-    /// [`Self::permissions_for_model`]) run against the same per-request
-    /// connection — no second pool acquire.
+    /// Permission checks, when configured via [`Self::permissions`]
+    /// or [`Self::permissions_for_model`], run on the same
+    /// per-request connection — no second pool acquire.
     ///
-    /// **Note on list-endpoint parallelism (v0.30 behavior change)**:
-    /// pre-v0.30 the static-pool list endpoint ran SELECT + COUNT in
-    /// parallel via `tokio::join!`. v0.30 unified both pool-source
-    /// paths on the same handler, which serializes the two queries —
-    /// tenant mode can't `join!` because `Tenant::conn()` hands out
-    /// an exclusive `&mut PgConnection`, and unifying the code path
-    /// keeps the handler simple. In practice two short queries on
-    /// one connection are usually faster than two pool round-trips
-    /// anyway, so the regression is bounded; latency-sensitive
-    /// callers can opt out of the page-number COUNT entirely with
+    /// The list endpoint runs its SELECT and COUNT one after the
+    /// other, not in parallel: `Tenant::conn()` hands out an
+    /// exclusive connection. To skip the COUNT entirely, use
     /// [`Self::cursor_pagination`].
     #[cfg(feature = "tenancy")]
     #[must_use]
@@ -1090,10 +1031,9 @@ impl ViewSet {
         } else {
             get(handle_list).post(handle_create)
         };
-        // RFC 10008 QUERY collection action (#1112) — same filtered list as
-        // GET, criteria in the body. Gated on `admin` since the QUERY
-        // routing shim lives in the `admin`-gated `http_query` module; a
-        // `tenancy`-only ViewSet build keeps GET/POST without QUERY.
+        // RFC 10008 QUERY: the same filtered list as GET, with the
+        // criteria in the body. Gated on `admin` because the routing
+        // shim lives in the `admin`-gated `http_query` module.
         #[cfg(feature = "admin")]
         let collection_route = {
             use crate::http_query::QueryRouterExt as _;
@@ -1119,23 +1059,19 @@ impl ViewSet {
 
 // ------------------------------------------------------------------ Internal state
 
-/// Source of the database pool for a [`ViewSet`]. `Static` carries an
-/// owned [`PgPool`] (the legacy `router(prefix, pool)` path); `Tenant`
-/// is a marker that defers resolution to per-request [`Tenant`]
-/// extraction (the v0.30 [`ViewSet::tenant_router`] path).
+/// Where a [`ViewSet`] gets its database pool.
 #[derive(Clone)]
 enum PoolSource {
-    /// PG-typed static pool (back-compat for the `router(prefix, &PgPool)` path).
+    /// PG-typed static pool, from `router(prefix, pool)`.
     #[cfg(feature = "postgres")]
     Static(crate::sql::sqlx::PgPool),
-    /// Backend-erasing static pool — accepts any dialect; used by
-    /// `router_pool(prefix, &Pool)`.
+    /// Any-dialect static pool, from `router_pool(prefix, pool)`.
     StaticPool(crate::sql::Pool),
-    /// Tenant mode — each handler resolves a connection via the
-    /// [`crate::extractors::Tenant`] extractor at request time. We
-    /// can't bake a `&PgPool` because schema-mode tenants need
-    /// per-connection `SET search_path` setup, which only the
-    /// `TenantPools::acquire` path provides.
+    /// Each handler resolves a connection through the
+    /// [`crate::extractors::Tenant`] extractor at request time. A
+    /// pool cannot be baked in because schema-mode tenants need a
+    /// per-connection `SET search_path`, which only
+    /// `TenantPools::acquire` does.
     #[cfg(feature = "tenancy")]
     Tenant,
 }
@@ -1145,25 +1081,21 @@ struct ViewSetState {
     pool_source: PoolSource,
     vs: ViewSet,
     /// Process-local fixed-window throttle counters, keyed by
-    /// `{table}:{action}:{client}`. Shared across requests via the
-    /// `Arc<ViewSetState>` the router holds. `#1010`.
+    /// `{table}:{action}:{client}` and shared across requests.
     throttle_store: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
 }
 
-/// A per-request connection handle that abstracts over static-pool
-/// and per-request-tenant modes. Constructed by
-/// [`ViewSetState::acquire`] near the top of each handler; the
-/// returned wrapper exposes `select_rows` / `count_rows` /
-/// `insert_returning` / `update` / `delete` / `has_perm` facade
-/// methods so handler bodies stay free of pool-source branching.
-/// v0.38 — `Pool` enum wraps either the static-mode pool or the
-/// tenant-scoped pool yielded by `Tenant<DB>::pool()`. Schema-mode
-/// PG tenants go through the search-path-bound pool that
-/// `TenantPools::scoped_pool_dyn` builds; database-mode tenants
-/// (any backend) clone the cached pool.
+/// A per-request connection handle covering both static-pool and
+/// per-request-tenant modes. [`ViewSetState::acquire`] builds it at
+/// the top of each handler, and its facade methods keep handler
+/// bodies free of pool-source branching.
+///
+/// In tenant mode the inner `Pool` is what `Tenant<DB>::pool()`
+/// yields: a search-path-bound pool for PG schema mode, or a clone of
+/// the cached pool for database mode.
 struct AcquiredConn {
     pool: Pool,
-    /// Kept alive so PG schema-mode connections aren't released
+    /// Kept alive so PG schema-mode connections are not released
     /// before the handler is done.
     #[cfg(feature = "tenancy")]
     #[allow(dead_code)]
@@ -1192,12 +1124,11 @@ impl AcquiredConn {
         Ok(rows.pop())
     }
 
-    /// Tri-dialect typed fetch — decode every row matching `q` into
-    /// `T` (the model struct) on Postgres, MySQL **or** SQLite. Used by
-    /// the serializer render path ([`SerializerBridge`]); mirrors
-    /// [`Self::select_rows_as_json`] but yields typed models instead of
-    /// the field-level JSON projection. Goes through `&self.pool`, so
-    /// it inherits the same tenant-scoping the JSON projection has.
+    /// Decode every row matching `q` into the model struct `T`, on
+    /// any backend. Used by the serializer render path
+    /// ([`SerializerBridge`]) in place of
+    /// [`Self::select_rows_as_json`]. Goes through the same pool, so
+    /// it inherits the same tenant scoping.
     #[cfg(feature = "serializer")]
     async fn select_rows_typed<T>(
         &mut self,
@@ -1216,9 +1147,8 @@ impl AcquiredConn {
         crate::sql::select_rows_pool_with_related::<T>(&self.pool, q).await
     }
 
-    /// Insert a row and return the primary-key value of the new row
-    /// (per-backend: PG/SQLite use RETURNING, MySQL uses
-    /// LAST_INSERT_ID()).
+    /// Insert a row and return its primary key. PG and SQLite use
+    /// RETURNING; MySQL uses `LAST_INSERT_ID()`.
     async fn insert_returning_pk(
         &mut self,
         q: &InsertQuery,
@@ -1229,10 +1159,8 @@ impl AcquiredConn {
     }
 }
 
-/// Decode the primary key out of an INSERT's RETURNING (or MySQL's
-/// `LAST_INSERT_ID()`). Shared by the single-row path and the
-/// transactional bulk path, which get the same enum from
-/// `insert_returning_pool` / `insert_returning_tx`.
+/// Read the primary key out of an INSERT's RETURNING, or MySQL's
+/// `LAST_INSERT_ID()`. Shared by the single-row and bulk paths.
 fn pk_from_returning(
     returning: crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
@@ -1303,15 +1231,13 @@ impl ViewSetState {
         }
     }
 
-    /// Acquire a per-request connection / pool handle. For static-pool
-    /// mode this is a cheap clone; for tenant mode this runs the
-    /// resolver chain + acquires a connection from the right tenant
-    /// pool. Errors return a fully-formed [`Response`] (with the
-    /// appropriate status code) rather than a typed error so handlers
-    /// can `?`-bubble straight to the client.
-    // Only the `PoolSource::Tenant` arm reads `parts` (it runs the tenant
-    // resolver chain), and that arm is `tenancy`-gated — so an admin-only
-    // build has an unused parameter it cannot rename (#1208).
+    /// Get a per-request pool handle. A cheap clone in static-pool
+    /// mode; in tenant mode it runs the resolver chain and takes a
+    /// connection from the right tenant pool. Errors come back as a
+    /// finished [`Response`] so handlers can `?` straight to the
+    /// client.
+    // Only the `tenancy`-gated `PoolSource::Tenant` arm reads `parts`,
+    // so an admin-only build sees an unused parameter.
     #[cfg_attr(not(feature = "tenancy"), allow(unused_variables))]
     async fn acquire(
         &self,
@@ -1332,10 +1258,9 @@ impl ViewSetState {
             #[cfg(feature = "tenancy")]
             PoolSource::Tenant => {
                 use axum::response::IntoResponse as _;
-                // v0.38 — annotate the generic param so multi-backend
-                // builds (e.g. `--features postgres,sqlite`) infer
-                // `Tenant<DefaultTenantDb>` instead of erroring on
-                // ambiguous type inference.
+                // The generic param is spelled out so multi-backend
+                // builds infer `Tenant<DefaultTenantDb>` instead of
+                // failing on an ambiguous type.
                 let t = <crate::extractors::Tenant<
                     crate::tenancy::DefaultTenantDb,
                 > as axum::extract::FromRequestParts<()>>::from_request_parts(parts, &())
@@ -1350,10 +1275,9 @@ impl ViewSetState {
         }
     }
 
-    /// Permission gate. Skips the check when `codenames` is empty.
-    /// Reads the request's `AuthenticatedUser` extension; superusers
-    /// short-circuit to allow. Falls through to the
-    /// `tenancy::permissions::has_perm_on` engine.
+    /// Permission gate. An empty `codenames` skips the check.
+    /// Superusers are allowed straight away; everyone else goes to
+    /// the `tenancy::permissions` engine.
     async fn check_perm(
         &self,
         codenames: &[String],
@@ -1369,8 +1293,8 @@ impl ViewSetState {
                 .extensions
                 .get::<crate::tenancy::middleware::AuthenticatedUser>()
             else {
-                // No principal at all — the client needs to authenticate,
-                // which is 401, not 403 (#1193).
+                // No principal at all: the client needs to
+                // authenticate, so 401 rather than 403.
                 return PermOutcome::Unauthenticated;
             };
             if auth.is_superuser {
@@ -1385,12 +1309,11 @@ impl ViewSetState {
         }
         #[cfg(not(feature = "tenancy"))]
         {
-            // Without tenancy there's no AuthenticatedUser extension and no
-            // has_perm engine, so codenames present + no engine means we
-            // conservatively deny. Deliberately 403, NOT 401: no amount of
-            // authenticating can satisfy a check with no engine behind it,
-            // and answering 401 would send a token client into exactly the
-            // futile refresh loop this issue set out to remove (#1193).
+            // Without tenancy there is no `AuthenticatedUser` and no
+            // `has_perm` engine, so codenames with nothing to check
+            // them against are denied. 403, not 401: authenticating
+            // cannot satisfy a check with no engine behind it, and
+            // 401 would send a token client into a refresh loop.
             let _ = (parts, conn);
             PermOutcome::Forbidden
         }
@@ -1414,7 +1337,7 @@ fn json_with_status(status: StatusCode, body: Value) -> Response {
         .unwrap()
 }
 
-/// Re-export of the shared row-to-JSON helper. Lives in
+/// A `200` JSON response.
 fn json_response(body: Value) -> Response {
     json_with_status(StatusCode::OK, body)
 }
@@ -1423,7 +1346,7 @@ fn json_error(status: StatusCode, msg: &str) -> Response {
     json_with_status(status, json!({ "error": msg }))
 }
 
-/// `400` from serializer validation, DRF shape:
+/// A `400` from serializer validation, shaped as
 /// `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
 fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     let mut map = serde_json::Map::new();
@@ -1436,27 +1359,21 @@ fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     json_with_status(StatusCode::BAD_REQUEST, Value::Object(map))
 }
 
-/// When a serializer is registered, validate the JSON request body (if
-/// present) through it and compute the extra model fields to skip on
-/// write — every column the serializer doesn't accept (`read_only` /
-/// computed). Returns the 400 response on a validation failure so the
-/// caller can short-circuit. No-op (`Ok(vec![])`) without a serializer.
-/// Translate inbound form keys from serializer field names to model
-/// columns for any `#[serializer(source = "…")]`-renamed **writable**
-/// field, so a client POSTs the serializer field name (DRF shape) — e.g.
-/// `content` for a field declared `#[serializer(source = "body")]` — and
-/// the persist step (which reads model columns) still finds the value.
+/// Rename inbound form keys from serializer field names to model
+/// columns, for any writable field with `#[serializer(source = "…")]`.
+/// A client can then POST `content` for a field declared
+/// `#[serializer(source = "body")]`, and the persist step, which reads
+/// model columns, still finds the value.
 ///
-/// Returns `None` when nothing needs renaming (no serializer, or no
-/// renamed writable key present in the body) — the common case, so no
-/// allocation. Otherwise returns a remapped clone of the form.
+/// Returns `None` when nothing needs renaming, which is the common
+/// case and costs no allocation.
 fn serializer_input_renamed_form(
     state: &ViewSetState,
     form: &HashMap<String, String>,
 ) -> Option<HashMap<String, String>> {
     let bridge = state.vs.serializer.as_ref()?;
-    // `writable_field_names()` (JSON keys) and `writable_model_fields()`
-    // (model columns) are parallel; they differ only at `source` renames.
+    // The two lists are parallel: JSON keys and model columns. They
+    // differ only at `source` renames.
     let renames: Vec<(&'static str, &'static str)> = bridge
         .writable_field_names()
         .iter()
@@ -1470,7 +1387,7 @@ fn serializer_input_renamed_form(
     let mut out = form.clone();
     for (name, col) in renames {
         if let Some(v) = out.remove(name) {
-            // Don't clobber an explicit model-column key if a client sent both.
+            // Do not clobber a model-column key the client also sent.
             out.entry(col.to_owned()).or_insert(v);
         }
     }
@@ -1480,10 +1397,10 @@ fn serializer_input_renamed_form(
 /// The name the API publishes for a model field, when a `source` rename
 /// gave it a different one.
 ///
-/// The inverse of [`serializer_input_renamed_form`]. Parse errors are
-/// raised against model fields, because that is what the write loop
-/// walks — so without this a `source = "body"` rename tells the client to
-/// supply `body`, a column their schema never mentions (#1386).
+/// The inverse of [`serializer_input_renamed_form`]. The write loop
+/// walks model fields, so parse errors name those. Without this, a
+/// `source = "body"` rename would tell the client to supply `body`, a
+/// column their schema never mentions.
 fn serializer_public_field_name(state: &ViewSetState, model_field: &str) -> Option<&'static str> {
     let bridge = state.vs.serializer.as_ref()?;
     bridge
@@ -1496,8 +1413,8 @@ fn serializer_public_field_name(state: &ViewSetState, model_field: &str) -> Opti
 
 /// Re-render a form error against the names the API publishes.
 ///
-/// Only the field name moves; the wording is untouched, so a client that
-/// was matching on the message still matches.
+/// Only the field name changes. The wording stays, so a client
+/// matching on the message still matches.
 fn public_form_error(state: &ViewSetState, e: FormError) -> FormError {
     match e {
         FormError::Missing { field } => FormError::Missing {
@@ -1514,9 +1431,9 @@ fn public_form_error(state: &ViewSetState, e: FormError) -> FormError {
             value,
             detail,
         },
-        // Names a primary key, which no serializer renames. Matched by
-        // name rather than `_` so a new variant has to be considered
-        // here instead of silently leaking a model column.
+        // Names a primary key, which no serializer renames. Matched
+        // by name rather than `_` so a new variant has to be
+        // considered here instead of leaking a model column.
         other @ FormError::UnsupportedPk { .. } => other,
     }
 }
@@ -1546,13 +1463,9 @@ fn serializer_write_prep(
     }
 }
 
-/// Unwrap-or-return-500. Collapses the `match expr { Ok(v) => v,
-/// Err(e) => return json_error(INTERNAL_SERVER_ERROR, &e.to_string()) }`
-/// shape that recurred ~5× in handler bodies. Issue #808 (item 4).
+/// Unwrap, or return a `500` JSON error carrying the message.
 ///
-/// `$expr` must yield `Result<_, E>` where `E: ::std::fmt::Display`
-/// — covers every error type used in the viewset (`ExecError`,
-/// `String`, `QueryError`, etc.).
+/// `$expr` must be a `Result<_, E>` where `E: Display`.
 macro_rules! or_500 {
     ($expr:expr) => {
         match $expr {
@@ -1567,9 +1480,7 @@ macro_rules! or_500 {
     };
 }
 
-/// Unwrap-or-return-400. Sibling of [`or_500`]; collapses the
-/// `match expr { Ok(v) => v, Err(e) => return json_error(BAD_REQUEST,
-/// &e.to_string()) }` shape. Issue #808 (item 4).
+/// Unwrap, or return a `400` JSON error. Sibling of [`or_500`].
 macro_rules! or_400 {
     ($expr:expr) => {
         match $expr {
@@ -1584,19 +1495,8 @@ macro_rules! or_400 {
     };
 }
 
-/// Common entry preamble shared by every REST handler — closes
-/// item 1 of #808. Splits the inbound `Request` into `(parts, body)`,
-/// resolves a connection via the [`PoolSource`] chain (per-tenant or
-/// static), then enforces the per-action permission codenames. On
-/// failure returns a fully-formed [`Response`] (401 / 403 / 5xx)
-/// ready for the handler to `?`-bubble.
-///
-/// Handlers that don't need the body bind it as `_body` and ignore
-/// it; the helper still returns the body so write paths
-/// (`handle_create`, `update_inner`) can consume it after the
-/// permission gate.
-/// Predicates every backend contributes for this request, ANDed into
-/// whatever query the action is about to run.
+/// The predicates every filter backend contributes for this request,
+/// to be ANDed into whatever query the action runs.
 fn scope_filters(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
@@ -1610,8 +1510,8 @@ fn scope_filters(
         .collect()
 }
 
-/// `expr` narrowed by `extra`. An empty `extra` returns `expr` untouched, so
-/// a ViewSet with no backends builds the same SQL it always did.
+/// `expr` narrowed by `extra`. An empty `extra` returns `expr`
+/// unchanged, so a ViewSet with no backends builds the same SQL.
 fn narrow(expr: WhereExpr, extra: Vec<WhereExpr>) -> WhereExpr {
     if extra.is_empty() {
         return expr;
@@ -1624,23 +1524,29 @@ fn narrow(expr: WhereExpr, extra: Vec<WhereExpr>) -> WhereExpr {
 /// Outcome of a per-action permission check.
 ///
 /// Three-valued on purpose: "no principal" and "principal without the
-/// permission" are different answers to the client. Collapsing them to a
-/// single bool is what produced a 403 for anonymous requests (#1193).
+/// permission" are different answers to the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermOutcome {
     /// Authorised — proceed.
     Allow,
     /// No authenticated principal → `401`.
     ///
-    /// Only the permission engine constructs this, and that lives behind
-    /// `tenancy`; without it every denial is a `Forbidden` by design, so the
-    /// variant is legitimately unconstructed rather than dead (#1208).
+    /// Only the `tenancy` permission engine builds this. Without that
+    /// feature every denial is `Forbidden`, so the variant is
+    /// unconstructed rather than dead.
     #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Unauthenticated,
     /// Authenticated, but lacks every required codename → `403`.
     Forbidden,
 }
 
+/// The preamble every REST handler runs. Splits the request into
+/// parts and body, resolves a connection through the [`PoolSource`],
+/// then checks the action's permission codenames. On failure it
+/// returns a finished [`Response`] (401 / 403 / 5xx) to `?`-bubble.
+///
+/// The body comes back unconsumed, so write paths can read it after
+/// the permission gate. Read handlers bind it as `_body`.
 async fn enter(
     state: &Arc<ViewSetState>,
     req: axum::extract::Request,
@@ -1648,18 +1554,17 @@ async fn enter(
     action: &'static str,
 ) -> Result<(axum::http::request::Parts, Body, AcquiredConn), Response> {
     let (mut parts, body) = req.into_parts();
-    // #1010 — per-action throttle is checked before acquiring a
-    // connection, so throttled requests shed load early.
+    // Throttle before acquiring a connection, so throttled requests
+    // shed load early.
     if let Some(resp) = check_throttle(state, action, &parts) {
         return Err(resp);
     }
     let mut acq = state.acquire(&mut parts).await?;
     match state.check_perm(codenames, &parts, &mut acq).await {
         PermOutcome::Allow => {}
-        // 401 means "authenticate", 403 means "you cannot do this". A token
-        // client treats 401 as its cue to refresh; answering 403 to an
-        // anonymous request means the refresh never fires and the member is
-        // silently logged out (#1193).
+        // 401 means "authenticate", 403 means "you may not". A token
+        // client treats 401 as its cue to refresh, so answering 403
+        // to an anonymous request silently logs the member out.
         PermOutcome::Unauthenticated => {
             return Err(json_error(
                 StatusCode::UNAUTHORIZED,
@@ -1673,9 +1578,9 @@ async fn enter(
     Ok((parts, body, acq))
 }
 
-/// Per-action fixed-window throttle (#1010). Returns `Some(429)` when the
-/// client has exceeded the action's [`ThrottleRule`] within its window,
-/// else `None`. Counters are process-local (see [`ViewSetThrottle`]).
+/// Per-action fixed-window throttle. Returns `Some(429)` when the
+/// client has gone over the action's [`ThrottleRule`] for this
+/// window. Counters are process-local — see [`ViewSetThrottle`].
 fn check_throttle(
     state: &ViewSetState,
     action: &str,
@@ -1687,8 +1592,8 @@ fn check_throttle(
     let now = Instant::now();
     let window = std::time::Duration::from_secs(rule.window_secs);
 
-    // A poisoned mutex means a prior panic mid-update; fail open rather
-    // than reject every subsequent request.
+    // A poisoned mutex means an earlier panic mid-update. Fail open
+    // rather than reject every request from here on.
     let mut store = match state.throttle_store.lock() {
         Ok(g) => g,
         Err(_) => return None,
@@ -1707,10 +1612,9 @@ fn check_throttle(
     None
 }
 
-/// Best-effort client identity for throttle keying: the peer IP from
-/// `ConnectInfo` when the server installed it, else the first
-/// `X-Forwarded-For` / `X-Real-IP` hop, else a shared `"global"` bucket
-/// (coarse but safe). #1010.
+/// Best-effort client identity for the throttle key: the peer IP
+/// from `ConnectInfo`, else the first `X-Forwarded-For` / `X-Real-IP`
+/// hop, else one shared `"global"` bucket.
 fn client_key(parts: &axum::http::request::Parts) -> String {
     if let Some(ci) = parts
         .extensions
@@ -1733,7 +1637,7 @@ fn client_key(parts: &axum::http::request::Parts) -> String {
     "global".to_owned()
 }
 
-/// A `429 Too Many Requests` with a `Retry-After` header (#1010).
+/// A `429 Too Many Requests` with a `Retry-After` header.
 fn throttled_response(retry_after_secs: u64) -> Response {
     Response::builder()
         .status(StatusCode::TOO_MANY_REQUESTS)
@@ -1745,11 +1649,7 @@ fn throttled_response(retry_after_secs: u64) -> Response {
         .unwrap()
 }
 
-/// #808 — was repeated verbatim in `handle_retrieve` / `update_inner`
-/// / `handle_destroy` (the three item-route handlers). Each spelled
-/// out the same `match parse_pk_string(field, raw) { Ok(v) => v, Err(e)
-/// => return json_error(400, &e.to_string()) }` pattern. Factored
-/// out so the handler bodies focus on what they're doing.
+/// Parse a path capture into the primary key's type, or a `400`.
 fn parse_pk_or_400(
     field: &'static crate::core::FieldSchema,
     raw: &str,
@@ -1757,11 +1657,7 @@ fn parse_pk_or_400(
     parse_pk_string(field, raw).map_err(|e| json_error(StatusCode::BAD_REQUEST, &e.to_string()))
 }
 
-/// #808 — was repeated verbatim ×4: `handle_retrieve`, `handle_create`,
-/// `update_inner`, `handle_destroy` all do the same
-/// `let Some(pk_field) = state.pk_field() else { return json_error(500,
-/// "model has no primary key") }`. Factored so the calling handlers
-/// shrink to the `?` form.
+/// The model's primary-key field, or a `500` if it has none.
 fn pk_field_or_500(state: &ViewSetState) -> Result<&'static crate::core::FieldSchema, Response> {
     state.pk_field().ok_or_else(|| {
         json_error(
@@ -1784,7 +1680,7 @@ fn no_content() -> Response {
 
 /// Build a `WhereExpr` from one query-param `field[__lookup]=value` entry.
 ///
-/// Supported Django-style lookups:
+/// Supported lookups:
 /// - (none) / `exact` — `Op::Eq`
 /// - `gt`, `gte`, `lt`, `lte`, `ne`
 /// - `in` / `not_in` — comma-separated values
@@ -1800,9 +1696,9 @@ fn build_lookup_filter(
     let column = field.column;
     let predicate =
         |op: Op, value: SqlValue| Some(WhereExpr::Predicate(Filter { column, op, value }));
-    // The escaped-LIKE builder: escapes the user value and pairs it with
-    // the matching `*Escaped` op in one place (#1257), so no arm can
-    // combine an escaped value with a plain `Op::Like` (or vice versa).
+    // Escapes the user value and pairs it with the matching
+    // `*Escaped` op in one place, so no arm can combine an escaped
+    // value with a plain `Op::Like`, or the reverse.
     let escaped_like = |prefix: &str, suffix: &str, raw: &str, case_insensitive: bool| {
         let escaped = crate::core::escape_like(raw);
         let op = if case_insensitive {
@@ -1812,9 +1708,8 @@ fn build_lookup_filter(
         };
         predicate(op, SqlValue::String(format!("{prefix}{escaped}{suffix}")))
     };
-    // #808 part 6 — six binary-comparison arms had byte-identical
-    // bodies modulo the `Op` constant. Map the lookup token to its
-    // `Op`, parse once, branch once.
+    // The binary comparisons differ only in their `Op`, so map the
+    // lookup token to one, then parse and branch once.
     let binary_op = match lookup.unwrap_or("exact") {
         "exact" => Some(Op::Eq),
         "ne" => Some(Op::Ne),
@@ -1847,11 +1742,9 @@ fn build_lookup_filter(
             };
             predicate(op, SqlValue::List(parts))
         }
-        // Escape LIKE metacharacters in `raw` (URL-supplied) so `%`/`_`
-        // match literally, and pair with the *Escaped ops so the ESCAPE
-        // clause is emitted — required for correctness on SQLite
-        // (#1257). One helper owns the escape⟷op pairing so a future
-        // arm cannot mismatch them.
+        // Escape LIKE metacharacters in the URL-supplied `raw`, so
+        // `%` and `_` match literally, and use the `*Escaped` ops so
+        // an ESCAPE clause is emitted. SQLite needs that clause.
         "contains" => escaped_like("%", "%", raw, false),
         "icontains" => escaped_like("%", "%", raw, true),
         "startswith" => escaped_like("", "%", raw, false),
@@ -1880,20 +1773,20 @@ async fn handle_list(
     run_list(state, params, acq, &parts).await
 }
 
-/// Core `list` logic shared by the GET `list` action and the RFC 10008
-/// QUERY action (#1112): builds filters / search / ordering / pagination
-/// from `params` and renders the paginated envelope. `params` arrive from
-/// the querystring on GET and from the request body on QUERY, so the two
-/// transports return byte-identical results for equivalent criteria.
+/// The `list` logic, shared by GET and the RFC 10008 QUERY action.
+/// Builds filters, search, ordering and pagination from `params` and
+/// renders the paginated envelope. `params` come from the
+/// querystring on GET and from the body on QUERY, so both transports
+/// return the same results for the same criteria.
 async fn run_list(
     state: Arc<ViewSetState>,
     params: HashMap<String, String>,
     mut acq: AcquiredConn,
     parts: &axum::http::request::Parts,
 ) -> Response {
-    // Clamp to the ViewSet's own ceiling, not a hard-coded 1000 (#1196). The
-    // default page size is clamped too, so a `page_size` larger than
-    // `max_page_size` can't smuggle a bigger page through the default path.
+    // Clamp to the ViewSet's own ceiling. The default page size is
+    // clamped too, so a `page_size` larger than `max_page_size`
+    // cannot smuggle a bigger page through the default path.
     let page_size: i64 = params
         .get("page_size")
         .and_then(|p| p.parse().ok())
@@ -1905,15 +1798,14 @@ async fn run_list(
     //
     // Supports both:
     //   ?author_id=42                — exact match (Op::Eq)
-    //   ?author_id__gt=10            — Django-style lookup
+    //   ?author_id__gt=10            — lookup suffix
     //   ?status__in=draft,published  — comma-separated for IN/NOT_IN
     //   ?title__icontains=hello      — pattern lookups
     //   ?published_at__isnull=true   — IS NULL / IS NOT NULL
     let mut filters: Vec<WhereExpr> = Vec::new();
     for (param_key, raw_val) in &params {
-        // #809 — was a hand-spelled `matches!` reserved-key check
-        // that had drifted from template_views's copy. Route through
-        // `list_params::is_reserved_list_key` (single source of truth).
+        // `list_params::is_reserved_list_key` is the single source of
+        // truth, shared with template_views.
         if crate::list_params::is_reserved_list_key(param_key) {
             continue;
         }
@@ -1932,8 +1824,8 @@ async fn run_list(
         }
     }
 
-    // #1010 — pluggable filter backends contribute extra predicates,
-    // ANDed with the built-in filter_fields parsed above.
+    // Filter backends add predicates, ANDed with the built-in
+    // `filter_fields` parsed above.
     filters.extend(scope_filters(&state, parts, &params));
 
     let where_clause = if filters.len() == 1 {
@@ -1956,24 +1848,17 @@ async fn run_list(
             .collect(),
     });
 
-    // Ordering — #439 honors the DRF `ordering_fields` whitelist when
-    // set: only listed field names are sortable via `?ordering=`. An
-    // empty whitelist (the default) keeps the v0.30 behavior of
-    // allowing any schema field. Unknown / off-whitelist names are
-    // silently dropped (mirrors DRF's defensive default — a hostile
-    // client can't sort on `password_hash` just because it's a column).
-    // #809 — was a hand-rolled `-`-prefix split + allowlist filter +
-    // schema-field lookup. Route through `list_params::parse_ordering`
-    // (single source of truth shared with template_views::ListView).
-    // #1282 — with no explicit `ordering_fields`, fall back to the fields
-    // this ViewSet actually *exposes* rather than every column on the
-    // model. The comment above described this protection, but an empty
-    // allowlist skipped the check entirely, so a ViewSet declaring
-    // `fields = "id, title"` still honoured `?ordering=password_hash` —
-    // a sort oracle over a column the API never returns. DRF defaults to
-    // the serializer's readable fields for the same reason. When `fields`
-    // is unset, `effective_fields` is every scalar column, so the
-    // permissive behaviour is retained exactly where it is harmless.
+    // Ordering. `?ordering=` honours the `ordering_fields`
+    // allow-list when it is set, and unknown names are dropped, so a
+    // client cannot sort on `password_hash` just because it is a
+    // column. With no explicit allow-list the fallback is the fields
+    // this ViewSet actually *exposes*, not every column on the model
+    // — otherwise `fields = "id, title"` would still allow a sort
+    // oracle over a column the API never returns. When `fields` is
+    // unset, `effective_fields` is every scalar column anyway.
+    //
+    // `list_params::parse_ordering` is the single source of truth,
+    // shared with `template_views::ListView`.
     let ordering_allowlist: Vec<String> = if state.vs.ordering_fields.is_empty() {
         state
             .effective_fields()
@@ -2013,7 +1898,7 @@ async fn run_list(
                 .max(1);
             let offset = (page - 1) * page_size;
 
-            // #562 — struct-update over SelectQuery::new for the
+            // Struct-update over `SelectQuery::new` for the
             // paginated list query.
             let select_q = SelectQuery {
                 where_clause: where_clause.clone(),
@@ -2029,16 +1914,13 @@ async fn run_list(
                 search: search_clause.clone(),
             };
 
-            // Tenant mode holds a single per-request connection, so
-            // the two queries serialize. Static mode could parallelize
-            // via `tokio::join!`, but unifying on the sequential path
-            // keeps the handler simple — two short queries on the
-            // same connection are typically faster than two pool
-            // round-trips anyway.
-            // `render_list` renders through the registered serializer
-            // (typed tri-dialect fetch) when one is set, else falls
-            // back to the default field-level `select_rows_as_json`
-            // projection — both dialect-agnostic.
+            // The SELECT and COUNT run one after the other: tenant
+            // mode holds a single per-request connection, and one
+            // sequential path keeps the handler simple.
+            //
+            // `render_list` goes through the registered serializer
+            // when there is one, else the default
+            // `select_rows_as_json` projection.
             let results = or_500!(render_list(&state, &mut acq, &select_q, &fields).await);
             let count = or_500!(acq.count_rows(&count_q).await);
             let last_page = ((count - 1).max(0) / page_size) + 1;
@@ -2068,10 +1950,10 @@ async fn run_list(
             .await
         }
         PaginationStyle::LimitOffset => {
-            // `?limit=` overrides the default page size; `?offset=` skips
-            // rows. Same `COUNT(*)` cost as page-number pagination.
-            // Same ceiling as `?page_size=` — otherwise limit/offset would be
-            // an unbounded way around it (#1196).
+            // `?limit=` overrides the default page size and
+            // `?offset=` skips rows. Same `COUNT(*)` cost as
+            // page-number pagination, and the same ceiling as
+            // `?page_size=` — otherwise it would be a way around it.
             let limit: i64 = params
                 .get("limit")
                 .and_then(|p| p.parse().ok())
@@ -2109,19 +1991,18 @@ async fn run_list(
     }
 }
 
-/// RFC 10008 QUERY action on the collection (#1112) — the same filtered,
-/// paginated `list`, but with the criteria in the request body instead of
-/// the querystring. A ViewSet gets this for free (no trait method to
-/// implement); `QUERY /things` with body `status=draft&ordering=-created`
-/// returns exactly what `GET /things?status=draft&ordering=-created`
-/// would. Permissions / throttles reuse the `list` codenames via `enter`.
+/// RFC 10008 QUERY on the collection: the same filtered, paginated
+/// `list`, with the criteria in the request body. `QUERY /things`
+/// with body `status=draft&ordering=-created` returns what
+/// `GET /things?status=draft&ordering=-created` would. Permissions
+/// and throttles reuse the `list` codenames.
 #[cfg(feature = "admin")]
 async fn handle_query(
     State(state): State<Arc<ViewSetState>>,
     req: axum::extract::Request,
 ) -> Response {
-    // `enter` returns the body unconsumed (it only reads `parts` for
-    // throttle + permission checks), so we can parse params from it here.
+    // `enter` reads only `parts`, so the body is still unconsumed
+    // and the params can be parsed from it here.
     let (parts, body, acq) = match enter(&state, req, &state.vs.perms.list, "query").await {
         Ok(x) => x,
         Err(resp) => return resp,
@@ -2133,11 +2014,11 @@ async fn handle_query(
     run_list(state, params, acq, &parts).await
 }
 
-/// Parse a QUERY request body into the same `HashMap<String, String>`
-/// param shape `run_list` consumes for GET. Dispatches on `Content-Type`:
-/// urlencoded (or none) via the querystring codepath, JSON objects flattened
-/// to string values (scalars stringified, arrays comma-joined so
-/// `{"status__in":["a","b"]}` matches `status__in=a,b`), anything else 415.
+/// Parse a QUERY body into the same param map `run_list` takes for
+/// GET. Dispatches on `Content-Type`: urlencoded (or none) goes
+/// through the querystring path, a JSON object is flattened to
+/// strings (arrays comma-joined, so `{"status__in":["a","b"]}`
+/// matches `status__in=a,b`), and anything else is a 415.
 #[cfg(feature = "admin")]
 async fn parse_query_body_params(
     parts: &axum::http::request::Parts,
@@ -2192,9 +2073,9 @@ async fn parse_query_body_params(
     }
 }
 
-/// Flatten a JSON value to the string form `run_list`'s filter parser
-/// expects: strings verbatim, arrays comma-joined (for `__in` lookups),
-/// null → empty, numbers / bools via their JSON text.
+/// Flatten a JSON value to the string form the filter parser wants:
+/// strings as-is, arrays comma-joined (for `__in`), null as empty,
+/// numbers and bools as their JSON text.
 #[cfg(feature = "admin")]
 fn json_value_to_param(v: &Value) -> String {
     match v {
@@ -2228,12 +2109,10 @@ async fn handle_list_cursor(
         );
     };
     if !cursor_field_supported(cursor_schema.ty) {
-        // Still a 500, because it is a server-side misconfiguration
-        // rather than anything the caller did — but the set of usable
-        // types is much wider now, and `cursor_pagination()` panics at
-        // build time on an unusable one, so reaching this at request
-        // time takes a `pagination(PaginationStyle::Cursor { .. })`
-        // constructed by hand (#1459).
+        // A 500, because it is a server misconfiguration, not
+        // anything the caller did. `cursor_pagination()` panics at
+        // build time on an unusable field, so reaching this at
+        // request time needs a hand-built `PaginationStyle::Cursor`.
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!(
@@ -2245,14 +2124,13 @@ async fn handle_list_cursor(
         );
     }
 
-    // The primary key breaks ties. A cursor column that is *not* unique
-    // — any timestamp, and #1459 made those legal — puts equal values on
-    // both sides of a page boundary, and a strict `>` on the column
-    // alone then skips every tied row after the first. Ordering by
-    // `(col, pk)` and comparing the pair makes the position total.
+    // The primary key breaks ties. A non-unique cursor column, such
+    // as any timestamp, can put equal values on both sides of a page
+    // boundary, and a strict `>` on the column alone then skips
+    // every tied row after the first. Ordering by `(col, pk)` and
+    // comparing the pair makes the position total.
     //
-    // Skipped when the cursor *is* the primary key, which is the
-    // pre-#1459 case and already unique.
+    // Skipped when the cursor is the primary key, already unique.
     let pk_schema = state.vs.schema.fields.iter().find(|f| f.primary_key);
     let tiebreak = pk_schema.filter(|pk| pk.column != cursor_schema.column);
 
@@ -2314,16 +2192,14 @@ async fn handle_list_cursor(
         None => where_clause,
     };
 
-    // Order by the cursor field, then the tiebreaker — the ORDER BY has
-    // to match the comparison above or the "strictly after" is a lie.
+    // Order by the cursor field, then the tiebreaker. The ORDER BY
+    // must match the comparison above, or "strictly after" is wrong.
     let mut order_by = vec![crate::core::OrderItem::column(cursor_schema.column, desc)];
     if let Some(pk) = tiebreak {
         order_by.push(crate::core::OrderItem::column(pk.column, desc));
     }
 
-    // #562 — struct-update over SelectQuery::new for the cursor-
-    // paginated SELECT. Fetch page_size+1 to detect if a next page
-    // exists.
+    // Fetch `page_size + 1` rows to tell whether a next page exists.
     let select_q = SelectQuery {
         where_clause: final_where,
         search: search_clause,
@@ -2343,11 +2219,10 @@ async fn handle_list_cursor(
     let next_cursor = if has_more {
         // Read the cursor field value from the last JSON row.
         let last = page_rows.last().expect("non-empty page");
-        // The tiebreaker travels in the token. If the PK is projected
-        // away the position cannot be made total, and issuing a
-        // value-only token would quietly reintroduce the row-skipping
-        // this exists to prevent — so it is reported, like a missing
-        // cursor column.
+        // The tiebreaker travels in the token. If the PK is
+        // projected away the position cannot be total, and a
+        // value-only token would start skipping tied rows again — so
+        // report it, like a missing cursor column.
         let pk_part = match tiebreak {
             Some(pk) => match cursor_value_of(last, pk.name) {
                 Some(v) => Some(v),
@@ -2369,12 +2244,11 @@ async fn handle_list_cursor(
         };
         match cursor_value_of(last, cursor_schema.name) {
             Some(v) => Some(encode_cursor(&v, pk_part.as_deref())),
-            // The cursor column is not in the rendered row — almost
-            // always `.fields([...])` (or a serializer) projecting it
-            // away. Answering `next: null` here would be **silent
-            // truncation**: `has_more` is true, the caller sees a page
-            // with no continuation token, and pagination stops at page
-            // one with nothing reporting an error. Say so instead.
+            // The cursor column is not in the rendered row, almost
+            // always because `.fields([...])` or a serializer
+            // projected it away. `next: null` here would be silent
+            // truncation: `has_more` is true, but the caller gets no
+            // continuation token and no error. Say so instead.
             None => {
                 return json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2403,21 +2277,13 @@ async fn handle_list_cursor(
 /// Can this column be a cursor?
 ///
 /// Cursor pagination needs a **totally ordered** column whose value
-/// round-trips through a string. Integers qualify, and so do timestamps,
-/// dates, UUIDs and strings — the last two because monotonic ids
-/// (`UUIDv7`, ULID) are a common cursor and sort correctly in SQL.
+/// round-trips through a string. Integers, timestamps, dates, UUIDs
+/// and strings all qualify; monotonic ids (`UUIDv7`, ULID) are a
+/// common cursor and sort correctly in SQL.
 ///
-/// What is excluded is excluded for a reason: floats do not round-trip
-/// exactly, `Json` / `Binary` / `Array` have no useful total order, and
-/// `Bool` has too few values to page by.
-///
-/// Before #1459 this list was `I16 | I32 | I64` only, and a
-/// non-integer field was not rejected where it was *configured* — it
-/// was accepted by `cursor_pagination()` and then returned 500 on every
-/// request, forever, while the docs described "a stable,
-/// monotonically-ordered column (typically `id`)". A `TIMESTAMPTZ
-/// created_at` is exactly that, and is the canonical cursor in the DRF
-/// API this one is shaped after.
+/// The rest are excluded for a reason: floats do not round-trip
+/// exactly, `Json` / `Binary` / `Array` have no useful total order,
+/// and `Bool` has too few values to page by.
 pub(crate) fn cursor_field_supported(ty: FieldType) -> bool {
     matches!(
         ty,
@@ -2433,18 +2299,15 @@ pub(crate) fn cursor_field_supported(ty: FieldType) -> bool {
 
 /// Encode a cursor position as URL-safe base64.
 ///
-/// `tiebreak` is the row's primary key, carried alongside the cursor
-/// value whenever the cursor column is not itself the primary key.
-/// Without it a page boundary that lands on a run of equal values drops
-/// every row in that run but one: the next page asks for `col > v`, and
-/// the rest of the tied rows are `= v`. That was latent while cursors
-/// had to be integers (in practice the unique PK); #1459 widened them to
-/// timestamps and strings, where ties are ordinary — a `bulk_insert`, or
-/// Postgres' per-transaction `now()`.
+/// `tiebreak` is the row's primary key, carried with the cursor value
+/// whenever the cursor column is not the primary key. Without it a
+/// page boundary landing on a run of equal values drops all but one
+/// of them: the next page asks for `col > v`, and the tied rows are
+/// `= v`. Ties are ordinary on timestamp cursors — a `bulk_insert`,
+/// or Postgres' per-transaction `now()`.
 ///
-/// Composite tokens are a two-element JSON array; a bare value is the
-/// pre-#1459 form. [`decode_cursor`] reads both, so a client paginating
-/// across an upgrade keeps working.
+/// A composite token is a two-element JSON array; a bare value is the
+/// older form. [`decode_cursor`] reads both.
 fn encode_cursor(value: &str, tiebreak: Option<&str>) -> String {
     use base64::Engine;
     let payload = match tiebreak {
@@ -2457,8 +2320,7 @@ fn encode_cursor(value: &str, tiebreak: Option<&str>) -> String {
 /// Decode a cursor token into a bind value of the cursor column's type.
 ///
 /// Returns `None` for malformed input, which the caller turns into a
-/// 400 — a bad cursor is the client's, unlike the 500 a misconfigured
-/// cursor *field* used to produce.
+/// 400: a bad cursor is the client's mistake.
 fn decode_cursor(
     token: &str,
     ty: FieldType,
@@ -2470,10 +2332,9 @@ fn decode_cursor(
         .ok()?;
     let s = std::str::from_utf8(&bytes).ok()?;
 
-    // Composite form first: `["<value>", "<pk>"]`. A pre-#1459 token is
-    // a bare value, and a bare value that happens to parse as JSON (an
-    // integer cursor does) is not a two-element array of strings, so
-    // the two forms cannot be confused.
+    // Composite form first: `["<value>", "<pk>"]`. A bare value that
+    // happens to parse as JSON, as an integer cursor does, is not a
+    // two-element array of strings, so the forms cannot be confused.
     if let Some([a, b]) = serde_json::from_str::<Vec<String>>(s)
         .ok()
         .filter(|v| v.len() == 2)
@@ -2508,9 +2369,9 @@ fn parse_cursor_scalar(s: &str, ty: FieldType) -> Option<SqlValue> {
 /// The string form of a rendered row's cursor column, for the `next`
 /// token.
 ///
-/// Reads the JSON the list endpoint already produced rather than
-/// re-querying: an integer arrives as a number, everything else as a
-/// string, and the two cases are the whole of it.
+/// Reads the JSON the list endpoint already produced instead of
+/// re-querying. An integer arrives as a number, everything else as a
+/// string.
 fn cursor_value_of(row: &Value, field_name: &str) -> Option<String> {
     let v = row.get(field_name)?;
     v.as_i64()
@@ -2538,11 +2399,9 @@ async fn handle_retrieve(
         Err(resp) => return resp,
     };
 
-    // #562 — was 11-field struct literal; SelectQuery::by_pk constructs
-    // the single-PK-lookup shape directly.
     let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
-    // …narrowed by the filter backends, so a row this principal may not see
-    // reads as absent rather than forbidden — a 403 would confirm the id.
+    // Narrowed by the filter backends, so a row this principal may
+    // not see reads as absent. A 403 would confirm the id exists.
     let scope = scope_filters(&state, &parts, &HashMap::new());
     select_q.where_clause = narrow(select_q.where_clause, scope);
 
@@ -2566,7 +2425,7 @@ async fn handle_create(
         Err(resp) => return resp,
     };
 
-    // #435 — sniff for bulk shape (JSON array body) and dispatch.
+    // A JSON array body means a bulk create.
     let create_body = or_400!(extract_create_body(parts, body).await);
 
     let skip: Vec<&str> = state
@@ -2590,21 +2449,19 @@ async fn handle_create(
     }
 }
 
-/// Build the `InsertQuery`, run `INSERT … RETURNING <pk>`, then
-/// re-fetch the row by its PK as a JSON object — the
-/// `create_one` ↔ `create_many` shared insert→fetch tail. Issue #808
-/// (item 5).
+/// Run `INSERT … RETURNING <pk>`, then re-fetch the row by its PK as
+/// JSON. The insert-then-fetch tail shared by `create_one` and
+/// `create_many`.
 ///
-/// Returns `(StatusCode, message)` on the two distinct failure modes
-/// so both callers can re-emit the right HTTP code:
-/// * `BAD_REQUEST` when the INSERT itself fails (constraint violation,
-///   bad value, etc. — likely client fault).
-/// * `INTERNAL_SERVER_ERROR` when the INSERT succeeds but the re-fetch
-///   misses (a row vanishing between INSERT and SELECT is a server-
-///   side anomaly).
+/// Returns `(StatusCode, message)` so both callers emit the right
+/// code:
+/// * `BAD_REQUEST` when the INSERT fails — a constraint violation or
+///   a bad value, so probably the client's fault.
+/// * `INTERNAL_SERVER_ERROR` when the INSERT works but the re-fetch
+///   misses, which should not happen.
 ///
-/// `columns` / `values` come from a prior `collect_values` step so
-/// the caller has already validated the inbound form / JSON shape.
+/// `columns` and `values` come from an earlier `collect_values`, so
+/// the inbound shape is already validated.
 async fn insert_and_fetch_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
@@ -2656,7 +2513,7 @@ async fn create_one(
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
-    let collected = match collect_values(state.vs.schema, form, &all_skip) {
+    let collected = match collect_insert_values(state.vs.schema, form, &all_skip) {
         Ok(v) => v,
         Err(e) => {
             return json_error(
@@ -2673,7 +2530,7 @@ async fn create_one(
     }
 }
 
-/// Bulk create — Django DRF `ListSerializer(many=True)` shape.
+/// Bulk create from a JSON array body.
 /// Validates every entry first; on first failure, the WHOLE bulk
 /// is rejected with the index + message (atomic-validate, not
 /// atomic-insert — partial-insert recovery is a separate concern).
@@ -2694,8 +2551,7 @@ async fn create_many(
 
     // Atomic validation: collect every (columns, values) up front
     // so a bad row near the end of the list doesn't leave half the
-    // INSERTs committed. DRF's default ListSerializer.create has
-    // the same shape — validate the whole list before any save.
+    // INSERTs committed: validate the whole list before any save.
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
         // Serializer validation + non-writable skip, per entry.
@@ -2707,7 +2563,7 @@ async fn create_many(
         all_skip.extend(extra_skip);
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
-        let collected = match collect_values(state.vs.schema, row, &all_skip) {
+        let collected = match collect_insert_values(state.vs.schema, row, &all_skip) {
             Ok(v) => v,
             Err(e) => {
                 let e = public_form_error(state, e);
@@ -3049,8 +2905,7 @@ async fn extract_form_body(
 }
 
 /// Sniff a POST body and return either a single record (object body
-/// or form-urlencoded body) or a bulk list (JSON array body — DRF's
-/// `ListSerializer(many=True)` shape). Issue #435.
+/// or form-urlencoded body) or a bulk list (JSON array body).
 ///
 /// Bulk shape is only recognized for `application/json` content-type
 /// + a JSON array body — form-urlencoded payloads always parse as

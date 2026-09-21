@@ -6,7 +6,7 @@
 //! | Type | When to use |
 //! |---|---|
 //! | [`Form`] + `#[derive(Form)]` | Typed struct with declared fields and compile-time validators |
-//! | [`ModelForm`] | Any [`Model`] table — parse + validate + save without a dedicated struct |
+//! | [`ModelForm`] | Any [`Model`](crate::core::Model) table — parse + validate + save without a dedicated struct |
 //! | [`DynamicForm`] | Runtime JSON-schema forms (surveys, intake, admin-configurable) |
 //!
 //! ## `#[derive(Form)]` usage
@@ -61,9 +61,8 @@ use crate::core::{
 #[cfg(feature = "csrf")]
 pub mod csrf;
 
-/// Form sets — Django's `formset_factory` / `modelformset_factory`
-/// shape. Parse N copies of the same [`Form`] from a single
-/// HTTP request payload keyed `<prefix>-<N>-<field>`. Issue #49.
+/// Form sets — parse N copies of the same [`Form`] from a single
+/// HTTP request payload keyed `<prefix>-<N>-<field>`.
 pub mod formset;
 
 /// Reusable declarative field-constraint validators (`max_length` /
@@ -281,8 +280,8 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
         return Ok(SqlValue::Null);
     }
     // Non-nullable String field with empty raw is a *missing* value,
-    // not a valid empty string — matches Django/DRF where CharField
-    // rejects "" unless allow_blank=True. Without this guard, blank
+    // not a valid empty string: `""` is rejected unless the field
+    // is marked `blank`. Without this guard, blank
     // form submits silently land empty strings in NOT NULL columns
     // (surfaced playing with the cookbook /authors/new form).
     if matches!(field.ty, FieldType::String) && !field.nullable && raw.is_empty() {
@@ -356,8 +355,7 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
         }
         // Decimal accepts standard `123.45` / `-0.001` / `1e3` forms via
         // `rust_decimal::Decimal::from_str_exact`; reject anything else
-        // rather than silently truncate. Django's DecimalField behaves
-        // the same way.
+        // rather than silently truncate.
         FieldType::Decimal => raw
             .parse::<rust_decimal::Decimal>()
             .map(SqlValue::Decimal)
@@ -458,11 +456,14 @@ pub fn collect_values(
     for field in model.scalar_fields() {
         // Server-assigned columns (`Auto<T>` PK with BIGSERIAL,
         // `auto_now_add` / `auto_now` mixins, `auto_uuid`) are never
-        // present in HTML forms — the macro skips them on INSERT and
-        // the DB DEFAULT supplies the value. Filtering them here
-        // keeps both code paths in lock-step. See cookbook chapter 7
+        // present in HTML forms. Filtering them here keeps both code
+        // paths in lock-step. See cookbook chapter 7
         // `modelform_parses_form_encoded_into_typed_values` for the
         // ModelFormFor analogue.
+        //
+        // Dropping them is right for an UPDATE. For an INSERT, use
+        // [`collect_insert_values`] — the timestamps among them have to
+        // be supplied rather than left to the column default (#1464).
         if field.auto || skip.contains(&field.name) {
             continue;
         }
@@ -471,6 +472,72 @@ pub fn collect_values(
         out.push((field.column, value));
     }
     Ok(out)
+}
+
+/// [`collect_values`], plus the server-assigned timestamps an INSERT
+/// has to supply itself.
+///
+/// `auto_now_add` / `auto_now` columns are absent from every client
+/// payload, so a schema-driven writer omits them and the column default
+/// fires. That default cannot be trusted: on a SQLite database created
+/// before #1464 it is still `CURRENT_TIMESTAMP`, and `ALTER TABLE`
+/// there has no statement that can replace it. Its
+/// `YYYY-MM-DD HH:MM:SS` sorts below the canonical spelling, so a
+/// cursor keyed on such a column matches every row and serves page one
+/// forever — which is how this was found, in the commerce soak, after
+/// the derive macro's own INSERT path had already been fixed.
+///
+/// Separate from [`collect_values`] rather than a flag on it because
+/// the two differ on UPDATE: `auto_now` should be restamped there and
+/// `auto_now_add` must not, and [`crate::core::FieldSchema`] cannot
+/// tell them apart. UPDATE keeps the plain version, where the derive
+/// macro's `update_assignments` already handles both correctly.
+///
+/// # Errors
+/// As [`collect_values`].
+pub fn collect_insert_values(
+    model: &'static ModelSchema,
+    form: &HashMap<String, String>,
+    skip: &[&str],
+) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
+    let mut out = collect_values(model, form, skip)?;
+    let now = chrono::Utc::now();
+    for field in model.scalar_fields() {
+        if field.is_auto_timestamp()
+            && !skip.contains(&field.name)
+            && !out.iter().any(|(c, _)| *c == field.column)
+        {
+            out.push((field.column, SqlValue::DateTime(now)));
+        }
+    }
+    Ok(out)
+}
+
+/// Add the server-assigned timestamps to a schema-driven INSERT's
+/// column list — the `(columns, values)` form, for the writers that
+/// build those directly rather than through [`collect_insert_values`].
+///
+/// **INSERT only.** `auto_now_add` is immutable after insert, and
+/// nothing here can tell it from `auto_now`; an UPDATE must leave both
+/// alone and let the derive macro's `update_assignments` handle them.
+///
+/// Idempotent — a column already in the list is left as the caller set
+/// it, so an explicit value always wins.
+///
+/// See [`collect_insert_values`] for why the database default is not
+/// good enough (#1464).
+pub fn stamp_auto_timestamps(
+    model: &'static ModelSchema,
+    columns: &mut Vec<&'static str>,
+    values: &mut Vec<SqlValue>,
+) {
+    let now = chrono::Utc::now();
+    for field in model.scalar_fields() {
+        if field.is_auto_timestamp() && !columns.contains(&field.column) {
+            columns.push(field.column);
+            values.push(SqlValue::DateTime(now));
+        }
+    }
 }
 
 // ------------------------------------------------------------------ ModelForm
@@ -484,7 +551,8 @@ pub enum ModelFormError {
     Database(#[from] crate::sql::ExecError),
 }
 
-/// Schema-driven form that can insert or update any [`Model`] row.
+/// Schema-driven form that can insert or update any
+/// [`Model`](crate::core::Model) row.
 ///
 /// `ModelForm` reads the model's [`ModelSchema`] to know which fields
 /// to parse and validate — no separate struct required.
@@ -549,8 +617,8 @@ impl ModelForm {
         self
     }
 
-    /// Drop the named fields from the form. v0.49 — Django's
-    /// `Meta.exclude` analog. Applied AFTER `fields(...)` if both
+    /// Drop the named fields from the form.
+    /// Applied AFTER `fields(...)` if both
     /// are set, so `.fields(&["a", "b", "c"]).exclude(&["b"])`
     /// produces `["a", "c"]`. Excluding a field also drops it from
     /// validation / INSERT / UPDATE; PK / auto fields are excluded
@@ -628,7 +696,7 @@ impl ModelForm {
         self.prepare_save()?.commit_pool(pool).await
     }
 
-    /// Django-shape `form.save(commit=False)` — issue #375. Validates
+    /// Validate without writing. Checks
     /// every included field and returns a mutable
     /// [`PreparedSave`] holding the parsed columns + values, without
     /// touching the DB. The caller can `.set(column, value)` to add
@@ -681,15 +749,13 @@ impl ModelForm {
     }
 }
 
-/// Result of `form.prepare_save()` — issue #375 / Django
-/// `form.save(commit=False)`. Holds the validated columns + values
-/// ready to INSERT or UPDATE; caller can mutate before
+/// Result of `form.prepare_save()`. Holds the validated columns +
+/// values ready to INSERT or UPDATE; the caller can mutate before
 /// [`Self::commit_pool`] to add session-derived fields the form
 /// didn't expose.
 ///
-/// `save_m2m()` — Django's deferred M2M companion — has no analog
-/// yet because rustango's `ModelForm` doesn't surface M2M form
-/// fields; once it does, the deferred-apply lives on this struct.
+/// There is no deferred M2M apply yet, because `ModelForm` does not
+/// surface M2M form fields. When it does, that lands here.
 #[derive(Debug, Clone)]
 pub struct PreparedSave {
     schema: &'static ModelSchema,
@@ -735,8 +801,8 @@ impl PreparedSave {
         self
     }
 
-    /// Drop a column from the prepared write. Mirrors Django's
-    /// `del obj.field` between `save(commit=False)` and `obj.save()`.
+    /// Drop a column from the prepared write, between
+    /// `prepare_save()` and the commit.
     /// Unknown field names are a no-op.
     pub fn unset(&mut self, field: &str) -> &mut Self {
         let Some(target_col) = self
@@ -803,10 +869,19 @@ impl PreparedSave {
             return Ok(pk_val);
         }
 
+        // INSERT, not UPDATE — so the server-assigned timestamps are
+        // stamped here (#1464). `should_include` drops every `auto`
+        // field, which is right for the payload and wrong for the
+        // statement: nothing else supplies them and the column default
+        // cannot be trusted. The UPDATE branch above deliberately does
+        // not do this — `auto_now_add` is immutable after insert.
+        let mut columns = self.columns;
+        let mut values = self.values;
+        stamp_auto_timestamps(self.schema, &mut columns, &mut values);
         let query = InsertQuery {
             model: self.schema,
-            columns: self.columns,
-            values: self.values,
+            columns,
+            values,
             returning: vec![self.pk_field.column],
             on_conflict: None,
         };
@@ -1313,7 +1388,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
 
     // (helper for validate_unique_together below)
 
-    /// DRF-shape `UniqueTogetherValidator` — pre-checks every composite
+    /// Pre-check every composite
     /// UNIQUE index declared on `T::SCHEMA.indexes` (via
     /// `#[rustango(unique_together = "...")]`) by SELECT-ing the
     /// matching `(col1, col2, ...)` pair from the DB. Hits become
@@ -1322,8 +1397,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// `duplicate key value violates unique constraint "..."` error.
     ///
     /// Pass the optional `pk_value` when validating an UPDATE so the
-    /// row being edited isn't its own conflict (analog to DRF's
-    /// `instance` parameter on the validator).
+    /// row being edited isn't reported as its own conflict.
     ///
     /// v0.38 — tri-dialect via `&crate::sql::Pool`. Identifier quoting
     /// routes through `dialect.quote_ident` (double-quotes on PG/SQLite,
@@ -1622,7 +1696,7 @@ mod model_form_tests {
     #[test]
     fn modelform_exclude_and_fields_compose() {
         // `.fields()` whitelists, then `.exclude()` removes —
-        // Django's `Meta.fields` + `Meta.exclude` interaction.
+        // `fields(...)` first, then `exclude(...)` on top.
         let form = ModelForm::new(post_schema(), HashMap::new())
             .fields(&["title", "body"])
             .exclude(&["body"]);

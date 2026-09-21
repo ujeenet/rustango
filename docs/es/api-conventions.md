@@ -129,7 +129,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **Una excepción:** las señales no reciben un pool, porque nunca tocan la base de datos. La regla se mantiene: todo lo que llega a la BD recibe el pool; todo lo que no, no.
 
-**¿Por qué pasarlo cada vez?** Rust prefiere las dependencias que puedes ver sobre el estado global oculto. Django mantiene la conexión en almacenamiento thread-local, pero eso se desmorona en el mundo async de Rust, donde una tarea puede saltar entre hilos a mitad de una petición. La desventaja es más tecleo; la ventaja es que puedes hacer grep de cada lugar que toca la base de datos.
+**¿Por qué pasarlo cada vez?** Rust prefiere las dependencias que puedes ver sobre el estado global oculto. La alternativa obvia — guardar la conexión en almacenamiento thread-local — se desmorona en el mundo async de Rust, donde una tarea puede saltar entre hilos a mitad de una petición. La desventaja es más tecleo; la ventaja es que puedes hacer grep de cada lugar que toca la base de datos.
 
 Si te encuentras pasando `&pool` a través de diez capas de llamadas a funciones, acepta `impl Executor` una sola vez en el punto de entrada público y deja que los helpers internos compartan esa única conexión.
 
@@ -152,7 +152,7 @@ Post::objects().where_(Post::author_id.eq(42));
 
 | Sintaxis | Úsala cuando |
 |---|---|
-| Query HTTP | Endpoints de API públicos — el ViewSet los analiza por ti, como los backends de filtro de DRF |
+| Query HTTP | Endpoints de API públicos — el ViewSet los analiza por ti a partir de la cadena de consulta |
 | `.filter` por clave-cadena | Código CRUD genérico o de admin, donde los nombres de campos vienen de la configuración y no se conocen en tiempo de compilación |
 | `.where_` tipado | El código de tu aplicación — la opción por defecto recomendada. El compilador comprueba que el campo existe y que los tipos coinciden |
 
@@ -203,7 +203,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 
 `ApiError` implementa `IntoResponse`, así que devolverlo produce automáticamente su forma JSON: `{"error": <código máquina>, "message": …, "status": …, "details": …}`.
 
-**No es la única forma de error que emite el framework.** Un ViewSet responde `{"error": "<mensaje legible>"}` para sus propios fallos, y un mapa DRF indexado por campo para la validación del serializador — tres sobres en total, y `error` lleva un código máquina en uno y una frase en otro. [ViewSets — formas de respuesta de error](viewsets.md#formas-de-respuesta-de-error) indica qué ruta emite cuál.
+**No es la única forma de error que emite el framework.** Un ViewSet responde `{"error": "<mensaje legible>"}` para sus propios fallos, y un mapa indexado por nombre de campo para la validación del serializador — tres sobres en total, y `error` lleva un código máquina en uno y una frase en otro. [ViewSets — formas de respuesta de error](viewsets.md#formas-de-respuesta-de-error) indica qué ruta emite cuál.
 
 ---
 
@@ -264,7 +264,7 @@ let l = AccessLogLayer {
 
 ## Feature flags
 
-Un *feature* es un flag de compilación de Cargo (el `[features]` de `Cargo.toml`) que activa o desactiva una parte del crate — similar al package discovery de Laravel o a los `INSTALLED_APPS` de Django, pero resuelto en tiempo de compilación. Cada módulo que arrastra una dependencia extra queda detrás de uno. El conjunto por defecto es «casi seguro que quieres estos»:
+Un *feature* es un flag de compilación de Cargo (el `[features]` de `Cargo.toml`) que activa o desactiva una parte del crate — la lista de piezas instaladas de tu aplicación, pero resuelta en tiempo de compilación. Cada módulo que arrastra una dependencia extra queda detrás de uno. El conjunto por defecto es «casi seguro que quieres estos»:
 
 ```toml
 default = [

@@ -1,4 +1,4 @@
-//! Django-parity #409 — `DatabaseCache` against a live sqlite pool.
+//! Issue #409 — `DatabaseCache` against a live sqlite pool.
 //! Round-trip, lazy GC on TTL expiry, delete, clear, ensure_table
 //! idempotency. The DDL emit + upsert SQL is dialect-rendered, so
 //! sqlite hits the `ON CONFLICT` arm; the MySQL `ON DUPLICATE KEY

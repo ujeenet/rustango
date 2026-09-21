@@ -1,6 +1,6 @@
-//! Maintenance-mode middleware — return 503 with `Retry-After` from a
-//! shared flag, so an orchestrator (or a sidecar) can drain traffic
-//! before a deploy / migration without killing in-flight requests.
+//! Maintenance-mode middleware: a shared flag turns every response into
+//! a 503 with `Retry-After`. Use it to drain traffic before a deploy or
+//! a migration without cutting off requests already running.
 //!
 //! ## Quick start
 //!
@@ -24,19 +24,15 @@
 //!
 //! ## What it does
 //!
-//! - When the flag is OFF, requests pass through unchanged.
-//! - When the flag is ON, requests return `503 Service Unavailable`
-//!   with a configurable JSON body, `Retry-After`, and the standard
-//!   `Cache-Control: no-store` so caches don't sticky the maintenance
-//!   page.
-//! - Optional allow-list of exact paths that bypass the layer (almost
-//!   always `/health` and `/ready` so orchestrators keep getting truth
-//!   while you're under maintenance).
+//! - Flag off: requests pass through unchanged.
+//! - Flag on: `503 Service Unavailable` with a JSON body you choose,
+//!   `Retry-After`, and `Cache-Control: no-store` so no cache keeps the
+//!   maintenance page.
+//! - Exact paths can be allow-listed, usually `/health` and `/ready`,
+//!   so orchestrators still get real answers.
 //!
-//! Pair this with [`crate::body_limit::BodyLimitLayer`] and
-//! [`crate::real_ip::RealIpLayer`] in the same router stack — order
-//! doesn't matter much, but putting maintenance OUTERMOST means a
-//! flipped flag short-circuits before any handler work runs.
+//! Mount it outermost in the router stack: then a flipped flag answers
+//! before any handler work runs.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,7 +57,7 @@ impl MaintenanceFlag {
         Self::default()
     }
 
-    /// Pre-configured with a starting state — handy for tests.
+    /// Flag with a starting state. Handy in tests.
     #[must_use]
     pub fn with_state(on: bool) -> Self {
         Self {
@@ -69,18 +65,18 @@ impl MaintenanceFlag {
         }
     }
 
-    /// Switch maintenance mode ON. New requests outside the allow-list
-    /// will see 503.
+    /// Turn maintenance mode on. New requests outside the allow-list
+    /// get a 503.
     pub fn enable(&self) {
         self.inner.store(true, Ordering::SeqCst);
     }
 
-    /// Switch maintenance mode OFF. Resumes normal operation.
+    /// Turn maintenance mode off.
     pub fn disable(&self) {
         self.inner.store(false, Ordering::SeqCst);
     }
 
-    /// Atomically swap state, returning the previous value.
+    /// Set the state and return the previous one.
     pub fn swap(&self, on: bool) -> bool {
         self.inner.swap(on, Ordering::SeqCst)
     }
@@ -101,8 +97,8 @@ pub struct MaintenanceLayer {
 }
 
 impl MaintenanceLayer {
-    /// New layer driven by `flag`. Default `Retry-After` is 60 s; default
-    /// body is `{"error":"under maintenance"}`.
+    /// Layer driven by `flag`. `Retry-After` defaults to 60 s and the
+    /// body to `{"error":"under maintenance"}`.
     #[must_use]
     pub fn new(flag: MaintenanceFlag) -> Self {
         Self {
@@ -119,16 +115,16 @@ impl MaintenanceLayer {
         self
     }
 
-    /// Override the JSON body returned during maintenance. Must be
-    /// valid JSON (the layer doesn't validate).
+    /// Set the body returned during maintenance. It is sent as
+    /// `application/json` and is not validated, so pass valid JSON.
     #[must_use]
     pub fn body(mut self, body: impl Into<String>) -> Self {
         self.body = Arc::new(body.into());
         self
     }
 
-    /// Add an exact path that bypasses maintenance mode. Almost always
-    /// `/health` and `/ready` so orchestrators see truth.
+    /// Add an exact path that stays up during maintenance, usually
+    /// `/health` or `/ready`.
     #[must_use]
     pub fn allow_path(mut self, path: impl Into<String>) -> Self {
         let mut set = (*self.allow_paths).clone();

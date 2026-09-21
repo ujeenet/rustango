@@ -1,9 +1,7 @@
-//! Database-backed [`Cache`] backend (#409) — Django parity for
-//! `django.core.cache.backends.db.DatabaseCache`. Stores one row per
-//! cache key in a small `cache_key TEXT PRIMARY KEY, value TEXT,
-//! expires BIGINT` table (epoch milliseconds), identical layout across
-//! PG / MySQL / SQLite. Expired rows are pruned lazily on read (no
-//! background reaper).
+//! A [`Cache`] backend that stores one row per key in the database.
+//! The table is `cache_key`, `value` and `expires`,
+//! with the same layout on PG, MySQL and SQLite. Expired rows are
+//! removed on read; there is no background reaper.
 //!
 //! ## Quick start
 //!
@@ -26,24 +24,19 @@
 //! - MySQL:    `cache_key VARCHAR(255) PRIMARY KEY, value LONGTEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
 //! - SQLite:   `cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL DEFAULT 0`
 //!
-//! `expires` is a Unix-**milliseconds** timestamp; `0` means "never
-//! expires". It carried seconds until v0.42, and this line still said so
-//! long after the code stopped doing it (#1245) — the column type never
-//! changed, so nothing failed to give it away.
-//!
-//! An entry is expired once *now is past* `expires`, not once it reaches
-//! it, which is what [`super::InMemoryCache`] and [`super::FileCache`] do
-//! and what `purge_expired` here has always done. Lazy GC: any
-//! `get`/`exists` call that lands on an expired row deletes the row
-//! before returning `None`.
+//! `expires` holds Unix **milliseconds**; `0` means the entry never
+//! expires. An entry is expired once now is *past* `expires`, not once
+//! it reaches it — the same rule as [`super::InMemoryCache`] and
+//! [`super::FileCache`]. A `get` or `exists` that lands on an expired
+//! row deletes it and reports a miss.
 //!
 //! ## Why not a migration?
 //!
-//! The cache table's lifecycle is decoupled from application data —
-//! it's safe to drop, recreate, or store in a separate database.
-//! [`DatabaseCache::ensure_table`] runs the dialect's
-//! `CREATE TABLE IF NOT EXISTS` once at boot, matching Django's
-//! `createcachetable` manage command.
+//! The cache table does not follow the app's data. You can drop it,
+//! recreate it, or keep it in another database.
+//! [`DatabaseCache::ensure_table`] runs the right
+//! `CREATE TABLE IF NOT EXISTS` at boot; `manage createcachetable`
+//! does the same from the CLI.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -53,8 +46,8 @@ use super::{Cache, CacheError};
 use crate::core::SqlValue;
 use crate::sql::{raw_execute_pool, raw_query_pool, Pool};
 
-/// SQL-table-backed cache. Holds a [`Pool`] + table name; each
-/// operation runs one dialect-rendered statement.
+/// Cache stored in a SQL table. Holds a [`Pool`] and a table name;
+/// every operation runs one statement written for that dialect.
 #[derive(Clone)]
 pub struct DatabaseCache {
     pool: Pool,
@@ -63,8 +56,7 @@ pub struct DatabaseCache {
 
 impl DatabaseCache {
     /// Build a cache writing to `table` on `pool`. Call
-    /// [`Self::ensure_table`] once at startup to issue the
-    /// `CREATE TABLE IF NOT EXISTS` DDL.
+    /// [`Self::ensure_table`] once at startup to create the table.
     #[must_use]
     pub fn new(pool: Pool, table: impl Into<String>) -> Self {
         Self {
@@ -73,19 +65,18 @@ impl DatabaseCache {
         }
     }
 
-    /// The configured table name (used for diagnostics + manage verbs).
+    /// The configured table name.
     #[must_use]
     pub fn table(&self) -> &str {
         &self.table
     }
 
-    /// Idempotently create the cache table on the active backend.
-    /// Safe to call at every boot; uses `CREATE TABLE IF NOT EXISTS`.
+    /// Create the cache table if it is missing. Safe to call at every
+    /// boot.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] forwarded from the executor on
-    /// DDL failure (permissions, syntax mismatch on an unknown
-    /// dialect, etc.).
+    /// [`CacheError::Connection`] when the DDL fails, for example on a
+    /// permission problem.
     pub async fn ensure_table(&self) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
@@ -104,7 +95,7 @@ impl DatabaseCache {
                  expires BIGINT NOT NULL DEFAULT 0\
                  )"
             ),
-            // SQLite + ANSI-leaning fallback.
+            // SQLite, and a reasonable default for anything else.
             _ => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
                  cache_key TEXT PRIMARY KEY, \
@@ -119,12 +110,11 @@ impl DatabaseCache {
         Ok(())
     }
 
-    /// Drop the cache table. Useful in tests; production deployments
-    /// should typically issue this as a deliberate manage verb
-    /// rather than from app code.
+    /// Drop the cache table. Handy in tests. In production, run it
+    /// from a manage verb rather than from app code.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] forwarded from the executor.
+    /// [`CacheError::Connection`] when the statement fails.
     pub async fn drop_table(&self) -> Result<(), CacheError> {
         let table = self.pool.dialect().quote_ident(&self.table);
         let sql = format!("DROP TABLE IF EXISTS {table}");
@@ -134,27 +124,21 @@ impl DatabaseCache {
         Ok(())
     }
 
-    /// Eagerly delete every expired row. Pairs with the implicit
-    /// lazy GC on `get` / `exists` — call this from a periodic
-    /// cron / scheduled-task / `manage` verb to reclaim space
-    /// from keys nobody reads anymore. Django parity for
-    /// `manage clearsessions` (when the session backend is the
-    /// DB cache) + the broader `manage clearcache` flow.
+    /// Delete every expired row now. `get` and `exists` already clean
+    /// up rows they touch, so run this on a schedule to reclaim space
+    /// from keys nobody reads.
     ///
     /// Returns the number of rows deleted. Rows with `expires = 0`
-    /// (no TTL) are never touched.
+    /// have no TTL and are never touched.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] forwarded from the executor on
-    /// DELETE failure.
+    /// [`CacheError::Connection`] when the DELETE fails.
     pub async fn purge_expired(&self) -> Result<u64, CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p1 = dialect.placeholder(1);
-        // Keep `expires = 0` (no-TTL) rows. Compare against the
-        // same `now_unix_ms` reading the get/set path uses so this
-        // method's notion of "expired" stays consistent with the
-        // lazy GC branch.
+        // Keep no-TTL rows. Use the same clock as `get`/`set` so both
+        // agree on what "expired" means.
         let sql = format!("DELETE FROM {table} WHERE expires != 0 AND expires < {p1}");
         let now = Self::now_unix_ms();
         raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
@@ -162,15 +146,10 @@ impl DatabaseCache {
             .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))
     }
 
-    /// Unix epoch in **milliseconds**. Promoted from seconds in v0.42
-    /// to eliminate a second-boundary race: `set` at `HH:MM:SS.999`
-    /// followed by `get` at `HH:MM:SS+1.001` used to truncate both
-    /// readings to integer seconds (`SS` and `SS+1`), making a TTL of
-    /// 1 second look already-expired at the immediate read. The
-    /// `expires BIGINT` column stays the same — it now carries
-    /// millisecond ticks instead of second ticks; existing pre-v0.42
-    /// rows look like 1970-era timestamps under the new lens and are
-    /// lazily purged on first read (cache is regeneratable by design).
+    /// Unix epoch in **milliseconds**. Seconds are too coarse: a
+    /// `set` at `HH:MM:SS.999` read back 2 ms later would truncate to
+    /// two different seconds, so a 1-second TTL looked expired at
+    /// once.
     fn now_unix_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -201,12 +180,10 @@ impl Cache for DatabaseCache {
         let Some((value, expires)) = rows.into_iter().next() else {
             return Ok(None);
         };
-        // `>`, not `>=`: an entry lives its full stated duration. The
-        // other two backends both use `>`, and so does `purge_expired`
-        // below — so `>=` here meant a row could read as a miss while
-        // the backend's own sweep still considered it live (#1245).
+        // `>`, not `>=`, so an entry lives its full stated duration.
+        // The other backends and `purge_expired` use `>` as well.
         if expires != 0 && Self::now_unix_ms() > expires {
-            // Lazy GC — purge expired before reporting miss.
+            // Drop the dead row before reporting a miss.
             let _ = self.delete(key).await;
             return Ok(None);
         }
@@ -247,25 +224,18 @@ impl Cache for DatabaseCache {
         Ok(())
     }
 
-    /// Atomic set-if-absent (#1281).
+    /// Atomic set-if-absent. `DistributedLock` needs this: the trait
+    /// default checks and then writes, so two racers could both get
+    /// `Ok(true)` and both run the guarded body.
     ///
-    /// Without this override `DatabaseCache` inherited the trait default
-    /// — `exists()` then `set()` — which is a check-then-act across two
-    /// round trips, and `set` is an unconditional upsert, so two racers
-    /// both saw "absent", both wrote, and **both got `Ok(true)`**. That
-    /// silently voided `DistributedLock`'s entire guarantee on this
-    /// backend: two processes ran the same guarded body. Redis and
-    /// in-memory already overrode `add`; this was the third backend.
+    /// An expired row must still be takeable, so this is not a plain
+    /// `INSERT`. It takes the row when it is absent *or* expired, and
+    /// says whether it did. A row with `expires = 0` never expires, so
+    /// a live permanent entry is never stolen.
     ///
-    /// An expired row must still be acquirable, so this is not a bare
-    /// `INSERT` — it takes the row when it is absent *or* already
-    /// expired, and reports whether it did. `expires = 0` means "never
-    /// expires" (see [`Self::expires_for`]), so a live persistent entry
-    /// is never stolen.
-    ///
-    /// The database does the test-and-set under row locks, so a race
-    /// resolves to exactly one winner: the loser's `WHERE` no longer
-    /// matches once the winner has pushed `expires` into the future.
+    /// The database does the test-and-set under row locks, so exactly
+    /// one racer wins: once the winner moves `expires` forward, the
+    /// loser's `WHERE` no longer matches.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
@@ -276,18 +246,15 @@ impl Cache for DatabaseCache {
         let expires = Self::expires_for(ttl);
         let now = Self::now_unix_ms();
 
-        // Bind order is *textual* placeholder order, not logical order:
-        // MySQL and SQLite use positional `?`, so the args must appear in
-        // the sequence the placeholders do. (Postgres' numbered `$n`
-        // would tolerate any order, which is exactly how a MySQL-only
-        // mismatch stays hidden until a MySQL test runs it.)
+        // Bind args in the order the placeholders appear in the text.
+        // MySQL and SQLite use positional `?`. Postgres' `$n` would
+        // accept any order, which is how a MySQL-only mismatch hides
+        // until a MySQL test runs.
         if dialect.name() == "mysql" {
-            // MySQL's `ON DUPLICATE KEY UPDATE` takes no WHERE, so the
-            // conditional take is two statements. Both are individually
-            // atomic and the pair is still race-free: the INSERT settles
-            // the absent case, and for the expired case the UPDATE's own
-            // predicate is the compare-and-swap — whoever lands first
-            // moves `expires` forward and the other matches nothing.
+            // MySQL's `ON DUPLICATE KEY UPDATE` takes no WHERE, so
+            // this needs two statements. Still race-free: the INSERT
+            // covers the absent case, and the UPDATE's own predicate
+            // is the compare-and-swap for the expired one.
             let inserted = raw_execute_pool(
                 &self.pool,
                 &format!(
@@ -323,10 +290,10 @@ impl Cache for DatabaseCache {
             return Ok(took == 1);
         }
 
-        // Postgres and SQLite both support `ON CONFLICT … DO UPDATE …
-        // WHERE`, which expresses the whole thing in one statement:
-        // insert, or overwrite only an expired row. When the predicate
-        // fails nothing is written and the statement reports 0 rows.
+        // Postgres and SQLite support `ON CONFLICT … DO UPDATE …
+        // WHERE`, so one statement does it: insert, or overwrite only
+        // an expired row. A failed predicate writes nothing and
+        // reports 0 rows.
         let took = raw_execute_pool(
             &self.pool,
             &format!(
@@ -336,7 +303,7 @@ impl Cache for DatabaseCache {
                  SET value = EXCLUDED.value, expires = EXCLUDED.expires \
                  WHERE {table}.expires <> 0 AND {table}.expires <= {p4}"
             ),
-            // Textual placeholder order — see the note above.
+            // Textual placeholder order; see the note above.
             vec![
                 SqlValue::String(key.to_owned()),
                 SqlValue::String(value.to_owned()),
@@ -374,38 +341,28 @@ impl Cache for DatabaseCache {
         Ok(())
     }
 
-    /// Exact prefix delete via `LIKE 'prefix%'` — the keys are a real
-    /// column, so there is no need for the trait default's whole-table
-    /// clear (#1227).
+    /// Prefix delete with `LIKE 'prefix%'`. The keys are a real
+    /// column, so no whole-table clear is needed.
     ///
     /// `%` and `_` are LIKE wildcards, so a prefix containing either
-    /// would match more rows than intended — an unescaped `_` matches
-    /// any single character, and one namespace's clear could sweep a
-    /// neighbour's rows.
+    /// has to be escaped or it would sweep a neighbour's rows.
     ///
-    /// The escape character is **`!`, not `\`**. A backslash cannot be
-    /// written portably here: MySQL treats `\` as an escape *inside
-    /// string literals*, so `ESCAPE '\'` is a syntax error there, while
-    /// Postgres (with `standard_conforming_strings`) reads the same
-    /// literal as one backslash and accepts it. `!` needs no escaping in
-    /// any of the three dialects, so one statement works everywhere.
-    /// Covered on all three by `cache_db_backend_sqlite_live.rs` and
-    /// `cache_delete_prefix_live.rs`.
+    /// The escape character is **`!`, not `\`**. A backslash is not
+    /// portable: `ESCAPE '\'` is a syntax error on MySQL but valid on
+    /// Postgres. `!` needs no escaping on any of the three, so one
+    /// statement works everywhere.
     ///
-    /// One asymmetry to know about: `LIKE` uses the column's collation,
-    /// which folds ASCII case on SQLite and is case-insensitive by
-    /// default on MySQL, while `get` / `delete` compare with `=`. Two
-    /// namespaces differing only in case therefore collide on a prefix
-    /// delete but not on a read. Keep namespaces lower-case — tenant
-    /// slugs already are — and it does not arise.
+    /// One thing to watch: `LIKE` uses the column's collation, which
+    /// ignores ASCII case on SQLite and, by default, on MySQL, while
+    /// `get` and `delete` compare with `=`. Two namespaces that differ
+    /// only in case collide on a prefix delete but not on a read. Keep
+    /// namespaces lower-case, as tenant slugs already are.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p = dialect.placeholder(1);
-        // One escape algorithm for the whole crate (#1257 promoted this
-        // module's `!`-based escaping to `core::escape_like`); reusing
-        // it here means the escape character can never drift between
-        // the cache and the ORM's LIKE lookups.
+        // Use the crate-wide escaper so the escape character cannot
+        // drift between the cache and the ORM's LIKE lookups.
         let pattern = format!("{}%", crate::core::escape_like(prefix));
         let sql = format!(
             "DELETE FROM {table} WHERE cache_key LIKE {p}{}",
@@ -422,11 +379,7 @@ impl Cache for DatabaseCache {
 mod tests {
     use super::*;
 
-    /// Pure-string DDL emission — no real pool needed. Verifies the
-    /// dialect branch (`postgres` arm above) compiles a syntactically
-    /// well-formed `CREATE TABLE IF NOT EXISTS` shape. The runtime
-    /// path is exercised by the sqlite live test in
-    /// `tests/cache_db_backend_sqlite_live.rs`.
+    /// No TTL means `expires = 0`, which never expires.
     #[test]
     fn expires_for_zero_when_no_ttl() {
         assert_eq!(DatabaseCache::expires_for(None), 0);
@@ -434,8 +387,7 @@ mod tests {
 
     #[test]
     fn expires_for_offsets_from_now() {
-        // ms precision: a 60-second TTL adds 60_000 ms to the current
-        // unix-ms reading, bracketed by the surrounding observations.
+        // A 60-second TTL adds 60_000 ms to the clock reading.
         let before = DatabaseCache::now_unix_ms();
         let ts = DatabaseCache::expires_for(Some(Duration::from_secs(60)));
         let after = DatabaseCache::now_unix_ms();

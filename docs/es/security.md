@@ -1,6 +1,6 @@
 # Guía de seguridad
 
-Esta guía cubre todas las funciones de seguridad que incluye **Rustango** y cómo combinarlas. Si vienes de Django, Laravel o Rails, la mayoría te resultarán familiares — los nombres difieren, pero las ideas son las mismas. Cada función de abajo suele ser una sola línea de configuración. Cuando estés listo para desplegar, ejecuta `manage check --deploy` para una auditoría automatizada.
+Esta guía cubre todas las funciones de seguridad que incluye **Rustango** y cómo combinarlas. Si ya has usado algún framework web, la mayoría te resultarán familiares — los nombres difieren, pero las ideas son las mismas. Cada función de abajo suele ser una sola línea de configuración. Cuando estés listo para desplegar, ejecuta `manage check --deploy` para una auditoría automatizada.
 
 [![La pila de middleware endurecida conectada en una sola cadena: identificadores de petición, registro de accesos, limitación de tasa, CORS y cabeceras de seguridad](../img/security.png)](../img/security.png)
 
@@ -52,7 +52,7 @@ let app = Router::new()
 
 ## Establecer cabeceras de seguridad
 
-Las cabeceras de seguridad le indican al navegador cómo proteger a tus usuarios (bloquear el clickjacking, forzar HTTPS, detener el sniffing del tipo de contenido). `SecurityHeadersLayer` establece el conjunto estándar con una sola línea — las mismas cabeceras que Django incluye por defecto. (Una "capa" es el término de **Rustango** para el middleware; la adjuntas a tu router.)
+Las cabeceras de seguridad le indican al navegador cómo proteger a tus usuarios (bloquear el clickjacking, forzar HTTPS, detener el sniffing del tipo de contenido). `SecurityHeadersLayer` establece el conjunto estándar con una sola línea — las cabeceras de protección habituales, sin tener que nombrarlas una a una. (Una "capa" es el término de **Rustango** para el middleware; la adjuntas a tu router.)
 
 > Análisis en profundidad: [Middleware](middleware.md) cubre cómo funcionan las capas, el orden, el catálogo completo de las incorporadas, y cómo escribir la tuya propia (locale, zona horaria, cabeceras, CSRF).
 
@@ -233,7 +233,7 @@ Si tu proxy inverso reenvía `X-Forwarded-For`, configúralo para que establezca
 > legítimos). Para una SPA que *sí* usa cookies, lee la cookie `rustango_csrf`
 > y reenvíala en la cabecera `X-CSRF-Token`.
 
-CSRF (falsificación de petición en sitios cruzados) es cuando otro sitio engaña al navegador de un usuario que ha iniciado sesión para que envíe una petición a tu aplicación. La defensa es un token secreto en cada formulario, igual que el `{% csrf_token %}` de Django. El middleware CSRF vive en `rustango::forms::csrf` (detrás de la función `csrf`, que se activa automáticamente con la función `admin`):
+CSRF (falsificación de petición en sitios cruzados) es cuando otro sitio engaña al navegador de un usuario que ha iniciado sesión para que envíe una petición a tu aplicación. La defensa es un token secreto en cada formulario, que el servidor vuelve a comprobar en cada escritura. El middleware CSRF vive en `rustango::forms::csrf` (detrás de la función `csrf`, que se activa automáticamente con la función `admin`):
 
 ```rust
 use rustango::forms::csrf;
@@ -259,7 +259,7 @@ Hasta [#1395](https://github.com/ujeenet/rustango/issues/1395) este párrafo afi
 
 XSS (scripting entre sitios) ocurre cuando la entrada del usuario se renderiza como HTML y se ejecuta como código en el navegador de otra persona. La solución es escapar cualquier entrada del usuario antes de que llegue a la página. **Rustango** maneja esto de dos maneras:
 
-**1. Auto-escape de plantillas Tera** — Tera es el motor de plantillas de **Rustango** (como las plantillas de Django o Blade). Cada `{{ var }}` se escapa como HTML automáticamente — pero solo en plantillas que Tera autoescapa, es decir su conjunto por defecto `.html`, `.htm` y `.xml`. Rustango no define `autoescape_suffixes`, así que una plantilla `.txt`, `.j2` o `.tera` **no** se escapa. Usa `{{ var | safe }}` para desactivarlo — raro, y peligroso, así que hazlo solo con HTML en el que confíes plenamente.
+**1. Auto-escape de plantillas Tera** — Tera es el motor de plantillas de **Rustango**. Cada `{{ var }}` se escapa como HTML automáticamente — pero solo en plantillas que Tera autoescapa, es decir su conjunto por defecto `.html`, `.htm` y `.xml`. Rustango no define `autoescape_suffixes`, así que una plantilla `.txt`, `.j2` o `.tera` **no** se escapa. Usa `{{ var | safe }}` para desactivarlo — raro, y peligroso, así que hazlo solo con HTML en el que confíes plenamente.
 
 **2. Ayudante de escape manual** — para cuando construyes HTML en código Rust en lugar de en una plantilla:
 
@@ -305,7 +305,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 ## Autenticar usuarios
 
-La autenticación es cómo confirmas quién está haciendo una petición. **Rustango** incluye tres backends listos para usar (autenticación Basic, claves de API y JWTs) y te permite escribir el tuyo propio — muy parecido a los backends de autenticación de Django. Los adjuntas a las rutas, y las peticiones sin una credencial reconocida obtienen un `401`.
+La autenticación es cómo confirmas quién está haciendo una petición. **Rustango** incluye tres backends listos para usar (autenticación Basic, claves de API y JWTs) y te permite escribir el tuyo propio implementando un único trait. Los adjuntas a las rutas, y las peticiones sin una credencial reconocida obtienen un `401`.
 
 > **SSO del admin.** Para permitir que los operadores inicien sesión en el admin con
 > un IdP externo (Google, Microsoft/Azure AD, GitHub, o cualquier proveedor
@@ -334,12 +334,12 @@ let backends = vec![
 // behind post.add. Gate the permission on an inner sub-router instead.
 let posts = Router::new()
     .route("/posts/new", post(create_post))
-    .require_perm("post.add", pool.clone());        // inner: needs the codename
+    .require_perm("post.add");     // inner: needs the codename
 
 let app = Router::new()
     .route("/me", get(profile))
     .merge(posts)
-    .require_auth(backends, pool);                  // outer: resolves the user first
+    .require_auth(backends);       // outer: resolves the user first
 ```
 
 El middleware prueba cada backend en orden. El primero que tiene éxito gana; el primero que devuelve un error duro detiene la cadena.

@@ -6,8 +6,8 @@ un cliente: sin arrancar un servidor ni tocar la red. El `TestClient` de
 petición se enruta a través de la pila real (extractores, middleware, manejadores)
 y te devuelve la respuesta para hacer aserciones. Añade el aislamiento por
 reversión de transacción para las pruebas de base de datos y un conjunto de
-aserciones de respuesta, y tienes el cliente de pruebas de Django + `TestCase`, en
-Rust.
+aserciones de respuesta, y tienes un entorno completo de pruebas de integración
+sin salir del proceso.
 
 [![Pruebas en Rustango: TestClient envuelve tu Router y envía peticiones en proceso a través de la pila real de manejadores; el TestResponse expone el estado, el texto y el JSON para hacer aserciones — sin socket, sin servidor](../img/testing.png)](../img/testing.png)
 
@@ -168,7 +168,7 @@ ejecutado. Conviene saberlo antes de leer un resultado en verde como cobertura.
 
 | Variable | Suites | Qué necesitan |
 |---|---:|---|
-| *(ninguna)* | 210 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
+| *(ninguna)* | 211 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
 | `DATABASE_URL` | 96 | Un servidor PostgreSQL accesible. |
 | `MYSQL_TEST_URL` | 28 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis accesible. |
@@ -211,7 +211,8 @@ conectar, que es una señal más ruidosa y más honesta que un salto.
 ## Ayudantes de aserción de respuesta
 
 Para valores `axum::Response` sin procesar (por ejemplo, de `tower::oneshot`),
-`test_assertions` se lee como los `assertContains` / `assertRedirects` de Django:
+`test_assertions` ofrece comprobaciones legibles de una línea para estado, contenido,
+redirecciones y cookies:
 
 ```rust
 use rustango::test_assertions::{assert_status_2xx, assert_redirects, assert_cookie_set};

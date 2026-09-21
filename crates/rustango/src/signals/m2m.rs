@@ -1,6 +1,5 @@
-//! Django-shape `m2m_changed` signal — fires when an M2M relationship's
-//! junction-table membership changes via [`crate::sql::M2MManager`].
-//! Django-parity #410.
+//! The `m2m_changed` signal. It is sent when
+//! [`crate::sql::M2MManager`] changes what is in a junction table.
 //!
 //! ## Quick start
 //!
@@ -35,19 +34,16 @@
 //! }));
 //! ```
 //!
-//! ## Action shapes
+//! ## What each action carries
 //!
-//! - `Add` — one destination added; `dst_pks = [the_id]`.
-//! - `Remove` — one destination removed; `dst_pks = [the_id]`.
-//! - `Set` — entire set replaced; `dst_pks = [the new set]` (may be empty).
-//! - `Clear` — every destination removed; `dst_pks = []`.
+//! - `Add`: one destination added, `dst_pks` holds its id.
+//! - `Remove`: one destination removed, `dst_pks` holds its id.
+//! - `Set`: the whole set replaced, `dst_pks` is the new set, which
+//!   may be empty.
+//! - `Clear`: everything removed, `dst_pks` is empty.
 //!
-//! Django's `m2m_changed` carries `action = "pre_add" / "post_add" /
-//! "pre_remove" / "post_remove" / "pre_clear" / "post_clear"` plus
-//! `pk_set`. rustango v1 fires only the `post_*` equivalent (after
-//! the SQL completed successfully) — pre_* hooks aren't useful in
-//! Rust where you can't abort the operation from the signal handler
-//! without convoluted plumbing.
+//! The signal is sent only after the SQL succeeds. There is no
+//! `pre_*` form, because a receiver cannot cancel the write anyway.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -56,48 +52,43 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
-/// Future returned by m2m-signal receivers. `'static` because the
-/// receiver is stored as `Arc<dyn ...>` and may run after the caller
+/// The future a receiver returns. It is `'static` because the
+/// receiver is stored behind an `Arc` and may run after the caller
 /// has returned.
 pub type ReceiverFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// Opaque identifier returned by `connect_*` for later use with
-/// `disconnect_*`.
+/// Handle returned by `connect_*`, for a later `disconnect_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReceiverId(u64);
 
-/// Which M2M mutation triggered the signal.
+/// Which change caused the signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum M2mAction {
-    /// Single destination added via `M2MManager::add_pool`.
+    /// One destination added, through `M2MManager::add_pool`.
     Add,
-    /// Single destination removed via `M2MManager::remove_pool`.
+    /// One destination removed, through `M2MManager::remove_pool`.
     Remove,
-    /// Full set replaced via `M2MManager::set_pool`.
+    /// The whole set replaced, through `M2MManager::set_pool`.
     Set,
-    /// Every destination removed via `M2MManager::clear_pool`.
+    /// Every destination removed, through `M2MManager::clear_pool`.
     Clear,
 }
 
-/// Payload delivered to `m2m_changed` receivers.
+/// What an `m2m_changed` receiver gets.
 #[derive(Debug, Clone)]
 pub struct M2mChangedContext {
     pub action: M2mAction,
-    /// SQL name of the junction table (e.g. `"post_tags"`).
+    /// Name of the junction table, such as `"post_tags"`.
     pub through: &'static str,
-    /// Source-side column name (the FK column pointing at the
-    /// source model). Lets receivers disambiguate when one junction
-    /// table holds multiple relationships.
+    /// The column pointing at the source model. It tells relations
+    /// apart when one junction table holds several.
     pub src_col: &'static str,
-    /// Destination-side column name (the FK column pointing at the
-    /// target model).
+    /// The column pointing at the target model.
     pub dst_col: &'static str,
-    /// PK value of the source instance whose M2M was mutated.
+    /// Primary key of the source row that changed.
     pub src_pk: i64,
-    /// Affected destination PKs:
-    /// - `Add` / `Remove`: single element with the affected id
-    /// - `Set`: the new full set (may be empty)
-    /// - `Clear`: always empty
+    /// The destination keys involved. One id for `Add` and
+    /// `Remove`, the new set for `Set`, and empty for `Clear`.
     pub dst_pks: Vec<i64>,
 }
 
@@ -157,13 +148,13 @@ where
     insert_receiver(boxed)
 }
 
-/// Remove a previously-connected `m2m_changed` receiver.
+/// Remove an `m2m_changed` receiver.
 pub fn disconnect_m2m_changed(id: ReceiverId) -> bool {
     remove_receiver(id)
 }
 
-/// Fire `m2m_changed` for `ctx`. Called by [`crate::sql::M2MManager`];
-/// available publicly so tests / custom dispatch can also fire.
+/// Send `m2m_changed`. [`crate::sql::M2MManager`] calls this; it is
+/// public so tests and custom dispatch can too.
 pub async fn send_m2m_changed(ctx: M2mChangedContext) {
     let receivers: Vec<ChangedReceiver> = snapshot();
     for r in receivers {
@@ -171,8 +162,8 @@ pub async fn send_m2m_changed(ctx: M2mChangedContext) {
     }
 }
 
-/// Remove **all** m2m-signal receivers. Useful in tests to reset
-/// registry state between cases.
+/// Remove every `m2m_changed` receiver. Mostly for resetting state
+/// between tests.
 pub fn clear_all() {
     registry()
         .write()
@@ -180,7 +171,7 @@ pub fn clear_all() {
         .clear();
 }
 
-/// Total receivers currently registered.
+/// How many receivers are registered.
 #[must_use]
 pub fn receiver_count() -> usize {
     let reg = registry().read().unwrap_or_else(|e| e.into_inner());

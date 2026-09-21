@@ -9,7 +9,7 @@ End users normally reach these via the framework's facade (e.g. `use rustango::M
 | `#[derive(Model)]` | Implements `rustango::core::Model` for a struct, populates the `inventory` registry the auto-admin walks, generates `objects()` / typed columns / `insert` / `delete` / `save`. |
 | `#[derive(Form)]` | Implements `rustango::forms::Form` so a struct can be parsed from an HTTP form payload with multi-error validation. Behind the `forms` feature on `rustango`. |
 | `#[derive(Serializer)]` | Implements `rustango::serializer::ModelSerializer` for typed JSON output. With the `openapi` feature also emits `OpenApiSchema`. |
-| `#[derive(ViewSet)]` | Generates a `router(prefix, pool) -> axum::Router` associated method wiring the full DRF-style CRUD ViewSet in one annotation. |
+| `#[derive(ViewSet)]` | Generates a `router(prefix, pool) -> axum::Router` associated method wiring a full REST CRUD ViewSet (list, retrieve, create, update, partial update, destroy) in one annotation. |
 | `embed_migrations!("path")` | Bakes every migration in a directory into the binary at compile time (single-binary distribution). |
 | `#[rustango::main]` | `runserver` entrypoint that wraps `#[tokio::main]` with a default `tracing-subscriber` boot. |
 

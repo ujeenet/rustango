@@ -1,7 +1,7 @@
-//! Streamable-HTTP transport. `POST {prefix}` carries a single JSON-RPC
-//! message client→server; the optional `GET {prefix}` opens an SSE stream
-//! for server→client notifications (Slice 1 wires the channel; the
-//! `list_changed` / `progress` follow-ups, #1087 / #1090, fill it).
+//! The Streamable HTTP transport. `POST {prefix}` carries one
+//! JSON-RPC message from the client. `GET {prefix}` opens an SSE
+//! stream that carries `progress` and `list_changed` notifications
+//! back.
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -15,30 +15,29 @@ use super::handlers::dispatch;
 use super::router::McpState;
 use super::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
-/// `POST {prefix}` — parse one JSON-RPC message, dispatch it, and reply.
+/// `POST {prefix}`: parse one JSON-RPC message, run it, reply.
 ///
-/// - Malformed JSON → JSON-RPC `parse error` (id `null`).
-/// - Valid JSON that isn't a well-formed request → `invalid request`.
-/// - A notification (no `id`) is acknowledged with `202 Accepted` and no
-///   body, per JSON-RPC 2.0 §4.1.
-/// - A request gets a `200` JSON-RPC success/error response.
+/// - Malformed JSON gives a `parse error` with a null id.
+/// - Valid JSON in the wrong shape gives an `invalid request`.
+/// - A notification, which has no `id`, gets `202 Accepted` and an
+///   empty body.
+/// - A request gets a `200` with a success or error result.
 pub(crate) async fn post_handler(State(state): State<McpState>, body: Bytes) -> Response {
-    // Unauthed Slice-1 transport: no agent principal, so `tools/*` are
-    // refused with "authentication required".
+    // This route does not authenticate, so there is no agent and the
+    // `tools/*` methods are refused.
     handle_message(&state, &body, None).await
 }
 
-/// Parse + dispatch one JSON-RPC message and build the HTTP response.
-/// Shared by the unauthed handler above and the authed handler in
-/// [`super::auth`] (which runs agent-JWT verification first and passes the
-/// resolved [`McpContext`]).
+/// Parse one message, dispatch it, and build the HTTP response.
+/// Shared with the authenticated handler in [`super::auth`], which
+/// verifies the token first and passes the agent context in.
 pub(crate) async fn handle_message(
     state: &McpState,
     body: &[u8],
     ctx: Option<super::tools::McpContext>,
 ) -> Response {
-    // Two-step parse so a syntactically valid but structurally wrong
-    // message still recovers its `id` for the error response.
+    // Parse in two steps, so a message with valid JSON but the wrong
+    // shape still yields its `id` for the error response.
     let value: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return json_error(Value::Null, JsonRpcError::parse_error()),
@@ -50,11 +49,11 @@ pub(crate) async fn handle_message(
     };
 
     if request.is_notification() {
-        // `notifications/cancelled { requestId }` trips the in-flight call's
-        // cancel token (#1090), scoped to the requesting agent so it can only
-        // cancel its own calls (#1095). Without an authenticated agent (the
-        // unauthed Slice-1 transport) there are no cancellable calls, so it's a
-        // no-op. Other notifications (e.g. `initialized`) are no-ops too.
+        // `notifications/cancelled { requestId }` trips the cancel
+        // token of a call in flight. It is scoped to the agent that
+        // sent it, so nobody can cancel another agent's call. With no
+        // authenticated agent there is nothing to cancel. Every other
+        // notification, such as `initialized`, does nothing.
         if request.method == "notifications/cancelled" {
             if let (Some(ctx), Some(rid)) = (
                 ctx.as_ref(),
@@ -86,11 +85,12 @@ pub(crate) async fn handle_message(
     }
 }
 
-/// `GET {prefix}` — authenticated SSE stream relaying server→client
-/// notifications for the **connected agent only** (#1092). Requires the same
-/// tenant-pinned agent Bearer as the JSON-RPC endpoint, then filters the
-/// process-global bus so an agent never sees another agent's / tenant's
-/// `progress` or `list_changed` frames.
+/// `GET {prefix}`: an SSE stream of notifications **for the
+/// connected agent only**.
+///
+/// It needs the same agent bearer token as the JSON-RPC endpoint, and
+/// then filters the shared bus, so an agent never sees another
+/// agent's or another tenant's frames.
 pub(crate) async fn sse_handler(
     t: crate::extractors::Tenant,
     axum::extract::State(state): axum::extract::State<McpState>,
@@ -103,9 +103,9 @@ pub(crate) async fn sse_handler(
     let Some(token) = super::auth::bearer(&headers) else {
         return super::auth::unauthorized(&headers, &uri);
     };
-    // Same two bearer shapes the JSON-RPC POST accepts, including the raw
-    // `prefix.secret` key — see `auth::authenticate_bearer` for why this
-    // stream must not be stricter than the endpoint beside it.
+    // Accept both bearer shapes the JSON-RPC POST accepts. See
+    // `auth::authenticate_bearer` for why this stream must not be
+    // stricter than the endpoint next to it.
     let agent = match super::auth::authenticate_bearer(jwt, t.pool(), &t.org.slug, token).await {
         Ok(agent) => agent,
         Err(e) => return e.into_response(&headers, &uri),
@@ -121,12 +121,12 @@ pub(crate) async fn sse_handler(
                     if super::notifications::frame_visible(&frame, &tenant, agent_id) {
                         yield Ok::<Event, std::convert::Infallible>(Event::default().data(frame.body));
                     }
-                    // else: not for this agent — drop silently.
+                    // Frames for anyone else are dropped.
                 }
-                // Slow consumer fell behind the buffer — skip and continue
-                // rather than tearing the connection down.
+                // This client fell behind the buffer. Skip what it
+                // missed rather than closing the connection.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                // All senders dropped — end the stream.
+                // Every sender is gone, so end the stream.
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -140,8 +140,8 @@ fn json_error(id: Value, error: JsonRpcError) -> Response {
     Json(JsonRpcResponse::failure(id, error)).into_response()
 }
 
-/// Normalize a JSON-RPC id (string or number) to a stable registry key so
-/// a `notifications/cancelled { requestId }` matches the in-flight call.
+/// Turn a JSON-RPC id, which may be a string or a number, into one
+/// stable key, so a `cancelled` notification finds its call.
 fn jsonrpc_id_string(id: &Value) -> String {
     match id {
         Value::String(s) => s.clone(),

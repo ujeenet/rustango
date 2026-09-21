@@ -1,10 +1,10 @@
 //! Request body size limit middleware.
 //!
-//! axum's `DefaultBodyLimit` already caps incoming bodies at 2 MiB
-//! per-extractor — this layer adds a router-wide cap that fires
-//! BEFORE the body is read into memory by checking `Content-Length`
-//! upfront, returning a structured `413 Payload Too Large` JSON
-//! response instead of axum's default plain-text error.
+//! An unbounded request body is a denial-of-service: one client can
+//! make the server buffer gigabytes. axum's `DefaultBodyLimit` caps
+//! 2 MiB per extractor; this layer adds a router-wide cap that checks
+//! `Content-Length` before the body is read into memory and answers
+//! with a JSON `413 Payload Too Large`.
 //!
 //! ## Quick start
 //!
@@ -16,8 +16,8 @@
 //!     .body_limit(BodyLimitLayer::new(10 * 1024 * 1024)); // 10 MiB
 //! ```
 //!
-//! Per-route override: build a sub-router for the route(s) that need a
-//! different cap and merge it after the global layer is applied.
+//! For a different cap on one route, put that route in a sub-router and
+//! merge it after the global layer.
 
 use std::sync::Arc;
 
@@ -33,8 +33,8 @@ pub struct BodyLimitLayer {
     /// Maximum body size in bytes. Requests with a `Content-Length`
     /// above this get a `413 Payload Too Large` upfront.
     pub max_bytes: usize,
-    /// Method names whose bodies we check. Default: POST, PUT, PATCH.
-    /// GET / DELETE / HEAD typically have no body so we skip them.
+    /// Methods whose bodies are checked. Default: POST, PUT, PATCH.
+    /// GET, DELETE and HEAD usually have no body, so they are skipped.
     pub methods: Vec<axum::http::Method>,
 }
 
@@ -54,20 +54,17 @@ impl BodyLimitLayer {
         }
     }
 
-    /// Override the methods checked. Pass an empty vec to check every
-    /// request regardless of method.
+    /// Choose which methods to check. An empty vec checks every
+    /// request.
     #[must_use]
     pub fn methods(mut self, m: Vec<axum::http::Method>) -> Self {
         self.methods = m;
         self
     }
 
-    /// Build the layer from a loaded
-    /// [`crate::config::ServerSettings`] section (#87 wiring).
-    /// Returns `None` when `max_body_bytes` is unset — opt-in
-    /// semantics, since most projects are happy with axum's
-    /// default. When set, uses the value as the cap; methods stay
-    /// at the default (POST/PUT/PATCH).
+    /// Build the layer from [`crate::config::ServerSettings`]. Returns
+    /// `None` when `max_body_bytes` is unset, so the layer is opt-in.
+    /// Methods stay at the default POST/PUT/PATCH.
     ///
     /// ```ignore
     /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -79,10 +76,8 @@ impl BodyLimitLayer {
     #[must_use]
     pub fn from_settings(s: &crate::config::ServerSettings) -> Option<Self> {
         let max = s.max_body_bytes?;
-        // u64 → usize. On 32-bit targets a comically-large config
-        // value saturates rather than wrapping; not realistic in
-        // practice (max_body_bytes is typically MB-range), but the
-        // saturate is the safe fail-mode.
+        // On 32-bit targets a huge config value saturates instead of
+        // wrapping, which is the safe way to fail.
         let max = usize::try_from(max).unwrap_or(usize::MAX);
         Some(Self::new(max))
     }
@@ -213,9 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_requests_skipped_by_default() {
-        // GET shouldn't have a body, but a malicious client can lie about
-        // Content-Length. By default we don't check GET so handlers see
-        // it for what it is.
+        // GET is not checked by default, even with a Content-Length.
         let resp = app(10)
             .oneshot(
                 Request::builder()
@@ -232,8 +225,8 @@ mod tests {
 
     #[tokio::test]
     async fn missing_content_length_lets_request_through() {
-        // Without Content-Length we can't enforce upfront; defer to
-        // axum's per-extractor DefaultBodyLimit (or the user's choice).
+        // No Content-Length: nothing to check here, so axum's
+        // per-extractor limit takes over.
         let resp = app(10)
             .oneshot(
                 Request::builder()

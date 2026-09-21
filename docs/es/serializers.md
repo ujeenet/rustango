@@ -1,20 +1,20 @@
 # Serializadores
 
 Un serializador convierte una instancia de modelo en una forma tipada, lista para
-JSON — y de vuelta a la entrada. Es la respuesta de **Rustango** a un
-`ModelSerializer` de Django REST Framework o a un API Resource de Laravel: declara
+JSON — y de vuelta a la entrada. Es la capa entre tus modelos y la superficie
+JSON de tu API: declara
 una struct, anota sus campos y obtienes una salida controlada (renombrar, ocultar,
 calcular, anidar), validación a nivel de campo y de objeto, y un enganche limpio
 con los ViewSets.
 
-Una cosa que conviene interiorizar de entrada, porque difiere de DRF: un
+Una cosa que conviene interiorizar de entrada: un
 serializador de Rustango **da forma a los datos, no los persiste**. No hay ningún
 `serializer.save()` que escriba en la base de datos — de eso se encarga el ORM. El
 serializador mapea un modelo a JSON (`from_model` → `to_value`), declara qué campos
 son escribibles y valida. Lo compones con el ORM y los ViewSets en lugar de enrutar
 escrituras *a través* de él.
 
-> **¿Algún término nuevo aquí?** — *serializer*, *model*, *ORM*, *DRF*? El
+> **¿Algún término nuevo aquí?** — *serializer*, *model*, *ORM*? El
 > [glosario](glossary.md) define cada uno en lenguaje llano.
 
 [![Un serializador de Rustango: read_only, renombrado con source, un campo de método calculado, una FK anidada y un campo write_only — declarados en una sola struct](../img/serializers.png)](../img/serializers.png)
@@ -151,7 +151,7 @@ separado).
 
 ## Campos calculados
 
-`method = "fn"` es el `SerializerMethodField` de DRF. Declara el campo, luego escribe
+Con `method = "fn"` el campo se calcula en lugar de leerse de una columna. Declara el campo, luego escribe
 una función asociada `fn(&Model) -> FieldType`; se llama durante `from_model`:
 
 ```rust
@@ -235,7 +235,7 @@ let json = s.to_value();
 
 ## Campos slug relacionados
 
-`slug = "name"` es el `SlugRelatedField` de DRF: en lugar de un id de FK o un objeto
+`slug = "name"` expone una relación mediante un campo legible: en lugar de un id de FK o un objeto
 anidado completo, emite un único campo con nombre extraído del padre cargado.
 
 ```rust
@@ -257,15 +257,14 @@ cargada; es solo para visualización (no escribible).
 ## Validación
 
 Tres capas, todas aflorando como `rustango::forms::FormErrors` (y, en una escritura
-de ViewSet, un `400` con forma de DRF). Se ejecutan en este orden: restricciones
+de ViewSet, un `400` con un mapa de errores por campo). Se ejecutan en este orden: restricciones
 declarativas, luego validadores por campo, luego el enganche entre campos.
 
-**Restricciones declarativas (los `validators` de DRF, auto-heredadas).**
+**Restricciones declarativas (heredadas automáticamente del modelo).**
 `max_length`, `min_length`, `min` y `max` son atributos de campo — y cuando los
 omites un campo **hereda del modelo** su `max_length` / `min` / `max` / `choices`.
 Así que una columna `#[rustango(max_length = 200)]` recibe la comprobación de
-longitud sin ningún atributo de serializador en absoluto (comportamiento del
-`ModelSerializer` de DRF). Se comprueban en cada campo escribible, convirtiendo los
+longitud sin ningún atributo de serializador en absoluto. Se comprueban en cada campo escribible, convirtiendo los
 `500` de restricción de base de datos que habría en `400` amables:
 
 ```rust
@@ -279,7 +278,7 @@ struct WidgetSerializer {
 }
 ```
 
-Los mensajes coinciden con Django/DRF: `"Ensure this value has at most N characters."`,
+Los mensajes son: `"Ensure this value has at most N characters."`,
 `"Ensure this value has at least N characters."`, `"Ensure this value is ≥ N."` /
 `"≤ N"`, y `"Select a valid choice."`. (`min_length` es solo de serializador;
 `choices` se hereda del modelo — no existe un atributo `choices`.)
@@ -335,14 +334,14 @@ restricciones declarativas de arriba (`max_length` / `min_length` / `min` / `max
 de `email`/regex, lo que mantiene la validación personalizada explícita y verificable.
 Fuera de un ViewSet, el framework no renderiza automáticamente `FormErrors` a un
 cuerpo HTTP; mapéalo a tu respuesta 400 (la separación campo/no-campo coincide con el
-JSON de errores de DRF).
+JSON de errores que emite un ViewSet).
 
 ---
 
 ## Validación unique-together
 
-Para el `UniqueTogetherValidator` de Django — una comprobación previa al guardado de
-que una fila candidata no colisionará en un índice único multicolumna — llama a
+Para comprobar antes de guardar que una fila candidata no colisionará en un
+índice único multicolumna, llama a
 `check_unique_together_pool` antes de guardar:
 
 ```rust
@@ -421,7 +420,7 @@ pub struct PostViewSet;
   renderizan a través de `from_model`, así que `source` / `method` / `read_only` /
   `write_only` dan forma al JSON.
 - **Entrada** — `create` / `update` ejecutan el `validate()` del serializador (un
-  fallo es un `400` con forma de DRF, `{field: [msgs]}`), y solo se escriben los
+  fallo es un `400` con un mapa de errores por campo, `{field: [msgs]}`), y solo se escriben los
   campos escribibles — los campos `read_only` / calculados que un cliente envíe se
   ignoran, resueltos por `source` a la columna del modelo.
 

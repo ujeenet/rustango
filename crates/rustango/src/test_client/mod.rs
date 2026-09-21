@@ -57,8 +57,8 @@ use tower::ServiceExt;
 ///
 /// ## Cookie persistence
 ///
-/// The client carries a cookie jar shared between requests — Django's
-/// `Client` behaviour. Every `Set-Cookie` response header is parsed
+/// The client carries a cookie jar shared between requests, like a
+/// browser. Every `Set-Cookie` response header is parsed
 /// (name+value only; `Path`/`Domain`/`Max-Age`/etc are ignored, which
 /// is fine for tests against a single in-process router) and merged
 /// into the jar. Every subsequent request automatically sends the
@@ -107,7 +107,7 @@ impl TestClient {
             .insert(name.into(), value.into());
     }
 
-    /// Drop every cookie. Equivalent to Django's `Client.cookies.clear()`.
+    /// Drop every cookie from the jar.
     pub fn clear_cookies(&self) {
         self.cookies.lock().expect("cookie jar poisoned").clear();
     }
@@ -115,14 +115,13 @@ impl TestClient {
     /// Convenience: POST a form to `path` and return the response.
     /// The client carries a cookie jar so any session cookie set by
     /// the login handler is automatically attached to subsequent
-    /// requests. Issue #41 — partial Django `Client.login` parity.
+    /// requests.
     pub async fn login(&self, path: impl Into<String>, fields: &[(&str, &str)]) -> TestResponse {
         self.post(path).form(fields).send().await
     }
 
-    /// Mint a tenant session cookie directly into the jar — Django's
-    /// `Client.force_login(user)` for the tenancy stack. Bypasses the
-    /// login form entirely: subsequent requests look authenticated to
+    /// Mint a tenant session cookie directly into the jar. Bypasses
+    /// the login form entirely: subsequent requests look authenticated to
     /// the [`crate::extractors::SessionUser`] extractor as long as the
     /// row at `user_id` is `active = true` in the tenant DB.
     ///
@@ -136,7 +135,7 @@ impl TestClient {
     /// the session expiry; one hour (3600) is a fine default for a
     /// test run.
     ///
-    /// Issue #41 — Django `Client.force_login` parity for tenancy.
+    /// Skips the login form: mints the cookie directly.
     #[cfg(feature = "tenancy")]
     pub fn force_login_tenant_user(
         &self,
@@ -161,7 +160,7 @@ impl TestClient {
     /// Operator sessions aren't slug-bound — operators span all
     /// tenants in the registry — so no slug parameter.
     ///
-    /// Issue #41 — Django `Client.force_login` parity for operators.
+    /// The operator counterpart of [`TestClient::force_login_tenant_user`].
     #[cfg(feature = "tenancy")]
     pub fn force_login_operator(
         &self,
@@ -179,8 +178,7 @@ impl TestClient {
     /// Convenience: clear the cookie jar (so the next request looks
     /// fully logged-out) and optionally hit `path` (a logout endpoint
     /// that may itself emit a `Set-Cookie: name=; Max-Age=0`
-    /// expiration). Pass `None` to only drop the jar locally. Issue
-    /// #41 — partial Django `Client.logout` parity.
+    /// expiration). Pass `None` to only drop the jar locally.
     pub async fn logout(&self, path: Option<&str>) -> Option<TestResponse> {
         self.clear_cookies();
         match path {
@@ -197,14 +195,12 @@ impl TestClient {
 
     /// Issue a GET request and follow up to `max_hops` 3xx redirects.
     /// Returns the final response **plus** the chain of visited
-    /// (status, location) pairs. Django's `Client.get(..., follow=True)`.
-    /// Issue #41 follow-up.
+    /// (status, location) pairs.
     ///
     /// Each hop reuses the same cookie jar, so `Set-Cookie` from an
     /// intermediate hop is visible to the next request. The original
-    /// request's headers / content-type are NOT propagated — Django
-    /// follows redirects as GET regardless of the request method,
-    /// matching browser behaviour.
+    /// request's headers / content-type are NOT propagated: every
+    /// hop is a GET, matching browser behaviour.
     ///
     /// Stops following when:
     /// - The response status is not 3xx.
@@ -354,8 +350,8 @@ impl<'a> RequestBuilder<'a> {
             req = req.header("content-type", ct);
         }
         // Attach the cookie jar as a single `Cookie:` header (the
-        // wire format the server side will see; Django's Client does
-        // the same). Only emit when non-empty so requests that
+        // wire format the server side will see). Only emit when
+        // non-empty so requests that
         // legitimately need no cookies don't get a stray header.
         {
             let jar = self.client.cookies.lock().expect("cookie jar poisoned");
@@ -420,10 +416,10 @@ fn parse_set_cookie(raw: &str) -> Option<(String, String)> {
 }
 
 // ============================================================================
-// RequestFactory — Django-parity #430
+// RequestFactory
 // ============================================================================
 
-/// Django-shape `RequestFactory` — builds `axum::http::Request<Body>`
+/// `RequestFactory` — builds `axum::http::Request<Body>`
 /// instances for direct handler / extractor tests, without dispatching
 /// through a router and without the cookie persistence machinery
 /// [`TestClient`] adds.
@@ -852,7 +848,7 @@ mod tests {
         async fn login() -> impl IntoResponse {
             // Two cookies in one response. `append` (not `insert`)
             // stacks them so both arrive as separate Set-Cookie
-            // headers — exactly the wire shape Django emits.
+            // headers — exactly the wire shape a browser sends.
             let mut h = HeaderMap::new();
             h.append(
                 header::SET_COOKIE,
@@ -1162,7 +1158,7 @@ mod tests {
         assert!(decode(&wrong_secret, "acme", &cookie).is_err());
     }
 
-    // -- RequestFactory (Django-parity #430) --
+    // -- RequestFactory --
 
     async fn read_body_bytes(req: Request<Body>) -> Vec<u8> {
         let (_, body) = req.into_parts();
@@ -1279,8 +1275,8 @@ mod tests {
     #[tokio::test]
     async fn request_factory_request_is_usable_with_oneshot() {
         // End-to-end shape: build a request via the factory, then
-        // dispatch it directly through a Router via tower::oneshot —
-        // the Django-parity reason for this helper.
+        // dispatch it directly through a Router via tower::oneshot.
+        // That is what this helper exists for.
         let app = Router::new().route("/hello", axum::routing::get(|| async { "hi" }));
         let req = RequestFactory::new().get("/hello").build();
         let resp = app.oneshot(req).await.unwrap();

@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
-//! Live PostgreSQL round-trip for `Range<T>` columns — Django
-//! `RangeField` family (#343). Proves the typed field wrapper writes a
+//! Live PostgreSQL round-trip for `Range<T>` columns
+//! (#343). Proves the typed field wrapper writes a
 //! native PG range on INSERT (via a range-literal bind) and decodes it
 //! back into `Range<T>` on SELECT, and that the `@>` containment
 //! operator filters on it.

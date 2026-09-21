@@ -1,7 +1,7 @@
 # El panel de administración
 
 **Rustango** genera una interfaz de administración completa a partir de tus modelos —
-la misma idea que el admin de Django o un panel Nova/Filament de Laravel, pero con
+un backoffice listo para explorar y editar tus datos, pero con
 **cero código repetitivo por modelo**. Añade `#[derive(Model)]`, monta el admin una
 vez, y cada modelo obtiene una vista de lista con búsqueda, filtros, ordenación,
 paginación y acciones masivas; un formulario de creación/edición agrupado en conjuntos
@@ -236,8 +236,8 @@ texto escapado en el formulario en lugar de como entradas.
 
 ## Inlines
 
-Los inlines muestran las filas de un modelo hijo en la página del padre (inlines de
-Django). Registra uno a nivel de módulo:
+Los inlines muestran las filas de un modelo hijo directamente en la página del padre,
+de modo que ambos se editan en un solo formulario. Registra uno a nivel de módulo:
 
 ```rust
 rustango::register_admin_inline!(
@@ -364,7 +364,7 @@ rustango::register_admin_list_filter!(
 
 ## Vistas, querysets y permisos personalizados
 
-Tres macros de registro más reflejan los hooks de `ModelAdmin` de Django:
+Tres macros de registro más se enganchan al comportamiento de un modelo registrado:
 
 - **Páginas de admin personalizadas** —
   `register_admin_view!("posts", "duplicate", Method::POST, "Duplicate", handler)`
@@ -511,7 +511,7 @@ Las rutas personalizadas registradas con `register_admin_view!` se montan en
 
 ## La referencia de modelos
 
-Cada admin incluye una referencia de modelos en vivo (los admindocs de Django) en
+Cada admin incluye una referencia de modelos en vivo en
 `<prefix>/__docs` — un catálogo de solo lectura de cada modelo registrado con sus campos,
 columnas, tipos, flags (PK, unique, …) y relaciones. Nada que configurar; se genera a
 partir de tus modelos, así que nunca se desvía del esquema.

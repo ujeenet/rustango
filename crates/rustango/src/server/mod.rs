@@ -1,4 +1,4 @@
-//! `rustango::server` — Django-style runserver builder.
+//! `rustango::server` — the builder behind `manage runserver`.
 //!
 //! Owns every line of boilerplate that's identical across tenancy
 //! apps: connect to `DATABASE_URL`, build `TenantPools`, mount the

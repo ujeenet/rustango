@@ -1,5 +1,5 @@
-//! Live SQLite test for `QuerySet::exclude` (Django `.exclude()`,
-//! #1030). Covers the filter/exclude inverse pair, `__lookup` suffixes
+//! Live SQLite test for `QuerySet::exclude`
+//! (#1030). Covers the filter/exclude inverse pair, `__lookup` suffixes
 //! through exclude, chained-excludes-AND, and the NULL-row semantics of
 //! `NOT (col = v)`.
 
@@ -100,8 +100,8 @@ async fn chained_excludes_and_together() {
 async fn exclude_drops_null_rows() {
     let pool = seeded().await;
     // NOT (category = 'a') excludes the 'a' rows (1, 4) AND the NULL-row
-    // (3) — `NOT (NULL = 'a')` is NULL, which fails the WHERE. Matches
-    // Django's emission. Only the 'b' row (2) survives.
+    // (3) — `NOT (NULL = 'a')` is NULL, which fails the WHERE.
+    // Only the 'b' row (2) survives.
     let got = ids(&pool, Post::objects().exclude("category", "a")).await;
     assert_eq!(got, vec![2], "NULL category row excluded by NOT(=)");
 }

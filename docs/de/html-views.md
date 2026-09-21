@@ -7,9 +7,9 @@ JSON für API-Clients ausgibt, gibt ein HTML-View eine gerenderte Seite für ein
 werden aus demselben `#[derive(Model)]` gebaut, und du kannst ein Modell *beides* zugleich
 ausliefern.
 
-Dies sind das Äquivalent von **Rustango** zu Djangos generischen klassenbasierten Views
-(`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) oder Laravels
-Resource-Controllern, die Blade-Views zurückgeben. Sie rendern über [Tera](https://keats.github.io/tera/)-Templates.
+Die einzelnen View-Typen (`ListView`, `DetailView`, `CreateView`, `UpdateView`,
+`DeleteView`) decken je einen Standardfall ab und rendern über
+[Tera](https://keats.github.io/tera/)-Templates.
 
 [![HTML-Views in Rustango: Ein Modell speist ListView, DetailView und CreateView/UpdateView/DeleteView, die jeweils ein Tera-Template zu einer serverseitig gerenderten Seite rendern](../img/html-views.png)](../img/html-views.png)
 
@@ -55,7 +55,6 @@ darin, *was herauskommt* und *wer aufruft*.
 | Bei fehlerhafter Eingabe | `400` + eine feldbasierte JSON-Fehlerkarte | rendert das Formular mit den angezeigten Fehlern neu |
 | Liest eine Liste als | eine paginierte JSON-Hülle | eine `<table>`/Schleife in deinem Template |
 | Üblicherweise authentifiziert per | Tokens / JWT / API-Keys | Session-Cookies |
-| Django-Analogon | DRF `ModelViewSet` | generische klassenbasierte Views |
 
 Du musst nicht global wählen — wähle pro Ressource, und du kannst **beide auf demselben Modell**
 einhängen (siehe [unten](#ein-modell-auf-beide-arten-ausliefern)). Faustregeln:

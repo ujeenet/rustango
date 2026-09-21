@@ -117,9 +117,9 @@ pub struct RouteConfig {
     pub impersonation_ttl: Duration,
 }
 
-/// `Default` returns the friendly preset (Django-style) since
-/// v0.29 (#85). Projects that need the v0.28 `__`-prefixed URLs
-/// must opt in via [`RouteConfig::legacy`].
+/// `Default` returns the friendly preset — plain paths such as
+/// `/login` and `/admin`. Projects that need the `__`-prefixed
+/// URLs must opt in via [`RouteConfig::legacy`].
 impl Default for RouteConfig {
     fn default() -> Self {
         Self {

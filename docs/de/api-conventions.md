@@ -129,7 +129,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **Eine Ausnahme:** Signale nehmen keinen Pool entgegen, weil sie die Datenbank niemals berühren. Die Regel hält: Alles, was die DB erreicht, nimmt den Pool; alles, was das nicht tut, nicht.
 
-**Warum jedes Mal übergeben?** Rust bevorzugt sichtbare Abhängigkeiten gegenüber verstecktem globalem Zustand. Django hält die Verbindung im Thread-Local-Speicher, aber das bricht in Rusts async-Welt zusammen, wo eine Task mitten in einer Anfrage zwischen Threads springen kann. Der Nachteil ist mehr Tipparbeit; der Vorteil ist, dass Sie nach jeder Stelle greppen können, die die Datenbank berührt.
+**Warum jedes Mal übergeben?** Rust bevorzugt sichtbare Abhängigkeiten gegenüber verstecktem globalem Zustand. Die naheliegende Alternative — die Verbindung in einem Thread-Local zu halten — bricht in Rusts async-Welt zusammen, wo eine Task mitten in einer Anfrage zwischen Threads springen kann. Der Nachteil ist mehr Tipparbeit; der Vorteil ist, dass Sie nach jeder Stelle greppen können, die die Datenbank berührt.
 
 Wenn Sie feststellen, dass Sie `&pool` durch zehn Schichten von Funktionsaufrufen durchreichen, akzeptieren Sie einmal `impl Executor` am öffentlichen Einstiegspunkt und lassen Sie die internen Helfer diese eine Verbindung teilen.
 
@@ -152,7 +152,7 @@ Post::objects().where_(Post::author_id.eq(42));
 
 | Syntax | Verwenden, wenn |
 |---|---|
-| HTTP-Query | Öffentliche API-Endpunkte — das ViewSet parst diese für Sie, wie die Filter-Backends von DRF |
+| HTTP-Query | Öffentliche API-Endpunkte — das ViewSet parst diese für Sie aus dem Query-String |
 | String-basiertes `.filter` | Generischer CRUD- oder Admin-Code, wo Feldnamen aus der Config stammen und zur Kompilierzeit nicht bekannt sind |
 | Typisiertes `.where_` | Ihr Anwendungscode — der bevorzugte Standard. Der Compiler prüft, dass das Feld existiert und die Typen übereinstimmen |
 
@@ -203,7 +203,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 
 `ApiError` implementiert `IntoResponse`, sodass die Rückgabe automatisch seine JSON-Form erzeugt: `{"error": <Maschinencode>, "message": …, "status": …, "details": …}`.
 
-**Es ist nicht die einzige Fehlerform, die das Framework ausgibt.** Ein ViewSet antwortet bei eigenen Fehlern mit `{"error": "<lesbare Meldung>"}` und bei Serializer-Validierung mit einer feldgeschlüsselten DRF-Map — insgesamt drei Umschläge, und `error` trägt in einem einen Maschinencode, im anderen einen Satz. [ViewSets — Formen der Fehlerantwort](viewsets.md#formen-der-fehlerantwort) listet auf, welcher Pfad welche ausgibt.
+**Es ist nicht die einzige Fehlerform, die das Framework ausgibt.** Ein ViewSet antwortet bei eigenen Fehlern mit `{"error": "<lesbare Meldung>"}` und bei Serializer-Validierung mit einer nach Feldnamen geschlüsselten Map — insgesamt drei Umschläge, und `error` trägt in einem einen Maschinencode, im anderen einen Satz. [ViewSets — Formen der Fehlerantwort](viewsets.md#formen-der-fehlerantwort) listet auf, welcher Pfad welche ausgibt.
 
 ---
 
@@ -264,7 +264,7 @@ Verwenden, wenn:
 
 ## Feature-Flags
 
-Ein *Feature* ist ein Cargo-Build-Flag (das `[features]` von `Cargo.toml`), das einen Teil des Crates ein- oder ausschaltet — ähnlich der Package-Discovery von Laravel oder den `INSTALLED_APPS` von Django, aber zur Kompilierzeit aufgelöst. Jedes Modul, das eine zusätzliche Abhängigkeit hereinzieht, sitzt hinter einem. Der Standardsatz lautet „die wollen Sie mit ziemlicher Sicherheit“:
+Ein *Feature* ist ein Cargo-Build-Flag (das `[features]` von `Cargo.toml`), das einen Teil des Crates ein- oder ausschaltet — die Liste der installierten Bestandteile Ihrer Anwendung, aber zur Kompilierzeit aufgelöst. Jedes Modul, das eine zusätzliche Abhängigkeit hereinzieht, sitzt hinter einem. Der Standardsatz lautet „die wollen Sie mit ziemlicher Sicherheit“:
 
 ```toml
 default = [

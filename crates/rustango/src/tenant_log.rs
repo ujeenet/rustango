@@ -1,16 +1,11 @@
-//! Ambient tenant identity for log lines — the field that says *whose*
-//! request this was.
+//! Tenant identity for log lines: the field that says whose request
+//! this was.
 //!
-//! Tenant identity lives in the request: `Tenant` is an axum extractor,
-//! not a task-local ([`crate::extractors::tenant`]). By the time anything
-//! logs, the resolved [`Org`](crate::tenancy::Org) has been moved into a
-//! handler and nothing downstream can see it — which is why an access-log
-//! line could name the method, path, status and IP, but never the tenant.
-//!
-//! This module is the missing slot. [`scope`] opens one per request,
-//! the resolver calls [`record`] when it identifies the tenant, and
-//! outer middleware reads it back with [`current`] after the handler
-//! returns.
+//! `Tenant` is an axum extractor, so the resolved
+//! [`Org`](crate::tenancy::Org) is moved into the handler and the
+//! logging middleware outside it cannot see the tenant. This module is
+//! the missing slot. [`scope`] opens one per request, the resolver
+//! calls [`record`], and outer middleware reads it with [`current`].
 //!
 //! ```ignore
 //! // Middleware, outside the handler. Read back INSIDE the scope:
@@ -23,17 +18,24 @@
 //! .await;
 //! ```
 //!
-//! [`record`] also writes `tenant` / `org_id` onto the current `tracing`
+//! [`record`] also puts `tenant` and `org_id` on the current `tracing`
 //! span, so with [`crate::tracing_layer::TracingLayer`] installed every
-//! event emitted during the request carries the tenant in its span
-//! context — the ORM's included, with no plumbing of their own.
+//! event in the request carries the tenant, the ORM's events included.
 //!
-//! ## Scope
+//! ## Scope and safety
 //!
-//! Per-task, and `tokio::spawn` does not inherit it: work that leaves the
-//! request leaves the scope. Giving background jobs a tenant is a
-//! different mechanism (issues #1229 / #1223) — this covers the request
-//! path only.
+//! The slot is per-task and set once. `tokio::spawn` does not inherit
+//! it, so work that leaves the request leaves the scope. Keep it that
+//! way: a slot shared or reused between requests would label one
+//! tenant's log lines with another tenant's slug, which leaks customer
+//! names across tenants and corrupts any per-tenant audit trail. Open a
+//! fresh [`scope`] per request and never hold a [`TenantLabel`] past
+//! it. Background jobs need their own mechanism.
+//!
+//! [`scope`]: crate::tenant_log::scope
+//! [`record`]: crate::tenant_log::record
+//! [`current`]: crate::tenant_log::current
+//! [`TenantLabel`]: crate::tenant_log::TenantLabel
 
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
@@ -41,22 +43,22 @@ use std::sync::{Arc, OnceLock};
 /// The resolved tenant, as logs should name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantLabel {
-    /// `Org.slug` — operator-chosen, and often a customer name. See
-    /// [`crate::access_log::TenantField`] for logging the id instead.
+    /// `Org.slug`. Often a customer name, so treat logs holding it as
+    /// customer data. See [`crate::access_log::TenantField`] to log the
+    /// id instead.
     pub slug: String,
-    /// `Org.id`. `None` for an unsaved org, which no request path
-    /// produces — the field is Optional because `Auto<i64>` is.
+    /// `Org.id`. `None` only for an unsaved org, because `Auto<i64>` is
+    /// optional; no request path produces that.
     pub id: Option<i64>,
 }
 
 tokio::task_local! {
     /// Per-request slot for the resolved tenant.
     ///
-    /// `Arc<OnceLock<_>>` rather than a plain task-local value because
-    /// the write happens *below* the read: the resolver runs inside the
-    /// handler, the middleware that logs sits outside it. A task-local
-    /// holding a plain value could not be filled in from in there.
-    /// Set-once matches the semantic — one request, one tenant.
+    /// It holds `Arc<OnceLock<_>>`, not a plain value, because the write
+    /// happens below the read: the resolver runs inside the handler and
+    /// the logging middleware sits outside it. Set-once matches the
+    /// rule of one request, one tenant.
     static TENANT: Arc<OnceLock<TenantLabel>>;
 }
 
@@ -75,30 +77,21 @@ where
     TENANT.scope(Arc::new(OnceLock::new()), fut).await
 }
 
-/// Publish the request's tenant. Called by the tenant resolver the
-/// moment an `Org` is identified.
+/// Publish the request's tenant. The resolver calls this as soon as it
+/// identifies an `Org`.
 ///
-/// Records `tenant` / `org_id` on the current span, and fills the
-/// [`scope`] slot when one is open. Both halves are no-ops outside
-/// their respective contexts, so calling this from a CLI verb or a
-/// test costs nothing and breaks nothing. First call wins.
+/// Fills the [`scope`] slot if one is open, and puts `tenant` and
+/// `org_id` on the current span. Both halves do nothing outside their
+/// context, so a CLI verb or test can call it safely. First call wins,
+/// so a later resolver cannot relabel the request.
 pub fn record(slug: &str, id: Option<i64>) {
-    // The slot is the dedupe, so it has to be consulted *first*.
+    // Check the slot first: it is what stops a chain of resolvers from
+    // stamping the same field once each, which is a duplicate key in
+    // JSON logs.
     //
-    // These two halves used to run in the other order, with the
-    // `span.record` calls above an unguarded `OnceLock::set`. "First
-    // call wins" was then true of the slot and false of the span: every
-    // resolver in `ChainResolver` that published the same tenant
-    // stamped the field again. Measured on a running app, `/healthz`
-    // rendered `tenant=` three times — and `/healthz` is usually the
-    // highest-volume endpoint in a deployment. Cosmetic in text mode; a
-    // duplicate key in JSON, which is the format that ships to a
-    // collector.
-    //
-    // `Ok(false)` means the slot was already filled — a later resolver,
-    // so nothing to do. `Err` means no scope is open (a CLI verb, a
-    // test), and there is no slot to dedupe against; record
-    // unconditionally, as before.
+    // `Ok(false)` means a resolver already filled it, so stop. `Err`
+    // means no scope is open, so there is nothing to dedupe against and
+    // we record anyway.
     let first = TENANT
         .try_with(|slot| {
             slot.set(TenantLabel {
@@ -121,9 +114,9 @@ pub fn record(slug: &str, id: Option<i64>) {
 
 /// The tenant resolved for the current request, if any.
 ///
-/// `None` means no tenant was identified — an apex-domain or operator
-/// console request, a single-tenant deployment, or any code running
-/// outside a [`scope`]. It never means "there was one and we lost it".
+/// `None` means no tenant was identified: an apex-domain or operator
+/// console request, a single-tenant deployment, or code outside a
+/// [`scope`]. It never means one was found and then lost.
 #[must_use]
 pub fn current() -> Option<TenantLabel> {
     TENANT.try_with(|slot| slot.get().cloned()).ok().flatten()
@@ -133,16 +126,8 @@ pub fn current() -> Option<TenantLabel> {
 mod tests {
     use super::*;
 
-    /// One `tenant=` per line, however many resolvers run.
-    ///
-    /// `record`'s doc says "First call wins". That holds for the slot —
-    /// `OnceLock::set` fails silently on repeat — but the two
-    /// `span.record` calls sat above that check, unguarded, and fired
-    /// on every `ChainResolver::resolve`. Paths that resolve more than
-    /// once stamped the field repeatedly: measured on a booted CMS,
-    /// `/healthz` rendered `tenant=` three times, `/` three, `/login`
-    /// twice. Cosmetic in text mode; a duplicate key in JSON, which is
-    /// what ships to a collector.
+    /// One `tenant=` per line, however many resolvers run. More than
+    /// one is a duplicate key in JSON logs.
     #[cfg(feature = "runtime")]
     #[tokio::test]
     async fn a_field_is_stamped_once_however_many_resolvers_run() {
@@ -182,7 +167,7 @@ mod tests {
                 org_id = tracing::field::Empty,
             );
             let _e = span.enter();
-            // Three resolvers in the chain all publish the same tenant.
+            // Three resolvers publish the same tenant.
             record("acme", Some(7));
             record("acme", Some(7));
             record("acme", Some(7));
@@ -244,18 +229,17 @@ mod tests {
         assert_eq!(seen.unwrap().slug, "acme");
     }
 
-    /// The slot does not outlive its scope. Pins the shape that read
-    /// `tenant=-` on every line until the read moved inside — the
-    /// failure is silent, so it needs a test of its own.
+    /// The slot does not outlive its scope. A read placed after it
+    /// fails silently, so this needs its own test.
     #[tokio::test]
     async fn a_read_after_the_scope_closes_sees_nothing() {
         scope(async { record("acme", Some(7)) }).await;
         assert_eq!(current(), None);
     }
 
-    /// Two layers both opening a scope must not shadow each other —
-    /// otherwise the resolver fills the inner slot and the outer
-    /// middleware reads an empty one.
+    /// Two layers opening a scope must not shadow each other, or the
+    /// resolver fills the inner slot and the outer read comes back
+    /// empty.
     #[tokio::test]
     async fn a_nested_scope_reuses_the_outer_slot() {
         let seen = scope(async {
@@ -267,7 +251,7 @@ mod tests {
     }
 
     /// A spawned task is a different task: it neither sees the parent's
-    /// tenant nor leaks one back. Pins the boundary #1223 has to cross.
+    /// tenant nor leaks one back.
     #[tokio::test]
     async fn a_spawned_task_does_not_inherit_the_scope() {
         let seen = scope(async {

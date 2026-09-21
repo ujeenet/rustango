@@ -1,6 +1,6 @@
 # Guide de sécurité
 
-Ce guide couvre chaque fonctionnalité de sécurité fournie par **Rustango** et la manière de les combiner. Si vous venez de Django, Laravel ou Rails, la plupart vous sembleront familières — les noms diffèrent, mais les idées sont les mêmes. Chaque fonctionnalité ci-dessous se met généralement en place en une seule ligne. Quand vous êtes prêt à déployer, lancez `manage check --deploy` pour un audit automatisé.
+Ce guide couvre chaque fonctionnalité de sécurité fournie par **Rustango** et la manière de les combiner. Si vous avez déjà utilisé un framework web, la plupart vous sembleront familières — les noms diffèrent, mais les idées sont les mêmes. Chaque fonctionnalité ci-dessous se met généralement en place en une seule ligne. Quand vous êtes prêt à déployer, lancez `manage check --deploy` pour un audit automatisé.
 
 [![La pile de middleware renforcée câblée dans une seule chaîne : identifiants de requête, journalisation des accès, limitation de débit, CORS et en-têtes de sécurité](../img/security.png)](../img/security.png)
 
@@ -52,7 +52,7 @@ let app = Router::new()
 
 ## Définir les en-têtes de sécurité
 
-Les en-têtes de sécurité indiquent au navigateur comment protéger vos utilisateurs (bloquer le clickjacking, forcer HTTPS, empêcher le sniffing de type de contenu). `SecurityHeadersLayer` définit l'ensemble standard en une ligne — les mêmes en-têtes que Django fournit par défaut. (Une « couche » est le terme de **Rustango** pour désigner un middleware ; vous l'attachez à votre routeur.)
+Les en-têtes de sécurité indiquent au navigateur comment protéger vos utilisateurs (bloquer le clickjacking, forcer HTTPS, empêcher le sniffing de type de contenu). `SecurityHeadersLayer` définit l'ensemble standard en une ligne — les en-têtes de protection habituels, sans avoir à les nommer un par un. (Une « couche » est le terme de **Rustango** pour désigner un middleware ; vous l'attachez à votre routeur.)
 
 > À approfondir : [Middleware](middleware.md) couvre le fonctionnement des couches, leur ordre, le catalogue intégré complet et la rédaction de vos propres couches (sensibles à la locale, au fuseau horaire, en-têtes, CSRF).
 
@@ -233,7 +233,7 @@ Si votre reverse proxy transmet `X-Forwarded-For`, configurez-le pour définir `
 > des cookies, lisez le cookie `rustango_csrf` et renvoyez-le dans l'en-tête
 > `X-CSRF-Token`.
 
-Le CSRF (cross-site request forgery) survient lorsqu'un autre site trompe le navigateur d'un utilisateur connecté pour lui faire soumettre une requête à votre application. La défense est un jeton secret sur chaque formulaire, tout comme le `{% csrf_token %}` de Django. Le middleware CSRF vit dans `rustango::forms::csrf` (derrière la feature `csrf`, activée automatiquement par la feature `admin`) :
+Le CSRF (cross-site request forgery) survient lorsqu'un autre site trompe le navigateur d'un utilisateur connecté pour lui faire soumettre une requête à votre application. La défense est un jeton secret sur chaque formulaire, que le serveur revérifie à chaque écriture. Le middleware CSRF vit dans `rustango::forms::csrf` (derrière la feature `csrf`, activée automatiquement par la feature `admin`) :
 
 ```rust
 use rustango::forms::csrf;
@@ -259,7 +259,7 @@ Jusqu'à [#1395](https://github.com/ujeenet/rustango/issues/1395), ce paragraphe
 
 Le XSS (cross-site scripting) survient lorsqu'une entrée utilisateur est rendue en HTML et s'exécute comme du code dans le navigateur de quelqu'un d'autre. La solution est d'échapper toute entrée utilisateur avant qu'elle n'atteigne la page. **Rustango** gère cela de deux façons :
 
-**1. Auto-échappement des templates Tera** — Tera est le moteur de templates de **Rustango** (comme les templates Django ou Blade). Chaque `{{ var }}` est automatiquement échappé en HTML — mais seulement dans les templates que Tera échappe, c'est-à-dire son ensemble par défaut `.html`, `.htm` et `.xml`. Rustango ne définit aucun `autoescape_suffixes`, donc un template `.txt`, `.j2` ou `.tera` n'est **pas** échappé. Utilisez `{{ var | safe }}` pour vous en soustraire — rare, et dangereux, donc ne le faites que pour du HTML auquel vous faites entièrement confiance.
+**1. Auto-échappement des templates Tera** — Tera est le moteur de templates de **Rustango**. Chaque `{{ var }}` est automatiquement échappé en HTML — mais seulement dans les templates que Tera échappe, c'est-à-dire son ensemble par défaut `.html`, `.htm` et `.xml`. Rustango ne définit aucun `autoescape_suffixes`, donc un template `.txt`, `.j2` ou `.tera` n'est **pas** échappé. Utilisez `{{ var | safe }}` pour vous en soustraire — rare, et dangereux, donc ne le faites que pour du HTML auquel vous faites entièrement confiance.
 
 **2. Fonction d'échappement manuelle** — pour quand vous construisez du HTML dans du code Rust au lieu d'un template :
 
@@ -311,7 +311,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 ## Authentifier les utilisateurs
 
-L'authentification est la manière dont vous confirmez qui effectue une requête. **Rustango** fournit trois backends prêts à l'emploi (Basic auth, clés d'API et JWT) et vous laisse écrire les vôtres — un peu comme les backends d'authentification de Django. Vous les attachez aux routes, et les requêtes sans identifiant reconnu reçoivent un `401`.
+L'authentification est la manière dont vous confirmez qui effectue une requête. **Rustango** fournit trois backends prêts à l'emploi (Basic auth, clés d'API et JWT) et vous laisse écrire les vôtres en implémentant un seul trait. Vous les attachez aux routes, et les requêtes sans identifiant reconnu reçoivent un `401`.
 
 > **SSO admin.** Pour permettre aux opérateurs de se connecter à l'admin avec un IdP externe (Google, Microsoft/Azure AD, GitHub, ou tout fournisseur OpenID Connect) au lieu d'un mot de passe, activez la feature `admin-sso` — voir le [guide SSO](sso.md). Les fournisseurs sont **gérés depuis l'interface admin sous forme de lignes** (plusieurs par surface ; par tenant, ou un ensemble partagé entre tenants), avec le secret client **chiffré au repos**. C'est un rattachement à l'existant (l'email vérifié de l'IdP doit correspondre à un utilisateur admin ; pas d'auto-provisionnement) et cela réutilise la session existante.
 
@@ -333,12 +333,12 @@ let backends = vec![
 // behind post.add. Gate the permission on an inner sub-router instead.
 let posts = Router::new()
     .route("/posts/new", post(create_post))
-    .require_perm("post.add", pool.clone());        // inner: needs the codename
+    .require_perm("post.add");     // inner: needs the codename
 
 let app = Router::new()
     .route("/me", get(profile))
     .merge(posts)
-    .require_auth(backends, pool);                  // outer: resolves the user first
+    .require_auth(backends);       // outer: resolves the user first
 ```
 
 Le middleware essaie chaque backend dans l'ordre. Le premier qui réussit l'emporte ; le premier qui renvoie une erreur dure arrête la chaîne.

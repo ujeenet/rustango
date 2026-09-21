@@ -1,16 +1,16 @@
-//! TOML layered-loader pipeline: `default.toml` → `{env}.toml` →
-//! `RUSTANGO__*` env-var overrides → typed [`Settings`].
+//! The layered loader: `default.toml`, then `{env}.toml`, then
+//! `RUSTANGO__*` env vars, then a typed [`Settings`].
 //!
-//! Hand-rolled merger (no figment) — the workspace already pulls
-//! `serde` and we add only `toml = "0.8"` for parsing. Three steps:
+//! The merge is hand-written rather than pulled from a crate, so the
+//! only new dependency is `toml`. Three steps:
 //!
-//! 1. Parse each TOML file to `toml::Value` (tree-shape).
-//! 2. Recursively merge env file on top of defaults (env wins).
-//! 3. Apply `RUSTANGO__SECTION__KEY=…` env-var overrides to the
-//!    merged tree, splitting on `__` for the path.
+//! 1. Parse each file into a `toml::Value` tree.
+//! 2. Merge the env file over the defaults; the env file wins.
+//! 3. Graft `RUSTANGO__SECTION__KEY=…` values into that tree,
+//!    splitting the name on `__` to get the path.
 //!
-//! Then `serde_path_to_error` style deserialise to [`Settings`] so
-//! field-shape mismatches surface with the offending path.
+//! The tree is then deserialized into [`Settings`], so a type
+//! mismatch names the field that caused it.
 
 use std::path::Path;
 
@@ -19,9 +19,8 @@ use super::sections::Settings;
 /// Errors the layered loader can raise.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// `config/default.toml` couldn't be opened or read. The
-    /// env-specific overlay is optional (skipped silently when
-    /// missing); the default file is the contract.
+    /// `config/default.toml` could not be read. The per-env file is
+    /// optional and is skipped when missing; this one is required.
     #[error("config: failed to read {path}: {source}")]
     Io {
         path: String,
@@ -37,13 +36,13 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
 
-    /// Final deserialise into [`Settings`] failed — usually a type
-    /// mismatch (e.g. `[database].pool_max_size = "ten"`).
+    /// The merged tree did not fit [`Settings`], usually a type
+    /// mismatch such as `[database].pool_max_size = "ten"`.
     #[error("config: settings shape mismatch: {0}")]
     Shape(toml::de::Error),
 
-    /// A `RUSTANGO__*` env var couldn't be parsed into the path it
-    /// targets (e.g. malformed integer).
+    /// A `RUSTANGO__*` env var did not parse into the field it
+    /// targets, for example a malformed integer.
     #[error("config: env-var override `{var}` invalid: {detail}")]
     EnvOverride { var: String, detail: String },
 }
@@ -52,24 +51,18 @@ pub(super) fn load_with_root(root: &Path, env: &str) -> Result<Settings, ConfigE
     load_with_root_and_env(root, env, std::env::vars())
 }
 
-/// Test-friendly variant: caller supplies the env-var iterator
-/// instead of reading the process environment. Avoids
-/// `std::env::set_var` (which requires `unsafe` and is forbidden by
-/// the workspace lint policy) in unit tests.
+/// Same as `load_with_root`, but the caller passes the env vars in.
+/// Unit tests need that, because the workspace forbids
+/// `std::env::set_var`.
 ///
-/// File-search order (each layer is optional except the first):
-/// 1. `default.toml` — shared defaults, REQUIRED.
-/// 2. `{env}_settings.toml` — tier convention (`dev_settings.toml`,
-///    `staging_settings.toml`, `prod_settings.toml`), preferred since
-///    v0.29 (#87) because the suffix makes the file's purpose clear
-///    next to `default.toml`.
-/// 3. `{env}.toml` — legacy convention (`prod.toml`, `staging.toml`),
-///    kept for back-compat with v0.28 deployments.
-/// 4. `RUSTANGO__*` env-var overrides.
+/// Layers, in order. Only the first is required:
+/// 1. `default.toml`, the shared defaults.
+/// 2. `{env}_settings.toml`, the preferred per-tier name.
+/// 3. `{env}.toml`, the older name, still supported.
+/// 4. `RUSTANGO__*` env vars.
 ///
-/// If both `{env}_settings.toml` and `{env}.toml` exist, the `_settings`
-/// variant wins — same shape as a more-specific override beating a
-/// less-specific one, and the loader emits a stderr warning.
+/// If both per-env files exist, `_settings` wins and the loader warns
+/// on stderr about the unused one.
 fn load_with_root_and_env<I>(root: &Path, env: &str, env_vars: I) -> Result<Settings, ConfigError>
 where
     I: IntoIterator<Item = (String, String)>,
@@ -78,8 +71,8 @@ where
     let tiered_path = root.join(format!("{env}_settings.toml"));
     let legacy_path = root.join(format!("{env}.toml"));
 
-    // `read_toml(path, required = true)` returns Some(_) or errors,
-    // so this expect can never trip.
+    // With `required = true`, `read_toml` returns `Some` or errors,
+    // so this expect cannot fire.
     let mut tree =
         read_toml(&default_path, true)?.expect("read_toml(_, required=true) returns Some on Ok");
 
@@ -87,9 +80,8 @@ where
     let legacy = read_toml(&legacy_path, false)?;
     match (tiered, legacy) {
         (Some(t), Some(_)) => {
-            // Both exist — _settings wins. Warn so the user notices
-            // the dead file (typically left from a mid-migration v0.28
-            // deployment that didn't clean up).
+            // Both exist. `_settings` wins; warn so the unused file
+            // does not go unnoticed.
             eprintln!(
                 "config: both {} and {} exist — using the `_settings` variant; \
                  delete the legacy file to silence this warning",
@@ -108,9 +100,8 @@ where
     Ok(settings)
 }
 
-/// Read a TOML file. `required = true` errors when the file is
-/// missing; `required = false` returns `Ok(None)` so the caller can
-/// skip the overlay layer cleanly.
+/// Read a TOML file. With `required = true` a missing file is an
+/// error; otherwise it gives `Ok(None)` so the caller skips the layer.
 fn read_toml(path: &Path, required: bool) -> Result<Option<toml::Value>, ConfigError> {
     match std::fs::read_to_string(path) {
         Ok(s) => {
@@ -130,8 +121,8 @@ fn read_toml(path: &Path, required: bool) -> Result<Option<toml::Value>, ConfigE
     }
 }
 
-/// Recursively merge `overlay` onto `dst` in place. Tables merge key
-/// by key; non-table values from `overlay` replace `dst` outright.
+/// Merge `overlay` onto `dst` in place. Tables merge key by key;
+/// anything else in `overlay` replaces what `dst` had.
 fn merge(dst: &mut toml::Value, overlay: toml::Value) {
     match (dst, overlay) {
         (toml::Value::Table(d), toml::Value::Table(o)) => {
@@ -150,15 +141,13 @@ fn merge(dst: &mut toml::Value, overlay: toml::Value) {
     }
 }
 
-/// Walk `RUSTANGO__*` env vars and graft each one's value into the
-/// TOML tree at the matching path. Path segments split on `__`,
-/// lowercased, so `RUSTANGO__DATABASE__POOL_MAX_SIZE=20` → `tree`
-/// gets `[database].pool_max_size = 20`.
+/// Graft every `RUSTANGO__*` env var into the tree at its path. The
+/// name splits on `__` and is lowercased, so
+/// `RUSTANGO__DATABASE__POOL_MAX_SIZE=20` sets
+/// `[database].pool_max_size = 20`.
 ///
-/// Values are coerced through TOML's parser by writing
-/// `key = "raw_string_value"` and parsing it as a 1-line TOML — this
-/// gives us automatic type detection (integer, bool, string) without
-/// us reinventing TOML's lexer.
+/// Each value goes through TOML's own parser, so integers, booleans
+/// and strings are detected without writing a lexer here.
 fn apply_env_overrides<I>(tree: &mut toml::Value, env_vars: I) -> Result<(), ConfigError>
 where
     I: IntoIterator<Item = (String, String)>,
@@ -181,9 +170,8 @@ where
     Ok(())
 }
 
-/// Parse the env var's raw string as a TOML scalar (int/float/bool/
-/// string). We prepend `__rustango_envvar = ` so the parser sees a
-/// well-formed key-value pair, then pull out the value side.
+/// Parse the raw string as a TOML scalar. A dummy key is prepended so
+/// the parser sees a valid pair, then the value side is taken.
 fn parse_env_value(_var: &str, raw: &str) -> Result<toml::Value, ConfigError> {
     let probe = format!("__rustango_envvar = {raw}");
     if let Ok(parsed) = probe.parse::<toml::Value>() {
@@ -193,13 +181,13 @@ fn parse_env_value(_var: &str, raw: &str) -> Result<toml::Value, ConfigError> {
             }
         }
     }
-    // Fallback: treat as a string — covers the common case where the
-    // user wrote `RUSTANGO__DATABASE__URL=postgres://…` (unquoted).
+    // Otherwise treat it as a string. That covers the common
+    // unquoted case, such as `RUSTANGO__DATABASE__URL=postgres://…`.
     Ok(toml::Value::String(raw.to_owned()))
 }
 
-/// Graft `value` into `tree` at `path`, creating intermediate tables
-/// as needed. Last segment replaces whatever was there.
+/// Put `value` into `tree` at `path`, creating tables along the way.
+/// The last segment replaces whatever was there.
 fn graft(tree: &mut toml::Value, path: &[String], value: toml::Value) {
     if path.is_empty() {
         *tree = value;
@@ -286,9 +274,8 @@ mod tests {
             "default.toml",
             "[database]\nurl = \"postgres://from-file\"\n",
         );
-        // Use the test-friendly variant that takes a mock env-var
-        // iterator — avoids `std::env::set_var` (unsafe in 2024
-        // edition) and the workspace `unsafe_code = forbid` lint.
+        // Pass the env vars in, since the workspace forbids
+        // `std::env::set_var`.
         let mock_env = vec![(
             "RUSTANGO__DATABASE__URL".to_owned(),
             "postgres://from-env".to_owned(),
@@ -319,8 +306,7 @@ mod tests {
     fn nested_section_via_env_var() {
         let root = fresh_root("nested");
         write(&root, "default.toml", "[admin]\n");
-        // The loader splits on `__` and lowercases — so
-        // RUSTANGO__ADMIN__ALLOWED_TABLES grafts into [admin].allowed_tables.
+        // Splitting on `__` puts this in [admin].allowed_tables.
         let mock_env = vec![(
             "RUSTANGO__ADMIN__ALLOWED_TABLES".to_owned(),
             r#"["user", "post"]"#.to_owned(),
@@ -341,8 +327,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Tier convention: `prod_settings.toml` is found before the
-    /// legacy `prod.toml` shape and overrides default settings.
+    /// `prod_settings.toml` is found and overrides the defaults.
     #[test]
     fn tiered_settings_filename_loads() {
         let root = fresh_root("tiered");
@@ -361,8 +346,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Legacy `<env>.toml` still loads when no `_settings` variant
-    /// exists — keeps v0.28 deployments working untouched.
+    /// The older `<env>.toml` still loads when no `_settings` file
+    /// exists.
     #[test]
     fn legacy_filename_still_loads() {
         let root = fresh_root("legacy");
@@ -373,9 +358,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Both files present: `_settings` wins. Mirrors how a more
-    /// specific override beats a less specific one — and the loader
-    /// emits a stderr warning so the dead legacy file is visible.
+    /// When both files exist, `_settings` wins.
     #[test]
     fn both_filenames_present_settings_wins() {
         let root = fresh_root("both");
@@ -395,10 +378,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Section coverage (#87 slice 2): the new server/auth/brand/
-    /// security/routes/audit sections parse cleanly from a single
-    /// TOML and survive default-section merging without touching
-    /// pre-existing sections.
+    /// The server, auth, brand, security, routes and audit sections
+    /// all parse from one file, and merging leaves the older sections
+    /// alone.
     #[test]
     fn slice2_sections_parse_and_merge() {
         let root = fresh_root("slice2");
@@ -440,12 +422,11 @@ retention_days = 90
 "##,
         );
         let cfg = load_with_root(&root, "missing-env").unwrap();
-        // Pre-existing section unaffected.
+        // The older section is untouched.
         assert_eq!(
             cfg.database.url.as_deref(),
             Some("postgres://localhost/dev")
         );
-        // New sections.
         assert_eq!(cfg.server.bind.as_deref(), Some("127.0.0.1:9000"));
         assert_eq!(cfg.server.request_timeout_secs, Some(30));
         assert_eq!(cfg.auth.argon2_memory_kib, Some(19456));
@@ -462,10 +443,9 @@ retention_days = 90
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `Settings::detected_features` reflects compile-time feature
-    /// flags. The lib-test build pulls every default feature, so
-    /// the list is non-empty and includes a few we know are on
-    /// (postgres, tenancy, admin).
+    /// `Settings::detected_features` reports the compiled-in
+    /// features. The lib-test build turns on every default feature,
+    /// so the list is not empty and includes postgres.
     #[test]
     fn detected_features_lists_compiled_in_features() {
         use crate::config::Settings;

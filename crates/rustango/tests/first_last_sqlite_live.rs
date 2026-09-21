@@ -2,8 +2,7 @@
 //! `last`, `earliest`, `latest`.
 //!
 //! Builder sugar over `order_by + limit(1) + fetch`. No DB-side
-//! ranking logic; this suite proves the ordering semantics match
-//! Django:
+//! ranking logic; this suite proves the ordering semantics:
 //!
 //! - `first` returns the first row by current ordering (PK ASC
 //!   when no `order_by` is set).

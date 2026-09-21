@@ -1,9 +1,8 @@
-//! Per-request timezone activation — Django's `USE_TZ = True` flow.
-//! Issue #47.
+//! Per-request timezone activation.
 //!
-//! Django's stack stores UTC in the DB and converts to a per-request
-//! active timezone at render time. This module ports that shape via
-//! a `tokio::task_local` carrying the active `FixedOffset`:
+//! Store UTC in the database and convert to a per-request active
+//! timezone at render time. A `tokio::task_local` carries the active
+//! `FixedOffset`:
 //!
 //! ```ignore
 //! use rustango::i18n::timezone::{activate, current_offset, localtime};
@@ -71,12 +70,11 @@ pub fn current_offset() -> FixedOffset {
 }
 
 /// Run `future` with the active timezone temporarily set to
-/// `offset`. Django's `timezone.override(tz)` analog.
+/// `offset`.
 ///
 /// The override is scoped to `future`'s execution — it doesn't
 /// leak to other tasks or out of the closure. Nested calls
-/// replace (not stack-add) the outer offset for the inner scope,
-/// matching Django's `override` semantics.
+/// replace the outer offset for the inner scope; they do not add up.
 pub async fn with_offset<F>(offset: FixedOffset, future: F) -> F::Output
 where
     F: Future,
@@ -85,10 +83,9 @@ where
 }
 
 /// **DO NOT USE in production code.** This is a process-global
-/// override that affects every future task on every thread —
-/// equivalent to setting `TIME_ZONE` in Django settings. It exists
-/// for tests and one-off scripts that want a fixed offset for the
-/// whole process.
+/// override that affects every future task on every thread. It
+/// exists for tests and one-off scripts that want a fixed offset for
+/// the whole process.
 ///
 /// For per-request overrides, use [`with_offset`] (task-scoped).
 ///
@@ -105,7 +102,6 @@ pub fn activate(_offset: FixedOffset) -> bool {
 }
 
 /// Convert a `DateTime<Utc>` to the current active offset.
-/// Django's `timezone.localtime(value)`.
 ///
 /// ```ignore
 /// // Inside a handler running under `with_offset(user_offset, ...)`:
@@ -118,7 +114,7 @@ pub fn localtime(utc_dt: DateTime<Utc>) -> DateTime<FixedOffset> {
 }
 
 /// Convert a `DateTime<Utc>` to an explicit offset (ignores the
-/// task-local). Django's `timezone.localtime(value, tz=...)`.
+/// task-local).
 #[must_use]
 pub fn localtime_with_offset(utc_dt: DateTime<Utc>, offset: FixedOffset) -> DateTime<FixedOffset> {
     utc_dt.with_timezone(&offset)
@@ -222,7 +218,7 @@ pub fn from_request_headers(
 
 /// Register the `localtime` Tera filter on `tera`. Renders a stored
 /// UTC datetime (any RFC 3339 string) in the request's active
-/// timezone — Django's `{{ ts | localtime }}` shape.
+/// timezone, as `{{ ts | localtime }}`.
 ///
 /// ```ignore
 /// let mut tera = tera::Tera::default();

@@ -1,7 +1,7 @@
 # Décorateurs d'accès
 
 Une fois qu'un utilisateur est authentifié, vous verrouillez les routes.
-**Rustango** livre la famille `@login_required` de Django sous forme de **couches**
+**Rustango** livre pour cela une famille de **couches**
 axum composables : attachez-en une à un routeur et les requêtes anonymes sont
 refoulées — redirigées par 302 vers votre page de connexion (flux navigateur) ou
 répondues par 401/403 (flux API) — avant même d'atteindre le handler.

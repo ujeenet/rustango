@@ -92,8 +92,8 @@ async fn mysql_multi_auto_inserts_then_refetches_for_remaining_fields() {
         "MySQL multi-Auto path leaves trailing Auto fields Unset; got {:?}", a.joined_at);
 
     // Re-fetch by PK materializes joined_at via the regular FromRow
-    // path — same shape as Django apps that .refresh_from_db() after
-    // save when they need server-set timestamps.
+    // path — the usual move when you need a server-set timestamp
+    // right after the save.
     let rows: Vec<Author> = Author::objects()
         .filter_op("id", Op::Eq, id)
         .fetch(&p).await.unwrap();

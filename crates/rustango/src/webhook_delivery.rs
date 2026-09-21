@@ -1,8 +1,8 @@
-//! Outbound webhook delivery — POSTs an HMAC-signed JSON payload to a
-//! subscriber URL via the background job queue.
+//! Outbound webhooks: POST an HMAC-signed JSON payload to a subscriber
+//! URL through the background job queue.
 //!
-//! Wraps the existing [`crate::webhook`] signing format and the
-//! [`crate::jobs`] retry-with-backoff machinery into a one-call API:
+//! Joins [`crate::webhook`] signing to the [`crate::jobs`] retry and
+//! backoff machinery behind one call:
 //!
 //! ```ignore
 //! use rustango::webhook::SignatureFormat;
@@ -28,27 +28,27 @@
 //! - Body: the payload re-serialized to JSON.
 //! - `Content-Type: application/json`
 //! - `User-Agent: rustango-webhook/<crate version>`
-//! - `X-Webhook-Id: <uuid>` — stable per delivery, retried as-is so the
-//!   receiver can dedup.
+//! - `X-Webhook-Id: <uuid>`, the same on every retry so the receiver
+//!   can drop duplicates.
 //! - `X-Webhook-Event: <event_name>`
-//! - `X-Webhook-Signature: <signature>` (header + format follow your
-//!   chosen [`SignatureFormat`]).
-//! - Any extra headers added via [`WebhookSubscription::header`].
+//! - `X-Webhook-Signature: <signature>`, in your chosen
+//!   [`SignatureFormat`].
+//! - Any extra headers from [`WebhookSubscription::header`].
 //!
 //! ## Retry policy
 //!
-//! Status codes are mapped to job outcomes:
+//! - 2xx: done.
+//! - 408, 429 and 5xx: retried with backoff, up to `MAX_ATTEMPTS`.
+//! - Other 4xx: dead-lettered at once. A bad URL or bad auth will not
+//!   fix itself.
+//! - Transport errors (refused connection, DNS, TLS): retried.
 //!
-//! - **2xx** — success, delivery completes.
-//! - **408 Request Timeout** / **429 Too Many Requests** / **5xx** —
-//!   `JobError::Retryable`; retried with exponential backoff up to
-//!   `MAX_ATTEMPTS` (default 8).
-//! - **other 4xx** — `JobError::Fatal`; goes straight to dead-letter,
-//!   no retries (a malformed URL or auth failure won't fix itself).
-//! - **transport errors** (connect refused, DNS failure, body too
-//!   large, etc.) — `JobError::Retryable`.
+//! Add more retryable codes with
+//! [`WebhookSubscription::retry_status_codes`].
 //!
-//! Customize per-subscription with [`WebhookSubscription::retry_status_codes`].
+//! [`SignatureFormat`]: crate::webhook::SignatureFormat
+//! [`WebhookSubscription::header`]: crate::webhook_delivery::WebhookSubscription::header
+//! [`WebhookSubscription::retry_status_codes`]: crate::webhook_delivery::WebhookSubscription::retry_status_codes
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,7 +61,7 @@ use uuid::Uuid;
 use crate::jobs::{Job, JobError, JobQueue};
 use crate::webhook::{sign as sign_body, SignatureFormat};
 
-/// Header that carries the per-delivery UUID — receivers can dedup on it.
+/// Per-delivery UUID. Receivers can use it to drop duplicates.
 pub const HEADER_ID: &str = "X-Webhook-Id";
 /// Header that carries the event name.
 pub const HEADER_EVENT: &str = "X-Webhook-Event";
@@ -71,11 +71,10 @@ pub const HEADER_SIGNATURE: &str = "X-Webhook-Signature";
 /// User-Agent advertised on every delivery.
 pub static USER_AGENT: &str = concat!("rustango-webhook/", env!("CARGO_PKG_VERSION"));
 
-/// One outbound webhook event — the [`Job`] payload that the queue persists,
-/// retries, and eventually delivers (or dead-letters).
+/// One outbound webhook event: the [`Job`] payload the queue stores,
+/// retries and finally delivers or dead-letters.
 ///
-/// Constructed via [`WebhookSubscription::dispatch`] — you don't usually
-/// build this directly.
+/// [`WebhookSubscription::dispatch`] builds these for you.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookEvent {
     pub id: String,
@@ -86,21 +85,16 @@ pub struct WebhookEvent {
     pub payload: Value,
     pub headers: HashMap<String, String>,
     pub timeout_secs: u64,
-    /// Status codes (besides 5xx, 408, 429) that should retry. Empty
-    /// uses the default policy.
+    /// Extra status codes to retry, on top of 408, 429 and 5xx.
     pub retry_status_codes: Vec<u16>,
 }
 
 #[async_trait::async_trait]
 impl Job for WebhookEvent {
     const NAME: &'static str = "rustango.webhook_delivery";
-    /// Webhooks retry for a while: 8 **total** attempts, so 7 retries,
-    /// and the queue's `1s · 2^attempt` backoff sums to 127s — about two
-    /// minutes end to end.
-    ///
-    /// The "~17 minutes" this used to claim needs 10 retries, not 7; the
-    /// arithmetic was against a larger ceiling than the constant it sits
-    /// above (#1410). Raise `MAX_ATTEMPTS` to 11 if you want that reach.
+    /// 8 attempts in total, so 7 retries. With the queue's
+    /// `1s * 2^attempt` backoff that spans about two minutes. Raise it
+    /// to 11 for roughly 17 minutes.
     const MAX_ATTEMPTS: u32 = 8;
 
     async fn run(&self) -> Result<(), JobError> {
@@ -110,7 +104,7 @@ impl Job for WebhookEvent {
 
 async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     let body = serde_json::to_vec(&event.payload).map_err(|e| {
-        // Bad payload — won't fix itself.
+        // A bad payload will not fix itself.
         JobError::Fatal(format!("payload serialize: {e}"))
     })?;
     let signature = sign_body(
@@ -139,7 +133,7 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            // Transport / DNS / TLS — retry.
+            // Transport, DNS or TLS: worth retrying.
             return Err(JobError::Retryable(format!("transport: {e}")));
         }
     };
@@ -176,14 +170,10 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-// =====================================================================
-// WebhookSubscription — fluent builder + dispatch helper
-// =====================================================================
-
-/// Static config for one webhook subscriber, plus convenience methods to
-/// register the delivery handler and dispatch events.
+/// Config for one webhook subscriber, plus methods to register the
+/// delivery handler and send events.
 ///
-/// Keep one of these per subscription. Cheap to clone.
+/// Keep one per subscription. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct WebhookSubscription {
     target_url: String,
@@ -224,26 +214,25 @@ impl WebhookSubscription {
         self
     }
 
-    /// Add status codes that should be retried in addition to the
-    /// defaults (408, 429, 5xx).
+    /// Retry these status codes too, on top of 408, 429 and 5xx.
     #[must_use]
     pub fn retry_status_codes(mut self, codes: impl IntoIterator<Item = u16>) -> Self {
         self.retry_status_codes.extend(codes);
         self
     }
 
-    /// Register the delivery [`Job`] on `queue`. Idempotent — call once
-    /// per process at startup before [`Self::dispatch`].
+    /// Register the delivery [`Job`] on `queue`. Call once at startup,
+    /// before [`Self::dispatch`]. Safe to call twice.
     pub async fn register<Q: JobQueue>(queue: &Q) {
         queue.register::<WebhookEvent>().await;
     }
 
-    /// Build a [`WebhookEvent`] and enqueue it. Returns immediately —
-    /// delivery happens asynchronously on a worker.
+    /// Queue a [`WebhookEvent`] and return its id at once. A worker
+    /// delivers it later.
     ///
     /// # Errors
-    /// Returns the underlying [`JobError::Queue`] when the enqueue fails
-    /// (DB unavailable, channel closed, payload not serializable).
+    /// [`JobError::Queue`] if the enqueue fails: database down, channel
+    /// closed, or a payload that will not serialize.
     pub async fn dispatch<Q: JobQueue>(
         &self,
         queue: &Q,
@@ -268,9 +257,7 @@ impl WebhookSubscription {
     }
 }
 
-// `Arc<WebhookSubscription>` is the typical way apps pass a subscription
-// across handlers. The newtype lets us add methods cheaply later if
-// needed.
+// How apps usually share one subscription across handlers.
 pub type SharedSubscription = Arc<WebhookSubscription>;
 
 #[cfg(test)]
@@ -283,16 +270,14 @@ mod tests {
     use std::sync::Mutex;
     use tokio::net::TcpListener;
 
-    /// Spin up a tiny axum server on a random port. Returns the bound
-    /// URL plus a shutdown handle. The handler stashes incoming
-    /// (status,headers,body) into `received` and returns the configured
-    /// `respond_status`.
+    /// Start a tiny axum server on a random port. It records each
+    /// request into `received` and replies with `respond_status`.
     async fn start_server(
         respond_status: u16,
         received: Arc<Mutex<Vec<(reqwest::StatusCode, HashMap<String, String>, Vec<u8>)>>>,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        // Capture the chosen status code in shared state so the handler
-        // can read it without it being part of the closure type.
+        // Shared state so the handler can read the status code without
+        // it changing the closure type.
         let status = Arc::new(std::sync::atomic::AtomicU16::new(respond_status));
         let status_clone = status.clone();
         let received_clone = received.clone();
@@ -331,7 +316,7 @@ mod tests {
         let h = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        // Tiny delay so the server is accept()-ing before we POST.
+        // Give the server a moment to start accepting.
         tokio::time::sleep(Duration::from_millis(20)).await;
         (url, h)
     }
@@ -409,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn fatal_on_4xx_other_than_408_429() {
-        // 404 — Fatal, dead-letters immediately, no retry.
+        // 404 is fatal: dead-letter at once, no retry.
         let received = Arc::new(Mutex::new(Vec::new()));
         let (url, srv) = start_server(404, received.clone()).await;
 
@@ -431,7 +416,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait a beat for delivery + dead-letter callback.
+        // Wait for delivery and the dead-letter callback.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             received.lock().unwrap().len(),
@@ -446,10 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn retryable_on_5xx() {
-        // First two attempts fail with 503, third succeeds. Deliveries
-        // are `crate::jobs` jobs, so the backoff is the queue's: 1s after
-        // the first failure, 2s after the second (#1410 — it was 2s/4s
-        // until the shift was corrected). The 7s sleep stays generous.
+        // Two 503s, then a 200. The queue backs off 1s, then 2s.
         let received = Arc::new(Mutex::new(Vec::new()));
         let status_seq = Arc::new(Mutex::new(vec![503u16, 503u16, 200u16]));
 
@@ -507,8 +489,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 503 → 1s backoff → 503 → 2s backoff → 200 (#1410). ~3s of
-        // backoff; the sleep below is deliberately well clear of it.
+        // 503, 1s backoff, 503, 2s backoff, 200. The sleep leaves room.
         tokio::time::sleep(Duration::from_millis(7500)).await;
         let recv = received.lock().unwrap();
         assert!(
