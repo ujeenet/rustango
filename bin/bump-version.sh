@@ -159,11 +159,10 @@ done
 # here, so they are printed rather than assumed correct.
 #
 # This list is the ONLY thing standing between an unrecognised claim shape and
-# a silently stale version. The verification below checks a SUBSET of what the
-# rewriter handles — six full-version shapes against the pass's eight — so it
-# cannot catch an unrecognised shape, and does not even cover the two
-# series-version substitutions (see the note above CLAIM, and #1605). That is
-# why this is a stop-and-read rather than a log line: the earlier version
+# a silently stale version. The verification below now covers all eight shapes
+# the rewriter handles — six full-version, plus the two series ones on a series
+# bump (#1605) — but it still cannot catch a shape neither side knows about.
+# That is why this is a stop-and-read rather than a log line: the earlier version
 # printed the list and then exited 1 on it, which was wrong but at least loud.
 # Dropping straight through to "clean" would have been the worse failure.
 LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \
@@ -227,15 +226,33 @@ echo "verifying nothing still claims $OLD"
 # whole reason the rewrite is anchored. So the verification has to ask the
 # narrower question the rewrite asks: does any *claim about the current
 # version* still say OLD? The alternation below is the six FULL-version
-# shapes the perl pass rewrites, and nothing else.
+# shapes the perl pass rewrites; the two SERIES shapes are checked
+# separately just after, and only when the series changes.
 #
-# The perl pass also rewrites two SERIES-version shapes (`rustango = "0.57"`
-# bare and inside an inline table). Those are not checked here — this grep
-# looks for OLD, the full version, which a series claim never contains. So a
-# stale series claim is rewritten but never verified. See #1605.
 CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
 stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)
+
+# The perl pass also rewrites two SERIES shapes (`rustango = "0.57"` bare and
+# inside an inline table). The grep above cannot see them: it looks for OLD,
+# the full version, and a series claim never contains it. So they were
+# rewritten and never verified (#1605).
+#
+# This costs nothing while the series holds — 0.57.10 to 0.57.11 leaves both
+# substitutions as no-ops — and is the whole risk at a series bump, which is
+# exactly when nobody has exercised the path. Only run it when the series
+# actually changes; otherwise OLD_SERIES == NEW_SERIES and every correct
+# claim would report as stale.
+if [ "$OLD_SERIES" != "$NEW_SERIES" ]; then
+  # No `\b` here: the perl pass can use it, `git grep -E` is POSIX ERE and
+  # silently matches nothing if you do. Spell the boundary out instead.
+  SERIES_CLAIM='(^|[^a-z-])rustango[[:space:]]*=[[:space:]]*("|\{[^#]*version[[:space:]]*=[[:space:]]*")'
+  stale_series=$(git grep -nE "${SERIES_CLAIM}${OLD_SERIES//./\\.}([^0-9.]|\$)" -- . \
+    ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)
+  if [ -n "$stale_series" ]; then
+    stale=$(printf '%s\n%s' "$stale" "$stale_series")
+  fi
+fi
 
 # Lockfiles need a *narrower* check, not the same one. A third-party crate can
 # sit at the same version by coincidence — `wit-bindgen` really was at 0.57.1
