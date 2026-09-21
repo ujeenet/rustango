@@ -4347,15 +4347,15 @@ fn inherent_impl_tokens(
             /// `UPDATE <table> SET <col> = <col> + $1 WHERE <pk> = $2`.
             ///
             /// **Doesn't mutate `self`** — the in-memory copy is now
-            /// stale; call [`Self::refresh_from_db_pool`] /
-            /// [`Self::fresh_pool`] to re-sync. Returns the rows-
+            /// stale; call [`Self::refresh_from_db`] /
+            /// [`Self::fresh`] to re-sync. Returns the rows-
             /// affected count (0 when the PK doesn't match any row,
             /// 1 on success).
             ///
             /// `col` is the Rust field name as a string; unknown
             /// fields surface as `UnknownField` at runtime. Negative
             /// `by` values atomically decrement (see also
-            /// [`Self::decrement_pool`]).
+            /// [`Self::decrement`]).
             ///
             /// # Errors
             /// As [`UpdaterPool::execute_pool`].
@@ -4475,10 +4475,10 @@ fn inherent_impl_tokens(
             /// Re-SELECT this row by its primary key and return a
             /// **new** instance with the freshly-fetched fields.
             /// Eloquent `Model::fresh()` parity — non-mutating
-            /// counterpart of [`Self::refresh_from_db_pool`].
+            /// counterpart of [`Self::refresh_from_db`].
             ///
             /// Returns `Ok(None)` when the row was deleted
-            /// concurrently — vs [`Self::refresh_from_db_pool`]
+            /// concurrently — vs [`Self::refresh_from_db`]
             /// which surfaces that as `RowNotFound` because
             /// in-place mutation has nothing to write to.
             ///
@@ -4524,12 +4524,12 @@ fn inherent_impl_tokens(
 
             #last_method
 
-            /// Throwing counterpart of [`Self::first_pool`] —
+            /// Throwing counterpart of [`Self::first`] —
             /// errors with `RowNotFound` when the table is empty.
             /// Eloquent `Model::firstOrFail()` parity.
             ///
             /// # Errors
-            /// As [`Self::first_pool`]; additionally
+            /// As [`Self::first`]; additionally
             /// [`sqlx::Error::RowNotFound`] on empty tables.
             ///
             /// [`sqlx::Error::RowNotFound`]: rustango::sql::sqlx::Error::RowNotFound
@@ -4871,7 +4871,7 @@ fn inherent_impl_tokens(
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .filter(col, val).fetch(pool)`. For one row,
-            /// use [`Self::first_where_pool`]; for a chain that
+            /// use [`Self::first_where`]; for a chain that
             /// needs further `.filter()` / `.order_by()` /
             /// `.limit()`, drop down to `Self::query().filter(...)`
             /// directly.
@@ -5043,7 +5043,7 @@ fn inherent_impl_tokens(
 
             /// Fetch one row in random order. Eloquent
             /// `Model::inRandomOrder()->first()` parity. Same
-            /// performance caveat as [`Self::random_n_pool`].
+            /// performance caveat as [`Self::random_n`].
             ///
             /// # Errors
             /// As [`FetcherPool::fetch`].
@@ -5062,7 +5062,7 @@ fn inherent_impl_tokens(
 
             /// Fetch every row ordered ASC by `field`. Eloquent
             /// `Model::oldest($field)->get()` parity — the multi-row
-            /// counterpart of [`Self::earliest_pool`].
+            /// counterpart of [`Self::earliest`].
             ///
             /// # Errors
             /// As [`FetcherPool::fetch`].
@@ -5084,7 +5084,7 @@ fn inherent_impl_tokens(
 
             /// Fetch every row ordered DESC by `field`. Eloquent
             /// `Model::latest($field)->get()` parity — the multi-row
-            /// counterpart of [`Self::latest_pool`].
+            /// counterpart of [`Self::latest`].
             ///
             /// # Errors
             /// As [`FetcherPool::fetch`].
@@ -5883,9 +5883,10 @@ fn inherent_impl_tokens(
             /// .latest(field, pool)`.
             ///
             /// **Field name** is the Rust field ident as a string
-            /// (not the SQL column). Unknown fields surface as
-            /// `ExecError::Query(QueryError::UnknownField)` at
-            /// compile time.
+            /// (not the SQL column). It is a runtime `&str`, so an
+            /// unknown one compiles and surfaces as
+            /// `ExecError::Query(QueryError::UnknownField)` when the
+            /// query runs.
             ///
             /// # Errors
             /// As `QuerySet::latest`.
@@ -5901,13 +5902,13 @@ fn inherent_impl_tokens(
                     .await
             }
 
-            /// Sibling of [`Self::latest_pool`] — fetches the row
+            /// Sibling of [`Self::latest`] — fetches the row
             /// with the smallest `field` value (`ORDER BY <field>
             /// ASC LIMIT 1`). Eloquent `Model::oldest($field)
             /// ->first()` parity.
             ///
             /// # Errors
-            /// As [`Self::latest_pool`].
+            /// As [`Self::latest`].
             pub async fn earliest(
                 field: &str,
                 pool: &#root::sql::Pool,
@@ -6104,7 +6105,7 @@ fn inherent_impl_tokens(
 
             /// Look up the row whose primary key equals `pk`. Errors
             /// when no row matches — the throwing counterpart of
-            /// [`Self::find_pool`]. Eloquent `Model::findOrFail`
+            /// [`Self::find`]. Eloquent `Model::findOrFail`
             /// parity.
             ///
             /// Translates the miss into
@@ -6113,7 +6114,7 @@ fn inherent_impl_tokens(
             /// `ExecError` error chain.
             ///
             /// # Errors
-            /// As [`Self::find_pool`]; additionally
+            /// As [`Self::find`]; additionally
             /// [`sqlx::Error::RowNotFound`] when no row matches.
             ///
             /// [`ExecError::Driver`]: rustango::sql::ExecError::Driver
@@ -6192,7 +6193,7 @@ fn inherent_impl_tokens(
             /// default row to return. Eloquent
             /// `Model::findOr($pk, fn() => …)` parity.
             ///
-            /// Unlike [`Self::find_or_fail_pool`] (which raises on
+            /// Unlike [`Self::find_or_fail`] (which raises on
             /// miss), this is the "give me something sensible"
             /// branch: typical use is "fetch the user's row, else
             /// fall back to an anonymous/guest stub".
@@ -6201,7 +6202,7 @@ fn inherent_impl_tokens(
             /// round-trip happens unconditionally.
             ///
             /// # Errors
-            /// As [`Self::find_pool`].
+            /// As [`Self::find`].
             pub async fn find_or<F>(
                 pk: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
@@ -6288,7 +6289,7 @@ fn inherent_impl_tokens(
             /// `Model::firstOr(fn() => …)` parity.
             ///
             /// # Errors
-            /// As [`Self::first_pool`].
+            /// As [`Self::first`].
             pub async fn first_or<F>(
                 pool: &#root::sql::Pool,
                 fallback: F,
@@ -6314,7 +6315,7 @@ fn inherent_impl_tokens(
             /// Eloquent `Model::sole($col, $val)` parity.
             ///
             /// # Errors
-            /// As [`Self::where_pool`] plus the explicit
+            /// As [`Self::where_`] plus the explicit
             /// `RowNotFound` / `MultipleRowsReturned` cases above.
             pub async fn sole(
                 col: &str,
@@ -7087,7 +7088,7 @@ fn inherent_impl_tokens(
                 /// Today every queryset already includes trashed rows
                 /// (rustango has no global-scope tracking yet — issue
                 /// #820), so this is functionally equivalent to
-                /// [`Self::all_pool`]. Exposed as a named shortcut so
+                /// [`Self::all`]. Exposed as a named shortcut so
                 /// soft-delete-aware code reads `Model::with_trashed_pool`
                 /// rather than `Model::all_pool` — keeps intent visible
                 /// in callers and stays correct when auto-scoping lands.
