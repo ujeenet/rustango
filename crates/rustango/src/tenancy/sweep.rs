@@ -41,14 +41,12 @@
 //! ## Watch the pool-cache cap
 //!
 //! Database-mode pools come from the `TenantPools` cache, capped by
-//! `max_cached_database_pools` (default 64). The cache does not evict:
-//! past the cap, resolving a pool errors.
-//!
-//! So with more active database-mode tenants than the cap, the tail of
-//! the list fails on every run as [`SweepError::Pool`] while the sweep
-//! still returns `Ok`. Raise the cap to at least the number of active
-//! tenants before you schedule a sweep, and alert on a non-zero
-//! [`TenantSweep::failed`].
+//! `max_cached_database_pools` (default 64). Past the cap the most
+//! idle pool is evicted, so a sweep over more tenants than the cap
+//! reconnects rather than failing — it used to fail the tail of the
+//! list on every run as [`SweepError::Pool`] while still returning
+//! `Ok` (#1527). Raise the cap to your active tenant count to avoid
+//! the churn, and alert on a non-zero [`TenantSweep::failed`].
 
 use crate::core::Column as _;
 use crate::sql::sqlx::Database;

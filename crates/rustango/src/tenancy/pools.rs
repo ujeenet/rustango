@@ -342,13 +342,16 @@ impl TenantPool<sqlx::Postgres> {
 /// generic and work on any backend.
 /// A cached tenant pool plus its LRU stamp. The stamp is a counter,
 /// not a clock — eviction needs only the ordering.
-struct CachedPool<DB: Database> {
-    pool: Arc<sqlx::Pool<DB>>,
+///
+/// Shared with [`super::database_pools`] so the two never drift into
+/// different cap policies, which is how they got here (#1527).
+pub(super) struct CachedPool<DB: Database> {
+    pub(super) pool: Arc<sqlx::Pool<DB>>,
     last_used: AtomicU64,
 }
 
 impl<DB: Database> CachedPool<DB> {
-    fn new(pool: Arc<sqlx::Pool<DB>>, tick: u64) -> Self {
+    pub(super) fn new(pool: Arc<sqlx::Pool<DB>>, tick: u64) -> Self {
         Self {
             pool,
             last_used: AtomicU64::new(tick),
@@ -357,7 +360,7 @@ impl<DB: Database> CachedPool<DB> {
 
     /// Mark as just used. Takes `&self` so a hit records itself under
     /// the read lock.
-    fn touch(&self, tick: u64) {
+    pub(super) fn touch(&self, tick: u64) {
         self.last_used.store(tick, Ordering::Relaxed);
     }
 }
@@ -365,7 +368,7 @@ impl<DB: Database> CachedPool<DB> {
 /// Drop least-recently-used entries until one more fits under `cap`,
 /// returning the evicted slugs to log. Evicting only drops this map's
 /// handle; sqlx pools are ref-counted, so a live holder keeps theirs.
-fn evict_to_fit<DB: Database>(
+pub(super) fn evict_to_fit<DB: Database>(
     cache: &mut HashMap<String, CachedPool<DB>>,
     cap: usize,
 ) -> Vec<String> {
