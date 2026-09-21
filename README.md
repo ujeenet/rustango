@@ -9,6 +9,8 @@
 
 **A batteries-included web framework for Rust: declare a model once, and get an ORM, auto-migrations, an auto-admin, multi-tenancy, and a REST API out of it.**
 
+**Runs on [axum](https://github.com/tokio-rs/axum) and [tokio](https://tokio.rs).** Handlers are plain axum handlers and everything Rustango adds is a `tower` layer or an `axum::Router`, so any axum extractor, middleware or crate from that ecosystem drops straight in.
+
 One `#[derive(Model)]` is the whole contract — from it Rustango emits typed queries, migration diffs, admin screens, serializers, and CRUD endpoints. A tri-dialect ORM, first-class auth, and every standard middleware ship in the box: all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** from the same source.
 
 📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
