@@ -333,12 +333,14 @@ let backends = vec![
 // behind post.add. Gate the permission on an inner sub-router instead.
 let posts = Router::new()
     .route("/posts/new", post(create_post))
-    .require_perm("post.add", pool.clone());        // inner: needs the codename
+    .require_perm("post.add");     // inner: needs the codename
 
 let app = Router::new()
     .route("/me", get(profile))
     .merge(posts)
-    .require_auth(backends, pool);                  // outer: resolves the user first
+    .require_auth(backends);       // outer: resolves the user first
+// No pool: the credential is checked against the tenant resolved from
+// the request's own host. Passing one is GHSA-c4gg-mvfq-h268.
 ```
 
 The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain.
