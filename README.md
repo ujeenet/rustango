@@ -100,7 +100,7 @@ The **same code** boots on Postgres with `DATABASE_URL=postgres://…` or MySQL 
 - [The `manage` CLI](#the-manage-cli)
 - [Configuration](#configuration)
 - [Testing](#testing)
-- [Comparison](#comparison)
+- [Features](#features)
 - [Documentation](#documentation)
 
 ---
@@ -302,27 +302,115 @@ A `TestClient` drives the router as a tower service (no socket), a `RequestFacto
 
 ---
 
-## Comparison
+## Features
 
-| | Rustango | Laravel | Rocket | Cot |
-|---|:-:|:-:|:-:|:-:|
-| ORM | ✅ | ✅ | ❌ | ✅ |
-| Auto-migrations | ✅ | ✅ | ❌ | ✅ |
-| Auto-admin | ✅ | ⚠️ Filament | ❌ | ✅ |
-| Multi-tenancy | ✅ | ⚠️ ext | ❌ | ❌ |
-| JWT lifecycle (refresh + blacklist + custom claims) | ✅ | ⚠️ Sanctum/Passport | ❌ | ❌ |
-| TOTP / 2FA | ✅ | ✅ Fortify | ❌ | ❌ |
-| Signals | ✅ | ✅ Events | ❌ | ❌ |
-| Cache backends | ✅ | ✅ | ❌ | ⚠️ optional |
-| Email backends | ✅ | ✅ | ❌ | ❌ |
-| File storage | ✅ | ✅ Flysystem | ❌ | ❌ |
-| Scheduled tasks | ✅ | ✅ | ❌ | ❌ |
-| Security headers | ✅ | ⚠️ middleware | ✅ Shield | ❌ |
-| Test client | ✅ | ✅ | ✅ Client | ✅ |
-| Project scaffolder | ✅ `cargo rustango new` | ✅ installer | ❌ | ✅ `cot new` |
-| File generators | ✅ `make:*` | ✅ artisan | ❌ | ❌ |
+Always on: the ORM, the query builder, the SQL layer and migrations.
+Everything else is a cargo feature.
 
-✅ shipped · ⚠️ partial / via extension · ❌ not shipped
+`default = ["postgres", "batteries"]` turns on most of the list below.
+The ones it does not, opt in by name: `mysql`, `sqlite`, `tenancy`,
+`csrf`, `sso`, `admin-sso`, `passkey`, `cache-redis`, `cache-page`,
+`email-smtp`, `mcp`, `testkit` and `test_utils`.
+
+**Backends** — pick one; every framework surface works the same on all three.
+
+| Feature | |
+|---|---|
+| `postgres` | PostgreSQL, TLS included. The default. |
+| `mysql` | MySQL 8.0+. |
+| `sqlite` | SQLite 3.35+, with WAL and foreign keys on. |
+
+**Data & storage**
+
+| Feature | |
+|---|---|
+| `casts` | Typed field conversions. |
+| `media` | Media library with collections and tags. |
+| `storage` | File storage abstraction. |
+| `storage-s3` | S3-compatible backend. |
+| `uploads` | Multipart upload handling. |
+| `signed_url` | Expiring signed URLs. |
+
+**Web**
+
+| Feature | |
+|---|---|
+| `runserver` | The development server. |
+| `manage` | `cargo run -- <verb>` CLI dispatcher. |
+| `template_views` | Generic CRUD view handlers. |
+| `forms` | Forms framework with multi-error validation. |
+| `sessions` | Server-side sessions. |
+| `compression` | Response compression. |
+| `sse` | Server-sent events. |
+| `websocket` | WebSocket support. |
+| `http-client` | Outbound HTTP client. |
+
+**APIs**
+
+| Feature | |
+|---|---|
+| `serializer` | Typed JSON serializers. |
+| `openapi` | OpenAPI schemas generated from serializers. |
+| `jwt` | JWT with refresh, blacklist and custom claims. |
+| `api_keys` | API key authentication. |
+| `hmac-auth` | HMAC request signing. |
+| `oauth2` | OAuth2 provider. |
+| `webhook` | Webhook registration. |
+| `webhook-delivery` | Delivery with retries. |
+
+**Admin**
+
+| Feature | |
+|---|---|
+| `admin` | The auto-admin site. |
+| `admin-sso` | OIDC single sign-on for admins. |
+
+**Auth & security**
+
+| Feature | |
+|---|---|
+| `auth_flows` | Login, logout, password reset. |
+| `passwords` | Password hashing and validators. |
+| `totp` | TOTP two-factor authentication. |
+| `passkey` | WebAuthn / passkeys. |
+| `sso` | OIDC single sign-on for app users. |
+| `csrf` | CSRF middleware for form POSTs. |
+| `csp-nonce` | Per-response CSP nonces. |
+| `secrets` | Secret management and rotation. |
+
+**Operations**
+
+| Feature | |
+|---|---|
+| `cache` | Cache framework. |
+| `cache-redis` | Redis backend. |
+| `cache-page` | Whole-page response caching. |
+| `jobs` | In-process background job queue. |
+| `jobs-postgres` | Database-backed queue, surviving restarts. |
+| `scheduler` | Fixed-interval tasks. |
+| `signals` | Model lifecycle signals. |
+| `email` | Email framework. |
+| `email-smtp` | SMTP transport. |
+| `notifications` | User notifications. |
+| `config` | Layered settings and deploy audit. |
+
+**Multi-tenancy**
+
+| Feature | |
+|---|---|
+| `tenancy` | Tenant registry, per-tenant databases, operator console. Schema mode is PostgreSQL only. |
+
+**Tooling**
+
+| Feature | |
+|---|---|
+| `mcp` | Model Context Protocol server for AI agents. |
+| `testkit` | Schema builders and model factories for tests. |
+| `test_utils` | Test-only constructors for downstream crates. |
+
+Internationalisation, signals, content types, permissions and the audit
+log need no feature flag. `cargo rustango new --help` prints the opt-in
+list as the scaffolder sees it.
 
 ---
 
