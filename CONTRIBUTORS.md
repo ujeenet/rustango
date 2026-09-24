@@ -10,6 +10,10 @@ Thanks to everyone who has worked on rustango.
 
 ## Contributors
 
+- **[@asaph1214-lang](https://github.com/asaph1214-lang)** — reported the ORM,
+  migration, scaffolding and connection-pool defects behind #1271, #1272,
+  #1273, #1297, #1298 and #1299, and opened #1293, which the 0.58.0 work on
+  `PgPool` is built around
 - **[@nightcityblade](https://github.com/nightcityblade)** — kept the crate
   install examples on the shipping series, which is also what #1605 builds on
 
