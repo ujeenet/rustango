@@ -271,7 +271,30 @@ async fn login_submit(
     // login form.
     #[cfg(feature = "totp")]
     {
-        if let Some(totp_secret) = super::totp_store::confirmed_secret(&state.pool, id).await {
+        // Fail closed. `confirmed_secret` cannot tell "no device" from
+        // "could not read", and reading the second as the first grants
+        // the session on the password alone (#1644).
+        let enrolled = match super::totp_store::confirmed_secret_checked(&state.pool, id).await {
+            Ok(secret) => secret,
+            Err(e) => {
+                tracing::error!(
+                    target: "rustango::admin",
+                    user_id = id,
+                    error = %e,
+                    "cannot read the TOTP device; refusing the login rather \
+                     than treating it as no second factor",
+                );
+                send_user_login_failed(UserLoginFailedContext {
+                    source: "admin",
+                    attempted_username: Some(form.username.clone()),
+                    reason: AuthFailureReason::InvalidCredentials,
+                    request: meta.clone(),
+                })
+                .await;
+                return login_response(&state, &headers, Some("Invalid credentials.")).await;
+            }
+        };
+        if let Some(totp_secret) = enrolled {
             let code = form.totp_code.as_deref().unwrap_or("").trim();
             // 30s step, 6 digits, ±1 window: the authenticator-app
             // defaults, which allow one step of clock skew.
