@@ -334,6 +334,25 @@ jobs:
             --test sqlite_datetime_normalise \
             --test tenant_datetime_sweep_sqlite_file_live \
             --test cursor_pagination_on_a_timestamp
+      # Lib tests on feature sets WITHOUT tenancy, which nothing here
+      # compiled. `src/` is mostly ungated, so an ungated reference to a
+      # `#[cfg]`-gated module is a hard error on these sets and a silent
+      # pass on every job that runs — `tests_compile` covers
+      # --all-features and sqlite,tenancy, and `feature_combos` is
+      # `needs: gate`.
+      #
+      # That is not hypothetical: #1643 added a unit test naming
+      # `crate::tenancy::` from ungated `migrate` and it went green here
+      # (#1643 review, tests-001/007).
+      #
+      # Run them rather than `--no-run`: `the_guards_job_is_actually_ungated`
+      # rejects `--no-run` in this job, and it is right to — compiling a
+      # guard without executing it is the failure mode this whole job
+      # exists to prevent. Executing also costs almost nothing here,
+      # since these are lib unit tests with no database.
+      - run: cargo test -p rustango --no-default-features --features sqlite --lib
+      - run: cargo test -p rustango --no-default-features --features postgres --lib
+      - run: cargo test -p rustango --no-default-features --features mysql --lib
 
   # Ungated, and the reason is #1572: a test file that does not build was
   # merging green.
