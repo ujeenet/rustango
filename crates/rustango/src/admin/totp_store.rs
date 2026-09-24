@@ -53,18 +53,7 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
     let batch =
         crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
             .map_err(sqlx::Error::Protocol)?;
-    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
-        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
-            let msg = format!("{e}").to_lowercase();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(match e {
-                crate::sql::ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            });
-        }
-    }
+    crate::migrate::apply_idempotent(pool, &batch).await?;
     Ok(())
 }
 

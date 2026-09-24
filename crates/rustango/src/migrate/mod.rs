@@ -12,6 +12,8 @@
 pub mod callbacks;
 pub mod ddl;
 pub mod diff;
+/// Applying rendered DDL idempotently, for the `ensure_*_table` helpers.
+pub mod ensure;
 mod error;
 pub mod file;
 // The CLI's "emit Model derives from a live schema" verb. Works on any
@@ -38,6 +40,7 @@ pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,
     render_changes_split_with_dialect, RenderedBatch, SchemaChange,
 };
+pub use ensure::apply_idempotent;
 pub use error::MigrateError;
 pub use file::{
     discover_migration_dirs, list_dirs, CallbackOp, DataOp, Migration, MigrationScope, Operation,
