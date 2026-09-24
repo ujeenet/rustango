@@ -667,7 +667,11 @@ async fn scoped_pool_over_cap_holds_the_connection_budget() {
 
     // Budget is cap x scoped_pool_max_connections, plus slack for the
     // registry pool. The failure caught is one pool per request: +12.
-    let budget = i64::from(pools.pool_config().scoped_pool_max_connections) + 2;
+    // Read off a fresh default rather than `pools.pool_config()`:
+    // CodeQL taints anything reachable from `with_secrets` and flags
+    // this count as a secret reaching a panic message.
+    let budget =
+        i64::from(rustango::tenancy::TenantPoolsConfig::default().scoped_pool_max_connections) + 2;
     assert!(
         opened <= budget,
         "{REQUESTS} requests for an over-cap tenant opened {opened} \
