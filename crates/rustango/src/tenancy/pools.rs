@@ -396,6 +396,9 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     /// Source of `CachedPool::last_used` stamps, shared by both caches
     /// so their orderings never collide.
     lru_tick: AtomicU64,
+    /// Latch for the near-cap warning, so it fires on the crossing
+    /// rather than on every insert (#1528).
+    warned_near_cap: std::sync::atomic::AtomicBool,
     cache: RwLock<HashMap<String, CachedPool<DB>>>,
     /// Schema-mode scoped pools, keyed by `slug` (#1235). Separate
     /// from `cache` so the two capacity budgets can't cannibalise
@@ -426,6 +429,7 @@ impl<DB: Database> TenantPools<DB> {
             config: TenantPoolsConfig::default(),
             secrets: Arc::new(secrets),
             lru_tick: AtomicU64::new(0),
+            warned_near_cap: std::sync::atomic::AtomicBool::new(false),
             cache: RwLock::new(HashMap::new()),
             scoped_cache: RwLock::new(HashMap::new()),
         }
@@ -440,8 +444,15 @@ impl<DB: Database> TenantPools<DB> {
 
     /// Warn once a cache passes 80% of its cap, so the operator hears
     /// about it while it is still headroom and not an incident.
-    fn warn_if_near_cap(len: usize, cap: usize, mode: &'static str) {
-        if cap > 0 && len * 5 >= cap * 4 {
+    ///
+    /// Warns **once per crossing**, not once per insert. A cache that
+    /// sits at its cap inserts on every miss, and an unbounded warn
+    /// there floods the log with the message meant to be noticed
+    /// (#1528). `warned_near_cap` latches on the way up and resets
+    /// when occupancy falls back below the threshold, so a cache
+    /// hovering on the boundary cannot chatter either.
+    fn warn_if_near_cap(&self, len: usize, cap: usize, mode: &'static str) {
+        if self.claim_near_cap_warning(len, cap) {
             tracing::warn!(
                 target: "rustango::tenancy::pools",
                 mode,
@@ -451,6 +462,25 @@ impl<DB: Database> TenantPools<DB> {
                  recently used tenant is evicted and reconnects on its \
                  next request",
             );
+        }
+    }
+
+    /// `true` exactly once per crossing into the near-cap band.
+    ///
+    /// Separated from the logging so a test can count the *decisions*.
+    /// Asserting the latch field instead would not catch the bug this
+    /// exists to prevent: a version that warns every time while still
+    /// setting the latch passes that assertion (#1528).
+    fn claim_near_cap_warning(&self, len: usize, cap: usize) -> bool {
+        if cap == 0 {
+            return false;
+        }
+        if len * 5 >= cap * 4 {
+            // `swap` is the whole point: only the transition claims it.
+            !self.warned_near_cap.swap(true, Ordering::Relaxed)
+        } else {
+            self.warned_near_cap.store(false, Ordering::Relaxed);
+            false
         }
     }
 
@@ -811,7 +841,7 @@ impl<DB: Database> TenantPools<DB> {
             org.slug.clone(),
             CachedPool::new(Arc::clone(&pool), self.next_tick()),
         );
-        Self::warn_if_near_cap(
+        self.warn_if_near_cap(
             cache.len(),
             self.config.max_cached_database_pools,
             "database",
@@ -1103,7 +1133,7 @@ impl TenantPools<sqlx::Postgres> {
                     org.slug.clone(),
                     CachedPool::new(Arc::new(scoped.clone()), self.next_tick()),
                 );
-                Self::warn_if_near_cap(cache.len(), self.config.max_cached_scoped_pools, "schema");
+                self.warn_if_near_cap(cache.len(), self.config.max_cached_scoped_pools, "schema");
                 Ok(scoped)
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
@@ -1351,6 +1381,40 @@ fn quote_ident(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The near-cap warning fires on the crossing, not on every
+    /// insert. A cache sitting at its cap inserts on every miss, so an
+    /// unbounded warn there floods the log with the very message meant
+    /// to be noticed (#1528).
+    ///
+    /// Asserts the latch rather than the log line: the state machine
+    /// is what decides whether the warn repeats, and a test that
+    /// captured one `warn!` would pass either way.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_near_cap_warning_latches_and_resets() {
+        use std::sync::atomic::Ordering;
+        let pools: TenantPools<sqlx::Sqlite> =
+            TenantPools::new(sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"));
+        // Below the threshold: no warning.
+        assert!(!pools.claim_near_cap_warning(7, 10), "70% is not near");
+
+        // The crossing warns exactly once. Every insert after it, while
+        // the cache stays full, must stay silent — this is the assertion
+        // that fails against an unbounded warn.
+        assert!(pools.claim_near_cap_warning(8, 10), "80% warns");
+        assert!(!pools.claim_near_cap_warning(9, 10), "no repeat at 90%");
+        assert!(!pools.claim_near_cap_warning(10, 10), "no repeat at cap");
+        assert!(!pools.claim_near_cap_warning(10, 10), "still no repeat");
+
+        // Falling back below re-arms it for the next genuine crossing.
+        assert!(!pools.claim_near_cap_warning(3, 10), "back under: silent");
+        assert!(pools.claim_near_cap_warning(9, 10), "second crossing warns");
+
+        // `cap == 0` means caching is off; it must never warn.
+        pools.warned_near_cap.store(false, Ordering::Relaxed);
+        assert!(!pools.claim_near_cap_warning(0, 0), "cap 0 must not warn");
+    }
 
     #[cfg(feature = "postgres")]
     #[test]
