@@ -544,7 +544,7 @@ async fn invalidate_drops_the_scoped_pool_too() {
 }
 
 #[tokio::test]
-async fn scoped_pool_past_the_cap_falls_back_instead_of_failing() {
+async fn scoped_pool_past_the_cap_still_serves_every_tenant() {
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
@@ -573,9 +573,9 @@ async fn scoped_pool_past_the_cap_falls_back_instead_of_failing() {
     )
     .await;
 
-    // Cap of 1: the second tenant cannot be cached. Schema mode is
-    // sold for high tenant counts, so exceeding the cap must degrade
-    // to the old per-call build — never error.
+    // Cap of 1: the second tenant evicts the first. Exceeding the cap
+    // must never error. The budget half is pinned by
+    // `scoped_pool_over_cap_holds_the_connection_budget`.
     let cfg = rustango::tenancy::TenantPoolsConfig {
         max_cached_scoped_pools: 1,
         ..Default::default()
@@ -597,6 +597,91 @@ async fn scoped_pool_past_the_cap_falls_back_instead_of_failing() {
     assert_eq!(current_schema(&mut cg2).await, "globex_sp_cap");
 
     for s in ["acme_sp_cap", "globex_sp_cap"] {
+        drop_schema(&pool, s).await;
+    }
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+/// Backends this database currently has open, excluding the counting
+/// query's own connection.
+async fn backend_count(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = current_database() AND pid <> pg_backend_pid()",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count backends")
+}
+
+/// An over-cap schema-mode tenant must not open a fresh pool per
+/// request (#1528). Asserts the connection count on the server — the
+/// warning and the error type both pass against the broken code.
+#[tokio::test]
+async fn scoped_pool_over_cap_holds_the_connection_budget() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    for s in ["acme_sp_budget", "globex_sp_budget"] {
+        drop_schema(&pool, s).await;
+        create_schema(&pool, s).await;
+    }
+    let acme = seed_org(
+        &pool,
+        "acme_sp_budget",
+        StorageMode::Schema,
+        Some("acme_sp_budget"),
+        None,
+    )
+    .await;
+    let globex = seed_org(
+        &pool,
+        "globex_sp_budget",
+        StorageMode::Schema,
+        Some("globex_sp_budget"),
+        None,
+    )
+    .await;
+
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        max_cached_scoped_pools: 1,
+        ..Default::default()
+    };
+    let pools = TenantPools::new(pool.clone()).config(cfg);
+
+    // Hold the handle so eviction does not close its connections
+    // mid-measurement.
+    let _warm = pools.scoped_pool(&acme).await.unwrap();
+    let before = backend_count(&pool).await;
+
+    const REQUESTS: usize = 12;
+    let mut held = Vec::with_capacity(REQUESTS);
+    for _ in 0..REQUESTS {
+        held.push(pools.scoped_pool(&globex).await.unwrap());
+    }
+    let after = backend_count(&pool).await;
+    let opened = after - before;
+
+    // Budget is cap x scoped_pool_max_connections, plus slack for the
+    // registry pool. The failure caught is one pool per request: +12.
+    // Read off a fresh default rather than `pools.pool_config()`:
+    // CodeQL taints anything reachable from `with_secrets` and flags
+    // this count as a secret reaching a panic message.
+    let budget =
+        i64::from(rustango::tenancy::TenantPoolsConfig::default().scoped_pool_max_connections) + 2;
+    assert!(
+        opened <= budget,
+        "{REQUESTS} requests for an over-cap tenant opened {opened} \
+         connections (budget {budget}). A pool per request is the \
+         #1528 outage.",
+    );
+
+    drop(held);
+    drop(_warm);
+    for s in ["acme_sp_budget", "globex_sp_budget"] {
         drop_schema(&pool, s).await;
     }
     migrate::drop_all(&pool).await.unwrap();
