@@ -15,7 +15,6 @@ const PG_DUPLICATE_TABLE: &str = "42P07";
 const PG_DUPLICATE_OBJECT: &str = "42710";
 /// MySQL `ER_TABLE_EXISTS_ERROR`, `ER_DUP_KEYNAME`, `ER_FK_DUP_NAME`.
 /// These are error *numbers*, not `SQLSTATE`s — see below.
-#[cfg(feature = "mysql")]
 const MYSQL_DUPLICATES: &[u16] = &[1050, 1061, 1826];
 
 /// `true` when the error says the object is already there.
@@ -35,17 +34,31 @@ fn is_already_exists(e: &crate::sql::ExecError) -> bool {
     };
     if let Some(db) = err.as_database_error() {
         #[cfg(feature = "mysql")]
-        if let Some(my) = db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() {
-            return MYSQL_DUPLICATES.contains(&my.number());
-        }
-        if let Some(code) = db.code() {
-            if matches!(code.as_ref(), PG_DUPLICATE_TABLE | PG_DUPLICATE_OBJECT) {
-                return true;
-            }
+        let number = db
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .map(sqlx::mysql::MySqlDatabaseError::number);
+        #[cfg(not(feature = "mysql"))]
+        let number: Option<u16> = None;
+        if is_duplicate_code(db.code().as_deref(), number) {
+            return true;
         }
     }
     let msg = format!("{e}").to_lowercase();
     msg.contains("already exists") || msg.contains("duplicate")
+}
+
+/// The code decision on its own, over the raw values, so a test can
+/// reach it without constructing a driver error.
+///
+/// `sqlstate` is `DatabaseError::code()`; `mysql_number` is the MySQL
+/// error number, which lives somewhere else entirely. Keeping them as
+/// separate arguments is the point — comparing one against the other
+/// is the bug this function exists to make visible.
+fn is_duplicate_code(sqlstate: Option<&str>, mysql_number: Option<u16>) -> bool {
+    if let Some(n) = mysql_number {
+        return MYSQL_DUPLICATES.contains(&n);
+    }
+    matches!(sqlstate, Some(PG_DUPLICATE_TABLE | PG_DUPLICATE_OBJECT))
 }
 
 /// `CREATE TABLE x` -> `CREATE TABLE IF NOT EXISTS x`, so the common
@@ -69,7 +82,7 @@ fn idempotent(stmt: &str) -> std::borrow::Cow<'_, str> {
 ///
 /// # Errors
 /// Any driver failure that is not "already exists".
-pub async fn apply_idempotent(
+pub(crate) async fn apply_idempotent(
     pool: &Pool,
     batch: &super::RenderedBatch,
 ) -> Result<(), sqlx::Error> {
@@ -115,5 +128,62 @@ mod tests {
         assert_eq!(idempotent(s), s);
         let idx = r#"CREATE UNIQUE INDEX "i" ON "t" ("a")"#;
         assert_eq!(idempotent(idx), idx);
+    }
+
+    /// The tests above feed in hand-written SQL, so they would pass
+    /// even if the renderer stopped emitting the shape `idempotent`
+    /// looks for. This one runs a real batch through the real
+    /// renderer, which is the coupling that actually has to hold.
+    #[test]
+    fn the_renderer_output_is_actually_rewritten() {
+        use crate::core::Model as _;
+        let snapshot = crate::migrate::SchemaSnapshot::from_models(&[
+            crate::tenancy::permissions::Permission::SCHEMA,
+        ]);
+        let changes =
+            crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
+        let batch = crate::migrate::render_changes_split_with_dialect(
+            &changes,
+            &snapshot,
+            &crate::sql::Postgres,
+        )
+        .expect("render");
+
+        let creates: Vec<_> = batch
+            .immediate
+            .iter()
+            .filter(|s| s.contains("CREATE TABLE"))
+            .collect();
+        assert!(!creates.is_empty(), "expected at least one CREATE TABLE");
+        for stmt in creates {
+            assert!(
+                idempotent(stmt).starts_with("CREATE TABLE IF NOT EXISTS"),
+                "renderer emits a shape `idempotent` does not rewrite, so the \
+                 ensure paths are back to erroring per call: {stmt}"
+            );
+        }
+    }
+
+    /// The exact mistake this function exists to prevent: a MySQL
+    /// error *number* is not a `SQLSTATE`, and comparing one as the
+    /// other silently never matches.
+    #[test]
+    fn a_mysql_number_is_not_read_as_a_sqlstate() {
+        use super::is_duplicate_code;
+        assert!(is_duplicate_code(None, Some(1050)), "MySQL table exists");
+        assert!(is_duplicate_code(None, Some(1061)), "MySQL dup key name");
+        assert!(is_duplicate_code(None, Some(1826)), "MySQL dup FK name");
+        assert!(
+            !is_duplicate_code(Some("1050"), None),
+            "an error number arriving as a SQLSTATE must not match — the \
+             first draft did exactly this and the text fallback hid it"
+        );
+        assert!(is_duplicate_code(Some("42P07"), None), "PG duplicate_table");
+        assert!(
+            is_duplicate_code(Some("42710"), None),
+            "PG duplicate_object, what ADD CONSTRAINT raises"
+        );
+        assert!(!is_duplicate_code(Some("42P01"), None), "undefined_table");
+        assert!(!is_duplicate_code(None, None));
     }
 }

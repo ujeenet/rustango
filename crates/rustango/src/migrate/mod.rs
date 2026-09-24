@@ -40,7 +40,7 @@ pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,
     render_changes_split_with_dialect, RenderedBatch, SchemaChange,
 };
-pub use ensure::apply_idempotent;
+pub(crate) use ensure::apply_idempotent;
 pub use error::MigrateError;
 pub use file::{
     discover_migration_dirs, list_dirs, CallbackOp, DataOp, Migration, MigrationScope, Operation,
