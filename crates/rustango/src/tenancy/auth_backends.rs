@@ -185,7 +185,12 @@ pub struct ApiKey {
     /// accepted, minor exposure — a DB leak reveals which prefixes exist
     /// but NOT the secret (the secret half is argon2id-hashed in
     /// `key_hash`), so a stolen prefix can't authenticate on its own.
-    #[rustango(max_length = 8)]
+    ///
+    /// Indexed: every Bearer request looks the row up by this column,
+    /// so without one it is a sequential scan on the hit path — 5.9 ms
+    /// at 100k keys against 0.025 ms indexed, growing with every key
+    /// ever issued (#1647).
+    #[rustango(max_length = 8, index)]
     pub key_prefix: String,
     /// argon2id hash of the 32-char secret. Never returned to callers.
     #[rustango(max_length = 255)]
