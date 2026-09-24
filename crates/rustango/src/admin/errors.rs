@@ -49,8 +49,11 @@ pub enum AdminError {
 /// registered but not yet migrated" case and show a hint.
 const PG_UNDEFINED_TABLE: &str = "42P01";
 
-/// MySQL `ER_NO_SUCH_TABLE`.
-const MYSQL_NO_SUCH_TABLE: &str = "1146";
+/// MySQL `ER_NO_SUCH_TABLE`. An error *number*, not a `SQLSTATE` —
+/// MySQL reports `42S02` for it, so this must be read off
+/// `MySqlDatabaseError::number()` and never off `code()` (#1646).
+#[cfg(feature = "mysql")]
+const MYSQL_NO_SUCH_TABLE: u16 = 1146;
 
 fn pg_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     let db = e.as_database_error()?;
@@ -90,9 +93,11 @@ fn sqlite_undefined_table_error(e: &sqlx::Error) -> Option<String> {
 /// MySQL reports a missing table as code 1146 with a message like
 /// `Table 'db.table' doesn't exist`. Match the code first, then take
 /// the unqualified name from the message.
+#[cfg(feature = "mysql")]
 fn mysql_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     let db = e.as_database_error()?;
-    if db.code().as_deref() != Some(MYSQL_NO_SUCH_TABLE) {
+    let my = db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()?;
+    if my.number() != MYSQL_NO_SUCH_TABLE {
         return None;
     }
     // Message shape: `Table 'demo.rustango_admin_users' doesn't exist`.
@@ -104,6 +109,12 @@ fn mysql_undefined_table_error(e: &sqlx::Error) -> Option<String> {
         .map(|(_, t)| t)
         .unwrap_or(qualified);
     Some(name.to_owned())
+}
+
+/// `cfg(not(mysql))` stub — there is no MySQL driver to downcast to.
+#[cfg(not(feature = "mysql"))]
+fn mysql_undefined_table_error(_e: &sqlx::Error) -> Option<String> {
+    None
 }
 
 fn undefined_table_error(e: &sqlx::Error) -> Option<String> {

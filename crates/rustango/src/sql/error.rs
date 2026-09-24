@@ -324,6 +324,9 @@ pub fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
 /// and 1170 TEXT-in-index. `run_ddl_idempotent` therefore returned `Ok`
 /// for statements that never ran (#1646). The `|| contains("Duplicate
 /// key name")` arm was English-only on top of that; MySQL localises.
+// Its only caller is `cfg(mysql)`, but the tests above it run on every
+// backend, so compile it always rather than gate it.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
 #[must_use]
 pub(crate) fn mysql_duplicate_decision(number: u16) -> bool {
     matches!(
