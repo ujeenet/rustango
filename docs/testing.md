@@ -192,6 +192,24 @@ MySQL is the one that catches people: it reads its own variable, so a shell with
 only `DATABASE_URL` set runs the Postgres suites and silently skips every MySQL
 one.
 
+### Run them one at a time
+
+The live suites share one database and most drop or truncate the framework
+tables in setup, so running them in parallel makes them fight over the
+catalog. Use the `live` profile, which sets `test-threads = 1`:
+
+```bash
+cargo nextest run --profile live --workspace --all-features
+```
+
+Without it the failures are many and none of them are real: 758 against
+PostgreSQL, 95 against MySQL, 0 either way with the profile. The
+`tokio::sync::Mutex` guards inside those suites do not help, because nextest
+runs each test in its own process and a mutex in one does not reach another.
+
+This is a workaround, not a fix — see #1624 for per-process databases, which
+would restore the parallelism.
+
 ### Telling a skip from a pass
 
 Most skips are a bare early `return` with no output at all. A minority print a
