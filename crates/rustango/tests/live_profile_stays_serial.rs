@@ -25,26 +25,61 @@ fn nextest_toml() -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// The `[profile.live]` block, up to the next `[` at column 0.
-fn live_profile(toml: &str) -> &str {
-    let start = toml
-        .find("[profile.live]")
-        .expect("`[profile.live]` is gone — docs/testing.md tells people to use it");
-    let rest = &toml[start + "[profile.live]".len()..];
-    match rest.find("\n[") {
-        Some(end) => &rest[..end],
-        None => rest,
+/// `test-threads` as declared in `[profile.live]`, or `None`.
+///
+/// Parsed line by line rather than matched as a substring. Both
+/// shortcuts were wrong: `find("[profile.live]")` latched onto a
+/// *commented* header, and `contains("test-threads = 1")` is satisfied
+/// by `test-threads = 16`. Each let the guard pass on the exact
+/// regression it exists to catch.
+fn live_profile_test_threads(toml: &str) -> Option<u32> {
+    let mut in_block = false;
+    for raw in toml.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') {
+            continue; // a comment is not a header and not a setting
+        }
+        if line.starts_with('[') {
+            in_block = line == "[profile.live]";
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "test-threads" {
+                return value.trim().parse().ok();
+            }
+        }
     }
+    None
 }
 
 #[test]
 fn live_profile_runs_one_test_at_a_time() {
     let toml = nextest_toml();
-    let block = live_profile(&toml);
-    assert!(
-        block.contains("test-threads = 1"),
-        "[profile.live] lost `test-threads = 1`, so it no longer serializes \
-         the live suites and `--profile live` is a lie. Block was:\n{block}"
+    let threads = live_profile_test_threads(&toml);
+    assert_eq!(
+        threads,
+        Some(1),
+        "[profile.live] must declare `test-threads = 1`; got {threads:?}. \
+         Anything else lets the live suites race again and `--profile live` \
+         stops meaning what docs/testing.md says it means."
+    );
+}
+
+#[test]
+fn the_guard_rejects_what_it_is_meant_to_reject() {
+    // The two mutations the substring version passed.
+    let bumped = "[profile.live]\ntest-threads = 16\n";
+    assert_eq!(live_profile_test_threads(bumped), Some(16));
+
+    let only_a_comment =
+        "# [profile.live] used to set test-threads = 1\n[profile.ci]\nfail-fast = false\n";
+    assert_eq!(
+        live_profile_test_threads(only_a_comment),
+        None,
+        "a commented header must not satisfy the guard"
     );
 }
 

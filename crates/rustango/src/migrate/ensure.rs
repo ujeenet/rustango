@@ -1,73 +1,82 @@
 //! Apply rendered DDL idempotently, for the `ensure_*_table` helpers.
 //!
 //! Five subsystems create their own table on first use — audit, TOTP,
-//! passkeys, API keys, permissions. Each rendered DDL through
-//! [`super::render_changes_split_with_dialect`] and then swallowed the
-//! failure by matching `"already exists"` in the error text. That put an
-//! ERROR in the server log on every call after the first, and the match
-//! depended on the database speaking English (#1642).
+//! passkeys, API keys, permissions. Each swallowed the failure by
+//! matching `"already exists"` in the error text, which needed the
+//! server to speak English (#1642).
+//!
+//! **The logged-ERROR symptom is PostgreSQL-only.** A failing
+//! `CREATE TABLE` writes two lines to PG's server log and none to
+//! MySQL's, so the `IF NOT EXISTS` rewrite runs on PG alone: on MySQL
+//! it silences nothing and costs 3.4x, because the no-op now succeeds
+//! and is binlogged.
 
 use crate::sql::Pool;
 
-/// Postgres `duplicate_table`.
-const PG_DUPLICATE_TABLE: &str = "42P07";
-/// Postgres `duplicate_object` — what `ADD CONSTRAINT` raises.
-const PG_DUPLICATE_OBJECT: &str = "42710";
 /// MySQL `ER_TABLE_EXISTS_ERROR`, `ER_DUP_KEYNAME`, `ER_FK_DUP_NAME`.
-/// These are error *numbers*, not `SQLSTATE`s — see below.
+/// Error *numbers*, not `SQLSTATE`s — see [`is_already_exists`].
+///
+/// Reachable from the tests on every feature set, which is the point:
+/// the trap it guards does not need the `mysql` feature to explain.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
 const MYSQL_DUPLICATES: &[u16] = &[1050, 1061, 1826];
+
+/// `true` when `number` is MySQL's way of saying the object is there.
+///
+/// Split out so a test can pin the trap without a driver error: these
+/// are error numbers, and comparing one against `DatabaseError::code()`
+/// — which is the `SQLSTATE` — silently never matches.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+fn is_mysql_duplicate(number: u16) -> bool {
+    MYSQL_DUPLICATES.contains(&number)
+}
 
 /// `true` when the error says the object is already there.
 ///
-/// Prefers the backend's code, which does not change with the server's
-/// language. Two traps, both already documented in
-/// [`crate::sql::connect_diagnosis`]:
+/// Dispatched on the dialect rather than tried in sequence, so a
+/// backend that reports a code gets decided by that code. Falling
+/// through to the message after a code said "no" is what let MySQL
+/// `ER_DUP_ENTRY` — a genuinely failed unique index — read as success.
 ///
-/// * `DatabaseError::code()` is the `SQLSTATE`. MySQL's are far too
-///   coarse to use here, so MySQL is matched on `number()` via
-///   downcast.
-/// * SQLite reports nothing useful either way, so it keeps the text
+/// * **Postgres** delegates to [`crate::sql::is_pg_dup_object_error`],
+///   which also covers the `23505` concurrent-create race (#1458).
+/// * **MySQL** matches `number()`, because its `SQLSTATE`s are far too
+///   coarse: `42000` is also a syntax error and TEXT-in-index (#1646).
+///   Deliberately *not* [`crate::sql::is_mysql_dup_index_error`], which
+///   matches that catch-all.
+/// * **SQLite** reports nothing usable either way, so it keeps the text
 ///   match. Its messages are not localised.
-fn is_already_exists(e: &crate::sql::ExecError) -> bool {
+fn is_already_exists(e: &crate::sql::ExecError, dialect: &str) -> bool {
     let crate::sql::ExecError::Driver(err) = e else {
         return false;
     };
-    if let Some(db) = err.as_database_error() {
+    match dialect {
+        "postgres" => crate::sql::is_pg_dup_object_error(err),
         #[cfg(feature = "mysql")]
-        let number = db
-            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-            .map(sqlx::mysql::MySqlDatabaseError::number);
-        #[cfg(not(feature = "mysql"))]
-        let number: Option<u16> = None;
-        if is_duplicate_code(db.code().as_deref(), number) {
-            return true;
+        "mysql" => err
+            .as_database_error()
+            .and_then(|db| db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
+            .is_some_and(|my| is_mysql_duplicate(my.number())),
+        _ => {
+            let msg = format!("{e}").to_lowercase();
+            msg.contains("already exists") || msg.contains("duplicate")
         }
     }
-    let msg = format!("{e}").to_lowercase();
-    msg.contains("already exists") || msg.contains("duplicate")
 }
 
-/// The code decision on its own, over the raw values, so a test can
-/// reach it without constructing a driver error.
+/// `CREATE TABLE x` -> `CREATE TABLE IF NOT EXISTS x`, on Postgres only.
 ///
-/// `sqlstate` is `DatabaseError::code()`; `mysql_number` is the MySQL
-/// error number, which lives somewhere else entirely. Keeping them as
-/// separate arguments is the point — comparing one against the other
-/// is the bug this function exists to make visible.
-fn is_duplicate_code(sqlstate: Option<&str>, mysql_number: Option<u16>) -> bool {
-    if let Some(n) = mysql_number {
-        return MYSQL_DUPLICATES.contains(&n);
-    }
-    matches!(sqlstate, Some(PG_DUPLICATE_TABLE | PG_DUPLICATE_OBJECT))
-}
-
-/// `CREATE TABLE x` -> `CREATE TABLE IF NOT EXISTS x`, so the common
-/// case stops going to the server as an error at all. Same rewrite
-/// [`crate::server::app`] does on the boot path.
+/// The point is PG's server log, not capability — all three backends
+/// accept the syntax. On MySQL the rewrite turns a cheap client-side
+/// error into a successful statement that gets binlogged and fsynced,
+/// 165 -> 568 us, to silence a log line MySQL never wrote.
 ///
-/// `ADD CONSTRAINT` gets no such treatment: Postgres has no
+/// `ADD CONSTRAINT` is left alone everywhere: no backend has
 /// `IF NOT EXISTS` for it, so those still rely on [`is_already_exists`].
-fn idempotent(stmt: &str) -> std::borrow::Cow<'_, str> {
+fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
+    if dialect != "postgres" {
+        return std::borrow::Cow::Borrowed(stmt);
+    }
     match stmt.strip_prefix("CREATE TABLE ") {
         Some(rest) if !rest.starts_with("IF NOT EXISTS") => {
             std::borrow::Cow::Owned(format!("CREATE TABLE IF NOT EXISTS {rest}"))
@@ -86,10 +95,11 @@ pub(crate) async fn apply_idempotent(
     pool: &Pool,
     batch: &super::RenderedBatch,
 ) -> Result<(), sqlx::Error> {
+    let dialect = pool.dialect().name();
     for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
-        let stmt = idempotent(stmt);
+        let stmt = idempotent(stmt, dialect);
         if let Err(e) = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await {
-            if is_already_exists(&e) {
+            if is_already_exists(&e, dialect) {
                 continue;
             }
             return Err(match e {
@@ -103,42 +113,56 @@ pub(crate) async fn apply_idempotent(
 
 #[cfg(test)]
 mod tests {
-    use super::idempotent;
+    use super::{idempotent, is_mysql_duplicate};
 
     #[test]
-    fn create_table_gains_if_not_exists() {
+    fn create_table_gains_if_not_exists_on_postgres() {
         assert_eq!(
-            idempotent(r#"CREATE TABLE "t" ("id" BIGSERIAL)"#),
+            idempotent(r#"CREATE TABLE "t" ("id" BIGSERIAL)"#, "postgres"),
             r#"CREATE TABLE IF NOT EXISTS "t" ("id" BIGSERIAL)"#
         );
+    }
+
+    /// MySQL never had the logged ERROR this rewrite exists to silence,
+    /// and on MySQL the rewritten statement succeeds and is binlogged —
+    /// 3.4x slower for nothing.
+    #[test]
+    fn other_dialects_are_left_alone() {
+        let s = r#"CREATE TABLE "t" ("id" BIGSERIAL)"#;
+        assert_eq!(idempotent(s, "mysql"), s);
+        assert_eq!(idempotent(s, "sqlite"), s);
     }
 
     #[test]
     fn already_guarded_create_is_left_alone() {
         let s = r#"CREATE TABLE IF NOT EXISTS "t" ("id" BIGSERIAL)"#;
-        assert_eq!(idempotent(s), s, "must not double up the guard");
+        assert_eq!(idempotent(s, "postgres"), s, "must not double up the guard");
     }
 
     #[test]
-    fn other_statements_are_untouched() {
-        // Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, so this one
+    fn non_create_table_statements_are_untouched() {
+        // No backend has `ADD CONSTRAINT IF NOT EXISTS`, so this one
         // still reaches the server and still relies on the code check.
         let s =
             r#"ALTER TABLE "a" ADD CONSTRAINT "a_b_fkey" FOREIGN KEY ("b") REFERENCES "b" ("id")"#;
-        assert_eq!(idempotent(s), s);
+        assert_eq!(idempotent(s, "postgres"), s);
         let idx = r#"CREATE UNIQUE INDEX "i" ON "t" ("a")"#;
-        assert_eq!(idempotent(idx), idx);
+        assert_eq!(idempotent(idx, "postgres"), idx);
     }
 
-    /// The tests above feed in hand-written SQL, so they would pass
-    /// even if the renderer stopped emitting the shape `idempotent`
-    /// looks for. This one runs a real batch through the real
-    /// renderer, which is the coupling that actually has to hold.
+    /// The tests above feed in hand-written SQL, so they would pass even
+    /// if the renderer stopped emitting the shape `idempotent` looks
+    /// for. This one runs a real batch through the real renderer, which
+    /// is the coupling that actually has to hold.
+    ///
+    /// `ContentType` rather than a tenancy model on purpose: `migrate`
+    /// is ungated, and naming a `#[cfg]`-gated module here broke every
+    /// build without that feature.
     #[test]
     fn the_renderer_output_is_actually_rewritten() {
         use crate::core::Model as _;
         let snapshot = crate::migrate::SchemaSnapshot::from_models(&[
-            crate::tenancy::permissions::Permission::SCHEMA,
+            crate::contenttypes::ContentType::SCHEMA,
         ]);
         let changes =
             crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
@@ -157,33 +181,71 @@ mod tests {
         assert!(!creates.is_empty(), "expected at least one CREATE TABLE");
         for stmt in creates {
             assert!(
-                idempotent(stmt).starts_with("CREATE TABLE IF NOT EXISTS"),
+                idempotent(stmt, "postgres").starts_with("CREATE TABLE IF NOT EXISTS"),
                 "renderer emits a shape `idempotent` does not rewrite, so the \
                  ensure paths are back to erroring per call: {stmt}"
             );
         }
     }
 
-    /// The exact mistake this function exists to prevent: a MySQL
-    /// error *number* is not a `SQLSTATE`, and comparing one as the
-    /// other silently never matches.
+    /// `apply_idempotent` itself, against a real SQLite database.
+    ///
+    /// Written because the review found three reverts of it that every
+    /// other test survived: dropping the `idempotent` rewrite, dropping
+    /// `.chain(deferred_fks)` so FK statements never run, and making
+    /// `is_already_exists` return `true` so every failure is silent.
+    /// Each assertion below kills one of them.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn apply_idempotent_runs_both_lists_and_still_propagates() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+
+        // `deferred_fks` must run too — this table only exists if it does.
+        let batch = super::super::RenderedBatch {
+            immediate: vec!["CREATE TABLE a (id INTEGER PRIMARY KEY)".to_owned()],
+            deferred_fks: vec!["CREATE TABLE b (id INTEGER PRIMARY KEY)".to_owned()],
+            ..Default::default()
+        };
+        super::apply_idempotent(&pool, &batch)
+            .await
+            .expect("first run creates both");
+        for t in ["a", "b"] {
+            crate::sql::raw_execute_pool(&pool, &format!("SELECT 1 FROM {t}"), Vec::new())
+                .await
+                .unwrap_or_else(|e| panic!("{t} was never created — deferred_fks skipped? {e}"));
+        }
+
+        // Second run is a no-op, not an error.
+        super::apply_idempotent(&pool, &batch)
+            .await
+            .expect("re-running an ensure must be idempotent");
+
+        // A failure that is NOT "already exists" must still surface.
+        let bad = super::super::RenderedBatch {
+            immediate: vec!["CREATE TABLE c (id INTEGER PRIMARY KEY".to_owned()],
+            ..Default::default()
+        };
+        assert!(
+            super::apply_idempotent(&pool, &bad).await.is_err(),
+            "a syntax error must propagate; swallowing everything would \
+             make every ensure silently succeed"
+        );
+    }
+
+    /// A MySQL error *number* is not a `SQLSTATE`. An earlier draft
+    /// compared these against `DatabaseError::code()`, which returns the
+    /// `SQLSTATE`, so it could never match — and a text fallback hid it.
     #[test]
-    fn a_mysql_number_is_not_read_as_a_sqlstate() {
-        use super::is_duplicate_code;
-        assert!(is_duplicate_code(None, Some(1050)), "MySQL table exists");
-        assert!(is_duplicate_code(None, Some(1061)), "MySQL dup key name");
-        assert!(is_duplicate_code(None, Some(1826)), "MySQL dup FK name");
-        assert!(
-            !is_duplicate_code(Some("1050"), None),
-            "an error number arriving as a SQLSTATE must not match — the \
-             first draft did exactly this and the text fallback hid it"
-        );
-        assert!(is_duplicate_code(Some("42P07"), None), "PG duplicate_table");
-        assert!(
-            is_duplicate_code(Some("42710"), None),
-            "PG duplicate_object, what ADD CONSTRAINT raises"
-        );
-        assert!(!is_duplicate_code(Some("42P01"), None), "undefined_table");
-        assert!(!is_duplicate_code(None, None));
+    fn mysql_duplicates_are_numbers() {
+        assert!(is_mysql_duplicate(1050), "ER_TABLE_EXISTS_ERROR");
+        assert!(is_mysql_duplicate(1061), "ER_DUP_KEYNAME");
+        assert!(is_mysql_duplicate(1826), "ER_FK_DUP_NAME");
+        // ER_DUP_ENTRY: a unique index that genuinely could not be
+        // built. It must propagate, not read as "already exists".
+        assert!(!is_mysql_duplicate(1062), "ER_DUP_ENTRY must not swallow");
+        assert!(!is_mysql_duplicate(1064), "syntax error must not swallow");
+        assert!(!is_mysql_duplicate(1170), "TEXT-in-index must not swallow");
     }
 }

@@ -12,8 +12,7 @@
 pub mod callbacks;
 pub mod ddl;
 pub mod diff;
-/// Applying rendered DDL idempotently, for the `ensure_*_table` helpers.
-pub mod ensure;
+pub(crate) mod ensure;
 mod error;
 pub mod file;
 // The CLI's "emit Model derives from a live schema" verb. Works on any
