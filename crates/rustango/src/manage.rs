@@ -970,6 +970,7 @@ impl Cli {
     /// Separate from [`Self::access_log_layer`] because the span needs
     /// the same redact list even when the log is off, and building it
     /// a second way is how the two drifted apart (#1610).
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn configured_access_log(&self) -> crate::access_log::AccessLogLayer {
         let log_layer = crate::access_log::AccessLogLayer::default();
         #[cfg(feature = "config")]
@@ -985,6 +986,7 @@ impl Cli {
     /// Taken from the configured access log rather than recomputed, so
     /// `[audit] redact_query_params` reaches the span even with
     /// `[logging] access_log = false` (#1610).
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn span_redact_params(&self) -> Vec<String> {
         self.configured_access_log().redact_query_params
     }
