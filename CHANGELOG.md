@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenant login was the one POST with no CSRF protection (#1607)
+
+`POST /login` accepted a request with no token, a wrong token or no
+cookie — all three behaved identically — while every other
+server-rendered POST returned 403. That is login CSRF: a third-party
+page can auto-submit the attacker's own credentials and silently sign
+the victim's browser into an **attacker-controlled** account, after
+which the victim works inside the attacker's session.
+
+`SameSite=Lax` does not cover it. Login CSRF mints a *new* session
+cookie rather than replaying an existing one.
+
+`login_form` now seeds the double-submit token and `login_submit`
+verifies it before the user lookup, so a forged POST costs nothing and
+cannot probe usernames by timing. No new mechanism — the same
+`ensure_token` / `verify_form_token` pair the content POSTs already
+use.
+
 ## [0.57.12] — 2026-09-24
 
 A security release. An admin could log in on the password alone when

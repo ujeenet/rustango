@@ -455,6 +455,7 @@ where
                             brand_storage,
                             routes,
                             parts.uri.query(),
+                            &parts.headers,
                             &pool,
                             &registry_pool,
                         )
@@ -462,9 +463,16 @@ where
                         .into_response()
                     };
                     #[cfg(not(feature = "admin-sso"))]
-                    let resp = login_form(&org, cfg, brand_storage, routes, parts.uri.query())
-                        .await
-                        .into_response();
+                    let resp = login_form(
+                        &org,
+                        cfg,
+                        brand_storage,
+                        routes,
+                        parts.uri.query(),
+                        &parts.headers,
+                    )
+                    .await
+                    .into_response();
                     resp
                 }
                 axum::http::Method::POST => {
@@ -803,9 +811,10 @@ async fn login_form(
     brand_storage: &BoxedStorage,
     routes: &super::routes::RouteConfig,
     query: Option<&str>,
+    headers: &HeaderMap,
     #[cfg(feature = "admin-sso")] tenant_pool: &crate::sql::Pool,
     #[cfg(feature = "admin-sso")] registry_pool: &crate::sql::Pool,
-) -> axum::response::Html<String> {
+) -> Response {
     let mut next: Option<String> = None;
     let mut error: Option<String> = None;
     if let Some(q) = query {
@@ -861,10 +870,21 @@ async fn login_form(
         ctx.insert("sso_enabled", &!providers.is_empty());
         ctx.insert("sso_providers", &providers);
     }
+    // Seed the double-submit CSRF token so the first GET already
+    // carries one; without it the first POST would always fail
+    // (#1607). The cookie rides on this response.
+    #[cfg(feature = "csrf")]
+    let set_cookie = {
+        let (token, cookie) =
+            crate::forms::csrf::ensure_token(headers, crate::forms::csrf::CSRF_COOKIE);
+        ctx.insert("csrf_token", &token);
+        cookie
+    };
+
     // v0.27.5 — log render errors instead of silently rendering an
     // empty body. The previous `unwrap_or_default()` hid a real
     // template-include resolution bug from the operator.
-    axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
+    let html = axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
         Ok(html) => html,
         Err(e) => {
             tracing::error!(
@@ -878,7 +898,16 @@ async fn login_form(
              server logs for the underlying Tera error.</p></body></html>"
                 .to_owned()
         }
-    })
+    });
+
+    let mut resp = html.into_response();
+    #[cfg(feature = "csrf")]
+    if let Some(cookie) = set_cookie {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+            resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    resp
 }
 
 #[derive(serde::Deserialize)]
@@ -887,6 +916,8 @@ struct LoginSubmitForm {
     password: String,
     #[serde(default)]
     next: Option<String>,
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 async fn login_submit(
@@ -915,6 +946,16 @@ async fn login_submit(
         Err(_) => return (StatusCode::BAD_REQUEST, "malformed login form").into_response(),
     };
     let next = sanitize_next(form.next.as_deref());
+
+    // Login CSRF (#1607): reject before the user lookup, so a forged
+    // POST costs nothing and cannot probe usernames by timing.
+    // `SameSite=Lax` does not cover this — login CSRF sets a *new*
+    // session rather than replaying an existing one, which is what
+    // makes "the victim is now inside the attacker's account" possible.
+    #[cfg(feature = "csrf")]
+    if !crate::forms::csrf::verify_form_token(&headers, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF token missing or mismatched").into_response();
+    }
 
     // v0.38 — auth check via the tri-dialect ORM. The query targets
     // the tenant's `rustango_users` table on the user-supplied pool;
