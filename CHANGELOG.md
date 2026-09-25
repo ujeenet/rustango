@@ -4,6 +4,119 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.12] — 2026-09-24
+
+A security release. An admin could log in on the password alone when
+the 2FA device table was unreadable, and the two tenant pool caches
+broke in opposite directions once full. Most of this came out of a
+7-angle review of #1643 rather than from a bug report.
+
+### Fixed — an unreadable 2FA table let the password alone log an admin in (#1644)
+
+`confirmed_secret` returns an `Option`, so a read error and "this
+admin has no second factor" were the same answer: `None`. The login
+gate read that as "no 2FA" and granted the session.
+
+`rustango_admin_totp` is `managed = false`, so a missing table is a
+reachable state, not a hypothetical.
+
+`confirmed_secret_checked` returns the error instead. The gate uses it
+and fails closed — the login is refused and the cause is logged at
+error level. `confirmed_secret` stays for callers that genuinely want
+the lossy answer, and now documents that an auth gate is not one.
+
+### Fixed — the tenant pool caches had no eviction, and failed two ways (#1527, #1528)
+
+Both caches were fixed-size with no eviction, and past the cap they
+broke in opposite directions.
+
+- **Database mode refused.** The request failed — and so did every
+  later one, so tenant 65 was down until the process restarted. It
+  also built a connection before each refusal.
+- **Schema mode never refused.** It returned an uncached pool per
+  call, eagerly opening connections, with nothing bounding how many
+  existed at once — at exactly the tenant count the mode exists for.
+
+Both now carry an LRU stamp and evict the most idle entry, so the cap
+is the live pool count and the documented connection budget is real.
+
+A third cache, `DatabasePools`, had the same refuse-on-full policy and
+was named by neither issue. It shares the type now instead of being a
+fourth copy.
+
+The near-cap warning fires once per crossing rather than once per
+insert: a cache sitting at its cap inserts on every miss, and an
+unbounded warn there floods the log with the message meant to be
+noticed.
+
+### Fixed — MySQL DDL failures were swallowed as "already exists" (#1646)
+
+`is_mysql_dup_index_error` matched SQLSTATE `42000`, which on MySQL 8
+is the catch-all for DDL errors — it also covers 1064 syntax error,
+1071 key-too-long, 1072 unknown key column and 1170 TEXT-in-index. So
+`run_ddl_idempotent` reported `Ok` for statements that never ran, and
+a missing index stayed missing.
+
+It matches the error *number* now (1050, 1061, 1826). The
+`contains("Duplicate key name")` arm is gone with it — MySQL localises
+its messages.
+
+### Fixed — Bearer auth full-scanned the API key table (#1647)
+
+5.9–7.0 ms at 100k keys against 0.025 ms indexed, on every
+authenticated request. Indexed through the schema, not a hand-written
+migration.
+
+### Fixed — five small defects (#1605, #1608, #1635, #1637, #1638)
+
+- Admin **Save and add another** returned a 404 (#1635).
+- The CSRF cookie was issued without `Secure` in `ensure_token` (#1608).
+- 20 dangling doc links in emitted docstrings (#1637).
+- A runtime error documented as compile-time (#1638).
+- The bump script verified six of the eight shapes it rewrites (#1605).
+
+### Changed — the live suites run one test at a time (#1624)
+
+They share one database. Run in parallel they produced 758 false
+failures on PostgreSQL and 95 on MySQL; serially, none either way. A
+`live` nextest profile now pins them to a single thread.
+
+### Changed — one idempotent ensure-table path (#1642)
+
+Five copies of the ensure-table error swallow collapse into
+`migrate::ensure::apply_idempotent`. `CREATE TABLE` becomes `IF NOT
+EXISTS` on PostgreSQL only — the logged-ERROR symptom is PG-only, and
+on MySQL the rewrite costs 3.4× for nothing. What remains matches the
+backend error code rather than English text.
+
+### Known issue — a tenant FK can cascade a delete across tenants (#1645)
+
+An unqualified `REFERENCES` binds a tenant foreign key to `public`, so
+a delete there cascades into other tenants' rows. This is **not fixed
+in this release**: the fix needs the DDL renderer to carry schema
+context, and it has none today. The issue holds a live reproduction.
+
+### CI
+
+`guards` now builds and runs the lib tests without the `tenancy`
+feature, on sqlite, postgres and mysql separately. Nothing did before,
+which is what hid a compile break in #1643.
+
+`s3_live` ran nothing for four merges (#1651). MinIO withdrew its
+public images — the server, the `mc` client and the `dl.min.io` binary
+are all gone — so the job failed at `docker run` with `unauthorized`
+and the presigned-URL and media suites never executed. It now pulls
+the same server from Bitnami's archive at a pinned tag, creates the
+bucket through `MINIO_DEFAULT_BUCKETS` instead of `mc`, and fails
+outright when the server does not come up rather than falling through
+to a confusing test error.
+
+### Docs
+
+`cargo-rustango` has a README, so the scaffolder is no longer a blank
+page on crates.io. The 0.57.9 CI entry in this file described the gap
+backwards and is corrected (#1615).
+
 ## [0.57.11] — 2026-09-21
 
 Two unrelated threads. The last of the `auto_now_add` timestamp bugs,
