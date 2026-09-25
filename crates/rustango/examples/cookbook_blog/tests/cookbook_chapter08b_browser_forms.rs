@@ -127,7 +127,25 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
         .unwrap();
 
     // 1. Login as alice on acme tenant.
-    let login_body = [("username", "alice"), ("password", "tenantpw")];
+    // GET the form first so the CSRF cookie is seeded and the token
+    // can be echoed back, as a browser does (#1607).
+    let csrf = {
+        let html = client
+            .get(format!("http://{BIND}/login"))
+            .header("Host", "acme.localhost")
+            .send().await.unwrap()
+            .text().await.unwrap();
+        html.split(r#"name="_csrf" value=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let login_body = [
+        ("username", "alice"),
+        ("password", "tenantpw"),
+        ("_csrf", csrf.as_str()),
+    ];
     let resp = client
         .post(format!("http://{BIND}/login"))
         .header("Host", "acme.localhost")
