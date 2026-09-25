@@ -4,6 +4,34 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the CSRF Origin check was off by default (#1529)
+
+An empty `trusted_origins` skipped the Origin check entirely, so the
+default deployment ran on bare **unsigned** double-submit: a random
+cookie compared against a header. Cookies are scoped by registrable
+domain, not by origin, so anyone able to write one on the parent
+domain forges a valid pair — XSS on a sibling subdomain, a
+dangling-CNAME takeover, or a network attacker on any plaintext
+`http://*.example.com` (`Secure` stops the cookie being *sent* over
+HTTP, not *written*). Origin is what catches that.
+
+The check now runs with an empty list, using the request's own `Host`
+as the implicit trusted origin — so a same-origin deployment needs no
+configuration, and a foreign Origin is refused out of the box. Add
+entries only for origins other than the app's own.
+
+Two related holes closed with it:
+
+- **A missing Origin no longer passes over TLS.** Anything able to
+  omit the header skipped the check. Plain HTTP keeps the old
+  behaviour, so server-to-server callers are not locked out.
+- **Wildcard entries now match a non-default port.** `https://*.example.com`
+  did not cover `https://sub.example.com:8443`, a silent false
+  negative that reads as a flaky 403.
+
+Signing the token against the session — the remaining item on #1529 —
+is not in this release.
+
 ### Fixed — a JWT with no `exp` never expired, and `decode` accepted it (#1538)
 
 `decode` skipped the expiry check when the claim was absent, so a
