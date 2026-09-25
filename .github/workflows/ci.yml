@@ -1103,19 +1103,35 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
+      # MinIO withdrew its public images — `quay.io/minio/minio`, the `mc`
+      # client and the `dl.min.io` binary are all gone, so this job started
+      # every run with `unauthorized` and tested nothing (#1651). Bitnami's
+      # archive still serves the same server; the tag is pinned because an
+      # unpinned image is what let this break without a commit.
+      #
+      # `MINIO_DEFAULT_BUCKETS` replaces the `mc` step, which has no
+      # surviving image to pull.
+      #
+      # The wait loop now fails instead of falling through: it used to
+      # `break` on success and carry on regardless, so an unhealthy server
+      # surfaced later as an unexplained test failure.
       - name: Start MinIO
         run: |
           docker run -d --name minio -p 9100:9000 \
             -e MINIO_ROOT_USER=$RUSTANGO_S3_TEST_KEY \
             -e MINIO_ROOT_PASSWORD=$RUSTANGO_S3_TEST_SECRET \
-            quay.io/minio/minio:latest server /data
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:9100/minio/health/live && break
+            -e MINIO_DEFAULT_BUCKETS=$RUSTANGO_S3_TEST_BUCKET \
+            bitnamilegacy/minio:2025.7.23-debian-12-r5
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:9100/minio/health/live >/dev/null; then
+              echo "MinIO healthy after ${i}s"
+              exit 0
+            fi
             sleep 1
           done
-          docker run --rm --network host \
-            -e MC_HOST_m=http://$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET@127.0.0.1:9100 \
-            quay.io/minio/mc:latest mb --ignore-existing m/$RUSTANGO_S3_TEST_BUCKET
+          echo "MinIO did not become healthy" >&2
+          docker logs minio >&2 || true
+          exit 1
       - run: cargo test -p rustango --features postgres --test s3_live_presign
       # These 22 were the ones that exposed #1450 the first time they ran
       # against a real database. `--test-threads=1`: the setup helper

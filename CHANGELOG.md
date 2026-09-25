@@ -102,8 +102,14 @@ context, and it has none today. The issue holds a live reproduction.
 feature, on sqlite, postgres and mysql separately. Nothing did before,
 which is what hid a compile break in #1643.
 
-`s3_live` is red: MinIO withdrew its public images, so the presigned
-URL test and the media live suites have not run since (#1651).
+`s3_live` ran nothing for four merges (#1651). MinIO withdrew its
+public images — the server, the `mc` client and the `dl.min.io` binary
+are all gone — so the job failed at `docker run` with `unauthorized`
+and the presigned-URL and media suites never executed. It now pulls
+the same server from Bitnami's archive at a pinned tag, creates the
+bucket through `MINIO_DEFAULT_BUCKETS` instead of `mc`, and fails
+outright when the server does not come up rather than falling through
+to a confusing test error.
 
 ### Docs
 
