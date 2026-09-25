@@ -4,6 +4,32 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — turning off the access log silently narrowed span redaction (#1610)
+
+The request span is mounted whether or not `[logging] access_log` is
+on, but it could only take the configured `redact_query_params` list
+*from* the access-log layer. With the log off it fell back to the
+defaults, so a project that set
+
+```toml
+[audit]
+redact_query_params = ["invite_token"]
+```
+
+got `invite_token` redacted in the access-log event and written in
+**clear text on the span** when there was no event.
+
+The two settings live in different config sections, and nothing in
+either said one disarmed the other — a control that reads as on in the
+configuration and is off in the process.
+
+`mount_observability` now takes the redact list directly, so there is
+one arm instead of two and no path that can fall back. `Cli` derives
+it from the same `AccessLogLayer` it would have mounted, rather than
+recomputing the composition, since building it a second way is how
+these drifted apart. `server::Builder` gains `span_redact` for the
+hand-built case.
+
 ## [0.57.12] — 2026-09-24
 
 A security release. An admin could log in on the password alone when

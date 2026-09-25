@@ -960,16 +960,33 @@ impl Cli {
     /// outermost router instead, where every branch inherits it.
     #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn access_log_layer(&self) -> Option<crate::access_log::AccessLogLayer> {
-        if !self.access_log_enabled() {
-            return None;
-        }
+        self.access_log_enabled()
+            .then(|| self.configured_access_log())
+    }
+
+    /// The access-log layer as configured, built whether or not it
+    /// will be mounted.
+    ///
+    /// Separate from [`Self::access_log_layer`] because the span needs
+    /// the same redact list even when the log is off, and building it
+    /// a second way is how the two drifted apart (#1610).
+    fn configured_access_log(&self) -> crate::access_log::AccessLogLayer {
         let log_layer = crate::access_log::AccessLogLayer::default();
         #[cfg(feature = "config")]
         let log_layer = match self.settings_for_layers.as_ref() {
             Some(s) => log_layer.with_audit_settings(&s.audit),
             None => log_layer,
         };
-        Some(log_layer)
+        log_layer
+    }
+
+    /// Query params the request span must redact.
+    ///
+    /// Taken from the configured access log rather than recomputed, so
+    /// `[audit] redact_query_params` reaches the span even with
+    /// `[logging] access_log = false` (#1610).
+    fn span_redact_params(&self) -> Vec<String> {
+        self.configured_access_log().redact_query_params
     }
 
     /// The per-request span and the access log.
@@ -1023,7 +1040,11 @@ impl Cli {
         // opposite relative order.
         #[cfg(any(feature = "admin", feature = "tenancy"))]
         {
-            return crate::access_log::mount_observability(api, self.access_log_layer());
+            return crate::access_log::mount_observability(
+                api,
+                self.access_log_layer(),
+                self.span_redact_params(),
+            );
         }
 
         #[cfg(not(any(feature = "admin", feature = "tenancy")))]
@@ -1193,7 +1214,9 @@ impl Cli {
         // operator console, and layers applied now would reach neither.
         // The builder applies them to the outermost router instead.
         let mut builder = crate::server::Builder::from_env().await?.api(api);
-        builder = builder.observability(self.access_log_layer());
+        builder = builder
+            .observability(self.access_log_layer())
+            .span_redact(self.span_redact_params());
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1269,7 +1292,9 @@ impl Cli {
             apex,
         )
         .api(api);
-        builder = builder.observability(self.access_log_layer());
+        builder = builder
+            .observability(self.access_log_layer())
+            .span_redact(self.span_redact_params());
         if self.health_endpoints {
             builder = builder.with_health();
         }

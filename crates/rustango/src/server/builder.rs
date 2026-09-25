@@ -79,6 +79,12 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// The access-log layer, when request logging is on. `None` with
     /// `observability == true` means "span and request id, no log line".
     access_log: Option<crate::access_log::AccessLogLayer>,
+    /// Query params the span redacts. Held separately from
+    /// `access_log` because the span is mounted even when the log is
+    /// off, and taking the list from the layer meant `[logging]
+    /// access_log = false` silently narrowed it to the defaults
+    /// (#1610).
+    span_redact: Vec<String>,
     _phantom: PhantomData<DB>,
 }
 
@@ -141,6 +147,7 @@ impl<DB: Database> Builder<DB> {
             static_dirs: Vec::new(),
             observability: false,
             access_log: None,
+            span_redact: crate::access_log::default_redact_params(),
             _phantom: PhantomData,
         }
     }
@@ -177,6 +184,19 @@ impl<DB: Database> Builder<DB> {
     pub fn observability(mut self, access_log: Option<crate::access_log::AccessLogLayer>) -> Self {
         self.observability = true;
         self.access_log = access_log;
+        self
+    }
+
+    /// Query params the request span replaces with `[redacted]`.
+    ///
+    /// Set this alongside [`Self::observability`] when the access log
+    /// may be off: the span is mounted either way, and without it the
+    /// list falls back to the defaults, so a param configured through
+    /// `[audit] redact_query_params` would be written in clear text
+    /// (#1610). `Cli` passes the configured list for you.
+    #[must_use]
+    pub fn span_redact(mut self, params: Vec<String>) -> Self {
+        self.span_redact = params;
         self
     }
 
@@ -697,7 +717,7 @@ impl<DB: Database> Builder<DB> {
             // One definition, shared with `Cli::mount_observability` —
             // see `access_log::mount_observability` for the ordering
             // rules and why they live in one place.
-            crate::access_log::mount_observability(app, self.access_log)
+            crate::access_log::mount_observability(app, self.access_log, self.span_redact)
         } else {
             app
         };
