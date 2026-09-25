@@ -35,7 +35,7 @@
 //! [`Config::session_secret`] for projects that want a separate
 //! signing key.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -54,7 +54,7 @@ use crate::tenancy::jwt_lifecycle::JwtLifecycle;
 /// Knobs for [`jwt_router`]. All have sensible defaults; override
 /// when integrating with non-default URL prefixes (#74), shorter
 /// access TTLs, custom signing keys, etc.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// URL prefix every endpoint mounts under. Default `/api/auth`.
     pub prefix: String,
@@ -67,6 +67,51 @@ pub struct Config {
     /// session secret is reused. Set explicitly for projects that
     /// want separate signing keys for cookie sessions vs API JWTs.
     pub session_secret: Option<Vec<u8>>,
+    /// Revocation store. `None` keeps the default
+    /// [`InMemoryJtiStore`](crate::jti_store::InMemoryJtiStore), which
+    /// is single-process and forgets every revocation on restart — so
+    /// on more than one replica `/logout` is best-effort (#1190). Pass
+    /// a Redis- or database-backed store for a real deployment.
+    pub jti_store: Option<Arc<dyn crate::jti_store::JtiStore>>,
+    /// Extra claims baked into both tokens at login, on top of the
+    /// `tenant` claim the router always sets (#1190).
+    ///
+    /// Returning a reserved name (`sub`, `exp`, `jti`, `typ`) fails the
+    /// login with a 500 rather than silently dropping it; `tenant` is
+    /// the router's own and is not overridable either.
+    pub extra_claims: Option<ClaimsHook>,
+}
+
+/// Builds the per-login custom claims for [`Config::extra_claims`].
+pub type ClaimsHook =
+    Arc<dyn Fn(&ClaimsContext<'_>) -> serde_json::Map<String, serde_json::Value> + Send + Sync>;
+
+/// What the router knows about the user it just authenticated, handed
+/// to [`Config::extra_claims`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ClaimsContext<'a> {
+    pub user_id: i64,
+    pub username: &'a str,
+    pub is_superuser: bool,
+    /// Slug of the tenant the request resolved to.
+    pub tenant_slug: &'a str,
+}
+
+// Hand-written: neither a `dyn JtiStore` nor a boxed closure is
+// `Debug`, and `Config` is in enough public signatures to want it.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("prefix", &self.prefix)
+            .field("access_ttl_secs", &self.access_ttl_secs)
+            .field("refresh_ttl_secs", &self.refresh_ttl_secs)
+            // Never the key itself — only whether one was set.
+            .field("session_secret", &self.session_secret.is_some())
+            .field("jti_store", &self.jti_store.is_some())
+            .field("extra_claims", &self.extra_claims.is_some())
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -76,6 +121,8 @@ impl Default for Config {
             access_ttl_secs: 900,
             refresh_ttl_secs: 7 * 86400,
             session_secret: None,
+            jti_store: None,
+            extra_claims: None,
         }
     }
 }
@@ -116,9 +163,13 @@ impl Config {
              guessable key (would allow JWT forgery).",
             secret.len(),
         );
-        JwtLifecycle::new(secret)
+        let jwt = JwtLifecycle::new(secret)
             .with_access_ttl(self.access_ttl_secs)
-            .with_refresh_ttl(self.refresh_ttl_secs)
+            .with_refresh_ttl(self.refresh_ttl_secs);
+        match &self.jti_store {
+            Some(store) => jwt.with_jti_store(Arc::clone(store)),
+            None => jwt,
+        }
     }
 
     /// Apply values from a loaded [`crate::config::JwtSettings`]
@@ -165,7 +216,13 @@ impl Config {
 ///
 /// `JwtLifecycle` isn't `Clone` (its blacklist is a `RwLock`) so we
 /// hand handlers a `&'static JwtLifecycle` rather than copying.
-static JWT: OnceLock<JwtLifecycle> = OnceLock::new();
+static JWT: OnceLock<RouterState> = OnceLock::new();
+
+/// What the handlers need from the config, resolved once.
+struct RouterState {
+    jwt: JwtLifecycle,
+    extra_claims: Option<ClaimsHook>,
+}
 
 /// Build the JWT auth router with the given [`Config`]. Mount it
 /// alongside your app's API routes — the endpoints are tenant-aware
@@ -177,7 +234,10 @@ static JWT: OnceLock<JwtLifecycle> = OnceLock::new();
 /// is fine for the common case (mount once at boot) and prevents
 /// silently-divergent signing keys across multiple mount sites.
 pub fn jwt_router(cfg: Config) -> Router<()> {
-    let _ = JWT.set(cfg.build_jwt());
+    let _ = JWT.set(RouterState {
+        jwt: cfg.build_jwt(),
+        extra_claims: cfg.extra_claims.clone(),
+    });
 
     Router::new()
         .route(&format!("{}/login", cfg.prefix), post(login))
@@ -189,8 +249,34 @@ pub fn jwt_router(cfg: Config) -> Router<()> {
 /// Share access to the singleton [`JwtLifecycle`]. Falls back to a
 /// default-config build for tests or unwired setups so the panic
 /// surface is "401: invalid token" rather than "deref of None".
+fn router_state() -> &'static RouterState {
+    JWT.get_or_init(|| RouterState {
+        jwt: Config::default().build_jwt(),
+        extra_claims: None,
+    })
+}
+
 fn jwt_handle() -> &'static JwtLifecycle {
-    JWT.get_or_init(|| Config::default().build_jwt())
+    &router_state().jwt
+}
+
+/// Claims for a freshly issued login pair: the app's hook first, then
+/// the router's own `tenant`.
+///
+/// The order is the point. `tenant` is what stops a token signed on
+/// one subdomain being replayed on another, so a hook must not be able
+/// to overwrite it — and a hook that tries is a mistake worth ignoring
+/// rather than a request worth honouring (#1190).
+fn login_claims(
+    hook: Option<&ClaimsHook>,
+    ctx: &ClaimsContext<'_>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut custom = hook.map_or_else(serde_json::Map::new, |h| h(ctx));
+    custom.insert(
+        "tenant".to_owned(),
+        serde_json::Value::String(ctx.tenant_slug.to_owned()),
+    );
+    custom
 }
 
 // ---------------------------------------------------------------- Handlers
@@ -312,9 +398,17 @@ async fn login(
     // means "the user with id=1", and id=1 likely exists on
     // every tenant. With the binding, verify checks the resolved
     // request's tenant slug against the claim.
-    let custom = serde_json::json!({"tenant": t.org.slug});
+    let custom = login_claims(
+        router_state().extra_claims.as_ref(),
+        &ClaimsContext {
+            user_id,
+            username: &user.username,
+            is_superuser: user.is_superuser,
+            tenant_slug: &t.org.slug,
+        },
+    );
     let pair = jwt_handle()
-        .issue_pair_with(user_id, custom.as_object().cloned().unwrap_or_default())
+        .issue_pair_with(user_id, custom)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 
     Ok(Json(LoginOutput {
@@ -677,6 +771,95 @@ mod tests {
         assert_eq!(cfg.access_ttl_secs, 900);
         assert_eq!(cfg.refresh_ttl_secs, 7 * 86400);
         assert!(cfg.session_secret.is_none());
+    }
+
+    /// The claims hook reaches the token, and the router's `tenant`
+    /// binding survives a hook that tries to replace it (#1190).
+    #[test]
+    fn the_claims_hook_adds_claims_but_cannot_rewrite_tenant() {
+        let ctx = ClaimsContext {
+            user_id: 7,
+            username: "alice",
+            is_superuser: false,
+            tenant_slug: "acme",
+        };
+
+        // No hook: the tenant binding alone.
+        let plain = login_claims(None, &ctx);
+        assert_eq!(plain.get("tenant").and_then(|v| v.as_str()), Some("acme"));
+        assert_eq!(plain.len(), 1);
+
+        // A hook adding its own claims — the case the issue was filed
+        // for (`fam` is a token family, for replay detection).
+        let hook: ClaimsHook = Arc::new(|c: &ClaimsContext<'_>| {
+            let mut m = serde_json::Map::new();
+            m.insert("fam".into(), serde_json::Value::String("f-1".into()));
+            m.insert("su".into(), serde_json::Value::Bool(c.is_superuser));
+            m.insert(
+                "who".into(),
+                serde_json::Value::String(c.username.to_owned()),
+            );
+            m
+        });
+        let out = login_claims(Some(&hook), &ctx);
+        assert_eq!(out.get("fam").and_then(|v| v.as_str()), Some("f-1"));
+        assert_eq!(
+            out.get("su").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(out.get("who").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(out.get("tenant").and_then(|v| v.as_str()), Some("acme"));
+
+        // A hook that tries to forge a different tenant loses.
+        let evil: ClaimsHook = Arc::new(|_: &ClaimsContext<'_>| {
+            let mut m = serde_json::Map::new();
+            m.insert("tenant".into(), serde_json::Value::String("victim".into()));
+            m
+        });
+        let out = login_claims(Some(&evil), &ctx);
+        assert_eq!(
+            out.get("tenant").and_then(|v| v.as_str()),
+            Some("acme"),
+            "the router's tenant binding must win — it is what stops \
+             cross-subdomain replay"
+        );
+    }
+
+    /// A custom store reaches the lifecycle the router hands its
+    /// handlers, rather than being dropped on the floor (#1190).
+    #[tokio::test]
+    async fn a_custom_jti_store_is_installed() {
+        use crate::jti_store::{JtiFuture, JtiStore};
+
+        #[derive(Default)]
+        struct MarkerStore(std::sync::atomic::AtomicUsize);
+        impl JtiStore for MarkerStore {
+            fn is_used<'a>(&'a self, _jti: &'a str) -> JtiFuture<'a, bool> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Box::pin(async { false })
+            }
+            fn mark_used<'a>(&'a self, _jti: &'a str, _exp_unix: i64) -> JtiFuture<'a, bool> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Box::pin(async { true })
+            }
+        }
+
+        let store = Arc::new(MarkerStore::default());
+        let cfg = Config {
+            session_secret: Some(b"a-test-signing-key-of-32-bytes!!".to_vec()),
+            jti_store: Some(store.clone()),
+            ..Config::default()
+        };
+        let jwt = cfg.build_jwt();
+        let pair = jwt.issue_pair(1);
+
+        // Revoking goes through the store we installed. Against the
+        // default in-memory store this counter stays at 0.
+        jwt.revoke(&pair.access).await;
+        assert!(
+            store.0.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the configured JtiStore must be the one the lifecycle uses"
+        );
     }
 
     #[test]
