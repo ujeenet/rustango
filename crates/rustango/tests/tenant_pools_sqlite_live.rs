@@ -107,3 +107,63 @@ async fn tenant_pools_sqlite_cache_persists() {
     pools.invalidate(&org.slug).await;
     assert_eq!(pools.cached_database_pool_count().await, 0);
 }
+
+/// Past the cap the cache evicts its most idle tenant instead of
+/// refusing (#1527). Asserts both halves: the over-cap tenant is
+/// served, and the cache stays bounded.
+#[tokio::test]
+async fn database_cache_evicts_the_idle_tenant_instead_of_refusing() {
+    let registry: sqlx::SqlitePool = sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("registry pool");
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        max_cached_database_pools: 2,
+        ..Default::default()
+    };
+    let pools: TenantPools<sqlx::Sqlite> = TenantPools::new(registry).config(cfg);
+
+    let org = |n: usize| {
+        fake_db_org(
+            &format!("evict{n}"),
+            &format!("sqlite:file:tenant_pools_evict_{n}?mode=memory&cache=shared"),
+        )
+    };
+
+    // Fill to the cap, then touch tenant 0 so tenant 1 is the idle one.
+    for n in 0..2 {
+        pools.database_pool_for_org(&org(n)).await.expect("fill");
+    }
+    assert_eq!(pools.cached_database_pool_count().await, 2);
+    pools
+        .database_pool_for_org(&org(0))
+        .await
+        .expect("touch 0 so it is not the eviction victim");
+
+    // The over-cap tenant must get a usable pool, not an error.
+    let mut conn = pools
+        .database_acquire(&org(2))
+        .await
+        .expect("tenant past the cap must still be served");
+    sqlx::query("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)")
+        .execute(&mut **conn)
+        .await
+        .expect("the evicting path must hand back a live pool");
+    drop(conn);
+
+    // And the cache must still be bounded.
+    assert_eq!(
+        pools.cached_database_pool_count().await,
+        2,
+        "eviction must hold the cache at the cap, not grow past it",
+    );
+
+    // The old bug returned the same error forever, so one success is
+    // not enough.
+    for _ in 0..3 {
+        pools
+            .database_pool_for_org(&org(2))
+            .await
+            .expect("over-cap tenant stays served on later requests");
+    }
+    assert_eq!(pools.cached_database_pool_count().await, 2);
+}

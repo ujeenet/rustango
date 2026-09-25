@@ -22,30 +22,24 @@
 //!
 //! ## Cache shape
 //!
-//! Database-mode pools live in an `RwLock<HashMap<slug, Arc<PgPool>>>`.
-//! Bounded by [`TenantPoolsConfig::max_cached_database_pools`] —
-//! when the cache is full, the next `pool_for_org` for an
-//! uncached org returns a [`TenancyError::Validation`] error. A real
-//! LRU evictor lands in a follow-up; the bounded-with-error semantics
-//! is the safest first version (silent eviction is its own footgun).
+//! Both caches are `RwLock<HashMap<slug, CachedPool>>`, bounded, and
+//! LRU past their cap: the most idle entry is evicted and the new
+//! tenant takes the slot. The cap is the live pool count, so the
+//! connection budgets below are real. Before 0.57.12 database mode
+//! refused forever (#1527) and schema mode rebuilt a pool per request
+//! (#1528).
 //!
-//! Schema-mode tenants don't consume *that* cache — acquiring a
-//! connection reuses the registry pool. They do have a second, separate
-//! cache: [`TenantPools::scoped_pool`] hands out a small pool with
-//! `search_path` baked into its connect options, and those are cached
-//! per slug under [`TenantPoolsConfig::max_cached_scoped_pools`]
-//! (#1235). Before that they were rebuilt on every call, which meant a
-//! full TCP + TLS + auth round-trip per request, since the `Tenant`
-//! extractor resolves one per request — the opposite of what schema
-//! mode is for. Past the cap they fall back to the old per-call build
-//! and warn, rather than erroring, because schema mode's whole premise
-//! is a high tenant count.
+//! Schema-mode tenants don't consume the *database* cache — acquiring
+//! a connection reuses the registry pool. Their separate cache holds
+//! the `search_path`-scoped pools [`TenantPools::scoped_pool`] hands
+//! out (#1235).
 //!
 //! The two budgets are deliberately separate: one shared cap would let
 //! schema-mode tenants silently eat a mixed deployment's database-mode
 //! capacity.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(feature = "postgres")]
@@ -61,9 +55,12 @@ use super::secrets::{LiteralSecretsResolver, SecretsResolver};
 #[derive(Debug, Clone)]
 pub struct TenantPoolsConfig {
     /// Maximum number of database-mode pools cached simultaneously.
-    /// When the cache is full, the next uncached database-mode tenant
-    /// errors out (no silent eviction). Schema-mode tenants don't
-    /// count against this limit. Default: 64.
+    /// Past it the most idle tenant is evicted and reconnects on its
+    /// next request. Schema-mode tenants don't count against this.
+    ///
+    /// It is the live pool count, so the connection ceiling is this
+    /// times `database_pool_max_connections`. `0` disables caching.
+    /// Default: 64.
     pub max_cached_database_pools: usize,
     /// Per-pool `max_connections` for database-mode tenants. Keep
     /// small enough that a fleet fan-out doesn't exhaust Postgres'
@@ -129,11 +126,11 @@ pub struct TenantPoolsConfig {
     /// deployment's database-mode capacity the moment schema-mode
     /// tenants started consuming slots.
     ///
-    /// Past the cap, `scoped_pool` falls back to building a transient
-    /// pool per call — the pre-#1235 behavior — and warns, rather
-    /// than erroring. Schema mode exists for high tenant counts, so
-    /// turning "more tenants than the cap" into a hard failure would
-    /// break exactly the deployments the mode is for.
+    /// Past the cap the most idle scoped pool is evicted and the new
+    /// tenant takes its slot. Safe here because a scoped pool is
+    /// cheap to rebuild: same server, only `search_path` differs.
+    /// Before 0.57.12 it returned an uncached pool per call instead,
+    /// uncapped (#1528).
     ///
     /// Budget the worst case as `max_cached_scoped_pools *
     /// scoped_pool_max_connections` concurrent connections against
@@ -343,17 +340,72 @@ impl TenantPool<sqlx::Postgres> {
 /// live on `impl TenantPools<sqlx::Postgres>` only — the type
 /// system forbids schema-mode on non-PG. Database-mode methods are
 /// generic and work on any backend.
+/// A cached tenant pool plus its LRU stamp. The stamp is a counter,
+/// not a clock — eviction needs only the ordering.
+///
+/// Shared with [`super::database_pools`] so the two never drift into
+/// different cap policies, which is how they got here (#1527).
+pub(super) struct CachedPool<DB: Database> {
+    pub(super) pool: Arc<sqlx::Pool<DB>>,
+    last_used: AtomicU64,
+}
+
+impl<DB: Database> CachedPool<DB> {
+    pub(super) fn new(pool: Arc<sqlx::Pool<DB>>, tick: u64) -> Self {
+        Self {
+            pool,
+            last_used: AtomicU64::new(tick),
+        }
+    }
+
+    /// Mark as just used. Takes `&self` so a hit records itself under
+    /// the read lock.
+    pub(super) fn touch(&self, tick: u64) {
+        self.last_used.store(tick, Ordering::Relaxed);
+    }
+}
+
+/// Drop least-recently-used entries until one more fits under `cap`,
+/// returning the evicted slugs to log. Evicting only drops this map's
+/// handle; sqlx pools are ref-counted, so a live holder keeps theirs.
+pub(super) fn evict_to_fit<DB: Database>(
+    cache: &mut HashMap<String, CachedPool<DB>>,
+    cap: usize,
+) -> Vec<String> {
+    let mut evicted = Vec::new();
+    // `cap == 0` would loop forever looking for room that cannot
+    // exist; callers treat 0 as "do not cache".
+    while cap > 0 && cache.len() >= cap {
+        let Some(victim) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
+            .map(|(slug, _)| slug.clone())
+        else {
+            break;
+        };
+        cache.remove(&victim);
+        evicted.push(victim);
+    }
+    evicted
+}
+
 pub struct TenantPools<DB: Database = DefaultTenantDb> {
     registry: sqlx::Pool<DB>,
     config: TenantPoolsConfig,
     secrets: Arc<dyn SecretsResolver>,
-    cache: RwLock<HashMap<String, Arc<sqlx::Pool<DB>>>>,
+    /// Source of `CachedPool::last_used` stamps, shared by both caches
+    /// so their orderings never collide.
+    lru_tick: AtomicU64,
+    /// Latch for the near-cap warning, so it fires on the crossing
+    /// rather than on every insert (#1528).
+    warned_near_cap: std::sync::atomic::AtomicBool,
+    cache: RwLock<HashMap<String, CachedPool<DB>>>,
     /// Schema-mode scoped pools, keyed by `slug` (#1235). Separate
     /// from `cache` so the two capacity budgets can't cannibalise
     /// each other. Generic over `DB` rather than `PgPool`-typed so
     /// this file still builds under `--no-default-features --features
     /// sqlite,tenancy`; only the Postgres impl ever populates it.
-    scoped_cache: RwLock<HashMap<String, Arc<sqlx::Pool<DB>>>>,
+    scoped_cache: RwLock<HashMap<String, CachedPool<DB>>>,
 }
 
 impl<DB: Database> TenantPools<DB> {
@@ -376,8 +428,59 @@ impl<DB: Database> TenantPools<DB> {
             registry,
             config: TenantPoolsConfig::default(),
             secrets: Arc::new(secrets),
+            lru_tick: AtomicU64::new(0),
+            warned_near_cap: std::sync::atomic::AtomicBool::new(false),
             cache: RwLock::new(HashMap::new()),
             scoped_cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Next LRU stamp. Relaxed is enough: the value only has to be
+    /// unique and increasing, and every reader of it already holds the
+    /// cache lock.
+    fn next_tick(&self) -> u64 {
+        self.lru_tick.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Warn once a cache passes 80% of its cap, so the operator hears
+    /// about it while it is still headroom and not an incident.
+    ///
+    /// Warns **once per crossing**, not once per insert. A cache that
+    /// sits at its cap inserts on every miss, and an unbounded warn
+    /// there floods the log with the message meant to be noticed
+    /// (#1528). `warned_near_cap` latches on the way up and resets
+    /// when occupancy falls back below the threshold, so a cache
+    /// hovering on the boundary cannot chatter either.
+    fn warn_if_near_cap(&self, len: usize, cap: usize, mode: &'static str) {
+        if self.claim_near_cap_warning(len, cap) {
+            tracing::warn!(
+                target: "rustango::tenancy::pools",
+                mode,
+                cached = len,
+                cap,
+                "tenant pool cache is near its cap; past it, the least \
+                 recently used tenant is evicted and reconnects on its \
+                 next request",
+            );
+        }
+    }
+
+    /// `true` exactly once per crossing into the near-cap band.
+    ///
+    /// Separated from the logging so a test can count the *decisions*.
+    /// Asserting the latch field instead would not catch the bug this
+    /// exists to prevent: a version that warns every time while still
+    /// setting the latch passes that assertion (#1528).
+    fn claim_near_cap_warning(&self, len: usize, cap: usize) -> bool {
+        if cap == 0 {
+            return false;
+        }
+        if len * 5 >= cap * 4 {
+            // `swap` is the whole point: only the transition claims it.
+            !self.warned_near_cap.swap(true, Ordering::Relaxed)
+        } else {
+            self.warned_near_cap.store(false, Ordering::Relaxed);
+            false
         }
     }
 
@@ -672,11 +775,13 @@ impl<DB: Database> TenantPools<DB> {
     }
 
     async fn pool_for_database_mode(&self, org: &Org) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
-        // Fast path: cache hit.
+        // Fast path: cache hit. Recording the hit needs only `&`, so
+        // the LRU stamp costs no write lock here.
         {
             let cache = self.cache.read().await;
-            if let Some(pool) = cache.get(&org.slug) {
-                return Ok(Arc::clone(pool));
+            if let Some(entry) = cache.get(&org.slug) {
+                entry.touch(self.next_tick());
+                return Ok(Arc::clone(&entry.pool));
             }
         }
         // Cache miss — instrument so the cold path is visible in
@@ -711,20 +816,36 @@ impl<DB: Database> TenantPools<DB> {
         );
         let pool = Arc::new(pool);
 
-        // Insert under write lock; check for race + capacity.
+        // Insert under write lock; check for race, then make room.
         let mut cache = self.cache.write().await;
         if let Some(existing) = cache.get(&org.slug) {
-            return Ok(Arc::clone(existing));
+            existing.touch(self.next_tick());
+            return Ok(Arc::clone(&existing.pool));
         }
-        if cache.len() >= self.config.max_cached_database_pools {
-            return Err(TenancyError::Validation(format!(
-                "tenant pool cache is full ({} cached); raise \
-                 `TenantPoolsConfig::max_cached_database_pools` or \
-                 invalidate idle tenants",
-                cache.len(),
-            )));
+        // Evict rather than refuse: refusing left tenant 65 down until
+        // restart (#1527).
+        for slug in evict_to_fit(&mut cache, self.config.max_cached_database_pools) {
+            tracing::info!(
+                target: "rustango::tenancy::pools",
+                evicted = %slug,
+                for_slug = %org.slug,
+                cap = self.config.max_cached_database_pools,
+                "evicted the least recently used tenant pool to make room",
+            );
         }
-        cache.insert(org.slug.clone(), Arc::clone(&pool));
+        if self.config.max_cached_database_pools == 0 {
+            // Caching disabled: hand back the pool without storing it.
+            return Ok(pool);
+        }
+        cache.insert(
+            org.slug.clone(),
+            CachedPool::new(Arc::clone(&pool), self.next_tick()),
+        );
+        self.warn_if_near_cap(
+            cache.len(),
+            self.config.max_cached_database_pools,
+            "database",
+        );
         Ok(pool)
     }
 }
@@ -967,8 +1088,9 @@ impl TenantPools<sqlx::Postgres> {
                 // Fast path: cache hit. Mirrors `pool_for_database_mode`.
                 {
                     let cache = self.scoped_cache.read().await;
-                    if let Some(pool) = cache.get(&org.slug) {
-                        return Ok((**pool).clone());
+                    if let Some(entry) = cache.get(&org.slug) {
+                        entry.touch(self.next_tick());
+                        return Ok((*entry.pool).clone());
                     }
                 }
 
@@ -986,22 +1108,32 @@ impl TenantPools<sqlx::Postgres> {
                     "tenant pool connected (schema mode)",
                 );
 
-                // Insert under write lock; check for race + capacity.
+                // Insert under write lock; check for race, then make room.
                 let mut cache = self.scoped_cache.write().await;
                 if let Some(existing) = cache.get(&org.slug) {
-                    return Ok((**existing).clone());
+                    existing.touch(self.next_tick());
+                    return Ok((*existing.pool).clone());
                 }
-                if cache.len() >= self.config.max_cached_scoped_pools {
-                    tracing::warn!(
+                // Evict rather than skip the cache: skipping built a
+                // fresh pool per request, uncapped (#1528). Safe here
+                // because a scoped pool is cheap to rebuild.
+                for slug in evict_to_fit(&mut cache, self.config.max_cached_scoped_pools) {
+                    tracing::info!(
                         target: "rustango::tenancy::pools",
-                        slug = %org.slug,
+                        evicted = %slug,
+                        for_slug = %org.slug,
                         cap = self.config.max_cached_scoped_pools,
-                        "scoped-pool cache is full; this tenant rebuilds its pool on every \
-                         request. Raise `TenantPoolsConfig::max_cached_scoped_pools`.",
+                        "evicted the least recently used scoped pool to make room",
                     );
+                }
+                if self.config.max_cached_scoped_pools == 0 {
                     return Ok(scoped);
                 }
-                cache.insert(org.slug.clone(), Arc::new(scoped.clone()));
+                cache.insert(
+                    org.slug.clone(),
+                    CachedPool::new(Arc::new(scoped.clone()), self.next_tick()),
+                );
+                self.warn_if_near_cap(cache.len(), self.config.max_cached_scoped_pools, "schema");
                 Ok(scoped)
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
@@ -1249,6 +1381,40 @@ fn quote_ident(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The near-cap warning fires on the crossing, not on every
+    /// insert. A cache sitting at its cap inserts on every miss, so an
+    /// unbounded warn there floods the log with the very message meant
+    /// to be noticed (#1528).
+    ///
+    /// Asserts the latch rather than the log line: the state machine
+    /// is what decides whether the warn repeats, and a test that
+    /// captured one `warn!` would pass either way.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_near_cap_warning_latches_and_resets() {
+        use std::sync::atomic::Ordering;
+        let pools: TenantPools<sqlx::Sqlite> =
+            TenantPools::new(sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"));
+        // Below the threshold: no warning.
+        assert!(!pools.claim_near_cap_warning(7, 10), "70% is not near");
+
+        // The crossing warns exactly once. Every insert after it, while
+        // the cache stays full, must stay silent — this is the assertion
+        // that fails against an unbounded warn.
+        assert!(pools.claim_near_cap_warning(8, 10), "80% warns");
+        assert!(!pools.claim_near_cap_warning(9, 10), "no repeat at 90%");
+        assert!(!pools.claim_near_cap_warning(10, 10), "no repeat at cap");
+        assert!(!pools.claim_near_cap_warning(10, 10), "still no repeat");
+
+        // Falling back below re-arms it for the next genuine crossing.
+        assert!(!pools.claim_near_cap_warning(3, 10), "back under: silent");
+        assert!(pools.claim_near_cap_warning(9, 10), "second crossing warns");
+
+        // `cap == 0` means caching is off; it must never warn.
+        pools.warned_near_cap.store(false, Ordering::Relaxed);
+        assert!(!pools.claim_near_cap_warning(0, 0), "cap 0 must not warn");
+    }
 
     #[cfg(feature = "postgres")]
     #[test]

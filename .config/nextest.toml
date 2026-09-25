@@ -31,6 +31,25 @@ fail-fast = false
 status-level = "fail"
 final-status-level = "slow"
 
+[profile.live]
+# Run one test at a time. The live suites all point at the same
+# database and most create, truncate or drop the framework tables in
+# setup, so in parallel they fight over the catalog rather than test
+# anything. Measured on this workspace: 758 failures with the default
+# profile against `postgres:16-alpine`, 0 here. MySQL: 95 vs 0 (#1624).
+#
+# The in-process `tokio::sync::Mutex` guards in those suites cannot
+# help — nextest gives each test its own process, so a mutex in one
+# serializes nothing against another.
+#
+#   cargo nextest run --profile live --workspace --all-features
+#
+# This makes the run correct, not fast. Per-process databases (#1624
+# option 2) are what buy back the parallelism.
+test-threads = 1
+slow-timeout = { period = "60s", terminate-after = 10 }
+fail-fast = false
+
 [profile.ci]
 # CI wants the whole picture in one go, and a little more patience for a
 # cold or loaded runner.

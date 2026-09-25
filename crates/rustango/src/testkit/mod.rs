@@ -167,18 +167,12 @@ pub async fn migrate_framework(pool: &Pool) -> Result<(), MigrateError> {
     let batch =
         crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
             .map_err(MigrateError::Validation)?;
-    for sql in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
-        // Idempotent: `render` emits plain CREATE (not IF NOT EXISTS), so
-        // swallow "already exists" / duplicate errors — a test may have
-        // pre-created some framework tables (e.g. via apply_all_pool).
-        if let Err(e) = crate::sql::raw_execute_pool(pool, sql, ::std::vec::Vec::new()).await {
-            let msg = format!("{e}").to_lowercase();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(e.into());
-        }
-    }
+    // The sixth copy of this loop used to live here, matching English
+    // error text. It is the path most live suites use to build their
+    // tables, so a genuinely failed setup reported `Ok` (#1646).
+    crate::migrate::apply_idempotent(pool, &batch)
+        .await
+        .map_err(|e| MigrateError::Validation(format!("{e}")))?;
     Ok(())
 }
 

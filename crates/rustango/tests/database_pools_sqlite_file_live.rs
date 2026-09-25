@@ -84,3 +84,44 @@ async fn template_creates_per_tenant_file_on_disk() {
     let slug: String = row.try_get("slug").expect("slug");
     assert_eq!(slug, "beta");
 }
+
+/// `DatabasePools` evicts past the cap like `TenantPools` does. It
+/// carried its own copy of the refuse-on-full policy — "same policy
+/// as TenantPools for consistency", said the comment — and was missed
+/// when that policy changed (#1527).
+#[tokio::test]
+async fn cache_evicts_the_idle_tenant_instead_of_refusing() {
+    let dir = TempDir::new().expect("tempdir");
+    let template = format!(
+        "sqlite:{}/{{slug}}.db?mode=rwc",
+        dir.path().to_string_lossy()
+    );
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        max_cached_database_pools: 2,
+        ..Default::default()
+    };
+    let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite)
+        .with_url_template(&template)
+        .config(cfg);
+
+    for n in 0..2 {
+        pools
+            .pool_for_org(&fake_sqlite_org(&format!("t{n}")))
+            .await
+            .expect("fill to cap");
+    }
+    // Touch t0 so t1 is the idle one.
+    pools
+        .pool_for_org(&fake_sqlite_org("t0"))
+        .await
+        .expect("touch t0");
+
+    // The over-cap tenant must be served, repeatedly — the old bug
+    // returned the same error forever.
+    for _ in 0..3 {
+        pools
+            .pool_for_org(&fake_sqlite_org("t2"))
+            .await
+            .expect("tenant past the cap must still be served");
+    }
+}

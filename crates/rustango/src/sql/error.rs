@@ -308,10 +308,33 @@ pub enum ExecError {
 #[must_use]
 pub fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
     if let crate::sql::sqlx::Error::Database(db) = e {
-        return db.code().as_deref() == Some("42000")
-            || db.message().contains("Duplicate key name");
+        return db
+            .try_downcast_ref::<crate::sql::sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|my| mysql_duplicate_decision(my.number()));
     }
     false
+}
+
+/// The decision, over the error *number*, so a test can reach it
+/// without a driver error.
+///
+/// Numbers, not `SQLSTATE`s. This predicate used to match SQLSTATE
+/// `42000`, which on MySQL 8 is the catch-all for DDL errors — it also
+/// covers 1064 syntax error, 1071 key-too-long, 1072 unknown key column
+/// and 1170 TEXT-in-index. `run_ddl_idempotent` therefore returned `Ok`
+/// for statements that never ran (#1646). The `|| contains("Duplicate
+/// key name")` arm was English-only on top of that; MySQL localises.
+// Its only caller is `cfg(mysql)`, but the tests above it run on every
+// backend, so compile it always rather than gate it.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+#[must_use]
+pub(crate) fn mysql_duplicate_decision(number: u16) -> bool {
+    matches!(
+        number,
+        1050  // ER_TABLE_EXISTS_ERROR
+        | 1061  // ER_DUP_KEYNAME
+        | 1826 // ER_FK_DUP_NAME
+    )
 }
 
 /// `cfg(not(mysql))` stub — see the documented variant above.
@@ -461,4 +484,29 @@ mod pg_dup_object_tests {
 #[must_use]
 pub fn is_pg_dup_object_error(_e: &crate::sql::sqlx::Error) -> bool {
     false
+}
+
+#[cfg(test)]
+mod mysql_duplicate_tests {
+    use super::mysql_duplicate_decision as decide;
+
+    #[test]
+    fn the_three_duplicate_numbers_are_swallowed() {
+        assert!(decide(1050), "ER_TABLE_EXISTS_ERROR");
+        assert!(decide(1061), "ER_DUP_KEYNAME");
+        assert!(decide(1826), "ER_FK_DUP_NAME");
+    }
+
+    /// The regression this function exists to stop. Every one of these
+    /// reports SQLSTATE `42000`, so the old predicate swallowed them
+    /// and `run_ddl_idempotent` reported success for an index that was
+    /// never created (#1646). Measured on MySQL 8.0.46.
+    #[test]
+    fn the_rest_of_sqlstate_42000_still_propagates() {
+        assert!(!decide(1064), "syntax error");
+        assert!(!decide(1071), "key too long");
+        assert!(!decide(1072), "unknown column in key");
+        assert!(!decide(1170), "BLOB/TEXT in key without a length");
+        assert!(!decide(1062), "ER_DUP_ENTRY: the index genuinely failed");
+    }
 }

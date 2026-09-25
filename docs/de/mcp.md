@@ -171,7 +171,7 @@ jedem Mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.57.11" },
+    "serverInfo": { "name": "rustango", "version": "0.57.12" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 

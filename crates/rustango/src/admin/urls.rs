@@ -12,6 +12,11 @@ use std::sync::Arc;
 use crate::core::SqlValue;
 use crate::sql::Pool;
 use axum::routing::{get, post};
+
+/// Path segment for a model's create form. The route below and the
+/// post-save redirect in [`super::views`] both read it, so they cannot
+/// name different paths (#1635).
+pub(crate) const CREATE_SEGMENT: &str = "new";
 use axum::Router;
 
 use super::errors::AdminError;
@@ -616,7 +621,10 @@ impl Builder {
                 "/{table}",
                 get(views::table_view).post(views::create_submit),
             )
-            .route("/{table}/new", get(views::create_form))
+            .route(
+                &format!("/{{table}}/{CREATE_SEGMENT}"),
+                get(views::create_form),
+            )
             .route("/{table}/__action", post(views::action_submit))
             .route("/{table}/__autocomplete", get(views::autocomplete_view))
             .route(
