@@ -4,6 +4,25 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a JWT with no `exp` never expired, and `decode` accepted it (#1538)
+
+`decode` skipped the expiry check when the claim was absent, so a
+token minted without `.ttl()` or `.expires_at()` was a permanent
+credential. `Claims::new(sub)` sets only `sub` and `iat`, so
+forgetting the TTL produced one silently.
+
+`exp` is required now, and its absence is `JwtError::MissingExp`
+rather than a pass. Non-expiring service tokens are a real case, so
+they get the explicit branch: `decode_allowing_no_exp` (and
+`decode_at_allowing_no_exp`), which still checks the signature and
+`nbf`.
+
+`JwtLifecycle` is unaffected — its `JwtClaims` has always had a
+required `exp` and always sets a TTL.
+
+**Breaking:** `JwtError` gains a variant, and a token your own code
+mints without an expiry now fails to decode. That is the bug.
+
 ## [0.57.11] — 2026-09-21
 
 Two unrelated threads. The last of the `auto_now_add` timestamp bugs,
