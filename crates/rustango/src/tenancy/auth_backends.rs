@@ -185,7 +185,12 @@ pub struct ApiKey {
     /// accepted, minor exposure — a DB leak reveals which prefixes exist
     /// but NOT the secret (the secret half is argon2id-hashed in
     /// `key_hash`), so a stolen prefix can't authenticate on its own.
-    #[rustango(max_length = 8)]
+    ///
+    /// Indexed: every Bearer request looks the row up by this column,
+    /// so without one it is a sequential scan on the hit path — 5.9 ms
+    /// at 100k keys against 0.025 ms indexed, growing with every key
+    /// ever issued (#1647).
+    #[rustango(max_length = 8, index)]
     pub key_prefix: String,
     /// argon2id hash of the 32-char secret. Never returned to callers.
     #[rustango(max_length = 255)]
@@ -234,18 +239,7 @@ pub async fn ensure_api_keys_table_pool(pool: &Pool) -> Result<(), sqlx::Error> 
     let batch =
         crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
             .map_err(sqlx::Error::Protocol)?;
-    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
-        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
-            let msg = format!("{e}").to_lowercase();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(match e {
-                crate::sql::ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            });
-        }
-    }
+    crate::migrate::apply_idempotent(pool, &batch).await?;
     Ok(())
 }
 

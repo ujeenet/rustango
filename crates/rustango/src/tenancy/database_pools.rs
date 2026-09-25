@@ -101,7 +101,9 @@ impl<DB: Database> std::ops::DerefMut for DatabaseConn<DB> {
 pub struct DatabasePools<DB: Database> {
     config: TenantPoolsConfig,
     secrets: Arc<dyn SecretsResolver>,
-    cache: RwLock<HashMap<String, Arc<Pool<DB>>>>,
+    /// LRU stamp source, as in [`super::pools`].
+    lru_tick: std::sync::atomic::AtomicU64,
+    cache: RwLock<HashMap<String, super::pools::CachedPool<DB>>>,
     /// The backend type this registry serves. Validated against each
     /// `org.backend_kind` on `pool_for_org` so a mis-routed tenant
     /// fails loudly instead of silently building the wrong pool.
@@ -130,12 +132,19 @@ impl<DB: Database> DatabasePools<DB> {
         Self::with_secrets(backend, LiteralSecretsResolver)
     }
 
+    /// Next LRU stamp. See [`super::pools::CachedPool`].
+    fn next_tick(&self) -> u64 {
+        self.lru_tick
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Construct with a user-supplied secrets resolver.
     #[must_use]
     pub fn with_secrets<R: SecretsResolver>(backend: BackendKind, secrets: R) -> Self {
         Self {
             config: TenantPoolsConfig::default(),
             secrets: Arc::new(secrets),
+            lru_tick: std::sync::atomic::AtomicU64::new(0),
             cache: RwLock::new(HashMap::new()),
             backend,
             url_template: None,
@@ -240,8 +249,11 @@ impl<DB: Database> DatabasePools<DB> {
         // Fast path — cache hit.
         {
             let cache = self.cache.read().await;
-            if let Some(pool) = cache.get(&org.slug) {
-                return Ok(DatabasePool { pool: pool.clone() });
+            if let Some(entry) = cache.get(&org.slug) {
+                entry.touch(self.next_tick());
+                return Ok(DatabasePool {
+                    pool: entry.pool.clone(),
+                });
             }
         }
 
@@ -280,21 +292,30 @@ impl<DB: Database> DatabasePools<DB> {
         let mut cache = self.cache.write().await;
         // Re-check under write lock (race-loser case).
         if let Some(existing) = cache.get(&org.slug) {
+            existing.touch(self.next_tick());
             return Ok(DatabasePool {
-                pool: existing.clone(),
+                pool: existing.pool.clone(),
             });
         }
-        // Cap enforcement: when the cache is full and this tenant
-        // isn't already present, refuse to grow. Same policy as
-        // TenantPools for consistency.
-        if cache.len() >= self.config.max_cached_database_pools {
-            return Err(TenancyError::Validation(format!(
-                "database-pool cache is at cap ({}); \
-                 bump TenantPoolsConfig::max_cached_database_pools",
-                self.config.max_cached_database_pools
-            )));
+        // Evict the most idle tenant rather than refuse. Same policy
+        // as `TenantPools`, and the same type, so the two cannot drift
+        // apart again (#1527).
+        for slug in super::pools::evict_to_fit(&mut cache, self.config.max_cached_database_pools) {
+            tracing::info!(
+                target: "rustango::tenancy::pools",
+                evicted = %slug,
+                for_slug = %org.slug,
+                cap = self.config.max_cached_database_pools,
+                "evicted the least recently used tenant pool to make room",
+            );
         }
-        cache.insert(org.slug.clone(), pool_arc.clone());
+        if self.config.max_cached_database_pools == 0 {
+            return Ok(DatabasePool { pool: pool_arc });
+        }
+        cache.insert(
+            org.slug.clone(),
+            super::pools::CachedPool::new(pool_arc.clone(), self.next_tick()),
+        );
         Ok(DatabasePool { pool: pool_arc })
     }
 

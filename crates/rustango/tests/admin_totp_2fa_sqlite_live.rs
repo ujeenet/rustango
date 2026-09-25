@@ -88,3 +88,48 @@ async fn enroll_confirm_verify_lifecycle() {
     assert_eq!(got2.0, secret2.0, "new secret is the active one");
     assert_ne!(got2.0, secret.0, "old secret no longer stored");
 }
+
+/// An unreadable device table is an error, not "this admin has no
+/// second factor" (#1644).
+///
+/// `confirmed_secret` cannot tell the two apart — it returns `None`
+/// either way — and the login gate read that as "no 2FA" and granted
+/// the session on the password alone. `rustango_admin_totp` is
+/// `managed = false`, so a missing table is a reachable state.
+///
+/// The assertion is on the *checked* variant, because the plain one
+/// returns `None` in both cases and so proves nothing.
+#[tokio::test]
+async fn an_unreadable_device_table_is_an_error_not_an_absent_device() {
+    let pool = pool().await;
+    let uid = 7;
+    let secret = TotpSecret::generate();
+    totp_store::start_enrollment(&pool, uid, &secret)
+        .await
+        .expect("enroll");
+    totp_store::confirm(&pool, uid).await.expect("confirm");
+
+    // Enrolled and readable: Ok(Some).
+    assert!(
+        totp_store::confirmed_secret_checked(&pool, uid)
+            .await
+            .expect("readable")
+            .is_some(),
+        "an enrolled, confirmed admin must report a second factor"
+    );
+
+    rustango::sql::raw_execute_pool(&pool, "DROP TABLE rustango_admin_totp", Vec::new())
+        .await
+        .expect("drop the device table");
+
+    assert!(
+        totp_store::confirmed_secret_checked(&pool, uid)
+            .await
+            .is_err(),
+        "a missing device table must surface as an error; returning \
+         Ok(None) is what let the login gate skip 2FA entirely"
+    );
+    // And the lossy helper still cannot tell — which is why the gate
+    // must not use it.
+    assert!(totp_store::confirmed_secret(&pool, uid).await.is_none());
+}

@@ -9,9 +9,11 @@
 //! `rustango_csrf` cookie. Mismatch / missing → `403 Forbidden`.
 //!
 //! The cookie is `HttpOnly = false` (the SPA / form code MUST be
-//! able to read it), `SameSite = Lax`, `Secure` when the URL
-//! scheme is `https`. Token is 32 bytes of `OsRng` rendered as
-//! URL-safe base64 (no padding).
+//! able to read it) and `SameSite = Lax`. `Secure` comes from
+//! [`CsrfConfig::secure`] on the middleware path (default `true`) and
+//! from [`crate::session::secure_cookies`] in [`ensure_token`]; no
+//! path inspects the request's URL scheme. Token is 32 bytes of
+//! `OsRng` rendered as URL-safe base64 (no padding).
 //!
 //! Wire it as an axum layer:
 //!
@@ -672,7 +674,16 @@ pub fn ensure_token(
         return (existing, None);
     }
     let token = mint_token();
-    let cookie = format!("{cookie_name}={token}; Path=/; SameSite=Lax");
+    // `Secure` from the same policy the session cookies use: the boot
+    // override, else the prod tier. Without it this cookie went out over
+    // plaintext in every tier, so a MITM on one cleartext request could
+    // read or fix the token (#1608).
+    let secure = if crate::session::secure_cookies() {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!("{cookie_name}={token}; Path=/; SameSite=Lax{secure}");
     (token, Some(cookie))
 }
 
@@ -917,6 +928,28 @@ mod tests {
         use axum::http::Request;
         let req = Request::builder().body(Body::empty()).unwrap();
         assert_eq!(read_csrf_cookie(&req, "anything"), None);
+    }
+
+    /// The minted cookie carries `Secure` when the policy asks for it.
+    /// It never did, in any tier, which put the token on the wire in
+    /// plaintext (#1608).
+    #[test]
+    fn ensure_token_marks_the_cookie_secure_under_a_secure_policy() {
+        // `SECURE_COOKIES_OVERRIDE` is a `OnceLock`, and nextest runs
+        // each test in its own process, so this is ours to set. If
+        // something did get there first, only assert when the policy it
+        // chose is the one this test is about.
+        let ours = crate::session::set_secure_cookies(true);
+        if !ours && !crate::session::secure_cookies() {
+            return;
+        }
+        let headers = axum::http::HeaderMap::new();
+        let (_token, set_cookie) = ensure_token(&headers, CSRF_COOKIE);
+        let cookie = set_cookie.expect("no cookie in the request, so one is minted");
+        assert!(
+            cookie.contains("; Secure"),
+            "policy is secure, so the cookie must say so: {cookie}"
+        );
     }
 
     /// `is_form_encoded` recognizes the canonical content type +

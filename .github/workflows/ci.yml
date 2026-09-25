@@ -306,6 +306,7 @@ jobs:
             --test every_serving_path_is_observable \
             --test every_migrate_path_normalises_datetimes \
             --test every_structural_guard_runs_in_ci \
+            --test live_profile_stays_serial \
             --test live_suites_fail_loudly \
             --test macro_internals_stays_internal \
             --test no_orphaned_doc_comments \
@@ -334,6 +335,25 @@ jobs:
             --test sqlite_datetime_normalise \
             --test tenant_datetime_sweep_sqlite_file_live \
             --test cursor_pagination_on_a_timestamp
+      # Lib tests on feature sets WITHOUT tenancy, which nothing here
+      # compiled. `src/` is mostly ungated, so an ungated reference to a
+      # `#[cfg]`-gated module is a hard error on these sets and a silent
+      # pass on every job that runs — `tests_compile` covers
+      # --all-features and sqlite,tenancy, and `feature_combos` is
+      # `needs: gate`.
+      #
+      # That is not hypothetical: #1643 added a unit test naming
+      # `crate::tenancy::` from ungated `migrate` and it went green here
+      # (#1643 review, tests-001/007).
+      #
+      # Run them rather than `--no-run`: `the_guards_job_is_actually_ungated`
+      # rejects `--no-run` in this job, and it is right to — compiling a
+      # guard without executing it is the failure mode this whole job
+      # exists to prevent. Executing also costs almost nothing here,
+      # since these are lib unit tests with no database.
+      - run: cargo test -p rustango --no-default-features --features sqlite --lib
+      - run: cargo test -p rustango --no-default-features --features postgres --lib
+      - run: cargo test -p rustango --no-default-features --features mysql --lib
 
   # Ungated, and the reason is #1572: a test file that does not build was
   # merging green.
@@ -1083,19 +1103,35 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
+      # MinIO withdrew its public images — `quay.io/minio/minio`, the `mc`
+      # client and the `dl.min.io` binary are all gone, so this job started
+      # every run with `unauthorized` and tested nothing (#1651). Bitnami's
+      # archive still serves the same server; the tag is pinned because an
+      # unpinned image is what let this break without a commit.
+      #
+      # `MINIO_DEFAULT_BUCKETS` replaces the `mc` step, which has no
+      # surviving image to pull.
+      #
+      # The wait loop now fails instead of falling through: it used to
+      # `break` on success and carry on regardless, so an unhealthy server
+      # surfaced later as an unexplained test failure.
       - name: Start MinIO
         run: |
           docker run -d --name minio -p 9100:9000 \
             -e MINIO_ROOT_USER=$RUSTANGO_S3_TEST_KEY \
             -e MINIO_ROOT_PASSWORD=$RUSTANGO_S3_TEST_SECRET \
-            quay.io/minio/minio:latest server /data
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:9100/minio/health/live && break
+            -e MINIO_DEFAULT_BUCKETS=$RUSTANGO_S3_TEST_BUCKET \
+            bitnamilegacy/minio:2025.7.23-debian-12-r5
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:9100/minio/health/live >/dev/null; then
+              echo "MinIO healthy after ${i}s"
+              exit 0
+            fi
             sleep 1
           done
-          docker run --rm --network host \
-            -e MC_HOST_m=http://$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET@127.0.0.1:9100 \
-            quay.io/minio/mc:latest mb --ignore-existing m/$RUSTANGO_S3_TEST_BUCKET
+          echo "MinIO did not become healthy" >&2
+          docker logs minio >&2 || true
+          exit 1
       - run: cargo test -p rustango --features postgres --test s3_live_presign
       # These 22 were the ones that exposed #1450 the first time they ran
       # against a real database. `--test-threads=1`: the setup helper

@@ -299,9 +299,9 @@ impl Cli {
     ///     });
     /// ```
     ///
-    /// Note `max_cached_database_pools` does not evict: past the cap an
-    /// uncached tenant errors rather than displacing another. Raise it
-    /// above your tenant count.
+    /// Past `max_cached_database_pools` the most idle tenant is
+    /// evicted and reconnects on its next request. Set it above your
+    /// tenant count to avoid the churn.
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn with_tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
