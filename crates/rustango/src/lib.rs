@@ -504,10 +504,8 @@ pub mod jsonapi;
 /// Internal: for raw HMAC, depend on `hmac` + `sha2` directly. The cfg list
 /// covers every feature that needs one of these primitives.
 #[cfg(any(
-    feature = "hmac-auth",
+    feature = "_signing",
     feature = "storage-s3",
-    feature = "signed_url",
-    feature = "jwt",
     feature = "csrf",
     feature = "totp",
 ))]
