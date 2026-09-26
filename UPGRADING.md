@@ -161,6 +161,21 @@ Embedded migrations need a rebuild.
 op before it. To keep that, split the file: the schema op in one
 migration, the callback alone in the next.
 
+### `require_bearer` and `verify_for_tenant` take a `JwtAuth`
+
+The JWT config no longer lives in a process global (#1190). Build one
+`JwtAuth` and share it; `jwt_router(cfg)` alone is unchanged.
+
+```rust
+let auth = JwtAuth::new(Config::default());
+api.layer(middleware::from_fn_with_state(auth.clone(), require_bearer))
+    .merge(auth.router())
+```
+
+`auth_routes::verify_for_tenant(t, slug)` is now
+`auth.verify_for_tenant(t, slug)`. Use the **same** `JwtAuth` for the
+router and the middleware, or a logout will not revoke for the middleware.
+
 ### `MigrateError` is now `#[non_exhaustive]`
 
 Only affects code that **matches exhaustively** on it. Add a `_ =>` arm:

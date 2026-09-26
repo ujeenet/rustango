@@ -785,7 +785,8 @@ use rustango::viewset::{OwnedBy, ViewSet};
 ViewSet::for_model(Note::SCHEMA)
     .filter_backend(OwnedBy::column("member_id"))
     .tenant_router("/api/notes")
-    .layer(axum::middleware::from_fn(
+    .layer(axum::middleware::from_fn_with_state(
+        auth.clone(), // el mismo `JwtAuth` que sirve `auth.router()`
         rustango::tenancy::auth_routes::require_bearer,
     ))
 ```

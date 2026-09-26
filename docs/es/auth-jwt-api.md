@@ -223,7 +223,7 @@ de refresco.
 
 Como la verificación consulta el almacén, `verify_access`, `verify_refresh`,
 `refresh`, `revoke` y los helpers de token de MCP / tenant
-(`mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`) son todos
+(`mcp::verify_agent_token`, `tenancy::auth_routes::JwtAuth::verify_for_tenant`) son todos
 `async`. La **expiración se comprueba antes** de consultar el almacén, así que un
 token caducado no cuesta ningún viaje de ida y vuelta.
 

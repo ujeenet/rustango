@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — JWT auth is a value, not a process global (#1190)
+
+**Breaking:** `require_bearer` needs `from_fn_with_state(auth, …)` and
+`verify_for_tenant` is a `JwtAuth` method. See UPGRADING.
+
+The first `jwt_router` call used to win for the whole process, so a
+second config was silently ignored and tests had to set
+`RUSTANGO_SESSION_SECRET` before anything touched it.
+
 ### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
 
 **Breaking:** the loader now refuses a callback in an atomic migration,

@@ -226,7 +226,7 @@ disparaît.
 
 Comme la vérification consulte le magasin, `verify_access`, `verify_refresh`,
 `refresh`, `revoke` et les helpers de token MCP / tenant
-(`mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`) sont tous
+(`mcp::verify_agent_token`, `tenancy::auth_routes::JwtAuth::verify_for_tenant`) sont tous
 `async`. L'**expiration est vérifiée avant** le magasin : un token expiré ne
 coûte donc aucun aller-retour.
 

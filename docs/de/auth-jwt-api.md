@@ -225,7 +225,7 @@ Sonst ist die Einmalverwendungs-Garantie für Refresh-Tokens verloren.
 
 Da die Verifizierung den Speicher konsultiert, sind `verify_access`,
 `verify_refresh`, `refresh`, `revoke` und die MCP-/Tenant-Token-Helfer
-(`mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`) alle
+(`mcp::verify_agent_token`, `tenancy::auth_routes::JwtAuth::verify_for_tenant`) alle
 `async`. Der **Ablauf wird vor** dem Speicherzugriff geprüft, ein abgelaufener
 Token kostet also keinen Roundtrip.
 

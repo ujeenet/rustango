@@ -218,7 +218,7 @@ exactly one `true`, or the single-use refresh guarantee is gone.
 
 Because verification consults the store, `verify_access`, `verify_refresh`,
 `refresh`, `revoke` and the MCP/tenant token helpers
-(`mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`) are all
+(`mcp::verify_agent_token`, `tenancy::auth_routes::JwtAuth::verify_for_tenant`) are all
 `async`. Token **expiry is checked before** the store is consulted, so an
 expired token never costs a round trip.
 
