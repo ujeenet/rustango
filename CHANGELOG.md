@@ -6,41 +6,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
 
-`MigrationCallbackFn` takes a `Pool`, not the migration's open
-transaction — `MigrationCallbackFut` is `'static`, so a borrowed
-transaction cannot reach it. The callback therefore works on a
-**second** connection, and inside the migration's transaction that
-connection waits on locks the transaction is holding.
+**Breaking:** the loader now refuses a callback in an atomic migration,
+and `atomic` defaults to true. See UPGRADING.
 
-It hung rather than failed. The migration's connection sits `idle in
-transaction`: it holds the lock while waiting on a Rust future, not on
-a lock, so there is no cycle for PostgreSQL's deadlock detector to
-find. `lock_timeout` and `statement_timeout` both default to `0`, so
-nothing ended the wait — `manage migrate` stopped forever with a
-production table under `ACCESS EXCLUSIVE`, which even a read-only
-callback conflicts with.
-
-Confirmed against PostgreSQL 16: with `ALTER TABLE … ADD COLUMN` held
-open, a plain `SELECT` on a second connection blocked until a
-`statement_timeout` cancelled it, and no deadlock was reported.
-
-`atomic` defaults to **true**, so this was the shape you got by not
-thinking about it. The loader now refuses a callback in an atomic
-migration and names the fix, turning an unbounded production hang into
-a startup error. SQLite errored at its `busy_timeout` and MySQL
-survived by accident (DDL implicit-commit); the hang was
-PostgreSQL-only.
-
-Two things that travelled with it:
-
-- The worked example in `callbacks::` put the callback **before** the
-  schema op, backfilling a column that did not exist yet. Corrected —
-  and correcting it is what exposes the deadlock.
-- `sqlmigrate` drew the `-- RunPython:` marker between `BEGIN` and
-  `COMMIT`, the opposite of where the callback runs, with a test
-  pinning that picture. A callback migration can no longer be atomic,
-  so there is no transaction to draw and the test now asserts its
-  absence.
+The callback runs on a second connection and waited on the migration
+transaction's own locks: forever on PostgreSQL, until `busy_timeout` on
+SQLite, and on MySQL after a data op (50s error, or a metadata-lock
+hang). The `callbacks::` example also put the callback before the
+schema op it backfills; corrected.
 
 ### Fixed — tenant login was the one POST with no CSRF protection (#1607)
 

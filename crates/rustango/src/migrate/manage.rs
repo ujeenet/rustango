@@ -1463,11 +1463,14 @@ pub fn append_data_op(
     reverse_sql: Option<&str>,
 ) -> Result<(), MigrateError> {
     let path = file_path(dir, migration_name);
-    let mut mig = file::load(&path).map_err(|_| {
-        MigrateError::Validation(format!(
-            "migration `{migration_name}` not found at {}",
-            path.display()
-        ))
+    let mut mig = file::load(&path).map_err(|e| match e {
+        MigrateError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            MigrateError::Validation(format!(
+                "migration `{migration_name}` not found at {}",
+                path.display()
+            ))
+        }
+        other => other,
     })?;
     mig.forward.push(Operation::Data(DataOp {
         sql: sql.to_owned(),

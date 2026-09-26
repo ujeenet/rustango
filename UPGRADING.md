@@ -150,6 +150,17 @@ untouched.
 
 ## Unreleased
 
+### `migrate` refuses a callback migration without `"atomic": false`
+
+Any migration file with a `{"callback": …}` op now needs
+`"atomic": false`, including files already applied (#1626). Add it;
+the ledger stores only names, so editing an applied file is safe.
+Embedded migrations need a rebuild.
+
+`atomic: false` means a failed callback does not roll back the schema
+op before it. To keep that, split the file: the schema op in one
+migration, the callback alone in the next.
+
 ### `MigrateError` is now `#[non_exhaustive]`
 
 Only affects code that **matches exhaustively** on it. Add a `_ =>` arm:

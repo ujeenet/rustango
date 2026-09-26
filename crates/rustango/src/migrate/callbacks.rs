@@ -16,19 +16,14 @@
 //! }
 //! ```
 //!
-//! Two things in that file are load-bearing.
+//! `"atomic": false` is **required**; the loader refuses a callback
+//! without it. The callback gets a `Pool`, not the migration's
+//! transaction, so inside one it waits on that transaction's locks —
+//! forever on PostgreSQL (#1626).
 //!
-//! The schema op comes **first**: the callback backfills the column,
-//! so it cannot run before the column exists. The example used to have
-//! these the other way round.
-//!
-//! `"atomic": false` is **required** whenever a migration has a
-//! callback, and the loader refuses the file without it. A callback is
-//! handed a `Pool`, not the migration's open transaction, so it works
-//! on a second connection — and inside the transaction that connection
-//! waits on locks the transaction is holding. On PostgreSQL that hangs
-//! forever rather than failing, because the first connection is `idle
-//! in transaction` and the deadlock detector sees no cycle (#1626).
+//! Non-atomic means a failed callback does not roll back the schema op
+//! before it. To keep that rollback, put the schema op in its own
+//! (atomic) migration and the callback alone in the next one.
 //!
 //! ## Quick start
 //!

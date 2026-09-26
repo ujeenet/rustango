@@ -154,7 +154,8 @@ fn default_reversible() -> bool {
 /// Returns [`MigrateError::Io`] if the file is unreadable, or
 /// [`MigrateError::Json`] if its contents don't deserialize. Also
 /// rejects an internally-inconsistent `Operation::Data` where
-/// `reversible == true` but `reverse_sql` is missing.
+/// `reversible == true` but `reverse_sql` is missing, and a callback in
+/// an atomic migration (#1626).
 pub fn load(path: &Path) -> Result<Migration, MigrateError> {
     let raw = std::fs::read_to_string(path)?;
     parse(&raw)
@@ -331,30 +332,12 @@ fn validate(mig: &Migration) -> Result<(), MigrateError> {
                     )));
                 }
             }
-            // A callback receives a `Pool`, not the open transaction —
-            // `MigrationCallbackFut` is `'static`, so a borrowed tx
-            // cannot be handed to it. Its connection is therefore a
-            // *second* one, and on PostgreSQL it blocks on the locks
-            // the migration's own transaction is holding.
-            //
-            // It hangs rather than erroring: the first connection sits
-            // `idle in transaction`, waiting on a Rust future and not
-            // on a lock, so there is no cycle for the deadlock
-            // detector to find. `lock_timeout` and `statement_timeout`
-            // both default to `0`, so nothing breaks the wait —
-            // `manage migrate` stops forever with a production table
-            // under `ACCESS EXCLUSIVE`, which even a read-only
-            // callback conflicts with (#1626).
-            //
-            // Refusing at load time turns an unbounded production hang
-            // into a startup error naming the fix.
+            // The callback runs on a second connection; inside the tx it
+            // waits on the tx's locks, forever on PostgreSQL (#1626).
             Operation::Callback(c) if mig.atomic => {
                 return Err(MigrateError::Validation(format!(
-                    "{}: forward[{}]: callback `{}` needs `\"atomic\": false`. \
-                     A callback runs on its own connection, so inside the \
-                     migration's transaction it waits on locks that \
-                     transaction holds — on PostgreSQL that hangs forever \
-                     rather than failing (#1626).",
+                    "{}: forward[{}]: callback `{}` needs `\"atomic\": false` \
+                     (#1626); safe to add to an already-applied file",
                     mig.name, i, c.name,
                 )));
             }
