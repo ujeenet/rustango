@@ -102,7 +102,9 @@ async fn create_runs_serializer_validate_and_400s_on_failure() {
         "short name should 400"
     );
     let v = json_body(resp).await;
-    let name_errs = v["name"].as_array().expect("field-error shape: {v}");
+    let name_errs = v["details"]["name"]
+        .as_array()
+        .expect("field-error shape: {v}");
     assert!(
         name_errs
             .iter()
@@ -255,7 +257,7 @@ async fn max_length_inherited_from_model() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "inherited max_length: {v}");
     assert!(
-        v["code"][0]
+        v["details"]["code"][0]
             .as_str()
             .unwrap_or("")
             .contains("at most 8 characters"),
@@ -274,7 +276,7 @@ async fn max_length_attr_overrides_model() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "override max_length: {v}");
     assert!(
-        v["note"][0]
+        v["details"]["note"][0]
             .as_str()
             .unwrap_or("")
             .contains("at most 4 characters"),
@@ -293,7 +295,10 @@ async fn min_max_inherited_from_model() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        v["priority"][0].as_str().unwrap_or("").contains("≤ 3"),
+        v["details"]["priority"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("≤ 3"),
         "max inherited: {v}"
     );
     // priority = 0 < model min = 1.
@@ -304,7 +309,10 @@ async fn min_max_inherited_from_model() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        v["priority"][0].as_str().unwrap_or("").contains("≥ 1"),
+        v["details"]["priority"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("≥ 1"),
         "min inherited: {v}"
     );
 }
@@ -319,7 +327,7 @@ async fn choices_inherited_from_model() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        v["status"][0]
+        v["details"]["status"][0]
             .as_str()
             .unwrap_or("")
             .contains("valid choice"),
@@ -471,7 +479,7 @@ async fn a_missing_renamed_field_is_reported_by_its_published_name() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     let v = json_body(resp).await;
-    let msg = v["error"].as_str().unwrap_or_default().to_owned();
+    let msg = v["message"].as_str().unwrap_or_default().to_owned();
     assert!(
         msg.contains("content"),
         "the error must name `content`, the field the API publishes: {msg}"

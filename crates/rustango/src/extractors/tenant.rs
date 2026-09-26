@@ -209,15 +209,16 @@ pub enum TenantRejection {
 
 impl IntoResponse for TenantRejection {
     fn into_response(self) -> Response {
+        use crate::api_errors::ApiError;
         match self {
-            Self::MissingContext => (
+            Self::MissingContext => ApiError::logged(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "rustango::server::Builder did not run — Tenant extractor cannot find TenantContext",
-            )
-                .into_response(),
-            Self::NotFound => (StatusCode::NOT_FOUND, "tenant not found").into_response(),
-            Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+            ),
+            Self::NotFound => ApiError::not_found("tenant not found"),
+            Self::Internal(msg) => ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, msg),
         }
+        .into_response()
     }
 }
 

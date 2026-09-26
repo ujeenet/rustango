@@ -796,7 +796,8 @@ pub mod webhook;
 pub mod webhook_delivery;
 
 /// Standardized API error responses. See [`api_errors::ApiError`].
-#[cfg(feature = "admin")]
+/// Needs only axum, so every HTTP surface can answer in this shape.
+#[cfg(feature = "_axum")]
 pub mod api_errors;
 
 /// Generic API key generation + verification (argon2id-hashed).

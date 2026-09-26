@@ -207,7 +207,7 @@ impl IntoResponse for Refusal {
             Self::Policy(m) => (StatusCode::FORBIDDEN, m),
             Self::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
-        (code, Json(serde_json::json!({ "error": message }))).into_response()
+        crate::api_errors::ApiError::logged(code, message).into_response()
     }
 }
 

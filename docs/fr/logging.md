@@ -119,6 +119,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | Target | Ce que ça couvre |
 |---|---|
 | `rustango::admin` | Routage et enregistrement de l'admin |
+| `rustango::api` | La cause d'une `ApiError` `5xx`, que la réponse omet |
 | `rustango::admin::audit` | Écritures du journal d'audit |
 | `rustango::admin::sso` | SSO de l'admin |
 | `rustango::cache` | Backends de cache |

@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — one error envelope across the framework (#1193)
+
+**Breaking** for clients parsing error bodies. See UPGRADING.
+
+ViewSets, tenant and `Principal` rejections, media, the admin's JSON
+errors, body and rate limits, HMAC auth and maintenance mode now all
+answer with `ApiError`. A client no longer needs a layer to normalise
+four shapes, and a 5xx no longer sends the driver's message, which
+could name tables and columns.
+
 ### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
 
 **Breaking:** the loader now refuses a callback in an atomic migration,

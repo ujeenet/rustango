@@ -114,6 +114,7 @@ matches on. Framework events live under the `rustango::` root, so
 | Target | What it covers |
 |---|---|
 | `rustango::admin` | Admin routing and registration |
+| `rustango::api` | The cause of a `5xx` `ApiError`, which the response leaves out |
 | `rustango::admin::audit` | Audit-log writes |
 | `rustango::admin::sso` | Admin SSO |
 | `rustango::cache` | Cache backends |

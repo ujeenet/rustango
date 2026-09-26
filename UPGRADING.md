@@ -161,6 +161,24 @@ Embedded migrations need a rebuild.
 op before it. To keep that, split the file: the schema op in one
 migration, the callback alone in the next.
 
+### Every framework JSON error is now an `ApiError` body
+
+Only affects clients that parse error bodies (#1193). The shape is
+
+```json
+{"error": "not_found", "message": "not found", "status": 404, "details": {}}
+```
+
+| Was | Now |
+|---|---|
+| ViewSet `{"error": "<sentence>"}` | sentence in `message`; `error` is a code |
+| Serializer 400 `{"title": [...]}` | `details.title`, `error: "validation_failed"` |
+| Tenant / `Principal` rejections, plain text | JSON, same shape |
+| `limit_bytes`, `retry_after`, admin `table` / `pk` | under `details` |
+| 5xx carrying the driver message | generic `message`; cause logged at `rustango::api` |
+
+A `MaintenanceLayer` with a custom `.body(…)` is unchanged.
+
 ### `MigrateError` is now `#[non_exhaustive]`
 
 Only affects code that **matches exhaustively** on it. Add a `_ =>` arm:

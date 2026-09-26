@@ -108,6 +108,7 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
+use axum::response::IntoResponse as _;
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
@@ -1342,11 +1343,13 @@ fn json_response(body: Value) -> Response {
     json_with_status(StatusCode::OK, body)
 }
 
+/// An [`ApiError`](crate::api_errors::ApiError) body; a 5xx message is
+/// logged rather than sent.
 fn json_error(status: StatusCode, msg: &str) -> Response {
-    json_with_status(status, json!({ "error": msg }))
+    crate::api_errors::ApiError::logged(status, msg).into_response()
 }
 
-/// A `400` from serializer validation, shaped as
+/// A `400` from serializer validation. `details` is
 /// `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
 fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     let mut map = serde_json::Map::new();
@@ -1356,7 +1359,13 @@ fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     if !errs.non_field().is_empty() {
         map.insert("non_field_errors".to_owned(), json!(errs.non_field()));
     }
-    json_with_status(StatusCode::BAD_REQUEST, Value::Object(map))
+    crate::api_errors::ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "validation_failed",
+        "invalid input",
+    )
+    .with_details(Value::Object(map))
+    .into_response()
 }
 
 /// Rename inbound form keys from serializer field names to model
@@ -1639,14 +1648,7 @@ fn client_key(parts: &axum::http::request::Parts) -> String {
 
 /// A `429 Too Many Requests` with a `Retry-After` header.
 fn throttled_response(retry_after_secs: u64) -> Response {
-    Response::builder()
-        .status(StatusCode::TOO_MANY_REQUESTS)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::RETRY_AFTER, retry_after_secs.to_string())
-        .body(Body::from(
-            json!({ "error": "request throttled" }).to_string(),
-        ))
-        .unwrap()
+    crate::api_errors::ApiError::too_many_requests("request throttled", retry_after_secs)
 }
 
 /// Parse a path capture into the primary key's type, or a `400`.

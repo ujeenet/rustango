@@ -70,6 +70,42 @@ impl ApiError {
         self.with_details(json!({"field": field.into()}))
     }
 
+    /// Build an error with the canonical code for `status`, so every
+    /// framework surface names the same status the same way (#1193).
+    #[must_use]
+    pub fn from_status(status: StatusCode, message: impl Into<String>) -> Self {
+        let code = match status {
+            StatusCode::BAD_REQUEST => "bad_request",
+            StatusCode::UNAUTHORIZED => "unauthorized",
+            StatusCode::FORBIDDEN => "forbidden",
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+            StatusCode::CONFLICT => "conflict",
+            StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
+            StatusCode::UNPROCESSABLE_ENTITY => "validation_failed",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+            StatusCode::BAD_GATEWAY => "bad_gateway",
+            StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
+            s if s.is_server_error() => "internal_error",
+            _ => "error",
+        };
+        Self::new(status, code, message)
+    }
+
+    /// [`from_status`](Self::from_status), except a 5xx logs `message`
+    /// and sends a generic one: a server error's text is usually a
+    /// driver message that names the schema.
+    #[must_use]
+    pub fn logged(status: StatusCode, message: impl std::fmt::Display) -> Self {
+        if status.is_server_error() {
+            tracing::error!(target: "rustango::api", status = status.as_u16(), error = %message, "request failed");
+            Self::from_status(status, "internal error")
+        } else {
+            Self::from_status(status, message.to_string())
+        }
+    }
+
     // ---------------------------------------------------------------- presets
 
     /// `400 Bad Request` — `code = "bad_request"`.
@@ -116,6 +152,17 @@ impl ApiError {
     #[must_use]
     pub fn rate_limited(message: impl Into<String>) -> Self {
         Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", message)
+    }
+
+    /// A `429` response with `Retry-After`, as every rate limiter sends it.
+    #[must_use]
+    pub fn too_many_requests(message: impl Into<String>, retry_after_secs: u64) -> Response {
+        let mut resp = Self::rate_limited(message)
+            .with_details(json!({ "retry_after": retry_after_secs }))
+            .into_response();
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, retry_after_secs.into());
+        resp
     }
 
     /// `500 Internal Server Error` — `code = "internal_error"`.
@@ -237,6 +284,28 @@ mod tests {
             .with_field("title") // sets details
             .with_details(json!({"custom": true})); // overrides
         assert!(e.details.unwrap().get("custom").is_some());
+    }
+
+    /// A driver message names the schema; a 5xx must not send it (#1193).
+    #[test]
+    fn logged_hides_a_server_errors_cause_but_not_a_client_errors() {
+        let e = ApiError::logged(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relation \"users\" missing",
+        );
+        assert_eq!(e.code, "internal_error");
+        assert!(!e.message.contains("users"), "{e}");
+
+        let e = ApiError::logged(StatusCode::BAD_REQUEST, "invalid cursor");
+        assert_eq!(e.code, "bad_request");
+        assert_eq!(e.message, "invalid cursor");
+    }
+
+    #[test]
+    fn too_many_requests_sets_retry_after() {
+        let r = ApiError::too_many_requests("slow down", 7);
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r.headers()[axum::http::header::RETRY_AFTER], "7");
     }
 
     #[test]

@@ -203,7 +203,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 
 `ApiError` implementiert `IntoResponse`, sodass die Rückgabe automatisch seine JSON-Form erzeugt: `{"error": <Maschinencode>, "message": …, "status": …, "details": …}`.
 
-**Es ist nicht die einzige Fehlerform, die das Framework ausgibt.** Ein ViewSet antwortet bei eigenen Fehlern mit `{"error": "<lesbare Meldung>"}` und bei Serializer-Validierung mit einer nach Feldnamen geschlüsselten Map — insgesamt drei Umschläge, und `error` trägt in einem einen Maschinencode, im anderen einen Satz. [ViewSets — Formen der Fehlerantwort](viewsets.md#formen-der-fehlerantwort) listet auf, welcher Pfad welche ausgibt.
+Die eigenen JSON-Fehler des Frameworks nutzen dieselbe Form: ViewSets, Tenant- und `Principal`-Ablehnungen, Media, die JSON-Endpunkte des Admins, Body-Limits, Rate-Limits und der Wartungsmodus. Ein `5xx` loggt seine Ursache und sendet eine generische `message`. Siehe [ViewSets — Formen der Fehlerantwort](viewsets.md#formen-der-fehlerantwort).
 
 ---
 

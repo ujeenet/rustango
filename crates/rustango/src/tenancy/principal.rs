@@ -21,7 +21,6 @@
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use super::middleware::AuthenticatedUser;
@@ -148,7 +147,7 @@ pub struct Unauthenticated;
 
 impl IntoResponse for Unauthenticated {
     fn into_response(self) -> Response {
-        (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+        crate::api_errors::ApiError::unauthorized("authentication required").into_response()
     }
 }
 

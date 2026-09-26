@@ -69,7 +69,7 @@ Darunter dasselbe Model; was sich unterscheidet, ist, was herauskommt und wer au
 | Sendet zurück | **JSON-Daten** | eine **servergerenderte HTML-Seite** |
 | Gebaut für | SPAs, Mobile, andere Dienste | Browser, servergerenderte Websites, admin-artiges CRUD |
 | Ein „Erstellen" | `POST` JSON → `201` + das Objekt | `POST` eines Formulars → `303`-Weiterleitung (Post/Redirect/Get) |
-| Bei ungültiger Eingabe | `400` — feldbasiert aus einem Serializer, sonst `{"error": "…"}` ([Formen](#formen-der-fehlerantwort)) | das Formular mit angezeigten Fehlern neu rendern |
+| Bei ungültiger Eingabe | `400` [`ApiError`](#formen-der-fehlerantwort); Serializer-Feldfehler in `details` | das Formular mit angezeigten Fehlern neu rendern |
 | Eine „Liste" ist | ein paginierter JSON-Umschlag | eine Schleife über Zeilen in deinem Template |
 | Üblicherweise authentifiziert per | Tokens / JWT / API-Keys | Session-Cookies |
 
@@ -670,26 +670,20 @@ plus deine eigenen Pro-Feld- und feldübergreifenden Regeln zu erhalten.
 
 ### Formen der Fehlerantwort
 
-Es gibt keinen einzelnen Fehlerumschlag — ein Client, der auf eine Form parst,
-scheitert an den anderen. **Drei** werden ausgeliefert, und welche du bekommst,
-hängt vom fehlgeschlagenen Pfad ab:
+Jeder ViewSet-Fehler ist ein [`ApiError`](api-conventions.md)-Body, dieselbe Form,
+die deine eigenen Handler senden (#1193):
 
-| Form | Ausgegeben von | Body |
-|---|---|---|
-| **Feldgeschlüsselte Map** | nur Serializer-Validierung | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
-| **Einfache Meldung** | jeder andere ViewSet-Fehler | `{"error": "<lesbare Meldung>"}` |
-| **`ApiError`** | deine eigenen Handler, die `rustango::api_errors::ApiError` zurückgeben | `{"error": "<Maschinencode>", "message": …, "status": …, "details": …}` |
+```json
+{"error": "<machine code>", "message": "<sentence>", "status": 400, "details": {}}
+```
 
-Die ersten beiden kommen beide aus einem ViewSet, der Unterschied zählt also:
-die oben aufgeführten `400`er aus Typkonvertierung, Erforderlich/NOT NULL und
-Datenbank-Constraints sind **keine** feldgeschlüsselten Maps — sie sind
-`{"error": "…"}`. Nur die eigenen Validatoren des Serializers erzeugen die
-feldgeschlüsselte Map.
-
-Beachte außerdem: `error` bedeutet in der Tabelle zweierlei — einen lesbaren Satz
-in der ViewSet-Form und einen stabilen Maschinencode in `ApiError` (das den Satz
-in `message` trägt). Verzweige über den HTTP-Status und darüber, ob der Body
-einen `message`-Schlüssel hat, nicht über `error` allein.
+- `error` ist ein stabiler Code (`bad_request`, `unauthorized`, `not_found`,
+  `validation_failed`, `rate_limited`, `internal_error`, …). Verzweige darüber.
+- Serializer-Validierung ist `validation_failed`, mit der Feld-Map in `details`:
+  `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}`.
+  Die oben genannten `400`er aus Typkonvertierung, Pflichtfeldern und
+  Datenbank-Constraints sind `bad_request` mit dem Grund in `message`.
+- Ein `5xx` trägt nie die Ursache. Sie wird geloggt; `message` ist generisch.
 
 ---
 
