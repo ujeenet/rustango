@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — one cookie reader (#1663)
+
+New `cookies::cookie_value(header, name)` and `cookies::cookie_from_headers`
+replace fourteen private `Cookie:` readers. A repeated cookie name now
+resolves to the first one everywhere (RFC 6265 §5.4), and values are
+trimmed and unquoted the same way `parse_cookie_header` does.
+
 ### Changed — one set of percent codecs (#1663)
 
 Five private copies now use `url_codec`: `method_override` decoded bytes

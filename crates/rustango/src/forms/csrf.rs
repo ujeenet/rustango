@@ -559,16 +559,7 @@ fn read_csrf_cookie(req: &Request<Body>, name: &str) -> Option<String> {
 }
 
 fn read_csrf_cookie_from_headers(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';') {
-        let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k == name {
-                return Some(v.to_owned());
-            }
-        }
-    }
-    None
+    crate::cookies::cookie_from_headers(headers, name).map(str::to_owned)
 }
 
 /// `true` when the request body is `application/x-www-form-urlencoded`

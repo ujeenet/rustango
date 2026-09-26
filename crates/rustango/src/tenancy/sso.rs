@@ -304,10 +304,10 @@ pub(super) async fn tenant_sso_callback(
     let (Some(code), Some(cb_state)) = (params.code, params.state) else {
         return login_error(routes, "callback");
     };
-    let Some(sealed) = read_flow_cookie(parts) else {
+    let Some(sealed) = crate::cookies::cookie_from_headers(&parts.headers, SSO_FLOW_COOKIE) else {
         return login_error(routes, "expired");
     };
-    let flow = match open_flow(&sealed, secret.key()) {
+    let flow = match open_flow(sealed, secret.key()) {
         Ok(f) => f,
         Err(_) => return login_error(routes, "expired"),
     };
@@ -367,14 +367,6 @@ pub(super) async fn tenant_sso_callback(
     set_cookie(&mut resp, &session_cookie);
     set_cookie(&mut resp, &clear_flow);
     resp
-}
-
-fn read_flow_cookie(parts: &Parts) -> Option<String> {
-    let raw = parts.headers.get(header::COOKIE)?.to_str().ok()?;
-    raw.split(';')
-        .filter_map(|kv| kv.trim().split_once('='))
-        .find(|(k, _)| *k == SSO_FLOW_COOKIE)
-        .map(|(_, v)| v.to_owned())
 }
 
 /// Look up a tenant user's `(id, active)` by lowercased email in the

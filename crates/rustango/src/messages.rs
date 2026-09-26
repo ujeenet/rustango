@@ -330,13 +330,7 @@ pub fn stamp_into_context(
 // ------------------------------------------------------------------ cookie internals
 
 fn read_cookie(secret: &[u8], headers: &axum::http::HeaderMap) -> Option<Vec<Message>> {
-    let raw = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|h| h.to_str().ok())?;
-    let value = raw
-        .split(';')
-        .map(str::trim)
-        .find_map(|kv| kv.strip_prefix(MESSAGES_COOKIE)?.strip_prefix('='))?;
+    let value = crate::cookies::cookie_from_headers(headers, MESSAGES_COOKIE)?;
     let (payload_b64, sig_b64) = value.split_once('.')?;
     let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
     let sig = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
