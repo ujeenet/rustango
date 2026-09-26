@@ -7,9 +7,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — two HTML escapers skipped `'` (#1663)
 
 The operator console's provisioning page and the admin's error page
-escaped `& < > "` but not `'`. Eleven private escapers now import
-`text::html_escape` (or the new shared XML one), and the
-`one_html_escaper` guard fails on a new copy.
+escaped `& < > "` but not `'`. Twelve private escapers (and the
+cookbook example's) now import `text::html_escape` or the shared XML
+one, so `'` is `&#x27;` everywhere, `csrf_input_html` included (was
+`&#39;`). The `one_html_escaper` guard fails on a new copy.
 
 ### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
 

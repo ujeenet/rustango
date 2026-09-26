@@ -232,7 +232,7 @@ fn push_text_element(out: &mut String, name: &str, text: &str, indent: usize) {
 }
 
 // Keeps a URL with `&` or a quote in it well-formed.
-use crate::text::escape_xml_into as escape_xml_text;
+use crate::text::xml_escape_into as escape_xml_text;
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, the full W3C datetime sitemaps.org asks
 /// for.

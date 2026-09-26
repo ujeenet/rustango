@@ -211,7 +211,7 @@ fn push_text_element(out: &mut String, name: &str, text: &str, indent: usize) {
     out.push_str(">\n");
 }
 
-use crate::text::escape_xml_into as escape_xml_text;
+use crate::text::xml_escape_into as escape_xml_text;
 
 /// The RFC 2822 date RSS 2.0 wants in `<pubDate>` and
 /// `<lastBuildDate>`.

@@ -95,9 +95,7 @@ async fn new_form(error: Option<&str>, prev: Option<&HashMap<String, String>>) -
     ))
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
+use rustango::text::html_escape;
 
 async fn show_new_form() -> Html<String> {
     new_form(None, None).await

@@ -269,6 +269,18 @@ mod tests {
         assert_eq!(seen.len(), 32, "expected all distinct correlation ids");
     }
 
+    /// The table-missing page escapes `'` too; this copy used to skip it (#1663).
+    #[tokio::test]
+    async fn table_missing_page_escapes_the_apostrophe() {
+        let resp = AdminError::TableMissing {
+            table: "x'<b>".into(),
+        }
+        .into_response();
+        let body = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("x&#x27;&lt;b&gt;"), "{html}");
+    }
+
     /// `AdminError::Internal` must **not** echo the raw error text in
     /// the JSON body: SQL, table names and file paths stay in the
     /// operator's log only.
