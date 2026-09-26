@@ -500,7 +500,7 @@ pub mod mailable;
 /// [`jsonapi::to_resource`] + [`jsonapi::to_collection`].
 pub mod jsonapi;
 
-/// Shared HMAC-SHA256 / SHA-256 / hex primitives, plus `constant_time_eq`.
+/// Shared HMAC-SHA256 / SHA-256 / hex primitives, plus `constant_time_compare`.
 /// Internal: for raw HMAC, depend on `hmac` + `sha2` directly. The cfg list
 /// covers every feature that needs one of these primitives.
 #[cfg(any(
