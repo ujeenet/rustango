@@ -15,6 +15,39 @@ SQLite, and on MySQL after a data op (50s error, or a metadata-lock
 hang). The `callbacks::` example also put the callback before the
 schema op it backfills; corrected.
 
+### Fixed — turning off the access log silently narrowed span redaction (#1610)
+
+The request span is mounted whether or not `[logging] access_log` is
+on, but it could only take the configured `redact_query_params` list
+*from* the access-log layer. With the log off it fell back to the
+defaults, so a project that set
+
+```toml
+[audit]
+redact_query_params = ["invite_token"]
+```
+
+got `invite_token` redacted in the access-log event and written in
+**clear text on the span** when there was no event.
+
+The two settings live in different config sections, and nothing in
+either said one disarmed the other — a control that reads as on in the
+configuration and is off in the process.
+
+`mount_observability` now takes the redact list directly, so there is
+one arm instead of two and no path that can fall back. `Cli` derives
+it from the same `AccessLogLayer` it would have mounted, rather than
+recomputing the composition, since building it a second way is how
+these drifted apart.
+
+`server::Builder` gains `span_redact` for the hand-built case, as an
+**override**: leave it unset and the span follows the access log's
+list, exactly as it did before. Defaulting it to the plain defaults
+instead would have re-created this bug with the log *on* — a
+hand-built server would have logged a configured param as
+`[redacted]` in the event and in clear text on the span, for the same
+request. Found by review before release.
+
 ### Fixed — tenant login was the one POST with no CSRF protection (#1607)
 
 `POST /login` accepted a request with no token, a wrong token or no
