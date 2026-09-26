@@ -161,6 +161,13 @@ Embedded migrations need a rebuild.
 op before it. To keep that, split the file: the schema op in one
 migration, the callback alone in the next.
 
+### `rustango::core` enums are `#[non_exhaustive]`
+
+`SqlValue`, `FieldType`, `Op`, `WhereExpr`, `Expr`, `Relation`,
+`OnDeleteAction`, `QueryError` and the other enums in `rustango::core`
+(#1661). A match without a `_ =>` arm now fails with
+`error[E0004]: non-exhaustive patterns`; add the arm. `Weight` and
+`NullsOrder` stay exhaustive.
 ### Every framework JSON error is now an `ApiError` body
 
 Only affects clients that parse error bodies (#1193). The shape is
