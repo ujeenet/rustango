@@ -766,15 +766,14 @@ Die meisten besitzgebundenen Ressourcen brauchen genau eine Regel: *Zeilen, dere
 Aufrufer ist*. Benenne die Spalte und binde es ein.
 
 ```rust
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::viewset::{OwnedBy, ViewSet};
 
+let auth = JwtAuth::new(Config::default()); // einer, der auch `auth.router()` bedient
 ViewSet::for_model(Note::SCHEMA)
     .filter_backend(OwnedBy::column("member_id"))
     .tenant_router("/api/notes")
-    .layer(axum::middleware::from_fn_with_state(
-        auth.clone(), // derselbe `JwtAuth`, der `auth.router()` bedient
-        rustango::tenancy::auth_routes::require_bearer,
-    ))
+    .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
 ```
 
 Jede Spalte funktioniert — `owner_id`, `member_id`, `author_id` — weil das Backend

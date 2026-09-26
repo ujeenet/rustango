@@ -12,12 +12,12 @@
 //! ## Quick start
 //!
 //! ```ignore
-//! use rustango::tenancy::auth_routes;
+//! use rustango::tenancy::auth_routes::{Config, JwtAuth};
 //!
+//! let auth = JwtAuth::new(Config::default());
 //! rustango::manage::Cli::new()
 //!     .tenancy()
-//!     .api(my_app::urls::api()
-//!         .merge(auth_routes::jwt_router(auth_routes::Config::default())))
+//!     .api(my_app::urls::api().merge(auth.router()))
 //!     .run().await
 //! ```
 //!
@@ -51,7 +51,7 @@ use crate::tenancy::jwt_lifecycle::JwtLifecycle;
 
 // ---------------------------------------------------------------- Config
 
-/// Knobs for [`jwt_router`]. All have sensible defaults; override
+/// Knobs for [`JwtAuth`]. All have sensible defaults; override
 /// when integrating with non-default URL prefixes (#74), shorter
 /// access TTLs, custom signing keys, etc.
 #[derive(Clone)]
@@ -187,7 +187,7 @@ impl Config {
     /// let cfg = rustango::config::Settings::load_from_env()?;
     /// let auth = auth_routes::Config::default()
     ///     .with_jwt_settings(&cfg.auth.jwt);
-    /// api.merge(auth_routes::jwt_router(auth))
+    /// api.merge(auth_routes::JwtAuth::new(auth).router())
     /// ```
     #[cfg(feature = "config")]
     #[must_use]
@@ -212,13 +212,20 @@ impl Config {
 /// hook, shared by the router, [`require_bearer`] and
 /// [`JwtAuth::verify_for_tenant`]. Cheap to clone.
 ///
-/// This replaced a process-global `OnceLock` where the first
-/// `jwt_router` call won, so a second config was silently ignored (#1190).
+/// Build **one** and share it: a second instance has its own in-memory
+/// revocation list, so a logout through one is not seen by the other.
 ///
-/// ```ignore
-/// let auth = JwtAuth::new(Config::default());
+/// ```no_run
+/// use axum::{middleware, Router};
+/// use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
+///
+/// # fn my_api() -> Router { Router::new() }
+/// let auth = JwtAuth::new(Config {
+///     session_secret: Some(vec![7; 32]),
+///     ..Config::default()
+/// });
 /// let api = my_api()
-///     .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
+///     .layer(middleware::from_fn_with_state(auth.clone(), require_bearer))
 ///     .merge(auth.router());
 /// ```
 #[derive(Clone)]
@@ -287,12 +294,6 @@ impl JwtAuth {
         }
         Ok(claims.sub)
     }
-}
-
-/// `JwtAuth::new(cfg).router()`, for an app that needs no
-/// [`require_bearer`] on its own routes.
-pub fn jwt_router(cfg: Config) -> Router<()> {
-    JwtAuth::new(cfg).router()
 }
 
 /// Claims for a freshly issued login pair: the app's hook first, then
@@ -946,14 +947,14 @@ mod tests {
     }
 
     #[test]
-    fn jwt_router_mounts_all_four_endpoints() {
+    fn router_mounts_all_four_endpoints() {
         // Pass a valid 32-byte secret — build_jwt now fails closed on a
         // short/empty key, so the smoke test must supply a real one.
         let cfg = Config {
             session_secret: Some(b"router-smoke-test-secret-32-byte".to_vec()),
             ..Default::default()
         };
-        let r = jwt_router(cfg);
+        let r = JwtAuth::new(cfg).router();
         // Smoke: building the router doesn't panic. The actual route
         // registration is exercised via integration tests that send
         // requests against the constructed router.

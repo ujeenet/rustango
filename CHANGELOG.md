@@ -6,8 +6,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed — JWT auth is a value, not a process global (#1190)
 
-**Breaking:** `require_bearer` needs `from_fn_with_state(auth, …)` and
+**Breaking:** `jwt_router(cfg)` is now `JwtAuth::new(cfg).router()`,
+`require_bearer` needs `from_fn_with_state(auth, …)`, and
 `verify_for_tenant` is a `JwtAuth` method. See UPGRADING.
+
+`jwt_router` was removed rather than kept: it hid its `JwtAuth`, so the
+easy upgrade built a second one and lost logout revocation.
 
 The first `jwt_router` call used to win for the whole process, so a
 second config was silently ignored and tests had to set

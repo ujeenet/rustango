@@ -4509,7 +4509,7 @@ pub struct DeployAuditFindings {
 /// var (`SECRET_KEY` — never read by the framework). The
 /// framework reads `RUSTANGO_SESSION_SECRET` for HMAC-signing
 /// the operator-console + tenant-admin cookies AND the JWT
-/// payloads issued by `auth_routes::jwt_router` (#81). Same key
+/// payloads issued by `auth_routes::JwtAuth` (#81). Same key
 /// covers both surfaces.
 pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindings) {
     // RUSTANGO_ENV — production should be explicitly tagged.

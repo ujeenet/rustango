@@ -780,15 +780,14 @@ La mayoría de los recursos con dueño necesitan exactamente una regla: *filas c
 columna de propiedad es el llamador*. Nombra la columna y móntala.
 
 ```rust
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::viewset::{OwnedBy, ViewSet};
 
+let auth = JwtAuth::new(Config::default()); // uno solo, que también sirve `auth.router()`
 ViewSet::for_model(Note::SCHEMA)
     .filter_backend(OwnedBy::column("member_id"))
     .tenant_router("/api/notes")
-    .layer(axum::middleware::from_fn_with_state(
-        auth.clone(), // el mismo `JwtAuth` que sirve `auth.router()`
-        rustango::tenancy::auth_routes::require_bearer,
-    ))
+    .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
 ```
 
 Cualquier columna funciona — `owner_id`, `member_id`, `author_id` — porque el
