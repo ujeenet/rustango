@@ -768,6 +768,9 @@ jobs:
           # No row had it, so `signing` gated on it without its crypto
           # deps went unseen (#1678).
           - sqlite,storage-s3
+          # Both enable `crypto` and did not compile alone.
+          - sqlite,csrf
+          - sqlite,totp
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88

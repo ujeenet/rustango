@@ -1108,7 +1108,8 @@ pub mod password_hashers;
 /// Signed-cookie session primitives — an HMAC-SHA256 key wrapper and a
 /// `sign(secret, msg)` helper, shared by every layer that sets a signed
 /// cookie so the crypto lives in one place. See [`session::SessionSecret`].
-#[cfg(any(feature = "admin", feature = "tenancy"))]
+/// `csrf` too: its cookie reads `session::secure_cookies` (#1608).
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
 pub mod session;
 
 /// Graceful-shutdown signal handling — SIGINT **and** SIGTERM in one place,

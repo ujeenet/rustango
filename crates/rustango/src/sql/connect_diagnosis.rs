@@ -53,7 +53,7 @@ pub enum ConnectFault {
     /// Reached the server; it refused the credentials.
     AuthFailed,
     /// Reached the server and authenticated; the named database is not
-    /// there.
+    /// there, or (MySQL 1044) this user may not see it.
     NoSuchDatabase,
     /// Connected fine, but this role may not do what a tenant needs —
     /// create tables, most importantly. The failure a naive `SELECT 1`

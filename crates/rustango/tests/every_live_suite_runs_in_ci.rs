@@ -795,7 +795,16 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
     let mut problems: Vec<String> = Vec::new();
 
     for (job, detect, need) in families {
-        let block = job_block(&yaml, job);
+        // Per real command, so a commented-out step or one built without
+        // the backend does not count as running the suite.
+        let cmds = run_commands(&job_block(&yaml, job));
+        let runs = |stem: &str| {
+            cmds.iter().any(|c| {
+                let words: Vec<&str> = c.split_whitespace().collect();
+                words.windows(2).any(|w| w == ["--test", stem])
+                    && (job != "mysql_live" || c.contains("mysql") || c.contains("--all-features"))
+            })
+        };
         for entry in std::fs::read_dir(&dir).expect("tests/ is readable") {
             let p = entry.expect("dir entry").path();
             let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
@@ -822,7 +831,7 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
                 Detect::Reads(var) => src.contains(&format!("env::var(\"{var}")),
                 Detect::NamedLike(frag) => stem.contains(frag),
             };
-            if needs && !block.contains(&format!("--test {stem}")) {
+            if needs && !runs(stem) {
                 problems.push(format!(
                     "  {stem} needs {need}, but `{job}` does not name `--test {stem}`"
                 ));
@@ -870,11 +879,22 @@ fn the_gate_opens_for_prs_into_develop() {
     let path = repo_root().join(".github/workflows/ci.yml");
     let yaml = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    let block = job_block(&yaml, "gate");
-    assert!(
-        block.contains("github.base_ref == 'develop'"),
-        "the `gate` job no longer opens for PRs into `develop`:\n{block}"
-    );
+    let code: String = job_block(&yaml, "gate")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for clause in [
+        "github.event_name != 'pull_request'",
+        "github.base_ref == 'main'",
+        "github.base_ref == 'develop'",
+        "contains(github.base_ref, 'release')",
+    ] {
+        assert!(
+            code.contains(clause),
+            "the `gate` job lost `{clause}`:\n{code}"
+        );
+    }
 }
 
 /// The media feature axis is compiled by `feature_combos`.
