@@ -4,11 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Changed — the ORM's public enums are `#[non_exhaustive]` (#1661)
+### Changed — `rustango::core` enums are `#[non_exhaustive]` (#1661)
 
-**Breaking** only for exhaustive matches; see UPGRADING. 29 enums in
-`rustango::core` can now gain a variant in a minor release, which the
-fixes owed before 1.0 need.
+**Breaking** only for exhaustive matches; see UPGRADING. 29 enums can
+now gain a variant without a breaking release, and
+`clippy::exhaustive_enums` is denied in `core` so a new one cannot
+slip in exhaustive.
 
 ### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
 

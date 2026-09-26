@@ -912,6 +912,7 @@ pub struct OrderClause {
 /// three; MySQL has no `NULLS` keywords, so the writer emits an
 /// `IFNULL(…)` workaround there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::exhaustive_enums)] // SQL has only FIRST and LAST.
 pub enum NullsOrder {
     /// Backend's native default — emits no `NULLS …` clause.
     #[default]
