@@ -167,7 +167,7 @@ the exact failure this release was about.
 - **#1528** (schema mode) was unbounded connections, which HTTP cannot
   count; on `saas-pg` the pool-cap check only proves no tenant is refused.
 - **Browser `Origin`**: the driver sets `Origin` itself, so it checks the
-  login page's `Referrer-Policy` instead (`no-referrer` makes browsers
+  preset's `Referrer-Policy` on an app route instead (`no-referrer` makes browsers
   send `Origin: null`).
 
 ## Known gaps

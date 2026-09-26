@@ -729,14 +729,23 @@ async def check_tenant_login(client, name, base):
     session must not work on t02.
     """
     a, b = tenant_host(1), tenant_host(2)
-    # Under `no-referrer` a browser sends `Origin: null` on the login POST,
+    # Under `no-referrer` a browser sends `Origin: null` on every POST,
     # which the Origin check refuses. The driver sets Origin itself, so
-    # it can only see the header that causes it.
-    page = await client.get(f"{base}/__login", headers={"Host": a})
-    policy = page.headers.get("referrer-policy", "")
-    REPORT.add("login page lets browsers send their Origin", "#1695",
+    # it can only see the header that causes it. Read off an app route:
+    # that is where the configured preset applies.
+    api = await client.get(f"{base}/api/v1/products", headers={"Host": a})
+    policy = api.headers.get("referrer-policy", "")
+    REPORT.add("headers preset lets browsers send their Origin", "#1695",
+               "NOT-COVERED" if not policy else
                "FAIL" if policy == "no-referrer" else "PASS",
-               f"Referrer-Policy: {policy or '(none)'}", name)
+               f"Referrer-Policy: {policy or '(none sent)'}", name)
+
+    page = await client.get(f"{base}/__login", headers={"Host": a})
+    xfo = page.headers.get("x-frame-options")
+    REPORT.add("tenant login page carries security headers", "#1699",
+               "PASS" if xfo else "FAIL",
+               f"X-Frame-Options: {xfo}" if xfo else
+               "no X-Frame-Options: the login can be framed", name)
 
     token = await login_form(client, base, a)
     if not token:
