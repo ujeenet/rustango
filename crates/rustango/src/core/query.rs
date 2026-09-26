@@ -12,6 +12,7 @@ use super::{validate::validate_value, ModelSchema, QueryError, SqlValue};
 
 /// Comparison operator on a single column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Op {
     Eq,
     Ne,
@@ -226,6 +227,7 @@ pub struct ColumnFilter {
 /// emits no `WHERE` for it. `Or(vec![])` would quietly match nothing,
 /// so the writer rejects it.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum WhereExpr {
     /// Leaf — a single column predicate.
     Predicate(Filter),
@@ -294,6 +296,7 @@ pub enum WhereExpr {
 /// raw-table path (M2M / GFK) has no `ModelSchema` and supports only
 /// `COUNT(*)` / `SUM` / `AVG` / `MAX` / `MIN`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RelAggKind {
     Count,
     Sum,
@@ -320,6 +323,7 @@ pub struct CtFilter {
 /// How a raw-table relation subquery ([`WhereExpr::RelExists`] /
 /// [`Expr::RelAggregate`]) correlates back to the enclosing row.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RelCorrelation {
     /// `<table>.<fk_column> = <outer>.<outer_column>`, plus an
     /// optional GFK content-type check. Covers an M2M junction
@@ -744,6 +748,7 @@ impl SelectQuery {
 
 /// Distinct mode — all columns, or a named subset.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DistinctMode {
     /// `SELECT DISTINCT ...` — the same on every dialect.
     All,
@@ -773,6 +778,7 @@ pub struct CompoundBranch {
 ///   landed in MySQL 8.0.31; older versions return a syntax error
 ///   from the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SetOp {
     /// `UNION` — combine + deduplicate.
     Union,
@@ -924,6 +930,7 @@ pub enum NullsOrder {
 /// An [`OrderClause`] converts into the `Column` variant, so older
 /// constructors keep working.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum OrderItem {
     /// `<col> [DESC] [NULLS FIRST|LAST]` — an [`OrderClause`] plus a
     /// [`NullsOrder`].
@@ -1043,6 +1050,7 @@ impl OrderItem {
 /// writer raises [`crate::sql::SqlError::JoinKindNotSupported`] for
 /// `Right` on SQLite and `Full` on MySQL / SQLite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum JoinKind {
     Inner,
     #[default]
@@ -1088,6 +1096,7 @@ pub struct Join {
 /// ([`crate::query::QuerySet::join_sub`] and friends) take
 /// `impl Into<DerivedSource>`, so both types work directly.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum DerivedSource {
     /// A plain typed `SELECT` derived table.
     Select(Box<SelectQuery>),
@@ -1162,6 +1171,7 @@ pub struct SearchClause {
 /// [`InsertQuery::on_conflict`] or [`BulkInsertQuery::on_conflict`];
 /// the writer emits the right shape for each dialect.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ConflictClause {
     /// `ON CONFLICT DO NOTHING` — skip the duplicate rows.
     DoNothing,
@@ -1446,6 +1456,7 @@ pub struct BulkUpdateQuery {
 /// [`Filtered`]: AggregateExpr::Filtered
 /// [`Coalesced`]: AggregateExpr::Coalesced
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AggregateExpr {
     /// `COUNT(*)` or `COUNT(column)` when `column` is `Some`.
     Count(Option<&'static str>),

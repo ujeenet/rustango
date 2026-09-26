@@ -66,6 +66,7 @@ use super::SqlValue;
 
 /// Which window function to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WindowFn {
     /// `ROW_NUMBER()` — sequential row index within the partition.
     RowNumber,
@@ -102,6 +103,7 @@ pub enum WindowFn {
 
 /// `ROWS` vs `RANGE` frame mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameKind {
     /// `ROWS BETWEEN …` — physical row offsets.
     Rows,
@@ -112,6 +114,7 @@ pub enum FrameKind {
 
 /// One end of a frame range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameBoundary {
     /// `UNBOUNDED PRECEDING`.
     UnboundedPreceding,

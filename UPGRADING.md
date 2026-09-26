@@ -161,6 +161,14 @@ Embedded migrations need a rebuild.
 op before it. To keep that, split the file: the schema op in one
 migration, the callback alone in the next.
 
+### The ORM's public enums are `#[non_exhaustive]`
+
+`SqlValue`, `FieldType`, `Op`, `WhereExpr`, `Expr`, `Relation`,
+`OnDeleteAction`, `QueryError` and the other enums in `rustango::core`
+(#1661). Only code that **matches exhaustively** on one breaks; add a
+`_ =>` arm. `Weight` and `NullsOrder` stay exhaustive: their sets are
+closed by definition.
+
 ### `MigrateError` is now `#[non_exhaustive]`
 
 Only affects code that **matches exhaustively** on it. Add a `_ =>` arm:

@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — the ORM's public enums are `#[non_exhaustive]` (#1661)
+
+**Breaking** only for exhaustive matches; see UPGRADING. 29 enums in
+`rustango::core` can now gain a variant in a minor release, which the
+fixes owed before 1.0 need.
+
 ### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
 
 **Breaking:** the loader now refuses a callback in an atomic migration,
