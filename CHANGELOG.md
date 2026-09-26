@@ -27,8 +27,15 @@ configuration and is off in the process.
 one arm instead of two and no path that can fall back. `Cli` derives
 it from the same `AccessLogLayer` it would have mounted, rather than
 recomputing the composition, since building it a second way is how
-these drifted apart. `server::Builder` gains `span_redact` for the
-hand-built case.
+these drifted apart.
+
+`server::Builder` gains `span_redact` for the hand-built case, as an
+**override**: leave it unset and the span follows the access log's
+list, exactly as it did before. Defaulting it to the plain defaults
+instead would have re-created this bug with the log *on* — a
+hand-built server would have logged a configured param as
+`[redacted]` in the event and in clear text on the span, for the same
+request. Found by review before release.
 
 ### Fixed — tenant login was the one POST with no CSRF protection (#1607)
 

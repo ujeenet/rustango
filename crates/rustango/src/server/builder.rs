@@ -79,12 +79,15 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// The access-log layer, when request logging is on. `None` with
     /// `observability == true` means "span and request id, no log line".
     access_log: Option<crate::access_log::AccessLogLayer>,
-    /// Query params the span redacts. Held separately from
-    /// `access_log` because the span is mounted even when the log is
-    /// off, and taking the list from the layer meant `[logging]
-    /// access_log = false` silently narrowed it to the defaults
-    /// (#1610).
-    span_redact: Vec<String>,
+    /// Query params the span redacts, when the caller has named them.
+    ///
+    /// `None` means **derive from `access_log`**, which is what the
+    /// span did before `span_redact` existed. Holding an `Option`
+    /// rather than a list is what keeps the two in step: a default of
+    /// `default_redact_params()` would silently drop a configured list
+    /// whenever `observability()` was called without this setter,
+    /// which is #1610 again with the access log *on*.
+    span_redact: Option<Vec<String>>,
     _phantom: PhantomData<DB>,
 }
 
@@ -147,7 +150,7 @@ impl<DB: Database> Builder<DB> {
             static_dirs: Vec::new(),
             observability: false,
             access_log: None,
-            span_redact: crate::access_log::default_redact_params(),
+            span_redact: None,
             _phantom: PhantomData,
         }
     }
@@ -187,16 +190,20 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
-    /// Query params the request span replaces with `[redacted]`.
+    /// Override the query params the request span replaces with
+    /// `[redacted]`.
     ///
-    /// Set this alongside [`Self::observability`] when the access log
-    /// may be off: the span is mounted either way, and without it the
-    /// list falls back to the defaults, so a param configured through
-    /// `[audit] redact_query_params` would be written in clear text
-    /// (#1610). `Cli` passes the configured list for you.
+    /// Optional. Without it the span uses the list from
+    /// [`Self::observability`]'s access-log layer, and
+    /// `default_redact_params()` when there is no layer — so a
+    /// configured list reaches the span whether or not `[logging]
+    /// access_log` is on (#1610). `Cli` calls this for you.
+    ///
+    /// Reach for it only when the span should redact something the
+    /// access log does not.
     #[must_use]
     pub fn span_redact(mut self, params: Vec<String>) -> Self {
-        self.span_redact = params;
+        self.span_redact = Some(params);
         self
     }
 
@@ -714,10 +721,15 @@ impl<DB: Database> Builder<DB> {
         // it. Anything layered on the api router before it reached this
         // builder covered only the api router (#1480).
         let app = if self.observability {
+            // Resolved here rather than at each setter, so the order
+            // `observability()` and `span_redact()` are called in
+            // cannot change the result and neither can clobber the
+            // other.
+            let redact = resolve_span_redact(self.span_redact.clone(), self.access_log.as_ref());
             // One definition, shared with `Cli::mount_observability` —
             // see `access_log::mount_observability` for the ordering
             // rules and why they live in one place.
-            crate::access_log::mount_observability(app, self.access_log, self.span_redact)
+            crate::access_log::mount_observability(app, self.access_log, redact)
         } else {
             app
         };
@@ -857,4 +869,72 @@ fn root_has_json_files(root: &std::path::Path) -> bool {
     };
     read.filter_map(Result::ok)
         .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+}
+
+/// The query params the request span redacts.
+///
+/// `explicit` is [`Builder::span_redact`]; `None` derives the list
+/// from the access-log layer, and falls back to the defaults when
+/// there is no layer.
+///
+/// A free function so the rule can be tested without a registry pool,
+/// and so the precedence lives in one place rather than in whichever
+/// setter ran last.
+fn resolve_span_redact(
+    explicit: Option<Vec<String>>,
+    access_log: Option<&crate::access_log::AccessLogLayer>,
+) -> Vec<String> {
+    explicit
+        .or_else(|| access_log.map(|l| l.redact_query_params.clone()))
+        .unwrap_or_else(crate::access_log::default_redact_params)
+}
+
+#[cfg(test)]
+mod span_redact_tests {
+    use super::resolve_span_redact;
+    use crate::access_log::{default_redact_params, AccessLogLayer};
+
+    fn layer_with(name: &str) -> AccessLogLayer {
+        let mut l = AccessLogLayer::default();
+        l.redact_query_params.push(name.to_owned());
+        l
+    }
+
+    /// With no explicit list, the span takes the access log's — which
+    /// is what the span did before `span_redact` existed.
+    ///
+    /// Defaulting the field to `default_redact_params()` instead made
+    /// a hand-built `Builder` drop a configured name unless the caller
+    /// also remembered the setter: redacted in the access-log event
+    /// and in clear text on the span, same request (#1610).
+    #[test]
+    fn without_an_explicit_list_the_span_follows_the_access_log() {
+        let got = resolve_span_redact(None, Some(&layer_with("invite_token")));
+        assert!(
+            got.iter().any(|p| p == "invite_token"),
+            "the configured name must reach the span: {got:?}"
+        );
+        assert!(
+            got.iter().any(|p| p == "password"),
+            "and the defaults it extends must survive: {got:?}"
+        );
+    }
+
+    /// No layer at all — `[logging] access_log = false` — still gets
+    /// the defaults rather than an empty list.
+    #[test]
+    fn with_no_access_log_the_span_gets_the_defaults() {
+        assert_eq!(resolve_span_redact(None, None), default_redact_params());
+    }
+
+    /// An explicit list wins over the layer, so the span can redact
+    /// something the access log does not.
+    #[test]
+    fn an_explicit_list_overrides_the_access_log() {
+        let got = resolve_span_redact(
+            Some(vec!["only_this".to_owned()]),
+            Some(&layer_with("invite_token")),
+        );
+        assert_eq!(got, vec!["only_this".to_owned()]);
+    }
 }
