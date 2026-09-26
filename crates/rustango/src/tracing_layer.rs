@@ -14,17 +14,17 @@
 //! - `request_id`                  — set by [`crate::request_id::record`]
 //! - `tenant` / `org_id`           — set when a tenant resolves
 //!
-//! `url.query` is always redacted, but **which list is used depends on
-//! how the span was mounted**:
+//! `url.query` is always redacted, using the **configured**
+//! `redact_query_params` — so a key added under `[audit]
+//! redact_query_params` is hidden on the span too, whether or not
+//! `[logging] access_log` is on.
 //!
-//! * Next to the access log (the normal path), it uses that layer's
-//!   **configured** `redact_query_params`, so a key the project adds
-//!   is hidden on the span too.
-//! * With `[logging] access_log = false` there is no layer to read
-//!   the list from, so the span falls back to
-//!   `default_redact_params()`. A key added under
-//!   `[audit] redact_query_params` is then written in clear text.
-//!   Turning the access log off quietly narrows an audit setting.
+//! That independence is the point. The span used to take its list
+//! *from* the access-log layer, so turning the log off left the span
+//! on `default_redact_params()` and wrote a configured key in clear
+//! text — one config section quietly narrowing another (#1610). The
+//! list now reaches the span directly, and `server::Builder` derives
+//! it from the access log only when no explicit list was given.
 //!
 //! [`crate::tenant_log::record`] and [`crate::request_id::record`] set
 //! `tenant` and `request_id` partway through the request, so every
