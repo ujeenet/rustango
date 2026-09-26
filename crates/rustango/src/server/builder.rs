@@ -88,6 +88,10 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// whenever `observability()` was called without this setter,
     /// which is #1610 again with the access log *on*.
     span_redact: Option<Vec<String>>,
+    /// Applied to the outermost router, so the tenant login, tenant
+    /// admin and operator console carry them too (#1699).
+    #[cfg(feature = "admin")]
+    security_headers: Option<crate::security_headers::SecurityHeadersLayer>,
     _phantom: PhantomData<DB>,
 }
 
@@ -151,8 +155,23 @@ impl<DB: Database> Builder<DB> {
             observability: false,
             access_log: None,
             span_redact: None,
+            #[cfg(feature = "admin")]
+            security_headers: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Send these security headers on every response, the tenant
+    /// login, tenant admin and operator console included (#1699).
+    /// `Cli` calls this for you from `[security]`.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn security_headers(
+        mut self,
+        layer: crate::security_headers::SecurityHeadersLayer,
+    ) -> Self {
+        self.security_headers = Some(layer);
+        self
     }
 
     /// Auto-mount `/health` (liveness) + `/ready` (readiness with
@@ -714,6 +733,15 @@ impl<DB: Database> Builder<DB> {
                 }
             }
         }));
+
+        #[cfg(feature = "admin")]
+        let app = match self.security_headers {
+            Some(layer) => {
+                use crate::security_headers::SecurityHeadersRouterExt as _;
+                app.security_headers(layer)
+            }
+            None => app,
+        };
 
         // Observability goes on the OUTERMOST router, after both
         // branches are behind the Host dispatch, so tenant app, tenant

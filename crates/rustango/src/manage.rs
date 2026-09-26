@@ -947,6 +947,15 @@ impl Cli {
         api.layer(axum::Extension(pool))
     }
 
+    /// `[security]` headers for the tenancy builder's outermost router,
+    /// which the api-router layer never reaches (#1699).
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "admin"))]
+    fn tenancy_security_headers(&self) -> Option<crate::security_headers::SecurityHeadersLayer> {
+        self.settings_for_layers
+            .as_ref()
+            .map(|s| crate::security_headers::SecurityHeadersLayer::from_settings(&s.security))
+    }
+
     /// The configured access-log layer, or `None` when
     /// `[logging] access_log = false`.
     ///
@@ -1219,6 +1228,10 @@ impl Cli {
         builder = builder
             .observability(self.access_log_layer())
             .span_redact(self.span_redact_params());
+        #[cfg(all(feature = "config", feature = "admin"))]
+        if let Some(sec) = self.tenancy_security_headers() {
+            builder = builder.security_headers(sec);
+        }
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1297,6 +1310,10 @@ impl Cli {
         builder = builder
             .observability(self.access_log_layer())
             .span_redact(self.span_redact_params());
+        #[cfg(all(feature = "config", feature = "admin"))]
+        if let Some(sec) = self.tenancy_security_headers() {
+            builder = builder.security_headers(sec);
+        }
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1809,6 +1826,21 @@ mod tests {
         let mut s = Settings::default();
         s.secret_key = Some("irrelevant".into());
         assert!(inert_layer_settings(&s).is_empty());
+    }
+
+    /// #1699 — the tenancy server gets `[security]` headers only when
+    /// settings are loaded, and then from those settings.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "admin"))]
+    #[test]
+    fn tenancy_security_headers_follow_the_settings() {
+        assert!(Cli::new().tenancy_security_headers().is_none());
+        let mut s = crate::config::Settings::default();
+        s.security.headers_preset = Some("relaxed".into());
+        let got = Cli::new().with_settings(&s).tenancy_security_headers();
+        assert_eq!(
+            got.map(|l| l.xfo),
+            Some(crate::security_headers::SecurityHeadersLayer::relaxed().xfo)
+        );
     }
 
     #[cfg(feature = "config")]
