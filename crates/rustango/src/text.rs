@@ -151,6 +151,22 @@ pub fn html_escape(s: &str) -> String {
     out
 }
 
+/// Append `s` to `out` with the five XML characters escaped (`&apos;`
+/// for `'`), for feeds and sitemaps.
+#[allow(dead_code)] // callers are feature-gated
+pub(crate) fn escape_xml_into(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+}
+
 /// Inverse of [`html_escape`] — decode HTML entities back to their
 /// characters.
 ///

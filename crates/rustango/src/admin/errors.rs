@@ -243,12 +243,7 @@ fn short_correlation_id() -> String {
     out
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+use crate::text::html_escape;
 
 #[cfg(test)]
 mod tests {

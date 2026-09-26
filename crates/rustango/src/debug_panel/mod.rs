@@ -387,18 +387,7 @@ tbody tr:hover {{ background: rgba(127,127,127,.06); }}
     )
 }
 
-fn html_escape(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '&' => "&amp;".to_owned(),
-            '<' => "&lt;".to_owned(),
-            '>' => "&gt;".to_owned(),
-            '"' => "&quot;".to_owned(),
-            '\'' => "&#x27;".to_owned(),
-            _ => c.to_string(),
-        })
-        .collect()
-}
+use crate::text::html_escape;
 
 #[cfg(test)]
 mod tests {

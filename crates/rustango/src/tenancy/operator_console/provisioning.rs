@@ -650,13 +650,8 @@ pub(super) async fn provision_run_stream(
 ///
 /// Both carry a connection diagnosis, which contains a hostname and a
 /// driver message — neither of which is ours, so neither goes into a
-/// page unescaped.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+/// page unescaped. The shared escaper, which also covers `'` (#1663).
+use crate::text::html_escape;
 
 #[cfg(test)]
 mod tests {
