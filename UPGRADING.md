@@ -150,6 +150,23 @@ untouched.
 
 ## Unreleased
 
+### Query IR structs are `#[non_exhaustive]`
+
+`Filter`, `Assignment`, `SelectQuery`, `InsertQuery`, `BulkInsertQuery`,
+`UpdateQuery`, `BulkUpdateQuery`, `DeleteQuery`, `CountQuery` and
+`AggregateQuery` (#1661). A struct literal outside the crate, including
+`..SelectQuery::new(m)`, now fails with `E0639`; use `X::new(..)`:
+
+```rust
+let f = Filter::new("status", Op::Eq, SqlValue::from("draft"));
+let q = InsertQuery::new(Post::SCHEMA, cols, vals).returning(vec!["id"]);
+let mut s = SelectQuery::new(Post::SCHEMA).where_clause(f.into());
+s.limit = Some(10);
+```
+
+Reading and assigning fields still works. Code that only uses the
+`QuerySet` API or `#[derive(Model)]` is unaffected.
+
 ### `migrate` refuses a callback migration without `"atomic": false`
 
 Any migration file with a `{"callback": …}` op now needs

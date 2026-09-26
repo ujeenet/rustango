@@ -13,16 +13,12 @@
 //!
 //! fn status_to_filters(value: &str) -> Vec<Filter> {
 //!     match value {
-//!         "draft" => vec![Filter {
-//!             column: "status",
-//!             op: Op::Eq,
-//!             value: SqlValue::String("draft".into()),
-//!         }],
-//!         "published" => vec![Filter {
-//!             column: "status",
-//!             op: Op::Eq,
-//!             value: SqlValue::String("published".into()),
-//!         }],
+//!         "draft" => vec![Filter::new("status", Op::Eq, SqlValue::String("draft".into()))],
+//!         "published" => vec![Filter::new(
+//!             "status",
+//!             Op::Eq,
+//!             SqlValue::String("published".into()),
+//!         )],
 //!         _ => Vec::new(),
 //!     }
 //! }

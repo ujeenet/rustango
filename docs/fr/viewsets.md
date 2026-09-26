@@ -843,11 +843,11 @@ impl ViewSetFilter for OwnerFilter {
         let Some(principal) = Principal::from_parts(parts) else {
             return vec![match_nothing(schema)];
         };
-        vec![WhereExpr::Predicate(Filter {
-            column: schema.field("owner_id").expect("owner_id").column,
-            op: Op::Eq,
-            value: SqlValue::from(principal.user_id),
-        })]
+        vec![WhereExpr::Predicate(Filter::new(
+            schema.field("owner_id").expect("owner_id").column,
+            Op::Eq,
+            SqlValue::from(principal.user_id),
+        ))]
     }
 }
 

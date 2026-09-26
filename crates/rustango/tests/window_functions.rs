@@ -29,18 +29,7 @@ pub struct User {
 }
 
 fn agg(expr: AggregateExpr) -> AggregateQuery {
-    AggregateQuery {
-        model: User::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(vec![]),
-        aggregates: vec![("w".into(), expr)],
-        aliases: vec![],
-        group_by: vec![],
-        having: None,
-        order_by: vec![],
-        limit: None,
-        offset: None,
-    }
+    AggregateQuery::new(User::SCHEMA, vec![("w".into(), expr)])
 }
 
 // ---------- Per-function emission ----------
@@ -275,18 +264,11 @@ fn sqlite_uses_double_quotes_for_window_columns() {
 fn window_as_expr_emits_when_force_constructed_but_db_will_reject() {
     use rustango::core::{Assignment, Filter, Op, UpdateQuery};
     let expr: Expr = row_number().order_by(&[("score", true)]).into();
-    let q = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![Assignment {
-            column: "score",
-            value: expr,
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
-    };
+    let q = UpdateQuery::new(
+        User::SCHEMA,
+        vec![Assignment::new("score", expr)],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+    );
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
         stmt.sql
@@ -469,11 +451,7 @@ fn filtered_window_rejection_msg_consistent_across_dialects() {
             order_by: vec![],
             frame: None,
         }))),
-        filter: WhereExpr::Predicate(Filter {
-            column: "score",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
+        filter: WhereExpr::Predicate(Filter::new("score", Op::Eq, SqlValue::I64(1))),
     };
     let q = agg(f);
     for (label, err) in [

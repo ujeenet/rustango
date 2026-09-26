@@ -35,11 +35,11 @@ fn published_only(
         return Vec::new();
     }
     schema.field("status").map_or_else(Vec::new, |f| {
-        vec![WhereExpr::Predicate(Filter {
-            column: f.column,
-            op: Op::Eq,
-            value: SqlValue::from("published"),
-        })]
+        vec![WhereExpr::Predicate(Filter::new(
+            f.column,
+            Op::Eq,
+            SqlValue::from("published"),
+        ))]
     })
 }
 

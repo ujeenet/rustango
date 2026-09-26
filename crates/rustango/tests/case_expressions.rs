@@ -28,18 +28,11 @@ pub struct Csq {
 }
 
 fn update_set(value: Expr) -> UpdateQuery {
-    UpdateQuery {
-        model: Csq::SCHEMA,
-        set: vec![Assignment {
-            column: "title",
-            value,
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
-    }
+    UpdateQuery::new(
+        Csq::SCHEMA,
+        vec![Assignment::new("title", value)],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+    )
 }
 
 // ---------- Emit shape: single WHEN + ELSE ----------
@@ -284,11 +277,7 @@ fn unknown_column_inside_case_when_predicate_is_caught() {
             case()
                 .when(
                     // bogus column in the predicate
-                    WhereExpr::Predicate(Filter {
-                        column: "nope_col",
-                        op: Op::Eq,
-                        value: SqlValue::I64(1),
-                    }),
+                    WhereExpr::Predicate(Filter::new("nope_col", Op::Eq, SqlValue::I64(1))),
                     value("anything"),
                 )
                 .default(value("fallback")),

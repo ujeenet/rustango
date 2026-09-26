@@ -98,13 +98,8 @@ async fn a_schema_driven_insert_writes_canonical_text() {
     let collected =
         collect_insert_values(Note::SCHEMA, &form("through-the-viewset"), &[]).expect("collect");
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
-    let query = rustango::core::InsertQuery {
-        model: Note::SCHEMA,
-        columns,
-        values,
-        returning: vec!["id"],
-        on_conflict: None,
-    };
+    let query =
+        rustango::core::InsertQuery::new(Note::SCHEMA, columns, values).returning(vec!["id"]);
     rustango::sql::insert_returning_pool(&pool, &query)
         .await
         .expect("insert");
@@ -172,13 +167,7 @@ async fn the_newest_row_sorts_first() {
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     rustango::sql::insert_returning_pool(
         &pool,
-        &rustango::core::InsertQuery {
-            model: Note::SCHEMA,
-            columns,
-            values,
-            returning: vec!["id"],
-            on_conflict: None,
-        },
+        &rustango::core::InsertQuery::new(Note::SCHEMA, columns, values).returning(vec!["id"]),
     )
     .await
     .expect("insert");

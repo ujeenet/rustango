@@ -43,14 +43,11 @@ pub struct Book {
 // in the outer query's where_clause AND scalar Expr::Subquery in the
 // assignment RHS.
 fn update_against_author(set_value: Expr, where_clause: WhereExpr) -> UpdateQuery {
-    UpdateQuery {
-        model: Author::SCHEMA,
-        set: vec![Assignment {
-            column: "name",
-            value: set_value,
-        }],
+    UpdateQuery::new(
+        Author::SCHEMA,
+        vec![Assignment::new("name", set_value)],
         where_clause,
-    }
+    )
 }
 
 // ---------- EXISTS ----------
@@ -182,11 +179,7 @@ fn scalar_subquery_in_set_expr_emits_in_parens() {
         .unwrap();
     let q = update_against_author(
         subquery(inner),
-        WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
     );
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
@@ -210,11 +203,7 @@ fn outer_ref_without_any_subquery_wrap_is_an_emit_error() {
     // dedicated error rather than emitting nonsense SQL.
     let q = update_against_author(
         outer_ref("id"),
-        WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
     );
     let err = Postgres.compile_update(&q).unwrap_err();
     assert!(

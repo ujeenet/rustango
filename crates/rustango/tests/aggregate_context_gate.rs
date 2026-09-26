@@ -171,11 +171,11 @@ fn aggregate_in_aggregate_query_where_is_rejected() {
         .annotate("c", count_all().into())
         .compile()
         .unwrap();
-    q.where_clause = rustango::core::WhereExpr::Predicate(rustango::core::Filter {
-        column: "views",
-        op: Op::Eq,
-        value: rustango::core::SqlValue::Null,
-    });
+    q.where_clause = rustango::core::WhereExpr::Predicate(rustango::core::Filter::new(
+        "views",
+        Op::Eq,
+        rustango::core::SqlValue::Null,
+    ));
     // Stash an aggregate inside the WHERE via a ColumnCompare predicate.
     q.where_clause = rustango::core::WhereExpr::ColumnCompare(rustango::core::ColumnFilter {
         column: "views",

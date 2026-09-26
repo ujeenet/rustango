@@ -150,11 +150,7 @@ async fn live_delete_affects_zero_rows() {
     // All seeded rows still present.
     let surviving = rustango::sql::count_rows_pool(
         &pool,
-        &rustango::core::CountQuery {
-            model: QsnPost::SCHEMA,
-            where_clause: WhereExpr::And(vec![]),
-            search: None,
-        },
+        &rustango::core::CountQuery::new(QsnPost::SCHEMA, WhereExpr::And(vec![])),
     )
     .await
     .expect("count");
@@ -167,6 +163,7 @@ fn where_contains_pk_is_null(w: &WhereExpr) -> bool {
             column,
             op: Op::IsNull,
             value: SqlValue::Bool(true),
+            ..
         }) => *column == QsnPost::SCHEMA.primary_key().unwrap().column,
         WhereExpr::And(nodes) | WhereExpr::Or(nodes) | WhereExpr::Xor(nodes) => {
             nodes.iter().any(where_contains_pk_is_null)

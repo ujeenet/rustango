@@ -184,10 +184,19 @@ pub fn escape_like(input: &str) -> String {
 /// One predicate in a `WHERE` clause: `column <op> value`. Always
 /// the leaf of a [`WhereExpr`] tree.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Filter {
     pub column: &'static str,
     pub op: Op,
     pub value: SqlValue,
+}
+
+impl Filter {
+    /// A `column <op> value` predicate.
+    #[must_use]
+    pub fn new(column: &'static str, op: Op, value: SqlValue) -> Self {
+        Self { column, op, value }
+    }
 }
 
 /// `WHERE` predicate that compares two columns of the same row, such
@@ -571,6 +580,7 @@ impl From<Filter> for WhereExpr {
 /// group AND-ed to `where_clause`. `joins` adds JOIN clauses and
 /// pulls extra columns into the projection under aliased names.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SelectQuery {
     pub model: &'static ModelSchema,
     pub where_clause: WhereExpr,
@@ -643,16 +653,13 @@ pub struct SelectQuery {
 impl SelectQuery {
     /// Construct an empty `SelectQuery` against `model`: no filters
     /// (`WhereExpr::And(vec![])`, vacuously true), empty lists, `None`
-    /// options. Layer the real filter / order / limit on top with
-    /// struct update, so a new field does not break existing callers:
+    /// options. Set the rest with the builders or by assigning a field:
     ///
     /// ```ignore
     /// use rustango::core::SelectQuery;
     ///
-    /// let q = SelectQuery {
-    ///     limit: Some(10),
-    ///     ..SelectQuery::new(MyModel::SCHEMA)
-    /// };
+    /// let mut q = SelectQuery::new(MyModel::SCHEMA).where_clause(filter.into());
+    /// q.limit = Some(10);
     /// ```
     #[must_use]
     pub fn new(model: &'static ModelSchema) -> Self {
@@ -679,21 +686,7 @@ impl SelectQuery {
 
     /// A single-PK lookup — the most common shape in the framework.
     /// Use it when the WHERE is one `<pk_column> = <value>` and you
-    /// want one row back.
-    ///
-    /// Equivalent to:
-    ///
-    /// ```ignore
-    /// SelectQuery {
-    ///     where_clause: WhereExpr::Predicate(Filter {
-    ///         column: pk_column,
-    ///         op: Op::Eq,
-    ///         value: pk_value,
-    ///     }),
-    ///     limit: Some(1),
-    ///     ..SelectQuery::new(model)
-    /// }
-    /// ```
+    /// want one row back. Sets `LIMIT 1`.
     #[must_use]
     pub fn by_pk(model: &'static ModelSchema, pk_column: &'static str, pk_value: SqlValue) -> Self {
         Self {
@@ -710,21 +703,7 @@ impl SelectQuery {
     /// Multi-PK `IN (...)` lookup. Companion to [`Self::by_pk`] for bulk
     /// fetch, bulk delete by id, and FK display fetches.
     ///
-    /// Equivalent to:
-    ///
-    /// ```ignore
-    /// SelectQuery {
-    ///     where_clause: WhereExpr::Predicate(Filter {
-    ///         column: pk_column,
-    ///         op: Op::In,
-    ///         value: SqlValue::List(pk_values),
-    ///     }),
-    ///     ..SelectQuery::new(model)
-    /// }
-    /// ```
-    ///
-    /// No `LIMIT` is set. Add one with struct update if you need it:
-    /// `SelectQuery { limit: Some(50), ..SelectQuery::by_pk_in(...) }`.
+    /// No `LIMIT` is set. Assign `q.limit = Some(50)` if you need one.
     #[must_use]
     pub fn by_pk_in(
         model: &'static ModelSchema,
@@ -739,6 +718,20 @@ impl SelectQuery {
             }),
             ..Self::new(model)
         }
+    }
+
+    /// Replace the `WHERE` tree.
+    #[must_use]
+    pub fn where_clause(mut self, where_clause: WhereExpr) -> Self {
+        self.where_clause = where_clause;
+        self
+    }
+
+    /// Project exactly `columns` instead of every scalar field.
+    #[must_use]
+    pub fn projection(mut self, columns: Vec<&'static str>) -> Self {
+        self.projection = Some(columns);
+        self
     }
 }
 
@@ -1180,6 +1173,7 @@ pub enum ConflictClause {
 /// `columns` and `values` are positional: `values[i]` binds to
 /// `columns[i]`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct InsertQuery {
     pub model: &'static ModelSchema,
     pub columns: Vec<&'static str>,
@@ -1196,6 +1190,36 @@ pub struct InsertQuery {
 }
 
 impl InsertQuery {
+    /// A plain single-row `INSERT`: no `RETURNING`, no `ON CONFLICT`.
+    #[must_use]
+    pub fn new(
+        model: &'static ModelSchema,
+        columns: Vec<&'static str>,
+        values: Vec<SqlValue>,
+    ) -> Self {
+        Self {
+            model,
+            columns,
+            values,
+            returning: Vec::new(),
+            on_conflict: None,
+        }
+    }
+
+    /// Read `columns` back from the inserted row.
+    #[must_use]
+    pub fn returning(mut self, columns: Vec<&'static str>) -> Self {
+        self.returning = columns;
+        self
+    }
+
+    /// Set the `ON CONFLICT` clause.
+    #[must_use]
+    pub fn on_conflict(mut self, clause: ConflictClause) -> Self {
+        self.on_conflict = Some(clause);
+        self
+    }
+
     /// Check each `(column, value)` pair against the field's declared
     /// bounds (`max_length`, `min`, `max`).
     ///
@@ -1233,6 +1257,7 @@ impl InsertQuery {
 /// `Auto::Set(v)` for every row. Mixing the two in one call is
 /// rejected at validate time.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BulkInsertQuery {
     pub model: &'static ModelSchema,
     pub columns: Vec<&'static str>,
@@ -1243,6 +1268,36 @@ pub struct BulkInsertQuery {
 }
 
 impl BulkInsertQuery {
+    /// A plain multi-row `INSERT`: no `RETURNING`, no `ON CONFLICT`.
+    #[must_use]
+    pub fn new(
+        model: &'static ModelSchema,
+        columns: Vec<&'static str>,
+        rows: Vec<Vec<SqlValue>>,
+    ) -> Self {
+        Self {
+            model,
+            columns,
+            rows,
+            returning: Vec::new(),
+            on_conflict: None,
+        }
+    }
+
+    /// Read `columns` back from every inserted row.
+    #[must_use]
+    pub fn returning(mut self, columns: Vec<&'static str>) -> Self {
+        self.returning = columns;
+        self
+    }
+
+    /// Set the `ON CONFLICT` clause.
+    #[must_use]
+    pub fn on_conflict(mut self, clause: ConflictClause) -> Self {
+        self.on_conflict = Some(clause);
+        self
+    }
+
     /// Chainable builder — upsert on conflict. Sets `on_conflict` to
     /// `DoUpdate { target, update_columns }`.
     ///
@@ -1309,9 +1364,21 @@ impl BulkInsertQuery {
 /// `impl From<SqlValue> for Expr`, so `Column::set` and
 /// `UpdateBuilder::set` keep their signatures.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Assignment {
     pub column: &'static str,
     pub value: Expr,
+}
+
+impl Assignment {
+    /// `column = value`; a [`SqlValue`] converts into an `Expr::Literal`.
+    #[must_use]
+    pub fn new(column: &'static str, value: impl Into<Expr>) -> Self {
+        Self {
+            column,
+            value: value.into(),
+        }
+    }
 }
 
 /// Compiled `UPDATE`.
@@ -1321,6 +1388,7 @@ pub struct Assignment {
 /// `WhereExpr::And(vec![])`) updates every row; the caller must mean
 /// that.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UpdateQuery {
     pub model: &'static ModelSchema,
     pub set: Vec<Assignment>,
@@ -1328,6 +1396,16 @@ pub struct UpdateQuery {
 }
 
 impl UpdateQuery {
+    /// `UPDATE <model> SET <set> WHERE <where_clause>`.
+    #[must_use]
+    pub fn new(model: &'static ModelSchema, set: Vec<Assignment>, where_clause: WhereExpr) -> Self {
+        Self {
+            model,
+            set,
+            where_clause,
+        }
+    }
+
     /// Check each `SET column = value` against the field's declared
     /// bounds. Filters are not checked: they read existing rows
     /// instead of writing them.
@@ -1358,12 +1436,22 @@ impl UpdateQuery {
 ///
 /// As with `UpdateQuery`, an empty `where_clause` deletes every row.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DeleteQuery {
     pub model: &'static ModelSchema,
     pub where_clause: WhereExpr,
 }
 
 impl DeleteQuery {
+    /// `DELETE FROM <model> WHERE <where_clause>`.
+    #[must_use]
+    pub fn new(model: &'static ModelSchema, where_clause: WhereExpr) -> Self {
+        Self {
+            model,
+            where_clause,
+        }
+    }
+
     /// A `DELETE … WHERE <pk_column> = <pk_value>`. Companion to
     /// [`SelectQuery::by_pk`].
     #[must_use]
@@ -1402,6 +1490,7 @@ impl DeleteQuery {
 /// `DeleteQuery`. The writer emits a `COUNT(*)` projection and no
 /// `LIMIT` / `OFFSET`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CountQuery {
     pub model: &'static ModelSchema,
     pub where_clause: WhereExpr,
@@ -1410,6 +1499,18 @@ pub struct CountQuery {
     /// paginated list shows the right total while `?search=...` is
     /// active.
     pub search: Option<SearchClause>,
+}
+
+impl CountQuery {
+    /// `SELECT COUNT(*) FROM <model> WHERE <where_clause>`, no search.
+    #[must_use]
+    pub fn new(model: &'static ModelSchema, where_clause: WhereExpr) -> Self {
+        Self {
+            model,
+            where_clause,
+            search: None,
+        }
+    }
 }
 
 /// Bulk per-row UPDATE using `UPDATE t SET … FROM (VALUES …)`: one
@@ -1421,6 +1522,7 @@ pub struct CountQuery {
 ///
 /// Run it with [`crate::sql::bulk_update_pool`], or build it directly.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BulkUpdateQuery {
     pub model: &'static ModelSchema,
     /// The columns to update, not counting the PK.
@@ -1429,6 +1531,22 @@ pub struct BulkUpdateQuery {
     /// `[pk_value, col1_value, col2_value, …]`. The first element is
     /// always the PK; the rest line up with `update_columns`.
     pub rows: Vec<Vec<SqlValue>>,
+}
+
+impl BulkUpdateQuery {
+    /// A per-row update; each row is `[pk, values of update_columns..]`.
+    #[must_use]
+    pub fn new(
+        model: &'static ModelSchema,
+        update_columns: Vec<&'static str>,
+        rows: Vec<Vec<SqlValue>>,
+    ) -> Self {
+        Self {
+            model,
+            update_columns,
+            rows,
+        }
+    }
 }
 
 /// One aggregate expression in an [`AggregateQuery`].
@@ -1684,6 +1802,7 @@ impl AggregateExpr {
 ///
 /// Build via [`crate::query::QuerySet::aggregate`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AggregateQuery {
     pub model: &'static ModelSchema,
     /// FK-chain and ad-hoc JOINs, so an aggregate can group by a
@@ -1719,6 +1838,28 @@ pub struct AggregateQuery {
     pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+impl AggregateQuery {
+    /// An ungrouped aggregate over every row; set the rest by field.
+    #[must_use]
+    pub fn new(
+        model: &'static ModelSchema,
+        aggregates: Vec<(Cow<'static, str>, AggregateExpr)>,
+    ) -> Self {
+        Self {
+            model,
+            joins: Vec::new(),
+            where_clause: WhereExpr::And(Vec::new()),
+            group_by: Vec::new(),
+            aggregates,
+            aliases: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        }
+    }
 }
 
 /// `PartialEq` for `AggregateQuery`, so [`crate::core::Expr`] (which
