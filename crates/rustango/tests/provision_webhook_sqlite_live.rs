@@ -403,7 +403,7 @@ async fn a_caller_supplied_url_is_refused_under_the_default_policy() {
     );
     let json = json_of(resp).await;
     assert!(
-        json["error"]
+        json["message"]
             .as_str()
             .is_some_and(|e| e.contains("derives")),
         "the refusal should say why: {json}"

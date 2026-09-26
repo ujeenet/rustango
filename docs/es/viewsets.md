@@ -69,7 +69,7 @@ El mismo modelo por debajo; lo que difiere es qué sale y quién llama.
 | Devuelve | **datos JSON** | una **página HTML renderizada en el servidor** |
 | Diseñado para | SPAs, móvil, otros servicios | navegadores, sitios renderizados en el servidor, CRUD estilo admin |
 | Un "crear" | `POST` JSON → `201` + el objeto | `POST` de un formulario → redirección `303` (Post/Redirect/Get) |
-| Ante entrada inválida | `400` — indexado por campo desde un serializador, si no `{"error": "…"}` ([formas](#formas-de-respuesta-de-error)) | re-renderiza el formulario con los errores mostrados |
+| Ante entrada inválida | `400` [`ApiError`](#formas-de-respuesta-de-error); errores del serializador `422`, campos en `details` | re-renderiza el formulario con los errores mostrados |
 | Un "listar" es | un sobre JSON paginado | un bucle sobre filas en tu plantilla |
 | Normalmente autenticado por | tokens / JWT / claves de API | cookies de sesión |
 
@@ -683,25 +683,23 @@ reglas por campo y entre campos.
 
 ### Formas de respuesta de error
 
-No hay un único sobre de error — un cliente que parsee una forma fallará con las
-otras. Se envían **tres**, y cuál obtienes depende de la ruta que falló:
+Todo error de un ViewSet es un cuerpo [`ApiError`](api-conventions.md), la misma
+forma que envían tus propios handlers (#1193):
 
-| Forma | Emitida por | Cuerpo |
-|---|---|---|
-| **Mapa indexado por campo** | solo la validación del serializador | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
-| **Mensaje simple** | cualquier otro fallo del ViewSet | `{"error": "<mensaje legible>"}` |
-| **`ApiError`** | tus propios handlers que devuelven `rustango::api_errors::ApiError` | `{"error": "<código máquina>", "message": …, "status": …, "details": …}` |
+```json
+{"error": "<machine code>", "message": "<sentence>", "status": 400}
+```
 
-Las dos primeras salen ambas de un ViewSet, así que la distinción importa: los
-`400` de coerción de tipos, de requerido/NOT NULL y de restricción de base de
-datos listados arriba **no** son mapas indexados por campo — son
-`{"error": "…"}`. Solo los validadores propios del serializador producen el mapa
-indexado por campo.
-
-Fíjate además en que `error` significa dos cosas distintas en la tabla: una frase
-legible en la forma del ViewSet, y un código máquina estable en `ApiError` (que
-lleva la frase en `message`). Ramifica según el estado HTTP y según si el cuerpo
-tiene una clave `message`, no según `error` a secas.
+- `error` es un código estable (`bad_request`, `unauthorized`, `not_found`,
+  `validation_failed`, `rate_limited`, `internal_error`, …). Ramifica según él.
+- La validación del serializador es un `422` `validation_failed`, con el mapa por
+  campo en `details`:
+  `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}`.
+  Los `400` de coerción de tipos y de campo requerido de arriba son
+  `bad_request`, con el motivo en `message`; un `400` de restricción de base de
+  datos oculta el texto del driver.
+- Un `5xx` nunca lleva la causa salvo que `RUSTANGO_DISCLOSE_ERRORS` esté
+  definida. Se registra en el log; `message` es genérico.
 
 ---
 

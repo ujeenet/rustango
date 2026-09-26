@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request};
-use axum::http::{header, HeaderValue, Response, StatusCode};
+use axum::http::{HeaderValue, Response};
 use axum::middleware::Next;
 use axum::Router;
 
@@ -346,15 +346,16 @@ async fn handle(cfg: Arc<RateLimitLayer>, req: Request<Body>, next: Next) -> Res
             );
             response
         }
-        Err(retry_secs) => Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header(header::RETRY_AFTER, retry_secs.to_string())
-            .header("x-ratelimit-limit", cfg.capacity.to_string())
-            .header("x-ratelimit-remaining", "0")
-            .body(Body::from(format!(
-                r#"{{"error":"rate limit exceeded","retry_after":{retry_secs}}}"#
-            )))
-            .unwrap(),
+        Err(retry_secs) => {
+            let mut resp = crate::api_errors::ApiError::rate_limited_response(
+                "rate limit exceeded",
+                retry_secs,
+            );
+            let h = resp.headers_mut();
+            h.insert("x-ratelimit-limit", cfg.capacity.into());
+            h.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+            resp
+        }
     }
 }
 
