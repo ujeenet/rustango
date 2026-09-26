@@ -150,6 +150,15 @@ untouched.
 
 ## Unreleased
 
+### `shortcuts::redirect_to_login` is removed
+
+Its arguments ran the other way round from the one that stays (#1663):
+
+```rust
+// before: shortcuts::redirect_to_login(next, "/login")
+rustango::auth_decorators::redirect_to_login("/login", "next", next)
+```
+
 ### Query IR structs are `#[non_exhaustive]`
 
 `Filter`, `Assignment`, `SelectQuery`, `InsertQuery`, `BulkInsertQuery`,

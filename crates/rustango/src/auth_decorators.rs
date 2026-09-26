@@ -759,6 +759,13 @@ mod tests {
     }
 
     #[test]
+    fn redirect_to_login_joins_with_ampersand_after_a_query() {
+        let res = redirect_to_login("/login?lang=fr", "next", "/profile");
+        let loc = res.headers().get(header::LOCATION).unwrap();
+        assert_eq!(loc, "/login?lang=fr&next=%2Fprofile");
+    }
+
+    #[test]
     fn redirect_to_login_drops_location_on_crlf_attempt() {
         // CRLF in the original URL is a response-splitting vector.
         // The value is percent-encoded first, so no raw CRLF reaches
