@@ -4,8 +4,8 @@
 //! ## Why this exists
 //!
 //! The integration suite is shaped by dialect rather than by feature
-//! (#1461). Of 188 `*_sqlite_live.rs` files, 16 stems have a sibling
-//! file for another backend and **172 have no MySQL or PG counterpart at
+//! (#1461). Of 189 `*_sqlite_live.rs` files, 16 stems have a sibling
+//! file for another backend and **173 have no MySQL or PG counterpart at
 //! all** — not because those features are SQLite-only, but because
 //! writing the second and third copy by hand costs more than it returns.
 //! The `orm_*` scenario files already solved this for eight features;
