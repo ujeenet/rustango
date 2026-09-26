@@ -272,6 +272,7 @@ async fn soak_info(
             "max_connections": st.pool_cfg.database_pool_max_connections,
             "min_connections": st.pool_cfg.database_pool_min_connections,
             "cache_max": st.pool_cfg.max_cached_database_pools,
+            "scoped_cache_max": st.pool_cfg.max_cached_scoped_pools,
         },
     }))
 }

@@ -115,6 +115,47 @@ def tenant_host(i: int) -> str:
     return f"t{i:02d}.{APEX}"
 
 
+# `ApiError::from_status` — the code each status must carry (#1193).
+ERROR_CODES = {400: "bad_request", 401: "unauthorized", 403: "forbidden",
+               404: "not_found", 409: "conflict", 422: "validation_failed",
+               429: "rate_limited"}
+
+# Driver text that must stay in the log, never in a 4xx body (#1193).
+DRIVER_WORDS = ("commerce_", "unique", "duplicate", "constraint", "violates",
+                "sqlite", "mysql", "postgres")
+
+
+def envelope_problem(r) -> str | None:
+    """Why `r` is not an `ApiError` body for its status, or None."""
+    try:
+        body = r.json()
+    except ValueError:
+        return f"not JSON: {r.text[:120]!r}"
+    if not isinstance(body, dict):
+        return f"not an object: {r.text[:120]!r}"
+    want = ERROR_CODES.get(r.status_code)
+    if body.get("status") != r.status_code:
+        return f"status field {body.get('status')!r} != {r.status_code}"
+    if want and body.get("error") != want:
+        return f"error {body.get('error')!r}, want {want!r}"
+    if not isinstance(body.get("message"), str):
+        return f"no string message: {r.text[:120]!r}"
+    return None
+
+
+def set_cookie_value(r, name: str) -> str | None:
+    """The value `r` sets for cookie `name`, read off the raw headers.
+
+    Read by hand: the fleet runs `RUSTANGO_ENV=prod`, so cookies are
+    `Secure`, and httpx will not send those back over plain HTTP.
+    """
+    for h in r.headers.get_list("set-cookie"):
+        first = h.split(";", 1)[0]
+        if first.startswith(f"{name}="):
+            return first[len(name) + 1:]
+    return None
+
+
 # ----------------------------------------------------------- health / info
 
 
@@ -292,6 +333,16 @@ async def check_bulk_atomic(client, name, base, headers=None):
         REPORT.add("bulk create leaves zero rows on rollback", issue, "FAIL",
                    f"rejected with {r.status_code} but {n} row(s) committed", name)
 
+    # #1193 — a 400 from the database, with the driver text kept out.
+    problem = envelope_problem(r) if r.status_code == 400 else f"status {r.status_code}"
+    leaked = [w for w in DRIVER_WORDS if w in r.text.lower()]
+    if problem or leaked:
+        REPORT.add("constraint error is a 400 envelope without driver text", "#1193",
+                   "FAIL", problem or f"body names {leaked}: {r.text[:200]}", name)
+    else:
+        REPORT.add("constraint error is a 400 envelope without driver text", "#1193",
+                   "PASS", r.json().get("message", ""), name)
+
 
 async def check_serializer_source(client, name, base, headers=None):
     """#1386 — a `source` rename must not leak the column name."""
@@ -312,6 +363,21 @@ async def check_serializer_source(client, name, base, headers=None):
     else:
         REPORT.add("serializer rename does not leak the column", issue, "PASS",
                    "", name)
+
+    # #1193 — serializer validation is a 422, with the field in details.
+    problem = envelope_problem(r) if r.status_code == 422 else f"status {r.status_code}"
+    if not problem and "price_cents" not in (r.json().get("details") or {}):
+        problem = f"details do not name price_cents: {text[:200]}"
+    REPORT.add("serializer validation is a 422 envelope", "#1193",
+               "FAIL" if problem else "PASS", problem or "", name)
+
+
+async def check_not_found_envelope(client, name, base, headers=None):
+    """#1193 — a missing row is a 404 `ApiError`, not a bare string."""
+    r = await client.get(f"{base}/api/v1/products/987654321987", headers=headers)
+    problem = envelope_problem(r) if r.status_code == 404 else f"status {r.status_code}"
+    REPORT.add("missing row is a 404 envelope", "#1193",
+               "FAIL" if problem else "PASS", problem or "", name)
 
 
 async def check_pagination(client, name, base, headers=None):
@@ -427,6 +493,9 @@ async def check_malformed_cursor_is_400(client, name, base, headers=None):
                          params={"cursor": "not-a-real-token"})
     if r.status_code == 400:
         REPORT.add("malformed cursor is a client error", "#1459", "PASS", "", name)
+        problem = envelope_problem(r)
+        REPORT.add("malformed cursor is a 400 envelope", "#1193",
+                   "FAIL" if problem else "PASS", problem or "", name)
     else:
         REPORT.add("malformed cursor is a client error", "#1459", "FAIL",
                    f"expected 400, got {r.status_code}", name)
@@ -619,13 +688,137 @@ async def check_apex_does_not_serve_app(client, name, base):
                    f"{r.status_code}", name)
 
 
+async def check_unknown_tenant_envelope(client, name, base):
+    """#1193 — a tenant rejection is JSON, not plain text."""
+    r = await client.get(f"{base}/api/v1/products",
+                         headers={"Host": f"no-such-tenant.{APEX}"})
+    problem = (envelope_problem(r) if 400 <= r.status_code < 500
+               else f"status {r.status_code}")
+    REPORT.add("unknown tenant is an error envelope", "#1193",
+               "FAIL" if problem else "PASS",
+               problem or f"{r.status_code} {r.json().get('error')}", name)
+
+
+TENANT_ADMIN = ("soakadmin", os.environ.get("SOAK_TENANT_ADMIN_PASSWORD", "soak-admin-pw"))
+SESSION_COOKIE = "rustango_tenant_session"
+
+
+async def login_form(client, base, host):
+    """GET the tenant login page; return its CSRF token, or None."""
+    r = await client.get(f"{base}/__login", headers={"Host": host})
+    return set_cookie_value(r, "rustango_csrf") if r.status_code == 200 else None
+
+
+async def post_login(client, base, host, token, *, send_field=True, origin=None,
+                     user=TENANT_ADMIN):
+    headers = {"Host": host, "Cookie": f"rustango_csrf={token}"}
+    if origin:
+        headers["Origin"] = origin
+    form = {"username": user[0], "password": user[1], "next": "/__admin"}
+    if send_field:
+        form["_csrf"] = token
+    return await client.post(f"{base}/__login", headers=headers, data=form)
+
+
+async def check_tenant_login(client, name, base):
+    """The tenant login, end to end, as a browser does it.
+
+    #1607 — the POST needs the CSRF pair. #1692 — the admin gate reads
+    the session cookie through the shared cookie reader; no other check
+    sends a valid session. GHSA-c4gg-mvfq-h268 — t01's login and t01's
+    session must not work on t02.
+    """
+    a, b = tenant_host(1), tenant_host(2)
+    token = await login_form(client, base, a)
+    if not token:
+        REPORT.add("tenant login", "#1607", "NOT-COVERED",
+                   "GET /__login set no rustango_csrf cookie", name)
+        return
+
+    r = await post_login(client, base, a, token, send_field=False)
+    REPORT.add("tenant login refuses a POST without the CSRF field", "#1607",
+               "PASS" if r.status_code == 403 else "FAIL",
+               "" if r.status_code == 403 else f"got {r.status_code}", name)
+
+    # #1529 made Origin the default check, but only in `CsrfLayer`. Every
+    # tenant shares the apex, so a page on one tenant can plant the
+    # cookie half for another; Origin is what tells them apart.
+    r = await post_login(client, base, a, token, origin="http://evil.example")
+    REPORT.add("tenant login refuses a foreign Origin", "#1695",
+               "PASS" if r.status_code == 403 else "FAIL",
+               "" if r.status_code == 403 else
+               f"got {r.status_code}: the login checks the token pair but not Origin",
+               name)
+
+    r = await post_login(client, base, a, token, origin=f"http://{a}")
+    session = set_cookie_value(r, SESSION_COOKIE)
+    if r.status_code != 303 or not session:
+        REPORT.add("tenant login signs a user in", "#1607", "FAIL",
+                   f"{r.status_code}, session cookie set: {bool(session)}", name)
+        return
+    REPORT.add("tenant login signs a user in", "#1607", "PASS", "", name)
+
+    cookie = {"Cookie": f"{SESSION_COOKIE}={session}"}
+    ok = await client.get(f"{base}/__admin", headers={"Host": a, **cookie})
+    anon = await client.get(f"{base}/__admin", headers={"Host": a})
+    good = ok.status_code == 200 and anon.status_code in (302, 303)
+    REPORT.add("tenant admin admits the session cookie, and only it", "#1692",
+               "PASS" if good else "FAIL",
+               "" if good else f"with cookie {ok.status_code}, without {anon.status_code}",
+               name)
+
+    other = await client.get(f"{base}/__admin", headers={"Host": b, **cookie})
+    REPORT.add("t01's session is refused on t02", "GHSA-c4gg",
+               "PASS" if other.status_code != 200 else "FAIL",
+               f"{other.status_code}", name)
+
+    token_b = await login_form(client, base, b)
+    if not token_b:
+        REPORT.add("t01's password is refused on t02", "GHSA-c4gg", "NOT-COVERED",
+                   "t02's login set no CSRF cookie", name)
+        return
+    r = await post_login(client, base, b, token_b, origin=f"http://{b}")
+    signed_in = set_cookie_value(r, SESSION_COOKIE)
+    REPORT.add("t01's password is refused on t02", "GHSA-c4gg",
+               "FAIL" if signed_in else "PASS",
+               f"{r.status_code}, session cookie set: {bool(signed_in)}", name)
+
+
+async def check_every_tenant_answers(client, name, base, info):
+    """#1527/#1528 — past the pool cap, the idle pool is evicted.
+
+    Database mode used to refuse every tenant past the cap, on every
+    request, until a restart. Run after the load phase, which spread
+    requests over all tenants.
+    """
+    pool = (info or {}).get("pool") or {}
+    cap = pool.get("scoped_cache_max" if name == "saas-pg" else "cache_max")
+    issue = "#1528" if name == "saas-pg" else "#1527"
+    if not cap or cap >= TENANTS:
+        REPORT.add("every tenant answers past the pool cap", issue, "NOT-COVERED",
+                   f"cap {cap} is not below {TENANTS} tenants", name)
+        return
+    down = []
+    for i in range(1, TENANTS + 1):
+        r = await client.get(f"{base}/_soak/info", headers={"Host": tenant_host(i)})
+        if r.status_code != 200:
+            down.append(f"t{i:02d}={r.status_code}")
+    # Schema mode answered before its fix too; its bug was unbounded
+    # connections, which HTTP cannot count.
+    note = " (schema mode: evidence of no refusal only)" if name == "saas-pg" else ""
+    REPORT.add("every tenant answers past the pool cap", issue,
+               "FAIL" if down else "PASS",
+               f"cap {cap}, down: {down}" if down else f"cap {cap}, {TENANTS} tenants{note}",
+               name)
+
+
 async def check_supervisor_retires(client, name, base):
     """The refresh loop removes queues, not just adds them.
 
     It only ever added. A tenant that was deactivated or deleted kept
     its two workers polling a database it no longer used, held its pool
-    against the server's connection limit and against the 64-pool cache
-    cap (which has no eviction), and was drained on every deploy.
+    against the server's connection limit and against the pool cache
+    cap, and was drained on every deploy.
 
     Nothing reported it: a deactivated tenant produces no error, it just
     stops appearing in the registry query. So the only way to see the
@@ -851,13 +1044,15 @@ async def main():
             await check_pagination(client, name, base)
             await check_cursor_walks(client, name, base)
             await check_malformed_cursor_is_400(client, name, base)
+            await check_not_found_envelope(client, name, base)
             await check_page_cache(client, name, base)
 
         print("\n== assertions: multi-tenant ==")
+        saas_info = {}
         for name, base in live_saas.items():
             hdr = {"Host": tenant_host(1)}
-            await check_soak_info(client, name, base, headers=hdr,
-                                  expect_tenant="t01")
+            saas_info[name] = await check_soak_info(client, name, base, headers=hdr,
+                                                    expect_tenant="t01")
             await check_health_endpoints(client, name, base)
             await check_null_fk(client, name, base, headers=hdr)
             await check_serializer_carries_fk(client, name, base, headers=hdr)
@@ -866,11 +1061,14 @@ async def main():
             await check_pagination(client, name, base, headers=hdr)
             await check_cursor_walks(client, name, base, headers=hdr)
             await check_malformed_cursor_is_400(client, name, base, headers=hdr)
+            await check_not_found_envelope(client, name, base, headers=hdr)
             await check_page_cache(client, name, base, headers=hdr)
             await check_page_cache_is_per_tenant(client, name, base)
             await check_tenant_isolation(client, name, base)
             await check_registered_host(client, name, base)
             await check_apex_does_not_serve_app(client, name, base)
+            await check_unknown_tenant_envelope(client, name, base)
+            await check_tenant_login(client, name, base)
 
         await check_page_cache_does_not_cross_apps(client, live_single, live_saas)
         report_uncoverable(live_single, live_saas)
@@ -933,6 +1131,9 @@ async def main():
                        f"Top statuses: {[(k, v) for v, k in worst]}")
         print(f"  {counters.ok} ok, {counters.err} error, "
               f"{counters.confirmed} orders confirmed")
+
+        for name, base in live_saas.items():
+            await check_every_tenant_answers(client, name, base, saas_info.get(name))
 
         # Let the queues drain before counting them.
         print("\n== waiting 60s for queues to drain ==")
