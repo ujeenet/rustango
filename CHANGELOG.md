@@ -4,6 +4,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — one error envelope across the framework (#1193)
+
+**Breaking** for clients parsing error bodies. See UPGRADING.
+
+ViewSets, tenant and `Principal` rejections, media, the admin's JSON
+errors, body and rate limits, HMAC auth and maintenance mode now all
+answer with `ApiError`. A client no longer needs a layer to normalise
+four shapes, and a 5xx no longer sends the driver's message, which
+could name tables and columns.
+
+Serializer validation is now `422`, like every other
+`validation_failed`. `ApiError` is available with `_axum` (was `admin`)
+and gains `from_status`, `logged` and `rate_limited_response`.
+
 ### Changed — JWT auth is a value, not a process global (#1190)
 
 **Breaking:** `jwt_router(cfg)` is now `JwtAuth::new(cfg).router()`,

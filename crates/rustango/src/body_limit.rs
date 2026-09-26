@@ -23,9 +23,9 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use axum::Router;
 
 #[derive(Clone, Debug)]
@@ -118,16 +118,9 @@ async fn handle(cfg: Arc<BodyLimitLayer>, req: Request<Body>, next: Next) -> Res
 }
 
 fn too_large(limit: usize) -> Response {
-    let body = format!(r#"{{"error":"payload too large","limit_bytes":{limit}}}"#);
-    let mut resp = Response::builder()
-        .status(StatusCode::PAYLOAD_TOO_LARGE)
-        .body(Body::from(body))
-        .unwrap_or_else(|_| Response::new(Body::empty()));
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
+    crate::api_errors::ApiError::from_status(StatusCode::PAYLOAD_TOO_LARGE, "payload too large")
+        .with_details(serde_json::json!({ "limit_bytes": limit }))
+        .into_response()
 }
 
 #[cfg(test)]
@@ -202,8 +195,9 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["error"], "payload too large");
-        assert_eq!(v["limit_bytes"], 10);
+        assert_eq!(v["error"], "payload_too_large");
+        assert_eq!(v["message"], "payload too large");
+        assert_eq!(v["details"]["limit_bytes"], 10);
     }
 
     #[tokio::test]
