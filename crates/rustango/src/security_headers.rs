@@ -90,7 +90,7 @@ impl SecurityHeadersLayer {
     /// - HSTS: `max-age=31536000; includeSubDomains; preload`
     /// - X-Frame-Options: `DENY`
     /// - X-Content-Type-Options: `nosniff`
-    /// - Referrer-Policy: `no-referrer`
+    /// - Referrer-Policy: `same-origin` (not `no-referrer`: that makes browsers send `Origin: null`)
     /// - Cross-Origin-Opener-Policy: `same-origin`
     /// - Permissions-Policy: `camera=(), microphone=(), geolocation=()`
     #[must_use]
@@ -99,7 +99,7 @@ impl SecurityHeadersLayer {
             hsts: Some("max-age=31536000; includeSubDomains; preload".into()),
             xfo: Some("DENY"),
             nosniff: true,
-            referrer_policy: Some("no-referrer"),
+            referrer_policy: Some("same-origin"),
             coop: Some("same-origin"),
             permissions_policy: Some("camera=(), microphone=(), geolocation=()".into()),
             csp: None,
@@ -517,9 +517,22 @@ mod tests {
         assert!(l.hsts.is_some());
         assert_eq!(l.xfo, Some("DENY"));
         assert!(l.nosniff);
-        assert_eq!(l.referrer_policy, Some("no-referrer"));
+        assert_eq!(l.referrer_policy, Some("same-origin"));
         assert_eq!(l.coop, Some("same-origin"));
         assert!(l.permissions_policy.is_some());
+    }
+
+    /// Under `no-referrer` browsers send `Origin: null` on every POST,
+    /// and the CSRF Origin check refuses it, so no form works (#1695).
+    #[test]
+    fn no_preset_makes_browsers_send_a_null_origin() {
+        for l in [
+            SecurityHeadersLayer::strict(),
+            SecurityHeadersLayer::relaxed(),
+            SecurityHeadersLayer::dev(),
+        ] {
+            assert_ne!(l.referrer_policy, Some("no-referrer"));
+        }
     }
 
     #[test]

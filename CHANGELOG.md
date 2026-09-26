@@ -6,11 +6,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — login forms check Origin (#1695)
 
-`verify_form_token`, used by the tenant and admin logins, now runs
-`CsrfLayer`'s Origin check against the request's Host. A foreign
-Origin with a valid cookie pair was signing users in; tenants share an
-apex, so one tenant's page could plant the cookie for another. Over TLS
-a POST without Origin is refused, as `CsrfLayer` does.
+`verify_form_token`, used by the tenant and admin logins, now requires
+the Origin to match the request's Host (`csrf_trusted_origins` does not
+apply). A foreign Origin with a valid cookie pair was signing users in;
+tenants share an apex, so one tenant's page could plant the cookie for
+another. Over TLS a POST without Origin is refused, as `CsrfLayer` does.
+
+The `strict` headers preset now sends `Referrer-Policy: same-origin`,
+not `no-referrer`. Under `no-referrer` browsers send `Origin: null`, so
+every login and every `CsrfLayer` form was refused. See UPGRADING.
 
 ### Changed — one cookie reader (#1663)
 

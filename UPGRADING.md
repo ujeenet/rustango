@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+### Login returns 403 behind a proxy that rewrites Host
+
+The admin and tenant logins now require `Origin` to match `Host`
+(#1695); `csrf_trusted_origins` does not apply. Forward the original
+`Host` from the proxy. A custom handler calling `verify_form_token`
+gets the same check.
+
+### `strict` headers preset: `Referrer-Policy: same-origin`
+
+Was `no-referrer`, which makes browsers send `Origin: null` on every
+POST, so forms were refused (#1695). If you need `no-referrer`, set it
+per response on pages without forms.
+
 ### `shortcuts::redirect_to_login` is removed
 
 Its arguments ran the other way round from the one that stays (#1663):

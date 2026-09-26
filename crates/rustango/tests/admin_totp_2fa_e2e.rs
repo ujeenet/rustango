@@ -175,6 +175,41 @@ async fn non_enrolled_user_logs_in_without_a_code() {
     assert_eq!(status, StatusCode::SEE_OTHER);
 }
 
+/// #1695 — a valid pair and valid credentials from a foreign Origin
+/// get no session.
+#[tokio::test]
+async fn login_from_a_foreign_origin_is_refused() {
+    let (pool, _secret) = seed().await;
+    let app = router(pool);
+    let csrf = fetch_csrf(&app).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/login"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::HOST, "admin.example.com")
+                .header(header::ORIGIN, "http://evil.example")
+                .header(header::COOKIE, format!("rustango_csrf={csrf}"))
+                .body(Body::from(format!(
+                    "_csrf={csrf}&username=bob&password=correct%20horse&totp_code="
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let sess = resp.headers().get_all(header::SET_COOKIE).iter().any(|v| {
+        v.to_str()
+            .is_ok_and(|s| s.contains("rustango_admin_session="))
+    });
+    assert!(
+        !sess,
+        "foreign Origin must not get a session ({})",
+        resp.status()
+    );
+}
+
 #[tokio::test]
 async fn wrong_password_never_reaches_the_totp_step() {
     let (pool, secret) = seed().await;

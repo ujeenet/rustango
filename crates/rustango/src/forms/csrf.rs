@@ -674,18 +674,15 @@ pub fn ensure_token(
     (token, Some(cookie))
 }
 
-/// Validate a server-rendered form POST against the double-submit CSRF
-/// cookie. Returns `true` iff [`CSRF_COOKIE`] is present in `headers`
-/// and matches `submitted` (the `_csrf` form field) in constant time.
+/// Validate a server-rendered form POST. Returns `true` iff the Origin
+/// is the request's own Host (no trusted list; #1695) and
+/// [`CSRF_COOKIE`] matches `submitted` (the `_csrf` field) in constant time.
 ///
 /// For handlers that render their own form and seed the token via
 /// [`ensure_token`] + [`csrf_input_html`] (so the GET response sets the
 /// cookie and the form carries the matching token), rather than relying
 /// on the [`CsrfLayer`] middleware. Using the layer *and* seeding the
 /// token in the handler would set two conflicting cookies.
-///
-/// Also runs the layer's Origin check against the request's own Host
-/// (#1695): tenants share an apex, so one can plant the cookie half.
 #[must_use]
 pub fn verify_form_token(headers: &axum::http::HeaderMap, submitted: Option<&str>) -> bool {
     if !origin_allowed_in(headers, false, &[]) {
