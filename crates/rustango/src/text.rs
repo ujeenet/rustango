@@ -151,6 +151,21 @@ pub fn html_escape(s: &str) -> String {
     out
 }
 
+/// Append `s` to `out` with the five XML characters escaped (`&apos;`
+/// for `'`), for feeds and sitemaps.
+pub(crate) fn xml_escape_into(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+}
+
 /// Inverse of [`html_escape`] — decode HTML entities back to their
 /// characters.
 ///
@@ -2552,6 +2567,14 @@ mod tests {
     #[test]
     fn html_escape_passes_safe_chars() {
         assert_eq!(html_escape("hello world 123"), "hello world 123");
+    }
+
+    /// Atom writes this into a double-quoted `href`, so every arm matters.
+    #[test]
+    fn xml_escape_into_covers_all_five() {
+        let mut out = String::new();
+        xml_escape_into(&mut out, r#"a&b<c>"d'e"#);
+        assert_eq!(out, "a&amp;b&lt;c&gt;&quot;d&apos;e");
     }
 
     #[test]

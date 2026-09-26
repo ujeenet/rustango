@@ -309,6 +309,7 @@ jobs:
             --test macro_internals_stays_internal \
             --test no_orphaned_doc_comments \
             --test one_redirect_sanitizer \
+            --test one_html_escaper \
             --test pool_construction \
             --test sqlite_datetime_ddl_is_consistent \
             --test system_migration_scopes \

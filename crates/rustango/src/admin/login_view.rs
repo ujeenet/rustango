@@ -814,20 +814,7 @@ pub(crate) async fn require_session(
 /// chrome: rendering the chrome needs this same gate to have passed.
 /// The body offers a sign-out button.
 fn forbidden_page(session: &AdminSession) -> Response {
-    // Inline escape. The gate runs before `next.run`, so the chrome's
-    // `render::escape` helper is not reachable here without rebuilding
-    // state, and the username must still be escaped.
-    let mut username = String::with_capacity(session.username.len());
-    for ch in session.username.chars() {
-        match ch {
-            '&' => username.push_str("&amp;"),
-            '<' => username.push_str("&lt;"),
-            '>' => username.push_str("&gt;"),
-            '"' => username.push_str("&quot;"),
-            '\'' => username.push_str("&#39;"),
-            other => username.push(other),
-        }
-    }
+    let username = crate::text::html_escape(&session.username);
     let body = format!(
         "<!doctype html>\
          <html><head><title>Forbidden</title>\

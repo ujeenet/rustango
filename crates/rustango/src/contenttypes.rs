@@ -615,13 +615,7 @@ pub async fn render_generic_fk_link(
     pool: &crate::sql::Pool,
     gfk: GenericForeignKey,
 ) -> Result<String, ExecError> {
-    let escape = |s: &str| -> String {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&#x27;")
-    };
+    let escape = crate::text::html_escape;
     let ct = match ContentType::by_id(&pool.clone().into(), gfk.content_type_id).await? {
         Some(c) => c,
         None => {

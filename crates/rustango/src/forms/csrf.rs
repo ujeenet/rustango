@@ -752,24 +752,7 @@ pub fn csrf_input_html(token: &str) -> String {
     format!(r#"<input type="hidden" name="{CSRF_FORM_FIELD}" value="{escaped}">"#)
 }
 
-/// Tiny HTML-attribute escaper — sufficient for the token alphabet
-/// (`A-Z`, `a-z`, `0-9`, `-`, `_` from base64url) but defensive in
-/// case a caller passes a token from an unusual source. Avoids
-/// pulling a full HTML-escape crate for the one-string case.
-fn html_escape_attr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+use crate::text::html_escape as html_escape_attr;
 
 /// Read or mint a CSRF token and stamp it into the Tera context with
 /// two keys callers can pick from: `csrf_token` (raw string, for SPA
@@ -1174,7 +1157,7 @@ mod tests {
         assert!(html.contains("&lt;"), "{html}");
         assert!(html.contains("&amp;"), "{html}");
         assert!(html.contains("&gt;"), "{html}");
-        assert!(html.contains("&#39;"), "{html}");
+        assert!(html.contains("&#x27;"), "{html}");
     }
 
     #[cfg(feature = "template_views")]
