@@ -10,6 +10,8 @@ Under `Cli::tenancy()` the `[security]` headers reached only the api
 router, so the tenant login and admin could be framed. They now go on
 the server's outermost router (`server::Builder::security_headers`).
 A header a handler sets itself is kept rather than overwritten.
+A `[security] csp` now reaches these pages too; they use inline script,
+so a CSP without `'unsafe-inline'` breaks them (#1703).
 
 ### Security — login forms check Origin (#1695)
 

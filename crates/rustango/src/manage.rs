@@ -1828,6 +1828,21 @@ mod tests {
         assert!(inert_layer_settings(&s).is_empty());
     }
 
+    /// #1699 — the tenancy server gets `[security]` headers only when
+    /// settings are loaded, and then from those settings.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "admin"))]
+    #[test]
+    fn tenancy_security_headers_follow_the_settings() {
+        assert!(Cli::new().tenancy_security_headers().is_none());
+        let mut s = crate::config::Settings::default();
+        s.security.headers_preset = Some("relaxed".into());
+        let got = Cli::new().with_settings(&s).tenancy_security_headers();
+        assert_eq!(
+            got.map(|l| l.xfo),
+            Some(crate::security_headers::SecurityHeadersLayer::relaxed().xfo)
+        );
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn apply_settings_layers_smoke() {

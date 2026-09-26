@@ -48,6 +48,8 @@ use axum::middleware::Next;
 use axum::Router;
 
 /// Configuration for the security headers middleware.
+///
+/// A header the handler already set is kept, not overwritten.
 #[derive(Clone)]
 pub struct SecurityHeadersLayer {
     pub hsts: Option<String>,
@@ -190,7 +192,8 @@ impl SecurityHeadersLayer {
         self
     }
 
-    /// Add an arbitrary custom header.
+    /// Add an arbitrary custom header. Overrides the preset's value
+    /// for the same name.
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.custom.insert(name.into(), value.into());
@@ -276,12 +279,12 @@ impl<S: Clone + Send + Sync + 'static> SecurityHeadersRouterExt for Router<S> {
 
 async fn handle(cfg: Arc<SecurityHeadersLayer>, req: Request<Body>, next: Next) -> Response<Body> {
     let mut response = next.run(req).await;
-    let headers = response.headers_mut();
-    // A header the handler set wins: the impersonation handoff sets
-    // `no-referrer` to keep its token out of `Referer` (#1699).
+    // Build the layer's own set first (a `.header()` overrides the
+    // preset), then add only what the handler did not set (#1699).
+    let mut own = axum::http::HeaderMap::new();
     let mut set = |name: &str, value: &str| {
         if let (Ok(n), Ok(v)) = (HeaderName::try_from(name), HeaderValue::from_str(value)) {
-            headers.entry(n).or_insert(v);
+            own.insert(n, v);
         }
     };
 
@@ -315,6 +318,12 @@ async fn handle(cfg: Arc<SecurityHeadersLayer>, req: Request<Body>, next: Next) 
         set(k, v);
     }
 
+    let headers = response.headers_mut();
+    for (name, value) in own {
+        if let Some(name) = name {
+            headers.entry(name).or_insert(value);
+        }
+    }
     response
 }
 
@@ -527,6 +536,23 @@ mod tests {
             .unwrap();
         assert_eq!(resp.headers()["referrer-policy"], "no-referrer");
         assert_eq!(resp.headers()["x-frame-options"], "DENY");
+    }
+
+    /// `.header()` still overrides the preset for the same name.
+    #[tokio::test]
+    async fn a_custom_header_overrides_the_preset() {
+        use axum::routing::get;
+        use tower::ServiceExt as _;
+        let app = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .security_headers(
+                SecurityHeadersLayer::strict().header("x-frame-options", "SAMEORIGIN"),
+            );
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["x-frame-options"], "SAMEORIGIN");
     }
 
     /// Under `no-referrer` browsers send `Origin: null` on every POST,
