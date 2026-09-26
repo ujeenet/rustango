@@ -696,17 +696,7 @@ impl TestResponse {
     }
 }
 
-fn url_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
+use crate::url_codec::url_encode;
 
 #[cfg(test)]
 mod tests {

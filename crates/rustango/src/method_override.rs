@@ -243,42 +243,11 @@ fn form_method(bytes: &[u8], field: &str) -> Option<Method> {
     None
 }
 
-fn percent_decode_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut bytes = s.bytes().peekable();
-    while let Some(b) = bytes.next() {
-        if b == b'+' {
-            out.push(' ');
-        } else if b == b'%' {
-            if let (Some(hi), Some(lo)) = (bytes.next(), bytes.next()) {
-                if let (Some(h), Some(l)) = (hex(hi), hex(lo)) {
-                    out.push(char::from(h * 16 + l));
-                    continue;
-                }
-                out.push('%');
-                out.push(hi as char);
-                out.push(lo as char);
-            } else {
-                out.push('%');
-            }
-        } else {
-            out.push(char::from(b));
-        }
-    }
-    out
-}
+// The crate's form decoder; the old copy decoded bytes as Latin-1 (#1663).
+use crate::url_codec::url_decode as percent_decode_string;
 
 fn percent_decode_eq(encoded: &str, expected: &str) -> bool {
     percent_decode_string(encoded) == expected
-}
-
-fn hex(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn swap_method(req: Request<Body>, target: Method) -> Request<Body> {

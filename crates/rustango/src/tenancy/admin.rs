@@ -1405,18 +1405,8 @@ fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-fn urlencoding_lite(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
+// The crate's one query-value encoder (#1663); it also escapes `/`.
+use crate::url_codec::url_encode as urlencoding_lite;
 
 // Percent-decoder consolidated into [`crate::url_codec`] — same
 // behavior the local `url_decode_lite` had (lossy UTF-8 conversion).

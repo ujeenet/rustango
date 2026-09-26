@@ -604,46 +604,16 @@ fn read_form_field(body: &[u8], name: &str) -> Option<String> {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
         };
-        let key = percent_decode(k.replace('+', " ").as_bytes())?;
+        // Strict: a malformed field is refused, not truncated.
+        let key = url_decode_strict(k)?;
         if key == name {
-            return percent_decode(v.replace('+', " ").as_bytes());
+            return url_decode_strict(v);
         }
     }
     None
 }
 
-/// Minimal RFC 3986 percent-decoder used by the form-field parser.
-/// Returns `None` on malformed `%xx` sequences (rejects rather
-/// than truncating).
-fn percent_decode(bytes: &[u8]) -> Option<String> {
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'%' {
-            if i + 2 >= bytes.len() {
-                return None;
-            }
-            let hi = hex_digit(bytes[i + 1])?;
-            let lo = hex_digit(bytes[i + 2])?;
-            out.push(hi * 16 + lo);
-            i += 3;
-        } else {
-            out.push(b);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
+use crate::url_codec::url_decode_strict;
 
 /// Generate a fresh 32-byte token, base64url-encoded (no padding).
 fn mint_token() -> String {
@@ -1108,10 +1078,12 @@ mod tests {
 
     #[test]
     fn percent_decode_rejects_malformed() {
-        assert!(percent_decode(b"%2").is_none()); // truncated
-        assert!(percent_decode(b"%ZZ").is_none()); // non-hex
-        assert_eq!(percent_decode(b"plain").as_deref(), Some("plain"));
-        assert_eq!(percent_decode(b"a%20b").as_deref(), Some("a b"));
+        assert!(url_decode_strict("%2").is_none()); // truncated
+        assert!(url_decode_strict("%ZZ").is_none()); // non-hex
+        assert!(url_decode_strict("%+5").is_none()); // sign is not hex
+        assert!(url_decode_strict("%FF").is_none()); // not UTF-8
+        assert_eq!(url_decode_strict("plain").as_deref(), Some("plain"));
+        assert_eq!(url_decode_strict("a%20b+c").as_deref(), Some("a b c"));
     }
 
     // ---- template helpers (issue #15) ----
