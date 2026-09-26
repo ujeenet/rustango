@@ -182,47 +182,14 @@ async fn empty_or_branch_returns_named_writer_error() {
     use rustango::sql::Dialect as _;
     use rustango::sql::Postgres;
 
-    let q = SelectQuery {
-        model: Person::SCHEMA,
-        where_clause: WhereExpr::Or(vec![]),
-        search: None,
-        joins: vec![],
-        subquery_joins: Vec::new(),
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-        compound_order_by: vec![],
-        compound_limit: None,
-        compound_offset: None,
-    };
+    let q = SelectQuery::new(Person::SCHEMA).where_clause(WhereExpr::Or(vec![]));
     let err = Postgres.compile_select(&q).unwrap_err();
     assert!(matches!(err, SqlError::EmptyOrBranch));
 
     // Single-element Or is fine — proves we only reject *empty* Or.
-    let q2 = SelectQuery {
-        model: Person::SCHEMA,
-        where_clause: WhereExpr::Or(vec![WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        })]),
-        search: None,
-        joins: vec![],
-        subquery_joins: Vec::new(),
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-        compound_order_by: vec![],
-        compound_limit: None,
-        compound_offset: None,
-    };
+    let q2 =
+        SelectQuery::new(Person::SCHEMA).where_clause(WhereExpr::Or(vec![WhereExpr::Predicate(
+            Filter::new("id", Op::Eq, SqlValue::I64(1)),
+        )]));
     rustango::sql::select_rows_on(&pool, &q2).await.unwrap();
 }

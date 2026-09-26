@@ -210,11 +210,7 @@ fn on_predicate_composes_column_equality_with_literal_filter() {
                 op: Op::Eq,
                 rhs: aliased("aj_post", "id"),
             },
-            WhereExpr::Predicate(Filter {
-                column: "is_approved",
-                op: Op::Eq,
-                value: SqlValue::Bool(true),
-            }),
+            WhereExpr::Predicate(Filter::new("is_approved", Op::Eq, SqlValue::Bool(true))),
         ]),
         project: vec![],
     };
@@ -568,10 +564,6 @@ fn project_on_ad_hoc_join_appears_in_select_list_today() {
 // at the bottom of the file are commented out for debugging.
 #[allow(dead_code)]
 fn _used() {
-    let _ = (Filter {
-        column: "x",
-        op: Op::Eq,
-        value: SqlValue::I64(1),
-    },);
+    let _ = (Filter::new("x", Op::Eq, SqlValue::I64(1)),);
     let _: Expr = aliased("a", "b");
 }

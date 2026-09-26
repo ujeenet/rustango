@@ -4,7 +4,7 @@
 //! `string_agg` is database-agnostic (#1024) — it
 //! lowers to GROUP_CONCAT (MySQL) / group_concat (SQLite).
 
-use rustango::core::{AggregateExpr, AggregateQuery, SqlValue, WhereExpr};
+use rustango::core::{AggregateExpr, AggregateQuery, SqlValue};
 use rustango::sql::{Dialect, MySql, Postgres, SqlError, Sqlite};
 use rustango::Model;
 
@@ -21,18 +21,10 @@ pub struct Post {
 }
 
 fn aggregate_query(expr: AggregateExpr, alias: &'static str) -> AggregateQuery {
-    AggregateQuery {
-        model: <Post as rustango::core::Model>::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(vec![]),
-        group_by: Vec::new(),
-        aggregates: vec![(alias.into(), expr)],
-        aliases: vec![],
-        having: None,
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-    }
+    AggregateQuery::new(
+        <Post as rustango::core::Model>::SCHEMA,
+        vec![(alias.into(), expr)],
+    )
 }
 
 // ---------- array_agg ----------
@@ -266,18 +258,11 @@ fn jsonb_agg_rejected_on_non_pg() {
 
 #[test]
 fn array_agg_composes_with_group_by() {
-    let q = AggregateQuery {
-        model: <Post as rustango::core::Model>::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(vec![]),
-        group_by: vec!["author"],
-        aggregates: vec![("tags".into(), AggregateExpr::array_agg("tag"))],
-        aliases: vec![],
-        having: None,
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-    };
+    let mut q = AggregateQuery::new(
+        <Post as rustango::core::Model>::SCHEMA,
+        vec![("tags".into(), AggregateExpr::array_agg("tag"))],
+    );
+    q.group_by = vec!["author"];
     let stmt = Postgres.compile_aggregate(&q).unwrap();
     // SELECT "author", array_agg("tag") AS "tags" FROM "pga_post" GROUP BY "author"
     assert!(stmt.sql.contains(r#"SELECT "author""#));

@@ -32,18 +32,11 @@ pub struct Row {
 // ---------- Helper: assert UPDATE SET emits an expr literally ----------
 
 fn update_set_expr(value: Expr) -> UpdateQuery {
-    UpdateQuery {
-        model: Row::SCHEMA,
-        set: vec![Assignment {
-            column: "name",
-            value,
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
-    }
+    UpdateQuery::new(
+        Row::SCHEMA,
+        vec![Assignment::new("name", value)],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+    )
 }
 
 // ---------- Text: simple unary ----------

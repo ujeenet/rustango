@@ -288,16 +288,12 @@ async fn or_nested_predicates_via_where_raw() {
 
     // (slug = "rust-orm") OR (view_count > 200)
     let predicate = WhereExpr::Or(vec![
-        WhereExpr::Predicate(Filter {
-            column: "slug",
-            op: Op::Eq,
-            value: SqlValue::String("rust-orm".into()),
-        }),
-        WhereExpr::Predicate(Filter {
-            column: "view_count",
-            op: Op::Gt,
-            value: SqlValue::I64(200),
-        }),
+        WhereExpr::Predicate(Filter::new(
+            "slug",
+            Op::Eq,
+            SqlValue::String("rust-orm".into()),
+        )),
+        WhereExpr::Predicate(Filter::new("view_count", Op::Gt, SqlValue::I64(200))),
     ]);
     let hits: Vec<Post> = Post::objects()
         .where_raw(predicate).fetch_on(&pool).await.unwrap();
@@ -316,11 +312,7 @@ async fn where_expr_not_negates_predicate() {
 
     // NOT (published = true) → drafts only.
     let predicate = WhereExpr::Not(Box::new(
-        WhereExpr::Predicate(Filter {
-            column: "published",
-            op: Op::Eq,
-            value: SqlValue::Bool(true),
-        }),
+        WhereExpr::Predicate(Filter::new("published", Op::Eq, SqlValue::Bool(true))),
     ));
     let drafts: Vec<Post> = Post::objects()
         .where_raw(predicate).fetch_on(&pool).await.unwrap();
@@ -353,13 +345,7 @@ async fn bulk_insert_writes_many_rows_in_one_round_trip() {
         SqlValue::Json(serde_json::json!({"bulk": i})),
     ]).collect();
 
-    let q = BulkInsertQuery {
-        model: Post::SCHEMA,
-        columns,
-        rows,
-        returning: vec!["id"],
-        on_conflict: None,
-    };
+    let q = BulkInsertQuery::new(Post::SCHEMA, columns, rows).returning(vec!["id"]);
     let returned = bulk_insert_on(&pool, &q).await.expect("bulk insert");
     assert_eq!(returned.len(), 4, "4 RETURNING rows");
 

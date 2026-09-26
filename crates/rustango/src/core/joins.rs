@@ -19,11 +19,11 @@
 //!         op: Op::Eq,
 //!         rhs: aliased("post", "id"),
 //!     },
-//!     WhereExpr::Predicate(rustango::core::Filter {
-//!         column: "is_approved",
-//!         op: Op::Eq,
-//!         value: rustango::core::SqlValue::Bool(true),
-//!     }),
+//!     WhereExpr::Predicate(rustango::core::Filter::new(
+//!         "is_approved",
+//!         Op::Eq,
+//!         rustango::core::SqlValue::Bool(true),
+//!     )),
 //! ]);
 //! Post::objects()
 //!     .join(Comment::SCHEMA, "c", JoinKind::Inner, on)

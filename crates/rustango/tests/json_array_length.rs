@@ -16,14 +16,13 @@ pub struct Doc {
 }
 
 fn compile_with<D: Dialect>(d: D) -> String {
-    let q = SelectQuery {
-        where_clause: WhereExpr::ExprCompare {
+    let q = SelectQuery::new(<Doc as rustango::core::Model>::SCHEMA).where_clause(
+        WhereExpr::ExprCompare {
             lhs: json_array_length(F("data")),
             op: Op::Gt,
             rhs: Expr::Literal(SqlValue::I64(0)),
         },
-        ..SelectQuery::new(<Doc as rustango::core::Model>::SCHEMA)
-    };
+    );
     d.compile_select(&q).unwrap().sql
 }
 

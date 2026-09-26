@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — the ten query IR structs are `#[non_exhaustive]`, with constructors (#1661)
+
+**Breaking:** `Filter`, `Assignment`, `SelectQuery`, `InsertQuery`,
+`BulkInsertQuery`, `UpdateQuery`, `BulkUpdateQuery`, `DeleteQuery`,
+`CountQuery` and `AggregateQuery` can no longer be built with a struct
+literal outside the crate. Use `X::new(..)` and the builders
+(`InsertQuery::returning`, `.on_conflict`, `SelectQuery::where_clause`,
+`.projection`). Fields stay `pub`, so a new field is no longer a break.
+`Filter::new` takes `impl Into<SqlValue>`. A `compile_fail` doctest per
+struct fails if the marker is dropped. See UPGRADING.
 ### Fixed — two HTML escapers skipped `'` (#1663)
 
 The operator console's provisioning page and the admin's error page

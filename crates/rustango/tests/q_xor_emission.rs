@@ -22,23 +22,7 @@ pub struct User {
 }
 
 fn select(where_clause: WhereExpr) -> SelectQuery {
-    SelectQuery {
-        model: User::SCHEMA,
-        where_clause,
-        search: None,
-        joins: vec![],
-        subquery_joins: Vec::new(),
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-        compound_order_by: vec![],
-        compound_limit: None,
-        compound_offset: None,
-    }
+    SelectQuery::new(User::SCHEMA).where_clause(where_clause)
 }
 
 // ---------- Binary XOR — canonical (a AND NOT b) OR (NOT a AND b) form ----------
@@ -168,11 +152,7 @@ fn xor_inside_and_parenthesizes_correctly() {
     ]);
     let where_clause = WhereExpr::And(vec![
         xor,
-        WhereExpr::Predicate(Filter {
-            column: "age",
-            op: Op::Gt,
-            value: SqlValue::I32(30),
-        }),
+        WhereExpr::Predicate(Filter::new("age", Op::Gt, SqlValue::I32(30))),
     ]);
     let stmt = Postgres.compile_select(&select(where_clause)).unwrap();
     // The XOR rewrite is wrapped in parens by write_child when it
@@ -194,11 +174,7 @@ fn xor_inside_or_parenthesizes_correctly() {
     ]);
     let where_clause = WhereExpr::Or(vec![
         xor,
-        WhereExpr::Predicate(Filter {
-            column: "age",
-            op: Op::Gt,
-            value: SqlValue::I32(30),
-        }),
+        WhereExpr::Predicate(Filter::new("age", Op::Gt, SqlValue::I32(30))),
     ]);
     let stmt = Postgres.compile_select(&select(where_clause)).unwrap();
     assert!(stmt.sql.contains(") OR "));
@@ -289,16 +265,16 @@ fn nary_parity_tally_parenthesizes_composite_children() {
 #[test]
 fn xor_validate_walks_children() {
     let xor = WhereExpr::Xor(vec![
-        WhereExpr::Predicate(Filter {
-            column: "name",
-            op: Op::Eq,
-            value: SqlValue::String("alice".into()),
-        }),
-        WhereExpr::Predicate(Filter {
-            column: "nonexistent_column",
-            op: Op::Eq,
-            value: SqlValue::Bool(true),
-        }),
+        WhereExpr::Predicate(Filter::new(
+            "name",
+            Op::Eq,
+            SqlValue::String("alice".into()),
+        )),
+        WhereExpr::Predicate(Filter::new(
+            "nonexistent_column",
+            Op::Eq,
+            SqlValue::Bool(true),
+        )),
     ]);
     let r = xor.validate(User::SCHEMA);
     assert!(

@@ -115,11 +115,7 @@ async fn inner_join_with_extra_predicate_filters_outer_rows() {
             },
             // Bare Filter — qualifies to `c` because the writer
             // passes `qualify_with: Some(join.alias)`.
-            WhereExpr::Predicate(Filter {
-                column: "is_approved",
-                op: Op::Eq,
-                value: SqlValue::Bool(true),
-            }),
+            WhereExpr::Predicate(Filter::new("is_approved", Op::Eq, SqlValue::Bool(true))),
         ]),
         project: vec![],
     };
