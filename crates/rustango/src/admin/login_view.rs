@@ -707,15 +707,9 @@ async fn logout_submit(State(state): State<AppState>, headers: axum::http::Heade
         .session_secret
         .as_ref()
         .and_then(|secret| {
-            let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-            for part in raw.split(';').map(str::trim) {
-                if let Some(val) = part.strip_prefix(&format!("{SESSION_COOKIE}=")) {
-                    if let Some(sess) = session::decode(secret, val) {
-                        return Some((Some(sess.user_id), Some(sess.username)));
-                    }
-                }
-            }
-            None
+            let val = crate::cookies::cookie_from_headers(&headers, SESSION_COOKIE)?;
+            let sess = session::decode(secret, val)?;
+            Some((Some(sess.user_id), Some(sess.username)))
         })
         .unwrap_or((None, None));
 
@@ -842,13 +836,8 @@ fn read_session_cookie(
     req: &Request<Body>,
     secret: &AdminSessionSecret,
 ) -> Option<(AdminSession, String)> {
-    let raw = req.headers().get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';').map(str::trim) {
-        if let Some(val) = part.strip_prefix(&format!("{SESSION_COOKIE}=")) {
-            return session::decode_full(secret, val);
-        }
-    }
-    None
+    let val = crate::cookies::cookie_from_headers(req.headers(), SESSION_COOKIE)?;
+    session::decode_full(secret, val)
 }
 
 /// Outcome of the gate's per-request liveness lookup.

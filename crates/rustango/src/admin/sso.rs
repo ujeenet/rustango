@@ -88,14 +88,6 @@ fn cookie_attrs(secure: bool) -> &'static str {
     }
 }
 
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    raw.split(';')
-        .filter_map(|kv| kv.trim().split_once('='))
-        .find(|(k, _)| *k == name)
-        .map(|(_, v)| v.to_owned())
-}
-
 // GET /login/sso/{slug}: start the handshake for one provider.
 async fn sso_begin(
     State(state): State<AppState>,
@@ -154,10 +146,10 @@ async fn sso_callback(
         return login_error(&state, "callback");
     };
     // Recover + verify the sealed flow from its cookie.
-    let Some(sealed) = read_cookie(&headers, SSO_FLOW_COOKIE) else {
+    let Some(sealed) = crate::cookies::cookie_from_headers(&headers, SSO_FLOW_COOKIE) else {
         return login_error(&state, "expired");
     };
-    let flow = match open_flow(&sealed, secret.key()) {
+    let flow = match open_flow(sealed, secret.key()) {
         Ok(f) => f,
         Err(_) => return login_error(&state, "expired"),
     };

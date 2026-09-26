@@ -1395,14 +1395,7 @@ fn rustango_icon_png_response() -> Response {
 }
 
 fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for piece in raw.split(';') {
-        let piece = piece.trim();
-        if let Some(value) = piece.strip_prefix(&format!("{name}=")) {
-            return Some(value.to_owned());
-        }
-    }
-    None
+    crate::cookies::cookie_from_headers(headers, name).map(str::to_owned)
 }
 
 // The crate's one query-value encoder (#1663); it also escapes `/`.

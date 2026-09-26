@@ -866,9 +866,7 @@ async fn require_session(
     mut req: axum::http::Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    let cookie_value = read_cookie(&headers, COOKIE_NAME);
-    let payload = cookie_value
-        .as_deref()
+    let payload = crate::cookies::cookie_from_headers(&headers, COOKIE_NAME)
         .and_then(|v| session::decode(&state.session_secret, v).ok());
     // A 303 back from login turns the original POST into a GET, which
     // then 405s on POST-only routes. Trim `next` down to the parent GET
@@ -1217,15 +1215,8 @@ async fn logout(
 /// Best-effort: decode the operator session cookie to recover the
 /// operator id for audit signals. `None` on any error.
 fn decode_operator_session(headers: &axum::http::HeaderMap, secret: &SessionSecret) -> Option<i64> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';').map(str::trim) {
-        if let Some(val) = part.strip_prefix(&format!("{COOKIE_NAME}=")) {
-            if let Ok(p) = session::decode(secret, val) {
-                return Some(p.oid);
-            }
-        }
-    }
-    None
+    let val = crate::cookies::cookie_from_headers(headers, COOKIE_NAME)?;
+    session::decode(secret, val).ok().map(|p| p.oid)
 }
 
 // ----------------------------- views
@@ -2057,17 +2048,6 @@ async fn static_rustango_png() -> Response<Body> {
 }
 
 // ----------------------------- helpers
-
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for piece in raw.split(';') {
-        let piece = piece.trim();
-        if let Some(value) = piece.strip_prefix(&format!("{name}=")) {
-            return Some(value.to_owned());
-        }
-    }
-    None
-}
 
 // The crate's one query-value encoder (#1663); it also escapes `/`.
 use crate::url_codec::url_encode as urlencoding_lite;

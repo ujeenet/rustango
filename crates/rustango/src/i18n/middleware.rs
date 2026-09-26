@@ -164,7 +164,7 @@ impl LocaleMiddleware {
 
         // 1. Cookie
         if let Some(name) = cfg.cookie_name.as_deref() {
-            if let Some(value) = cookie_value(req.headers(), name) {
+            if let Some(value) = crate::cookies::cookie_from_headers(req.headers(), name) {
                 let lower = value.to_lowercase();
                 if cfg.available.iter().any(|a| *a == lower) {
                     return lower;
@@ -184,24 +184,6 @@ impl LocaleMiddleware {
         // 3. Default fallback
         cfg.default.clone()
     }
-}
-
-fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
-    for h in headers.get_all(axum::http::header::COOKIE) {
-        let raw = match h.to_str() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        for pair in raw.split(';') {
-            let pair = pair.trim();
-            if let Some((k, v)) = pair.split_once('=') {
-                if k == name {
-                    return Some(v.to_owned());
-                }
-            }
-        }
-    }
-    None
 }
 
 impl<S> tower::Layer<S> for LocaleMiddleware {

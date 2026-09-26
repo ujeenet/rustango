@@ -156,19 +156,6 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
 
 // ------------------------------------------------------------------ helpers
 
-fn extract_cookie<'a>(parts: &'a Parts, name: &str) -> Option<String> {
-    let header = parts
-        .headers
-        .get(axum::http::header::COOKIE)?
-        .to_str()
-        .ok()?;
-    for pair in header.split(';') {
-        let pair = pair.trim();
-        if let Some(val) = pair.strip_prefix(name) {
-            if val.starts_with('=') {
-                return Some(val[1..].to_owned());
-            }
-        }
-    }
-    None
+fn extract_cookie(parts: &Parts, name: &str) -> Option<String> {
+    crate::cookies::cookie_from_headers(&parts.headers, name).map(str::to_owned)
 }

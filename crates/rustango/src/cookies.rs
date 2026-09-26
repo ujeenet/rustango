@@ -288,17 +288,48 @@ pub fn parse_cookie_header(header: &str) -> std::collections::HashMap<String, St
         if key.is_empty() {
             continue;
         }
-        let val = val.trim();
-        // RFC 6265 §5.2: drop the quotes only when both ends have
-        // one. A quote on one end alone stays in the value.
-        let unquoted = if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
-            &val[1..val.len() - 1]
-        } else {
-            val
-        };
-        out.insert(key.to_owned(), unquoted.to_owned());
+        out.insert(key.to_owned(), unquote(val.trim()).to_owned());
     }
     out
+}
+
+/// RFC 6265 §5.2: drop the quotes only when both ends have one.
+fn unquote(val: &str) -> &str {
+    if val.len() >= 2 && val.starts_with('"') && val.ends_with('"') {
+        &val[1..val.len() - 1]
+    } else {
+        val
+    }
+}
+
+/// The value of cookie `name` in a `Cookie:` header value, trimmed and unquoted.
+///
+/// A repeated name gives the first one: per RFC 6265 §5.4 the browser
+/// sends the more specific cookie first.
+///
+/// ```
+/// use rustango::cookies::cookie_value;
+/// assert_eq!(cookie_value("a=1; ab=2; a=3", "a"), Some("1"));
+/// assert_eq!(cookie_value("ab=2", "a"), None);
+/// ```
+#[must_use]
+pub fn cookie_value<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    header.split(';').find_map(|chunk| {
+        let (key, val) = chunk.trim().split_once('=')?;
+        (key.trim() == name).then(|| unquote(val.trim()))
+    })
+}
+
+/// [`cookie_value`] over every `Cookie` header in `headers`, in order.
+/// HTTP/2 may split cookies across several headers.
+#[cfg(feature = "_axum")]
+#[must_use]
+pub fn cookie_from_headers<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .find_map(|raw| cookie_value(raw, name))
 }
 
 #[cfg(test)]
@@ -525,5 +556,54 @@ mod tests {
         // `name=` with nothing after.
         let m = parse_cookie_header("name=");
         assert_eq!(m.get("name"), Some(&String::new()));
+    }
+
+    // -------- cookie_value --------
+
+    #[test]
+    fn cookie_value_first_duplicate_wins() {
+        assert_eq!(cookie_value("a=1; a=2", "a"), Some("1"));
+    }
+
+    #[test]
+    fn cookie_value_trims() {
+        assert_eq!(cookie_value("  x = 1 ;  a = v  ", "a"), Some("v"));
+    }
+
+    #[test]
+    fn cookie_value_unquotes_only_when_both_ends_quoted() {
+        assert_eq!(cookie_value(r#"a="dark mode""#, "a"), Some("dark mode"));
+        assert_eq!(cookie_value(r#"a="open"#, "a"), Some("\"open"));
+    }
+
+    #[test]
+    fn cookie_value_no_match() {
+        assert_eq!(cookie_value("", "a"), None);
+        assert_eq!(cookie_value("b=1; noeq", "a"), None);
+    }
+
+    #[test]
+    fn cookie_value_prefix_name_does_not_match() {
+        assert_eq!(cookie_value("ab=1", "a"), None);
+        assert_eq!(cookie_value("a=1", "ab"), None);
+        assert_eq!(cookie_value("ab=1; a=2", "a"), Some("2"));
+    }
+
+    #[test]
+    fn cookie_value_empty_value() {
+        assert_eq!(cookie_value("a=; b=1", "a"), Some(""));
+    }
+
+    #[cfg(feature = "_axum")]
+    #[test]
+    fn cookie_from_headers_reads_cookie_header() {
+        let mut h = axum::http::HeaderMap::new();
+        assert_eq!(cookie_from_headers(&h, "a"), None);
+        h.insert(axum::http::header::COOKIE, "b=2; a=1".parse().unwrap());
+        assert_eq!(cookie_from_headers(&h, "a"), Some("1"));
+        // A later `Cookie` header is read too, but the earlier one wins.
+        h.append(axum::http::header::COOKIE, "c=3; a=9".parse().unwrap());
+        assert_eq!(cookie_from_headers(&h, "c"), Some("3"));
+        assert_eq!(cookie_from_headers(&h, "a"), Some("1"));
     }
 }

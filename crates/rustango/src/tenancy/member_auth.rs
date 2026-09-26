@@ -307,16 +307,7 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
 
 /// Pull one cookie value out of the `Cookie` request header by name.
 fn extract_cookie(parts: &Parts, name: &str) -> Option<String> {
-    let header = parts.headers.get(header::COOKIE)?.to_str().ok()?;
-    for pair in header.split(';') {
-        let pair = pair.trim();
-        if let Some(val) = pair.strip_prefix(name) {
-            if let Some(v) = val.strip_prefix('=') {
-                return Some(v.to_owned());
-            }
-        }
-    }
-    None
+    crate::cookies::cookie_from_headers(&parts.headers, name).map(str::to_owned)
 }
 
 // ===================================================================
