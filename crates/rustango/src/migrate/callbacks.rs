@@ -8,12 +8,27 @@
 //! ```json
 //! {
 //!   "name": "0003_backfill_user_locale",
+//!   "atomic": false,
 //!   "forward": [
-//!     {"callback": {"name": "backfill_locale"}},
-//!     {"schema": ...}
+//!     {"schema": ...},
+//!     {"callback": {"name": "backfill_locale"}}
 //!   ]
 //! }
 //! ```
+//!
+//! Two things in that file are load-bearing.
+//!
+//! The schema op comes **first**: the callback backfills the column,
+//! so it cannot run before the column exists. The example used to have
+//! these the other way round.
+//!
+//! `"atomic": false` is **required** whenever a migration has a
+//! callback, and the loader refuses the file without it. A callback is
+//! handed a `Pool`, not the migration's open transaction, so it works
+//! on a second connection — and inside the transaction that connection
+//! waits on locks the transaction is holding. On PostgreSQL that hangs
+//! forever rather than failing, because the first connection is `idle
+//! in transaction` and the deadlock detector sees no cycle (#1626).
 //!
 //! ## Quick start
 //!

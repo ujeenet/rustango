@@ -226,6 +226,67 @@ fn load_rejects_inconsistent_reversible_without_reverse_sql() {
     }
 }
 
+/// A callback inside an atomic migration is refused at load time
+/// (#1626).
+///
+/// The callback is handed a `Pool`, not the migration's open
+/// transaction, so it runs on a second connection and waits on the
+/// locks that transaction holds. Verified against PostgreSQL 16: the
+/// migration's connection sits `idle in transaction` holding `ACCESS
+/// EXCLUSIVE` from `ALTER TABLE … ADD COLUMN`, a plain `SELECT` on the
+/// other connection blocks, and because the holder waits on a future
+/// rather than a lock there is no cycle for the deadlock detector.
+/// `lock_timeout` and `statement_timeout` both default to `0`, so
+/// nothing ends the wait.
+///
+/// `atomic` defaults to **true**, so the dangerous shape is the one
+/// you get by not thinking about it — which is why this is refused
+/// rather than documented.
+#[test]
+fn load_rejects_a_callback_inside_an_atomic_migration() {
+    let raw = serde_json::json!({
+        "name": "0003_backfill",
+        "created_at": "2026-09-25T00:00:00Z",
+        "prev": "0002_x",
+        "snapshot": {"tables": []},
+        // No `atomic` key at all: the default is what makes this the
+        // shape a user falls into.
+        "forward": [{"callback": {"name": "backfill_locale"}}]
+    });
+    let path = tmp_path("callback_atomic");
+    std::fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+    let err = file::load(&path).unwrap_err();
+    let _ = std::fs::remove_file(&path);
+    match err {
+        MigrateError::Validation(msg) => {
+            assert!(msg.contains("backfill_locale"), "names the callback: {msg}");
+            assert!(msg.contains("atomic"), "names the fix: {msg}");
+        }
+        other => panic!("expected Validation error, got: {other:?}"),
+    }
+}
+
+/// …and the same file with `"atomic": false` loads, so the guard
+/// refuses one shape rather than callbacks in general.
+#[test]
+fn load_accepts_a_callback_when_the_migration_is_not_atomic() {
+    let raw = serde_json::json!({
+        "name": "0003_backfill",
+        "created_at": "2026-09-25T00:00:00Z",
+        "prev": "0002_x",
+        "atomic": false,
+        "snapshot": {"tables": []},
+        "forward": [{"callback": {"name": "backfill_locale"}}]
+    });
+    let path = tmp_path("callback_non_atomic");
+    std::fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+    let loaded = file::load(&path);
+    let _ = std::fs::remove_file(&path);
+    let mig = loaded.expect("a non-atomic callback migration must load");
+    assert!(!mig.atomic);
+    assert_eq!(mig.forward.len(), 1);
+}
+
 #[test]
 fn load_missing_file_is_io_error() {
     let path = tmp_path("definitely_does_not_exist_aaaa");

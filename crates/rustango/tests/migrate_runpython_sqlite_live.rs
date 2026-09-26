@@ -55,7 +55,10 @@ fn callback_migration(name: &str, callback_name: &str) -> Migration {
         name: name.to_owned(),
         created_at: "2026-05-22T00:00:00Z".into(),
         prev: None,
-        atomic: true,
+        // A callback runs on its own connection, so it must not be
+        // inside the migration's transaction (#1626). The loader now
+        // refuses `atomic: true` here.
+        atomic: false,
         scope: Default::default(),
         replaces: Vec::new(),
         snapshot: empty_snapshot(),
@@ -77,9 +80,23 @@ fn sqlmigrate_preview_emits_runpython_comment() {
         body.contains("-- RunPython: runpython_test_backfill"),
         "preview missing RunPython marker:\n{body}"
     );
-    // BEGIN + ledger INSERT + COMMIT still appear.
-    assert!(body.contains("BEGIN"), "preview missing BEGIN");
     assert!(body.contains("INSERT INTO"), "preview missing ledger row");
+
+    // No BEGIN/COMMIT — and this assertion is the point.
+    //
+    // It used to assert the opposite, so the preview drew the callback
+    // *inside* a transaction while the runner deliberately runs it
+    // outside one. `MigrationPreview`'s own rustdoc says these markers
+    // exist "so the reader can see where the transaction boundary is",
+    // which made the picture wrong in the one way that matters.
+    //
+    // A callback migration cannot be atomic now (#1626), so there is
+    // no transaction to draw.
+    assert!(
+        !body.contains("BEGIN") && !body.contains("COMMIT"),
+        "a callback migration is never atomic, so the preview must not \
+         draw a transaction around it:\n{body}"
+    );
 }
 
 #[tokio::test]
