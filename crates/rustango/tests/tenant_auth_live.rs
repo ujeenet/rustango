@@ -292,6 +292,30 @@ async fn login_without_a_csrf_token_is_refused() {
         "cookie alone is not enough; the form must echo the token"
     );
 
+    // A full pair from a foreign Origin is refused (#1695): tenants
+    // share an apex, so another tenant's page can plant the cookie.
+    let body = serde_urlencoded::to_string([
+        ("username", "alice"),
+        ("password", "hunter2"),
+        ("_csrf", token.as_str()),
+    ])
+    .unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/__login")
+        .header("x-org", &slug)
+        .header("host", "t01.example.com")
+        .header("origin", "http://t02.example.com")
+        .header("cookie", format!("rustango_csrf={token}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::FORBIDDEN,
+        "a matching pair from a foreign Origin must be refused"
+    );
+
     // And the real flow still works.
     let body = serde_urlencoded::to_string([
         ("username", "alice"),

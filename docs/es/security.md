@@ -66,7 +66,7 @@ let app = router.security_headers(SecurityHeadersLayer::strict());
 
 | Preajuste | Cuándo usarlo |
 |---|---|
-| `strict()` | Producción: HSTS preload + XFO=DENY + nosniff + Referrer-Policy=no-referrer + COOP=same-origin + Permissions-Policy restringida |
+| `strict()` | Producción: HSTS preload + XFO=DENY + nosniff + Referrer-Policy=same-origin + COOP=same-origin + Permissions-Policy restringida |
 | `relaxed()` | Incrustable en iframes: SAMEORIGIN + HSTS de 1 año |
 | `dev()` | Local: solo nosniff (sin HSTS para evitar bloquear localhost en HTTPS para siempre) |
 | `empty()` | Construir desde cero |
