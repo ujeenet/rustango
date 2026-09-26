@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Changed — query IR structs are `#[non_exhaustive]`, with constructors (#1661)
+### Changed — the ten query IR structs are `#[non_exhaustive]`, with constructors (#1661)
 
 **Breaking:** `Filter`, `Assignment`, `SelectQuery`, `InsertQuery`,
 `BulkInsertQuery`, `UpdateQuery`, `BulkUpdateQuery`, `DeleteQuery`,
@@ -12,7 +12,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 literal outside the crate. Use `X::new(..)` and the builders
 (`InsertQuery::returning`, `.on_conflict`, `SelectQuery::where_clause`,
 `.projection`). Fields stay `pub`, so a new field is no longer a break.
-See UPGRADING.
+`Filter::new` takes `impl Into<SqlValue>`. A `compile_fail` doctest per
+struct fails if the marker is dropped. See UPGRADING.
 
 ### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
 

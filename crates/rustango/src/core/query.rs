@@ -194,8 +194,12 @@ pub struct Filter {
 impl Filter {
     /// A `column <op> value` predicate.
     #[must_use]
-    pub fn new(column: &'static str, op: Op, value: SqlValue) -> Self {
-        Self { column, op, value }
+    pub fn new(column: &'static str, op: Op, value: impl Into<SqlValue>) -> Self {
+        Self {
+            column,
+            op,
+            value: value.into(),
+        }
     }
 }
 
@@ -1881,3 +1885,74 @@ impl PartialEq for AggregateQuery {
             && self.offset == other.offset
     }
 }
+
+/// Each block builds one IR struct with `..X::new(..)` from outside the
+/// crate, which only `#[non_exhaustive]` forbids (#1661). Dropping the
+/// attribute makes that block compile, and fail.
+///
+/// ```compile_fail
+/// # use rustango::core::*;
+/// let _ = Filter { ..Filter::new("a", Op::Eq, SqlValue::Null) };
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// let _ = Assignment { ..Assignment::new("a", SqlValue::Null) };
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// # #[derive(rustango::Model)] #[rustango(table = "t")] pub struct T { #[rustango(primary_key)] id: i64 }
+/// # fn main() {
+/// let _ = SelectQuery { ..SelectQuery::new(T::SCHEMA) };
+/// # }
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// # #[derive(rustango::Model)] #[rustango(table = "t")] pub struct T { #[rustango(primary_key)] id: i64 }
+/// # fn main() {
+/// let _ = InsertQuery { ..InsertQuery::new(T::SCHEMA, vec![], vec![]) };
+/// # }
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// # #[derive(rustango::Model)] #[rustango(table = "t")] pub struct T { #[rustango(primary_key)] id: i64 }
+/// # fn main() {
+/// let _ = BulkInsertQuery { ..BulkInsertQuery::new(T::SCHEMA, vec![], vec![]) };
+/// # }
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// # #[derive(rustango::Model)] #[rustango(table = "t")] pub struct T { #[rustango(primary_key)] id: i64 }
+/// # fn main() {
+/// let _ = UpdateQuery { ..UpdateQuery::new(T::SCHEMA, vec![], WhereExpr::And(vec![])) };
+/// # }
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// # #[derive(rustango::Model)] #[rustango(table = "t")] pub struct T { #[rustango(primary_key)] id: i64 }
+/// # fn main() {
+/// let _ = BulkUpdateQuery { ..BulkUpdateQuery::new(T::SCHEMA, vec![], vec![]) };
+/// # }
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// # #[derive(rustango::Model)] #[rustango(table = "t")] pub struct T { #[rustango(primary_key)] id: i64 }
+/// # fn main() {
+/// let _ = DeleteQuery { ..DeleteQuery::new(T::SCHEMA, WhereExpr::And(vec![])) };
+/// # }
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// # #[derive(rustango::Model)] #[rustango(table = "t")] pub struct T { #[rustango(primary_key)] id: i64 }
+/// # fn main() {
+/// let _ = CountQuery { ..CountQuery::new(T::SCHEMA, WhereExpr::And(vec![])) };
+/// # }
+/// ```
+/// ```compile_fail
+/// # use rustango::core::*;
+/// # #[derive(rustango::Model)] #[rustango(table = "t")] pub struct T { #[rustango(primary_key)] id: i64 }
+/// # fn main() {
+/// let _ = AggregateQuery { ..AggregateQuery::new(T::SCHEMA, vec![]) };
+/// # }
+/// ```
+#[cfg(doctest)]
+pub struct IrStructsStayNonExhaustive;
