@@ -249,11 +249,10 @@ fn split_origin(origin: &str) -> Option<(&str, &str)> {
 /// *reject* a plain-http Origin, so a proxy that forwards neither
 /// header leaves behaviour exactly as it was rather than locking
 /// anyone out.
-fn request_is_https(req: &Request<Body>) -> bool {
-    if req.uri().scheme_str() == Some("https") {
+fn request_is_https(h: &axum::http::HeaderMap, uri_is_https: bool) -> bool {
+    if uri_is_https {
         return true;
     }
-    let h = req.headers();
     if h.get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| {
@@ -278,8 +277,19 @@ fn request_is_https(req: &Request<Body>) -> bool {
 }
 
 fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
-    let Some(origin) = req
-        .headers()
+    origin_allowed_in(
+        req.headers(),
+        req.uri().scheme_str() == Some("https"),
+        trusted,
+    )
+}
+
+fn origin_allowed_in(
+    headers: &axum::http::HeaderMap,
+    uri_is_https: bool,
+    trusted: &[String],
+) -> bool {
+    let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|h| h.to_str().ok())
     else {
@@ -295,11 +305,10 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
         // Plain HTTP keeps the old behaviour, so server-to-server and
         // curl callers on internal networks are not locked out by an
         // upgrade; they are still covered by the token check.
-        return !request_is_https(req);
+        return !request_is_https(headers, uri_is_https);
     };
     // Same-origin: Origin's scheme AND host must match the request.
-    if let Some(host) = req
-        .headers()
+    if let Some(host) = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
     {
@@ -313,7 +322,7 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
             // `http://` Origin is a different origin, not this one.
             // Accepting it let a network attacker who can serve the
             // http site forge a same-origin POST at the https one.
-            let scheme_ok = !(scheme == "http" && request_is_https(req));
+            let scheme_ok = !(scheme == "http" && request_is_https(headers, uri_is_https));
             if host_matches && scheme_ok {
                 return true;
             }
@@ -674,8 +683,14 @@ pub fn ensure_token(
 /// cookie and the form carries the matching token), rather than relying
 /// on the [`CsrfLayer`] middleware. Using the layer *and* seeding the
 /// token in the handler would set two conflicting cookies.
+///
+/// Also runs the layer's Origin check against the request's own Host
+/// (#1695): tenants share an apex, so one can plant the cookie half.
 #[must_use]
 pub fn verify_form_token(headers: &axum::http::HeaderMap, submitted: Option<&str>) -> bool {
+    if !origin_allowed_in(headers, false, &[]) {
+        return false;
+    }
     match (
         read_csrf_cookie_from_headers(headers, CSRF_COOKIE),
         submitted,
@@ -1113,6 +1128,31 @@ mod tests {
         // Missing cookie entirely → reject.
         let empty = axum::http::HeaderMap::new();
         assert!(!verify_form_token(&empty, Some("tok-abc123")));
+    }
+
+    /// #1695 — a matching pair from a foreign Origin is refused.
+    #[test]
+    fn verify_form_token_checks_origin() {
+        let with = |origin: Option<&str>, proto: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(
+                axum::http::header::COOKIE,
+                format!("{CSRF_COOKIE}=tok").parse().unwrap(),
+            );
+            h.insert(axum::http::header::HOST, "t01.example.com".parse().unwrap());
+            if let Some(o) = origin {
+                h.insert(axum::http::header::ORIGIN, o.parse().unwrap());
+            }
+            if let Some(p) = proto {
+                h.insert("x-forwarded-proto", p.parse().unwrap());
+            }
+            verify_form_token(&h, Some("tok"))
+        };
+        assert!(!with(Some("http://t02.example.com"), None));
+        assert!(!with(Some("null"), None));
+        assert!(with(Some("http://t01.example.com"), None));
+        assert!(with(None, None), "plain http without Origin keeps working");
+        assert!(!with(None, Some("https")), "over TLS, Origin is required");
     }
 
     #[test]
