@@ -30,6 +30,69 @@ recomputing the composition, since building it a second way is how
 these drifted apart. `server::Builder` gains `span_redact` for the
 hand-built case.
 
+### Fixed — the CSRF Origin check was off by default (#1529)
+
+An empty `trusted_origins` skipped the Origin check entirely, so the
+default deployment ran on bare **unsigned** double-submit: a random
+cookie compared against a header. Cookies are scoped by registrable
+domain, not by origin, so anyone able to write one on the parent
+domain forges a valid pair — XSS on a sibling subdomain, a
+dangling-CNAME takeover, or a network attacker on any plaintext
+`http://*.example.com` (`Secure` stops the cookie being *sent* over
+HTTP, not *written*). Origin is what catches that.
+
+The check now runs with an empty list, using the request's own `Host`
+as the implicit trusted origin — so a same-origin deployment needs no
+configuration, and a foreign Origin is refused out of the box. Add
+entries only for origins other than the app's own.
+
+Two related holes closed with it:
+
+- **A missing Origin no longer passes over TLS.** Anything able to
+  omit the header skipped the check. Plain HTTP keeps the old
+  behaviour, so server-to-server callers are not locked out.
+- **Wildcard entries now match a non-default port.** `https://*.example.com`
+  did not cover `https://sub.example.com:8443`, a silent false
+  negative that reads as a flaky 403.
+
+Signing the token against the session — the remaining item on #1529 —
+is not in this release.
+
+### Fixed — a JWT with no `exp` never expired, and `decode` accepted it (#1538)
+
+`decode` skipped the expiry check when the claim was absent, so a
+token minted without `.ttl()` or `.expires_at()` was a permanent
+credential. `Claims::new(sub)` sets only `sub` and `iat`, so
+forgetting the TTL produced one silently.
+
+`exp` is required now, and its absence is `JwtError::MissingExp`
+rather than a pass. Non-expiring service tokens are a real case, so
+they get the explicit branch: `decode_allowing_no_exp` (and
+`decode_at_allowing_no_exp`), which still checks the signature and
+`nbf`.
+
+`JwtLifecycle` is unaffected — its `JwtClaims` has always had a
+required `exp` and always sets a TTL.
+
+**Breaking:** `JwtError` gains a variant, and a token your own code
+mints without an expiry now fails to decode. That is the bug.
+
+### Added — `jwt_router` takes a revocation store and a claims hook (#1190)
+
+`Config` gains `jti_store` and `extra_claims`, so an app no longer has
+to abandon the router to add its own claims or to share revocation
+state between replicas. The default `InMemoryJtiStore` is
+single-process and forgets every revocation on restart, which made
+`/logout` best-effort on more than one replica.
+
+The hook runs before the router's own `tenant` claim, so it cannot
+overwrite the binding that stops a token signed on one subdomain being
+replayed on another.
+
+The `OnceLock` the issue also names is unchanged: `verify_for_tenant`
+is public and reads it, so removing it is a breaking change. #1190
+stays open for that part.
+
 ## [0.57.12] — 2026-09-24
 
 A security release. An admin could log in on the password alone when

@@ -109,10 +109,15 @@ pub struct CsrfConfig {
     /// `"https://app.example.com"` or
     /// `"https://*.example.com"` for a wildcard subdomain.
     ///
-    /// Default `[]` (empty) — disables the Origin-header check
-    /// entirely so existing deployments don't break. To enable
-    /// defense-in-depth Origin-based CSRF protection, populate this
-    /// list with at least the application's own canonical origin.
+    /// Default `[]` (empty). The Origin check still runs: the
+    /// request's own `Host` is the implicit trusted origin, so a
+    /// same-origin deployment needs no configuration. Add entries only
+    /// for origins *other* than the app's own.
+    ///
+    /// It used to be that an empty list skipped the check entirely,
+    /// which left the default deployment on bare unsigned
+    /// double-submit — forgeable by anyone able to write a cookie on
+    /// the parent domain (#1529).
     ///
     /// When non-empty, the layer ALSO accepts the request's own
     /// Host header as an implicit trusted origin (same-origin
@@ -222,9 +227,10 @@ impl CsrfConfig {
 ///   `*.subdomain.example.com` wildcard) → allow.
 /// * Anything else → reject.
 ///
-/// When `trusted_origins` is empty, the layer skips the check
-/// entirely (back-compat default) — the Origin header alone is
-/// not consulted.
+/// An empty `trusted_origins` no longer skips the check: the
+/// request's own `Host` is the implicit trusted origin, so
+/// same-origin traffic passes with no configuration and a foreign
+/// Origin is rejected by default (#1529).
 /// Split an `Origin` header into `(scheme, host[:port])`.
 ///
 /// `None` when it is not `scheme://host` — an empty header, the
@@ -272,19 +278,24 @@ fn request_is_https(req: &Request<Body>) -> bool {
 }
 
 fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
-    if trusted.is_empty() {
-        return true;
-    }
     let Some(origin) = req
         .headers()
         .get(axum::http::header::ORIGIN)
         .and_then(|h| h.to_str().ok())
     else {
-        // No Origin header — fall back to legacy behavior. Browsers
-        // always send Origin on cross-origin POST, so the missing
-        // case is curl / server-to-server which already gets
-        // protected by the double-submit token check.
-        return true;
+        // No Origin header. Over TLS this is refused: unsigned
+        // double-submit alone is forgeable by anyone who can write a
+        // cookie on the parent domain — XSS on a sibling subdomain, a
+        // dangling-CNAME takeover, or a network attacker on any
+        // plaintext `http://*.example.com` (`Secure` stops the cookie
+        // being *sent* over HTTP, not *written*). Origin is what
+        // catches that, so it must not be skippable by omitting it
+        // (#1529).
+        //
+        // Plain HTTP keeps the old behaviour, so server-to-server and
+        // curl callers on internal networks are not locked out by an
+        // upgrade; they are still covered by the token check.
+        return !request_is_https(req);
     };
     // Same-origin: Origin's scheme AND host must match the request.
     if let Some(host) = req
@@ -314,33 +325,39 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
         if entry == origin {
             return true;
         }
-        if let Some(wild) = entry.strip_prefix("https://*.") {
-            // Match `https://anything.<wild>` exactly.
-            if let Some(prefix) = origin.strip_prefix("https://") {
-                if prefix == wild {
-                    return true;
-                }
-                if let Some(rest) = prefix.strip_suffix(wild) {
-                    if rest.ends_with('.') {
-                        return true;
-                    }
-                }
-            }
-        }
-        if let Some(wild) = entry.strip_prefix("http://*.") {
-            if let Some(prefix) = origin.strip_prefix("http://") {
-                if prefix == wild {
-                    return true;
-                }
-                if let Some(rest) = prefix.strip_suffix(wild) {
-                    if rest.ends_with('.') {
-                        return true;
-                    }
-                }
+        for scheme in ["https://", "http://"] {
+            let Some(wild) = entry
+                .strip_prefix(scheme)
+                .and_then(|e| e.strip_prefix("*."))
+            else {
+                continue;
+            };
+            let Some(authority) = origin.strip_prefix(scheme) else {
+                continue;
+            };
+            if wildcard_matches(authority, wild) {
+                return true;
             }
         }
     }
     false
+}
+
+/// `true` when `authority` (`host` or `host:port`) is covered by a
+/// `*.<wild>` entry — either `wild` itself or any subdomain of it.
+///
+/// The port is stripped first. Matching the raw authority meant
+/// `https://sub.example.com:8443` missed a `https://*.example.com`
+/// entry the operator believed covered it, and the symptom was a 403
+/// that reads as flaky rather than as a config problem (#1529).
+fn wildcard_matches(authority: &str, wild: &str) -> bool {
+    let host = authority.split(':').next().unwrap_or(authority);
+    let wild_host = wild.split(':').next().unwrap_or(wild);
+    if host == wild_host {
+        return true;
+    }
+    host.strip_suffix(wild_host)
+        .is_some_and(|rest| rest.ends_with('.'))
 }
 
 /// The [`tower::Layer`] implementation. Wraps inner services with
@@ -839,6 +856,92 @@ fn csrf_input_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a POST with the given Origin/Host, optionally over TLS.
+    fn post(origin: Option<&str>, host: &str, https: bool) -> Request<Body> {
+        let mut b = Request::builder().method(Method::POST).uri("/forms/submit");
+        if let Some(o) = origin {
+            b = b.header(axum::http::header::ORIGIN, o);
+        }
+        if https {
+            b = b.header("x-forwarded-proto", "https");
+        }
+        b.header(axum::http::header::HOST, host)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// The default config must reject a cross-origin POST (#1529).
+    ///
+    /// This is the whole point of the issue: an attacker who can write
+    /// a cookie on the parent domain — XSS on a sibling subdomain, a
+    /// dangling-CNAME takeover, a network attacker on any plaintext
+    /// `http://*.example.com` — forges a matching double-submit pair.
+    /// Origin is what catches that, and it used to be off unless the
+    /// integrator populated a list.
+    #[test]
+    fn a_foreign_origin_is_rejected_with_the_default_config() {
+        let cfg = CsrfConfig::default();
+        assert!(cfg.trusted_origins.is_empty(), "the default is still []");
+
+        assert!(
+            !origin_allowed(
+                &post(Some("https://evil.example"), "app.example.com", true),
+                &cfg.trusted_origins
+            ),
+            "a foreign Origin must be refused out of the box"
+        );
+        // Same-origin still passes with no configuration at all.
+        assert!(origin_allowed(
+            &post(Some("https://app.example.com"), "app.example.com", true),
+            &cfg.trusted_origins
+        ));
+    }
+
+    /// A missing Origin must not be a way around the check on HTTPS —
+    /// otherwise anything able to omit the header skips it (#1529).
+    #[test]
+    fn a_missing_origin_is_refused_over_tls_only() {
+        let empty: Vec<String> = Vec::new();
+        assert!(
+            !origin_allowed(&post(None, "app.example.com", true), &empty),
+            "no Origin over TLS must be refused"
+        );
+        // Plain HTTP keeps the old behaviour so server-to-server and
+        // curl callers are not locked out by an upgrade.
+        assert!(
+            origin_allowed(&post(None, "app.example.com", false), &empty),
+            "no Origin over plain http stays allowed"
+        );
+    }
+
+    /// A wildcard entry covers a non-default port. Matching the raw
+    /// authority made this a silent false negative that reads as a
+    /// flaky 403 (#1529).
+    #[test]
+    fn a_wildcard_entry_matches_a_non_default_port() {
+        let trusted = vec!["https://*.example.com".to_owned()];
+        for origin in [
+            "https://sub.example.com:8443",
+            "https://sub.example.com",
+            "https://deep.sub.example.com:443",
+        ] {
+            assert!(
+                origin_allowed(&post(Some(origin), "app.other", true), &trusted),
+                "`{origin}` should match the wildcard"
+            );
+        }
+        // Still not a free pass for a lookalike domain.
+        for origin in [
+            "https://sub.example.com.evil.test",
+            "https://notexample.com:8443",
+        ] {
+            assert!(
+                !origin_allowed(&post(Some(origin), "app.other", true), &trusted),
+                "`{origin}` must not match the wildcard"
+            );
+        }
+    }
 
     #[test]
     fn safe_method_predicate() {
