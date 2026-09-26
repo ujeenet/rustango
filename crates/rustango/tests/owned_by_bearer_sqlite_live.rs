@@ -271,6 +271,23 @@ async fn another_members_row_is_not_found_by_id() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// A failed login is the `ApiError` envelope, like every JSON error (#1684).
+#[tokio::test]
+async fn a_bad_login_is_an_api_error() {
+    let (app, _, _, _) = app("acme", "bad_login").await;
+    let login = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"username":"alice","password":"wrong"}"#))
+        .expect("request");
+    let resp = app.oneshot(login).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let v = json(resp).await;
+    assert_eq!(v["error"], "unauthorized", "{v}");
+    assert_eq!(v["message"], "invalid credentials", "{v}");
+}
+
 /// Login, use, logout, refused: the router and the middleware share one
 /// `JwtAuth`, so the logout's revocation reaches the middleware (#1190).
 #[tokio::test]

@@ -365,14 +365,14 @@ async fn login(
         .where_(User::username.eq(body.username.clone()))
         .fetch(t.pool())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let Some(user) = users.into_iter().next() else {
         // H1: spend a verify's worth of work on the unknown-user path so
         // timing doesn't reveal whether the username exists.
         crate::tenancy::password::verify_dummy(&body.password);
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
-        return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     };
 
     // Audit M1 — per-account brute-force lockout, on by default. Key is
@@ -385,13 +385,13 @@ async fn login(
     #[cfg(feature = "cache")]
     if crate::account_lockout::shared().is_locked(&lock_key).await {
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
-        return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
     let ok = crate::tenancy::password::verify(&body.password, &user.password_hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     if !user.active {
         send_user_login_failed(fire_failed(AuthFailureReason::Inactive)).await;
@@ -401,7 +401,7 @@ async fn login(
         // The Inactive signal above still records the real reason. The
         // `me` handler keeps its 403 (the caller already proved it holds
         // a valid token for this user, so it's not an enumeration vector).
-        return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
     if !ok {
         // Audit M1 — count this failure toward the per-account lockout.
@@ -412,7 +412,7 @@ async fn login(
                 .await;
         }
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
-        return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
 
     // Audit M1 — successful login clears the failure counter + any lock.
@@ -447,7 +447,7 @@ async fn login(
     let pair = auth
         .lifecycle()
         .issue_pair_with(user_id, custom)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(LoginOutput {
         access: pair.access,
@@ -487,17 +487,17 @@ async fn refresh(
     // /refresh (they share the session secret) and rotated — burning A's
     // refresh token (a cross-tenant DoS / rotation oracle). Verify the
     // token's `tenant` claim matches this subdomain BEFORE rotating.
-    let claims = jwt.verify_refresh(&body.refresh).await.ok_or_else(|| {
-        (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
-    })?;
+    let claims = jwt
+        .verify_refresh(&body.refresh)
+        .await
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid or expired refresh token"))?;
     let tenant_ok =
         claims.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str());
     if !tenant_ok {
-        return Err((
+        return Err(err(
             StatusCode::UNAUTHORIZED,
             "refresh token issued for a different tenant",
-        )
-            .into_response());
+        ));
     }
     // Audit P2 — re-check the account is still active (and exists) before
     // minting a fresh pair. Otherwise a user deactivated/deleted after
@@ -513,17 +513,19 @@ async fn refresh(
             .where_(User::id.eq(claims.sub))
             .fetch(t.pool())
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let still_active = users.into_iter().next().is_some_and(|u| u.active);
         if !still_active {
-            return Err(
-                (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response(),
-            );
+            return Err(err(
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired refresh token",
+            ));
         }
     }
-    let pair = jwt.refresh(&body.refresh).await.ok_or_else(|| {
-        (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
-    })?;
+    let pair = jwt
+        .refresh(&body.refresh)
+        .await
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid or expired refresh token"))?;
     Ok(Json(RefreshOutput {
         access: pair.access,
         refresh: pair.refresh,
@@ -570,11 +572,10 @@ async fn logout(
     // expired token falls through to a best-effort revoke as before.)
     if let Some(c) = &claims {
         if c.custom_value("tenant").and_then(|v| v.as_str()) != Some(t.org.slug.as_str()) {
-            return Err((
+            return Err(err(
                 StatusCode::UNAUTHORIZED,
                 "token issued for a different tenant",
-            )
-                .into_response());
+            ));
         }
     }
     let user_id = claims.map(|c| c.sub);
@@ -637,21 +638,21 @@ async fn me(
     let user_id = auth
         .verify_for_tenant(&bearer.0, &t.org.slug)
         .await
-        .map_err(|msg| (StatusCode::UNAUTHORIZED, msg).into_response())?;
+        .map_err(|msg| err(StatusCode::UNAUTHORIZED, msg))?;
 
     let users = User::objects()
         .where_(User::id.eq(user_id))
         .fetch(t.pool())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let user = users
         .into_iter()
         .next()
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "user not found").into_response())?;
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "user not found"))?;
 
     if !user.active {
-        return Err((StatusCode::FORBIDDEN, "account inactive").into_response());
+        return Err(err(StatusCode::FORBIDDEN, "account inactive"));
     }
 
     Ok(Json(UserBrief {
@@ -731,7 +732,7 @@ pub async fn require_bearer(
         Ok(rows) => rows.into_iter().next(),
         Err(e) => {
             tracing::error!(error = %e, "bearer auth could not read the user row");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "authentication failed").into_response();
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "authentication failed");
         }
     };
     let Some(user) = user.filter(|u| u.active) else {
@@ -756,7 +757,12 @@ pub async fn require_bearer(
 }
 
 fn unauthorized(msg: &'static str) -> Response {
-    (StatusCode::UNAUTHORIZED, msg).into_response()
+    err(StatusCode::UNAUTHORIZED, msg)
+}
+
+/// An `ApiError` body; a 5xx cause is logged, not sent (#1684).
+fn err(status: StatusCode, msg: impl std::fmt::Display) -> Response {
+    crate::api_errors::ApiError::logged(status, "auth_routes", msg).into_response()
 }
 
 // ---------------------------------------------------------------- Bearer
@@ -779,7 +785,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Bearer {
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
             .map(|t| Bearer(t.trim().to_owned()))
-            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "missing Bearer token").into_response())
+            .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing Bearer token"))
     }
 }
 

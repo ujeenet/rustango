@@ -203,6 +203,7 @@ Only affects clients that parse error bodies (#1193). The shape is
 | Serializer `400` `{"title": [...]}` | **`422`**, `details.title`, `error: "validation_failed"` |
 | Admin `{"error": "form", "detail": …}` | `400` `bad_request`, reason in `message` |
 | Tenant / `Principal` rejections, plain text | JSON, same shape |
+| `auth_routes` login/refresh/logout/me errors, plain text | JSON, same shape (#1684) |
 | `limit_bytes`, `retry_after`, admin `table` / `pk` | under `details` |
 | 5xx carrying the driver message | generic `message` unless `RUSTANGO_DISCLOSE_ERRORS`; cause logged at `rustango::error` |
 | ViewSet create/update constraint `400` with driver text | `400`, generic `message` |
