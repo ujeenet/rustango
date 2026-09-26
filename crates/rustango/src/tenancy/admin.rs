@@ -351,8 +351,9 @@ where
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
         Err(e) => {
-            warn!(target: "rustango::tenancy::admin", error = %e, "resolver error");
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            // Logged, not sent: the resolver error can name the registry host.
+            let body = crate::error::server_error_body("tenancy::admin::resolve", &e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
         }
     };
 
