@@ -28,18 +28,11 @@ pub struct Evt {
 }
 
 fn update_set(value: Expr) -> UpdateQuery {
-    UpdateQuery {
-        model: Evt::SCHEMA,
-        set: vec![Assignment {
-            column: "year_out",
-            value,
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
-    }
+    UpdateQuery::new(
+        Evt::SCHEMA,
+        vec![Assignment::new("year_out", value)],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+    )
 }
 
 // ---------- NOW() ----------

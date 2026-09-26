@@ -7,7 +7,9 @@
 use crate::sql::sqlx;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::Json;
+use serde_json::json;
+
+use crate::api_errors::ApiError;
 
 use super::forms::FormError;
 
@@ -148,10 +150,8 @@ impl From<crate::sql::ExecError> for AdminError {
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
-            Self::TableNotFound { table } => (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "table not found", "table": table })),
-            )
+            Self::TableNotFound { table } => ApiError::not_found("table not found")
+                .with_details(json!({ "table": table }))
                 .into_response(),
             Self::TableMissing { table } => {
                 let body = format!(
@@ -177,30 +177,17 @@ applied yet for this tenant / database.</p>
                 );
                 (StatusCode::SERVICE_UNAVAILABLE, Html(body)).into_response()
             }
-            Self::RowNotFound { table, pk } => (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "row not found", "table": table, "pk": pk })),
-            )
+            Self::RowNotFound { table, pk } => ApiError::not_found("row not found")
+                .with_details(json!({ "table": table, "pk": pk }))
                 .into_response(),
-            Self::ReadOnly { table } => (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": "table is read-only", "table": table })),
-            )
+            Self::ReadOnly { table } => ApiError::forbidden("table is read-only")
+                .with_details(json!({ "table": table }))
                 .into_response(),
-            Self::Forbidden { table, action } => (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "permission denied",
-                    "table": table,
-                    "action": action,
-                })),
-            )
+            Self::Forbidden { table, action } => ApiError::forbidden("permission denied")
+                .with_details(json!({ "table": table, "action": action }))
                 .into_response(),
-            Self::Form(e) => (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "form", "detail": e.to_string() })),
-            )
-                .into_response(),
+            // Mostly an unparseable pk in the URL: a bad request.
+            Self::Form(e) => ApiError::bad_request(e.to_string()).into_response(),
             Self::Internal(msg) => {
                 // Log the raw message for the operator and return a
                 // generic body. The raw text can hold table names,
@@ -214,14 +201,8 @@ applied yet for this tenant / database.</p>
                     error = %msg,
                     "admin internal error"
                 );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": "internal",
-                        "detail": "internal server error",
-                        "correlation_id": id,
-                    })),
-                )
+                ApiError::internal("internal server error")
+                    .with_details(json!({ "correlation_id": id }))
                     .into_response()
             }
         }
@@ -243,12 +224,7 @@ fn short_correlation_id() -> String {
     out
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+use crate::text::html_escape;
 
 #[cfg(test)]
 mod tests {
@@ -272,6 +248,18 @@ mod tests {
             seen.insert(short_correlation_id());
         }
         assert_eq!(seen.len(), 32, "expected all distinct correlation ids");
+    }
+
+    /// The table-missing page escapes `'` too; this copy used to skip it (#1663).
+    #[tokio::test]
+    async fn table_missing_page_escapes_the_apostrophe() {
+        let resp = AdminError::TableMissing {
+            table: "x'<b>".into(),
+        }
+        .into_response();
+        let body = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("x&#x27;&lt;b&gt;"), "{html}");
     }
 
     /// `AdminError::Internal` must **not** echo the raw error text in

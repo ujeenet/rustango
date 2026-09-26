@@ -224,38 +224,36 @@ async fn upsert_via_insert_query_with_do_update_works_on_sqlite() {
         .expect("recreate");
     }
     // First insert.
-    let q = InsertQuery {
-        model: Post::SCHEMA,
-        columns: vec!["title", "author", "published"],
-        values: vec![
+    let q = InsertQuery::new(
+        Post::SCHEMA,
+        vec!["title", "author", "published"],
+        vec![
             SqlValue::from("unique-slot".to_owned()),
             SqlValue::from(alice),
             SqlValue::from(false),
         ],
-        returning: vec![],
-        on_conflict: Some(ConflictClause::DoUpdate {
-            target: vec!["title"],
-            update_columns: vec!["published"],
-        }),
-    };
+    )
+    .on_conflict(ConflictClause::DoUpdate {
+        target: vec!["title"],
+        update_columns: vec!["published"],
+    });
     rustango::sql::insert_pool(&pool, &q)
         .await
         .expect("first upsert");
     // Conflict insert with different `published` flips the row.
-    let q2 = InsertQuery {
-        model: Post::SCHEMA,
-        columns: vec!["title", "author", "published"],
-        values: vec![
+    let q2 = InsertQuery::new(
+        Post::SCHEMA,
+        vec!["title", "author", "published"],
+        vec![
             SqlValue::from("unique-slot".to_owned()),
             SqlValue::from(alice),
             SqlValue::from(true),
         ],
-        returning: vec![],
-        on_conflict: Some(ConflictClause::DoUpdate {
-            target: vec!["title"],
-            update_columns: vec!["published"],
-        }),
-    };
+    )
+    .on_conflict(ConflictClause::DoUpdate {
+        target: vec!["title"],
+        update_columns: vec!["published"],
+    });
     rustango::sql::insert_pool(&pool, &q2)
         .await
         .expect("conflict upsert");

@@ -9,21 +9,8 @@ use crate::core::{FieldSchema, FieldType};
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::{postgres::PgRow, Row};
 
-/// Escape a string for safe inclusion in HTML body or attribute context.
-pub(crate) fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
+/// Escape for HTML body or attribute context: the crate's one escaper (#1663).
+pub(crate) use crate::text::html_escape as escape;
 
 /// Parse a form-payload string into a typed [`serde_json::Value`]
 /// matching `field.ty`. Used by the admin audit emit to coerce form

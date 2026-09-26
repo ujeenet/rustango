@@ -203,7 +203,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 
 `ApiError` implements `IntoResponse`, so returning it produces its JSON shape automatically: `{"error": <machine code>, "message": …, "status": …, "details": …}`.
 
-**It is not the only error shape the framework emits.** A ViewSet answers with `{"error": "<human message>"}` for its own failures and with a field-keyed map of messages for serializer validation — three envelopes in total, and `error` carries a machine code in one and a sentence in another. [ViewSets — error response shapes](viewsets.md#error-response-shapes) lists which path emits which.
+The framework's own JSON errors use the same shape: ViewSets, tenant and `Principal` rejections, media, the admin's JSON endpoints, body limits, rate limits and maintenance mode. A `5xx` logs its cause and sends a generic `message`. See [ViewSets — error response shapes](viewsets.md#error-response-shapes).
 
 ---
 

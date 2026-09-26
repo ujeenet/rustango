@@ -108,6 +108,7 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
+use axum::response::IntoResponse as _;
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
@@ -382,11 +383,11 @@ where
 ///             return Vec::new();
 ///         }
 ///         schema.field("status").map_or_else(Vec::new, |f| {
-///             vec![WhereExpr::Predicate(Filter {
-///                 column: f.column,
-///                 op: Op::Eq,
-///                 value: SqlValue::from("published"),
-///             })]
+///             vec![WhereExpr::Predicate(Filter::new(
+///                 f.column,
+///                 Op::Eq,
+///                 SqlValue::from("published"),
+///             ))]
 ///         })
 ///     })
 ///     .router_pool("/posts", pool);
@@ -1342,12 +1343,20 @@ fn json_response(body: Value) -> Response {
     json_with_status(StatusCode::OK, body)
 }
 
+/// An [`ApiError`](crate::api_errors::ApiError) body; a 5xx message is
+/// logged rather than sent.
 fn json_error(status: StatusCode, msg: &str) -> Response {
-    json_with_status(status, json!({ "error": msg }))
+    crate::api_errors::ApiError::logged(status, "viewset", msg).into_response()
 }
 
-/// A `400` from serializer validation, shaped as
-/// `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
+/// A 500 whose cause is logged under `context`, not sent.
+fn json_server_error(context: &str, e: &dyn std::fmt::Display) -> Response {
+    crate::api_errors::ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, context, e)
+        .into_response()
+}
+
+/// A `422` from serializer validation, as every `validation_failed` is.
+/// `details` is `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
 fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     let mut map = serde_json::Map::new();
     for (field, msgs) in errs.fields() {
@@ -1356,7 +1365,9 @@ fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     if !errs.non_field().is_empty() {
         map.insert("non_field_errors".to_owned(), json!(errs.non_field()));
     }
-    json_with_status(StatusCode::BAD_REQUEST, Value::Object(map))
+    crate::api_errors::ApiError::validation("invalid input")
+        .with_details(Value::Object(map))
+        .into_response()
 }
 
 /// Rename inbound form keys from serializer field names to model
@@ -1639,14 +1650,7 @@ fn client_key(parts: &axum::http::request::Parts) -> String {
 
 /// A `429 Too Many Requests` with a `Retry-After` header.
 fn throttled_response(retry_after_secs: u64) -> Response {
-    Response::builder()
-        .status(StatusCode::TOO_MANY_REQUESTS)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::RETRY_AFTER, retry_after_secs.to_string())
-        .body(Body::from(
-            json!({ "error": "request throttled" }).to_string(),
-        ))
-        .unwrap()
+    crate::api_errors::ApiError::rate_limited_response("request throttled", retry_after_secs)
 }
 
 /// Parse a path capture into the primary key's type, or a `400`.
@@ -2409,10 +2413,7 @@ async fn handle_retrieve(
     match render_single(&state, &mut acq, &select_q, &fields).await {
         Ok(Some(row)) => json_response(row),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not found"),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &crate::error::server_error_body("viewset::retrieve", &e),
-        ),
+        Err(e) => json_server_error("viewset::retrieve", &e),
     }
 }
 
@@ -2480,7 +2481,7 @@ async fn insert_and_fetch_one(
     let pk_val = acq
         .insert_returning_pk(&query, pk_field)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        .map_err(|e| write_failure("viewset::create", &e))?;
     fetch_by_pk(state, acq, pk_field, pk_val, fields)
         .await
         .ok_or_else(|| {
@@ -2489,6 +2490,17 @@ async fn insert_and_fetch_one(
                 "created but could not retrieve".to_owned(),
             )
         })
+}
+
+/// A failed INSERT/UPDATE: a database rejection is the client's `400`,
+/// with the driver text withheld; anything else is a `500`.
+fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
+    if matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_))) {
+        let body = crate::error::client_error_body(context, e, true);
+        (StatusCode::BAD_REQUEST, body)
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
 }
 
 /// Single-row create — used by both the form-urlencoded codepath
@@ -2599,10 +2611,7 @@ async fn create_many(
     let mut tx = match crate::sql::transaction_pool(&acq.pool).await {
         Ok(tx) => tx,
         Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &crate::error::server_error_body("viewset::bulk_create::begin", &e),
-            );
+            return json_server_error("viewset::bulk_create::begin", &e);
         }
     };
 
@@ -2646,10 +2655,7 @@ async fn create_many(
         }
     }
     if let Err(e) = tx.commit().await {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &crate::error::server_error_body("viewset::bulk_create::commit", &e),
-        );
+        return json_server_error("viewset::bulk_create::commit", &e);
     }
 
     // Read the rows back after the commit. They have to be committed to
@@ -2773,7 +2779,10 @@ async fn update_inner(
         // scoped out of. Both are a 404 — see `handle_retrieve`.
         Ok(0) => return json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => {}
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => {
+            let (status, msg) = write_failure("viewset::update", &e);
+            return json_error(status, &msg);
+        }
     }
 
     let fields = state.effective_fields();
@@ -2819,10 +2828,7 @@ async fn handle_destroy(
     match acq.delete(&query).await {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => no_content(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &crate::error::server_error_body("viewset::destroy", &e),
-        ),
+        Err(e) => json_server_error("viewset::destroy", &e),
     }
 }
 
@@ -2982,6 +2988,54 @@ fn json_object_to_form(obj: &serde_json::Map<String, Value>) -> HashMap<String, 
         form.insert(k.clone(), s);
     }
     form
+}
+
+/// Every ViewSet error is an `ApiError`, and a 5xx withholds its cause (#1193).
+#[cfg(test)]
+mod envelope_tests {
+    use super::{json_error, json_server_error, throttled_response, StatusCode};
+
+    async fn body(r: axum::response::Response) -> serde_json::Value {
+        let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        serde_json::from_slice(&b).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_404_is_the_envelope() {
+        let v = body(json_error(StatusCode::NOT_FOUND, "not found")).await;
+        assert_eq!(
+            (v["error"].as_str(), v["message"].as_str()),
+            (Some("not_found"), Some("not found"))
+        );
+        assert_eq!(v["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn a_500_withholds_the_driver_text() {
+        let _env = crate::error::test_env::lock();
+        let (a, b) = (
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "relation \"users\" missing",
+            ),
+            json_server_error("t", &"relation \"users\" missing"),
+        );
+        for v in [body(a).await, body(b).await] {
+            assert_eq!(v["error"], "internal_error");
+            assert!(!v.to_string().contains("users"), "{v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_throttle_carries_retry_after() {
+        let r = throttled_response(5);
+        assert_eq!(r.headers()[axum::http::header::RETRY_AFTER], "5");
+        let v = body(r).await;
+        assert_eq!(
+            (v["error"].as_str(), v["details"]["retry_after"].as_u64()),
+            (Some("rate_limited"), Some(5))
+        );
+    }
 }
 
 #[cfg(test)]

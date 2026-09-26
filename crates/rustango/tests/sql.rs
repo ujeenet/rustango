@@ -211,17 +211,15 @@ fn is_null_with_non_bool_is_rejected() {
 
 #[test]
 fn insert_emits_columns_and_placeholders() {
-    let query = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["id", "name", "is_active"],
-        values: vec![
+    let query = InsertQuery::new(
+        User::SCHEMA,
+        vec!["id", "name", "is_active"],
+        vec![
             SqlValue::I64(7),
             SqlValue::String("alice".into()),
             SqlValue::Bool(true),
         ],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    );
     let stmt = pg().compile_insert(&query).unwrap();
     assert_eq!(
         stmt.sql,
@@ -239,33 +237,31 @@ fn insert_emits_columns_and_placeholders() {
 
 #[test]
 fn insert_on_conflict_do_nothing() {
-    let query = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["id", "name"],
-        values: vec![SqlValue::I64(1), SqlValue::String("alice".into())],
-        returning: Vec::new(),
-        on_conflict: Some(ConflictClause::DoNothing),
-    };
+    let query = InsertQuery::new(
+        User::SCHEMA,
+        vec!["id", "name"],
+        vec![SqlValue::I64(1), SqlValue::String("alice".into())],
+    )
+    .on_conflict(ConflictClause::DoNothing);
     let stmt = pg().compile_insert(&query).unwrap();
     assert!(stmt.sql.contains("ON CONFLICT DO NOTHING"), "{}", stmt.sql);
 }
 
 #[test]
 fn insert_on_conflict_do_update() {
-    let query = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["id", "name", "is_active"],
-        values: vec![
+    let query = InsertQuery::new(
+        User::SCHEMA,
+        vec!["id", "name", "is_active"],
+        vec![
             SqlValue::I64(1),
             SqlValue::String("alice".into()),
             SqlValue::Bool(true),
         ],
-        returning: Vec::new(),
-        on_conflict: Some(ConflictClause::DoUpdate {
-            target: vec!["id"],
-            update_columns: vec!["name", "is_active"],
-        }),
-    };
+    )
+    .on_conflict(ConflictClause::DoUpdate {
+        target: vec!["id"],
+        update_columns: vec!["name", "is_active"],
+    });
     let stmt = pg().compile_insert(&query).unwrap();
     assert!(
         stmt.sql.contains(r#"ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "is_active" = EXCLUDED."is_active""#),
@@ -276,26 +272,18 @@ fn insert_on_conflict_do_update() {
 
 #[test]
 fn insert_with_no_columns_is_rejected() {
-    let query = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec![],
-        values: vec![],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    let query = InsertQuery::new(User::SCHEMA, vec![], vec![]);
     let err = pg().compile_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInsert));
 }
 
 #[test]
 fn insert_with_mismatched_lengths_is_rejected() {
-    let query = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["id"],
-        values: vec![SqlValue::I64(1), SqlValue::I64(2)],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    let query = InsertQuery::new(
+        User::SCHEMA,
+        vec!["id"],
+        vec![SqlValue::I64(1), SqlValue::I64(2)],
+    );
     let err = pg().compile_insert(&query).unwrap_err();
     assert!(matches!(
         err,
@@ -310,10 +298,10 @@ fn insert_with_mismatched_lengths_is_rejected() {
 
 #[test]
 fn bulk_insert_emits_one_values_tuple_per_row() {
-    let query = BulkInsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["id", "name", "is_active"],
-        rows: vec![
+    let query = BulkInsertQuery::new(
+        User::SCHEMA,
+        vec!["id", "name", "is_active"],
+        vec![
             vec![
                 SqlValue::I64(1),
                 SqlValue::String("alice".into()),
@@ -325,9 +313,7 @@ fn bulk_insert_emits_one_values_tuple_per_row() {
                 SqlValue::Bool(false),
             ],
         ],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    );
     let stmt = pg().compile_bulk_insert(&query).unwrap();
     assert_eq!(
         stmt.sql,
@@ -338,45 +324,36 @@ fn bulk_insert_emits_one_values_tuple_per_row() {
 
 #[test]
 fn bulk_insert_with_returning_appends_clause() {
-    let query = BulkInsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["name", "is_active"],
-        rows: vec![
+    let query = BulkInsertQuery::new(
+        User::SCHEMA,
+        vec!["name", "is_active"],
+        vec![
             vec![SqlValue::String("alice".into()), SqlValue::Bool(true)],
             vec![SqlValue::String("bob".into()), SqlValue::Bool(false)],
         ],
-        returning: vec!["id"],
-        on_conflict: None,
-    };
+    )
+    .returning(vec!["id"]);
     let stmt = pg().compile_bulk_insert(&query).unwrap();
     assert!(stmt.sql.ends_with(r#"RETURNING "id""#), "{}", stmt.sql);
 }
 
 #[test]
 fn bulk_insert_empty_rows_is_rejected() {
-    let query = BulkInsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["name"],
-        rows: vec![],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    let query = BulkInsertQuery::new(User::SCHEMA, vec!["name"], vec![]);
     let err = pg().compile_bulk_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyBulkInsert));
 }
 
 #[test]
 fn bulk_insert_row_shape_mismatch_is_rejected() {
-    let query = BulkInsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["id", "name"],
-        rows: vec![
+    let query = BulkInsertQuery::new(
+        User::SCHEMA,
+        vec!["id", "name"],
+        vec![
             vec![SqlValue::I64(1), SqlValue::String("alice".into())],
             vec![SqlValue::I64(2)],
         ],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    );
     let err = pg().compile_bulk_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::InsertShapeMismatch { .. }));
 }
@@ -384,23 +361,16 @@ fn bulk_insert_row_shape_mismatch_is_rejected() {
 // ---------------- UPDATE ----------------
 
 fn eq_filter(column: &'static str, value: SqlValue) -> Filter {
-    Filter {
-        column,
-        op: Op::Eq,
-        value,
-    }
+    Filter::new(column, Op::Eq, value)
 }
 
 #[test]
 fn update_single_set_no_where_runs_table_wide() {
-    let query = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![Assignment {
-            column: "is_active",
-            value: SqlValue::Bool(false).into(),
-        }],
-        where_clause: WhereExpr::And(vec![]),
-    };
+    let query = UpdateQuery::new(
+        User::SCHEMA,
+        vec![Assignment::new("is_active", SqlValue::Bool(false))],
+        WhereExpr::And(vec![]),
+    );
     let stmt = pg().compile_update(&query).unwrap();
     assert_eq!(stmt.sql, r#"UPDATE "user" SET "is_active" = $1"#);
     assert_eq!(stmt.params, vec![SqlValue::Bool(false)]);
@@ -408,20 +378,14 @@ fn update_single_set_no_where_runs_table_wide() {
 
 #[test]
 fn update_multi_set_with_where_orders_set_then_filter_placeholders() {
-    let query = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![
-            Assignment {
-                column: "name",
-                value: SqlValue::String("ALICE".into()).into(),
-            },
-            Assignment {
-                column: "is_active",
-                value: SqlValue::Bool(false).into(),
-            },
+    let query = UpdateQuery::new(
+        User::SCHEMA,
+        vec![
+            Assignment::new("name", SqlValue::String("ALICE".into())),
+            Assignment::new("is_active", SqlValue::Bool(false)),
         ],
-        where_clause: WhereExpr::Predicate(eq_filter("id", SqlValue::I64(7))),
-    };
+        WhereExpr::Predicate(eq_filter("id", SqlValue::I64(7))),
+    );
     let stmt = pg().compile_update(&query).unwrap();
     assert_eq!(
         stmt.sql,
@@ -439,21 +403,14 @@ fn update_multi_set_with_where_orders_set_then_filter_placeholders() {
 
 #[test]
 fn update_with_multiple_filters_chains_with_and() {
-    let query = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![Assignment {
-            column: "is_active",
-            value: SqlValue::Bool(true).into(),
-        }],
-        where_clause: WhereExpr::and_predicates(vec![
+    let query = UpdateQuery::new(
+        User::SCHEMA,
+        vec![Assignment::new("is_active", SqlValue::Bool(true))],
+        WhereExpr::and_predicates(vec![
             eq_filter("name", SqlValue::String("alice".into())),
-            Filter {
-                column: "id",
-                op: Op::Gt,
-                value: SqlValue::I64(0),
-            },
+            Filter::new("id", Op::Gt, SqlValue::I64(0)),
         ]),
-    };
+    );
     let stmt = pg().compile_update(&query).unwrap();
     assert_eq!(
         stmt.sql,
@@ -463,11 +420,11 @@ fn update_with_multiple_filters_chains_with_and() {
 
 #[test]
 fn update_with_empty_set_is_rejected() {
-    let query = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![],
-        where_clause: WhereExpr::Predicate(eq_filter("id", SqlValue::I64(1))),
-    };
+    let query = UpdateQuery::new(
+        User::SCHEMA,
+        vec![],
+        WhereExpr::Predicate(eq_filter("id", SqlValue::I64(1))),
+    );
     let err = pg().compile_update(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyUpdateSet));
 }
@@ -475,18 +432,11 @@ fn update_with_empty_set_is_rejected() {
 #[test]
 fn update_propagates_filter_errors() {
     // `Op::In` with a non-list — same error path that compile_select uses.
-    let query = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![Assignment {
-            column: "is_active",
-            value: SqlValue::Bool(false).into(),
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::In,
-            value: SqlValue::I64(1),
-        }),
-    };
+    let query = UpdateQuery::new(
+        User::SCHEMA,
+        vec![Assignment::new("is_active", SqlValue::Bool(false))],
+        WhereExpr::Predicate(Filter::new("id", Op::In, SqlValue::I64(1))),
+    );
     let err = pg().compile_update(&query).unwrap_err();
     assert!(matches!(err, SqlError::InRequiresList));
 }
@@ -495,10 +445,7 @@ fn update_propagates_filter_errors() {
 
 #[test]
 fn delete_with_no_filters_runs_table_wide() {
-    let query = DeleteQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::And(vec![]),
-    };
+    let query = DeleteQuery::new(User::SCHEMA, WhereExpr::And(vec![]));
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user""#);
     assert!(stmt.params.is_empty());
@@ -506,10 +453,10 @@ fn delete_with_no_filters_runs_table_wide() {
 
 #[test]
 fn delete_with_single_filter() {
-    let query = DeleteQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::Predicate(eq_filter("id", SqlValue::I64(42))),
-    };
+    let query = DeleteQuery::new(
+        User::SCHEMA,
+        WhereExpr::Predicate(eq_filter("id", SqlValue::I64(42))),
+    );
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" = $1"#);
     assert_eq!(stmt.params, vec![SqlValue::I64(42)]);
@@ -517,13 +464,13 @@ fn delete_with_single_filter() {
 
 #[test]
 fn delete_with_multiple_filters_chains_with_and() {
-    let query = DeleteQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::and_predicates(vec![
+    let query = DeleteQuery::new(
+        User::SCHEMA,
+        WhereExpr::and_predicates(vec![
             eq_filter("name", SqlValue::String("alice".into())),
             eq_filter("is_active", SqlValue::Bool(false)),
         ]),
-    };
+    );
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(
         stmt.sql,
@@ -537,14 +484,14 @@ fn delete_with_multiple_filters_chains_with_and() {
 
 #[test]
 fn delete_with_in_list_expands_placeholders() {
-    let query = DeleteQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::In,
-            value: SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]),
-        }),
-    };
+    let query = DeleteQuery::new(
+        User::SCHEMA,
+        WhereExpr::Predicate(Filter::new(
+            "id",
+            Op::In,
+            SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]),
+        )),
+    );
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" IN ($1, $2, $3)"#);
     assert_eq!(
@@ -555,14 +502,10 @@ fn delete_with_in_list_expands_placeholders() {
 
 #[test]
 fn delete_with_is_null_does_not_consume_placeholder() {
-    let query = DeleteQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "name",
-            op: Op::IsNull,
-            value: SqlValue::Bool(true),
-        }),
-    };
+    let query = DeleteQuery::new(
+        User::SCHEMA,
+        WhereExpr::Predicate(Filter::new("name", Op::IsNull, SqlValue::Bool(true))),
+    );
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "name" IS NULL"#);
     assert!(stmt.params.is_empty());
@@ -570,14 +513,10 @@ fn delete_with_is_null_does_not_consume_placeholder() {
 
 #[test]
 fn delete_propagates_filter_errors() {
-    let query = DeleteQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::In,
-            value: SqlValue::List(vec![]),
-        }),
-    };
+    let query = DeleteQuery::new(
+        User::SCHEMA,
+        WhereExpr::Predicate(Filter::new("id", Op::In, SqlValue::List(vec![]))),
+    );
     let err = pg().compile_delete(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInList));
 }
@@ -585,31 +524,13 @@ fn delete_propagates_filter_errors() {
 // ---------------- LIMIT / OFFSET on SelectQuery ----------------
 
 fn empty_select() -> SelectQuery {
-    SelectQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::And(vec![]),
-        search: None,
-        joins: vec![],
-        subquery_joins: Vec::new(),
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-        compound_order_by: vec![],
-        compound_limit: None,
-        compound_offset: None,
-    }
+    SelectQuery::new(User::SCHEMA)
 }
 
 #[test]
 fn select_emits_limit_when_set() {
-    let q = SelectQuery {
-        limit: Some(10),
-        ..empty_select()
-    };
+    let mut q = empty_select();
+    q.limit = Some(10);
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
@@ -619,10 +540,8 @@ fn select_emits_limit_when_set() {
 
 #[test]
 fn select_emits_offset_when_set() {
-    let q = SelectQuery {
-        offset: Some(20),
-        ..empty_select()
-    };
+    let mut q = empty_select();
+    q.offset = Some(20);
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
@@ -632,11 +551,9 @@ fn select_emits_offset_when_set() {
 
 #[test]
 fn select_emits_both_in_canonical_order() {
-    let q = SelectQuery {
-        limit: Some(5),
-        offset: Some(10),
-        ..empty_select()
-    };
+    let mut q = empty_select();
+    q.limit = Some(5);
+    q.offset = Some(10);
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
@@ -646,16 +563,13 @@ fn select_emits_both_in_canonical_order() {
 
 #[test]
 fn select_with_filters_and_limit_orders_clauses() {
-    let q = SelectQuery {
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "is_active",
-            op: Op::Eq,
-            value: SqlValue::Bool(true),
-        }),
-        limit: Some(3),
-        offset: Some(0),
-        ..empty_select()
-    };
+    let mut q = empty_select().where_clause(WhereExpr::Predicate(Filter::new(
+        "is_active",
+        Op::Eq,
+        SqlValue::Bool(true),
+    )));
+    q.limit = Some(3);
+    q.offset = Some(0);
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
@@ -667,11 +581,7 @@ fn select_with_filters_and_limit_orders_clauses() {
 
 #[test]
 fn count_with_no_filters() {
-    let q = CountQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::And(vec![]),
-        search: None,
-    };
+    let q = CountQuery::new(User::SCHEMA, WhereExpr::And(vec![]));
     let stmt = pg().compile_count(&q).unwrap();
     assert_eq!(stmt.sql, r#"SELECT COUNT(*) FROM "user""#);
     assert!(stmt.params.is_empty());
@@ -679,22 +589,13 @@ fn count_with_no_filters() {
 
 #[test]
 fn count_with_filters() {
-    let q = CountQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::and_predicates(vec![
-            Filter {
-                column: "is_active",
-                op: Op::Eq,
-                value: SqlValue::Bool(true),
-            },
-            Filter {
-                column: "id",
-                op: Op::Gt,
-                value: SqlValue::I64(0),
-            },
+    let q = CountQuery::new(
+        User::SCHEMA,
+        WhereExpr::and_predicates(vec![
+            Filter::new("is_active", Op::Eq, SqlValue::Bool(true)),
+            Filter::new("id", Op::Gt, SqlValue::I64(0)),
         ]),
-        search: None,
-    };
+    );
     let stmt = pg().compile_count(&q).unwrap();
     assert_eq!(
         stmt.sql,
@@ -705,15 +606,10 @@ fn count_with_filters() {
 
 #[test]
 fn count_propagates_filter_errors() {
-    let q = CountQuery {
-        model: User::SCHEMA,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::In,
-            value: SqlValue::List(vec![]),
-        }),
-        search: None,
-    };
+    let q = CountQuery::new(
+        User::SCHEMA,
+        WhereExpr::Predicate(Filter::new("id", Op::In, SqlValue::List(vec![]))),
+    );
     let err = pg().compile_count(&q).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInList));
 }
@@ -722,13 +618,11 @@ fn count_propagates_filter_errors() {
 
 #[test]
 fn search_alone_emits_or_chain_with_one_param_per_column() {
-    let q = SelectQuery {
-        search: Some(SearchClause {
-            columns: vec!["name", "is_active"],
-            query: "ali".into(),
-        }),
-        ..empty_select()
-    };
+    let mut q = empty_select();
+    q.search = Some(SearchClause {
+        columns: vec!["name", "is_active"],
+        query: "ali".into(),
+    });
     let stmt = pg().compile_select(&q).unwrap();
     // #438 — one param + placeholder per column instead of one shared
     // `$1` repeated. Lets MySQL/SQLite (positional `?`) round-trip
@@ -749,18 +643,15 @@ fn search_alone_emits_or_chain_with_one_param_per_column() {
 
 #[test]
 fn search_combined_with_filter_uses_and() {
-    let q = SelectQuery {
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "is_active",
-            op: Op::Eq,
-            value: SqlValue::Bool(true),
-        }),
-        search: Some(SearchClause {
-            columns: vec!["name"],
-            query: "ali".into(),
-        }),
-        ..empty_select()
-    };
+    let mut q = empty_select().where_clause(WhereExpr::Predicate(Filter::new(
+        "is_active",
+        Op::Eq,
+        SqlValue::Bool(true),
+    )));
+    q.search = Some(SearchClause {
+        columns: vec!["name"],
+        query: "ali".into(),
+    });
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
@@ -774,13 +665,11 @@ fn search_combined_with_filter_uses_and() {
 
 #[test]
 fn empty_search_query_emits_no_clause() {
-    let q = SelectQuery {
-        search: Some(SearchClause {
-            columns: vec!["name"],
-            query: String::new(),
-        }),
-        ..empty_select()
-    };
+    let mut q = empty_select();
+    q.search = Some(SearchClause {
+        columns: vec!["name"],
+        query: String::new(),
+    });
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(stmt.sql, r#"SELECT "id", "name", "is_active" FROM "user""#);
     assert!(stmt.params.is_empty());
@@ -788,28 +677,24 @@ fn empty_search_query_emits_no_clause() {
 
 #[test]
 fn empty_search_columns_emits_no_clause() {
-    let q = SelectQuery {
-        search: Some(SearchClause {
-            columns: vec![],
-            query: "anything".into(),
-        }),
-        ..empty_select()
-    };
+    let mut q = empty_select();
+    q.search = Some(SearchClause {
+        columns: vec![],
+        query: "anything".into(),
+    });
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(stmt.sql, r#"SELECT "id", "name", "is_active" FROM "user""#);
 }
 
 #[test]
 fn search_with_limit_offset_orders_clauses_correctly() {
-    let q = SelectQuery {
-        search: Some(SearchClause {
-            columns: vec!["name"],
-            query: "x".into(),
-        }),
-        limit: Some(10),
-        offset: Some(20),
-        ..empty_select()
-    };
+    let mut q = empty_select();
+    q.search = Some(SearchClause {
+        columns: vec!["name"],
+        query: "x".into(),
+    });
+    q.limit = Some(10);
+    q.offset = Some(20);
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
@@ -820,38 +705,20 @@ fn search_with_limit_offset_orders_clauses_correctly() {
 // ---------------- LEFT JOIN ----------------
 
 fn empty_post_select() -> SelectQuery {
-    SelectQuery {
-        model: Post::SCHEMA,
-        where_clause: WhereExpr::And(vec![]),
-        search: None,
-        joins: vec![],
-        subquery_joins: Vec::new(),
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-        compound_order_by: vec![],
-        compound_limit: None,
-        compound_offset: None,
-    }
+    SelectQuery::new(Post::SCHEMA)
 }
 
 #[test]
 fn join_qualifies_main_columns_and_aliases_joined_ones() {
-    let q = SelectQuery {
-        joins: vec![fk_left_join(
-            User::SCHEMA,
-            "post",
-            "author_id",
-            "id",
-            "author_id",
-            vec!["name"],
-        )],
-        ..empty_post_select()
-    };
+    let mut q = empty_post_select();
+    q.joins = vec![fk_left_join(
+        User::SCHEMA,
+        "post",
+        "author_id",
+        "id",
+        "author_id",
+        vec!["name"],
+    )];
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
@@ -862,22 +729,19 @@ fn join_qualifies_main_columns_and_aliases_joined_ones() {
 
 #[test]
 fn join_with_filter_qualifies_filter_column() {
-    let q = SelectQuery {
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "title",
-            op: Op::Eq,
-            value: SqlValue::String("hi".into()),
-        }),
-        joins: vec![fk_left_join(
-            User::SCHEMA,
-            "post",
-            "author_id",
-            "id",
-            "author_id",
-            vec!["name"],
-        )],
-        ..empty_post_select()
-    };
+    let mut q = empty_post_select().where_clause(WhereExpr::Predicate(Filter::new(
+        "title",
+        Op::Eq,
+        SqlValue::String("hi".into()),
+    )));
+    q.joins = vec![fk_left_join(
+        User::SCHEMA,
+        "post",
+        "author_id",
+        "id",
+        "author_id",
+        vec!["name"],
+    )];
     let stmt = pg().compile_select(&q).unwrap();
     assert!(
         stmt.sql.contains(r#"WHERE "post"."title" = $1"#),
@@ -889,21 +753,19 @@ fn join_with_filter_qualifies_filter_column() {
 
 #[test]
 fn join_with_search_qualifies_search_columns() {
-    let q = SelectQuery {
-        search: Some(SearchClause {
-            columns: vec!["title"],
-            query: "hi".into(),
-        }),
-        joins: vec![fk_left_join(
-            User::SCHEMA,
-            "post",
-            "author_id",
-            "id",
-            "author_id",
-            vec!["name"],
-        )],
-        ..empty_post_select()
-    };
+    let mut q = empty_post_select();
+    q.search = Some(SearchClause {
+        columns: vec!["title"],
+        query: "hi".into(),
+    });
+    q.joins = vec![fk_left_join(
+        User::SCHEMA,
+        "post",
+        "author_id",
+        "id",
+        "author_id",
+        vec!["name"],
+    )];
     let stmt = pg().compile_select(&q).unwrap();
     assert!(
         stmt.sql
@@ -925,19 +787,17 @@ fn no_joins_keeps_unqualified_select_shape() {
 
 #[test]
 fn join_with_limit_and_offset_orders_clauses() {
-    let q = SelectQuery {
-        joins: vec![fk_left_join(
-            User::SCHEMA,
-            "post",
-            "author_id",
-            "id",
-            "author_id",
-            vec!["name"],
-        )],
-        limit: Some(10),
-        offset: Some(20),
-        ..empty_post_select()
-    };
+    let mut q = empty_post_select();
+    q.joins = vec![fk_left_join(
+        User::SCHEMA,
+        "post",
+        "author_id",
+        "id",
+        "author_id",
+        vec!["name"],
+    )];
+    q.limit = Some(10);
+    q.offset = Some(20);
     let stmt = pg().compile_select(&q).unwrap();
     // LIMIT/OFFSET come after the WHERE-less LEFT JOIN.
     assert!(

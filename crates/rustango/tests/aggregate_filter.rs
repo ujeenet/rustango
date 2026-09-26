@@ -28,18 +28,7 @@ pub struct Post {
 }
 
 fn agg(expr: AggregateExpr) -> AggregateQuery {
-    AggregateQuery {
-        model: Post::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(vec![]),
-        aggregates: vec![("agg".into(), expr)],
-        aliases: vec![],
-        group_by: vec![],
-        having: None,
-        order_by: vec![],
-        limit: None,
-        offset: None,
-    }
+    AggregateQuery::new(Post::SCHEMA, vec![("agg".into(), expr)])
 }
 
 // ---------- Plain aggregates (regression for the writer refactor) ----------
@@ -335,11 +324,7 @@ fn filter_accepts_and_or_typed_expr() {
 
 #[test]
 fn filter_accepts_raw_where_expr() {
-    let predicate = WhereExpr::Predicate(Filter {
-        column: "is_active",
-        op: Op::Eq,
-        value: SqlValue::Bool(true),
-    });
+    let predicate = WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(true)));
     let q = agg(count_all().filter(predicate).into());
     let stmt = Postgres.compile_aggregate(&q).unwrap();
     assert!(stmt.sql.contains("FILTER (WHERE"));
@@ -352,19 +337,11 @@ fn nested_filtered_is_rejected_at_emit_time() {
     // The builder never produces this — only a hand-rolled IR can.
     let inner = AggregateExpr::Filtered {
         inner: Box::new(AggregateExpr::Count(None)),
-        filter: WhereExpr::Predicate(Filter {
-            column: "is_active",
-            op: Op::Eq,
-            value: SqlValue::Bool(true),
-        }),
+        filter: WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(true))),
     };
     let outer = AggregateExpr::Filtered {
         inner: Box::new(inner),
-        filter: WhereExpr::Predicate(Filter {
-            column: "is_active",
-            op: Op::Eq,
-            value: SqlValue::Bool(false),
-        }),
+        filter: WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(false))),
     };
     let err = Postgres.compile_aggregate(&agg(outer)).unwrap_err();
     assert!(

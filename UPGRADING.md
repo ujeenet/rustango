@@ -150,6 +150,25 @@ untouched.
 
 ## Unreleased
 
+### Query IR structs are `#[non_exhaustive]`
+
+`Filter`, `Assignment`, `SelectQuery`, `InsertQuery`, `BulkInsertQuery`,
+`UpdateQuery`, `BulkUpdateQuery`, `DeleteQuery`, `CountQuery` and
+`AggregateQuery` (#1661). A struct literal outside the crate, including
+`..SelectQuery::new(m)`, now fails with `E0639`; use `X::new(..)`:
+
+```rust
+let f = Filter::new("status", Op::Eq, "draft");
+let q = InsertQuery::new(Post::SCHEMA, cols, vals).returning(vec!["id"]);
+let mut s = SelectQuery::new(Post::SCHEMA).where_clause(f.into());
+s.limit = Some(10);
+```
+
+A destructuring pattern needs `..` (`let Filter { column, .. } = f`), or
+it fails with `E0638`. Reading and assigning fields still works. Code
+that only uses the `QuerySet` API or `#[derive(Model)]` is unaffected.
+`OrderClause`, `Join` and the other clause structs are not changed yet.
+
 ### `migrate` refuses a callback migration without `"atomic": false`
 
 Any migration file with a `{"callback": …}` op now needs
@@ -160,6 +179,35 @@ Embedded migrations need a rebuild.
 `atomic: false` means a failed callback does not roll back the schema
 op before it. To keep that, split the file: the schema op in one
 migration, the callback alone in the next.
+
+### `rustango::core` enums are `#[non_exhaustive]`
+
+`SqlValue`, `FieldType`, `Op`, `WhereExpr`, `Expr`, `Relation`,
+`OnDeleteAction`, `QueryError` and the other enums in `rustango::core`
+(#1661). A match without a `_ =>` arm now fails with
+`error[E0004]: non-exhaustive patterns`; add the arm. `Weight` and
+`NullsOrder` stay exhaustive.
+### Every framework JSON error is now an `ApiError` body
+
+Only affects clients that parse error bodies (#1193). The shape is
+
+```json
+{"error": "not_found", "message": "not found", "status": 404}
+```
+
+`details` appears only when there is something in it.
+
+| Was | Now |
+|---|---|
+| ViewSet `{"error": "<sentence>"}` | sentence in `message`; `error` is a code |
+| Serializer `400` `{"title": [...]}` | **`422`**, `details.title`, `error: "validation_failed"` |
+| Admin `{"error": "form", "detail": …}` | `400` `bad_request`, reason in `message` |
+| Tenant / `Principal` rejections, plain text | JSON, same shape |
+| `limit_bytes`, `retry_after`, admin `table` / `pk` | under `details` |
+| 5xx carrying the driver message | generic `message` unless `RUSTANGO_DISCLOSE_ERRORS`; cause logged at `rustango::error` |
+| ViewSet create/update constraint `400` with driver text | `400`, generic `message` |
+
+A `MaintenanceLayer` with a custom `.body(…)` is unchanged.
 
 ### `jwt_router` is gone: build one `JwtAuth`
 

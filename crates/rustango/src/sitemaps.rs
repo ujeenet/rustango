@@ -231,20 +231,8 @@ fn push_text_element(out: &mut String, name: &str, text: &str, indent: usize) {
     out.push_str(">\n");
 }
 
-/// Escape the five XML characters, so a URL with `&` or a quote in it
-/// still leaves the document well-formed.
-fn escape_xml_text(out: &mut String, s: &str) {
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
-        }
-    }
-}
+// Keeps a URL with `&` or a quote in it well-formed.
+use crate::text::xml_escape_into as escape_xml_text;
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, the full W3C datetime sitemaps.org asks
 /// for.

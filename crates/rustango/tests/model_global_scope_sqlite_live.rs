@@ -32,11 +32,7 @@ use rustango::Model;
 /// Returns `is_active = true` so every queryset for `Post` is
 /// implicitly `Post::objects().filter(is_active = true)`.
 fn active_only() -> WhereExpr {
-    WhereExpr::Predicate(Filter {
-        column: "is_active",
-        op: Op::Eq,
-        value: SqlValue::Bool(true),
-    })
+    WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(true)))
 }
 
 #[derive(Model, Debug, Clone)]

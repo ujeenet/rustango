@@ -900,11 +900,7 @@ Scopes fold in at **every compile entry** — SELECT (`fetch_pool` / `Model::all
 use rustango::core::{Filter, Op, SqlValue, WhereExpr};
 
 fn active_only() -> WhereExpr {
-    WhereExpr::Predicate(Filter {
-        column: "is_active",
-        op: Op::Eq,
-        value: SqlValue::Bool(true),
-    })
+    WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(true)))
 }
 
 #[derive(Model)]
