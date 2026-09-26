@@ -30,8 +30,7 @@ use rustango::core::Model as _;
 use rustango::extractors::TenantContext;
 use rustango::sql::sqlx;
 use rustango::sql::{Auto, Pool};
-use rustango::tenancy::auth_routes::require_bearer;
-use rustango::tenancy::jwt_lifecycle::JwtLifecycle;
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::tenancy::{
     session::SessionSecret, ChainResolver, Org, OrgResolver, TenancyError, TenantPools,
 };
@@ -40,35 +39,14 @@ use rustango::Model;
 use serde_json::Value;
 use tower::ServiceExt as _;
 
-/// Must match what `auth_routes` signs with — the middleware verifies through
-/// the same process-wide handle the login route mints from, and that handle
-/// reads `RUSTANGO_SESSION_SECRET`.
 const SECRET: &[u8] = b"owned_by_bearer_test_secret_32byte!!";
 
-/// Set the signing key before anything touches the JWT handle. It is a
-/// `OnceLock` inside `auth_routes`, so the first call in the process wins —
-/// every test has to go through here first.
-fn install_secret() {
-    use base64::Engine as _;
-
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // **Base64**, not the raw bytes. `auth_routes` reads this through
-        // `SessionSecret::from_b64` (#1396 made that the one definition),
-        // and `owned_by_bearer_test_secret_32byte!!` is not valid base64 —
-        // `!` is outside the alphabet. It decoded to nothing, the key came
-        // back 0 bytes, and the fail-closed assert fired.
-        //
-        // It went unnoticed because this file is named in no CI job: it is
-        // only ever built by the `--all-features` run, where the test that
-        // passes an explicit `Config::session_secret` happened to
-        // initialise the process-wide `OnceLock` first. Whoever gets there
-        // first wins, so the outcome depended on test order.
-        std::env::set_var(
-            "RUSTANGO_SESSION_SECRET",
-            base64::engine::general_purpose::STANDARD.encode(SECRET),
-        );
-    });
+/// The auth both the middleware and `token_for` use.
+fn auth() -> JwtAuth {
+    JwtAuth::new(Config {
+        session_secret: Some(SECRET.to_vec()),
+        ..Config::default()
+    })
 }
 
 #[derive(Model, Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -139,7 +117,6 @@ async fn seed_member(pool: &Pool, username: &str, active: bool) -> i64 {
 /// `name` keys this test's private database; `slug` is the tenant the request
 /// resolves to.
 async fn app(slug: &str, name: &str) -> (Router, i64, i64, i64) {
-    install_secret();
     // Fresh every run — a leftover file from a previous run would carry its
     // rows into this one and quietly change what the assertions mean.
     let _ = std::fs::remove_file(db_path(name));
@@ -177,11 +154,17 @@ async fn app(slug: &str, name: &str) -> (Router, i64, i64, i64) {
         operator_secret: SessionSecret::from_bytes(SECRET.to_vec()),
     });
 
+    // One instance for both, so a logout revokes for the middleware too.
+    let auth = auth();
     let router = ViewSet::for_model(Note::SCHEMA)
         .page_size(100)
         .filter_backend(OwnedBy::column("member_id"))
         .tenant_router("/notes")
-        .layer(axum::middleware::from_fn(require_bearer))
+        .layer(axum::middleware::from_fn_with_state(
+            auth.clone(),
+            require_bearer,
+        ))
+        .merge(auth.router())
         .layer(axum::middleware::from_fn(
             move |mut req: Request<Body>, next: axum::middleware::Next| {
                 let ctx = ctx.clone();
@@ -197,7 +180,8 @@ async fn app(slug: &str, name: &str) -> (Router, i64, i64, i64) {
 
 /// An access token exactly as `/api/auth/login` mints one: tenant-pinned.
 fn token_for(user_id: i64, tenant: &str) -> String {
-    let jwt = JwtLifecycle::new(SECRET.to_vec());
+    let jwt = auth();
+    let jwt = jwt.lifecycle();
     let mut custom = serde_json::Map::new();
     custom.insert("tenant".into(), Value::String(tenant.to_owned()));
     jwt.issue_pair_with(user_id, custom).expect("issue").access
@@ -285,6 +269,38 @@ async fn another_members_row_is_not_found_by_id() {
         .await
         .expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// Login, use, logout, refused: the router and the middleware share one
+/// `JwtAuth`, so the logout's revocation reaches the middleware (#1190).
+#[tokio::test]
+async fn a_logged_out_token_is_refused_by_the_middleware() {
+    let (app, _, _, _) = app("acme", "logout").await;
+    let login = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"username":"alice","password":"irrelevant"}"#,
+        ))
+        .expect("request");
+    let resp = app.clone().oneshot(login).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let access = json(resp).await["access"]
+        .as_str()
+        .expect("access token")
+        .to_owned();
+
+    let notes = || req(Method::GET, "/notes", Some(&access));
+    let resp = app.clone().oneshot(notes()).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let logout = req(Method::POST, "/api/auth/logout", Some(&access));
+    let resp = app.clone().oneshot(logout).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app.oneshot(notes()).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
