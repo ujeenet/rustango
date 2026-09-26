@@ -55,7 +55,8 @@ fn callback_migration(name: &str, callback_name: &str) -> Migration {
         name: name.to_owned(),
         created_at: "2026-05-22T00:00:00Z".into(),
         prev: None,
-        atomic: true,
+        // The loader refuses a callback in an atomic migration (#1626).
+        atomic: false,
         scope: Default::default(),
         replaces: Vec::new(),
         snapshot: empty_snapshot(),
@@ -77,8 +78,6 @@ fn sqlmigrate_preview_emits_runpython_comment() {
         body.contains("-- RunPython: runpython_test_backfill"),
         "preview missing RunPython marker:\n{body}"
     );
-    // BEGIN + ledger INSERT + COMMIT still appear.
-    assert!(body.contains("BEGIN"), "preview missing BEGIN");
     assert!(body.contains("INSERT INTO"), "preview missing ledger row");
 }
 

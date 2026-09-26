@@ -226,6 +226,47 @@ fn load_rejects_inconsistent_reversible_without_reverse_sql() {
     }
 }
 
+/// The documented shape: schema op first, then the callback.
+fn backfill_migration(atomic: Option<bool>) -> serde_json::Value {
+    let mut raw = serde_json::json!({
+        "name": "0003_backfill",
+        "created_at": "2026-09-25T00:00:00Z",
+        "prev": "0002_x",
+        "snapshot": {"tables": []},
+        "forward": [
+            {"schema": {"AddColumn": {"table": "users", "column": "locale"}}},
+            {"callback": {"name": "backfill_locale"}}
+        ]
+    });
+    if let Some(a) = atomic {
+        raw["atomic"] = a.into();
+    }
+    raw
+}
+
+/// A callback in an atomic migration is refused, and no `atomic` key
+/// means atomic (#1626).
+#[test]
+fn parse_rejects_a_callback_inside_an_atomic_migration() {
+    let err = file::parse(&backfill_migration(None).to_string()).unwrap_err();
+    match err {
+        MigrateError::Validation(msg) => {
+            assert!(msg.contains("forward[1]"), "names the op: {msg}");
+            assert!(msg.contains("backfill_locale"), "names the callback: {msg}");
+            assert!(msg.contains("\"atomic\": false"), "names the fix: {msg}");
+        }
+        other => panic!("expected Validation error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_accepts_a_callback_when_the_migration_is_not_atomic() {
+    let mig = file::parse(&backfill_migration(Some(false)).to_string())
+        .expect("a non-atomic callback migration must load");
+    assert!(!mig.atomic);
+    assert_eq!(mig.forward.len(), 2);
+}
+
 #[test]
 fn load_missing_file_is_io_error() {
     let path = tmp_path("definitely_does_not_exist_aaaa");

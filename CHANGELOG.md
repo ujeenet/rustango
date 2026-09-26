@@ -4,6 +4,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
+
+**Breaking:** the loader now refuses a callback in an atomic migration,
+and `atomic` defaults to true. See UPGRADING.
+
+The callback runs on a second connection and waited on the migration
+transaction's own locks: forever on PostgreSQL, until `busy_timeout` on
+SQLite, and on MySQL after a data op (50s error, or a metadata-lock
+hang). The `callbacks::` example also put the callback before the
+schema op it backfills; corrected.
+
 ### Fixed — turning off the access log silently narrowed span redaction (#1610)
 
 The request span is mounted whether or not `[logging] access_log` is

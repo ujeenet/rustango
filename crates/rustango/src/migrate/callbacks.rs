@@ -8,12 +8,22 @@
 //! ```json
 //! {
 //!   "name": "0003_backfill_user_locale",
+//!   "atomic": false,
 //!   "forward": [
-//!     {"callback": {"name": "backfill_locale"}},
-//!     {"schema": ...}
+//!     {"schema": ...},
+//!     {"callback": {"name": "backfill_locale"}}
 //!   ]
 //! }
 //! ```
+//!
+//! `"atomic": false` is **required**; the loader refuses a callback
+//! without it. The callback gets a `Pool`, not the migration's
+//! transaction, so inside one it waits on that transaction's locks —
+//! forever on PostgreSQL (#1626).
+//!
+//! Non-atomic means a failed callback does not roll back the schema op
+//! before it. To keep that rollback, put the schema op in its own
+//! (atomic) migration and the callback alone in the next one.
 //!
 //! ## Quick start
 //!
