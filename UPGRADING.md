@@ -183,6 +183,21 @@ Only affects clients that parse error bodies (#1193). The shape is
 
 A `MaintenanceLayer` with a custom `.body(…)` is unchanged.
 
+### `jwt_router` is gone: build one `JwtAuth`
+
+The JWT config no longer lives in a process global (#1190).
+`jwt_router(cfg)` becomes `JwtAuth::new(cfg).router()`:
+
+```rust
+let auth = JwtAuth::new(Config::default());
+api.layer(middleware::from_fn_with_state(auth.clone(), require_bearer))
+    .merge(auth.router())
+```
+
+`auth_routes::verify_for_tenant(token, slug)` is now
+`auth.verify_for_tenant(token, slug)`. Use the **same** `JwtAuth` for the
+router and the middleware, or a logout will not revoke for the middleware.
+
 ### `MigrateError` is now `#[non_exhaustive]`
 
 Only affects code that **matches exhaustively** on it. Add a `_ =>` arm:

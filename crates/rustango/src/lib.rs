@@ -500,14 +500,12 @@ pub mod mailable;
 /// [`jsonapi::to_resource`] + [`jsonapi::to_collection`].
 pub mod jsonapi;
 
-/// Shared HMAC-SHA256 / SHA-256 / hex primitives, plus `constant_time_eq`.
+/// Shared HMAC-SHA256 / SHA-256 / hex primitives, plus `constant_time_compare`.
 /// Internal: for raw HMAC, depend on `hmac` + `sha2` directly. The cfg list
 /// covers every feature that needs one of these primitives.
 #[cfg(any(
-    feature = "hmac-auth",
+    feature = "_signing",
     feature = "storage-s3",
-    feature = "signed_url",
-    feature = "jwt",
     feature = "csrf",
     feature = "totp",
 ))]
@@ -1064,12 +1062,7 @@ pub mod dates;
 /// Value signer — `signing::Signer::sign(value)` and
 /// `signing::TimestampSigner` with a TTL. Use it for signed payloads such
 /// as password reset tokens, magic links and signed cookies.
-#[cfg(any(
-    feature = "hmac-auth",
-    feature = "storage-s3",
-    feature = "signed_url",
-    feature = "jwt",
-))]
+#[cfg(feature = "_signing")]
 pub mod signing;
 
 /// `Set-Cookie` builder — `Cookie::new(name, value)
@@ -1116,7 +1109,8 @@ pub mod password_hashers;
 /// Signed-cookie session primitives — an HMAC-SHA256 key wrapper and a
 /// `sign(secret, msg)` helper, shared by every layer that sets a signed
 /// cookie so the crypto lives in one place. See [`session::SessionSecret`].
-#[cfg(any(feature = "admin", feature = "tenancy"))]
+/// `csrf` too: its cookie reads `session::secure_cookies` (#1608).
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
 pub mod session;
 
 /// Graceful-shutdown signal handling — SIGINT **and** SIGTERM in one place,

@@ -12,12 +12,12 @@
 //! ## Quick start
 //!
 //! ```ignore
-//! use rustango::tenancy::auth_routes;
+//! use rustango::tenancy::auth_routes::{Config, JwtAuth};
 //!
+//! let auth = JwtAuth::new(Config::default());
 //! rustango::manage::Cli::new()
 //!     .tenancy()
-//!     .api(my_app::urls::api()
-//!         .merge(auth_routes::jwt_router(auth_routes::Config::default())))
+//!     .api(my_app::urls::api().merge(auth.router()))
 //!     .run().await
 //! ```
 //!
@@ -35,9 +35,9 @@
 //! [`Config::session_secret`] for projects that want a separate
 //! signing key.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -51,7 +51,7 @@ use crate::tenancy::jwt_lifecycle::JwtLifecycle;
 
 // ---------------------------------------------------------------- Config
 
-/// Knobs for [`jwt_router`]. All have sensible defaults; override
+/// Knobs for [`JwtAuth`]. All have sensible defaults; override
 /// when integrating with non-default URL prefixes (#74), shorter
 /// access TTLs, custom signing keys, etc.
 #[derive(Clone)]
@@ -187,7 +187,7 @@ impl Config {
     /// let cfg = rustango::config::Settings::load_from_env()?;
     /// let auth = auth_routes::Config::default()
     ///     .with_jwt_settings(&cfg.auth.jwt);
-    /// api.merge(auth_routes::jwt_router(auth))
+    /// api.merge(auth_routes::JwtAuth::new(auth).router())
     /// ```
     #[cfg(feature = "config")]
     #[must_use]
@@ -208,56 +208,92 @@ impl Config {
 
 // ---------------------------------------------------------------- The router
 
-/// Module-local singleton: the first call to [`jwt_router`] wins.
-/// Holds both the resolved [`Config`] and the built [`JwtLifecycle`]
-/// so handlers can share the same in-memory blacklist across
-/// requests (essential for `revoke` to actually persist between
-/// /logout and the next /me with the revoked jti).
+/// One configured JWT auth: the signing key, revocation store and claims
+/// hook, shared by the router, [`require_bearer`] and
+/// [`JwtAuth::verify_for_tenant`]. Cheap to clone.
 ///
-/// `JwtLifecycle` isn't `Clone` (its blacklist is a `RwLock`) so we
-/// hand handlers a `&'static JwtLifecycle` rather than copying.
-static JWT: OnceLock<RouterState> = OnceLock::new();
+/// Build **one** and share it: a second instance has its own in-memory
+/// revocation list, so a logout through one is not seen by the other.
+///
+/// ```no_run
+/// use axum::{middleware, Router};
+/// use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
+///
+/// # fn my_api() -> Router { Router::new() }
+/// let auth = JwtAuth::new(Config {
+///     session_secret: Some(vec![7; 32]),
+///     ..Config::default()
+/// });
+/// let api = my_api()
+///     .layer(middleware::from_fn_with_state(auth.clone(), require_bearer))
+///     .merge(auth.router());
+/// ```
+#[derive(Clone)]
+pub struct JwtAuth(Arc<AuthState>);
 
-/// What the handlers need from the config, resolved once.
-struct RouterState {
+struct AuthState {
     jwt: JwtLifecycle,
     extra_claims: Option<ClaimsHook>,
+    prefix: String,
 }
 
-/// Build the JWT auth router with the given [`Config`]. Mount it
-/// alongside your app's API routes — the endpoints are tenant-aware
-/// via the [`Tenant`] extractor, so requests resolve against the
-/// correct subdomain's user table.
-///
-/// Calling `jwt_router` more than once per process is a no-op for
-/// the JWT lifecycle: only the first call's config is honored. This
-/// is fine for the common case (mount once at boot) and prevents
-/// silently-divergent signing keys across multiple mount sites.
-pub fn jwt_router(cfg: Config) -> Router<()> {
-    let _ = JWT.set(RouterState {
-        jwt: cfg.build_jwt(),
-        extra_claims: cfg.extra_claims.clone(),
-    });
+impl JwtAuth {
+    /// Build from `cfg`. Panics on a signing key under 32 bytes, so a
+    /// misconfigured deployment refuses to start.
+    #[must_use]
+    pub fn new(cfg: Config) -> Self {
+        Self(Arc::new(AuthState {
+            jwt: cfg.build_jwt(),
+            extra_claims: cfg.extra_claims,
+            prefix: cfg.prefix,
+        }))
+    }
 
-    Router::new()
-        .route(&format!("{}/login", cfg.prefix), post(login))
-        .route(&format!("{}/refresh", cfg.prefix), post(refresh))
-        .route(&format!("{}/logout", cfg.prefix), post(logout))
-        .route(&format!("{}/me", cfg.prefix), get(me))
-}
+    /// The login / refresh / logout / me endpoints under `Config::prefix`.
+    /// They are tenant-aware via the [`Tenant`] extractor.
+    #[must_use]
+    pub fn router(&self) -> Router<()> {
+        let p = &self.0.prefix;
+        Router::new()
+            .route(&format!("{p}/login"), post(login))
+            .route(&format!("{p}/refresh"), post(refresh))
+            .route(&format!("{p}/logout"), post(logout))
+            .route(&format!("{p}/me"), get(me))
+            .with_state(self.clone())
+    }
 
-/// Share access to the singleton [`JwtLifecycle`]. Falls back to a
-/// default-config build for tests or unwired setups so the panic
-/// surface is "401: invalid token" rather than "deref of None".
-fn router_state() -> &'static RouterState {
-    JWT.get_or_init(|| RouterState {
-        jwt: Config::default().build_jwt(),
-        extra_claims: None,
-    })
-}
+    /// The lifecycle behind this auth, e.g. to mint a token in a test.
+    #[must_use]
+    pub fn lifecycle(&self) -> &JwtLifecycle {
+        &self.0.jwt
+    }
 
-fn jwt_handle() -> &'static JwtLifecycle {
-    &router_state().jwt
+    /// Verify a Bearer token's signature, expiry, revocation AND tenant
+    /// binding, returning `sub`.
+    ///
+    /// All tenants share one signing key, so the `tenant` claim is what
+    /// stops a token minted on `acme` being replayed on `sju`. A token
+    /// without that claim is refused.
+    pub async fn verify_for_tenant(
+        &self,
+        bearer: &str,
+        expected_slug: &str,
+    ) -> Result<i64, &'static str> {
+        let claims = self
+            .0
+            .jwt
+            .verify_access(bearer)
+            .await
+            .ok_or("invalid or expired token")?;
+        let claim_tenant = claims
+            .custom_value("tenant")
+            .and_then(|v| v.as_str())
+            .ok_or("token missing tenant binding")?;
+        if claim_tenant != expected_slug {
+            return Err("token issued for different tenant");
+        }
+        Ok(claims.sub)
+    }
 }
 
 /// Claims for a freshly issued login pair: the app's hook first, then
@@ -302,6 +338,7 @@ pub struct LoginOutput {
 }
 
 async fn login(
+    State(auth): State<JwtAuth>,
     t: Tenant,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginInput>,
@@ -399,7 +436,7 @@ async fn login(
     // every tenant. With the binding, verify checks the resolved
     // request's tenant slug against the claim.
     let custom = login_claims(
-        router_state().extra_claims.as_ref(),
+        auth.0.extra_claims.as_ref(),
         &ClaimsContext {
             user_id,
             username: &user.username,
@@ -407,7 +444,8 @@ async fn login(
             tenant_slug: &t.org.slug,
         },
     );
-    let pair = jwt_handle()
+    let pair = auth
+        .lifecycle()
         .issue_pair_with(user_id, custom)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 
@@ -439,20 +477,19 @@ pub struct RefreshOutput {
 /// refresh succeeds and invalidates whatever the attacker also tried
 /// to use.
 async fn refresh(
+    State(auth): State<JwtAuth>,
     t: Tenant,
     Json(body): Json<RefreshInput>,
 ) -> Result<Json<RefreshOutput>, Response> {
+    let jwt = auth.lifecycle();
     // Audit N3 — bind refresh to the resolved tenant. Without this, a
     // refresh token minted on tenant A could be POSTed to tenant B's
     // /refresh (they share the session secret) and rotated — burning A's
     // refresh token (a cross-tenant DoS / rotation oracle). Verify the
     // token's `tenant` claim matches this subdomain BEFORE rotating.
-    let claims = jwt_handle()
-        .verify_refresh(&body.refresh)
-        .await
-        .ok_or_else(|| {
-            (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
-        })?;
+    let claims = jwt.verify_refresh(&body.refresh).await.ok_or_else(|| {
+        (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
+    })?;
     let tenant_ok =
         claims.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str());
     if !tenant_ok {
@@ -484,7 +521,7 @@ async fn refresh(
             );
         }
     }
-    let pair = jwt_handle().refresh(&body.refresh).await.ok_or_else(|| {
+    let pair = jwt.refresh(&body.refresh).await.ok_or_else(|| {
         (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
     })?;
     Ok(Json(RefreshOutput {
@@ -515,17 +552,19 @@ pub struct LogoutInput {
 }
 
 async fn logout(
+    State(auth): State<JwtAuth>,
     t: Tenant,
     headers: axum::http::HeaderMap,
     bearer: Bearer,
     body: Option<Json<LogoutInput>>,
 ) -> Result<StatusCode, Response> {
+    let jwt = auth.lifecycle();
     use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
     // Best-effort: decode the bearer to recover the user id for the
     // signal. We don't reject on verify-failure here — the revoke
     // call below still runs, and a stale/expired token logout is a
     // valid audit event in its own right.
-    let claims = jwt_handle().verify_access(&bearer.0).await;
+    let claims = jwt.verify_access(&bearer.0).await;
     // Audit N3 — if the token IS valid but bound to a DIFFERENT tenant,
     // don't let this subdomain's endpoint revoke it. (An unverifiable /
     // expired token falls through to a best-effort revoke as before.)
@@ -541,7 +580,7 @@ async fn logout(
     let user_id = claims.map(|c| c.sub);
     let meta = meta_from_headers(&headers, Some("/auth/logout"));
 
-    jwt_handle().revoke(&bearer.0).await;
+    jwt.revoke(&bearer.0).await;
 
     // The refresh token too, when we were given one. Revoking it is what
     // actually ends the session: the access token expires on its own in
@@ -552,7 +591,7 @@ async fn logout(
     // revoke another tenant's token by posting it here.
     if let Some(Json(input)) = body {
         if let Some(refresh) = input.refresh.as_deref() {
-            let ok = match jwt_handle().verify_refresh(refresh).await {
+            let ok = match jwt.verify_refresh(refresh).await {
                 Some(c) => {
                     c.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str())
                 }
@@ -562,7 +601,7 @@ async fn logout(
                 None => true,
             };
             if ok {
-                jwt_handle().revoke(refresh).await;
+                jwt.revoke(refresh).await;
             }
         }
     }
@@ -577,32 +616,6 @@ async fn logout(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Verify a Bearer token's signature, expiry, AND tenant binding.
-/// Returns the user-id from `sub` if and only if the token's
-/// `tenant` claim matches the resolved request tenant — preventing
-/// cross-tenant replay where a JWT minted on `acme` is sent to
-/// `sju` (both tenants share the session secret, so signature alone
-/// would validate). Tokens without a `tenant` claim are rejected
-/// with 401 — they must have been minted by an old or external
-/// issuer that doesn't honor this contract.
-///
-/// Async since v0.52 — the revocation check may consult a durable
-/// [`crate::jti_store::JtiStore`] (#1191).
-pub async fn verify_for_tenant(bearer: &str, expected_slug: &str) -> Result<i64, &'static str> {
-    let claims = jwt_handle()
-        .verify_access(bearer)
-        .await
-        .ok_or("invalid or expired token")?;
-    let claim_tenant = claims
-        .custom_value("tenant")
-        .and_then(|v| v.as_str())
-        .ok_or("token missing tenant binding")?;
-    if claim_tenant != expected_slug {
-        return Err("token issued for different tenant");
-    }
-    Ok(claims.sub)
-}
-
 /// Return identity info for the user named in the access token's
 /// `sub` claim. Hits the tenant DB for the authoritative
 /// `is_superuser` and `active` flags — useful when the client wants
@@ -610,14 +623,19 @@ pub async fn verify_for_tenant(bearer: &str, expected_slug: &str) -> Result<i64,
 /// app endpoint.
 ///
 /// Validates the token's `tenant` claim against the resolved
-/// request tenant via [`verify_for_tenant`] so a JWT minted on one
-/// subdomain can't be replayed against another.
-async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
+/// request tenant via [`JwtAuth::verify_for_tenant`] so a JWT minted on
+/// one subdomain can't be replayed against another.
+async fn me(
+    State(auth): State<JwtAuth>,
+    t: Tenant,
+    bearer: Bearer,
+) -> Result<Json<UserBrief>, Response> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
     use crate::tenancy::auth::User;
 
-    let user_id = verify_for_tenant(&bearer.0, &t.org.slug)
+    let user_id = auth
+        .verify_for_tenant(&bearer.0, &t.org.slug)
         .await
         .map_err(|msg| (StatusCode::UNAUTHORIZED, msg).into_response())?;
 
@@ -655,7 +673,7 @@ async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
 ///
 /// What it checks, in order:
 /// 1. signature, expiry, `typ = access`, and the JTI revocation list, via
-///    [`verify_for_tenant`];
+///    [`JwtAuth::verify_for_tenant`];
 /// 2. the token's `tenant` claim against the resolved tenant — all tenants
 ///    share one signing key, so this is the only thing standing between a
 ///    token minted on `acme.` and a request to `globex.`;
@@ -665,10 +683,14 @@ async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
 ///
 /// ```no_run
 /// use axum::{middleware, Router};
-/// use rustango::tenancy::auth_routes::require_bearer;
+/// use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 ///
 /// # fn api() -> Router { Router::new() }
-/// let protected = api().layer(middleware::from_fn(require_bearer));
+/// let auth = JwtAuth::new(Config {
+///     session_secret: Some(vec![7; 32]),
+///     ..Config::default()
+/// });
+/// let protected = api().layer(middleware::from_fn_with_state(auth, require_bearer));
 /// ```
 ///
 /// Mount it on the routes that need a user, not on `/auth/login` or
@@ -678,6 +700,7 @@ async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
 /// [`Principal`]: crate::tenancy::Principal
 /// [`OwnedBy`]: crate::viewset::OwnedBy
 pub async fn require_bearer(
+    State(auth): State<JwtAuth>,
     t: Tenant,
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -693,7 +716,7 @@ pub async fn require_bearer(
         return unauthorized("missing Bearer token");
     };
 
-    let user_id = match verify_for_tenant(token, &t.org.slug).await {
+    let user_id = match auth.verify_for_tenant(token, &t.org.slug).await {
         Ok(id) => id,
         // The reason is deliberately not echoed: "expired" vs "wrong tenant"
         // vs "revoked" tells a prober which of those they achieved.
@@ -862,6 +885,26 @@ mod tests {
         );
     }
 
+    /// Two configs stay two. Under the old `OnceLock` the first one's key
+    /// signed for both, so B accepted A's token (#1190).
+    #[tokio::test]
+    async fn each_jwt_auth_keeps_its_own_key() {
+        let auth = |key: &[u8]| {
+            JwtAuth::new(Config {
+                session_secret: Some(key.to_vec()),
+                ..Config::default()
+            })
+        };
+        let a = auth(b"key-a-key-a-key-a-key-a-key-a-32");
+        let b = auth(b"key-b-key-b-key-b-key-b-key-b-32");
+        let mut custom = serde_json::Map::new();
+        custom.insert("tenant".into(), "acme".into());
+        let token = a.lifecycle().issue_pair_with(1, custom).unwrap().access;
+
+        assert_eq!(a.verify_for_tenant(&token, "acme").await, Ok(1));
+        assert!(b.verify_for_tenant(&token, "acme").await.is_err());
+    }
+
     #[test]
     #[should_panic(expected = "JWT signing key")]
     fn build_jwt_panics_on_empty_secret() {
@@ -904,14 +947,14 @@ mod tests {
     }
 
     #[test]
-    fn jwt_router_mounts_all_four_endpoints() {
+    fn router_mounts_all_four_endpoints() {
         // Pass a valid 32-byte secret — build_jwt now fails closed on a
         // short/empty key, so the smoke test must supply a real one.
         let cfg = Config {
             session_secret: Some(b"router-smoke-test-secret-32-byte".to_vec()),
             ..Default::default()
         };
-        let r = jwt_router(cfg);
+        let r = JwtAuth::new(cfg).router();
         // Smoke: building the router doesn't panic. The actual route
         // registration is exercised via integration tests that send
         // requests against the constructed router.

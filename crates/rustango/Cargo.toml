@@ -320,7 +320,8 @@ casts = ["dep:chacha20poly1305", "dep:base64", "_rand", "dep:sha2"]
 
 # TOTP / 2FA (`rustango::totp`) — RFC 6238 time-based one-time passwords
 # for second-factor authentication. SHA-1 (Google Authenticator default).
-totp = ["dep:hmac", "dep:sha1", "_rand"]
+# `sha2` because it enables `crypto`, which imports it (#1678).
+totp = ["dep:hmac", "dep:sha1", "dep:sha2", "_rand"]
 # Passkey / WebAuthn (#392). Foundation slice = credential storage only
 # (no extra deps). The ceremony layer adds pure-Rust CBOR (`ciborium`) +
 # ES256 (`p256`) when it lands — keeping the all-RustCrypto, no-C-dep
@@ -357,7 +358,7 @@ cache-redis = ["cache", "dep:redis"]
 # axum middleware. Lives behind its own flag so `forms`-only users
 # (parsers without CSRF) don't pull cookie + rand + tower
 # transitively.
-csrf = ["forms", "_axum", "dep:base64", "dep:cookie", "_rand", "_tower"]
+csrf = ["forms", "_axum", "dep:base64", "dep:cookie", "dep:hmac", "dep:sha2", "_rand", "_tower"]
 
 # Generic class-based views for HTML templates (`rustango::template_views`)
 # — `ListView` / `DetailView` / `CreateView` / `UpdateView` /

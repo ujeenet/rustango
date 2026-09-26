@@ -1,4 +1,4 @@
-#![cfg(feature = "manage")]
+#![cfg(all(feature = "manage", feature = "postgres"))]
 //! Live test for `manage inspectdb` (roadmap #1, v0.30.13).
 //!
 //! Creates a fixture table set in the test DB, runs the inspectdb

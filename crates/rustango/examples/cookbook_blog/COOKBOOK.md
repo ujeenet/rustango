@@ -408,7 +408,7 @@ let cfg = rustango::config::Settings::load_from_env()?;
 // auth_routes — access_ttl_secs / refresh_ttl_secs
 let auth = rustango::tenancy::auth_routes::Config::default()
     .with_jwt_settings(&cfg.auth.jwt);
-api.merge(rustango::tenancy::auth_routes::jwt_router(auth));
+api.merge(rustango::tenancy::auth_routes::JwtAuth::new(auth).router());
 
 // security_headers — preset + csp + hsts override
 let sec = rustango::security_headers::SecurityHeadersLayer::from_settings(&cfg.security);

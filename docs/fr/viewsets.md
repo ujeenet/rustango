@@ -764,14 +764,14 @@ La plupart des ressources possédées ont besoin d'exactement une règle : *les 
 l'appelant*. Nommez la colonne et montez-le.
 
 ```rust
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::viewset::{OwnedBy, ViewSet};
 
+let auth = JwtAuth::new(Config::default()); // un seul, qui sert aussi `auth.router()`
 ViewSet::for_model(Note::SCHEMA)
     .filter_backend(OwnedBy::column("member_id"))
     .tenant_router("/api/notes")
-    .layer(axum::middleware::from_fn(
-        rustango::tenancy::auth_routes::require_bearer,
-    ))
+    .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
 ```
 
 N'importe quelle colonne fonctionne — `owner_id`, `member_id`, `author_id` — parce que le backend
