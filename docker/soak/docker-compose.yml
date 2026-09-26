@@ -55,7 +55,7 @@ x-app-env: &app-env
   # half. This is the half that was impossible until 0.57.5 added
   # `Cli::with_tenant_pools`: 6 connections per tenant pool, which is
   # enough for the `Tenant` extractor's pinned connection plus handler
-  # work, and 20 x 6 x 2 = 240.
+  # work. With the cap below, a web process holds at most 8 x 6 = 48.
   TENANT_POOL_MAX_CONNECTIONS: "6"
   TENANT_POOL_MIN_CONNECTIONS: "1"
   # Below the 20 tenants on purpose: load across all of them forces LRU

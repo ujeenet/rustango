@@ -84,11 +84,11 @@ not a packaging choice.
 
 ## Things that will bite, and why they are set up this way
 
-**Connections.** 20 tenants × 16 connections × (web + worker) = 640,
-against a stock Postgres limit of 100. `TenantPoolsConfig` is
-unreachable from `manage::Cli` and reads no environment variables
-(#1456), so the database server's own limit is the only lever. Hence
-`max_connections=600` on `pg` and `--max-connections=1200` on `my`.
+**Connections.** `TENANT_POOL_*` sizes each tenant pool (6) and caps
+the cache at 8, below the 20 tenants on purpose so the run forces pool
+eviction (#1527). `max_connections=600` on `pg` and
+`--max-connections=1200` on `my` stay well above the draw, so an
+exhaustion failure is the app's, not this file's.
 
 **Shutdown grace.** `stop_grace_period: 45s`, because Docker's default
 is 10s, `PgJobQueue::shutdown` gives each in-flight job a hard-coded 5s,
@@ -164,6 +164,11 @@ the exact failure this release was about.
   available is `--locked` resolving, which `lockfiles` already does.
 - **#1440** is best proven by pointing a suite at a dead port, which is
   a test-suite property rather than an application one.
+- **#1528** (schema mode) was unbounded connections, which HTTP cannot
+  count; on `saas-pg` the pool-cap check only proves no tenant is refused.
+- **Browser `Origin`**: the driver sets `Origin` itself, so it checks the
+  login page's `Referrer-Policy` instead (`no-referrer` makes browsers
+  send `Origin: null`).
 
 ## Known gaps
 
