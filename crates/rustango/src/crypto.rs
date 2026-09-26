@@ -71,6 +71,7 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// assert!(!constant_time_compare(expected, b"abcdez"));
 /// assert!(!constant_time_compare(expected, b"abc"));  // length mismatch
 /// ```
+#[allow(dead_code)] // `storage-s3` alone enables this module with no caller
 #[must_use]
 pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
