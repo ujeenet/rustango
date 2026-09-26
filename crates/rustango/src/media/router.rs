@@ -851,13 +851,10 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                                 "refused: upload request body could not be read within \
                                  the gate's limit"
                             );
-                            return (
-                                StatusCode::FORBIDDEN,
-                                Json(serde_json::json!({
-                                    "error": "upload request body too large to authorize"
-                                })),
+                            return ApiError::forbidden(
+                                "upload request body too large to authorize",
                             )
-                                .into_response();
+                            .into_response();
                         };
                         // A body that does not parse is still an upload
                         // request. It reaches the policy with empty
@@ -1234,7 +1231,7 @@ impl IntoResponse for MediaError {
             MediaError::Other(m) if m.contains("not found") => StatusCode::NOT_FOUND,
             MediaError::Other(_) => StatusCode::BAD_REQUEST,
         };
-        ApiError::logged(status, &self).into_response()
+        ApiError::logged(status, "media", &self).into_response()
     }
 }
 

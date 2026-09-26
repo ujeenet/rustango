@@ -186,10 +186,8 @@ applied yet for this tenant / database.</p>
             Self::Forbidden { table, action } => ApiError::forbidden("permission denied")
                 .with_details(json!({ "table": table, "action": action }))
                 .into_response(),
-            Self::Form(e) => {
-                ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
-                    .into_response()
-            }
+            // Mostly an unparseable pk in the URL: a bad request.
+            Self::Form(e) => ApiError::bad_request(e.to_string()).into_response(),
             Self::Internal(msg) => {
                 // Log the raw message for the operator and return a
                 // generic body. The raw text can hold table names,

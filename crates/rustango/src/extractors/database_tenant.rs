@@ -106,11 +106,16 @@ impl IntoResponse for DatabaseTenantRejection {
         match self {
             Self::MissingContext => ApiError::logged(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "extractors::database_tenant",
                 "DatabaseTenantContext not installed — the server wasn't built \
                  with `Cli::tenants::<DB>()` for the matching backend.",
             ),
             Self::NotFound => ApiError::not_found("tenant not found"),
-            Self::Internal(msg) => ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, msg),
+            Self::Internal(msg) => ApiError::logged(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "extractors::database_tenant",
+                msg,
+            ),
         }
         .into_response()
     }

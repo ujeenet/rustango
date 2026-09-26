@@ -213,12 +213,33 @@ impl IntoResponse for TenantRejection {
         match self {
             Self::MissingContext => ApiError::logged(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "extractors::tenant",
                 "rustango::server::Builder did not run — Tenant extractor cannot find TenantContext",
             ),
             Self::NotFound => ApiError::not_found("tenant not found"),
-            Self::Internal(msg) => ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, msg),
+            Self::Internal(msg) => {
+                ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "extractors::tenant", msg)
+            }
         }
         .into_response()
+    }
+}
+
+#[cfg(test)]
+mod rejection_tests {
+    use super::*;
+
+    /// A resolver failure is a 500 that withholds the driver text (#1193).
+    #[tokio::test]
+    async fn an_internal_rejection_withholds_its_cause() {
+        let _env = crate::error::test_env::lock();
+        let r =
+            TenantRejection::Internal("pool timed out on registry-db:5432".into()).into_response();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["error"], "internal_error");
+        assert!(!v.to_string().contains("registry-db"), "{v}");
     }
 }
 

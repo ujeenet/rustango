@@ -69,7 +69,7 @@ Le même modèle en dessous ; ce qui diffère, c'est ce qui en ressort et qui ap
 | Renvoie | **des données JSON** | une **page HTML rendue côté serveur** |
 | Conçue pour | les SPA, le mobile, les autres services | les navigateurs, les sites rendus côté serveur, le CRUD de type admin |
 | Un « create » | `POST` JSON → `201` + l'objet | `POST` d'un formulaire → redirection `303` (Post/Redirect/Get) |
-| Sur entrée invalide | `400` [`ApiError`](#formes-de-réponse-en-erreur) ; erreurs de champ du sérialiseur dans `details` | re-rendu du formulaire avec les erreurs affichées |
+| Sur entrée invalide | `400` [`ApiError`](#formes-de-réponse-en-erreur) ; erreurs du sérialiseur `422`, champs dans `details` | re-rendu du formulaire avec les erreurs affichées |
 | Un « list » est | une enveloppe JSON paginée | une boucle sur les lignes dans votre template |
 | Généralement authentifiée par | tokens / JWT / clés d'API | cookies de session |
 
@@ -675,16 +675,19 @@ Chaque erreur de ViewSet est un corps [`ApiError`](api-conventions.md), la même
 forme que celle de vos propres handlers (#1193) :
 
 ```json
-{"error": "<machine code>", "message": "<sentence>", "status": 400, "details": {}}
+{"error": "<machine code>", "message": "<sentence>", "status": 400}
 ```
 
 - `error` est un code stable (`bad_request`, `unauthorized`, `not_found`,
   `validation_failed`, `rate_limited`, `internal_error`, …). Branchez dessus.
-- La validation du sérialiseur donne `validation_failed`, avec la map par champ dans `details` :
+- La validation du sérialiseur donne un `422` `validation_failed`, avec la map
+  par champ dans `details` :
   `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}`.
-  Les `400` de coercition de type, de champ requis et de contrainte de base de
-  données ci-dessus sont `bad_request`, avec la raison dans `message`.
-- Un `5xx` ne porte jamais la cause. Elle est journalisée ; `message` reste générique.
+  Les `400` de coercition de type et de champ requis ci-dessus sont
+  `bad_request`, avec la raison dans `message` ; un `400` de contrainte de base
+  de données retient le texte du driver.
+- Un `5xx` ne porte jamais la cause, sauf si `RUSTANGO_DISCLOSE_ERRORS` est
+  défini. Elle est journalisée ; `message` reste générique.
 
 ---
 

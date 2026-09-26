@@ -449,6 +449,9 @@ mod tests {
             .unwrap();
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 401);
+        let b = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["error"], "unauthorized", "the ApiError envelope (#1193)");
     }
 
     #[tokio::test]

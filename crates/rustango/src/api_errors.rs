@@ -93,14 +93,13 @@ impl ApiError {
         Self::new(status, code, message)
     }
 
-    /// [`from_status`](Self::from_status), except a 5xx logs `message`
-    /// and sends a generic one: a server error's text is usually a
-    /// driver message that names the schema.
+    /// [`from_status`](Self::from_status), except a 5xx goes through
+    /// `error::server_error_body`: logged under `context`, and sent only
+    /// when `RUSTANGO_DISCLOSE_ERRORS` allows it.
     #[must_use]
-    pub fn logged(status: StatusCode, message: impl std::fmt::Display) -> Self {
+    pub fn logged(status: StatusCode, context: &str, message: impl std::fmt::Display) -> Self {
         if status.is_server_error() {
-            tracing::error!(target: "rustango::api", status = status.as_u16(), error = %message, "request failed");
-            Self::from_status(status, "internal error")
+            Self::from_status(status, crate::error::server_error_body(context, &message))
         } else {
             Self::from_status(status, message.to_string())
         }
@@ -111,52 +110,49 @@ impl ApiError {
     /// `400 Bad Request` — `code = "bad_request"`.
     #[must_use]
     pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
+        Self::from_status(StatusCode::BAD_REQUEST, message)
     }
 
     /// `401 Unauthorized` — `code = "unauthorized"`.
     #[must_use]
     pub fn unauthorized(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
+        Self::from_status(StatusCode::UNAUTHORIZED, message)
     }
 
     /// `403 Forbidden` — `code = "forbidden"`.
     #[must_use]
     pub fn forbidden(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::FORBIDDEN, "forbidden", message)
+        Self::from_status(StatusCode::FORBIDDEN, message)
     }
 
     /// `404 Not Found` — `code = "not_found"`.
     #[must_use]
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "not_found", message)
+        Self::from_status(StatusCode::NOT_FOUND, message)
     }
 
     /// `409 Conflict` — `code = "conflict"`.
     #[must_use]
     pub fn conflict(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::CONFLICT, "conflict", message)
+        Self::from_status(StatusCode::CONFLICT, message)
     }
 
     /// `422 Unprocessable Entity` — `code = "validation_failed"`.
     #[must_use]
     pub fn validation(message: impl Into<String>) -> Self {
-        Self::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "validation_failed",
-            message,
-        )
+        Self::from_status(StatusCode::UNPROCESSABLE_ENTITY, message)
     }
 
     /// `429 Too Many Requests` — `code = "rate_limited"`.
     #[must_use]
     pub fn rate_limited(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", message)
+        Self::from_status(StatusCode::TOO_MANY_REQUESTS, message)
     }
 
-    /// A `429` response with `Retry-After`, as every rate limiter sends it.
+    /// A finished `429` response with `Retry-After`, as every rate
+    /// limiter sends it.
     #[must_use]
-    pub fn too_many_requests(message: impl Into<String>, retry_after_secs: u64) -> Response {
+    pub fn rate_limited_response(message: impl Into<String>, retry_after_secs: u64) -> Response {
         let mut resp = Self::rate_limited(message)
             .with_details(json!({ "retry_after": retry_after_secs }))
             .into_response();
@@ -170,17 +166,13 @@ impl ApiError {
     /// it to the client.
     #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+        Self::from_status(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
 
     /// `503 Service Unavailable` — `code = "service_unavailable"`.
     #[must_use]
     pub fn service_unavailable(message: impl Into<String>) -> Self {
-        Self::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "service_unavailable",
-            message,
-        )
+        Self::from_status(StatusCode::SERVICE_UNAVAILABLE, message)
     }
 
     /// Render the error as JSON, without building a response.
@@ -289,21 +281,25 @@ mod tests {
     /// A driver message names the schema; a 5xx must not send it (#1193).
     #[test]
     fn logged_hides_a_server_errors_cause_but_not_a_client_errors() {
-        let e = ApiError::logged(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "relation \"users\" missing",
-        );
-        assert_eq!(e.code, "internal_error");
-        assert!(!e.message.contains("users"), "{e}");
+        let _env = crate::error::test_env::lock();
+        crate::error::test_env::with("RUSTANGO_DISCLOSE_ERRORS", None, || {
+            let e = ApiError::logged(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "test",
+                "relation \"users\" missing",
+            );
+            assert_eq!(e.code, "internal_error");
+            assert!(!e.message.contains("users"), "{e}");
+        });
 
-        let e = ApiError::logged(StatusCode::BAD_REQUEST, "invalid cursor");
+        let e = ApiError::logged(StatusCode::BAD_REQUEST, "test", "invalid cursor");
         assert_eq!(e.code, "bad_request");
         assert_eq!(e.message, "invalid cursor");
     }
 
     #[test]
     fn too_many_requests_sets_retry_after() {
-        let r = ApiError::too_many_requests("slow down", 7);
+        let r = ApiError::rate_limited_response("slow down", 7);
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(r.headers()[axum::http::header::RETRY_AFTER], "7");
     }

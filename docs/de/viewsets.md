@@ -69,7 +69,7 @@ Darunter dasselbe Model; was sich unterscheidet, ist, was herauskommt und wer au
 | Sendet zurück | **JSON-Daten** | eine **servergerenderte HTML-Seite** |
 | Gebaut für | SPAs, Mobile, andere Dienste | Browser, servergerenderte Websites, admin-artiges CRUD |
 | Ein „Erstellen" | `POST` JSON → `201` + das Objekt | `POST` eines Formulars → `303`-Weiterleitung (Post/Redirect/Get) |
-| Bei ungültiger Eingabe | `400` [`ApiError`](#formen-der-fehlerantwort); Serializer-Feldfehler in `details` | das Formular mit angezeigten Fehlern neu rendern |
+| Bei ungültiger Eingabe | `400` [`ApiError`](#formen-der-fehlerantwort); Serializer-Fehler `422`, Felder in `details` | das Formular mit angezeigten Fehlern neu rendern |
 | Eine „Liste" ist | ein paginierter JSON-Umschlag | eine Schleife über Zeilen in deinem Template |
 | Üblicherweise authentifiziert per | Tokens / JWT / API-Keys | Session-Cookies |
 
@@ -674,16 +674,19 @@ Jeder ViewSet-Fehler ist ein [`ApiError`](api-conventions.md)-Body, dieselbe For
 die deine eigenen Handler senden (#1193):
 
 ```json
-{"error": "<machine code>", "message": "<sentence>", "status": 400, "details": {}}
+{"error": "<machine code>", "message": "<sentence>", "status": 400}
 ```
 
 - `error` ist ein stabiler Code (`bad_request`, `unauthorized`, `not_found`,
   `validation_failed`, `rate_limited`, `internal_error`, …). Verzweige darüber.
-- Serializer-Validierung ist `validation_failed`, mit der Feld-Map in `details`:
+- Serializer-Validierung ist ein `422` `validation_failed`, mit der Feld-Map in
+  `details`:
   `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}`.
-  Die oben genannten `400`er aus Typkonvertierung, Pflichtfeldern und
-  Datenbank-Constraints sind `bad_request` mit dem Grund in `message`.
-- Ein `5xx` trägt nie die Ursache. Sie wird geloggt; `message` ist generisch.
+  Die oben genannten `400`er aus Typkonvertierung und Pflichtfeldern sind
+  `bad_request` mit dem Grund in `message`; ein `400` aus einem
+  Datenbank-Constraint hält den Treibertext zurück.
+- Ein `5xx` trägt nie die Ursache, außer `RUSTANGO_DISCLOSE_ERRORS` ist gesetzt.
+  Sie wird geloggt; `message` ist generisch.
 
 ---
 

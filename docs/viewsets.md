@@ -66,7 +66,7 @@ Same model underneath; what differs is what comes out and who's calling.
 | Sends back | **JSON data** | a **server-rendered HTML page** |
 | Built for | SPAs, mobile, other services | browsers, server-rendered sites, admin-style CRUD |
 | A "create" | `POST` JSON → `201` + the object | `POST` a form → `303` redirect (Post/Redirect/Get) |
-| On bad input | `400` [`ApiError`](#error-response-shapes); serializer field errors in `details` | re-render the form with the errors shown |
+| On bad input | `400` [`ApiError`](#error-response-shapes); serializer errors `422`, fields in `details` | re-render the form with the errors shown |
 | A "list" is | a paginated JSON envelope | a loop over rows in your template |
 | Usually authed by | tokens / JWT / API keys | session cookies |
 
@@ -676,16 +676,18 @@ Every ViewSet error is an [`ApiError`](api-conventions.md) body, the same shape
 your own handlers send (#1193):
 
 ```json
-{"error": "<machine code>", "message": "<sentence>", "status": 400, "details": {}}
+{"error": "<machine code>", "message": "<sentence>", "status": 400}
 ```
 
 - `error` is a stable code (`bad_request`, `unauthorized`, `not_found`,
   `validation_failed`, `rate_limited`, `internal_error`, …). Branch on it.
-- Serializer validation is `validation_failed`, with the field map in `details`:
+- Serializer validation is a `422` `validation_failed`, with the field map in
+  `details`:
   `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}`.
-  The type-coercion, required and database-constraint `400`s above are
-  `bad_request` with the reason in `message`.
-- A `5xx` never carries the cause. It is logged; `message` is generic.
+  The type-coercion and required `400`s above are `bad_request` with the reason
+  in `message`; a database-constraint `400` withholds the driver text.
+- A `5xx` never carries the cause unless `RUSTANGO_DISCLOSE_ERRORS` is set. It
+  is logged; `message` is generic.
 
 ---
 

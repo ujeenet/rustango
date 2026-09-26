@@ -117,7 +117,6 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | Target | Wofür |
 |---|---|
 | `rustango::admin` | Admin-Routing und -Registrierung |
-| `rustango::api` | Die Ursache eines `5xx`-`ApiError`, die die Antwort weglässt |
 | `rustango::admin::audit` | Audit-Log-Schreibvorgänge |
 | `rustango::admin::sso` | Admin-SSO |
 | `rustango::cache` | Cache-Backends |

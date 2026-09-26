@@ -189,6 +189,15 @@ mod tests {
         assert!(Principal::from_parts(&parts()).is_none());
     }
 
+    #[tokio::test]
+    async fn the_rejection_is_an_api_error() {
+        let r = Unauthenticated.into_response();
+        assert_eq!(r.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["error"], "unauthorized");
+    }
+
     #[test]
     fn an_authenticated_user_becomes_a_user_principal() {
         let mut p = parts();

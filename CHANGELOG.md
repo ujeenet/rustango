@@ -14,6 +14,10 @@ answer with `ApiError`. A client no longer needs a layer to normalise
 four shapes, and a 5xx no longer sends the driver's message, which
 could name tables and columns.
 
+Serializer validation is now `422`, like every other
+`validation_failed`. `ApiError` is available with `_axum` (was `admin`)
+and gains `from_status`, `logged` and `rate_limited_response`.
+
 ### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
 
 **Breaking:** the loader now refuses a callback in an atomic migration,

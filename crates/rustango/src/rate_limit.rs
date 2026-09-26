@@ -347,8 +347,10 @@ async fn handle(cfg: Arc<RateLimitLayer>, req: Request<Body>, next: Next) -> Res
             response
         }
         Err(retry_secs) => {
-            let mut resp =
-                crate::api_errors::ApiError::too_many_requests("rate limit exceeded", retry_secs);
+            let mut resp = crate::api_errors::ApiError::rate_limited_response(
+                "rate limit exceeded",
+                retry_secs,
+            );
             let h = resp.headers_mut();
             h.insert("x-ratelimit-limit", cfg.capacity.into());
             h.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));

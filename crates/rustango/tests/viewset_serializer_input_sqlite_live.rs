@@ -98,8 +98,8 @@ async fn create_runs_serializer_validate_and_400s_on_failure() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::BAD_REQUEST,
-        "short name should 400"
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "short name should 422"
     );
     let v = json_body(resp).await;
     let name_errs = v["details"]["name"]
@@ -255,7 +255,11 @@ async fn max_length_inherited_from_model() {
         r#"{"code":"abcdefghi","note":"ok","priority":1,"status":"draft"}"#,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "inherited max_length: {v}");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "inherited max_length: {v}"
+    );
     assert!(
         v["details"]["code"][0]
             .as_str()
@@ -274,7 +278,11 @@ async fn max_length_attr_overrides_model() {
         r#"{"code":"ok","note":"toolong","priority":1,"status":"draft"}"#,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "override max_length: {v}");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "override max_length: {v}"
+    );
     assert!(
         v["details"]["note"][0]
             .as_str()
@@ -293,7 +301,7 @@ async fn min_max_inherited_from_model() {
         r#"{"code":"ok","note":"ok","priority":9,"status":"draft"}"#,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
         v["details"]["priority"][0]
             .as_str()
@@ -307,7 +315,7 @@ async fn min_max_inherited_from_model() {
         r#"{"code":"ok","note":"ok","priority":0,"status":"draft"}"#,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
         v["details"]["priority"][0]
             .as_str()
@@ -325,7 +333,7 @@ async fn choices_inherited_from_model() {
         r#"{"code":"ok","note":"ok","priority":1,"status":"bogus"}"#,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
         v["details"]["status"][0]
             .as_str()
