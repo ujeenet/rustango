@@ -277,37 +277,31 @@ impl<S: Clone + Send + Sync + 'static> SecurityHeadersRouterExt for Router<S> {
 async fn handle(cfg: Arc<SecurityHeadersLayer>, req: Request<Body>, next: Next) -> Response<Body> {
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
+    // A header the handler set wins: the impersonation handoff sets
+    // `no-referrer` to keep its token out of `Referer` (#1699).
+    let mut set = |name: &str, value: &str| {
+        if let (Ok(n), Ok(v)) = (HeaderName::try_from(name), HeaderValue::from_str(value)) {
+            headers.entry(n).or_insert(v);
+        }
+    };
 
     if let Some(v) = &cfg.hsts {
-        if let Ok(hv) = HeaderValue::from_str(v) {
-            headers.insert("strict-transport-security", hv);
-        }
+        set("strict-transport-security", v);
     }
     if let Some(v) = cfg.xfo {
-        if let Ok(hv) = HeaderValue::from_str(v) {
-            headers.insert("x-frame-options", hv);
-        }
+        set("x-frame-options", v);
     }
     if cfg.nosniff {
-        headers.insert(
-            "x-content-type-options",
-            HeaderValue::from_static("nosniff"),
-        );
+        set("x-content-type-options", "nosniff");
     }
     if let Some(v) = cfg.referrer_policy {
-        if let Ok(hv) = HeaderValue::from_str(v) {
-            headers.insert("referrer-policy", hv);
-        }
+        set("referrer-policy", v);
     }
     if let Some(v) = cfg.coop {
-        if let Ok(hv) = HeaderValue::from_str(v) {
-            headers.insert("cross-origin-opener-policy", hv);
-        }
+        set("cross-origin-opener-policy", v);
     }
     if let Some(v) = &cfg.permissions_policy {
-        if let Ok(hv) = HeaderValue::from_str(v) {
-            headers.insert("permissions-policy", hv);
-        }
+        set("permissions-policy", v);
     }
     if let Some(v) = &cfg.csp {
         let name = if cfg.csp_report_only {
@@ -315,17 +309,10 @@ async fn handle(cfg: Arc<SecurityHeadersLayer>, req: Request<Body>, next: Next) 
         } else {
             "content-security-policy"
         };
-        if let Ok(hv) = HeaderValue::from_str(v) {
-            if let Ok(n) = HeaderName::try_from(name) {
-                headers.insert(n, hv);
-            }
-        }
+        set(name, v);
     }
     for (k, v) in &cfg.custom {
-        if let (Ok(name), Ok(value)) = (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v))
-        {
-            headers.insert(name, value);
-        }
+        set(k, v);
     }
 
     response
@@ -520,6 +507,26 @@ mod tests {
         assert_eq!(l.referrer_policy, Some("same-origin"));
         assert_eq!(l.coop, Some("same-origin"));
         assert!(l.permissions_policy.is_some());
+    }
+
+    /// A header the handler set is kept (#1699): the impersonation
+    /// handoff's `no-referrer` must survive the outer layer.
+    #[tokio::test]
+    async fn a_header_the_handler_set_wins() {
+        use axum::routing::get;
+        use tower::ServiceExt as _;
+        let app = Router::new()
+            .route(
+                "/",
+                get(|| async { ([("referrer-policy", "no-referrer")], "ok") }),
+            )
+            .security_headers(SecurityHeadersLayer::strict());
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(resp.headers()["x-frame-options"], "DENY");
     }
 
     /// Under `no-referrer` browsers send `Origin: null` on every POST,

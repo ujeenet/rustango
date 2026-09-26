@@ -947,6 +947,15 @@ impl Cli {
         api.layer(axum::Extension(pool))
     }
 
+    /// `[security]` headers for the tenancy builder's outermost router,
+    /// which the api-router layer never reaches (#1699).
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "admin"))]
+    fn tenancy_security_headers(&self) -> Option<crate::security_headers::SecurityHeadersLayer> {
+        self.settings_for_layers
+            .as_ref()
+            .map(|s| crate::security_headers::SecurityHeadersLayer::from_settings(&s.security))
+    }
+
     /// The configured access-log layer, or `None` when
     /// `[logging] access_log = false`.
     ///
@@ -1219,6 +1228,10 @@ impl Cli {
         builder = builder
             .observability(self.access_log_layer())
             .span_redact(self.span_redact_params());
+        #[cfg(all(feature = "config", feature = "admin"))]
+        if let Some(sec) = self.tenancy_security_headers() {
+            builder = builder.security_headers(sec);
+        }
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1297,6 +1310,10 @@ impl Cli {
         builder = builder
             .observability(self.access_log_layer())
             .span_redact(self.span_redact_params());
+        #[cfg(all(feature = "config", feature = "admin"))]
+        if let Some(sec) = self.tenancy_security_headers() {
+            builder = builder.security_headers(sec);
+        }
         if self.health_endpoints {
             builder = builder.with_health();
         }
