@@ -103,13 +103,7 @@ fn intcomma_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Va
 }
 
 fn format_with_commas_i64(n: i64) -> String {
-    // `unsigned_abs`, not `abs`: `i64::MIN.abs()` overflows (#1663).
-    let sep = comma_separate_digits(&n.unsigned_abs().to_string());
-    if n < 0 {
-        format!("-{sep}")
-    } else {
-        sep
-    }
+    crate::numberformat::format_i64(n, 3, ",")
 }
 
 fn format_with_commas_u64(n: u64) -> String {
@@ -1677,6 +1671,19 @@ mod tests {
     #[test]
     fn intcomma_handles_i64_min() {
         assert_eq!(intcomma(i64::MIN), "-9,223,372,036,854,775,808");
+        assert_eq!(intcomma(i64::MAX), "9,223,372,036,854,775,807");
+    }
+
+    /// Above `i64::MAX` the filter takes the `u64` path.
+    #[test]
+    fn intcomma_filter_groups_u64_max() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("n", &u64::MAX);
+        assert_eq!(
+            render(&tera, "{{ n | intcomma }}", ctx),
+            "18,446,744,073,709,551,615"
+        );
     }
 
     #[test]

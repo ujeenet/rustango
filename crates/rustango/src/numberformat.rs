@@ -145,7 +145,6 @@ pub(crate) fn group_digits(digits: &str, n: usize, sep: &str) -> String {
     if digits.len() <= n {
         return digits.to_owned();
     }
-    let bytes = digits.as_bytes();
     let mut out = String::with_capacity(digits.len() + (digits.len() / n) * sep.len());
     let first_group_len = digits.len() % n;
     let mut i = 0;
@@ -154,7 +153,6 @@ pub(crate) fn group_digits(digits: &str, n: usize, sep: &str) -> String {
         out.push_str(&digits[..first_group_len]);
         i = first_group_len;
     }
-    let _ = bytes; // unused beyond length math
     while i < digits.len() {
         if !out.is_empty() {
             out.push_str(sep);
