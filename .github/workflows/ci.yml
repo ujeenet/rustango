@@ -71,12 +71,9 @@ on:
 # `on: push:` names `branches:` with no `tags:` key, so a tag push does
 # not trigger this workflow at all.)
 #
-# `develop` matters more than it looks, because PRs into it are ungated.
-# An unlabelled PR merges with only the cheap checks; the post-merge push
-# run is the first time the live matrix sees that code at all. Cancelling
-# it on the next merge means a commit can reach the branch everyone
-# builds on having never completed a single test run — which is the hole
-# the gate was supposed to leave open only until merge, not past it.
+# `develop` matters more than it looks: the post-merge run is the only
+# one that tests the squash result, so cancelling it on the next merge
+# leaves a commit on the shared branch with no build behind it.
 #
 # Feature branches and pull requests still cancel, which is where the
 # waste actually was.
@@ -192,24 +189,25 @@ jobs:
   # exists to close (#1572). `every_test_suite_compiles_in_ci` fails if
   # anyone adds `needs:`, `if:` or `continue-on-error:` to it.
   #
-  # It runs when:
-  #   * the event is not a pull request — a push to `main`, `develop` or
-  #     a release branch, or a manual `workflow_dispatch`;
-  #   * the PR targets `main`, which is the release promote;
-  #   * the PR carries the `ci` label. **That is the manual trigger for
-  #     an ordinary feature PR**: add the label and the full matrix runs
-  #     against the merge result; remove it and later pushes go quiet.
+  # It runs on every push and dispatch, and on every PR into `main`,
+  # `develop` or a release branch. Only a PR into a feature branch (a
+  # stack) needs the `ci` label.
+  #
+  # PRs into `develop` used to need the label too, so an ordinary PR merged
+  # with no live suite run — the main reason the v1 audit found so much
+  # (#1678).
   gate:
     runs-on: ubuntu-latest
     if: >-
       github.event_name != 'pull_request'
       || github.base_ref == 'main'
+      || github.base_ref == 'develop'
+      || contains(github.base_ref, 'release')
       || contains(github.event.pull_request.labels.*.name, 'ci')
     steps:
       - name: Why this run is happening
         run: |
           echo "event=${{ github.event_name }} base=${{ github.base_ref }}"
-          echo "Add the ci label to a pull request to run this matrix on it."
 
   # Ungated, along with `clippy`, `deny`, `deny-examples`, `lockfiles`
   # and `trivy`. These are minutes, not the matrix, and two of them are
@@ -767,6 +765,9 @@ jobs:
           # compile error no other job can reach.
           - sqlite,media
           - sqlite,media,admin
+          # No row had it, so `signing` gated on it without its crypto
+          # deps went unseen (#1678).
+          - sqlite,storage-s3
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
@@ -1262,6 +1263,16 @@ jobs:
       # the arm at all is both faster and more honest about what this
       # job covers. Postgres is exercised by `postgres_test`.
       - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_db_backend_add_live
+      # These read `MYSQL_TEST_URL` but no job set it for them, so their
+      # MySQL arm never ran (#1678).
+      - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_delete_prefix_live
+      - run: cargo test -p rustango --features mysql --test like_escape_live
+      - run: cargo test -p rustango --features mysql --test migrate_progress_live
+      - run: cargo test -p rustango --features mysql,tenancy --test preflight_live
+      - run: cargo test -p rustango --features mysql --test queryset_annotate_relation_live
+      - run: cargo test -p rustango --features mysql --test queryset_rel_m2m_gfk_live
+      - run: cargo test -p rustango --features mysql --test select_related_multihop
+      - run: cargo test -p rustango --features mysql,admin-sso --test sso_provider_ddl
       - run: cargo test -p rustango --features mysql,tenancy,mcp,testkit --test mcp_user_keys_mysql_live
       - run: cargo test -p rustango --features mysql --test audit_mysql_live
       - run: cargo test -p rustango --features mysql --test fixtures_mysql_live

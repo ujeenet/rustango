@@ -775,8 +775,10 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
 
     // (job, how a suite declares it needs that job, human name)
-    let families: [(&str, Detect, &str); 3] = [
+    let families: [(&str, Detect, &str); 4] = [
         ("redis_live", Detect::Reads("REDIS_TEST_URL"), "Redis"),
+        // Eight suites with a MySQL arm ran nowhere on MySQL (#1678).
+        ("mysql_live", Detect::Reads("MYSQL_TEST_URL"), "MySQL"),
         (
             "s3_live",
             Detect::Reads("RUSTANGO_S3_TEST_"),
@@ -859,6 +861,20 @@ enum Detect {
     /// `CREATE EXTENSION postgis` failing, so there is no variable to
     /// look for.
     NamedLike(&'static str),
+}
+
+/// Naming a suite in a job proves nothing if the job skips ordinary PRs.
+/// PRs into `develop` needed the `ci` label, so most merged untested (#1678).
+#[test]
+fn the_gate_opens_for_prs_into_develop() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let block = job_block(&yaml, "gate");
+    assert!(
+        block.contains("github.base_ref == 'develop'"),
+        "the `gate` job no longer opens for PRs into `develop`:\n{block}"
+    );
 }
 
 /// The media feature axis is compiled by `feature_combos`.

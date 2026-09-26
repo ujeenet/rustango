@@ -1063,12 +1063,7 @@ pub mod dates;
 /// Value signer — `signing::Signer::sign(value)` and
 /// `signing::TimestampSigner` with a TTL. Use it for signed payloads such
 /// as password reset tokens, magic links and signed cookies.
-#[cfg(any(
-    feature = "hmac-auth",
-    feature = "storage-s3",
-    feature = "signed_url",
-    feature = "jwt",
-))]
+#[cfg(feature = "_signing")]
 pub mod signing;
 
 /// `Set-Cookie` builder — `Cookie::new(name, value)
