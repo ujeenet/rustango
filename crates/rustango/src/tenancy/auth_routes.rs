@@ -730,10 +730,7 @@ pub async fn require_bearer(
         .await
     {
         Ok(rows) => rows.into_iter().next(),
-        Err(e) => {
-            tracing::error!(error = %e, "bearer auth could not read the user row");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "authentication failed");
-        }
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
     let Some(user) = user.filter(|u| u.active) else {
         // Deleted or deactivated between mint and use. Same body as a bad

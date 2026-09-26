@@ -333,7 +333,15 @@ async fn a_token_from_another_tenant_is_refused() {
         ))
         .await
         .expect("response");
+    assert_unauthorized(resp, "invalid or expired token").await;
+}
+
+/// The `ApiError` 401 `require_bearer` sends (#1684).
+async fn assert_unauthorized(resp: axum::response::Response, message: &str) {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let v = json(resp).await;
+    assert_eq!(v["error"], "unauthorized", "{v}");
+    assert_eq!(v["message"], message, "{v}");
 }
 
 #[tokio::test]
@@ -346,7 +354,7 @@ async fn a_deactivated_account_stops_working_immediately() {
         .oneshot(req(Method::GET, "/notes", Some(&token_for(ghost, "acme"))))
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_unauthorized(resp, "invalid or expired token").await;
 }
 
 #[tokio::test]
@@ -357,11 +365,11 @@ async fn no_token_is_401_and_never_reaches_the_query() {
         .oneshot(req(Method::GET, "/notes", None))
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_unauthorized(resp, "missing Bearer token").await;
 
     let resp = app
         .oneshot(req(Method::GET, "/notes", Some("not-a-token")))
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_unauthorized(resp, "invalid or expired token").await;
 }
