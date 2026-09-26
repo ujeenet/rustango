@@ -10,7 +10,7 @@ forme de `JwtLifecycle` — et un routeur clé en main qui monte pour vous
 [![API d'authentification JWT : login émet une paire access+refresh, refresh effectue une rotation et met en liste noire l'ancien token, logout révoque via un magasin de JTI](../img/auth-jwt-api.png)](../img/auth-jwt-api.png)
 
 > **Source :** `rustango::tenancy::jwt_lifecycle` (`JwtLifecycle`, `JwtTokenPair`,
-> `JwtClaims`) et `rustango::tenancy::auth_routes` (`jwt_router`, `Config`) +
+> `JwtClaims`) et `rustango::tenancy::auth_routes` (`JwtAuth`, `Config`) +
 > `rustango::jti_store` (`JtiStore`, `InMemoryJtiStore`) — derrière `jwt` +
 > `tenancy`.
 >
@@ -39,7 +39,7 @@ forme de `JwtLifecycle` — et un routeur clé en main qui monte pour vous
 
 ## Le routeur intégré
 
-`jwt_router` monte les quatre endpoints standard sur la table `rustango_users`
+`JwtAuth::router()` monte les quatre endpoints standard sur la table `rustango_users`
 propre à chaque tenant — les ~50 lignes de boilerplate de login que tout projet
 réécrit sinon :
 
@@ -56,15 +56,24 @@ paire. Les chemins, TTL et la clé de signature sont configurables via `Config`.
 ## Le câblage
 
 ```rust
-use rustango::tenancy::auth_routes::{jwt_router, Config};
+use axum::middleware::from_fn_with_state;
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 
+let auth = JwtAuth::new(Config::default());
 rustango::manage::Cli::new()
     .tenancy()
     .api(my_app::urls::api()
-        .merge(jwt_router(Config::default())))   // monte /api/auth/*
+        .layer(from_fn_with_state(auth.clone(), require_bearer)) // vos routes
+        .merge(auth.router()))                                   // /api/auth/*
     .run()
     .await
 ```
+
+Construisez **un seul** `JwtAuth` et passez-en des clones partout. Chaque
+instance a sa propre liste de révocation en mémoire : avec deux, un logout sur
+le routeur n'est pas vu par `require_bearer`, et le token reste valide jusqu'à
+son expiration. Un `jti_store` partagé (Redis, base de données) supprime aussi
+cette séparation.
 
 `Config::default()` signe avec `RUSTANGO_SESSION_SECRET` (la même clé que le
 cookie de session admin) et utilise des TTL de 15 min pour l'accès / 7 jours pour
@@ -226,7 +235,7 @@ disparaît.
 
 Comme la vérification consulte le magasin, `verify_access`, `verify_refresh`,
 `refresh`, `revoke` et les helpers de token MCP / tenant
-(`mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`) sont tous
+(`mcp::verify_agent_token`, `tenancy::auth_routes::JwtAuth::verify_for_tenant`) sont tous
 `async`. L'**expiration est vérifiée avant** le magasin : un token expiré ne
 coûte donc aucun aller-retour.
 
@@ -259,7 +268,7 @@ sauf si vous utilisez `refresh_with`.
   consultation du magasin à chaque requête ; `JwtLifecycle` est la voie
   intermédiaire — vérification sans état, plus une liste de blocage JTI pour les
   révocations dont vous avez réellement besoin (déconnexion, rotation).
-- **Les endpoints HTTP sont cloisonnés par tenant.** `jwt_router` résout les
+- **Les endpoints HTTP sont cloisonnés par tenant.** `JwtAuth::router()` résout les
   utilisateurs via le contexte du tenant + `rustango_users` ; montez-le dans une
   application `.tenancy()`. Le moteur de tokens (`JwtLifecycle`) lui-même n'a pas
   cette exigence.

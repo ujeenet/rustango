@@ -2482,13 +2482,10 @@ async fn allowlisted_action_without_handler_returns_500() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = body_string(resp).await;
-    // The 500 body has rolled over to a generic JSON envelope
-    // (`{"correlation_id":"...","detail":"internal server error","error":"internal"}`);
-    // the `register_action` hint that used to live in the body is now
-    // logged server-side. Assert the JSON envelope shape — the
-    // status code still pins the "no handler → 500" contract.
+    // The generic `ApiError` envelope; the `register_action` hint is
+    // logged server-side, not sent (#1193).
     assert!(
-        body.contains(r#""error":"internal""#),
+        body.contains(r#""error":"internal_error""#) && body.contains("correlation_id"),
         "expected JSON error envelope: {body}"
     );
 
