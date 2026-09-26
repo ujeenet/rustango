@@ -444,6 +444,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn url_decode_strict_refuses_what_url_decode_passes_through() {
+        for bad in ["%2", "%ZZ", "%+5", "%FF"] {
+            assert_eq!(url_decode_strict(bad), None, "{bad}");
+        }
+        assert_eq!(url_decode_strict("a%20b+c").as_deref(), Some("a b c"));
+    }
+
+    #[test]
     fn plain_text_passes_through() {
         assert_eq!(url_decode("hello"), "hello");
     }

@@ -8,8 +8,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Five private copies now use `url_codec`: `method_override` decoded bytes
 as Latin-1, the CSRF form parser had its own strict decoder (now
-`url_codec::url_decode_strict`, which also refuses `%+5`), and the
-tenant admin, operator console and test client had their own encoders.
+`url_codec::url_decode_strict`), and the tenant admin, operator
+console, test client and signed URLs had their own encoders.
 `?next=` values in their login redirects now escape `/` as `%2F`.
 
 ### Fixed — `intcomma(i64::MIN)` panicked; one `redirect_to_login` (#1663)

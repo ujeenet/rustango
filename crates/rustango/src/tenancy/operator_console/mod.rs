@@ -2069,9 +2069,6 @@ fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-/// Minimal URL-encoder for the small set of characters we need to
-/// quote in a `next=` query param. Avoids pulling in `urlencoding`
-/// as a dep for ~6 lines of work.
 // The crate's one query-value encoder (#1663); it also escapes `/`.
 use crate::url_codec::url_encode as urlencoding_lite;
 
@@ -2251,6 +2248,26 @@ mod sanitize_next_tests {
         for ok in ["/orgs", "/orgs/acme/edit", "/orgs?page=2&q=a"] {
             assert_eq!(sanitize_next(Some(ok)), ok, "{ok} should survive");
         }
+    }
+}
+
+#[cfg(test)]
+mod redirect_to_login_tests {
+    use super::redirect_to_login;
+
+    /// `next` is fully encoded and decodes back to the path it came from.
+    #[test]
+    fn next_round_trips_through_the_location() {
+        let resp = redirect_to_login("/orgs/acme edit?tab=1&x=2");
+        let loc = resp.headers()[axum::http::header::LOCATION]
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/login?next=%2Forgs%2Facme%20edit%3Ftab%3D1%26x%3D2");
+        let next = loc.strip_prefix("/login?next=").unwrap();
+        assert_eq!(
+            crate::url_codec::url_decode(next),
+            "/orgs/acme edit?tab=1&x=2"
+        );
     }
 }
 

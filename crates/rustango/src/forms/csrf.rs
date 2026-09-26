@@ -1062,6 +1062,14 @@ mod tests {
         assert_eq!(read_form_field(body, "_csrf").as_deref(), Some("abc/xyz"));
     }
 
+    /// The field parser refuses a malformed token rather than passing
+    /// through a lenient decode of it.
+    #[test]
+    fn read_form_field_refuses_a_malformed_token() {
+        assert_eq!(read_form_field(b"_csrf=ab%ZZ", "_csrf"), None);
+        assert_eq!(read_form_field(b"_csrf=ab%2", "_csrf"), None);
+    }
+
     #[test]
     fn read_form_field_treats_plus_as_space() {
         let body = b"q=hello+world";

@@ -556,6 +556,12 @@ mod tests {
         assert_eq!(percent_decode_string("a%21"), "a!");
     }
 
+    /// UTF-8, not Latin-1: `%C3%A9` is one `é`, not `Ã©` (#1663).
+    #[test]
+    fn percent_decode_reads_utf8() {
+        assert_eq!(percent_decode_string("caf%C3%A9"), "café");
+    }
+
     #[test]
     fn percent_decode_handles_bad_escape() {
         assert_eq!(percent_decode_string("100%"), "100%");
