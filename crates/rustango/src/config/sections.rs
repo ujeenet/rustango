@@ -510,7 +510,7 @@ pub struct ServerSettings {
 pub struct AuthSettings {
     /// JWT lifetimes. The field names match
     /// `rustango::tenancy::auth_routes::Config`, so this section can
-    /// go straight to `auth_routes::jwt_router(...)`.
+    /// go straight to `auth_routes::JwtAuth::new(...)`.
     pub jwt: JwtSettings,
     /// Argon2id memory cost in KiB. Default `19456`, about 19 MiB,
     /// which is the OWASP floor. Less memory means faster logins and

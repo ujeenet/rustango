@@ -69,7 +69,7 @@ Le même modèle en dessous ; ce qui diffère, c'est ce qui en ressort et qui ap
 | Renvoie | **des données JSON** | une **page HTML rendue côté serveur** |
 | Conçue pour | les SPA, le mobile, les autres services | les navigateurs, les sites rendus côté serveur, le CRUD de type admin |
 | Un « create » | `POST` JSON → `201` + l'objet | `POST` d'un formulaire → redirection `303` (Post/Redirect/Get) |
-| Sur entrée invalide | `400` — indexé par champ depuis un sérialiseur, sinon `{"error": "…"}` ([formes](#formes-de-réponse-en-erreur)) | re-rendu du formulaire avec les erreurs affichées |
+| Sur entrée invalide | `400` [`ApiError`](#formes-de-réponse-en-erreur) ; erreurs du sérialiseur `422`, champs dans `details` | re-rendu du formulaire avec les erreurs affichées |
 | Un « list » est | une enveloppe JSON paginée | une boucle sur les lignes dans votre template |
 | Généralement authentifiée par | tokens / JWT / clés d'API | cookies de session |
 
@@ -671,26 +671,23 @@ plus vos propres règles par champ et inter-champs.
 
 ### Formes de réponse en erreur
 
-Il n'y a pas d'enveloppe d'erreur unique — un client qui parse une forme échouera
-sur les autres. **Trois** sont livrées, et celle que vous obtenez dépend du
-chemin qui a échoué :
+Chaque erreur de ViewSet est un corps [`ApiError`](api-conventions.md), la même
+forme que celle de vos propres handlers (#1193) :
 
-| Forme | Émise par | Corps |
-|---|---|---|
-| **Map indexée par champ** | la validation d'un sérialiseur uniquement | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
-| **Message simple** | tout autre échec de ViewSet | `{"error": "<message lisible>"}` |
-| **`ApiError`** | vos propres handlers retournant `rustango::api_errors::ApiError` | `{"error": "<code machine>", "message": …, "status": …, "details": …}` |
+```json
+{"error": "<machine code>", "message": "<sentence>", "status": 400}
+```
 
-Les deux premières sortent toutes deux d'un ViewSet, donc la distinction compte :
-les `400` de coercition de type, de requis/NOT NULL et de contrainte de base de
-données listés ci-dessus ne sont **pas** des maps par champ — ce sont
-`{"error": "…"}`. Seuls les validateurs propres au sérialiseur produisent la map
-indexée par champ.
-
-Notez aussi que `error` signifie deux choses différentes dans le tableau : une
-phrase lisible dans la forme ViewSet, et un code machine stable dans `ApiError`
-(qui porte la phrase dans `message`). Branchez sur le statut HTTP et sur la
-présence d'une clé `message` dans le corps, pas sur `error` seul.
+- `error` est un code stable (`bad_request`, `unauthorized`, `not_found`,
+  `validation_failed`, `rate_limited`, `internal_error`, …). Branchez dessus.
+- La validation du sérialiseur donne un `422` `validation_failed`, avec la map
+  par champ dans `details` :
+  `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}`.
+  Les `400` de coercition de type et de champ requis ci-dessus sont
+  `bad_request`, avec la raison dans `message` ; un `400` de contrainte de base
+  de données retient le texte du driver.
+- Un `5xx` ne porte jamais la cause, sauf si `RUSTANGO_DISCLOSE_ERRORS` est
+  défini. Elle est journalisée ; `message` reste générique.
 
 ---
 
@@ -767,14 +764,14 @@ La plupart des ressources possédées ont besoin d'exactement une règle : *les 
 l'appelant*. Nommez la colonne et montez-le.
 
 ```rust
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::viewset::{OwnedBy, ViewSet};
 
+let auth = JwtAuth::new(Config::default()); // un seul, qui sert aussi `auth.router()`
 ViewSet::for_model(Note::SCHEMA)
     .filter_backend(OwnedBy::column("member_id"))
     .tenant_router("/api/notes")
-    .layer(axum::middleware::from_fn(
-        rustango::tenancy::auth_routes::require_bearer,
-    ))
+    .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
 ```
 
 N'importe quelle colonne fonctionne — `owner_id`, `member_id`, `author_id` — parce que le backend

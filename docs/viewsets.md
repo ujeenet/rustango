@@ -66,7 +66,7 @@ Same model underneath; what differs is what comes out and who's calling.
 | Sends back | **JSON data** | a **server-rendered HTML page** |
 | Built for | SPAs, mobile, other services | browsers, server-rendered sites, admin-style CRUD |
 | A "create" | `POST` JSON → `201` + the object | `POST` a form → `303` redirect (Post/Redirect/Get) |
-| On bad input | `400` — field-keyed from a serializer, `{"error": "…"}` otherwise ([shapes](#error-response-shapes)) | re-render the form with the errors shown |
+| On bad input | `400` [`ApiError`](#error-response-shapes); serializer errors `422`, fields in `details` | re-render the form with the errors shown |
 | A "list" is | a paginated JSON envelope | a loop over rows in your template |
 | Usually authed by | tokens / JWT / API keys | session cookies |
 
@@ -672,24 +672,22 @@ plus your own per-field and cross-field rules.
 
 ### Error response shapes
 
-There is no single error envelope — a client parsing one shape will fail on the
-others. **Three** ship, and which one you get depends on the path that failed:
+Every ViewSet error is an [`ApiError`](api-conventions.md) body, the same shape
+your own handlers send (#1193):
 
-| Shape | Emitted by | Body |
-|---|---|---|
-| **Field map** | serializer validation only | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
-| **Plain message** | every other ViewSet failure | `{"error": "<human-readable message>"}` |
-| **`ApiError`** | your own handlers returning `rustango::api_errors::ApiError` | `{"error": "<machine code>", "message": …, "status": …, "details": …}` |
+```json
+{"error": "<machine code>", "message": "<sentence>", "status": 400}
+```
 
-The first two both come out of a ViewSet, so the distinction matters: the
-type-coercion, required/NOT NULL and database-constraint `400`s listed above are
-**not** field-keyed maps — they are `{"error": "…"}`. Only the serializer's own
-validators produce the field map.
-
-Note also that `error` means two different things across the table: a
-human-readable sentence in the ViewSet shape, and a stable machine code in
-`ApiError` (which carries the sentence in `message`). Branch on the HTTP status
-and on whether the body has a `message` key, not on `error` alone.
+- `error` is a stable code (`bad_request`, `unauthorized`, `not_found`,
+  `validation_failed`, `rate_limited`, `internal_error`, …). Branch on it.
+- Serializer validation is a `422` `validation_failed`, with the field map in
+  `details`:
+  `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}`.
+  The type-coercion and required `400`s above are `bad_request` with the reason
+  in `message`; a database-constraint `400` withholds the driver text.
+- A `5xx` never carries the cause unless `RUSTANGO_DISCLOSE_ERRORS` is set. It
+  is logged; `message` is generic.
 
 ---
 
@@ -766,14 +764,14 @@ Most owned resources need exactly one rule: *rows whose ownership column is the
 caller*. Name the column and mount it.
 
 ```rust
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::viewset::{OwnedBy, ViewSet};
 
+let auth = JwtAuth::new(Config::default()); // one, also serving `auth.router()`
 ViewSet::for_model(Note::SCHEMA)
     .filter_backend(OwnedBy::column("member_id"))
     .tenant_router("/api/notes")
-    .layer(axum::middleware::from_fn(
-        rustango::tenancy::auth_routes::require_bearer,
-    ))
+    .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
 ```
 
 Any column works — `owner_id`, `member_id`, `author_id` — because the backend

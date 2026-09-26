@@ -1501,23 +1501,8 @@ fn build_assignments_generic(
     Ok(out)
 }
 
-/// Minimal HTML-escape — pre-rendered cells are dropped into the
-/// detail template with `| safe` so untrusted strings need escaping
-/// here. Mirrors the helper the list view uses.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
+// Pre-rendered cells go into the template with `| safe`, so they are escaped here.
+use crate::text::html_escape;
 
 #[cfg(test)]
 mod tests {
@@ -1527,7 +1512,7 @@ mod tests {
     fn html_escape_quotes_and_brackets() {
         assert_eq!(
             html_escape("<a href='x'>&"),
-            "&lt;a href=&#39;x&#39;&gt;&amp;"
+            "&lt;a href=&#x27;x&#x27;&gt;&amp;"
         );
     }
 

@@ -203,7 +203,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 
 `ApiError` implementa `IntoResponse`, así que devolverlo produce automáticamente su forma JSON: `{"error": <código máquina>, "message": …, "status": …, "details": …}`.
 
-**No es la única forma de error que emite el framework.** Un ViewSet responde `{"error": "<mensaje legible>"}` para sus propios fallos, y un mapa indexado por nombre de campo para la validación del serializador — tres sobres en total, y `error` lleva un código máquina en uno y una frase en otro. [ViewSets — formas de respuesta de error](viewsets.md#formas-de-respuesta-de-error) indica qué ruta emite cuál.
+Los errores JSON propios del framework usan la misma forma: ViewSets, rechazos de tenant y de `Principal`, media, los endpoints JSON del admin, límites de cuerpo, límites de tasa y modo de mantenimiento. Un `5xx` registra su causa en el log y envía un `message` genérico. Ver [ViewSets — formas de respuesta de error](viewsets.md#formas-de-respuesta-de-error).
 
 ---
 

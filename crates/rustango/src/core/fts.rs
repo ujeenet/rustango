@@ -44,6 +44,7 @@ use super::value::SqlValue;
 /// `ts_rank` scores a match in a higher class above one in a lower
 /// class. A is usually the title, B the summary, C the body, D tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::exhaustive_enums)] // Postgres defines exactly A–D.
 pub enum Weight {
     /// Highest priority. `setweight(..., 'A')`.
     A,

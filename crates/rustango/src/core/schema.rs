@@ -157,6 +157,7 @@ impl FieldSchema {
 
 /// Static description of a relation to another model.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum Relation {
     /// Foreign key. The local column references `to.<on>`.
     Fk { to: &'static str, on: &'static str },
@@ -173,6 +174,7 @@ pub enum Relation {
 /// Set it with `#[rustango(on_delete = "cascade" | "restrict" |
 /// "set_null" | "set_default" | "no_action")]`, case-insensitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OnDeleteAction {
     /// `ON DELETE CASCADE` — delete this row when the referenced row goes.
     Cascade,
@@ -634,6 +636,7 @@ impl ModelSchema {
 /// migration generator can route each change to the right scoped
 /// file without touching runtime schema discovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum ModelScope {
     /// Lives in the registry database, shared across tenants, with
     /// one row per tenant or per operator. `Org` and `Operator` are
@@ -774,6 +777,7 @@ pub struct IndexSchema {
 /// - **SQLite**: btree only; it has no `USING` clause, so other
 ///   methods are dropped at emit time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum IndexMethod {
     /// Default B-tree. Every backend supports it.
     #[default]
@@ -945,6 +949,7 @@ pub struct AdminConfig {
 
 /// The auto-JOIN policy for FK columns on the admin list view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ListSelectRelated {
     /// The default: join every visible FK, so list cells show the
     /// target's display value in one round trip.

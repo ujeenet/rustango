@@ -9,6 +9,7 @@ use super::FieldType;
 
 /// A typed value that can be bound to a query parameter.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum SqlValue {
     Null,
     /// 2-byte signed integer — Postgres `SMALLINT`, MySQL `SMALLINT`.

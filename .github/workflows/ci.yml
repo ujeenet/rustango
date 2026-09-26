@@ -309,6 +309,7 @@ jobs:
             --test macro_internals_stays_internal \
             --test no_orphaned_doc_comments \
             --test one_redirect_sanitizer \
+            --test one_html_escaper \
             --test pool_construction \
             --test sqlite_datetime_ddl_is_consistent \
             --test system_migration_scopes \
@@ -935,6 +936,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,notifications,http-client --test slack_notification
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test databases_using_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test database_routers_sqlite_live
+      # `not(postgres)`, so `--all-features` skips it; the #1190 logout guard.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,admin --test owned_by_bearer_sqlite_live
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This
