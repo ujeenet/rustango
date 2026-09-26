@@ -729,6 +729,15 @@ async def check_tenant_login(client, name, base):
     session must not work on t02.
     """
     a, b = tenant_host(1), tenant_host(2)
+    # Under `no-referrer` a browser sends `Origin: null` on the login POST,
+    # which the Origin check refuses. The driver sets Origin itself, so
+    # it can only see the header that causes it.
+    page = await client.get(f"{base}/__login", headers={"Host": a})
+    policy = page.headers.get("referrer-policy", "")
+    REPORT.add("login page lets browsers send their Origin", "#1695",
+               "FAIL" if policy == "no-referrer" else "PASS",
+               f"Referrer-Policy: {policy or '(none)'}", name)
+
     token = await login_form(client, base, a)
     if not token:
         REPORT.add("tenant login", "#1607", "NOT-COVERED",
@@ -758,7 +767,9 @@ async def check_tenant_login(client, name, base):
         return
     REPORT.add("tenant login signs a user in", "#1607", "PASS", "", name)
 
-    cookie = {"Cookie": f"{SESSION_COOKIE}={session}"}
+    # Two cookies, session second, as a browser sends them: a reader that
+    # splits or trims wrongly misses it.
+    cookie = {"Cookie": f"rustango_csrf={token}; {SESSION_COOKIE}={session}"}
     ok = await client.get(f"{base}/__admin", headers={"Host": a, **cookie})
     anon = await client.get(f"{base}/__admin", headers={"Host": a})
     good = ok.status_code == 200 and anon.status_code in (302, 303)
@@ -767,10 +778,11 @@ async def check_tenant_login(client, name, base):
                "" if good else f"with cookie {ok.status_code}, without {anon.status_code}",
                name)
 
+    # Refused means sent to the login page; a 500 is not a refusal.
     other = await client.get(f"{base}/__admin", headers={"Host": b, **cookie})
+    refused = other.status_code in (302, 303)
     REPORT.add("t01's session is refused on t02", "GHSA-c4gg",
-               "PASS" if other.status_code != 200 else "FAIL",
-               f"{other.status_code}", name)
+               "PASS" if refused else "FAIL", f"{other.status_code}", name)
 
     token_b = await login_form(client, base, b)
     if not token_b:
@@ -779,9 +791,13 @@ async def check_tenant_login(client, name, base):
         return
     r = await post_login(client, base, b, token_b, origin=f"http://{b}")
     signed_in = set_cookie_value(r, SESSION_COOKIE)
+    # Only the bad-credentials redirect counts; a 403 or 500 proves nothing.
+    refused = (r.status_code == 303 and not signed_in
+               and "error=" in r.headers.get("location", ""))
     REPORT.add("t01's password is refused on t02", "GHSA-c4gg",
-               "FAIL" if signed_in else "PASS",
-               f"{r.status_code}, session cookie set: {bool(signed_in)}", name)
+               "PASS" if refused else "FAIL",
+               f"{r.status_code} -> {r.headers.get('location', '')}, "
+               f"session cookie set: {bool(signed_in)}", name)
 
 
 async def check_every_tenant_answers(client, name, base, info):
