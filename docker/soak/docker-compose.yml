@@ -55,13 +55,13 @@ x-app-env: &app-env
   # half. This is the half that was impossible until 0.57.5 added
   # `Cli::with_tenant_pools`: 6 connections per tenant pool, which is
   # enough for the `Tenant` extractor's pinned connection plus handler
-  # work, and 20 x 6 x 2 = 240.
+  # work. With the cap below, a web process holds at most 8 x 6 = 48.
   TENANT_POOL_MAX_CONNECTIONS: "6"
   TENANT_POOL_MIN_CONNECTIONS: "1"
-  # 20 tenants at boot plus headroom for ones provisioned mid-soak. The
-  # cache has no eviction and errors hard when full, so this is a
-  # ceiling to set deliberately rather than discover.
-  TENANT_POOL_CACHE_MAX: "48"
+  # Below the 20 tenants on purpose: load across all of them forces LRU
+  # eviction, which used to fail every tenant past the cap (#1527, #1528).
+  TENANT_POOL_CACHE_MAX: "8"
+  TENANT_POOL_SCOPED_CACHE_MAX: "8"
   # Unlocks `POST /_soak/tenants/{slug}/active`, which is the only way
   # to make a tenant *stop* being active — and therefore the only way to
   # observe the supervisor retiring its queue. Off by default in the

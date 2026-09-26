@@ -61,6 +61,10 @@ pub fn pool_config_from_env() -> rustango::tenancy::TenantPoolsConfig {
     if let Some(n) = var("TENANT_POOL_CACHE_MAX") {
         cfg.max_cached_database_pools = n as usize;
     }
+    // Schema mode (Postgres) caches its pools separately (#1528).
+    if let Some(n) = var("TENANT_POOL_SCOPED_CACHE_MAX") {
+        cfg.max_cached_scoped_pools = n as usize;
+    }
     cfg
 }
 

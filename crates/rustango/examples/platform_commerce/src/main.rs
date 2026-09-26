@@ -84,6 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // worse than not shipping them.
     let settings = rustango::config::Settings::load_from_env()
         .map_err(|e| -> Box<dyn std::error::Error> { format!("loading config: {e}").into() })?;
+    // Loading is not applying: `Cli::with_settings` below runs after the
+    // pool exists, so apply the pool tuning here, first.
+    rustango::sql::configure_pools(settings.database.pool_tuning());
 
     let url = std::env::var("DATABASE_URL").map_err(|_| {
         "missing env var 'DATABASE_URL'. Set it in your shell, or copy '.env.example' to '.env'."

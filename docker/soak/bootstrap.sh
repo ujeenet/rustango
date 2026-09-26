@@ -136,6 +136,11 @@ done
 
 log "tenants created: $created (of $TENANTS requested)"
 
+# A tenant admin on t01 only: the driver logs in with it, and proves the
+# same login is refused on t02 (GHSA-c4gg-mvfq-h268).
+app create-user t01 soakadmin --password "${SOAK_TENANT_ADMIN_PASSWORD:-soak-admin-pw}" \
+    --superuser 2>/dev/null || log "tenant admin already exists"
+
 # The two custom hostnames. `add-host` is what writes
 # `rustango_org_hosts`, which is what `RegisteredHostResolver` reads.
 for pair in "t19 shop-t19.example.test" "t20 storefront-t20.example.test"; do
