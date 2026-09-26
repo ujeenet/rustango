@@ -103,13 +103,7 @@ fn intcomma_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Va
 }
 
 fn format_with_commas_i64(n: i64) -> String {
-    let s = n.abs().to_string();
-    let sep = comma_separate_digits(&s);
-    if n < 0 {
-        format!("-{sep}")
-    } else {
-        sep
-    }
+    crate::numberformat::format_i64(n, 3, ",")
 }
 
 fn format_with_commas_u64(n: u64) -> String {
@@ -118,15 +112,7 @@ fn format_with_commas_u64(n: u64) -> String {
 
 /// Put a comma every three digits, counting from the right.
 fn comma_separate_digits(digits: &str) -> String {
-    let bytes = digits.as_bytes();
-    let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
-    for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(*b as char);
-    }
-    out
+    crate::numberformat::group_digits(digits, 3, ",")
 }
 
 // ------------------------------------------------------------------ format_number / format_currency
@@ -1679,6 +1665,25 @@ mod tests {
     fn intcomma_public_negative() {
         assert_eq!(intcomma(-1_000), "-1,000");
         assert_eq!(intcomma(-1_234_567), "-1,234,567");
+    }
+
+    /// `i64::MIN.abs()` overflows; this used to panic (#1663).
+    #[test]
+    fn intcomma_handles_i64_min() {
+        assert_eq!(intcomma(i64::MIN), "-9,223,372,036,854,775,808");
+        assert_eq!(intcomma(i64::MAX), "9,223,372,036,854,775,807");
+    }
+
+    /// Above `i64::MAX` the filter takes the `u64` path.
+    #[test]
+    fn intcomma_filter_groups_u64_max() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("n", &u64::MAX);
+        assert_eq!(
+            render(&tera, "{{ n | intcomma }}", ctx),
+            "18,446,744,073,709,551,615"
+        );
     }
 
     #[test]

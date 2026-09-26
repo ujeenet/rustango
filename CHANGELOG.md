@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `intcomma(i64::MIN)` panicked; one `redirect_to_login` (#1663)
+
+`humanize::intcomma` overflowed on `i64::MIN` and now shares
+`numberformat`'s digit grouper. **Breaking:**
+`shortcuts::redirect_to_login(next, login_url)` is removed; it took its
+arguments in the opposite order to
+`auth_decorators::redirect_to_login(login_url, "next", next)`, which
+stays.
+
 ### Changed — the ten query IR structs are `#[non_exhaustive]`, with constructors (#1661)
 
 **Breaking:** `Filter`, `Assignment`, `SelectQuery`, `InsertQuery`,

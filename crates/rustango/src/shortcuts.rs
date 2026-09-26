@@ -337,29 +337,6 @@ pub fn redirect_permanent_preserve_method(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::PERMANENT_REDIRECT, url.into())
 }
 
-/// Redirect to a login page with the current URL as `?next=<path>`, so
-/// the login handler can send the user back afterwards.
-///
-/// `next` is URL-encoded. It is joined with `&` when `login_url` already
-/// has a query string, and with `?` otherwise.
-///
-/// ```ignore
-/// // Inside a view that requires auth:
-/// if user.is_none() {
-///     return redirect_to_login(req.uri().path_and_query()
-///         .map(|p| p.as_str())
-///         .unwrap_or("/"), "/login");
-/// }
-/// ```
-///
-/// Returns a `302 Found`, the same status as [`redirect`].
-#[must_use]
-pub fn redirect_to_login(next: &str, login_url: &str) -> Response {
-    let encoded = crate::url_codec::url_encode(next);
-    let separator = if login_url.contains('?') { '&' } else { '?' };
-    redirect(format!("{login_url}{separator}next={encoded}"))
-}
-
 fn build_redirect(status: StatusCode, url: String) -> Response {
     // Built by hand so the status is 302/301 instead of axum's default
     // 303/308. A URL with characters a header cannot
@@ -861,54 +838,6 @@ mod tests {
         // formatting varies; just check the name shows up somewhere.
         let s = format!("{err}");
         assert!(s.contains("absent") || s.contains("not found"), "got: {s}");
-    }
-
-    // ---------------- redirect_to_login ----------------
-
-    #[tokio::test]
-    async fn redirect_to_login_appends_next_with_question_mark() {
-        let res = redirect_to_login("/profile", "/login");
-        assert_eq!(res.status(), StatusCode::FOUND);
-        let loc = res
-            .headers()
-            .get(axum::http::header::LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(loc, "/login?next=%2Fprofile");
-    }
-
-    #[tokio::test]
-    async fn redirect_to_login_appends_next_with_ampersand_when_url_has_query() {
-        let res = redirect_to_login("/profile", "/login?lang=fr");
-        let loc = res
-            .headers()
-            .get(axum::http::header::LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(loc, "/login?lang=fr&next=%2Fprofile");
-    }
-
-    #[tokio::test]
-    async fn redirect_to_login_encodes_special_chars_in_next() {
-        // Path with spaces, ampersand, slashes — all must survive the
-        // round-trip back into the login handler as a clean ?next=.
-        let res = redirect_to_login("/posts/42?utm=ad&q=spaces here", "/login");
-        let loc = res
-            .headers()
-            .get(axum::http::header::LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert!(loc.starts_with("/login?next="), "got: {loc}");
-        // Spaces / ? / & all become percent-escaped.
-        assert!(!loc[12..].contains(' '), "next= must percent-escape spaces");
-        assert!(!loc[12..].contains('&'), "next= must percent-escape &");
-        assert!(!loc[12..].contains('?'), "next= must percent-escape ?");
     }
 
     // ---------------- json_response / json_ok / json_bad_request ----------------

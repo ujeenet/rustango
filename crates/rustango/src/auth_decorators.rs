@@ -746,6 +746,13 @@ mod tests {
         assert!(url.contains("%3F") || url.contains("%26") || url.contains("page%3D2"));
     }
 
+    /// `&` and `?` inside `next` must not end the value early.
+    #[test]
+    fn build_login_url_escapes_ampersand_and_question_mark() {
+        let url = build_login_url("/login", "next", "/p?a=1&b=2");
+        assert_eq!(url, "/login?next=%2Fp%3Fa%3D1%26b%3D2");
+    }
+
     #[test]
     fn redirect_to_login_returns_302_with_location() {
         let res = redirect_to_login("/login", "next", "/profile");
@@ -756,6 +763,13 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap();
         assert_eq!(loc, "/login?next=%2Fprofile");
+    }
+
+    #[test]
+    fn redirect_to_login_joins_with_ampersand_after_a_query() {
+        let res = redirect_to_login("/login?lang=fr", "next", "/profile");
+        let loc = res.headers().get(header::LOCATION).unwrap();
+        assert_eq!(loc, "/login?lang=fr&next=%2Fprofile");
     }
 
     #[test]
