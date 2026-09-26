@@ -271,6 +271,23 @@ async fn another_members_row_is_not_found_by_id() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// A failed login is the `ApiError` envelope, like every JSON error (#1684).
+#[tokio::test]
+async fn a_bad_login_is_an_api_error() {
+    let (app, _, _, _) = app("acme", "bad_login").await;
+    let login = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"username":"alice","password":"wrong"}"#))
+        .expect("request");
+    let resp = app.oneshot(login).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let v = json(resp).await;
+    assert_eq!(v["error"], "unauthorized", "{v}");
+    assert_eq!(v["message"], "invalid credentials", "{v}");
+}
+
 /// Login, use, logout, refused: the router and the middleware share one
 /// `JwtAuth`, so the logout's revocation reaches the middleware (#1190).
 #[tokio::test]
@@ -316,7 +333,15 @@ async fn a_token_from_another_tenant_is_refused() {
         ))
         .await
         .expect("response");
+    assert_unauthorized(resp, "invalid or expired token").await;
+}
+
+/// The `ApiError` 401 `require_bearer` sends (#1684).
+async fn assert_unauthorized(resp: axum::response::Response, message: &str) {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let v = json(resp).await;
+    assert_eq!(v["error"], "unauthorized", "{v}");
+    assert_eq!(v["message"], message, "{v}");
 }
 
 #[tokio::test]
@@ -329,7 +354,7 @@ async fn a_deactivated_account_stops_working_immediately() {
         .oneshot(req(Method::GET, "/notes", Some(&token_for(ghost, "acme"))))
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_unauthorized(resp, "invalid or expired token").await;
 }
 
 #[tokio::test]
@@ -340,11 +365,11 @@ async fn no_token_is_401_and_never_reaches_the_query() {
         .oneshot(req(Method::GET, "/notes", None))
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_unauthorized(resp, "missing Bearer token").await;
 
     let resp = app
         .oneshot(req(Method::GET, "/notes", Some("not-a-token")))
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_unauthorized(resp, "invalid or expired token").await;
 }

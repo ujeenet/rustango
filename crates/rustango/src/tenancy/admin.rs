@@ -351,8 +351,9 @@ where
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
         Err(e) => {
-            warn!(target: "rustango::tenancy::admin", error = %e, "resolver error");
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            // Logged, not sent: the resolver error can name the registry host.
+            let body = crate::error::server_error_body("tenancy::admin::resolve", &e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
         }
     };
 
@@ -362,13 +363,9 @@ where
     let pool = match pools.scoped_pool_dyn(&org).await {
         Ok(p) => p,
         Err(e) => {
-            warn!(
-                target: "rustango::tenancy::admin",
-                slug = %org.slug,
-                error = %e,
-                "tenant pool build failed",
-            );
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            // Before the session check, and the text can name the tenant DB host.
+            let body = crate::error::server_error_body("tenancy::admin::pool", &e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
         }
     };
 
@@ -1561,10 +1558,12 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
             | branding::BrandError::InvalidSlug
             | branding::BrandError::InvalidFilename,
         ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => {
-            warn!(target: "rustango::tenancy::admin", error = %e, "brand asset");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        // Unauthenticated route; a storage error can name the bucket or path.
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::error::server_error_body("tenancy::admin::brand_asset", &e),
+        )
+            .into_response(),
     }
 }
 
@@ -1573,6 +1572,58 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
 /// `Location` — rather than `urls::url_has_allowed_host_and_scheme`,
 /// which nothing in this codebase calls and which is where the
 /// original fix landed.
+/// A resolver failure is a 500 whose body withholds the driver text (#1684).
+#[cfg(all(test, feature = "sqlite"))]
+mod resolver_error_tests {
+    use super::*;
+    use crate::tenancy::TenancyError;
+
+    struct Failing;
+
+    #[async_trait::async_trait]
+    impl OrgResolver for Failing {
+        async fn resolve(
+            &self,
+            _parts: &axum::http::request::Parts,
+            _registry: &crate::sql::Pool,
+        ) -> Result<Option<Org>, TenancyError> {
+            Err(TenancyError::Resolution(
+                "could not reach registry-db:5432".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_500_withholds_the_resolver_text() {
+        let _env = crate::error::test_env::lock();
+        let registry = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pools = TenantPools::<sqlx::Sqlite>::new(registry);
+        let storage: BoxedStorage = Arc::new(crate::storage::InMemoryStorage::new());
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let resp = handle_request(
+            req,
+            &pools,
+            "",
+            &Failing,
+            &None,
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &storage,
+            &super::super::routes::RouteConfig::default(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("registry-db"), "{text}");
+    }
+}
+
 #[cfg(test)]
 mod sanitize_next_tests {
     use super::sanitize_next_with_routes;
