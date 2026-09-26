@@ -3,6 +3,10 @@
 //! Light on purpose: no async, no database drivers, no proc-macros.
 //! Anything the macro output and the runtime both name lives here.
 
+// A new public enum here must be `#[non_exhaustive]`, so it can grow
+// without a breaking release (#1661).
+#![deny(clippy::exhaustive_enums)]
+
 pub mod aggregates;
 pub mod case;
 mod column;

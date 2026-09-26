@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — `rustango::core` enums are `#[non_exhaustive]` (#1661)
+
+**Breaking** only for exhaustive matches; see UPGRADING. 29 enums can
+now gain a variant without a breaking release, and
+`clippy::exhaustive_enums` is denied in `core` so a new one cannot
+slip in exhaustive.
 ### Changed — one error envelope across the framework (#1193)
 
 **Breaking** for clients parsing error bodies. See UPGRADING.

@@ -6,6 +6,7 @@
 
 /// Kind of value stored in a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum FieldType {
     /// `i16` — `SMALLINT` on Postgres and MySQL, range
     /// `-32768..=32767`. This is the smallest portable integer width.
@@ -66,6 +67,7 @@ pub enum FieldType {
 /// Element type of a [`FieldType::Range`] column. Picks the Postgres
 /// range type the migration writer emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RangeElem {
     /// `int4range` — element `i32` ([`crate::sql::Range<i32>`]).
     Int,
@@ -97,6 +99,7 @@ impl RangeElem {
 /// array type the migration writer emits. Kept a small `Copy` enum so
 /// [`FieldType`] stays `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ArrayElem {
     /// `text[]` — element type `String` ([`crate::sql::Array<String>`]).
     Text,
