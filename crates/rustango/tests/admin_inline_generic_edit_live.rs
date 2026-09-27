@@ -367,3 +367,69 @@ async fn generic_inline_update_cannot_reparent_via_form_payload() {
         "object_pk must NOT change — slice 2 skips polymorphic columns on UPDATE"
     );
 }
+
+/// #1667: a tag PK owned by another post matches nothing, for UPDATE and DELETE.
+#[tokio::test]
+async fn generic_inline_cannot_touch_another_parents_row() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    fresh(&pool).await;
+    let p = rustango::sql::Pool::from(pool.clone());
+
+    let mut post_a = Post {
+        id: Auto::Unset,
+        title: "A".into(),
+    };
+    post_a.save_pool(&p).await.unwrap();
+    let post_a_pk = *post_a.id.get().unwrap();
+    let mut post_b = Post {
+        id: Auto::Unset,
+        title: "B".into(),
+    };
+    post_b.save_pool(&p).await.unwrap();
+
+    let mut tag = Tag {
+        id: Auto::Unset,
+        content_type_id: 0,
+        object_pk: 0,
+        name: "b-tag".into(),
+    };
+    tag.set_content_object_for::<Post>(&p, *post_b.id.get().unwrap())
+        .await
+        .unwrap();
+    tag.save_pool(&p).await.unwrap();
+    let tag_id_s = tag.id.get().unwrap().to_string();
+
+    for delete in [false, true] {
+        let mut form: HashMap<&str, &str> = HashMap::new();
+        form.insert("title", "A");
+        form.insert("gige_tag-TOTAL_FORMS", "1");
+        form.insert("gige_tag-INITIAL_FORMS", "1");
+        form.insert("gige_tag-MAX_NUM_FORMS", "");
+        form.insert("gige_tag-0-id", tag_id_s.as_str());
+        form.insert("gige_tag-0-name", "hijacked");
+        if delete {
+            form.insert("gige_tag-0-DELETE", "on");
+        }
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/gige_post/{post_a_pk}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(urlencode(&form)))
+            .unwrap();
+        let res = rustango::admin::router(pool.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "delete={delete}");
+    }
+
+    let names: Vec<(String,)> = sqlx::query_as(r#"SELECT name FROM "gige_tag""#)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(names, vec![("b-tag".to_owned(),)]);
+}
