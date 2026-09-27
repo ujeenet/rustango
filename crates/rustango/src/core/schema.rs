@@ -307,6 +307,7 @@ pub struct GenericRelation {
 }
 
 impl GenericRelation {
+    /// A generic FK: the content-type column, then the object-PK column.
     #[must_use]
     pub const fn new(name: &'static str, ct_column: &'static str, pk_column: &'static str) -> Self {
         Self {
@@ -347,6 +348,7 @@ pub struct ReverseRelation {
 }
 
 impl ReverseRelation {
+    /// A reverse FK: the child model, its FK column, then this model's PK column.
     #[must_use]
     pub const fn new(
         name: &'static str,
@@ -397,6 +399,8 @@ pub struct GenericReverseRelation {
 }
 
 impl GenericReverseRelation {
+    /// A reverse generic FK: the child, its content-type and object-PK
+    /// columns, then this model's PK column.
     #[must_use]
     pub const fn new(
         name: &'static str,
@@ -440,6 +444,7 @@ pub struct CompositeFkRelation {
 }
 
 impl CompositeFkRelation {
+    /// A composite FK from the local `from` columns to `to.on`, matched by position.
     #[must_use]
     pub const fn new(
         name: &'static str,
@@ -759,6 +764,7 @@ pub struct GlobalScope {
 }
 
 impl GlobalScope {
+    /// A scope named `name` whose filter `apply` builds.
     #[must_use]
     pub const fn new(name: &'static str, apply: fn() -> crate::core::WhereExpr) -> Self {
         Self { name, apply }
@@ -901,6 +907,7 @@ pub struct CheckConstraint {
 }
 
 impl CheckConstraint {
+    /// A `CHECK (expr)` constraint named `name`.
     #[must_use]
     pub const fn new(name: &'static str, expr: &'static str) -> Self {
         Self { name, expr }
@@ -1228,6 +1235,7 @@ pub struct PrepopulatedField {
 }
 
 impl PrepopulatedField {
+    /// Fills `target` from the slugified `sources`.
     #[must_use]
     pub const fn new(target: &'static str, sources: &'static [&'static str]) -> Self {
         Self { target, sources }
@@ -1249,6 +1257,7 @@ pub struct Fieldset {
 }
 
 impl Fieldset {
+    /// A fieldset titled `title`; an empty title renders no legend.
     #[must_use]
     pub const fn new(title: &'static str, fields: &'static [&'static str]) -> Self {
         Self { title, fields }
@@ -1378,6 +1387,7 @@ pub struct ModelEntry {
 }
 
 impl ModelEntry {
+    /// Registry entry; `module_path` is `module_path!()` at the model.
     #[must_use]
     pub const fn new(schema: &'static ModelSchema, module_path: &'static str) -> Self {
         Self {

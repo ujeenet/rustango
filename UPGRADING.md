@@ -208,9 +208,9 @@ that only uses the `QuerySet` API or `#[derive(Model)]` is unaffected.
 
 ### Schema structs are `#[non_exhaustive]`
 
-`FieldSchema`, `ModelSchema`, `AdminConfig`, `IndexSchema`, the
-relation and constraint structs, and `Relation::Fk` / `Relation::O2O`
-(#1661). A hand-built schema now fails with `E0639`. Start from `new`
+`FieldSchema`, `ModelSchema`, `AdminConfig`, `IndexSchema`,
+`GlobalScope`, `Fieldset`, `PrepopulatedField`, the relation and
+constraint structs, and `Relation::Fk` / `Relation::O2O` (#1661). A hand-built schema now fails with `E0639`. Start from `new`
 (or `AdminConfig::DEFAULT`) and assign fields:
 
 ```rust
@@ -222,7 +222,8 @@ const ID: FieldSchema = {
 let rel = Relation::fk("user", "id");
 ```
 
-A pattern on a variant needs `..`: `Relation::Fk { to, on, .. }`.
+A pattern on a variant needs `..` (`Relation::Fk { to, on, .. }`), or
+it fails with `E0638`.
 `SqlError` and `ExecError` are also `#[non_exhaustive]`; add a `_ =>`
 arm. `#[derive(Model)]` users are unaffected.
 

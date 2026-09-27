@@ -2587,7 +2587,13 @@ fn model_impl_tokens(
     // consumer's scope; the name is stored as a string literal.
     let global_scope_tokens = global_scopes.iter().map(|s| {
         let name = s.name.as_str();
-        let apply = &s.apply;
+        // The slice sits in a nested `const`, where `Self` does not resolve.
+        let mut apply = s.apply.clone();
+        if let Some(first) = apply.segments.first_mut() {
+            if first.ident == "Self" {
+                first.ident = struct_name.clone();
+            }
+        }
         quote!(#root::core::GlobalScope::new(#name, #apply))
     });
 
