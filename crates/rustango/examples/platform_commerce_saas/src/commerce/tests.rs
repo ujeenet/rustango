@@ -138,7 +138,7 @@ fn the_storefront_escapes_product_text() {
     let li = super::views::product_item(&p);
     assert!(!li.contains("<script>") && !li.contains("<b>"), "got: {li}");
     assert!(
-        li.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        li.contains(&rustango::text::html_escape("<script>alert(1)</script>")),
         "got: {li}"
     );
 }
