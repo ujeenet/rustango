@@ -101,6 +101,41 @@ async fn seed_permissions_never_binds_a_tenant_fk_to_public() {
         Vec::<String>::new()
     );
 
+    // UPGRADING's repair: drop the constraint, re-run `seed-permissions --slug`.
+    let fks = [
+        ("rustango_role_permissions", "role_id"),
+        ("rustango_user_roles", "user_id"),
+        ("rustango_user_roles", "role_id"),
+        ("rustango_user_permissions", "user_id"),
+    ];
+    for (table, column) in fks {
+        sqlx::query(&format!(
+            r#"ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT "{table}_{column}_fkey""#
+        ))
+        .execute(&registry)
+        .await
+        .unwrap();
+    }
+    run(&pools, &url, &["seed-permissions", "--slug", slug])
+        .await
+        .unwrap();
+    for (table, column) in fks {
+        let target: String = sqlx::query_scalar(
+            "SELECT tn.nspname FROM pg_constraint c \
+             JOIN pg_class t ON t.oid = c.confrelid \
+             JOIN pg_namespace tn ON tn.oid = t.relnamespace \
+             JOIN pg_class s ON s.oid = c.conrelid \
+             JOIN pg_namespace sn ON sn.oid = s.relnamespace \
+             WHERE c.conname = $1 AND sn.nspname = $2",
+        )
+        .bind(format!("{table}_{column}_fkey"))
+        .bind(&schema)
+        .fetch_one(&registry)
+        .await
+        .unwrap_or_else(|e| panic!("{table}.{column} FK not re-created: {e}"));
+        assert_eq!(target, schema, "{table}.{column}");
+    }
+
     drop(scoped);
     drop(pools);
     registry.close().await;
