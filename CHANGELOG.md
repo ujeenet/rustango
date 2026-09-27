@@ -58,7 +58,10 @@ type and object pk), and inserts always set the parent, ignoring a
 submitted FK. Each inline row passes the child table's own admin gates
 first. A child PK from another parent returns 404; a refused gate
 returns 403 and the parent is not saved. Inline and child
-`readonly_fields` are no longer written.
+`readonly_fields` are no longer written. Rows you did not edit skip
+the change check, so one locked child row no longer blocks the save. A
+child deleted by someone else since the page loaded counts as deleted;
+editing it re-renders the form with a message.
 
 ### Security — webhook delivery checks its target (#1670)
 
