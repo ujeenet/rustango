@@ -11,9 +11,7 @@ key, so tenants picked by `X-Org` on one Host no longer share a page.
 With `tenancy` on and no tenant context it does not cache; opt out per
 route with `tenant_agnostic(true)`. `DatabaseCache` stores keys over
 255 bytes as a 190-byte head plus SHA-256, so they round-trip on MySQL
-instead of truncating and colliding. `DistributedLock::for_tenant` and
-`scoped` now use the `ScopedCache` layout, so a tenant clear drops that
-tenant's locks.
+instead of truncating and colliding.
 
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 

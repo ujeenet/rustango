@@ -923,3 +923,28 @@ async fn cache_authenticated_opt_in_allows_cookie_requests() {
     // Second served from cache → handler ran once.
     assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
 }
+
+/// Without `tenancy` the default layer caches; there is no tenant to resolve.
+#[cfg(not(feature = "tenancy"))]
+#[tokio::test]
+async fn default_layer_caches_without_tenancy() {
+    let hits = Arc::new(AtomicU32::new(0));
+    let h = hits.clone();
+    let app: Router = Router::new()
+        .route(
+            "/page",
+            get(move || {
+                let h = h.clone();
+                async move { h.fetch_add(1, Ordering::SeqCst).to_string() }
+            }),
+        )
+        .layer(CachePageLayer::new(Arc::new(InMemoryCache::new())));
+    for _ in 0..2 {
+        let req = Request::builder().uri("/page").body(Body::empty()).unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}

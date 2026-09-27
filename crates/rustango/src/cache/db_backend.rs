@@ -25,7 +25,8 @@
 //! - SQLite:   `cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL DEFAULT 0`
 //!
 //! A key longer than 255 bytes is stored as its first 190 bytes plus
-//! `#` and its SHA-256, so it fits MySQL's column and stays unique.
+//! `#` and its SHA-256, so it fits MySQL's column and stays unique. A
+//! shorter key that already ends that way is hashed too.
 //!
 //! `expires` holds Unix **milliseconds**; `0` means the entry never
 //! expires. An entry is expired once now is *past* `expires`, not once
@@ -56,13 +57,14 @@ const MAX_RAW_KEY_BYTES: usize = 255;
 const HASHED_HEAD_BYTES: usize = MAX_RAW_KEY_BYTES - 1 - 64;
 
 /// The `cache_key` column value: the key itself, or `{head}#{sha256 hex}`
-/// when it is longer than [`MAX_RAW_KEY_BYTES`].
+/// when it is longer than [`MAX_RAW_KEY_BYTES`] or already ends like a hash,
+/// so a raw key never equals a hashed one.
 struct StoredKey(String);
 
 impl StoredKey {
     fn new(key: &str) -> Self {
         use sha2::{Digest, Sha256};
-        if key.len() <= MAX_RAW_KEY_BYTES {
+        if key.len() <= MAX_RAW_KEY_BYTES && !ends_like_hash(key) {
             return Self(key.to_owned());
         }
         let digest = crate::hex::hex_encode(&Sha256::digest(key.as_bytes()));
@@ -72,6 +74,16 @@ impl StoredKey {
     fn into_value(self) -> SqlValue {
         SqlValue::String(self.0)
     }
+}
+
+/// Whether `key` ends in `#` plus 64 lowercase hex, the hashed form's tail.
+fn ends_like_hash(key: &str) -> bool {
+    let b = key.as_bytes();
+    b.len() >= 65
+        && b[b.len() - 65] == b'#'
+        && b[b.len() - 64..]
+            .iter()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
 }
 
 /// `s` cut to at most [`HASHED_HEAD_BYTES`], on a char boundary.
@@ -439,6 +451,15 @@ mod tests {
         assert!(a.len() <= MAX_RAW_KEY_BYTES, "{}", a.len());
         assert_ne!(a, b);
         assert!(a.starts_with(head(&base)));
+    }
+
+    #[test]
+    fn a_raw_key_never_equals_a_hashed_one() {
+        let long = "x".repeat(300);
+        let hashed = StoredKey::new(&long).0;
+        assert!(hashed.len() <= MAX_RAW_KEY_BYTES);
+        // Writing the hashed form as a raw key must not reach the long key's row.
+        assert_ne!(StoredKey::new(&hashed).0, hashed);
     }
 
     #[test]

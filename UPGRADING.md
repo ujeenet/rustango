@@ -150,15 +150,23 @@ untouched.
 
 ## Unreleased
 
-### Page cache and lock keys change shape
+### Page cache keys include the tenant
 
 Page cache keys now include the tenant (#1674), so cached pages miss
-once after upgrade. Under `tenancy` a `CachePageLayer` outside the
-tenancy layer stops caching; mount it on a router passed to the server
-builder, or add `.tenant_agnostic(true)` for tenant-free routes.
-`DatabaseCache` keys over 255 bytes are hashed, so those entries miss
-once. Scoped lock keys move from `lock:tenant:{slug}:{name}` to
-`tenant:{slug}:lock:{name}`; drain scoped jobs before deploying.
+once after upgrade.
+
+### The page cache stops caching outside the tenancy layer
+
+Under `tenancy`, a `CachePageLayer` that cannot see the tenant context
+no longer caches. Mount it on a router passed to the server builder,
+or add `.tenant_agnostic(true)` for routes that are the same for every
+tenant. A CDN in front must vary on the tenant header itself.
+
+### Long database cache keys change stored form
+
+`DatabaseCache` keys over 255 bytes, or ending in `#` plus 64 hex, are
+now stored hashed, so those entries miss once. Run `cache.clear()`
+after upgrading to drop the old rows.
 
 ### The trusted client IP is the rightmost untrusted hop
 

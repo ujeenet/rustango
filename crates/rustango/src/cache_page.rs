@@ -61,7 +61,8 @@
 //!   tenant picked by a header never gets another tenant's page. Mount
 //!   the layer inside the tenancy layer (any router passed to the
 //!   server builder is). Where no tenant context is present it does
-//!   not cache, unless [`CachePageLayer::tenant_agnostic`] is set.
+//!   not cache, unless [`CachePageLayer::tenant_agnostic`] is set. A
+//!   CDN in front must still vary on the tenant header itself.
 //!
 //! [`CachePageLayer`]: crate::cache_page::CachePageLayer
 //! [`CachePageLayer::cache_query`]: crate::cache_page::CachePageLayer::cache_query
@@ -323,14 +324,14 @@ where
             }
 
             let (req, tenant) = if tenant_agnostic {
-                (req, PageTenant::None)
+                (req, PageTenant::NoTenant)
             } else {
                 request_tenant(req).await
             };
             let tenant = match tenant {
                 PageTenant::Unknown => return inner.call(req).await,
                 PageTenant::Slug(slug) => Some(slug),
-                PageTenant::None => None,
+                PageTenant::NoTenant => None,
             };
             let key = compute_cache_key(
                 &prefix,
@@ -447,20 +448,24 @@ const X_CACHE_STATUS: HeaderName = HeaderName::from_static("x-cache-status");
 #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
 enum PageTenant {
     /// No tenant: tenancy is off, or the resolver matched none.
-    None,
+    NoTenant,
     Slug(String),
     /// No tenant context, or resolution failed: never share a page.
     Unknown,
 }
 
-/// Resolve the request's tenant with the resolver of the mounted
-/// tenant context.
+/// The request's tenant: a `TenantSlug` already set, else the mounted
+/// tenant context's resolver.
 #[cfg(feature = "tenancy")]
 async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
+    if let Some(crate::tenancy::TenantSlug(slug)) = req.extensions().get() {
+        let slug = slug.clone();
+        return (req, PageTenant::Slug(slug));
+    }
     let (parts, body) = req.into_parts();
     let tenant = match crate::tenancy::middleware::request_org(&parts, &parts.extensions).await {
         Some(Ok(Some(org))) => PageTenant::Slug(org.slug),
-        Some(Ok(None)) => PageTenant::None,
+        Some(Ok(None)) => PageTenant::NoTenant,
         Some(Err(e)) => {
             tracing::warn!(target: "rustango::cache_page", error = %e, "tenant resolution failed; not caching");
             PageTenant::Unknown
@@ -476,7 +481,7 @@ async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
 #[cfg(not(feature = "tenancy"))]
 #[allow(clippy::unused_async)]
 async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
-    (req, PageTenant::None)
+    (req, PageTenant::NoTenant)
 }
 
 /// Log once per process: a misplaced layer would otherwise just stop caching.
@@ -514,10 +519,16 @@ fn compute_cache_key(
     write_lp(&mut k, req.uri().query().unwrap_or(""));
     // Default: partition on Host so multi-tenant deployments don't
     // mix tenants' responses. `vary_on` can still add more.
+    // HTTP/2 sends `:authority`, not `Host`.
     let host = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
+        .or_else(|| {
+            req.uri()
+                .authority()
+                .map(axum::http::uri::Authority::as_str)
+        })
         .unwrap_or("");
     write_lp(&mut k, host);
     // Slugs are never empty, so "" means "no tenant".
