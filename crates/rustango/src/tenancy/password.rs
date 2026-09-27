@@ -8,6 +8,12 @@
 //! Argon2id with the OWASP-recommended cost (m=19456, t=2, p=1 as of
 //! 2026). There is no hook for stronger parameters yet: [`hash`] uses
 //! the defaults.
+//!
+//! From async code use the `*_async` variants; the sync calls block a
+//! runtime worker.
+
+// This module owns the sync calls the lint bans elsewhere.
+#![allow(clippy::disallowed_methods)]
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
@@ -104,6 +110,29 @@ pub fn verify(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
 /// `Argon2::default()` cost as [`verify`] above.
 pub fn verify_dummy(plaintext: &str) {
     crate::passwords::verify_dummy(plaintext);
+}
+
+/// [`hash`] on the blocking pool. Use this from async code.
+///
+/// # Errors
+/// As [`hash`].
+pub async fn hash_async(plaintext: &str) -> Result<String, TenancyError> {
+    let plaintext = plaintext.to_owned();
+    crate::passwords::off_runtime(move || hash(&plaintext)).await
+}
+
+/// [`verify`] on the blocking pool. Use this from async code.
+///
+/// # Errors
+/// As [`verify`].
+pub async fn verify_async(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
+    let (plaintext, phc_hash) = (plaintext.to_owned(), phc_hash.to_owned());
+    crate::passwords::off_runtime(move || verify(&plaintext, &phc_hash)).await
+}
+
+/// [`verify_dummy`] on the blocking pool. Use this from async code.
+pub async fn verify_dummy_async(plaintext: &str) {
+    crate::passwords::verify_dummy_async(plaintext).await;
 }
 
 #[cfg(test)]

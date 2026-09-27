@@ -1325,12 +1325,13 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let ok =
-        super::password::verify(&form.current_password, &op_row.password_hash).unwrap_or(false);
+    let ok = super::password::verify_async(&form.current_password, &op_row.password_hash)
+        .await
+        .unwrap_or(false);
     if !ok {
         return redir_err("Current password did not match.");
     }
-    let new_hash = match super::password::hash(&form.new_password) {
+    let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
         Err(e) => return redir_err(&format!("hash failed: {e}")),
     };

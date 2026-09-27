@@ -652,7 +652,8 @@ async fn provision_member(
         let mut user = User {
             id: Auto::Unset,
             username,
-            password_hash: crate::tenancy::password::hash(&random_unusable_secret())
+            password_hash: crate::tenancy::password::hash_async(&random_unusable_secret())
+                .await
                 .map_err(|e| format!("hash: {e}"))?,
             email: Some(email.to_owned()),
             is_superuser: false,

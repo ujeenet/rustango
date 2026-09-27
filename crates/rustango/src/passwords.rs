@@ -23,6 +23,12 @@
 //!     return Err("bad credentials");
 //! }
 //! ```
+//!
+//! From async code call [`hash_async`] / [`verify_async`] /
+//! [`verify_dummy_async`]; the sync calls block a runtime worker.
+
+// This module owns the sync calls the lint bans elsewhere.
+#![allow(clippy::disallowed_methods)]
 
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordError {
@@ -91,6 +97,61 @@ fn dummy_hash() -> &'static str {
 /// attacker which accounts exist.
 pub fn verify_dummy(password: &str) {
     let _ = verify(password, dummy_hash());
+}
+
+// ------------------------------------------------------------------ Async variants
+
+/// [`hash`] on the blocking pool. Use this from async code: an inline
+/// argon2 call parks a runtime worker for the whole hash.
+///
+/// # Errors
+/// As [`hash`].
+pub async fn hash_async(password: &str) -> Result<String, PasswordError> {
+    let password = password.to_owned();
+    off_runtime(move || hash(&password)).await
+}
+
+/// [`verify`] on the blocking pool.
+///
+/// # Errors
+/// As [`verify`].
+pub async fn verify_async(password: &str, stored_hash: &str) -> Result<bool, PasswordError> {
+    let (password, stored_hash) = (password.to_owned(), stored_hash.to_owned());
+    off_runtime(move || verify(&password, &stored_hash)).await
+}
+
+/// [`verify_dummy`] on the blocking pool.
+pub async fn verify_dummy_async(password: &str) {
+    let password = password.to_owned();
+    off_runtime(move || verify_dummy(&password)).await;
+}
+
+/// Run argon2 work on the blocking pool, at most one job per CPU at once.
+/// A panic in `f` resumes in the caller, as it would inline.
+pub(crate) async fn off_runtime<T, F>(f: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    use std::sync::{Arc, OnceLock};
+    use tokio::sync::Semaphore;
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    let slots = SLOTS.get_or_init(|| {
+        let n = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+        Arc::new(Semaphore::new(n))
+    });
+    // The permit moves into the job, so a dropped caller still holds
+    // its slot until the hash finishes.
+    let permit = Arc::clone(slots)
+        .acquire_owned()
+        .await
+        .expect("password semaphore is never closed");
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
+    .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
 }
 
 // ------------------------------------------------------------------ Strength check
@@ -199,6 +260,41 @@ mod tests {
         assert!(!verify("whatever-an-attacker-types", dummy_hash()).unwrap());
         // The public entry point never panics.
         verify_dummy("whatever-an-attacker-types");
+    }
+
+    /// On a current-thread runtime an inline hash freezes every other
+    /// task; off the runtime a 1 ms ticker keeps running (#1709).
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_variants_do_not_block_the_runtime() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let t = Arc::clone(&ticks);
+        let ticker = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                t.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        tokio::task::yield_now().await;
+        let before = ticks.load(Ordering::Relaxed);
+        let h = hash_async("correct horse battery staple").await.unwrap();
+        assert!(verify_async("correct horse battery staple", &h)
+            .await
+            .unwrap());
+        verify_dummy_async("nobody").await;
+        let during = ticks.load(Ordering::Relaxed) - before;
+        ticker.abort();
+        assert!(
+            during >= 2,
+            "runtime stalled while hashing ({during} ticks)"
+        );
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "boom")]
+    async fn off_runtime_resumes_a_panic() {
+        off_runtime(|| panic!("boom")).await;
     }
 
     #[test]

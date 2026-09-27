@@ -137,7 +137,7 @@ pub struct User {
 /// Returns `Ok(Some(operator))` on success, `Ok(None)` for an unknown
 /// username, a wrong password, OR an inactive (`active = false`)
 /// operator — always the same `Ok(None)`. The unknown-username path
-/// runs a dummy Argon2 verify ([`password::verify_dummy`]) and the
+/// runs a dummy Argon2 verify ([`password::verify_dummy_async`]) and the
 /// active check happens *after* the real verify, so response timing
 /// doesn't reveal whether the account exists (audit H1).
 ///
@@ -180,12 +180,12 @@ pub async fn authenticate_operator_pool(
     let Some(op) = rows.into_iter().next() else {
         // H1: spend a verify's worth of work on the unknown-user path
         // so timing doesn't reveal whether the account exists.
-        password::verify_dummy(password);
+        password::verify_dummy_async(password).await;
         return Ok(None);
     };
     // Verify before the active check so active vs inactive accounts
     // take the same time (audit H1).
-    let password_ok = password::verify(password, &op.password_hash)?;
+    let password_ok = password::verify_async(password, &op.password_hash).await?;
     if !op.active || !password_ok {
         return Ok(None);
     }
@@ -230,7 +230,7 @@ pub async fn authenticate_user(
     .await?;
     let Some(row) = user_rows else {
         // H1: equalize timing for the unknown-user path.
-        password::verify_dummy(password);
+        password::verify_dummy_async(password).await;
         return Ok(None);
     };
     let user = User {
@@ -252,7 +252,7 @@ pub async fn authenticate_user(
             .ok()
             .flatten(),
     };
-    let password_ok = password::verify(password, &user.password_hash)?;
+    let password_ok = password::verify_async(password, &user.password_hash).await?;
     if !user.active || !password_ok {
         return Ok(None);
     }
@@ -291,10 +291,10 @@ pub async fn authenticate_user_pool(
         .await?;
     let Some(user) = rows.into_iter().next() else {
         // H1: equalize timing for the unknown-user path.
-        password::verify_dummy(password);
+        password::verify_dummy_async(password).await;
         return Ok(None);
     };
-    let password_ok = password::verify(password, &user.password_hash)?;
+    let password_ok = password::verify_async(password, &user.password_hash).await?;
     if !user.active || !password_ok {
         return Ok(None);
     }
