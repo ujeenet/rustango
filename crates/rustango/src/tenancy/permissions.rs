@@ -237,12 +237,7 @@ pub async fn ensure_tables_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Err
         UserRole::SCHEMA,
         UserPermission::SCHEMA,
     ]);
-    let changes =
-        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
-    let batch =
-        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
-            .map_err(sqlx::Error::Protocol)?;
-    crate::migrate::apply_idempotent(pool, &batch).await?;
+    crate::migrate::apply_idempotent(pool, &snapshot).await?;
     Ok(())
 }
 

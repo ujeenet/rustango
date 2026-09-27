@@ -162,15 +162,10 @@ pub async fn migrate_framework(pool: &Pool) -> Result<(), MigrateError> {
         .filter(|m| m.managed && m.table.starts_with("rustango_") && seen.insert(m.table))
         .collect();
     let snapshot = crate::migrate::SchemaSnapshot::from_models(&models);
-    let empty = crate::migrate::SchemaSnapshot::default();
-    let changes = crate::migrate::detect_changes(&empty, &snapshot);
-    let batch =
-        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
-            .map_err(MigrateError::Validation)?;
     // The sixth copy of this loop used to live here, matching English
     // error text. It is the path most live suites use to build their
     // tables, so a genuinely failed setup reported `Ok` (#1646).
-    crate::migrate::apply_idempotent(pool, &batch)
+    crate::migrate::apply_idempotent(pool, &snapshot)
         .await
         .map_err(|e| MigrateError::Validation(format!("{e}")))?;
     Ok(())
