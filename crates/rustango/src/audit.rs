@@ -1061,31 +1061,34 @@ pub async fn save_one_with_audit(
     Ok(affected)
 }
 
-/// Run an `InsertQuery`, capture the auto-assigned PK, and emit the audit
-/// entry in one transaction. Used by the generated `Model::insert_pool`
-/// for audited models.
-///
-/// Returns the same [`crate::sql::InsertReturningPool`] as the
-/// non-audited [`crate::sql::insert_returning_pool`].
+/// Run an `InsertQuery`, write the assigned PK back into `model`, then
+/// emit `entry(model)` in the same transaction, so the audit row carries
+/// the real PK. Used by the generated `Model::insert_pool` for audited
+/// models.
 ///
 /// MySQL fills in only one `Auto<T>` PK, because a connection has a
 /// single `LAST_INSERT_ID()`. A model with more than one returns
 /// `SqlError::OperatorNotSupportedInDialect`, as on the non-audited path.
 ///
 /// # Errors
-/// Any [`crate::sql::ExecError`] from compile, bind or execute, plus
-/// `sqlx::Error` from the audit emit.
-pub async fn insert_one_with_audit(
+/// Any [`crate::sql::ExecError`] from compile, bind, execute or PK
+/// decode, plus `sqlx::Error` from the audit emit.
+pub async fn insert_one_with_audit<M>(
     pool: &crate::sql::Pool,
     query: &crate::core::InsertQuery,
-    entry: &PendingEntry,
-) -> Result<crate::sql::InsertReturningPool, crate::sql::ExecError> {
+    model: &mut M,
+    entry: impl FnOnce(&M) -> PendingEntry,
+) -> Result<(), crate::sql::ExecError>
+where
+    M: crate::sql::AssignAutoPkPool,
+{
     // `insert_returning_tx` already handles each backend's return shape.
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
-    emit_one_tx(&mut tx, entry).await?;
+    crate::sql::apply_auto_pk(returning, model)?;
+    emit_one_tx(&mut tx, &entry(model)).await?;
     tx.commit().await?;
-    Ok(returning)
+    Ok(())
 }
 
 /// Postgres bind helper, exposed so generated bodies on the audited
