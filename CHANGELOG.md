@@ -17,7 +17,10 @@ ViewSet create and bulk create now write the PK a client sends for a
 model whose PK is not `Auto<T>` (a `String` slug, say). Before, it was
 dropped: the create failed, and on SQLite with a nullable PK column it
 committed an unreachable NULL-key row. A create with no PK is now a 400
-on every backend. Update still ignores a PK in the body.
+on every backend. Update still ignores a PK in the body. The created
+row is read back by that PK, so MySQL returns the right row and a Uuid
+PK no longer 500s. On SQLite, Uuid columns in ViewSet JSON now show
+their value instead of `null`.
 
 ### Security — CSRF refuses an empty token (#1693)
 
