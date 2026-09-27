@@ -149,6 +149,8 @@ pub(crate) enum MintError {
     Unauthorized,
     /// Something failed on our side.
     Internal,
+    /// No password-hashing slot freed up in time: `503`.
+    Busy,
 }
 
 /// Check `{name, secret}` against the tenant, resolve the agent's
@@ -164,6 +166,9 @@ pub(crate) async fn mint_agent_jwt(
     let agent = match crate::tenancy::authenticate_agent_pool(pool, name, secret).await {
         Ok(Some(a)) => a,
         Ok(None) => return Err(MintError::Unauthorized),
+        Err(crate::tenancy::AgentError::Tenancy(crate::tenancy::TenancyError::Busy)) => {
+            return Err(MintError::Busy)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "mcp agent authentication failed");
             return Err(MintError::Internal);
@@ -215,6 +220,7 @@ pub(crate) async fn agent_token(
         Err(MintError::Internal) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "token issuance failed").into_response()
         }
+        Err(MintError::Busy) => crate::login_throttle::LoginRefused::Busy.into_response(),
     }
 }
 

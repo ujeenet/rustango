@@ -36,6 +36,16 @@ keys: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`,
 `login_global_window_secs`, `hash_wait_ms`; `lockout_threshold` and
 `lockout_duration_secs` now take effect.
 
+The gate checks the account lock, then the per-IP limit, then a
+global limit per login scope (admin, operator console, each tenant); a
+refused request spends nothing from later limits, and successful logins
+are free. IPv6 clients are limited per /64. Once the row is found the
+lock also follows the stored username, so spellings MySQL treats as
+equal share one lock. HTTP Basic and API keys have their own scopes,
+count only failures per IP, and use at most half the hashing slots. A
+failure while locked no longer extends the lock. A busy hash queue
+answers 503 on the password-change pages and agent `/token`.
+
 ### Fixed — session extractors on SQLite and MySQL
 
 `SessionUser`, `SessionOperator` and `CurrentMember` looked only for

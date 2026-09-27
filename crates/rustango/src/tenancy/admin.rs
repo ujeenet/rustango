@@ -991,8 +991,12 @@ async fn login_submit(
     }
 
     // Rate limits and the account lock, before the lookup (#1609).
-    let attempt = match crate::login_throttle::shared()
-        .begin(&format!("tenant:{}", org.slug), &ip, &form.username)
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &ip,
+            &form.username,
+        )
         .await
     {
         Ok(a) => a,
@@ -1046,6 +1050,9 @@ async fn login_submit(
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
+    if let Err(refused) = attempt.resolve(&user.username).await {
+        return refused.into_response();
+    }
     let uid: i64 = user.id.get().copied().unwrap_or(0);
 
     // Verify before the active check so active vs inactive accounts take
@@ -1388,14 +1395,22 @@ async fn change_password_submit(
     let Some(mut user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
-    let ok = super::password::verify_async(&form.current_password, &user.password_hash)
-        .await
-        .unwrap_or(false);
+    let ok = match super::password::verify_async(&form.current_password, &user.password_hash).await
+    {
+        Ok(ok) => ok,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
+        Err(_) => false,
+    };
     if !ok {
         return redir_err("Current password did not match.");
     }
     let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(e) => {
             return redir_err(&format!("hash failed: {e}"));
         }

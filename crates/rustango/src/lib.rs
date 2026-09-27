@@ -863,6 +863,9 @@ pub mod logging;
 #[cfg(feature = "cache")]
 pub mod account_lockout;
 
+#[cfg(any(feature = "cache", feature = "passwords"))]
+pub(crate) mod boot_slot;
+
 /// Per-IP, per-account and global limits in front of every built-in
 /// password login. See [`login_throttle::LoginThrottle`].
 #[cfg(feature = "admin")]

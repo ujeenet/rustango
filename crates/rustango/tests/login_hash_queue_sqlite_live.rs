@@ -62,17 +62,43 @@ async fn a_full_queue_answers_busy_for_known_and_unknown_users() {
     rustango::admin::totp_store::ensure_table(&pool)
         .await
         .unwrap();
-    let mut u = AdminUser::new_with_password("hq_alice", "right-pass", false).unwrap();
+    // Superuser: only superusers reach the password page.
+    let mut u = AdminUser::new_with_password("hq_alice", "right-pass", true).unwrap();
     u.insert_pool(&pool).await.unwrap();
     let app = Builder::new(pool)
         .admin_prefix("")
         .with_session_auth(SessionSecret::from_bytes(vec![7u8; 32]))
         .build();
 
-    // More hashers than slots keep a queue ahead of every login.
+    // A session for the password change, while hashing is free.
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+        .body(Body::from(format!(
+            "_csrf={CSRF}&username=hq_alice&password=right-pass"
+        )))
+        .unwrap();
+    req.extensions_mut()
+        .insert(ConnectInfo("10.63.1.1:4000".parse::<SocketAddr>().unwrap()));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let session = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("rustango_admin_session="))
+        .expect("session cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    // A queue many hashes deep, so no login reaches a slot in 50 ms.
     let slots = std::thread::available_parallelism().map_or(4, |n| n.get());
     let run = Arc::new(AtomicBool::new(true));
-    let hogs: Vec<_> = (0..slots + 3)
+    let hogs: Vec<_> = (0..slots * 10)
         .map(|_| {
             let run = Arc::clone(&run);
             tokio::spawn(async move {
@@ -86,6 +112,22 @@ async fn a_full_queue_answers_busy_for_known_and_unknown_users() {
 
     let known = login(&app, "10.63.0.1", "hq_alice").await;
     let unknown = login(&app, "10.63.0.2", "hq_ghost").await;
+    let change = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/account/password")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={CSRF}; {session}"))
+                .header("x-csrf-token", CSRF)
+                .body(Body::from(format!(
+                    "_csrf={CSRF}&current_password=right-pass&new_password=new-pass-99&new_password_confirm=new-pass-99"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     run.store(false, Ordering::Relaxed);
     for h in hogs {
         let _ = h.await;
@@ -95,6 +137,12 @@ async fn a_full_queue_answers_busy_for_known_and_unknown_users() {
     assert_eq!(unknown.0, StatusCode::SERVICE_UNAVAILABLE, "unknown user");
     assert!(known.1 && unknown.1, "503 must carry Retry-After");
     assert_eq!(known.2, unknown.2, "busy must not reveal which name exists");
+    assert_eq!(
+        change.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "busy is not a wrong current password"
+    );
+    assert!(change.headers().contains_key(header::RETRY_AFTER));
 
     // Once the queue drains, the real user logs in again.
     let after = login(&app, "10.63.0.3", "hq_alice").await;

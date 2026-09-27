@@ -181,6 +181,14 @@ feature now enables `cache`. `passwords::verify_dummy_async` and
 `tenancy::password::verify_dummy_async` return `Result`; handle `Busy`
 as on the known-user path. New variants: `PasswordError::Busy`,
 `TenancyError::Busy`, `tenancy::auth_backends::AuthError::Refused`.
+`LoginThrottle::begin` takes a `&LoginScope`; `LoginThrottle::account`
+is gone (use `LoginScope::TenantBasic`); call
+`LoginAttempt::resolve(stored_username)` after the user lookup.
+`login_throttle::configure_shared`, `account_lockout::configure_shared`
+and `passwords::configure_hash_wait` now win over `[auth]` values in
+either order. `login_ip_limit` and `login_global_limit` count failed
+logins only; the global limit applies per scope. `ModelBackend` and
+`ApiKeyBackend` refuse without a `TenantSlug`.
 
 ### Sessions carry a password fingerprint
 

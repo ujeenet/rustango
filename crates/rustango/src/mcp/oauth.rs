@@ -162,6 +162,16 @@ pub(crate) async fn oauth_token(
             "server_error",
             "token issuance failed",
         ),
+        Err(MintError::Busy) => {
+            let mut resp = oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "try again",
+            );
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, 1u64.into());
+            resp
+        }
     }
 }
 
