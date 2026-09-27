@@ -307,10 +307,16 @@ async fn auth_middleware(
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    // Scopes the Basic-auth account lock to this tenant.
+    // Scope the Basic and API-key limits to this tenant and client.
     dummy_parts
         .extensions
         .insert(super::TenantSlug(org.slug.clone()));
+    dummy_parts
+        .extensions
+        .insert(crate::login_throttle::ClientIp::from_parts(
+            req.extensions(),
+            req.headers(),
+        ));
 
     let mut authenticated: Option<AuthUser> = None;
     let mut error_response: Option<Response> = None;

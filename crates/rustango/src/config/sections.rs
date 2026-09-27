@@ -528,12 +528,13 @@ pub struct AuthSettings {
     pub lockout_threshold: Option<u32>,
     /// Lockout duration in seconds. Default `900` (15 min).
     pub lockout_duration_secs: Option<u64>,
-    /// Login attempts one client IP may make per window. Default `20`.
+    /// Failed logins one client IP (IPv6: one /64) may make per window.
+    /// Default `20`.
     pub login_ip_limit: Option<u32>,
     /// Per-IP window in seconds. Default `60`.
     pub login_ip_window_secs: Option<u64>,
-    /// Login attempts all clients together may make per window.
-    /// Default `600`.
+    /// Failed logins all clients together may make per window, for each
+    /// login (admin, operator console, each tenant). Default `600`.
     pub login_global_limit: Option<u32>,
     /// Global window in seconds. Default `60`.
     pub login_global_window_secs: Option<u64>,

@@ -128,10 +128,7 @@ pub async fn hash_async(plaintext: &str) -> Result<String, TenancyError> {
 /// # Errors
 /// As [`verify`], or [`TenancyError::Busy`].
 pub async fn verify_async(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
-    let (plaintext, phc_hash) = (plaintext.to_owned(), phc_hash.to_owned());
-    crate::passwords::off_runtime(move || verify(&plaintext, &phc_hash))
-        .await
-        .map_err(|_| TenancyError::Busy)?
+    verify_async_in(HashLane::Login, plaintext, phc_hash).await
 }
 
 /// [`verify_dummy`] on the blocking pool. Use this from async code.
@@ -139,7 +136,30 @@ pub async fn verify_async(plaintext: &str, phc_hash: &str) -> Result<bool, Tenan
 /// # Errors
 /// [`TenancyError::Busy`], exactly when [`verify_async`] would be busy.
 pub async fn verify_dummy_async(plaintext: &str) -> Result<(), TenancyError> {
-    crate::passwords::verify_dummy_async(plaintext)
+    verify_dummy_async_in(HashLane::Login, plaintext).await
+}
+
+pub(crate) use crate::passwords::HashLane;
+
+/// [`verify_async`] in `lane`.
+pub(crate) async fn verify_async_in(
+    lane: HashLane,
+    plaintext: &str,
+    phc_hash: &str,
+) -> Result<bool, TenancyError> {
+    let (plaintext, phc_hash) = (plaintext.to_owned(), phc_hash.to_owned());
+    crate::passwords::off_runtime_in(lane, move || verify(&plaintext, &phc_hash))
+        .await
+        .map_err(|_| TenancyError::Busy)?
+}
+
+/// [`verify_dummy_async`] in `lane`.
+pub(crate) async fn verify_dummy_async_in(
+    lane: HashLane,
+    plaintext: &str,
+) -> Result<(), TenancyError> {
+    let plaintext = plaintext.to_owned();
+    crate::passwords::off_runtime_in(lane, move || verify_dummy(&plaintext))
         .await
         .map_err(|_| TenancyError::Busy)
 }

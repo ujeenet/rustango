@@ -173,12 +173,30 @@ pub async fn authenticate_operator_pool(
     username: &str,
     password: &str,
 ) -> Result<Option<Operator>, TenancyError> {
+    let op = find_operator(registry, username).await?;
+    check_operator_password(op, password).await
+}
+
+/// The operator row for `username`, active or not.
+pub(crate) async fn find_operator(
+    registry: &crate::sql::Pool,
+    username: &str,
+) -> Result<Option<Operator>, TenancyError> {
     use crate::sql::FetcherPool as _;
     let rows: Vec<Operator> = Operator::objects()
         .where_(Operator::username.eq(username.to_owned()))
         .fetch(registry)
         .await?;
-    let Some(op) = rows.into_iter().next() else {
+    Ok(rows.into_iter().next())
+}
+
+/// `Some(op)` when `op` is active and `password` matches; the same work
+/// for a missing row.
+pub(crate) async fn check_operator_password(
+    op: Option<Operator>,
+    password: &str,
+) -> Result<Option<Operator>, TenancyError> {
+    let Some(op) = op else {
         // H1: spend a verify's worth of work on the unknown-user path
         // so timing doesn't reveal whether the account exists.
         password::verify_dummy_async(password).await?;

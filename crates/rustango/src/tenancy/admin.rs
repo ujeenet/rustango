@@ -991,8 +991,12 @@ async fn login_submit(
     }
 
     // Rate limits and the account lock, before the lookup (#1609).
-    let attempt = match crate::login_throttle::shared()
-        .begin(&format!("tenant:{}", org.slug), &ip, &form.username)
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &ip,
+            &form.username,
+        )
         .await
     {
         Ok(a) => a,
@@ -1046,6 +1050,9 @@ async fn login_submit(
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
+    if let Err(refused) = attempt.resolve(&user.username).await {
+        return refused.into_response();
+    }
     let uid: i64 = user.id.get().copied().unwrap_or(0);
 
     // Verify before the active check so active vs inactive accounts take

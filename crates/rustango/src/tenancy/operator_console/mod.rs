@@ -1095,7 +1095,7 @@ async fn login_submit(
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginSubmit>,
 ) -> Response<Body> {
-    use crate::login_throttle::LoginRefused;
+    use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -1104,40 +1104,49 @@ async fn login_submit(
     let next = sanitize_next(form.next.as_deref());
 
     // Rate limits and the account lock, before the lookup (#1609).
-    let attempt = match crate::login_throttle::shared()
-        .begin("operator", &ip, &form.username)
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(&LoginScope::Operator, &ip, &form.username)
         .await
     {
         Ok(a) => a,
         Err(refused) => return refused.into_response(),
     };
+    let found = match auth::find_operator(&state.registry, &form.username).await {
+        Ok(op) => op,
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
+    };
+    if let Some(op) = &found {
+        if let Err(refused) = attempt.resolve(&op.username).await {
+            return refused.into_response();
+        }
+    }
 
-    let principal =
-        match auth::authenticate_operator_pool(&state.registry, &form.username, &form.password)
-            .await
-        {
-            Ok(Some(op)) => op,
-            Ok(None) => {
-                attempt.failed().await;
-                send_user_login_failed(UserLoginFailedContext {
-                    source: "operator",
-                    attempted_username: Some(form.username.clone()),
-                    reason: AuthFailureReason::InvalidCredentials,
-                    request: meta,
-                })
-                .await;
-                return Redirect::to(&format!(
-                    "/login?error=Invalid+credentials&next={}",
-                    urlencoding_lite(&next)
-                ))
-                .into_response();
-            }
-            Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
-            Err(e) => {
-                tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
-            }
-        };
+    let principal = match auth::check_operator_password(found, &form.password).await {
+        Ok(Some(op)) => op,
+        Ok(None) => {
+            attempt.failed().await;
+            send_user_login_failed(UserLoginFailedContext {
+                source: "operator",
+                attempted_username: Some(form.username.clone()),
+                reason: AuthFailureReason::InvalidCredentials,
+                request: meta,
+            })
+            .await;
+            return Redirect::to(&format!(
+                "/login?error=Invalid+credentials&next={}",
+                urlencoding_lite(&next)
+            ))
+            .into_response();
+        }
+        Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
+    };
     let oid = principal.id.get().copied().unwrap_or_default();
     attempt.succeeded().await;
     let payload = SessionPayload::new(

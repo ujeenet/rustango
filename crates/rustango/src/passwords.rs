@@ -137,45 +137,89 @@ pub async fn verify_dummy_async(password: &str) -> Result<(), PasswordError> {
 /// Default for how long a hash job waits for a free slot.
 pub const DEFAULT_HASH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-static HASH_WAIT: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+static HASH_WAIT: crate::boot_slot::BootSlot<std::time::Duration> =
+    crate::boot_slot::BootSlot::new();
 
 /// Set how long a hash job waits for a slot before [`PasswordError::Busy`].
-/// Call once at boot; first call wins and returns `false` after that.
+/// Call at boot. It replaces the `[auth] hash_wait_ms` value; `false`
+/// if an earlier call won.
 pub fn configure_hash_wait(wait: std::time::Duration) -> bool {
-    HASH_WAIT.set(wait).is_ok()
+    HASH_WAIT.set_explicit(wait)
 }
 
-/// At most `slots` argon2 jobs at once; a job that cannot get a slot
-/// within `wait` gives up with [`PasswordError::Busy`].
+/// The `[auth] hash_wait_ms` value; `false` if app code already set one.
+#[cfg(feature = "config")]
+pub(crate) fn configure_hash_wait_from_settings(wait: std::time::Duration) -> bool {
+    HASH_WAIT.set_from_settings(wait)
+}
+
+/// How long a hash job currently waits for a slot.
+#[must_use]
+pub fn hash_wait() -> std::time::Duration {
+    *HASH_WAIT.get(|| DEFAULT_HASH_WAIT)
+}
+
+/// Which share of the [`HashQueue`] a job may use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HashLane {
+    /// Login forms, JWT login, password changes: every slot.
+    Login,
+    /// Credentials sent per request (HTTP Basic, API keys, agent
+    /// secrets): at most half the slots, so a flood of them cannot
+    /// starve the login forms.
+    Credential,
+}
+
+/// At most `slots` argon2 jobs at once, [`HashLane::Credential`] jobs
+/// at most half of them; a job that cannot get a slot in time gives up
+/// with [`PasswordError::Busy`].
 pub(crate) struct HashQueue {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
-    wait: std::time::Duration,
+    credential: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl HashQueue {
-    pub(crate) fn new(slots: usize, wait: std::time::Duration) -> Self {
+    pub(crate) fn new(slots: usize) -> Self {
+        let slots = slots.max(1);
         Self {
-            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(slots.max(1))),
-            wait,
+            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(slots)),
+            credential: std::sync::Arc::new(tokio::sync::Semaphore::new((slots / 2).max(1))),
         }
     }
 
-    /// Run `f` on the blocking pool once a slot is free.
-    /// A panic in `f` resumes in the caller, as it would inline.
-    pub(crate) async fn run<T, F>(&self, f: F) -> Result<T, PasswordError>
+    /// Run `f` on the blocking pool once a slot is free, waiting at most
+    /// `wait` in all. A panic in `f` resumes in the caller, as inline.
+    pub(crate) async fn run<T, F>(
+        &self,
+        lane: HashLane,
+        wait: std::time::Duration,
+        f: F,
+    ) -> Result<T, PasswordError>
     where
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
     {
-        let acquire = std::sync::Arc::clone(&self.slots).acquire_owned();
-        let permit = tokio::time::timeout(self.wait, acquire)
+        let deadline = tokio::time::Instant::now() + wait;
+        let acquire = |s: &std::sync::Arc<tokio::sync::Semaphore>| {
+            tokio::time::timeout_at(deadline, std::sync::Arc::clone(s).acquire_owned())
+        };
+        let lane_permit = match lane {
+            HashLane::Login => None,
+            HashLane::Credential => Some(
+                acquire(&self.credential)
+                    .await
+                    .map_err(|_| PasswordError::Busy)?
+                    .expect("password semaphore is never closed"),
+            ),
+        };
+        let permit = acquire(&self.slots)
             .await
             .map_err(|_| PasswordError::Busy)?
             .expect("password semaphore is never closed");
-        // The permit moves into the job, so a dropped caller still holds
+        // The permits move into the job, so a dropped caller still holds
         // its slot until the hash finishes.
         Ok(tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+            let _permits = (permit, lane_permit);
             f()
         })
         .await
@@ -189,13 +233,23 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    off_runtime_in(HashLane::Login, f).await
+}
+
+/// [`off_runtime`] in `lane`.
+pub(crate) async fn off_runtime_in<T, F>(lane: HashLane, f: F) -> Result<T, PasswordError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
     static QUEUE: std::sync::OnceLock<HashQueue> = std::sync::OnceLock::new();
     QUEUE
         .get_or_init(|| {
-            let n = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
-            HashQueue::new(n, *HASH_WAIT.get_or_init(|| DEFAULT_HASH_WAIT))
+            HashQueue::new(
+                std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get),
+            )
         })
-        .run(f)
+        .run(lane, hash_wait(), f)
         .await
 }
 
@@ -357,7 +411,8 @@ mod tests {
     /// forever, and a freed slot is usable again (#1732).
     #[tokio::test]
     async fn a_full_queue_times_out_then_recovers() {
-        let q = HashQueue::new(1, std::time::Duration::from_millis(20));
+        let wait = std::time::Duration::from_millis(20);
+        let q = HashQueue::new(1);
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let hold = tokio::spawn({
             let slots = std::sync::Arc::clone(&q.slots);
@@ -372,11 +427,49 @@ mod tests {
             tokio::task::yield_now().await;
         }
         let started = std::time::Instant::now();
-        assert!(matches!(q.run(|| ()).await, Err(PasswordError::Busy)));
-        assert!(started.elapsed() >= std::time::Duration::from_millis(20));
+        let r = q.run(HashLane::Login, wait, || ()).await;
+        assert!(matches!(r, Err(PasswordError::Busy)));
+        assert!(started.elapsed() >= wait);
         tx.send(()).unwrap();
         hold.await.unwrap().unwrap();
-        assert!(q.run(|| 7).await.is_ok());
+        assert!(q.run(HashLane::Login, wait, || 7).await.is_ok());
+    }
+
+    /// Credential jobs holding their whole share leave the rest of the
+    /// slots to logins.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn credential_jobs_cannot_take_every_slot() {
+        let wait = std::time::Duration::from_millis(50);
+        let q = std::sync::Arc::new(HashQueue::new(4));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let hogs: Vec<_> = (0..6)
+            .map(|_| {
+                let (q, rx) = (std::sync::Arc::clone(&q), std::sync::Arc::clone(&rx));
+                tokio::spawn(async move {
+                    q.run(
+                        HashLane::Credential,
+                        std::time::Duration::from_secs(5),
+                        move || {
+                            let _ = rx.lock().unwrap().recv();
+                        },
+                    )
+                    .await
+                })
+            })
+            .collect();
+        while q.credential.available_permits() > 0 {
+            tokio::task::yield_now().await;
+        }
+        let r = q.run(HashLane::Credential, wait, || ()).await;
+        assert!(matches!(r, Err(PasswordError::Busy)), "share is capped");
+        assert!(q.run(HashLane::Login, wait, || 1).await.is_ok());
+        for _ in 0..6 {
+            tx.send(()).unwrap();
+        }
+        for h in hogs {
+            assert!(h.await.unwrap().is_ok());
+        }
     }
 
     #[test]
