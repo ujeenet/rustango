@@ -213,7 +213,12 @@ pub enum Relation {
 }
 
 impl Relation {
-    /// A foreign key to `to.<on>`.
+    /// A foreign key to `to.<on>`. The variant cannot be built by hand
+    /// outside the crate:
+    ///
+    /// ```compile_fail
+    /// let _ = rustango::core::Relation::Fk { to: "user", on: "id" };
+    /// ```
     #[must_use]
     pub const fn fk(to: &'static str, on: &'static str) -> Self {
         Self::Fk { to, on }
