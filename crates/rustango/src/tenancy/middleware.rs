@@ -137,6 +137,99 @@ pub(crate) async fn request_org(
     None
 }
 
+/// Signing keys and registry pool of the mounted tenant context.
+pub(crate) struct SessionKeys<'a> {
+    pub session: &'a crate::tenancy::session::SessionSecret,
+    pub operator: &'a crate::tenancy::session::SessionSecret,
+    pub registry: Pool,
+}
+
+/// The mounted context's [`SessionKeys`], in `request_org`'s order.
+/// `None` when no context is mounted.
+pub(crate) fn session_keys(ext: &axum::http::Extensions) -> Option<SessionKeys<'_>> {
+    use crate::extractors::{DatabaseTenantContext, TenantContext};
+
+    macro_rules! try_ctx {
+        ($db:ty) => {
+            if let Some(ctx) = ext.get::<Arc<TenantContext<$db>>>() {
+                return Some(SessionKeys {
+                    session: &ctx.session_secret,
+                    operator: &ctx.operator_secret,
+                    registry: ctx.pools.registry_pool(),
+                });
+            }
+        };
+    }
+    macro_rules! try_db_ctx {
+        ($db:ty) => {
+            if let Some(ctx) = ext.get::<Arc<DatabaseTenantContext<$db>>>() {
+                return Some(SessionKeys {
+                    session: &ctx.session_secret,
+                    operator: &ctx.operator_secret,
+                    registry: ctx.registry.clone(),
+                });
+            }
+        };
+    }
+
+    #[cfg(feature = "postgres")]
+    try_ctx!(sqlx::Postgres);
+    #[cfg(feature = "sqlite")]
+    try_ctx!(sqlx::Sqlite);
+    #[cfg(feature = "mysql")]
+    try_ctx!(sqlx::MySql);
+    #[cfg(feature = "postgres")]
+    try_db_ctx!(sqlx::Postgres);
+    #[cfg(feature = "sqlite")]
+    try_db_ctx!(sqlx::Sqlite);
+    #[cfg(feature = "mysql")]
+    try_db_ctx!(sqlx::MySql);
+    None
+}
+
+/// `org`'s data pool, from the same context as `request_org`.
+/// `None` when no context is mounted.
+pub(crate) async fn request_pool(
+    ext: &axum::http::Extensions,
+    org: &Org,
+) -> Option<Result<Pool, TenancyError>> {
+    use crate::extractors::{DatabaseTenantContext, TenantContext};
+
+    macro_rules! try_ctx {
+        ($db:ty) => {
+            if let Some(ctx) = ext.get::<Arc<TenantContext<$db>>>() {
+                return Some(ctx.pools.scoped_pool_dyn(org).await);
+            }
+        };
+    }
+    macro_rules! try_db_ctx {
+        ($db:ty, $variant:path) => {
+            if let Some(ctx) = ext.get::<Arc<DatabaseTenantContext<$db>>>() {
+                return Some(
+                    ctx.pools
+                        .pool_for_org(org)
+                        .await
+                        .map(|dbp| $variant(dbp.pool().clone())),
+                );
+            }
+        };
+    }
+
+    #[cfg(feature = "postgres")]
+    try_ctx!(sqlx::Postgres);
+    #[cfg(feature = "sqlite")]
+    try_ctx!(sqlx::Sqlite);
+    #[cfg(feature = "mysql")]
+    try_ctx!(sqlx::MySql);
+    #[cfg(feature = "postgres")]
+    try_db_ctx!(sqlx::Postgres, Pool::Postgres);
+    #[cfg(feature = "sqlite")]
+    try_db_ctx!(sqlx::Sqlite, Pool::Sqlite);
+    #[cfg(feature = "mysql")]
+    try_db_ctx!(sqlx::MySql, Pool::Mysql);
+    None
+}
+
 /// The tenant and pool this request's credential must be checked
 /// against — resolved from **this request**, never captured when the
 /// router was built.
@@ -145,8 +238,6 @@ pub(crate) async fn request_org(
 /// reject — an unresolvable tenant is exactly the case where guessing
 /// is what the vulnerability was.
 async fn tenant_pool(parts: &Parts, ext: &axum::http::Extensions) -> Result<(Org, Pool), Response> {
-    use crate::extractors::{DatabaseTenantContext, TenantContext};
-
     let org = match request_org(parts, ext).await {
         Some(Ok(Some(org))) => org,
         Some(Ok(None)) => return Err((StatusCode::NOT_FOUND, "unknown tenant").into_response()),
@@ -168,51 +259,14 @@ async fn tenant_pool(parts: &Parts, ext: &axum::http::Extensions) -> Result<(Org
             );
         }
     };
-    let pool_failed = |e: &dyn std::fmt::Display, slug: &str| {
-        tracing::error!(error = %e, slug = %slug, "require_auth: tenant pool failed");
-        (StatusCode::INTERNAL_SERVER_ERROR, "tenant pool unavailable").into_response()
-    };
-
-    // Same context order as `request_org`, so the pool matches the Org.
-    macro_rules! try_ctx {
-        ($db:ty) => {
-            if let Some(ctx) = ext.get::<Arc<TenantContext<$db>>>() {
-                return match ctx.pools.scoped_pool_dyn(&org).await {
-                    Ok(pool) => Ok((org, pool)),
-                    Err(e) => Err(pool_failed(&e, &org.slug)),
-                };
-            }
-        };
+    match request_pool(ext, &org).await {
+        Some(Ok(pool)) => Ok((org, pool)),
+        Some(Err(e)) => {
+            tracing::error!(error = %e, slug = %org.slug, "require_auth: tenant pool failed");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant pool unavailable").into_response())
+        }
+        None => Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant context missing").into_response()),
     }
-    macro_rules! try_db_ctx {
-        ($db:ty, $variant:path) => {
-            if let Some(ctx) = ext.get::<Arc<DatabaseTenantContext<$db>>>() {
-                return match ctx.pools.pool_for_org(&org).await {
-                    Ok(dbp) => {
-                        let pool = $variant(dbp.pool().clone());
-                        Ok((org, pool))
-                    }
-                    Err(e) => Err(pool_failed(&e, &org.slug)),
-                };
-            }
-        };
-    }
-
-    #[cfg(feature = "postgres")]
-    try_ctx!(sqlx::Postgres);
-    #[cfg(feature = "sqlite")]
-    try_ctx!(sqlx::Sqlite);
-    #[cfg(feature = "mysql")]
-    try_ctx!(sqlx::MySql);
-
-    #[cfg(feature = "postgres")]
-    try_db_ctx!(sqlx::Postgres, Pool::Postgres);
-    #[cfg(feature = "sqlite")]
-    try_db_ctx!(sqlx::Sqlite, Pool::Sqlite);
-    #[cfg(feature = "mysql")]
-    try_db_ctx!(sqlx::MySql, Pool::Mysql);
-
-    Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant context missing").into_response())
 }
 
 // ------------------------------------------------------------------ Internal states

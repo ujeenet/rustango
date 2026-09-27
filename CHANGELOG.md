@@ -18,6 +18,14 @@ keys: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`,
 `login_global_window_secs`, `hash_wait_ms`; `lockout_threshold` and
 `lockout_duration_secs` now take effect.
 
+### Fixed — session extractors on SQLite and MySQL
+
+`SessionUser`, `SessionOperator` and `CurrentMember` looked only for
+the Postgres `TenantContext`, so with the `postgres` feature on (the
+default) a stack that mounts `TenantContext<Sqlite>`,
+`TenantContext<MySql>` or `DatabaseTenantContext` saw every request as
+anonymous. They now find the tenant context of any backend.
+
 ### Security — a password change ends sessions from the same second (#1338)
 
 Tenant admin, member, `SessionUser` and operator-console sessions now
