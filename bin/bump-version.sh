@@ -233,7 +233,7 @@ CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|ve
 stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)
 
-# The perl pass also rewrites two SERIES shapes (`rustango = "0.57"` bare and
+# The perl pass also rewrites two SERIES shapes (`rustango = "0.58"` bare and
 # inside an inline table). The grep above cannot see them: it looks for OLD,
 # the full version, and a series claim never contains it. So they were
 # rewritten and never verified (#1605).

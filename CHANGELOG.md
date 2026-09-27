@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.58.0] — 2026-09-27
+
 ### Fixed — session extractors on SQLite and MySQL
 
 `SessionUser`, `SessionOperator` and `CurrentMember` looked only for

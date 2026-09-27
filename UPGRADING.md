@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.58.0
+
 ### Sessions carry a password fingerprint
 
 Bare-admin, tenant, member and operator sessions sign out once after
