@@ -3268,34 +3268,65 @@ fn inherent_impl_tokens(
     } else {
         quote!()
     };
-    let make_op_emit = |op_path: TokenStream2| -> TokenStream2 {
-        if audited_fields.is_some() {
-            quote! {
-                let _audit_entry = self.__rustango_audit_entry(#op_path);
-                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-            }
-        } else {
-            quote!()
+    // Builds `_audit_entry`; `written` is the soft-delete column's new
+    // value, recorded in place of the stale `self` field.
+    let make_entry = |op_path: TokenStream2, written: Option<TokenStream2>| -> TokenStream2 {
+        match (written, fields.soft_delete_column.as_deref()) {
+            (Some(v), Some(col)) => quote! {
+                let mut _audit_entry = self.__rustango_audit_entry(#op_path);
+                _audit_entry.set_tracked(#col, #v);
+            },
+            _ => quote!(let _audit_entry = self.__rustango_audit_entry(#op_path);),
         }
     };
-    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create));
-    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete));
-    let audit_softdelete_emit = make_op_emit(quote!(#root::audit::AuditOp::SoftDelete));
-    let audit_restore_emit = make_op_emit(quote!(#root::audit::AuditOp::Restore));
+    let soft_deleted_json = quote!(#root::__serde_json::to_value(&_now)
+        .unwrap_or(#root::__serde_json::Value::Null));
+    let restored_json = quote!(#root::__serde_json::Value::Null);
+    // `_on` emit; `affected` paths skip the row when nothing changed.
+    let make_op_emit =
+        |op_path: TokenStream2, written: Option<TokenStream2>, affected: bool| -> TokenStream2 {
+            if audited_fields.is_none() {
+                return quote!();
+            }
+            let entry = make_entry(op_path, written);
+            let emit = quote! {
+                #entry
+                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+            };
+            if affected {
+                quote!(if _affected > 0 { #emit })
+            } else {
+                emit
+            }
+        };
+    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create), None, false);
+    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete), None, true);
+    let audit_softdelete_emit = make_op_emit(
+        quote!(#root::audit::AuditOp::SoftDelete),
+        Some(soft_deleted_json.clone()),
+        true,
+    );
+    let audit_restore_emit = make_op_emit(
+        quote!(#root::audit::AuditOp::Restore),
+        Some(restored_json.clone()),
+        true,
+    );
     // `&Pool` update runner for soft_delete / restore: one tx with the
     // audit row when audited, a plain UPDATE otherwise.
-    let make_pool_update = |op_path: TokenStream2| -> TokenStream2 {
+    let make_pool_update = |op_path: TokenStream2, written: TokenStream2| -> TokenStream2 {
         if audited_fields.is_some() {
+            let entry = make_entry(op_path, Some(written));
             quote! {
-                let _audit_entry = self.__rustango_audit_entry(#op_path);
+                #entry
                 #root::audit::save_one_with_audit(pool, &_query, &_audit_entry).await
             }
         } else {
             quote!(#root::sql::update_pool(pool, &_query).await)
         }
     };
-    let pool_softdelete_run = make_pool_update(quote!(#root::audit::AuditOp::SoftDelete));
-    let pool_restore_run = make_pool_update(quote!(#root::audit::AuditOp::Restore));
+    let pool_softdelete_run =
+        make_pool_update(quote!(#root::audit::AuditOp::SoftDelete), soft_deleted_json);
+    let pool_restore_run = make_pool_update(quote!(#root::audit::AuditOp::Restore), restored_json);
 
     // `save_pool(&Pool)` — emitted for every model with a PK.
     // Audited Auto-PK models are deferred (the Auto::Unset →
@@ -6745,13 +6776,12 @@ fn inherent_impl_tokens(
                 ) -> ::core::result::Result<u64, #root::sql::ExecError>
                 #executor_where
                 {
+                    let _now = #root::__chrono::Utc::now();
                     let _query = #root::core::UpdateQuery::new(
                         <Self as #root::core::Model>::SCHEMA,
                         ::std::vec![#root::core::Assignment::new(
                             #col_lit,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                #root::__chrono::Utc::now()
-                            ),
+                            ::core::convert::Into::<#root::core::SqlValue>::into(_now),
                         )],
                         #root::core::WhereExpr::Predicate(#root::core::Filter::new(
                             #pk_column_lit,
@@ -6822,13 +6852,12 @@ fn inherent_impl_tokens(
                     &self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    let _now = #root::__chrono::Utc::now();
                     let _query = #root::core::UpdateQuery::new(
                         <Self as #root::core::Model>::SCHEMA,
                         ::std::vec![#root::core::Assignment::new(
                             #col_lit,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                #root::__chrono::Utc::now()
-                            ),
+                            ::core::convert::Into::<#root::core::SqlValue>::into(_now),
                         )],
                         #root::core::WhereExpr::Predicate(#root::core::Filter::new(
                             #pk_column_lit,

@@ -1,5 +1,5 @@
-//! Audited `insert_pool`, `soft_delete` and `restore` on `&Pool` each
-//! write exactly one audit row, keyed by the row's real PK (#1675).
+//! Audited `insert_pool`, `soft_delete`, `restore` and `delete_pool` on
+//! `&Pool` each write one audit row, keyed by the row's real PK (#1675).
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -9,7 +9,11 @@ use rustango::sql::{Auto, CounterPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "audit1675_note", app = "audit1675", audit(track = "title"))]
+#[rustango(
+    table = "audit1675_note",
+    app = "audit1675",
+    audit(track = "title, deleted_at")
+)]
 #[allow(dead_code)]
 pub struct Note {
     #[rustango(primary_key)]
@@ -73,12 +77,38 @@ async fn soft_delete_and_restore_each_write_one_row(pool: &Pool) {
     assert_eq!(audit_rows(pool).await, 2);
     let rows = entries(pool, &pk).await;
     assert_eq!(rows[0].operation, "soft_delete");
+    assert!(
+        !rows[0].changes["deleted_at"].is_null(),
+        "records the written time"
+    );
 
+    // Stale in-memory value: the audit row must still record NULL.
     note.deleted_at = Some(Utc::now());
     assert_eq!(note.restore(pool).await.unwrap(), 1);
     assert_eq!(audit_rows(pool).await, 3);
     let rows = entries(pool, &pk).await;
     assert_eq!(rows[0].operation, "restore");
+    assert!(rows[0].changes["deleted_at"].is_null());
+}
+
+async fn delete_writes_one_row(pool: &Pool) {
+    let note = insert_note(pool).await;
+    let pk = note.id.get().expect("pk assigned").to_string();
+    assert_eq!(note.delete_pool(pool).await.unwrap(), 1);
+    assert_eq!(audit_rows(pool).await, 2);
+    let rows = entries(pool, &pk).await;
+    assert_eq!(rows[0].operation, "delete");
+    assert_eq!(rows[0].changes["title"], "hello");
+}
+
+async fn no_row_changed_writes_no_audit_row(pool: &Pool) {
+    let note = insert_note(pool).await;
+    assert_eq!(note.delete_pool(pool).await.unwrap(), 1);
+    assert_eq!(audit_rows(pool).await, 2);
+    assert_eq!(note.delete_pool(pool).await.unwrap(), 0);
+    assert_eq!(note.soft_delete(pool).await.unwrap(), 0);
+    assert_eq!(note.restore(pool).await.unwrap(), 0);
+    assert_eq!(audit_rows(pool).await, 2);
 }
 
 tri_dialect_test! {
@@ -86,5 +116,7 @@ tri_dialect_test! {
     scenarios: [
         insert_records_the_assigned_pk,
         soft_delete_and_restore_each_write_one_row,
+        delete_writes_one_row,
+        no_row_changed_writes_no_audit_row,
     ],
 }
