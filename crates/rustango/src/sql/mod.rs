@@ -55,7 +55,7 @@ pub use executor::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use executor::row_to_json_sqlite;
 pub use executor::{
-    atomic, atomic_tx, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
+    atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
     explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
     fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
     fetch_with_prefetch_pool, get_or_create, insert_pool, insert_returning_pool,
@@ -63,10 +63,10 @@ pub use executor::{
     raw_query_pool, raw_query_tx, run_ddl_idempotent, select_one_row_as_json, select_one_row_pool,
     select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
     select_rows_tx_with_related, transaction_pool, update_or_create, update_pool, update_tx,
-    CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool, FetcherTx, FkPkAccess,
-    HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
+    AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool, FetcherTx,
+    FkPkAccess, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
     MaybeMyScalar, MaybePgFromRow, MaybePgScalar, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
-    MaybeSqliteScalar, Page, PoolTx, UpdaterPool,
+    MaybeSqliteScalar, Page, PoolTx, TxGuard, UpdaterPool,
 };
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the

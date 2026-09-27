@@ -71,21 +71,18 @@ impl<'a> PoolTx<'a> {
         }
     }
 
-    /// Open a nested transaction on the same connection: sqlx issues a
-    /// `SAVEPOINT`, and commit / rollback release or roll back to it.
-    ///
-    /// # Errors
-    /// `sqlx::Error` from the underlying `SAVEPOINT`.
-    pub async fn savepoint(&mut self) -> Result<PoolTx<'_>, sqlx::Error> {
-        use sqlx::Connection as _;
-        Ok(match self {
+    /// Run a bind-free statement unprepared. MySQL refuses `SAVEPOINT`
+    /// as a prepared statement (error 1295).
+    pub(crate) async fn execute_unprepared(&mut self, sql: &str) -> Result<(), sqlx::Error> {
+        use sqlx::Executor as _;
+        match self {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(tx) => PoolTx::Postgres((**tx).begin().await?),
+            PoolTx::Postgres(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(tx) => PoolTx::Mysql((**tx).begin().await?),
+            PoolTx::Mysql(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(tx) => PoolTx::Sqlite((**tx).begin().await?),
-        })
+            PoolTx::Sqlite(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+        }
     }
 
     /// Return the dialect for this transaction's backend — same
@@ -141,7 +138,7 @@ impl<'a> PoolTx<'a> {
 ///
 /// # Errors
 /// Driver errors from `BEGIN`.
-pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'_>, ExecError> {
+pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => Ok(PoolTx::Postgres(pg.begin().await?)),

@@ -11,9 +11,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 now bound the statement by primary key on every backend, and refuse
 (`QueryError::BoundedDmlUnsupported`) when they cannot. A nested
 `atomic()` on the same pool opened a second transaction that survived
-the outer rollback and deadlocked a one-connection pool; it now returns
-`ExecError::NestedAtomic`, and the new `atomic_tx` nests in a savepoint.
-`on_commit` callbacks fire only at the outermost commit. SQLite
+the outer rollback and deadlocked a one-connection pool; it now runs in
+a savepoint on the outer connection. `on_commit` callbacks fire only at
+the outermost commit. SQLite
 `.offset(n)` without `.limit()` no longer emits invalid SQL.
 
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)

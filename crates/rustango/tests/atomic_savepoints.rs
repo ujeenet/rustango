@@ -1,6 +1,6 @@
-//! Nested `atomic_tx` runs in a savepoint on the outer connection, and
-//! `on_commit` waits for the outermost commit (#1666). Pools have one
-//! connection, so a second transaction would deadlock.
+//! A nested `atomic()` on the same pool runs in a savepoint on the outer
+//! connection, and `on_commit` waits for the outermost commit (#1666).
+//! Pools have one connection, so a second transaction would deadlock.
 
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql"))]
 mod scenarios {
@@ -8,7 +8,7 @@ mod scenarios {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use rustango::sql::{on_commit, ExecError, FetcherPool as _, Pool, SqlError};
+    use rustango::sql::{on_commit, AtomicTx, ExecError, FetcherPool as _, Pool, SqlError};
     use rustango::Model;
 
     #[derive(Model, Debug, Clone)]
@@ -21,11 +21,12 @@ mod scenarios {
         pub label: String,
     }
 
-    fn note(id: i64) -> Note {
-        Note {
+    async fn put(tx: &AtomicTx, id: i64) -> Result<(), ExecError> {
+        let row = Note {
             id,
             label: format!("n{id}"),
-        }
+        };
+        row.insert_tx(&mut *tx.lock().await?).await
     }
 
     fn bail() -> ExecError {
@@ -49,9 +50,10 @@ mod scenarios {
     }
 
     pub async fn check_outer_rollback_drops_inner_write(pool: &Pool) {
+        let p = pool.clone();
         let res: Result<(), ExecError> = within(rustango::atomic!(pool, |tx| {
-            note(1).insert_tx(tx).await?;
-            rustango::atomic_tx!(tx, |sp| { note(2).insert_tx(sp).await })
+            put(tx, 1).await?;
+            rustango::atomic!(&p, |sp| { put(sp, 2).await })
                 .await
                 .expect("savepoint releases");
             Err(bail())
@@ -66,15 +68,16 @@ mod scenarios {
     }
 
     pub async fn check_inner_rollback_keeps_outer_write(pool: &Pool) {
+        let p = pool.clone();
         within(rustango::atomic!(pool, |tx| {
-            note(1).insert_tx(tx).await?;
-            let inner: Result<(), ExecError> = rustango::atomic_tx!(tx, |sp| {
-                note(2).insert_tx(sp).await?;
+            put(tx, 1).await?;
+            let inner: Result<(), ExecError> = rustango::atomic!(&p, |sp| {
+                put(sp, 2).await?;
                 Err(bail())
             })
             .await;
             assert!(inner.is_err());
-            note(3).insert_tx(tx).await?;
+            put(tx, 3).await?;
             Ok(())
         }))
         .await
@@ -83,6 +86,7 @@ mod scenarios {
     }
 
     pub async fn check_on_commit_waits_for_outermost(pool: &Pool) {
+        let (p1, p2, p3) = (pool.clone(), pool.clone(), pool.clone());
         let fired = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
         let (f1, f2, d1, seen) = (
@@ -91,13 +95,13 @@ mod scenarios {
             Arc::clone(&dropped),
             Arc::clone(&fired),
         );
-        within(rustango::atomic!(pool, |tx| {
-            rustango::atomic_tx!(tx, |sp| {
+        within(rustango::atomic!(pool, |_tx| {
+            rustango::atomic!(&p1, |_sp| {
                 on_commit(move || {
                     f1.fetch_add(1, Ordering::SeqCst);
                 });
-                rustango::atomic_tx!(sp, |sp2| {
-                    note(1).insert_tx(sp2).await?;
+                rustango::atomic!(&p2, |sp2| {
+                    put(sp2, 1).await?;
                     on_commit(move || {
                         f2.fetch_add(1, Ordering::SeqCst);
                     });
@@ -106,7 +110,7 @@ mod scenarios {
                 .await
             })
             .await?;
-            let _ = rustango::atomic_tx!(tx, |_sp| {
+            let _ = rustango::atomic!(&p3, |_sp| {
                 on_commit(move || {
                     d1.fetch_add(1, Ordering::SeqCst);
                 });
@@ -125,25 +129,57 @@ mod scenarios {
         assert_eq!(
             fired.load(Ordering::SeqCst),
             2,
-            "released callbacks fire once, at the end"
+            "released callbacks fire at the end"
         );
         assert_eq!(
             dropped.load(Ordering::SeqCst),
             0,
-            "rolled-back savepoint drops its callback"
+            "rolled-back block drops its callback"
         );
         assert_eq!(ids(pool).await, vec![1]);
     }
 
-    pub async fn check_nested_atomic_same_pool_rejected(pool: &Pool) {
-        let pool2 = pool.clone();
+    pub async fn check_cancelled_nested_block_rolls_back(pool: &Pool) {
+        let p = pool.clone();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = Arc::clone(&fired);
         within(rustango::atomic!(pool, |tx| {
-            note(1).insert_tx(tx).await?;
-            let inner: Result<(), ExecError> = rustango::atomic!(&pool2, |_t| { Ok(()) }).await;
+            put(tx, 1).await?;
+            let slow = rustango::atomic!(&p, |sp| {
+                put(sp, 2).await?;
+                on_commit(move || {
+                    f.fetch_add(1, Ordering::SeqCst);
+                });
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok::<_, ExecError>(())
+            });
+            assert!(tokio::time::timeout(Duration::from_millis(200), slow)
+                .await
+                .is_err());
+            put(tx, 3).await?;
+            Ok(())
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            ids(pool).await,
+            vec![1, 3],
+            "the cancelled block's write is gone"
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+    }
+
+    pub async fn check_guard_held_across_nested_is_an_error(pool: &Pool) {
+        let p = pool.clone();
+        within(rustango::atomic!(pool, |tx| {
+            let guard = tx.lock().await?;
+            let inner: Result<(), ExecError> = rustango::atomic!(&p, |_sp| { Ok(()) }).await;
             assert!(
                 matches!(inner, Err(ExecError::NestedAtomic)),
                 "got {inner:?}"
             );
+            drop(guard);
+            put(tx, 1).await?;
             Ok(())
         }))
         .await
@@ -201,7 +237,8 @@ mod pg_live {
     pg_case!(check_outer_rollback_drops_inner_write);
     pg_case!(check_inner_rollback_keeps_outer_write);
     pg_case!(check_on_commit_waits_for_outermost);
-    pg_case!(check_nested_atomic_same_pool_rejected);
+    pg_case!(check_cancelled_nested_block_rolls_back);
+    pg_case!(check_guard_held_across_nested_is_an_error);
 }
 
 // --------------------------------------------------------------- SQLite
@@ -241,28 +278,33 @@ mod sqlite_live {
     sqlite_case!(check_outer_rollback_drops_inner_write);
     sqlite_case!(check_inner_rollback_keeps_outer_write);
     sqlite_case!(check_on_commit_waits_for_outermost);
-    sqlite_case!(check_nested_atomic_same_pool_rejected);
+    sqlite_case!(check_cancelled_nested_block_rolls_back);
+    sqlite_case!(check_guard_held_across_nested_is_an_error);
 
-    /// A different pool is a different database: its block is its own
-    /// transaction and fires its callbacks on its own commit.
+    /// A different pool gets its own transaction and fires on its own
+    /// commit; the first pool is still found from inside it.
     #[tokio::test]
     async fn nested_atomic_on_another_pool_is_independent() {
         let (a, b) = (fresh_pool().await, fresh_pool().await);
+        let a2 = a.clone();
         let fired = Arc::new(AtomicUsize::new(0));
         let (f, seen) = (Arc::clone(&fired), Arc::clone(&fired));
-        rustango::atomic!(&a, |_tx| {
+        let run = rustango::atomic!(&a, |_tx| {
             rustango::atomic!(&b, |_t| {
                 on_commit(move || {
                     f.fetch_add(1, Ordering::SeqCst);
                 });
-                Ok(())
+                // Back on pool `a`: a savepoint, not a second connection.
+                rustango::atomic!(&a2, |_sp| { Ok(()) }).await
             })
             .await?;
             assert_eq!(seen.load(Ordering::SeqCst), 1);
             Ok(())
-        })
-        .await
-        .unwrap();
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .expect("deadlock")
+            .unwrap();
     }
 }
 
@@ -315,5 +357,6 @@ mod mysql_live {
     mysql_case!(check_outer_rollback_drops_inner_write);
     mysql_case!(check_inner_rollback_keeps_outer_write);
     mysql_case!(check_on_commit_waits_for_outermost);
-    mysql_case!(check_nested_atomic_same_pool_rejected);
+    mysql_case!(check_cancelled_nested_block_rolls_back);
+    mysql_case!(check_guard_held_across_nested_is_an_error);
 }

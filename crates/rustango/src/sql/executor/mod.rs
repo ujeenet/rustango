@@ -934,7 +934,7 @@ mod tx;
 pub use tx::{transaction_pool, PoolTx};
 
 mod atomic;
-pub use atomic::{atomic, atomic_tx, on_commit, on_commit_pending};
+pub use atomic::{atomic, on_commit, on_commit_pending, AtomicTx, TxGuard};
 
 // `&Pool` dispatch. The `_pool` functions below take a [`Pool`],
 // compile SQL through `pool.dialect()` and run it on the matching

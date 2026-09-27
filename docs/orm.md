@@ -285,7 +285,7 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 | MySQL 8.0.1+ | Supports everything except `NO KEY` — that flag falls back to plain `FOR UPDATE` (the stricter lock). |
 | SQLite | No row-level lock syntax. The writer emits no clause at all; transactions hold an implicit write lock for the whole database. Use a different strategy for SQLite (typically a busy-wait loop on the transaction itself). |
 
-**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::atomic(&pool, …)` or `transaction_pool(&pool)`, which hand you a `PoolTx` to `match` on.
+**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::atomic(&pool, …)` or `transaction_pool(&pool)`, which hand you a `PoolTx` to `match` on (`atomic` through `tx.lock().await?`).
 
 ### Combining queries (union, intersection, difference)
 
@@ -1447,7 +1447,7 @@ Post::bulk_upsert_pool(
 > `#[cfg(feature = "postgres")]`.
 >
 > The multi-backend entry points are `rustango::sql::transaction_pool(&pool)`
-> and `rustango::sql::atomic(&pool, …)`. Both hand you a `PoolTx` — an enum you
+> and `rustango::sql::atomic(&pool, …)` (via `tx.lock().await?`). Both hand you a `PoolTx` — an enum you
 > `match` on per backend — rather than a driver transaction, so a tri-dialect
 > transaction is written per-arm, not by swapping the pool type.
 
@@ -1480,7 +1480,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For a hook that runs only after the commit lands, the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback. To nest, use `rustango::atomic_tx!(tx, |sp| { … })`: it runs in a savepoint on the same connection, and its hooks wait for the outermost commit. A second `atomic(&pool, …)` on the same pool inside the block returns `ExecError::NestedAtomic`.
+Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For a hook that runs only after the commit lands, the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback. Inside the closure `tx` is an `AtomicTx`: lock it per statement, `insert_tx(&mut *tx.lock().await?, &q)`. A nested `atomic(&pool, …)` on the same pool runs in a savepoint on the same connection, and its hooks wait for the outermost commit; holding a `TxGuard` across it returns `ExecError::NestedAtomic`. A `tokio::spawn`ed task does not inherit the block.
 
 ---
 

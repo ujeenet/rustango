@@ -243,9 +243,9 @@ pub enum ExecError {
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
     EmptyReturning,
 
-    /// `atomic(&pool, …)` was called inside an `atomic` block on the same
-    /// pool. Nest with `atomic_tx(tx, …)`, which uses a savepoint.
-    #[error("nested `atomic()` on the same pool; use `atomic_tx(tx, …)` for a savepoint")]
+    /// A nested `atomic()` started while a `TxGuard` of the outer block
+    /// was still held. Drop the guard first.
+    #[error("nested `atomic()` while the outer transaction is locked; drop the `TxGuard` first")]
     NestedAtomic,
 
     /// `ForeignKey::get` resolved a PK that didn't match any row in
