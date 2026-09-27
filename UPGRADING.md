@@ -150,6 +150,16 @@ untouched.
 
 ## Unreleased
 
+### Model shortcuts respect global scopes
+
+`Model::sum/avg/min/max/destroy/delete_where` now apply global scopes
+(#1675); to act on every row use `Model::objects().without_global_scopes()`.
+`delete_where` type-checks its value like `update_where`
+(`QueryError::TypeMismatch`). `audit::insert_one_with_audit` takes
+`(pool, &query, &mut model, |m| entry)` and sets the PK on `model`. The
+hidden `Model::__aggregate_one_pool` and
+`sql::model_shortcuts::aggregate_one_pool` are removed.
+
 ### Logins are rate limited; lockout keys on the username
 
 A locked or throttled login answers `429` with `Retry-After` (#1609);

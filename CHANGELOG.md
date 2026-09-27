@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — Model shortcuts honour global scopes; Pool writes are audited (#1675)
+
+`Model::sum`, `avg`, `min`, `max`, `destroy` and `delete_where` now
+apply the model's global scopes, like their `QuerySet` versions. On
+audited models `soft_delete(&Pool)` and `restore(&Pool)` write their
+audit row in the same transaction as the UPDATE, and `insert_pool`
+records the assigned PK instead of an empty `entity_pk`.
+
 ### Security — login rate limits and a bounded hashing queue (#1609, #1732)
 
 Every built-in password login (admin, operator console, tenant admin,
