@@ -254,7 +254,7 @@ where
     let mut op = Operator {
         id: Auto::default(),
         username: username.to_owned(),
-        password_hash: crate::tenancy::password::hash(password)?,
+        password_hash: crate::tenancy::password::hash_async(password).await?,
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
@@ -300,7 +300,7 @@ where
     let mut user = User {
         id: Auto::default(),
         username: username.to_owned(),
-        password_hash: crate::tenancy::password::hash(password)?,
+        password_hash: crate::tenancy::password::hash_async(password).await?,
         #[cfg(feature = "sso")]
         email: None,
         is_superuser: superuser,

@@ -59,9 +59,11 @@ pub struct AdminUser {
 
 impl AdminUser {
     /// Hash the password and build an `AdminUser` ready to insert.
+    /// Sync: in a request handler, hash with `passwords::hash_async` instead.
     ///
     /// # Errors
     /// [`crate::passwords::PasswordError`] from `passwords::hash`.
+    #[allow(clippy::disallowed_methods)]
     pub fn new_with_password(
         username: impl Into<String>,
         password: &str,

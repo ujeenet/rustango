@@ -95,9 +95,9 @@ pub enum AgentError {
 /// `(full_token, prefix, secret_hash)`. Mirrors
 /// `tenancy::auth_backends::create_api_key`'s OS-CSPRNG + argon2id path —
 /// 4-byte hex prefix (lookup half) + 16-byte hex secret (bearer half),
-/// hashed with [`crate::tenancy::password::hash`]. No `api_keys` feature
+/// hashed with [`crate::tenancy::password::hash_async`]. No `api_keys` feature
 /// needed (the framework's own argon2id is always on with `tenancy`).
-fn generate_credential() -> Result<(String, String, String), AgentError> {
+async fn generate_credential() -> Result<(String, String, String), AgentError> {
     use rand::rngs::OsRng;
     use rand::RngCore;
 
@@ -107,7 +107,9 @@ fn generate_credential() -> Result<(String, String, String), AgentError> {
     let mut secret_bytes = [0u8; 16];
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
-    let hash = super::password::hash(&secret).map_err(|e| AgentError::Secret(e.to_string()))?;
+    let hash = super::password::hash_async(&secret)
+        .await
+        .map_err(|e| AgentError::Secret(e.to_string()))?;
     Ok((format!("{prefix}.{secret}"), prefix, hash))
 }
 
@@ -134,7 +136,7 @@ pub async fn create_agent_pool(pool: &Pool, name: &str) -> Result<AgentSecret, A
         return Err(AgentError::Duplicate(name.to_owned()));
     }
 
-    let (token, prefix, hash) = generate_credential()?;
+    let (token, prefix, hash) = generate_credential().await?;
 
     let mut agent = Agent {
         id: Auto::default(),
@@ -169,7 +171,7 @@ pub async fn rotate_agent_secret_pool(pool: &Pool, name: &str) -> Result<AgentSe
         .next()
         .ok_or_else(|| AgentError::NotFound(name.to_owned()))?;
 
-    let (token, prefix, hash) = generate_credential()?;
+    let (token, prefix, hash) = generate_credential().await?;
     agent.secret_prefix = prefix;
     agent.secret_hash = hash;
     agent.secret_rotated_at = Some(chrono::Utc::now());
@@ -222,11 +224,11 @@ pub async fn authenticate_agent_pool(
         // Unknown / inactive agent: still spend an argon2 verification against a
         // fixed dummy hash so the response time doesn't reveal whether the agent
         // name exists (timing oracle → agent enumeration). #1099.
-        super::password::verify_dummy(secret_half);
+        super::password::verify_dummy_async(secret_half).await;
         return Ok(None);
     };
 
-    match super::password::verify(secret_half, &agent.secret_hash) {
+    match super::password::verify_async(secret_half, &agent.secret_hash).await {
         Ok(true) => Ok(Some(agent)),
         _ => Ok(None),
     }
@@ -258,11 +260,11 @@ pub async fn authenticate_agent_by_prefix_pool(
         .filter(|a| a.active)
     else {
         // Timing-neutral for unknown prefixes (#1099).
-        super::password::verify_dummy(secret);
+        super::password::verify_dummy_async(secret).await;
         return Ok(None);
     };
 
-    match super::password::verify(secret, &agent.secret_hash) {
+    match super::password::verify_async(secret, &agent.secret_hash).await {
         Ok(true) => Ok(Some(agent)),
         _ => Ok(None),
     }
@@ -872,7 +874,7 @@ pub async fn create_user_key_pool(
     }
 
     let name = unique_key_name(pool, user_id).await?;
-    let (token, prefix, hash) = generate_credential()?;
+    let (token, prefix, hash) = generate_credential().await?;
     let mut agent = Agent {
         id: Auto::default(),
         name,

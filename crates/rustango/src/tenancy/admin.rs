@@ -1009,7 +1009,7 @@ async fn login_submit(
         // wasn't covered by the authenticate_*_pool timing fix); spend a
         // verify's worth of work on the unknown-user path so timing
         // doesn't reveal whether the username exists.
-        super::password::verify_dummy(&form.password);
+        super::password::verify_dummy_async(&form.password).await;
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
@@ -1030,7 +1030,7 @@ async fn login_submit(
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
     let ok = matches!(
-        super::password::verify(&form.password, &user.password_hash),
+        super::password::verify_async(&form.password, &user.password_hash).await,
         Ok(true)
     );
 
@@ -1370,11 +1370,13 @@ async fn change_password_submit(
     let Some(mut user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
-    let ok = super::password::verify(&form.current_password, &user.password_hash).unwrap_or(false);
+    let ok = super::password::verify_async(&form.current_password, &user.password_hash)
+        .await
+        .unwrap_or(false);
     if !ok {
         return redir_err("Current password did not match.");
     }
-    let new_hash = match super::password::hash(&form.new_password) {
+    let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
         Err(e) => {
             return redir_err(&format!("hash failed: {e}"));

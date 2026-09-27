@@ -153,6 +153,9 @@
 //! [`examples/cookbook_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/cookbook_blog)
 //! is a runnable multi-tenant blog with one chapter per feature.
 
+// Sync argon2 calls in `clippy.toml` must go through the `*_async` variants (#1709).
+#![deny(clippy::disallowed_methods)]
+
 // Lets `::rustango::...` paths emitted by the proc-macro resolve to
 // ourselves inside this crate.
 extern crate self as rustango;

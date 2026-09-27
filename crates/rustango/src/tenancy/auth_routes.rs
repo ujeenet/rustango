@@ -370,7 +370,7 @@ async fn login(
     let Some(user) = users.into_iter().next() else {
         // H1: spend a verify's worth of work on the unknown-user path so
         // timing doesn't reveal whether the username exists.
-        crate::tenancy::password::verify_dummy(&body.password);
+        crate::tenancy::password::verify_dummy_async(&body.password).await;
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
         return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     };
@@ -390,7 +390,8 @@ async fn login(
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
-    let ok = crate::tenancy::password::verify(&body.password, &user.password_hash)
+    let ok = crate::tenancy::password::verify_async(&body.password, &user.password_hash)
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     if !user.active {

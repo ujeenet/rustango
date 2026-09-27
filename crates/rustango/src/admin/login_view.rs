@@ -183,7 +183,7 @@ async fn login_submit(
     let Some(row) = row else {
         // Spend a verify's worth of work on the unknown-user path, so
         // timing does not reveal whether the username exists.
-        crate::passwords::verify_dummy(&form.password);
+        crate::passwords::verify_dummy_async(&form.password).await;
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -231,7 +231,9 @@ async fn login_submit(
 
     // Verify before the active check, so active and inactive accounts
     // take the same time.
-    let password_ok = crate::passwords::verify(&form.password, stored_hash).unwrap_or(false);
+    let password_ok = crate::passwords::verify_async(&form.password, stored_hash)
+        .await
+        .unwrap_or(false);
 
     if !is_active {
         send_user_login_failed(UserLoginFailedContext {
@@ -419,7 +421,10 @@ async fn change_password_submit(
         .get("password_hash")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if !crate::passwords::verify(&form.current_password, stored_hash).unwrap_or(false) {
+    if !crate::passwords::verify_async(&form.current_password, stored_hash)
+        .await
+        .unwrap_or(false)
+    {
         return Html(render_change_password_form(
             &state,
             None,
@@ -428,7 +433,7 @@ async fn change_password_submit(
         .into_response();
     }
 
-    let new_hash = match crate::passwords::hash(&form.new_password) {
+    let new_hash = match crate::passwords::hash_async(&form.new_password).await {
         Ok(h) => h,
         Err(_) => {
             return Html(render_change_password_form(

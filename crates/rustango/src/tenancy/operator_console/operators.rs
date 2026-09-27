@@ -262,7 +262,7 @@ pub(super) async fn operator_create(
         Err(msg) => return back_err(&state, &op, &msg).await,
     };
 
-    let hash = match password::hash(&plain) {
+    let hash = match password::hash_async(&plain).await {
         Ok(h) => h,
         Err(e) => return back_err(&state, &op, &format!("Could not hash password: {e}")).await,
     };
@@ -351,7 +351,7 @@ pub(super) async fn operator_reset_password(
         Ok(p) => p,
         Err(msg) => return back_err(&state, &op, &msg).await,
     };
-    let hash = match password::hash(&plain) {
+    let hash = match password::hash_async(&plain).await {
         Ok(h) => h,
         Err(e) => return back_err(&state, &op, &format!("Could not hash password: {e}")).await,
     };

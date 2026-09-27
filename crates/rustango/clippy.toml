@@ -1,0 +1,9 @@
+# argon2 is tens of ms of CPU; from async code use the `*_async` variants (#1709).
+disallowed-methods = [
+    { path = "rustango::passwords::hash", reason = "use passwords::hash_async from async code" },
+    { path = "rustango::passwords::verify", reason = "use passwords::verify_async from async code" },
+    { path = "rustango::passwords::verify_dummy", reason = "use passwords::verify_dummy_async from async code" },
+    { path = "rustango::tenancy::password::hash", reason = "use tenancy::password::hash_async from async code" },
+    { path = "rustango::tenancy::password::verify", reason = "use tenancy::password::verify_async from async code" },
+    { path = "rustango::tenancy::password::verify_dummy", reason = "use tenancy::password::verify_dummy_async from async code" },
+]

@@ -127,13 +127,14 @@ impl AuthBackend for ModelBackend {
             // Audit H1/N4 — spend a verify's worth of work on the
             // unknown-user path so timing doesn't reveal whether the
             // username exists.
-            password::verify_dummy(&password);
+            password::verify_dummy_async(&password).await;
             return Ok(None);
         };
 
         // Verify before the active check so active vs inactive accounts
         // take the same time (audit H1/N4).
-        let ok = password::verify(&password, &user.password_hash)
+        let ok = password::verify_async(&password, &user.password_hash)
+            .await
             .map_err(|_| AuthError::InvalidToken)?;
         if !user.active || !ok {
             // Audit N4 — an inactive account must look identical to a
@@ -282,7 +283,7 @@ impl AuthBackend for ApiKeyBackend {
         let Some(key) = keys.into_iter().next() else {
             // Audit N4 — equalize timing on the unknown-prefix path so it
             // doesn't reveal whether a key prefix exists.
-            password::verify_dummy(secret);
+            password::verify_dummy_async(secret).await;
             return Ok(None);
         };
 
@@ -292,7 +293,9 @@ impl AuthBackend for ApiKeyBackend {
             }
         }
 
-        let ok = password::verify(secret, &key.key_hash).map_err(|_| AuthError::InvalidToken)?;
+        let ok = password::verify_async(secret, &key.key_hash)
+            .await
+            .map_err(|_| AuthError::InvalidToken)?;
         if !ok {
             return Ok(None);
         }
@@ -342,7 +345,8 @@ pub async fn create_api_key(
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
 
-    let hash = password::hash(&secret)
+    let hash = password::hash_async(&secret)
+        .await
         .map_err(|e| crate::tenancy::error::TenancyError::Validation(e.to_string()))?;
 
     let mut key = ApiKey {

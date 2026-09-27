@@ -368,8 +368,9 @@ async fn write_password_hash(
     password_column: &str,
     rotated_at_column: Option<&str>,
 ) -> Result<i64, AuthFlowError> {
-    let hash =
-        crate::passwords::hash(new_password).map_err(|e| AuthFlowError::Database(e.to_string()))?;
+    let hash = crate::passwords::hash_async(new_password)
+        .await
+        .map_err(|e| AuthFlowError::Database(e.to_string()))?;
     let dialect = pool.dialect();
     let t = dialect.quote_ident(user_table);
     let pw = dialect.quote_ident(password_column);
