@@ -114,6 +114,23 @@ async fn post(app: axum::Router, uri: &str, form: &[(&str, &str)]) -> StatusCode
     .status()
 }
 
+async fn edit_page(app: axum::Router) -> String {
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/ips_parent/1/edit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
 fn app(pool: Pool) -> axum::Router {
     rustango::admin::Builder::new(pool).admin_prefix("").build()
 }
@@ -231,19 +248,7 @@ async fn read_only_child_table_refuses_inline_writes() {
     );
 
     // The edit page offers no FormSet for the read-only child.
-    let res = ro_app()
-        .oneshot(
-            Request::builder()
-                .uri("/ips_parent/1/edit")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(res.into_body(), 1_000_000)
-        .await
-        .unwrap();
-    let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(!html.contains("ips_child-TOTAL_FORMS"), "{html}");
+    let formset = "ips_child-TOTAL_FORMS";
+    assert!(edit_page(app(pool.clone())).await.contains(formset));
+    assert!(!edit_page(ro_app()).await.contains(formset));
 }
