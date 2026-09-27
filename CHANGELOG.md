@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — idempotency replays are scoped to the caller and route (#1668)
+
+`IdempotencyLayer` now keys a stored response on host, tenant,
+principal, the `Authorization` and `Cookie` headers, method, path and
+query, then the client's key. A response that sets a cookie is not
+stored. A reused key with a different body gets `422`.
+
 ### Security — ViewSet create keeps a client-supplied primary key (#1671)
 
 ViewSet create and bulk create now write the PK a client sends for a

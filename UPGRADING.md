@@ -150,6 +150,12 @@ untouched.
 
 ## Unreleased
 
+### Idempotency keys stored before the upgrade are not replayed
+
+The key format changed (#1668). Add your auth layer after
+`.idempotency(..)` so the principal is resolved first. A chunked body
+over `body_cap` now gets `413`.
+
 ### `template_views` POSTs need the CSRF token; `urlize` escapes
 
 `template_views` POST routes return 403 without a token (#1669): put
