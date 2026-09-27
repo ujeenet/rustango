@@ -246,13 +246,17 @@ async fn auth_middleware(
     let dummy = builder
         .body(())
         .unwrap_or_else(|_| axum::http::Request::new(()));
-    let (dummy_parts, _) = dummy.into_parts();
+    let (mut dummy_parts, _) = dummy.into_parts();
 
     // The tenant for THIS request, not for the router.
     let (org, pool) = match tenant_pool(&dummy_parts, req.extensions()).await {
         Ok(t) => t,
         Err(resp) => return resp,
     };
+    // Scopes the Basic-auth account lock to this tenant.
+    dummy_parts
+        .extensions
+        .insert(super::TenantSlug(org.slug.clone()));
 
     let mut authenticated: Option<AuthUser> = None;
     let mut error_response: Option<Response> = None;
@@ -266,6 +270,10 @@ async fn auth_middleware(
             Ok(None) => {}
             Err(AuthError::Inactive) => {
                 error_response = Some((StatusCode::FORBIDDEN, "account inactive").into_response());
+                break;
+            }
+            Err(AuthError::Refused(refused)) => {
+                error_response = Some(refused.into_response());
                 break;
             }
             Err(e) => {

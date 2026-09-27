@@ -340,10 +340,12 @@ pub struct LoginOutput {
 async fn login(
     State(auth): State<JwtAuth>,
     t: Tenant,
+    ip: crate::login_throttle::ClientIp,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginInput>,
 ) -> Result<Json<LoginOutput>, Response> {
     use crate::core::Column as _;
+    use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -361,6 +363,17 @@ async fn login(
         }
     };
 
+    // Rate limits and the account lock, before the lookup (#1609). Same
+    // scope as the tenant admin login, which shares the user table.
+    let attempt = crate::login_throttle::shared()
+        .begin(&format!("tenant:{}", t.org.slug), &ip, &body.username)
+        .await
+        .map_err(LoginRefused::into_response)?;
+    let busy = |e: crate::tenancy::TenancyError| match e {
+        crate::tenancy::TenancyError::Busy => LoginRefused::Busy.into_response(),
+        e => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
     let users = User::objects()
         .where_(User::username.eq(body.username.clone()))
         .fetch(t.pool())
@@ -370,31 +383,23 @@ async fn login(
     let Some(user) = users.into_iter().next() else {
         // H1: spend a verify's worth of work on the unknown-user path so
         // timing doesn't reveal whether the username exists.
-        crate::tenancy::password::verify_dummy_async(&body.password).await;
+        crate::tenancy::password::verify_dummy_async(&body.password)
+            .await
+            .map_err(busy)?;
+        attempt.failed().await;
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
         return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     };
-
-    // Audit M1 — per-account brute-force lockout, on by default. Key is
-    // scoped by tenant slug + resolved user id so it can't collide with
-    // another tenant's same-numbered user (or the operator/admin
-    // domains). A locked account short-circuits before the verify.
     let uid = user.id.get().copied().unwrap_or(0);
-    #[cfg(feature = "cache")]
-    let lock_key = format!("tenant:{}:{}", t.org.slug, uid);
-    #[cfg(feature = "cache")]
-    if crate::account_lockout::shared().is_locked(&lock_key).await {
-        send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
-        return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
-    }
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
     let ok = crate::tenancy::password::verify_async(&body.password, &user.password_hash)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(busy)?;
 
     if !user.active {
+        attempt.failed().await;
         send_user_login_failed(fire_failed(AuthFailureReason::Inactive)).await;
         // Audit M4 — at the login endpoint, an inactive account must
         // look identical to an unknown user / wrong password (same 401
@@ -405,20 +410,12 @@ async fn login(
         return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
     if !ok {
-        // Audit M1 — count this failure toward the per-account lockout.
-        #[cfg(feature = "cache")]
-        {
-            let _ = crate::account_lockout::shared()
-                .record_failure(&lock_key)
-                .await;
-        }
+        attempt.failed().await;
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
         return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
 
-    // Audit M1 — successful login clears the failure counter + any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared().clear(&lock_key).await;
+    attempt.succeeded().await;
 
     let user_id = uid;
     send_user_logged_in(UserLoggedInContext {

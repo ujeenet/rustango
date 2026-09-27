@@ -49,4 +49,8 @@ pub enum TenancyError {
     /// `manage` runner's writer (broken pipe etc.).
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// No password-hashing slot freed up in time. Answer 503.
+    #[error("password hashing is busy")]
+    Busy,
 }

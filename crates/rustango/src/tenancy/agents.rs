@@ -224,7 +224,7 @@ pub async fn authenticate_agent_pool(
         // Unknown / inactive agent: still spend an argon2 verification against a
         // fixed dummy hash so the response time doesn't reveal whether the agent
         // name exists (timing oracle → agent enumeration). #1099.
-        super::password::verify_dummy_async(secret_half).await;
+        let _ = super::password::verify_dummy_async(secret_half).await;
         return Ok(None);
     };
 
@@ -260,7 +260,7 @@ pub async fn authenticate_agent_by_prefix_pool(
         .filter(|a| a.active)
     else {
         // Timing-neutral for unknown prefixes (#1099).
-        super::password::verify_dummy_async(secret).await;
+        let _ = super::password::verify_dummy_async(secret).await;
         return Ok(None);
     };
 

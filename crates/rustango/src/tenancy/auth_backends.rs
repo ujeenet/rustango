@@ -71,6 +71,22 @@ pub enum AuthError {
     InvalidToken,
     #[error("account is inactive")]
     Inactive,
+    /// Locked out or password hashing busy; answer with its response.
+    #[error("login refused: {0:?}")]
+    Refused(crate::login_throttle::LoginRefused),
+}
+
+impl AuthError {
+    /// A hashing error: busy is [`LoginRefused::Busy`], anything else an
+    /// invalid credential.
+    ///
+    /// [`LoginRefused::Busy`]: crate::login_throttle::LoginRefused::Busy
+    fn from_hash(e: super::TenancyError) -> Self {
+        match e {
+            super::TenancyError::Busy => Self::Refused(crate::login_throttle::LoginRefused::Busy),
+            _ => Self::InvalidToken,
+        }
+    }
 }
 
 // ------------------------------------------------------------------ Trait
@@ -118,6 +134,16 @@ impl AuthBackend for ModelBackend {
             None => return Ok(None),
         };
 
+        // Same account lock as the login forms (#1609); no per-IP limit,
+        // since Basic credentials ride on every request.
+        let scope = parts
+            .extensions
+            .get::<super::TenantSlug>()
+            .map_or_else(|| "tenant".to_owned(), |s| format!("tenant:{}", s.0));
+        let attempt = crate::login_throttle::LoginThrottle::account(&scope, &username)
+            .await
+            .map_err(AuthError::Refused)?;
+
         let users = super::auth::User::objects()
             .where_(super::auth::User::username.eq(username.clone()))
             .fetch(pool)
@@ -127,7 +153,10 @@ impl AuthBackend for ModelBackend {
             // Audit H1/N4 — spend a verify's worth of work on the
             // unknown-user path so timing doesn't reveal whether the
             // username exists.
-            password::verify_dummy_async(&password).await;
+            password::verify_dummy_async(&password)
+                .await
+                .map_err(AuthError::from_hash)?;
+            attempt.failed().await;
             return Ok(None);
         };
 
@@ -135,8 +164,9 @@ impl AuthBackend for ModelBackend {
         // take the same time (audit H1/N4).
         let ok = password::verify_async(&password, &user.password_hash)
             .await
-            .map_err(|_| AuthError::InvalidToken)?;
+            .map_err(AuthError::from_hash)?;
         if !user.active || !ok {
+            attempt.failed().await;
             // Audit N4 — an inactive account must look identical to a
             // wrong password at this (username-keyed, pre-credential)
             // boundary: same `Ok(None)`, not a distinguishable
@@ -146,6 +176,7 @@ impl AuthBackend for ModelBackend {
             return Ok(None);
         }
 
+        attempt.succeeded().await;
         Ok(Some(AuthUser {
             id: user.id.get().copied().unwrap_or(0),
             username: user.username,
@@ -283,7 +314,9 @@ impl AuthBackend for ApiKeyBackend {
         let Some(key) = keys.into_iter().next() else {
             // Audit N4 — equalize timing on the unknown-prefix path so it
             // doesn't reveal whether a key prefix exists.
-            password::verify_dummy_async(secret).await;
+            password::verify_dummy_async(secret)
+                .await
+                .map_err(AuthError::from_hash)?;
             return Ok(None);
         };
 
@@ -295,7 +328,7 @@ impl AuthBackend for ApiKeyBackend {
 
         let ok = password::verify_async(secret, &key.key_hash)
             .await
-            .map_err(|_| AuthError::InvalidToken)?;
+            .map_err(AuthError::from_hash)?;
         if !ok {
             return Ok(None);
         }

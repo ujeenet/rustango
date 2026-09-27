@@ -169,6 +169,14 @@ When exhausted: `429 Too Many Requests` with `Retry-After` header. Every success
 >
 > Name the addresses your ingress actually connects from. Trusting a range wider than that hands the bypass to anyone inside it.
 
+### Built-in login limits
+
+Every built-in password login (admin, operator console, tenant admin, JWT `/auth/login`) goes through `rustango::login_throttle` before the user lookup. It applies a global ceiling (600/min), a per-IP limit (20/min, keyed like `per_ip` above) and a per-username lock (5 failures, 15 min) that counts unknown usernames the same as real ones. HTTP Basic gets the username lock only. A refused login gets `429` with `Retry-After`, and the same answer whether or not the account exists.
+
+Password hashing runs at most one job per CPU. A login that waits longer than `hash_wait_ms` (5 s) for a slot gets `503` with `Retry-After`, for known and unknown users alike.
+
+Tune them under `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. The per-IP and global buckets are per process; the username lock uses `account_lockout::shared()`, which you can back with a shared cache via `account_lockout::configure_shared`.
+
 `RateLimitLayer` is **process-local** — it counts requests only within one running instance, which is fine if you run a single instance. If you run several instances (replicas) behind a load balancer, each would keep its own count, so the real limit multiplies. To share one count across all replicas, use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
 
 ```rust

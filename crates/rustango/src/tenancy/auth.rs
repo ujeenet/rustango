@@ -143,8 +143,9 @@ pub struct User {
 ///
 /// # Errors
 /// Returns [`TenancyError::Driver`]/[`TenancyError::Exec`] for SQL
-/// failures, or [`TenancyError::Validation`] for malformed stored
-/// hashes (corrupt row).
+/// failures, [`TenancyError::Validation`] for malformed stored
+/// hashes (corrupt row), or [`TenancyError::Busy`] for a known and an
+/// unknown username alike when no hashing slot frees up.
 #[cfg(feature = "postgres")]
 pub async fn authenticate_operator(
     registry: &PgPool,
@@ -180,7 +181,7 @@ pub async fn authenticate_operator_pool(
     let Some(op) = rows.into_iter().next() else {
         // H1: spend a verify's worth of work on the unknown-user path
         // so timing doesn't reveal whether the account exists.
-        password::verify_dummy_async(password).await;
+        password::verify_dummy_async(password).await?;
         return Ok(None);
     };
     // Verify before the active check so active vs inactive accounts
@@ -230,7 +231,7 @@ pub async fn authenticate_user(
     .await?;
     let Some(row) = user_rows else {
         // H1: equalize timing for the unknown-user path.
-        password::verify_dummy_async(password).await;
+        password::verify_dummy_async(password).await?;
         return Ok(None);
     };
     let user = User {
@@ -291,7 +292,7 @@ pub async fn authenticate_user_pool(
         .await?;
     let Some(user) = rows.into_iter().next() else {
         // H1: equalize timing for the unknown-user path.
-        password::verify_dummy_async(password).await;
+        password::verify_dummy_async(password).await?;
         return Ok(None);
     };
     let password_ok = password::verify_async(password, &user.password_hash).await?;

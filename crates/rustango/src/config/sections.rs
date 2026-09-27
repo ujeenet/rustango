@@ -523,10 +523,23 @@ pub struct AuthSettings {
     /// fastest overall, since extra lanes only move work between
     /// cores.
     pub argon2_parallelism: Option<u32>,
-    /// Failed-login attempts before lockout. Default `5`.
+    /// Failed logins for one username, known or not, before it locks.
+    /// Default `5`.
     pub lockout_threshold: Option<u32>,
     /// Lockout duration in seconds. Default `900` (15 min).
     pub lockout_duration_secs: Option<u64>,
+    /// Login attempts one client IP may make per window. Default `20`.
+    pub login_ip_limit: Option<u32>,
+    /// Per-IP window in seconds. Default `60`.
+    pub login_ip_window_secs: Option<u64>,
+    /// Login attempts all clients together may make per window.
+    /// Default `600`.
+    pub login_global_limit: Option<u32>,
+    /// Global window in seconds. Default `60`.
+    pub login_global_window_secs: Option<u64>,
+    /// How long a login waits for a password-hashing slot before it
+    /// answers 503, in milliseconds. Default `5000`.
+    pub hash_wait_ms: Option<u64>,
 }
 
 /// JWT lifetimes. The defaults match

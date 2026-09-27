@@ -392,6 +392,9 @@ admin = [
     # Tokio was already in the admin closure; signals adds only the
     # in-process registry helpers.
     "signals",
+    # #1609 — every login's account lock lives in `account_lockout`,
+    # so no admin/tenancy build can compile a login without it.
+    "cache",
     "_axum",
     "_tera",
     "_signing",

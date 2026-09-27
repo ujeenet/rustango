@@ -65,12 +65,11 @@ fn warn_missing_discriminator(what: &str) {
 /// the limiter, or no proxies were marked trusted.
 ///
 /// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
-fn warn_forwarded_but_unresolved(req: &Request<Body>) {
+fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
 
-    let forwarded =
-        req.headers().contains_key("x-forwarded-for") || req.headers().contains_key("x-real-ip");
+    let forwarded = headers.contains_key("x-forwarded-for") || headers.contains_key("x-real-ip");
     if forwarded && !WARNED.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             target: "rustango::rate_limit",
@@ -100,19 +99,23 @@ fn warn_forwarded_but_unresolved(req: &Request<Body>) {
 /// [`RealIp`]: crate::real_ip::RealIp
 /// [`RealIpLayer::trust_proxies`]: crate::real_ip::RealIpLayer::trust_proxies
 pub(crate) fn client_ip_key(req: &Request<Body>) -> String {
-    if let Some(ip) = req.extensions().get::<crate::real_ip::TrustedRealIp>() {
-        return ip.0.to_string();
+    client_ip(req.extensions(), req.headers()).unwrap_or_else(|| {
+        warn_missing_discriminator("IP (ConnectInfo missing)");
+        "<no-ip>".to_owned()
+    })
+}
+
+/// [`client_ip_key`] from request parts; `None` when no address is known.
+pub(crate) fn client_ip(
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    if let Some(ip) = extensions.get::<crate::real_ip::TrustedRealIp>() {
+        return Some(ip.0.to_string());
     }
-    match req.extensions().get::<ConnectInfo<SocketAddr>>() {
-        Some(ci) => {
-            warn_forwarded_but_unresolved(req);
-            ci.ip().to_string()
-        }
-        None => {
-            warn_missing_discriminator("IP (ConnectInfo missing)");
-            "<no-ip>".to_owned()
-        }
-    }
+    let ci = extensions.get::<ConnectInfo<SocketAddr>>()?;
+    warn_forwarded_but_unresolved(headers);
+    Some(ci.ip().to_string())
 }
 
 /// Strategy for picking the bucket key per request.
@@ -257,7 +260,7 @@ impl RateLimitLayer {
 
     /// Take one token. Returns `Ok((remaining, retry_after_secs))` on success,
     /// `Err(retry_after_secs)` when the bucket is empty.
-    async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
+    pub(crate) async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
         let now = Instant::now();
         let cap = self.capacity as f64;
         let rate = self.rate_per_sec();

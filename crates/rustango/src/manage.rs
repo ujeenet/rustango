@@ -536,6 +536,9 @@ impl Cli {
         // per-Builder wiring; first call wins, like the other boot globals.
         let _ = crate::session::set_secure_cookies(s.security.secure_cookies.unwrap_or(true));
 
+        // #1609 / #1732 — login limits and the hash-slot wait, first call wins.
+        apply_login_settings(&s.auth);
+
         // Stash a clone for `runserver` to apply layered settings
         // (security_headers, CORS, access_log, body_limit) on top
         // of the user's `api` Router. Done at run time rather than
@@ -1650,6 +1653,37 @@ fn outer_layers(s: &crate::config::SecuritySettings) -> OuterLayers {
 /// projects that want code-side construction can keep doing it; and
 /// hybrid projects can mix (e.g. set the apex via env, override
 /// just `admin_url` in TOML).
+/// Install the `[auth]` login limits, lockout policy and hash-slot wait.
+/// The lockout is only replaced when a key is set, so a shared-cache
+/// lockout installed earlier by the app is kept.
+#[cfg(feature = "config")]
+fn apply_login_settings(a: &crate::config::AuthSettings) {
+    #[cfg(feature = "passwords")]
+    if let Some(ms) = a.hash_wait_ms {
+        let _ = crate::passwords::configure_hash_wait(std::time::Duration::from_millis(ms));
+    }
+    #[cfg(feature = "admin")]
+    {
+        use crate::login_throttle::{configure_shared, LoginLimits, LoginThrottle};
+        let _ = configure_shared(LoginThrottle::new(LoginLimits::from_settings(a)));
+    }
+    #[cfg(feature = "cache")]
+    if a.lockout_threshold.is_some() || a.lockout_duration_secs.is_some() {
+        use crate::account_lockout::{
+            configure_shared, Lockout, DEFAULT_LOCKOUT_DURATION_SECS, DEFAULT_MAX_ATTEMPTS,
+        };
+        let lockout = Lockout::new(std::sync::Arc::new(crate::cache::InMemoryCache::new()))
+            .max_attempts(a.lockout_threshold.unwrap_or(DEFAULT_MAX_ATTEMPTS))
+            .lockout_duration(std::time::Duration::from_secs(
+                a.lockout_duration_secs
+                    .unwrap_or(DEFAULT_LOCKOUT_DURATION_SECS),
+            ));
+        let _ = configure_shared(lockout);
+    }
+    #[cfg(not(any(feature = "passwords", feature = "admin", feature = "cache")))]
+    let _ = a;
+}
+
 #[cfg(all(feature = "config", feature = "tenancy"))]
 fn routes_from_settings(
     s: &crate::config::RoutesSettings,

@@ -863,6 +863,11 @@ pub mod logging;
 #[cfg(feature = "cache")]
 pub mod account_lockout;
 
+/// Per-IP, per-account and global limits in front of every built-in
+/// password login. See [`login_throttle::LoginThrottle`].
+#[cfg(feature = "admin")]
+pub mod login_throttle;
+
 /// Broadcast event bus — fan-out for SSE / WebSocket / signal-driven push.
 /// See [`sse::EventBus`].
 #[cfg(feature = "sse")]

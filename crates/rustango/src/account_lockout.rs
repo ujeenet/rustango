@@ -106,6 +106,12 @@ impl Lockout {
         self
     }
 
+    /// How long a lock lasts once set.
+    #[must_use]
+    pub fn lock_duration(&self) -> Duration {
+        self.lockout_duration
+    }
+
     /// Check whether `account` is currently locked. Returns `true` to
     /// reject the login attempt; `false` to proceed with verification.
     pub async fn is_locked(&self, account: &str) -> bool {

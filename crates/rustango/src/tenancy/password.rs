@@ -115,24 +115,33 @@ pub fn verify_dummy(plaintext: &str) {
 /// [`hash`] on the blocking pool. Use this from async code.
 ///
 /// # Errors
-/// As [`hash`].
+/// As [`hash`], or [`TenancyError::Busy`] when no hashing slot frees up.
 pub async fn hash_async(plaintext: &str) -> Result<String, TenancyError> {
     let plaintext = plaintext.to_owned();
-    crate::passwords::off_runtime(move || hash(&plaintext)).await
+    crate::passwords::off_runtime(move || hash(&plaintext))
+        .await
+        .map_err(|_| TenancyError::Busy)?
 }
 
 /// [`verify`] on the blocking pool. Use this from async code.
 ///
 /// # Errors
-/// As [`verify`].
+/// As [`verify`], or [`TenancyError::Busy`].
 pub async fn verify_async(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
     let (plaintext, phc_hash) = (plaintext.to_owned(), phc_hash.to_owned());
-    crate::passwords::off_runtime(move || verify(&plaintext, &phc_hash)).await
+    crate::passwords::off_runtime(move || verify(&plaintext, &phc_hash))
+        .await
+        .map_err(|_| TenancyError::Busy)?
 }
 
 /// [`verify_dummy`] on the blocking pool. Use this from async code.
-pub async fn verify_dummy_async(plaintext: &str) {
-    crate::passwords::verify_dummy_async(plaintext).await;
+///
+/// # Errors
+/// [`TenancyError::Busy`], exactly when [`verify_async`] would be busy.
+pub async fn verify_dummy_async(plaintext: &str) -> Result<(), TenancyError> {
+    crate::passwords::verify_dummy_async(plaintext)
+        .await
+        .map_err(|_| TenancyError::Busy)
 }
 
 #[cfg(test)]
@@ -147,7 +156,8 @@ mod tests {
         let (ok, n) = ticks_while(verify_async("hunter2", &h.unwrap())).await;
         assert!(ok.unwrap());
         assert!(n >= 2, "verify_async stalled the runtime ({n} ticks)");
-        let ((), n) = ticks_while(verify_dummy_async("hunter2")).await;
+        let (r, n) = ticks_while(verify_dummy_async("hunter2")).await;
+        assert!(r.is_ok());
         assert!(n >= 2, "verify_dummy_async stalled the runtime ({n} ticks)");
     }
 
