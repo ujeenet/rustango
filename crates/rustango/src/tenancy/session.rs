@@ -233,4 +233,22 @@ mod tests {
             None
         ));
     }
+
+    /// With the hash unchanged, a `password_changed_at` bump after `iat` still ends it.
+    #[test]
+    fn a_later_password_changed_at_ends_a_session_with_the_same_hash() {
+        let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
+        let pwf = PasswordFingerprint::of(&secret, "$h");
+        let iat = 1_700_000_000;
+        let at = |secs| chrono::DateTime::from_timestamp(secs, 0);
+        assert!(survives_password_change(&secret, &pwf, iat, "$h", None));
+        assert!(survives_password_change(&secret, &pwf, iat, "$h", at(iat)));
+        assert!(!survives_password_change(
+            &secret,
+            &pwf,
+            iat,
+            "$h",
+            at(iat + 1)
+        ));
+    }
 }

@@ -221,6 +221,170 @@ async fn a_password_change_in_the_login_second_ends_that_session() {
     );
 }
 
+/// Mount `handler` behind a `TenantContext` on `registry`, resolving `org`.
+fn app_with<H, T>(
+    handler: H,
+    registry: sqlx::SqlitePool,
+    org: Org,
+    session_secret: rustango::tenancy::session::SessionSecret,
+    operator_secret: rustango::tenancy::session::SessionSecret,
+) -> Router
+where
+    H: axum::handler::Handler<T, ()>,
+    T: 'static,
+{
+    let ctx = Arc::new(TenantContext {
+        pools: Arc::new(TenantPools::<sqlx::Sqlite>::new(registry)),
+        resolver: ChainResolver::new().push(FixedResolver(org)),
+        session_secret,
+        operator_secret,
+    });
+    Router::new()
+        .route("/whoami", get(handler))
+        .layer(axum::middleware::from_fn(
+            move |mut req: Request, next: axum::middleware::Next| {
+                let ctx = ctx.clone();
+                async move {
+                    req.extensions_mut().insert(ctx);
+                    next.run(req).await
+                }
+            },
+        ))
+}
+
+async fn whoami_with(app: &Router, cookie: &str) -> String {
+    let req = Request::builder()
+        .uri("/whoami")
+        .header("Cookie", cookie)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// `SessionOperator` authenticates a real cookie and drops it after a
+/// password change in the login second.
+#[tokio::test]
+async fn session_operator_ends_on_a_same_second_password_change() {
+    use rustango::extractors::SessionOperator;
+    use rustango::tenancy::session::{encode, PasswordFingerprint, SessionPayload, COOKIE_NAME};
+
+    async fn whoop(SessionOperator(op): SessionOperator) -> String {
+        op.map_or_else(|| "anon".to_owned(), |o| format!("op:{}", o.username))
+    }
+
+    let registry =
+        sqlx::SqlitePool::connect("sqlite:file:session_op_1338?mode=memory&cache=shared")
+            .await
+            .expect("registry pool");
+    let reg = rustango::sql::Pool::from(registry.clone());
+    rustango::testkit::create_tables_for::<rustango::tenancy::Operator>(&reg)
+        .await
+        .expect("operators table");
+    let mut op = rustango::tenancy::Operator {
+        id: rustango::sql::Auto::default(),
+        username: "root".into(),
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+    };
+    op.insert_pool(&reg).await.expect("seed operator");
+
+    let op_secret = rustango::tenancy::session::SessionSecret::from_bytes(
+        b"test_oper_session_secret____32b!".to_vec(),
+    );
+    let app = app_with(
+        whoop,
+        registry,
+        fake_sqlite_org(),
+        rustango::tenancy::session::SessionSecret::from_bytes(
+            b"test_tenant_session_secret_32by!".to_vec(),
+        ),
+        op_secret.clone(),
+    );
+    let login = SessionPayload::new(
+        op.id.get().copied().unwrap(),
+        3600,
+        PasswordFingerprint::of(&op_secret, &op.password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&op_secret, &login));
+    assert_eq!(whoami_with(&app, &cookie).await, "op:root");
+
+    op.password_hash = rustango::tenancy::password::hash("second-password").unwrap();
+    op.password_changed_at = chrono::DateTime::from_timestamp(login.iat, 999_000_000);
+    op.save_pool(&reg).await.expect("change password");
+    assert_eq!(
+        whoami_with(&app, &cookie).await,
+        "anon",
+        "an operator session must not survive a password change"
+    );
+}
+
+/// A member cookie from `mint_cookie` (what the SSO callback sets)
+/// authenticates, and a password change in the login second ends it.
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn current_member_ends_on_a_same_second_password_change() {
+    use rustango::tenancy::member_auth::{decode, mint_cookie, CurrentMember};
+
+    async fn member(CurrentMember(user): CurrentMember) -> String {
+        user.map_or_else(|| "anon".to_owned(), |u| format!("member:{}", u.username))
+    }
+
+    let url = "sqlite:file:current_member_1338?mode=memory&cache=shared";
+    let tenant = rustango::sql::Pool::connect(url).await.expect("tenant db");
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&tenant)
+        .await
+        .expect("users table");
+    let mut user = rustango::tenancy::User {
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&tenant).await.expect("seed user");
+
+    let secret = rustango::tenancy::session::SessionSecret::from_bytes(
+        b"test_tenant_session_secret_32by!".to_vec(),
+    );
+    let app = app_with(
+        member,
+        sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap(),
+        Org {
+            database_url: Some(url.into()),
+            ..fake_sqlite_org()
+        },
+        secret.clone(),
+        rustango::tenancy::session::SessionSecret::from_bytes(
+            b"test_oper_session_secret____32b!".to_vec(),
+        ),
+    );
+    let set_cookie = mint_cookie(&secret, &user, "acme", 3600);
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
+    assert_eq!(whoami_with(&app, &cookie).await, "member:alice");
+
+    let iat = decode(&secret, "acme", cookie.split_once('=').unwrap().1)
+        .unwrap()
+        .iat;
+    user.password_hash = rustango::tenancy::password::hash("second-password").unwrap();
+    user.password_changed_at = chrono::DateTime::from_timestamp(iat, 999_000_000);
+    user.save_pool(&tenant).await.expect("change password");
+    assert_eq!(
+        whoami_with(&app, &cookie).await,
+        "anon",
+        "a member session must not survive a password change"
+    );
+
+    let relogin = mint_cookie(&secret, &user, "acme", 3600);
+    assert_eq!(
+        whoami_with(&app, relogin.split(';').next().unwrap()).await,
+        "member:alice",
+        "a login after the change must work"
+    );
+}
+
 #[tokio::test]
 async fn session_user_malformed_cookie_returns_none_on_sqlite() {
     let registry = sqlx::SqlitePool::connect("sqlite::memory:")

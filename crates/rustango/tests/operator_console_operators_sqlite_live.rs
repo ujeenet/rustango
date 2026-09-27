@@ -397,25 +397,8 @@ async fn deactivating_takes_effect_on_the_next_request() {
     );
 }
 
-/// Wait until the wall clock crosses into the next second.
-///
-/// Session `iat` and `password_changed_at` are both second-granularity,
-/// and `require_session` rejects on `iat < password_changed_at` —
-/// strictly less than, deliberately: `change_password_submit` does not
-/// re-mint the cookie, so `<=` would sign an operator out the instant
-/// they changed their own password. The consequence is that a reset in
-/// the *same second* as a login leaves that session valid, which made
-/// this test pass or fail depending on where the second boundary fell.
-async fn cross_a_second_boundary() {
-    let start = chrono::Utc::now().timestamp();
-    while chrono::Utc::now().timestamp() == start {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-/// A reset rotates `password_changed_at`, and `require_session` rejects
-/// sessions issued before it. The page promises this; the promise has
-/// to be true.
+/// A reset writes a new hash, and `require_session` rejects sessions
+/// minted under the old one. The page promises this.
 #[tokio::test]
 async fn resetting_a_password_signs_that_operator_out() {
     let b = boot().await;
@@ -455,7 +438,6 @@ async fn resetting_a_password_signs_that_operator_out() {
         .unwrap()
         .to_owned();
 
-    cross_a_second_boundary().await;
     b.post(
         &format!("/operators/{id}/reset-password"),
         "password=totally-new-one&confirm_password=totally-new-one",
@@ -480,7 +462,7 @@ async fn resetting_a_password_signs_that_operator_out() {
     );
     assert!(
         b.find(&name).await.unwrap().password_changed_at.is_some(),
-        "password_changed_at is what does it, so it must be set"
+        "a reset still stamps password_changed_at"
     );
 }
 

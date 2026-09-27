@@ -146,7 +146,10 @@ impl TestClient {
     ) -> &Self {
         use crate::tenancy::tenant_console;
         let payload = tenant_console::TenantSessionPayload::new(
-            user.id.get().copied().unwrap_or_default(),
+            user.id
+                .get()
+                .copied()
+                .expect("force_login_tenant_user needs a saved user row"),
             slug,
             ttl_secs,
             tenant_console::PasswordFingerprint::of(secret, &user.password_hash),
@@ -175,7 +178,11 @@ impl TestClient {
     ) -> &Self {
         use crate::tenancy::session;
         let payload = session::SessionPayload::new(
-            operator.id.get().copied().unwrap_or_default(),
+            operator
+                .id
+                .get()
+                .copied()
+                .expect("force_login_operator needs a saved operator row"),
             ttl_secs,
             session::PasswordFingerprint::of(secret, &operator.password_hash),
         );
@@ -1153,6 +1160,16 @@ mod tests {
         let cookie = c.cookie(COOKIE_NAME).expect("operator cookie present");
         let payload = decode(&secret, &cookie).expect("cookie decodes");
         assert_eq!(payload.oid, 7);
+    }
+
+    /// An unsaved row panics rather than minting a cookie for id 0.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    #[should_panic(expected = "saved user row")]
+    fn force_login_tenant_user_refuses_an_unsaved_user() {
+        let secret = crate::tenancy::session::SessionSecret::from_bytes(vec![3u8; 32]);
+        let c = TestClient::new(Router::new());
+        c.force_login_tenant_user(&secret, "acme", &crate::testkit::user(), 3600);
     }
 
     #[cfg(feature = "tenancy")]
