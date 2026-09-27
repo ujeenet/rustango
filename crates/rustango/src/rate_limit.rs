@@ -89,8 +89,9 @@ fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
 /// This uses [`TrustedRealIp`], never [`RealIp`]. A `RealIp` is only a
 /// claim by whoever sent the header. Keying on it would let any client
 /// pick its own bucket and skip the limit entirely. Only
-/// [`RealIpLayer::trust_proxies`] produces the trusted form, so an
-/// operator must name the proxy hops; nothing is guessed.
+/// [`RealIpLayer::trust_proxies`] produces the trusted form: the
+/// rightmost hop outside the named proxies. It is only as sound as
+/// that list and the header strategy your proxy actually writes.
 ///
 /// All header parsing lives in `RealIpLayer`. The limiters never read
 /// `X-Forwarded-For` themselves.
