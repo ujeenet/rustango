@@ -156,11 +156,13 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
         "login status: {}", resp.status()
     );
 
-    // 2. POST the admin create form for cookbook_author.
+    // 2. POST the admin create form for cookbook_author. It echoes the
+    // same CSRF token: admin writes check it too (#1713).
     let create_body = [
         ("name",  "ada lovelace"),
         ("email", "ada@example.com"),
         ("bio",   "first programmer"),
+        ("_csrf", csrf.as_str()),
     ];
     let resp = client
         .post(format!("http://{BIND}/admin/cookbook_author"))
