@@ -4,6 +4,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — ViewSet and template views apply global scopes (#1746)
+
+`ViewSet` and `ListView` / `DetailView` / `UpdateView` / `DeleteView`
+now apply the model's `global_scope(...)` filters, like a `QuerySet`:
+lists, counts, filters, search, pagination and the built-in
+`delete_selected` skip scoped-out rows, and a PK read, update or delete
+of one is a 404. The admin still sees every row; narrow it with
+`register_admin_queryset!`. New `ModelSchema::with_global_scopes` and
+`.with_global_scopes()` on `SelectQuery`, `CountQuery`, `UpdateQuery`
+and `DeleteQuery` for queries built from a schema.
+
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 
 `RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`

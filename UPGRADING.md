@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### ViewSet and template views hide scoped-out rows
+
+A model with a `global_scope` served through `ViewSet` or the template
+views now hides the scoped-out rows there too, and a PK request for one
+is a 404 (#1746). An endpoint that must reach them should use
+`Model::objects().without_global_scopes()` in its own handler.
+
 ### The trusted client IP is the rightmost untrusted hop
 
 Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the
