@@ -4,6 +4,21 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — password hashing no longer blocks the async runtime (#1709)
+
+Login, change-password, API-key and agent checks ran argon2 inline on
+Tokio workers, so a few parallel logins could stall every request. New
+`passwords::{hash_async, verify_async, verify_dummy_async}` and
+`tenancy::password::*_async` run it on the blocking pool, at most one
+per CPU at a time, and every framework call site uses them. Call the
+async ones from handlers; clippy now refuses the sync ones inside the
+crate.
+
+### Security — examples escape product text in the storefronts (#1636)
+
+`platform_commerce` and `platform_commerce_saas` HTML-escape product
+`sku` and `name`.
+
 ### Security — idempotency replays are scoped to the caller and route (#1668)
 
 `IdempotencyLayer` now keys a stored response on host, tenant,
