@@ -379,14 +379,15 @@ pub fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
 #[serde(transparent)]
 pub struct PasswordFingerprint(String);
 
+/// Domain tag, so a fingerprint is never a valid MAC of anything else.
+const PASSWORD_FINGERPRINT_TAG: &[u8] = b"rustango-pwf-v1.";
+
 impl PasswordFingerprint {
     /// Fingerprint `password_hash` under `secret`.
     #[must_use]
     pub fn of(secret: &SessionSecret, password_hash: &str) -> Self {
-        Self(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(sign(secret, password_hash.as_bytes())),
-        )
+        let msg = [PASSWORD_FINGERPRINT_TAG, password_hash.as_bytes()].concat();
+        Self(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sign(secret, &msg)))
     }
 
     /// `true` when this was minted from `password_hash`. Constant time.
@@ -396,17 +397,20 @@ impl PasswordFingerprint {
         use subtle::ConstantTimeEq as _;
         self.0.as_bytes().ct_eq(current.0.as_bytes()).into()
     }
-
-    /// `true` for the empty value, so a payload can skip serializing it.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fingerprint is domain-tagged, not a bare MAC of the hash.
+    #[test]
+    fn a_password_fingerprint_is_not_a_bare_mac_of_the_hash() {
+        let secret = SessionSecret::from_bytes(vec![7u8; 32]);
+        let bare =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sign(&secret, b"$argon2id$h"));
+        assert_ne!(PasswordFingerprint::of(&secret, "$argon2id$h").0, bare);
+    }
 
     /// A short key is refused, not signed with. `sign` would accept
     /// it: HMAC takes any key length, so the check must be here.
