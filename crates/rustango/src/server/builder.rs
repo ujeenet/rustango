@@ -92,6 +92,12 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// admin and operator console carry them too (#1699).
     #[cfg(feature = "admin")]
     security_headers: Option<crate::security_headers::SecurityHeadersLayer>,
+    /// Same reason: the Host allowlist and HTTPS redirect must see the
+    /// tenant and console routes too (#1700).
+    #[cfg(feature = "admin")]
+    allowed_hosts: Option<crate::host_validation::AllowedHostsLayer>,
+    #[cfg(feature = "admin")]
+    ssl_redirect: Option<crate::ssl_redirect::SslRedirectLayer>,
     _phantom: PhantomData<DB>,
 }
 
@@ -157,6 +163,10 @@ impl<DB: Database> Builder<DB> {
             span_redact: None,
             #[cfg(feature = "admin")]
             security_headers: None,
+            #[cfg(feature = "admin")]
+            allowed_hosts: None,
+            #[cfg(feature = "admin")]
+            ssl_redirect: None,
             _phantom: PhantomData,
         }
     }
@@ -171,6 +181,24 @@ impl<DB: Database> Builder<DB> {
         layer: crate::security_headers::SecurityHeadersLayer,
     ) -> Self {
         self.security_headers = Some(layer);
+        self
+    }
+
+    /// Refuse requests whose `Host` is not allowed, on every route
+    /// (#1700). `Cli` calls this from `[security] allowed_hosts`.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn allowed_hosts(mut self, layer: crate::host_validation::AllowedHostsLayer) -> Self {
+        self.allowed_hosts = Some(layer);
+        self
+    }
+
+    /// Redirect plain HTTP to HTTPS on every route (#1700). `Cli`
+    /// calls this from `[security] secure_ssl_redirect`.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn ssl_redirect(mut self, layer: crate::ssl_redirect::SslRedirectLayer) -> Self {
+        self.ssl_redirect = Some(layer);
         self
     }
 
@@ -739,6 +767,24 @@ impl<DB: Database> Builder<DB> {
             Some(layer) => {
                 use crate::security_headers::SecurityHeadersRouterExt as _;
                 app.security_headers(layer)
+            }
+            None => app,
+        };
+        // Outside the headers, as on the single-tenant router, so a
+        // refused Host or the HTTPS redirect is answered first.
+        #[cfg(feature = "admin")]
+        let app = match self.allowed_hosts {
+            Some(layer) => {
+                use crate::host_validation::AllowedHostsRouterExt as _;
+                app.allowed_hosts(layer)
+            }
+            None => app,
+        };
+        #[cfg(feature = "admin")]
+        let app = match self.ssl_redirect {
+            Some(layer) => {
+                use crate::ssl_redirect::SslRedirectRouterExt as _;
+                app.ssl_redirect(layer)
             }
             None => app,
         };
