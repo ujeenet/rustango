@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — session extractors on SQLite and MySQL
+
+`SessionUser`, `SessionOperator` and `CurrentMember` looked only for
+the Postgres `TenantContext`, so with the `postgres` feature on (the
+default) a stack that mounts `TenantContext<Sqlite>`,
+`TenantContext<MySql>` or `DatabaseTenantContext` saw every request as
+anonymous. They now find the tenant context of any backend.
+
 ### Security — a password change ends sessions from the same second (#1338)
 
 Tenant admin, member, `SessionUser` and operator-console sessions now
