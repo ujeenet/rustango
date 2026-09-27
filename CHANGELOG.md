@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — tenant admin writes are CSRF-protected (#1713)
+
+The tenant admin's create, update, delete, bulk actions, change-password
+and logout checked no CSRF token. Tenant hosts are same-site, so a page
+on one tenant could edit another tenant's data through its admin's
+browser. `TenantAdminBuilder::build()` now wraps every route in the
+token and `Origin` check, and every tenant admin form carries the token.
+
 ### Security — the operator console is CSRF-protected (#1710)
 
 None of its POSTs checked a token or `Origin`, and a tenant subdomain

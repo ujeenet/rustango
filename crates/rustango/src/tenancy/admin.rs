@@ -279,7 +279,12 @@ where
             .unwrap_or_else(branding::default_brand_storage);
         let routes = self.routes;
 
-        Router::new().fallback(move |req: Request<Body>| {
+        // CSRF on every tenant admin write (#1713): tenant hosts are
+        // same-site, so `SameSite=Lax` lets `t02` post to `t01`. Same
+        // pair as the console: the layer checks token and Origin, and
+        // inside it `csrf_context` sets the token every form renders.
+        // `layer`, not `route_layer`: everything here is the fallback.
+        let router = Router::new().fallback(move |req: Request<Body>| {
             let pools = pools.clone();
             let registry_url = registry_url.clone();
             let resolver = resolver.clone();
@@ -308,7 +313,12 @@ where
                 )
                 .await
             }
-        })
+        });
+        router
+            .layer(axum::middleware::from_fn(
+                crate::admin::csrf_context::csrf_context,
+            ))
+            .layer(crate::forms::csrf::layer())
     }
 }
 
@@ -870,12 +880,20 @@ async fn login_form(
     // Seed the double-submit CSRF token so the first GET already
     // carries one; without it the first POST would always fail
     // (#1607). The cookie rides on this response.
+    // Under `build()` the request's token (and its cookie) comes from
+    // `csrf_context`; minting a second one here would not match (#1713).
     #[cfg(feature = "csrf")]
-    let set_cookie = {
-        let (token, cookie) =
-            crate::forms::csrf::ensure_token(headers, crate::forms::csrf::CSRF_COOKIE);
-        ctx.insert("csrf_token", &token);
-        cookie
+    let set_cookie = match crate::admin::session::current_csrf_token() {
+        Some(token) => {
+            ctx.insert("csrf_token", &token);
+            None
+        }
+        None => {
+            let (token, cookie) =
+                crate::forms::csrf::ensure_token(headers, crate::forms::csrf::CSRF_COOKIE);
+            ctx.insert("csrf_token", &token);
+            cookie
+        }
     };
 
     // v0.27.5 — log render errors instead of silently rendering an
@@ -1274,6 +1292,9 @@ fn change_password_form(
     ctx.insert("admin_url", &routes.admin_url);
     ctx.insert("logout_url", &routes.logout_url);
     ctx.insert("static_url", &routes.static_url);
+    if let Some(token) = crate::admin::session::current_csrf_token() {
+        ctx.insert("csrf_token", &token);
+    }
     axum::response::Html(match cfg.tera.render("tenant_change_password.html", &ctx) {
         Ok(html) => html,
         Err(e) => {

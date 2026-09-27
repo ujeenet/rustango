@@ -36,7 +36,10 @@ pub(crate) async fn csrf_context(request: Request<Body>, next: Next) -> Response
     // Only when `ensure_token` minted one. It returns `None` if the
     // request already carried the cookie, and re-sending it would be
     // noise on every admin response.
-    if let Some(cookie) = set_cookie {
+    // Never on a publicly cacheable response (a brand asset): a shared
+    // cache would hand the same token to everyone (#1714 review).
+    let cacheable = crate::forms::csrf::is_publicly_cacheable(response.headers());
+    if let Some(cookie) = set_cookie.filter(|_| !cacheable) {
         if let Ok(v) = HeaderValue::from_str(&cookie) {
             response.headers_mut().append(SET_COOKIE, v);
         }
