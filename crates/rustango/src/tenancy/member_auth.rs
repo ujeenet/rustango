@@ -65,7 +65,7 @@ use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::{Auto, Pool};
 use crate::sso::provider::resolve_by_slug;
 use crate::sso::{build_provider, open_flow, seal_flow, verified_email, NormalizedUser};
-use crate::tenancy::{OrgResolver as _, User};
+use crate::tenancy::User;
 
 // ===================================================================
 // A. Member session codec — SECURITY-CRITICAL, domain-separated.
@@ -272,16 +272,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
+        use crate::tenancy::middleware::{request_org, request_pool, session_keys};
+
+        let Some(keys) = session_keys(&parts.extensions) else {
             return Ok(CurrentMember(None));
         };
 
-        let org = match ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-        {
-            Ok(Some(o)) => o,
+        let org = match request_org(parts, &parts.extensions).await {
+            Some(Ok(Some(o))) => o,
             _ => return Ok(CurrentMember(None)),
         };
 
@@ -290,14 +288,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
             None => return Ok(CurrentMember(None)),
         };
 
-        let payload = match decode(&ctx.session_secret, &org.slug, &cookie_value) {
+        let payload = match decode(keys.session, &org.slug, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(CurrentMember(None)),
         };
 
-        let pool = match ctx.pools.scoped_pool_dyn(&org).await {
-            Ok(p) => p,
-            Err(_) => return Ok(CurrentMember(None)),
+        let pool = match request_pool(&parts.extensions, &org).await {
+            Some(Ok(p)) => p,
+            _ => return Ok(CurrentMember(None)),
         };
 
         use crate::core::Column as _;
@@ -313,7 +311,7 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
         // change (parity with `SessionUser`).
         let user = user.filter(|u| {
             crate::tenancy::session::survives_password_change(
-                &ctx.session_secret,
+                keys.session,
                 &payload.pwf,
                 payload.iat,
                 &u.password_hash,

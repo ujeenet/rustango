@@ -32,15 +32,12 @@
 //! }
 //! ```
 
-use std::sync::Arc;
-
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
 use crate::tenancy::auth::{Operator, User};
-use crate::tenancy::{operator_console, tenant_console, OrgResolver as _};
-
-use super::TenantContext;
+use crate::tenancy::middleware::{request_org, request_pool, session_keys};
+use crate::tenancy::{operator_console, tenant_console};
 
 // ------------------------------------------------------------------ SessionUser
 
@@ -49,8 +46,8 @@ use super::TenantContext;
 /// expired. It never rejects.
 ///
 /// It needs the [`crate::server::Builder`] stack, because it takes
-/// the session secret and the resolver from the `TenantContext`
-/// extension that `Builder::serve` adds.
+/// the session secret and the resolver from the tenant context
+/// extension that `Builder::serve` adds, on any backend.
 ///
 /// The cookie is bound to the tenant slug, so a cookie minted for
 /// `acme` never authenticates on `globex`.
@@ -60,18 +57,14 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
+        let Some(keys) = session_keys(&parts.extensions) else {
             return Ok(SessionUser(None));
         };
 
         // Resolve the tenant: needed for the slug check, and for the
         // pool that holds the user row.
-        let org = match ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-        {
-            Ok(Some(o)) => o,
+        let org = match request_org(parts, &parts.extensions).await {
+            Some(Ok(Some(o))) => o,
             _ => return Ok(SessionUser(None)),
         };
 
@@ -80,16 +73,14 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             None => return Ok(SessionUser(None)),
         };
 
-        let payload = match tenant_console::decode(&ctx.session_secret, &org.slug, &cookie_value) {
+        let payload = match tenant_console::decode(keys.session, &org.slug, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(SessionUser(None)),
         };
 
-        // Go through the `Pool` enum rather than a backend-specific
-        // `TenantConn`, so this works on SQLite and MySQL too.
-        let pool = match ctx.pools.scoped_pool_dyn(&org).await {
-            Ok(p) => p,
-            Err(_) => return Ok(SessionUser(None)),
+        let pool = match request_pool(&parts.extensions, &org).await {
+            Some(Ok(p)) => p,
+            _ => return Ok(SessionUser(None)),
         };
 
         use crate::core::Column as _;
@@ -105,7 +96,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
         // change, as `tenancy::admin::validate_session` does.
         let user = user.filter(|u| {
             crate::tenancy::session::survives_password_change(
-                &ctx.session_secret,
+                keys.session,
                 &payload.pwf,
                 payload.iat,
                 &u.password_hash,
@@ -123,14 +114,14 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
 /// expired. It never rejects.
 ///
 /// It uses the `operator_secret` that [`crate::server::Builder`] put
-/// in [`TenantContext`].
+/// in the tenant context, on any backend.
 pub struct SessionOperator(pub Option<Operator>);
 
 impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
+        let Some(keys) = session_keys(&parts.extensions) else {
             return Ok(SessionOperator(None));
         };
 
@@ -139,7 +130,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
             None => return Ok(SessionOperator(None)),
         };
 
-        let payload = match operator_console::session::decode(&ctx.operator_secret, &cookie_value) {
+        let payload = match operator_console::session::decode(keys.operator, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(SessionOperator(None)),
         };
@@ -148,14 +139,14 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
         use crate::sql::FetcherPool as _;
         let ops = Operator::objects()
             .where_(Operator::id.eq(payload.oid))
-            .fetch(&ctx.pools.registry_pool())
+            .fetch(&keys.registry)
             .await
             .unwrap_or_default();
 
         let op = ops.into_iter().next().filter(|o| {
             o.active
                 && crate::tenancy::session::survives_password_change(
-                    &ctx.operator_secret,
+                    keys.operator,
                     &payload.pwf,
                     payload.iat,
                     &o.password_hash,
