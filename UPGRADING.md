@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Tenant admin and operator console POSTs need the CSRF token
+
+Every POST to the tenant admin (#1713) and the operator console (#1710)
+now needs the `rustango_csrf` cookie echoed as `_csrf` (form) or
+`X-CSRF-Token` (header), and a same-host `Origin`. Browsers get this
+from the rendered forms. A script or test that posts directly gets
+`403`: GET a page first to receive the cookie, then send it back.
+
 ### Tenancy: `allowed_hosts` and the HTTPS redirect now cover `/health`
 
 Under `Cli::tenancy()` they now wrap every route (#1700). A load
