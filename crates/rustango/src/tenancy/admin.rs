@@ -729,9 +729,8 @@ async fn validate_session(
         Err(_) => return SessionCheck::Anonymous,
     };
     // An impersonation cookie from the operator console grants tenant
-    // superuser. Re-check the operator still exists and is active on
-    // every request: otherwise a deactivated operator keeps full admin
-    // for the rest of the cookie's lifetime.
+    // superuser. Re-check on every request that the operator still
+    // exists, is active and has the same password.
     if let Some(operator_id) = payload.imp {
         let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
             .where_(super::auth::Operator::id.eq(operator_id))
@@ -750,13 +749,24 @@ async fn validate_session(
             }
         };
         return match ops.into_iter().next() {
-            Some(op) if op.active => SessionCheck::Authenticated {
-                is_superuser: true,
-                user_id: 0,
-                username: String::new(),
-                impersonated_by: Some(operator_id),
-            },
-            // Operator gone or deactivated → drop the impersonation.
+            Some(op)
+                if op.active
+                    && super::session::survives_password_change(
+                        &cfg.secret,
+                        &payload.pwf,
+                        payload.iat,
+                        &op.password_hash,
+                        op.password_changed_at,
+                    ) =>
+            {
+                SessionCheck::Authenticated {
+                    is_superuser: true,
+                    user_id: 0,
+                    username: String::new(),
+                    impersonated_by: Some(operator_id),
+                }
+            }
+            // Operator gone, deactivated or password changed → drop it.
             _ => SessionCheck::Anonymous,
         };
     }
@@ -1156,7 +1166,7 @@ async fn redeem_impersonation_handoff(
     // so browsers accept it on localhost too.
     let ttl_secs = i64::try_from(routes.impersonation_ttl.as_secs())
         .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
-    let session = TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs);
+    let session = TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs, payload.pwf);
     let cookie_value = tenant_console::encode(&cfg.secret, &session);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")

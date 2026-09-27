@@ -43,8 +43,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-pub use super::session::SessionSecret;
 use super::session::{sign, SessionError};
+pub use super::session::{PasswordFingerprint, SessionSecret};
 
 /// Token lifetime, 60 seconds. Click, redirect, redeem: nothing real
 /// takes longer, and a wider window only helps an attacker.
@@ -99,12 +99,21 @@ pub struct HandoffPayload {
     /// [`JtiBlacklist`] on redemption; a second use gives
     /// [`HandoffError::AlreadyUsed`].
     pub jti: String,
+    /// The operator's [`PasswordFingerprint`]. Copied into the
+    /// impersonation cookie, so an operator password change ends it.
+    pub pwf: PasswordFingerprint,
 }
 
 impl HandoffPayload {
     /// Build a fresh payload with a random `jti` and `exp = now + ttl`.
+    /// `pwf` is the fingerprint of the operator's current hash.
     #[must_use]
-    pub fn new(op_id: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
+    pub fn new(
+        op_id: i64,
+        slug: impl Into<String>,
+        ttl_secs: i64,
+        pwf: PasswordFingerprint,
+    ) -> Self {
         let now = chrono::Utc::now().timestamp();
         // From the OS CSPRNG. A guessable jti would let someone who saw
         // one handoff URL predict the next and slip past the
@@ -118,6 +127,7 @@ impl HandoffPayload {
             slug: slug.into(),
             exp: now + ttl_secs,
             jti,
+            pwf,
         }
     }
 
@@ -233,10 +243,14 @@ mod tests {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())
     }
 
+    fn payload(ttl: i64) -> HandoffPayload {
+        HandoffPayload::new(7, "acme", ttl, PasswordFingerprint::of(&key(), "$h"))
+    }
+
     #[test]
     fn round_trip_valid_payload() {
         let secret = key();
-        let payload = HandoffPayload::new(7, "acme", 60);
+        let payload = payload(60);
         let token = mint(&secret, &payload);
         let back = decode(&secret, "acme", &token).unwrap();
         assert_eq!(back, payload);
@@ -245,7 +259,7 @@ mod tests {
     #[test]
     fn rejects_token_minted_for_a_different_tenant() {
         let secret = key();
-        let payload = HandoffPayload::new(7, "acme", 60);
+        let payload = payload(60);
         let token = mint(&secret, &payload);
         assert_eq!(
             decode(&secret, "globex", &token).unwrap_err(),
@@ -256,7 +270,7 @@ mod tests {
     #[test]
     fn rejects_tampered_signature() {
         let secret = key();
-        let payload = HandoffPayload::new(7, "acme", 60);
+        let payload = payload(60);
         let token = mint(&secret, &payload);
         // Flip a byte in the middle of the signature, not the last one.
         // The last base64 char of a 32-byte HMAC has only some valid
@@ -280,7 +294,7 @@ mod tests {
     fn rejects_token_signed_with_a_different_secret() {
         let s1 = key();
         let s2 = SessionSecret::from_bytes(b"b-other-secret-thirty-two-bytes-x".to_vec());
-        let token = mint(&s1, &HandoffPayload::new(7, "acme", 60));
+        let token = mint(&s1, &payload(60));
         assert_eq!(
             decode(&s2, "acme", &token).unwrap_err(),
             HandoffError::BadSignature,
@@ -290,7 +304,7 @@ mod tests {
     #[test]
     fn rejects_expired_token() {
         let secret = key();
-        let token = mint(&secret, &HandoffPayload::new(7, "acme", -10));
+        let token = mint(&secret, &payload(-10));
         assert_eq!(
             decode(&secret, "acme", &token).unwrap_err(),
             HandoffError::Expired,
@@ -314,8 +328,8 @@ mod tests {
 
     #[test]
     fn jtis_are_unique_across_mints() {
-        let p1 = HandoffPayload::new(7, "acme", 60);
-        let p2 = HandoffPayload::new(7, "acme", 60);
+        let p1 = payload(60);
+        let p2 = payload(60);
         assert_ne!(p1.jti, p2.jti, "random jti collision is unacceptable");
     }
 

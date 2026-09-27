@@ -2118,8 +2118,12 @@ async fn org_impersonate(
     // Mint the short-lived URL handoff token. Includes a random
     // single-use `jti` and the slug, both checked at redemption.
     use super::impersonation_handoff as handoff;
-    let payload =
-        handoff::HandoffPayload::new(operator_id, slug.clone(), handoff::HANDOFF_TTL_SECS);
+    let payload = handoff::HandoffPayload::new(
+        operator_id,
+        slug.clone(),
+        handoff::HANDOFF_TTL_SECS,
+        handoff::PasswordFingerprint::of(&tenant_secret, &op.password_hash),
+    );
     let token = handoff::mint(&tenant_secret, &payload);
 
     // Audit row on the operator side. The tenant admin writes its own
