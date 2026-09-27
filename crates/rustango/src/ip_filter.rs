@@ -161,12 +161,16 @@ pub(crate) enum CidrRange {
 }
 
 impl CidrRange {
-    /// An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) matches as IPv4.
+    /// An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) matches IPv4 rules
+    /// and any IPv6 rule covering it.
     pub(crate) fn contains(&self, ip: IpAddr) -> bool {
-        match (self, ip.to_canonical()) {
-            (Self::V4 { addr, mask }, IpAddr::V4(v4)) => u32::from(v4) & mask == *addr & mask,
-            (Self::V6 { addr, mask }, IpAddr::V6(v6)) => u128::from(v6) & mask == *addr & mask,
-            _ => false, // address family mismatch
+        match self {
+            Self::V4 { addr, mask } => {
+                matches!(ip.to_canonical(), IpAddr::V4(v4) if u32::from(v4) & mask == *addr & mask)
+            }
+            Self::V6 { addr, mask } => {
+                matches!(ip, IpAddr::V6(v6) if u128::from(v6) & mask == *addr & mask)
+            }
         }
     }
 }
@@ -355,7 +359,14 @@ mod tests {
     #[test]
     fn ipv4_mapped_cidr_matches_plain_ipv4() {
         let l = IpFilterLayer::block(vec!["::ffff:10.0.0.0/104"]).unwrap();
-        assert!(!l.allow(Some(ip4("10.9.9.9"))));
+        assert!(!l.allow(Some(ip4("10.200.0.1"))));
         assert!(l.allow(Some(ip4("11.0.0.1"))));
+    }
+
+    #[test]
+    fn wide_ipv6_rule_matches_mapped_peer() {
+        let l = IpFilterLayer::block(vec!["::/0"]).unwrap();
+        assert!(!l.allow(Some(ip6("::ffff:203.0.113.7"))));
+        assert!(l.allow(Some(ip4("203.0.113.7"))));
     }
 }

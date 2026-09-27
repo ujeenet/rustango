@@ -142,36 +142,45 @@ impl RealIpLayer {
     /// The client behind a trusted peer. A hop chain is read right to
     /// left and the first untrusted hop wins, since proxies append.
     fn resolve_trusted(&self, req: &Request<Body>) -> Option<IpAddr> {
-        // Every header line, in order: a proxy may add its own line.
-        let lines = |name: &str| -> Option<String> {
-            let all: Vec<&str> = req
-                .headers()
-                .get_all(name)
-                .iter()
-                .map(|v| v.to_str().ok())
-                .collect::<Option<_>>()?;
-            (!all.is_empty()).then(|| all.join(","))
-        };
-        let chain = match self.strategy {
+        let chain: Vec<Option<IpAddr>> = match self.strategy {
             // Proxies append to XFF; other headers may be client-sent.
             HeaderStrategy::XForwardedFor | HeaderStrategy::Auto => {
-                forwarded_for_chain(&lines("x-forwarded-for")?)
+                header_hops(req, "x-forwarded-for")?
+                    .map(|h| h.and_then(parse_ip_with_optional_port))
+                    .collect()
             }
-            HeaderStrategy::ForwardedRfc7239 => rfc7239_chain(&lines("forwarded")?),
+            HeaderStrategy::ForwardedRfc7239 => header_hops(req, "forwarded")?
+                .map(|h| h.and_then(rfc7239_for))
+                .collect(),
             HeaderStrategy::XRealIp | HeaderStrategy::CfConnectingIp => {
                 return extract(req, &self.strategy);
             }
         };
-        let mut leftmost = None;
+        let mut rightmost = None;
         for hop in chain.iter().rev() {
             let ip = (*hop)?;
             if !self.trusts(ip) {
                 return Some(ip);
             }
-            leftmost = Some(ip);
+            rightmost = rightmost.or(Some(ip));
         }
-        leftmost
+        rightmost
     }
+}
+
+/// Every comma-separated hop of every `name` line, in order. Each hop
+/// is decoded alone, so one bad hop does not void the others.
+fn header_hops<'a>(
+    req: &'a Request<Body>,
+    name: &str,
+) -> Option<impl Iterator<Item = Option<&'a str>>> {
+    let mut lines = req.headers().get_all(name).iter().peekable();
+    lines.peek()?;
+    Some(lines.flat_map(|v| {
+        v.as_bytes()
+            .split(|b| *b == b',')
+            .map(|hop| std::str::from_utf8(hop).ok())
+    }))
 }
 
 pub trait RealIpRouterExt {
@@ -415,10 +424,55 @@ mod tests {
     }
 
     #[test]
-    fn all_trusted_chain_yields_leftmost_hop() {
+    fn all_trusted_chain_yields_rightmost_hop() {
         let r = req_with_header("x-forwarded-for", "10.0.0.3, 10.0.0.2");
         let ip = trusting(HeaderStrategy::XForwardedFor).resolve_trusted(&r);
-        assert_eq!(ip.unwrap().to_string(), "10.0.0.3");
+        assert_eq!(ip.unwrap().to_string(), "10.0.0.2");
+    }
+
+    #[test]
+    fn non_ascii_hop_does_not_drop_the_chain() {
+        let v = axum::http::HeaderValue::from_bytes(b"caf\xc3\xa9, 203.0.113.7, 10.0.0.2").unwrap();
+        let r = Request::builder()
+            .header("x-forwarded-for", v)
+            .body(Body::empty())
+            .unwrap();
+        let ip = trusting(HeaderStrategy::XForwardedFor).resolve_trusted(&r);
+        assert_eq!(ip.unwrap().to_string(), "203.0.113.7");
+    }
+
+    #[test]
+    fn non_ascii_hop_stops_the_walk() {
+        let v = axum::http::HeaderValue::from_bytes(b"203.0.113.7, \xff, 10.0.0.2").unwrap();
+        let r = Request::builder()
+            .header("x-forwarded-for", v)
+            .body(Body::empty())
+            .unwrap();
+        assert!(trusting(HeaderStrategy::XForwardedFor)
+            .resolve_trusted(&r)
+            .is_none());
+    }
+
+    #[test]
+    fn trusted_x_real_ip_strips_port_and_canonicalises() {
+        let t = trusting(HeaderStrategy::XRealIp);
+        let r = req_with_header("x-real-ip", "203.0.113.7:8080");
+        assert_eq!(t.resolve_trusted(&r).unwrap().to_string(), "203.0.113.7");
+        let r = req_with_header("x-real-ip", "::ffff:198.51.100.1");
+        assert_eq!(t.resolve_trusted(&r).unwrap().to_string(), "198.51.100.1");
+        let r = req_with_header("x-forwarded-for", "198.51.100.1");
+        assert!(t.resolve_trusted(&r).is_none());
+    }
+
+    #[test]
+    fn trusted_cf_connecting_ip_strips_port_and_canonicalises() {
+        let t = trusting(HeaderStrategy::CfConnectingIp);
+        let r = req_with_header("cf-connecting-ip", "[2001:db8::1]:443");
+        assert_eq!(t.resolve_trusted(&r).unwrap().to_string(), "2001:db8::1");
+        let r = req_with_header("cf-connecting-ip", "::ffff:198.51.100.1");
+        assert_eq!(t.resolve_trusted(&r).unwrap().to_string(), "198.51.100.1");
+        let r = req_with_header("x-real-ip", "198.51.100.1");
+        assert!(t.resolve_trusted(&r).is_none());
     }
 
     #[test]

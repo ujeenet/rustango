@@ -245,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn streamed_body_over_limit_gets_413() {
         let resp = reading_app(1024)
-            .oneshot(streamed(Method::POST, 200 * 1024))
+            .oneshot(streamed(Method::POST, 1025))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -254,7 +254,7 @@ mod tests {
     #[tokio::test]
     async fn streamed_body_under_limit_passes() {
         let resp = reading_app(1024)
-            .oneshot(streamed(Method::POST, 1000))
+            .oneshot(streamed(Method::POST, 1024))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
