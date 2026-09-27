@@ -87,7 +87,9 @@ async fn seed_permissions_never_binds_a_tenant_fk_to_public() {
         cross_schema_fks(&registry, &schema).await,
         Vec::<String>::new()
     );
-    assert!(res.is_err(), "no rustango_users in the tenant: must refuse");
+    let err = res.expect_err("no rustango_users in the tenant: must refuse");
+    let missing = format!(r#"relation "{schema}.rustango_users" does not exist"#);
+    assert!(err.contains(&missing), "{err}");
 
     // Once the tenant has its own users table, the same path succeeds
     // and every FK stays inside the tenant.
