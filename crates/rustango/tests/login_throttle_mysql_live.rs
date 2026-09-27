@@ -3,7 +3,7 @@
 //! submitted one (#1609).
 //!
 //! Activated by `MYSQL_TEST_URL`; without it the test prints a skip and
-//! passes. Uses its own database, `rustango_login_throttle`.
+//! passes. Drops and recreates the admin user tables in that database.
 
 #![cfg(all(feature = "mysql", feature = "admin"))]
 
@@ -18,22 +18,13 @@ use rustango::sql::{sqlx, FetcherPool as _, Pool};
 use tower::ServiceExt as _;
 
 const CSRF: &str = "cccccccccccccccccccccccccccccccc";
-const DB: &str = "rustango_login_throttle";
 
 async fn pool() -> Option<Pool> {
     let url = std::env::var("MYSQL_TEST_URL").ok()?;
-    let base = sqlx::MySqlPool::connect(&url)
+    let p = sqlx::MySqlPool::connect(&url)
         .await
         .expect("MYSQL_TEST_URL");
-    // Test-only DDL: the ORM has no CREATE DATABASE.
-    sqlx::query(&format!("CREATE DATABASE IF NOT EXISTS {DB}"))
-        .execute(&base)
-        .await
-        .expect("create database");
-    let (root, _) = url.rsplit_once('/').expect("url has a database");
-    let p = sqlx::MySqlPool::connect(&format!("{root}/{DB}"))
-        .await
-        .expect("connect");
+    // Test-only DDL: reset the tables the admin creates on first use.
     for t in ["rustango_admin_users", "rustango_admin_totp"] {
         sqlx::query(&format!("DROP TABLE IF EXISTS {t}"))
             .execute(&p)
