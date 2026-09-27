@@ -437,11 +437,7 @@ where
                     .map(str::to_owned);
                 if let Some(h) = header_value {
                     // Header path — short-circuit, no body buffering.
-                    let token_match = match &cookie_value {
-                        Some(c) => crate::crypto::constant_time_compare(c.as_bytes(), h.as_bytes()),
-                        None => false,
-                    };
-                    if !token_match {
+                    if !tokens_match(cookie_value.as_deref(), Some(&h)) {
                         return Ok(forbid_response("CSRF token missing or mismatched"));
                     }
                     req
@@ -458,13 +454,7 @@ where
                         }
                     };
                     let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
-                    let token_match = match (&cookie_value, &form_token) {
-                        (Some(c), Some(f)) => {
-                            crate::crypto::constant_time_compare(c.as_bytes(), f.as_bytes())
-                        }
-                        _ => false,
-                    };
-                    if !token_match {
+                    if !tokens_match(cookie_value.as_deref(), form_token.as_deref()) {
                         return Ok(forbid_response("CSRF token missing or mismatched"));
                     }
                     Request::from_parts(parts, Body::from(bytes))
@@ -706,12 +696,18 @@ pub fn verify_form_token(headers: &axum::http::HeaderMap, submitted: Option<&str
     if !origin_allowed_in(headers, false, &[]) {
         return false;
     }
-    match (
-        read_csrf_cookie_from_headers(headers, CSRF_COOKIE),
+    tokens_match(
+        read_csrf_cookie_from_headers(headers, CSRF_COOKIE).as_deref(),
         submitted,
-    ) {
-        (Some(cookie), Some(form)) => {
-            crate::crypto::constant_time_compare(cookie.as_bytes(), form.as_bytes())
+    )
+}
+
+/// The one double-submit check: both tokens present, non-empty and
+/// equal in constant time (#1693).
+fn tokens_match(cookie: Option<&str>, submitted: Option<&str>) -> bool {
+    match (cookie, submitted) {
+        (Some(c), Some(s)) if !c.is_empty() => {
+            crate::crypto::constant_time_compare(c.as_bytes(), s.as_bytes())
         }
         _ => false,
     }
@@ -1167,6 +1163,43 @@ mod tests {
         // Missing cookie entirely → reject.
         let empty = axum::http::HeaderMap::new();
         assert!(!verify_form_token(&empty, Some("tok-abc123")));
+    }
+
+    /// #1693 — an empty cookie with an empty token is refused on
+    /// every entry point: the form helper, the header and the form body.
+    #[tokio::test]
+    async fn an_empty_cookie_and_empty_token_are_refused() {
+        use tower::ServiceExt as _;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{CSRF_COOKIE}=").parse().unwrap(),
+        );
+        let mut passed = Vec::new();
+        if verify_form_token(&headers, Some("")) {
+            passed.push("verify_form_token");
+        }
+
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(|| async { "saved" }))
+            .layer(layer());
+        let send = |req: Request<Body>| app.clone().oneshot(req);
+        let base = || {
+            Request::builder()
+                .method("POST")
+                .uri("/save")
+                .header("cookie", "rustango_csrf=")
+        };
+        let by_header = base().header("x-csrf-token", "").body(Body::empty());
+        let by_form = base()
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("_csrf="));
+        for (name, req) in [("header", by_header.unwrap()), ("form", by_form.unwrap())] {
+            if send(req).await.unwrap().status() != StatusCode::FORBIDDEN {
+                passed.push(name);
+            }
+        }
+        assert!(passed.is_empty(), "empty tokens passed via {passed:?}");
     }
 
     /// #1695 — a matching pair from a foreign Origin is refused.
