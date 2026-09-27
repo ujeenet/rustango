@@ -225,19 +225,21 @@ fn secure_suffix() -> &'static str {
     }
 }
 
-/// Build a `Set-Cookie` value minting a fresh member session for `uid`
+/// Build a `Set-Cookie` value minting a fresh member session for `user`
 /// on `slug`, valid for `ttl` seconds. `HttpOnly; SameSite=Lax; Path=/`
-/// with `; Secure` added on the prod tier. `password_hash` is the user's
-/// current hash; changing it ends the session.
+/// with `; Secure` added on the prod tier. Changing the user's password
+/// ends the session.
+///
+/// # Panics
+/// If `user` has no id (was never saved).
 #[must_use]
-pub fn mint_cookie(
-    secret: &SessionSecret,
-    uid: i64,
-    password_hash: &str,
-    slug: &str,
-    ttl: i64,
-) -> String {
-    let pwf = PasswordFingerprint::of(secret, password_hash);
+pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) -> String {
+    let uid = user
+        .id
+        .get()
+        .copied()
+        .expect("mint_cookie needs a saved user row");
+    let pwf = PasswordFingerprint::of(secret, &user.password_hash);
     let value = encode(secret, &MemberSessionPayload::new(uid, slug, ttl, pwf));
     format!(
         "{MEMBER_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={ttl}{s}",
@@ -585,7 +587,7 @@ async fn sso_callback(
             }
         };
 
-    let password_hash = {
+    let member = {
         use crate::core::Column as _;
         use crate::sql::FetcherPool as _;
         match User::objects()
@@ -594,7 +596,7 @@ async fn sso_callback(
             .await
             .map(|rows| rows.into_iter().next())
         {
-            Ok(Some(u)) => u.password_hash,
+            Ok(Some(u)) => u,
             Ok(None) | Err(_) => {
                 tracing::error!(member_id, "member row missing after find-or-provision");
                 return clear_flow(sso_error("Could not complete sign-in.", login_base));
@@ -603,8 +605,7 @@ async fn sso_callback(
     };
     let cookie = mint_cookie(
         &ctx.session_secret,
-        member_id,
-        &password_hash,
+        &member,
         &t.org.slug,
         config.session_ttl,
     );
