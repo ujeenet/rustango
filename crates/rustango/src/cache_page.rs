@@ -56,10 +56,17 @@
 //!   handlers, or leave the layer off those routes.
 //! - **Vary-on values are case-insensitive** and a missing header
 //!   counts as empty.
+//! - **Keyed on the resolved tenant.** With the `tenancy` feature the
+//!   layer resolves the request's tenant and puts it in the key, so a
+//!   tenant picked by a header never gets another tenant's page. Mount
+//!   the layer inside the tenancy layer (any router passed to the
+//!   server builder is). Where no tenant context is present it does
+//!   not cache, unless [`CachePageLayer::tenant_agnostic`] is set.
 //!
 //! [`CachePageLayer`]: crate::cache_page::CachePageLayer
 //! [`CachePageLayer::cache_query`]: crate::cache_page::CachePageLayer::cache_query
 //! [`CachePageLayer::cache_authenticated`]: crate::cache_page::CachePageLayer::cache_authenticated
+//! [`CachePageLayer::tenant_agnostic`]: crate::cache_page::CachePageLayer::tenant_agnostic
 //! [`CacheControl`]: crate::cache_page::CacheControl
 //! [`never_cache`]: crate::cache_page::never_cache
 //! [`vary_on`]: crate::cache_page::vary_on
@@ -108,6 +115,8 @@ pub struct CachePageLayer {
     /// cache, because its response is probably per-user. See
     /// [`Self::cache_authenticated`].
     cache_authenticated: bool,
+    /// Skip tenant resolution. See [`Self::tenant_agnostic`].
+    tenant_agnostic: bool,
 }
 
 impl CachePageLayer {
@@ -122,6 +131,7 @@ impl CachePageLayer {
             vary_on: Vec::new(),
             cache_query: false,
             cache_authenticated: false,
+            tenant_agnostic: false,
         }
     }
 
@@ -181,6 +191,18 @@ impl CachePageLayer {
         self
     }
 
+    /// Cache without resolving a tenant. Default `false`.
+    ///
+    /// Only for a route whose response is the same for every tenant,
+    /// or for a layer mounted outside any tenancy layer on purpose.
+    /// `Host` stays in the key. Without the `tenancy` feature this
+    /// changes nothing.
+    #[must_use]
+    pub fn tenant_agnostic(mut self, enabled: bool) -> Self {
+        self.tenant_agnostic = enabled;
+        self
+    }
+
     /// Cache RFC 10008 `QUERY` requests. Default `false`.
     ///
     /// QUERY is safe and idempotent, and its response depends on the
@@ -209,6 +231,7 @@ impl<S> tower::Layer<S> for CachePageLayer {
             vary_on: Arc::new(self.vary_on.clone()),
             cache_query: self.cache_query,
             cache_authenticated: self.cache_authenticated,
+            tenant_agnostic: self.tenant_agnostic,
         }
     }
 }
@@ -223,6 +246,7 @@ pub struct CachePageService<S> {
     vary_on: Arc<Vec<HeaderName>>,
     cache_query: bool,
     cache_authenticated: bool,
+    tenant_agnostic: bool,
 }
 
 impl<S> Service<Request<Body>> for CachePageService<S>
@@ -249,6 +273,7 @@ where
         let vary = self.vary_on.clone();
         let cache_query = self.cache_query;
         let cache_authenticated = self.cache_authenticated;
+        let tenant_agnostic = self.tenant_agnostic;
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
@@ -297,7 +322,23 @@ where
                 return inner.call(req).await;
             }
 
-            let key = compute_cache_key(&prefix, &req, &vary, body_digest.as_deref());
+            let (req, tenant) = if tenant_agnostic {
+                (req, PageTenant::None)
+            } else {
+                request_tenant(req).await
+            };
+            let tenant = match tenant {
+                PageTenant::Unknown => return inner.call(req).await,
+                PageTenant::Slug(slug) => Some(slug),
+                PageTenant::None => None,
+            };
+            let key = compute_cache_key(
+                &prefix,
+                &req,
+                tenant.as_deref(),
+                &vary,
+                body_digest.as_deref(),
+            );
 
             // Cache hit?
             if let Ok(Some(serialized)) = cache.get(&key).await {
@@ -402,16 +443,66 @@ const MAX_CACHEABLE_BODY_BYTES: usize = 1 << 20;
 /// `MISS` freshly computed.
 const X_CACHE_STATUS: HeaderName = HeaderName::from_static("x-cache-status");
 
+/// The tenant a page is cached for.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+enum PageTenant {
+    /// No tenant: tenancy is off, or the resolver matched none.
+    None,
+    Slug(String),
+    /// No tenant context, or resolution failed: never share a page.
+    Unknown,
+}
+
+/// Resolve the request's tenant with the resolver of the mounted
+/// tenant context.
+#[cfg(feature = "tenancy")]
+async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
+    let (parts, body) = req.into_parts();
+    let tenant = match crate::tenancy::middleware::request_org(&parts, &parts.extensions).await {
+        Some(Ok(Some(org))) => PageTenant::Slug(org.slug),
+        Some(Ok(None)) => PageTenant::None,
+        Some(Err(e)) => {
+            tracing::warn!(target: "rustango::cache_page", error = %e, "tenant resolution failed; not caching");
+            PageTenant::Unknown
+        }
+        None => {
+            warn_no_tenant_context();
+            PageTenant::Unknown
+        }
+    };
+    (Request::from_parts(parts, body), tenant)
+}
+
+#[cfg(not(feature = "tenancy"))]
+#[allow(clippy::unused_async)]
+async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
+    (req, PageTenant::None)
+}
+
+/// Log once per process: a misplaced layer would otherwise just stop caching.
+#[cfg(feature = "tenancy")]
+fn warn_no_tenant_context() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            target: "rustango::cache_page",
+            "no tenant context on the request; page cache bypassed. Mount \
+             CachePageLayer inside the tenancy layer, or set tenant_agnostic(true)"
+        );
+    });
+}
+
 /// Build the cache key, as `prefix|<len>:<bytes>|<len>:<bytes>|...`.
 ///
 /// Each part is length-prefixed, so a value holding a separator
 /// cannot make two different requests produce the same key.
 ///
-/// `Host` is always part of the key. Without it a multi-tenant app
-/// serving different content per host would get cross-tenant hits.
+/// `Host` and the resolved tenant slug are always part of the key, so
+/// neither a per-host nor a per-header tenant gets another's page.
 fn compute_cache_key(
     prefix: &str,
     req: &Request<Body>,
+    tenant: Option<&str>,
     vary_on: &[HeaderName],
     body_digest: Option<&str>,
 ) -> String {
@@ -429,6 +520,8 @@ fn compute_cache_key(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
     write_lp(&mut k, host);
+    // Slugs are never empty, so "" means "no tenant".
+    write_lp(&mut k, tenant.unwrap_or(""));
     for name in vary_on {
         let v = req
             .headers()

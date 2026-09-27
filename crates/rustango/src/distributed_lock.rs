@@ -63,23 +63,26 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::cache::BoxedCache;
+use crate::cache::{BoxedCache, ScopedCache};
 
 const KEY_PREFIX: &str = "lock";
 
 /// Lock factory. Cheap to clone.
 #[derive(Clone)]
 pub struct DistributedLock {
+    /// The unscoped cache, kept so a new scope replaces the old one.
+    base: BoxedCache,
+    /// `base`, or a [`ScopedCache`] view of it.
     cache: BoxedCache,
-    /// Prefix on every lock name. `None` is process-wide;
-    /// [`Self::for_tenant`] sets `tenant:{slug}`.
-    scope: Option<String>,
 }
 
 impl DistributedLock {
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
-        Self { cache, scope: None }
+        Self {
+            base: cache.clone(),
+            cache,
+        }
     }
 
     /// Scope every lock name to one tenant, so the same name in two
@@ -88,7 +91,8 @@ impl DistributedLock {
     /// Use this for any per-tenant job. Unscoped, a loop over tenants
     /// makes them all contend for one `lock:daily_report`: the first
     /// wins and the rest are skipped for a whole TTL, without a log
-    /// line. Scoped, each gets `lock:tenant:{slug}:daily_report`.
+    /// line. Scoped, each gets `tenant:{slug}:lock:daily_report`, the
+    /// [`ScopedCache::for_tenant`] layout, so a tenant clear drops it.
     ///
     /// ```ignore
     /// let lock = DistributedLock::new(cache).for_tenant(&org.slug);
@@ -99,24 +103,21 @@ impl DistributedLock {
     /// as registry cleanup or a cross-tenant rollup.
     #[must_use]
     pub fn for_tenant(mut self, slug: impl AsRef<str>) -> Self {
-        self.scope = Some(format!("tenant:{}", slug.as_ref()));
+        self.cache = ScopedCache::for_tenant(self.base.clone(), slug).boxed();
         self
     }
 
-    /// Scope lock names under any namespace. [`Self::for_tenant`] is
-    /// this with a `tenant:` prefix.
+    /// Scope lock names under any namespace, as [`ScopedCache::new`]
+    /// does: `{namespace}:lock:{name}`.
     #[must_use]
     pub fn scoped(mut self, namespace: impl AsRef<str>) -> Self {
-        self.scope = Some(namespace.as_ref().to_owned());
+        self.cache = ScopedCache::new(self.base.clone(), namespace).boxed();
         self
     }
 
-    /// The cache key for `name`, including this factory's scope.
-    fn key_for(&self, name: &str) -> String {
-        match &self.scope {
-            Some(scope) => format!("{KEY_PREFIX}:{scope}:{name}"),
-            None => format!("{KEY_PREFIX}:{name}"),
-        }
+    /// The cache key for `name`; any scope is added by the cache view.
+    fn key_for(name: &str) -> String {
+        format!("{KEY_PREFIX}:{name}")
     }
 
     /// Try to take `name` for `ttl`. Gives `None` when someone else
@@ -126,7 +127,7 @@ impl DistributedLock {
     /// the guard instead is safe, but the lock then stays taken until
     /// the TTL runs out.
     pub async fn try_acquire(&self, name: &str, ttl: Duration) -> Option<LockGuard> {
-        let key = self.key_for(name);
+        let key = Self::key_for(name);
         // The whole acquire is one atomic set-if-absent: `add` writes
         // the key only when it is absent and says whether it did. The
         // key's value IS the token, so there is no second write that
@@ -450,6 +451,32 @@ mod tests {
                 .await
                 .is_some(),
             "`acme-corp` must not be blocked by `acme`'s lock"
+        );
+    }
+
+    /// A tenant-scoped clear must also drop that tenant's locks (#1674).
+    #[tokio::test]
+    async fn tenant_cache_clear_reaches_tenant_locks() {
+        use crate::cache::Cache as _;
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let acme = DistributedLock::new(cache.clone()).for_tenant("acme");
+        let globex = DistributedLock::new(cache.clone()).for_tenant("globex");
+        let ttl = Duration::from_secs(30);
+        let _a = acme.try_acquire("j", ttl).await.expect("acme");
+        let _g = globex.try_acquire("j", ttl).await.expect("globex");
+
+        ScopedCache::for_tenant(cache, "acme")
+            .clear()
+            .await
+            .unwrap();
+
+        assert!(
+            acme.try_acquire("j", ttl).await.is_some(),
+            "acme lock cleared"
+        );
+        assert!(
+            globex.try_acquire("j", ttl).await.is_none(),
+            "globex untouched"
         );
     }
 }

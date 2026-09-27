@@ -150,6 +150,16 @@ untouched.
 
 ## Unreleased
 
+### Page cache and lock keys change shape
+
+Page cache keys now include the tenant (#1674), so cached pages miss
+once after upgrade. Under `tenancy` a `CachePageLayer` outside the
+tenancy layer stops caching; mount it on a router passed to the server
+builder, or add `.tenant_agnostic(true)` for tenant-free routes.
+`DatabaseCache` keys over 255 bytes are hashed, so those entries miss
+once. Scoped lock keys move from `lock:tenant:{slug}:{name}` to
+`tenant:{slug}:lock:{name}`; drain scoped jobs before deploying.
+
 ### The trusted client IP is the rightmost untrusted hop
 
 Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the

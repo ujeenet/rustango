@@ -1279,6 +1279,8 @@ jobs:
       # These read `MYSQL_TEST_URL` but no job set it for them, so their
       # MySQL arm never ran (#1678).
       - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_delete_prefix_live
+      # VARCHAR(255) truncated long keys only on MySQL (#1674).
+      - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_db_long_keys_live
       - run: cargo test -p rustango --features mysql --test like_escape_live
       - run: cargo test -p rustango --features mysql --test migrate_progress_live
       - run: cargo test -p rustango --features mysql,tenancy --test preflight_live
