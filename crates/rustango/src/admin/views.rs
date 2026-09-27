@@ -2014,7 +2014,15 @@ pub(crate) async fn update_submit(
     let before_row = pre_update_row.clone();
 
     // Gate every inline row before anything is written, the parent included.
-    let inline_plan = super::inlines::plan_post(&state, &parts, model, &pk_value, &form).await?;
+    let inline_plan = match super::inlines::plan_post(&state, &parts, model, &pk_value, &form).await
+    {
+        Ok(plan) => plan,
+        Err(super::inlines::InlinePlanError::Admin(e)) => return Err(e),
+        Err(super::inlines::InlinePlanError::Gone(msg)) => {
+            let html = render_form(&state, model, Some(&form), true, Some(&msg));
+            return Ok(Html(html).into_response());
+        }
+    };
 
     let query = UpdateQuery {
         model,

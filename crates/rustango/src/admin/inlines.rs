@@ -937,24 +937,62 @@ impl InlineTarget {
             .collect()
     }
 
-    /// The child row, only if it belongs to this parent.
+    /// The child row under this parent; `None` when no row has this PK.
+    ///
+    /// # Errors
+    /// [`AdminError::RowNotFound`] when the PK belongs to another parent.
     async fn fetch_own(
         &self,
         pool: &Pool,
-        pk: SqlValue,
+        pk: &SqlValue,
         raw_pk: &str,
-    ) -> Result<serde_json::Value, AdminError> {
+    ) -> Result<Option<serde_json::Value>, AdminError> {
         let fields: Vec<&'static FieldSchema> = self.child.scalar_fields().collect();
         let query = SelectQuery {
-            where_clause: self.scope.row_where(self.pk.column, pk),
+            where_clause: self.scope.row_where(self.pk.column, pk.clone()),
             ..SelectQuery::new(self.child)
         };
-        crate::sql::select_one_row_as_json(pool, &query, &fields)
-            .await?
-            .ok_or_else(|| AdminError::RowNotFound {
+        if let Some(row) = crate::sql::select_one_row_as_json(pool, &query, &fields).await? {
+            return Ok(Some(row));
+        }
+        let any_parent = SelectQuery::by_pk(self.child, self.pk.column, pk.clone());
+        match crate::sql::select_one_row_as_json(pool, &any_parent, &[self.pk]).await? {
+            Some(_) => Err(AdminError::RowNotFound {
                 table: self.child.table.to_owned(),
                 pk: raw_pk.to_owned(),
-            })
+            }),
+            None => Ok(None),
+        }
+    }
+
+    /// `true` when every submitted value equals the stored one, read
+    /// the way the edit form renders it.
+    fn unchanged(&self, before: &serde_json::Value, values: &[(&'static str, SqlValue)]) -> bool {
+        self.writable.iter().zip(values).all(|(f, (_, submitted))| {
+            let stored = crate::admin::render::render_value_for_input_json(before, f);
+            crate::forms::parse_form_value(f, Some(&stored)).is_ok_and(|v| v == *submitted)
+        })
+    }
+}
+
+/// Why [`plan_post`] refused the inline rows.
+pub(crate) enum InlinePlanError {
+    /// A gate or lookup error: the response is the error's own.
+    Admin(AdminError),
+    /// An edited child row was deleted after the page loaded. The form
+    /// re-renders with this message.
+    Gone(String),
+}
+
+impl From<AdminError> for InlinePlanError {
+    fn from(e: AdminError) -> Self {
+        Self::Admin(e)
+    }
+}
+
+impl From<ExecError> for InlinePlanError {
+    fn from(e: ExecError) -> Self {
+        Self::Admin(e.into())
     }
 }
 
@@ -978,17 +1016,21 @@ enum InlineWrite {
 /// DELETE box → DELETE, PK without it → UPDATE. A row whose values fail
 /// to parse is counted in `failed` and skipped.
 ///
+/// An unchanged existing row is skipped: no gate, no write. Deleting a
+/// row that is already gone counts as done.
+///
 /// # Errors
 /// [`AdminError::ReadOnly`] or [`AdminError::Forbidden`] when a child
 /// gate refuses a row; [`AdminError::RowNotFound`] when a submitted child
-/// PK is not under this parent.
+/// PK is under another parent; [`InlinePlanError::Gone`] when an edited
+/// row no longer exists.
 pub(crate) async fn plan_post(
     state: &AppState,
     parts: &Parts,
     parent_model: &'static ModelSchema,
     parent_pk: &SqlValue,
     form: &HashMap<String, String>,
-) -> Result<InlinePlan, AdminError> {
+) -> Result<InlinePlan, InlinePlanError> {
     let mut plan = InlinePlan {
         writes: Vec::new(),
         failed: 0,
@@ -1066,7 +1108,7 @@ async fn plan_target(
     target: &InlineTarget,
     form: &HashMap<String, String>,
     plan: &mut InlinePlan,
-) -> Result<(), AdminError> {
+) -> Result<(), InlinePlanError> {
     let table = target.child.table;
     // No management form: the panel was not rendered, nothing to do.
     let Ok(total_forms) = crate::forms::formset::total_forms(form, table) else {
@@ -1097,10 +1139,10 @@ async fn plan_target(
                 continue;
             }
             if !state.can_add(table) {
-                return Err(read_only());
+                return Err(read_only().into());
             }
             if !crate::admin::object_permissions::is_allowed(table, "add", parts, None) {
-                return Err(refused("add"));
+                return Err(refused("add").into());
             }
             let Ok(values) = target.values(&row) else {
                 plan.failed += 1;
@@ -1130,12 +1172,14 @@ async fn plan_target(
 
         if delete_flag {
             if !state.can_delete(table) {
-                return Err(read_only());
+                return Err(read_only().into());
             }
-            let before = target.fetch_own(&state.pool, pk.clone(), &raw_pk).await?;
+            let Some(before) = target.fetch_own(&state.pool, &pk, &raw_pk).await? else {
+                continue;
+            };
             if !crate::admin::object_permissions::is_allowed(table, "delete", parts, Some(&before))
             {
-                return Err(refused("delete"));
+                return Err(refused("delete").into());
             }
             plan.writes
                 .push(InlineWrite::Delete(crate::core::DeleteQuery::new(
@@ -1152,12 +1196,19 @@ async fn plan_target(
         if values.is_empty() {
             continue;
         }
-        if state.is_read_only(table) {
-            return Err(read_only());
+        let Some(before) = target.fetch_own(&state.pool, &pk, &raw_pk).await? else {
+            return Err(InlinePlanError::Gone(format!(
+                "{table} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
+            )));
+        };
+        if target.unchanged(&before, &values) {
+            continue;
         }
-        let before = target.fetch_own(&state.pool, pk.clone(), &raw_pk).await?;
+        if state.is_read_only(table) {
+            return Err(read_only().into());
+        }
         if !crate::admin::object_permissions::is_allowed(table, "change", parts, Some(&before)) {
-            return Err(refused("change"));
+            return Err(refused("change").into());
         }
         let set = values
             .into_iter()
