@@ -167,6 +167,7 @@ pub(crate) enum HashLane {
     /// Credentials sent per request (HTTP Basic, API keys, agent
     /// secrets): at most half the slots, so a flood of them cannot
     /// starve the login forms.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Credential,
 }
 
