@@ -150,6 +150,17 @@ untouched.
 
 ## Unreleased
 
+### The trusted client IP is the rightmost untrusted hop
+
+Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the
+rightmost hop that is not a trusted proxy (#1673). List every proxy hop
+(CDN egress, load balancer, nginx) in `trust_proxies`, or the client IP
+will be one of your proxies. If your proxy sets `X-Real-IP`,
+`CF-Connecting-IP` or `Forwarded` instead of appending to XFF, name
+that strategy; `Auto` behind a trusted proxy reads only XFF.
+`BodyLimitLayer` now also limits bodies without `Content-Length`; over
+the limit a body extractor answers axum's plain 413.
+
 ### Model shortcuts respect global scopes
 
 `Model::sum/avg/min/max/destroy/delete_where` now apply global scopes
