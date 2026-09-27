@@ -4,6 +4,80 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — idempotency replays are scoped to the caller and route (#1668)
+
+`IdempotencyLayer` now keys a stored response on host, the request's
+tenant, the resolved caller, method, path and query, then the client's
+key. With no resolved caller it hashes `Authorization`, `Cookie` and
+`X-Api-Key` instead, so a token refresh between retries still replays
+when auth runs first. A response that sets a cookie is not stored. A
+reused key with a different body gets `422`; a body over `body_cap`
+gets `413`, other body errors `400`. `require_auth` now records the
+tenant slug.
+
+### Security — ViewSet create keeps a client-supplied primary key (#1671)
+
+ViewSet create and bulk create now write the PK a client sends for a
+model whose PK is not `Auto<T>` (a `String` slug, say). Before, it was
+dropped: the create failed, and on SQLite with a nullable PK column it
+committed an unreachable NULL-key row. A create with no PK is now a 400
+on every backend. Update still ignores a PK in the body. The created
+row is read back by that PK, so MySQL returns the right row and a Uuid
+PK no longer 500s. On SQLite, Uuid columns in ViewSet JSON now show
+their value instead of `null`.
+
+### Security — CSRF refuses an empty token (#1693)
+
+An empty `rustango_csrf` cookie with an empty `_csrf` field or
+`X-CSRF-Token` header passed the double-submit check. The CSRF layer
+and `verify_form_token` now share one check that refuses it.
+
+### Fixed — the admin sets one CSRF cookie on a first visit (#1711)
+
+A first visit to a protected admin page set two different
+`rustango_csrf` cookies; it worked only because browsers keep the last.
+
+### Security — `urlize` escapes its output; built-in HTML views check CSRF (#1669)
+
+`urlize` and `urlizetrunc` now HTML-escape the href, the link text and
+the text around links, so `{{ x | urlize | safe }}` is safe on user
+input. Every `template_views` router with a POST route now refuses a
+POST without a matching CSRF token; before, the token was rendered but
+nothing checked it unless `Cli::with_csrf()` was on. `urlizetrunc` no
+longer breaks non-ASCII text.
+
+### Security — tenant FKs from ensure helpers stay in the tenant schema (#1645)
+
+On PostgreSQL, the tables that permissions, API keys, audit, TOTP and
+passkeys create for themselves now schema-qualify every FK target. A
+schema-mode tenant without `rustango_users` could get an FK bound to
+`public.rustango_users`, so a delete in `public` cascaded into the
+tenant. It now gets a "relation does not exist" error. MySQL and SQLite
+are unchanged.
+
+### Security — admin inline formsets stay under their parent (#1667)
+
+Inline updates and deletes are keyed on the parent (the FK, or content
+type and object pk), and inserts always set the parent, ignoring a
+submitted FK. Each inline row passes the child table's own admin gates
+first. A child PK from another parent returns 404; a refused gate
+returns 403 and the parent is not saved. Inline and child
+`readonly_fields` are no longer written. Rows you did not edit skip
+the change check, so one locked child row no longer blocks the save. A
+child deleted by someone else since the page loaded counts as deleted;
+editing it re-renders the form with a message.
+
+### Security — webhook delivery checks its target (#1670)
+
+Delivery sends only to http/https, does not follow redirects, and
+refuses loopback, private, link-local, CGNAT, multicast and unspecified
+addresses, including IPv4 inside 6to4, Teredo and NAT64, checked after
+DNS and pinned for the connection. The refusal does not name the
+resolved address. A failed
+delivery stores the status code, not the response body. Use
+`WebhookSubscription::allow_private_targets(true)` for intranet or test
+receivers.
+
 ### Changed — schema structs are `#[non_exhaustive]`, with `const fn` constructors (#1661)
 
 **Breaking** for hand-built schemas; see UPGRADING. `FieldSchema`,

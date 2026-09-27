@@ -210,15 +210,20 @@ async fn login_csrf(app: &axum::Router, slug: &str) -> Option<String> {
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    resp.headers()
+    let tokens: Vec<String> = resp
+        .headers()
         .get_all("set-cookie")
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find_map(|v| {
+        .filter_map(|v| {
             v.strip_prefix("rustango_csrf=")
                 .and_then(|rest| rest.split(';').next())
                 .map(str::to_owned)
         })
+        .collect();
+    // One cookie, not two different ones (#1711).
+    assert!(tokens.len() <= 1, "two CSRF cookies: {tokens:?}");
+    tokens.into_iter().next()
 }
 
 /// A login POST with no CSRF token is refused, and refused *before*

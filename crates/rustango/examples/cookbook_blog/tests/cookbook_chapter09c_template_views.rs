@@ -19,6 +19,9 @@ use std::sync::Arc;
 use tera::Tera;
 use tower::ServiceExt;
 
+/// The CSRF token a form POST echoes in its cookie and `_csrf` field.
+const CSRF: &str = "cookbook-csrf-token-cookbook-csrf-token-coo";
+
 fn url() -> Option<String> {
     std::env::var("DATABASE_URL").ok()
 }
@@ -226,7 +229,7 @@ async fn create_view_inserts_then_redirects_to_pk_url() {
     assert!(body.contains("FORM is_create=true"), "got: {body}");
 
     // POST /authors/new — inserts + 303 to /authors/<new pk>.
-    let post_body = "name=Frank&email=f@x.com&bio=";
+    let post_body = format!("_csrf={CSRF}&name=Frank&email=f@x.com&bio=");
     let resp = app
         .clone()
         .oneshot(
@@ -234,6 +237,7 @@ async fn create_view_inserts_then_redirects_to_pk_url() {
                 .method(Method::POST)
                 .uri("/authors/new")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
                 .body(Body::from(post_body))
                 .unwrap(),
         )
@@ -295,7 +299,8 @@ async fn delete_view_two_step_flow() {
                 .method(Method::POST)
                 .uri(&format!("/authors/{id}/delete"))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::empty())
+                .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+                .body(Body::from(format!("_csrf={CSRF}")))
                 .unwrap(),
         )
         .await

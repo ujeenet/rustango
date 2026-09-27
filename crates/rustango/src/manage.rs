@@ -107,8 +107,8 @@ pub struct Cli {
     /// CSRF middleware config registered via [`Cli::with_csrf`]. `None`
     /// means no CSRF layer mounted — the right default for pure JSON
     /// APIs that authenticate via JWT and reject form-encoded bodies
-    /// at the deserializer layer. Form-driven apps (anything using
-    /// `template_views` Create/Update/DeleteView) opt in.
+    /// at the deserializer layer. Form-driven apps opt in; the
+    /// `template_views` routers carry their own layer.
     #[cfg(feature = "csrf")]
     csrf: Option<crate::forms::csrf::CsrfConfig>,
     /// When `true`, mounts [`crate::welcome::welcome_router`] at `/`
@@ -370,11 +370,9 @@ impl Cli {
 
     /// Auto-mount the [`crate::forms::csrf::CsrfLayer`] on the API
     /// router at `runserver` time using
-    /// [`crate::forms::csrf::CsrfConfig::default`]. Required for any
-    /// project using the HTML CBVs (`template_views`'s
-    /// `CreateView`/`UpdateView`/`DeleteView`) — those views call
-    /// `csrf::ensure_token` to mint the cookie + form value, and the
-    /// layer enforces it on POST/PUT/PATCH/DELETE.
+    /// [`crate::forms::csrf::CsrfConfig::default`]. It enforces the
+    /// token on POST/PUT/PATCH/DELETE for hand-written form handlers;
+    /// the `template_views` routers already check it themselves.
     ///
     /// Default off — pure JSON APIs that authenticate via JWT
     /// (`Authorization: Bearer ...`) don't need CSRF and shouldn't

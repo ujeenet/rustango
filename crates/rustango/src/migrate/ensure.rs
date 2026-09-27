@@ -85,16 +85,48 @@ fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     }
 }
 
-/// Run every statement in `batch`, tolerating objects that already
+/// Create every table in `snapshot`, tolerating objects that already
 /// exist. The one entry point the `ensure_*` helpers share, so the
 /// policy cannot drift between them.
+///
+/// FK targets are pinned to the schema the tables are created in, so a
+/// missing target fails instead of binding to another schema (#1645).
 ///
 /// # Errors
 /// Any driver failure that is not "already exists".
 pub(crate) async fn apply_idempotent(
     pool: &Pool,
-    batch: &super::RenderedBatch,
+    snapshot: &super::SchemaSnapshot,
 ) -> Result<(), sqlx::Error> {
+    let schema = creation_schema(pool).await?;
+    let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
+    let batch = super::diff::render_changes_split_in_schema(
+        &changes,
+        snapshot,
+        pool.dialect(),
+        schema.as_deref(),
+    )
+    .map_err(sqlx::Error::Protocol)?;
+    apply_batch(pool, &batch).await
+}
+
+/// Where Postgres creates unqualified tables; `None` on backends
+/// without schemas.
+async fn creation_schema(pool: &Pool) -> Result<Option<String>, sqlx::Error> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => sqlx::query_scalar::<_, Option<String>>("SELECT current_schema()")
+            .fetch_one(pg)
+            .await?
+            .map(Some)
+            .ok_or_else(|| sqlx::Error::Protocol("search_path names no existing schema".into())),
+        #[allow(unreachable_patterns)]
+        _ => Ok(None),
+    }
+}
+
+/// Run every statement in `batch`, tolerating objects that already exist.
+async fn apply_batch(pool: &Pool, batch: &super::RenderedBatch) -> Result<(), sqlx::Error> {
     let dialect = pool.dialect().name();
     for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
         let stmt = idempotent(stmt, dialect);
@@ -188,7 +220,7 @@ mod tests {
         }
     }
 
-    /// `apply_idempotent` itself, against a real SQLite database.
+    /// `apply_batch` itself, against a real SQLite database.
     ///
     /// Written because the review found three reverts of it that every
     /// other test survived: dropping the `idempotent` rewrite, dropping
@@ -208,7 +240,7 @@ mod tests {
             deferred_fks: vec!["CREATE TABLE b (id INTEGER PRIMARY KEY)".to_owned()],
             ..Default::default()
         };
-        super::apply_idempotent(&pool, &batch)
+        super::apply_batch(&pool, &batch)
             .await
             .expect("first run creates both");
         for t in ["a", "b"] {
@@ -218,7 +250,7 @@ mod tests {
         }
 
         // Second run is a no-op, not an error.
-        super::apply_idempotent(&pool, &batch)
+        super::apply_batch(&pool, &batch)
             .await
             .expect("re-running an ensure must be idempotent");
 
@@ -228,7 +260,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            super::apply_idempotent(&pool, &bad).await.is_err(),
+            super::apply_batch(&pool, &bad).await.is_err(),
             "a syntax error must propagate; swallowing everything would \
              make every ensure silently succeed"
         );

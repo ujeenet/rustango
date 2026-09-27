@@ -24,8 +24,8 @@ use super::session::CURRENT_CSRF_TOKEN;
 /// Install the request's CSRF token as a task-local, then attach the
 /// cookie that pairs with it.
 ///
-/// Mounted inside the auth gate so it runs for every admin page, read
-/// pages included. A GET must seed the cookie, or the first POST from
+/// Mounted inside `csrf::layer()` and outside the session gate, so it
+/// runs for every admin page, read pages included. A GET must seed the cookie, or the first POST from
 /// a fresh browser has nothing to match against.
 pub(crate) async fn csrf_context(request: Request<Body>, next: Next) -> Response {
     let (token, set_cookie) =

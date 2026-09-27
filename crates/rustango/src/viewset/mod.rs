@@ -1148,21 +1148,34 @@ impl AcquiredConn {
         crate::sql::select_rows_pool_with_related::<T>(&self.pool, q).await
     }
 
-    /// Insert a row and return its primary key. PG and SQLite use
-    /// RETURNING; MySQL uses `LAST_INSERT_ID()`.
+    /// Insert a row and return its primary key (see [`created_pk`]).
     async fn insert_returning_pk(
         &mut self,
         q: &InsertQuery,
         pk_field: &crate::core::FieldSchema,
     ) -> Result<SqlValue, crate::sql::ExecError> {
         let returning = crate::sql::insert_returning_pool(&self.pool, q).await?;
-        Ok(pk_from_returning(returning, pk_field))
+        Ok(created_pk(q, returning, pk_field))
     }
 }
 
-/// Read the primary key out of an INSERT's RETURNING, or MySQL's
-/// `LAST_INSERT_ID()`. Shared by the single-row and bulk paths.
-fn pk_from_returning(
+/// The PK of the row `q` just inserted: the submitted value when the PK
+/// column is in the INSERT, else the database-generated one.
+/// Shared by the single-row and bulk paths.
+fn created_pk(
+    q: &InsertQuery,
+    returning: crate::sql::InsertReturningPool,
+    pk_field: &crate::core::FieldSchema,
+) -> SqlValue {
+    match q.columns.iter().position(|c| *c == pk_field.column) {
+        Some(i) => q.values[i].clone(),
+        None => generated_pk(returning, pk_field),
+    }
+}
+
+/// Read a generated PK out of an INSERT's RETURNING, or MySQL's
+/// `LAST_INSERT_ID()`.
+fn generated_pk(
     returning: crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
 ) -> SqlValue {
@@ -2429,14 +2442,6 @@ async fn handle_create(
     // A JSON array body means a bulk create.
     let create_body = or_400!(extract_create_body(parts, body).await);
 
-    let skip: Vec<&str> = state
-        .vs
-        .schema
-        .scalar_fields()
-        .filter(|f| f.primary_key || f.auto)
-        .map(|f| f.name)
-        .collect();
-
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
         Err(resp) => return resp,
@@ -2444,9 +2449,9 @@ async fn handle_create(
 
     match create_body {
         CreateBody::Single(form, json) => {
-            create_one(&state, &mut acq, &form, json.as_ref(), &skip, pk_field).await
+            create_one(&state, &mut acq, &form, json.as_ref(), pk_field).await
         }
-        CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, &skip, pk_field).await,
+        CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, pk_field).await,
     }
 }
 
@@ -2510,22 +2515,20 @@ async fn create_one(
     acq: &mut AcquiredConn,
     form: &HashMap<String, String>,
     json: Option<&Value>,
-    skip: &[&str],
     pk_field: &'static crate::core::FieldSchema,
 ) -> Response {
     // When a serializer is registered: run its input validation and
     // skip every model column it doesn't accept (read_only / computed).
-    let extra_skip = match serializer_write_prep(state, json) {
+    // `Auto` columns are skipped by `collect_values`; a natural PK is written.
+    let skip = match serializer_write_prep(state, json) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
-    let mut all_skip: Vec<&str> = skip.to_vec();
-    all_skip.extend(extra_skip);
     // Translate `source`-renamed writable keys (serializer field name →
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
-    let collected = match collect_insert_values(state.vs.schema, form, &all_skip) {
+    let collected = match collect_insert_values(state.vs.schema, form, &skip) {
         Ok(v) => v,
         Err(e) => {
             return json_error(
@@ -2554,7 +2557,6 @@ async fn create_many(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     rows: &[(HashMap<String, String>, Option<Value>)],
-    skip: &[&str],
     pk_field: &'static crate::core::FieldSchema,
 ) -> Response {
     if rows.is_empty() {
@@ -2567,15 +2569,13 @@ async fn create_many(
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
         // Serializer validation + non-writable skip, per entry.
-        let extra_skip = match serializer_write_prep(state, json.as_ref()) {
+        let skip = match serializer_write_prep(state, json.as_ref()) {
             Ok(s) => s,
             Err(resp) => return resp,
         };
-        let mut all_skip: Vec<&str> = skip.to_vec();
-        all_skip.extend(extra_skip);
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
-        let collected = match collect_insert_values(state.vs.schema, row, &all_skip) {
+        let collected = match collect_insert_values(state.vs.schema, row, &skip) {
             Ok(v) => v,
             Err(e) => {
                 let e = public_form_error(state, e);
@@ -2625,7 +2625,7 @@ async fn create_many(
             on_conflict: None,
         };
         match crate::sql::insert_returning_tx(&mut tx, &query).await {
-            Ok(returning) => pks.push(pk_from_returning(returning, pk_field)),
+            Ok(returning) => pks.push(created_pk(&query, returning, pk_field)),
             Err(e) => {
                 // Drop every row this request wrote, including the ones
                 // that succeeded before entry `i`.
@@ -3234,6 +3234,34 @@ mod tenant_router_tests {
         let vs = static_state.read_only();
         let _r = vs.clone().tenant_router("/api/users");
         // If this compiles, the variant + builder are wired.
+    }
+}
+
+/// A submitted PK wins over MySQL's `LAST_INSERT_ID()`, which is 0 for a
+/// non-auto PK and would read back `WHERE pk = 0` (#1671).
+#[cfg(all(test, feature = "mysql", feature = "tenancy"))]
+mod created_pk_tests {
+    use super::*;
+    use crate::core::Model as _;
+
+    #[test]
+    fn a_submitted_string_pk_is_not_replaced_by_last_insert_id() {
+        let schema = crate::tenancy::auth::User::SCHEMA;
+        let pk = schema
+            .fields
+            .iter()
+            .find(|f| f.ty == FieldType::String)
+            .expect("a String field");
+        let q = InsertQuery::new(
+            schema,
+            vec![pk.column],
+            vec![SqlValue::String("rust".into())],
+        );
+        let got = created_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk);
+        assert!(
+            matches!(got, SqlValue::String(ref s) if s == "rust"),
+            "{got:?}"
+        );
     }
 }
 

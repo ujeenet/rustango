@@ -150,6 +150,62 @@ untouched.
 
 ## Unreleased
 
+### Idempotency keys stored before the upgrade are not replayed
+
+The key format changed (#1668). Add your auth layer after
+`.idempotency(..)` so the caller is resolved first. A keyed request
+with a body over `body_cap` (4 MiB by default) now gets `413`, with or
+without `Content-Length`; raise `body_cap` for large uploads.
+
+### `template_views` POSTs need the CSRF token; `urlize` escapes
+
+`template_views` POST routes return 403 without a token (#1669): put
+`{{ csrf_input | safe }}` in every form. The feature now enables `csrf`.
+`urlize` escapes its input, so stop passing it pre-escaped text or `&`
+shows as `&amp;amp;`.
+
+### Webhooks to private addresses are dead-lettered
+
+Receivers on localhost, private or link-local addresses (tests,
+intranet) now fail unless the subscription calls
+`.allow_private_targets(true)` (#1670). Delivery ignores
+`HTTP(S)_PROXY`. `WebhookEvent` gained a public field,
+`allow_private_targets`; a hand-built `WebhookEvent { .. }` must set it.
+
+### Admin inline helpers are removed
+
+`admin::inlines::apply_post` and `apply_post_generic` wrote child rows
+with no permission check (#1667). The admin's parent update applies
+inlines itself; there is no public replacement.
+
+### Check schema-mode tenants for FKs into `public`
+
+Tenants created before #1645 may have a framework FK into `public`. This
+lists them (your own cross-schema FKs are left out):
+
+```sql
+SELECT n.nspname, s.relname, c.conname
+FROM pg_constraint c
+JOIN pg_class s ON s.oid = c.conrelid
+JOIN pg_namespace n ON n.oid = s.relnamespace
+JOIN pg_class t ON t.oid = c.confrelid
+JOIN pg_namespace tn ON tn.oid = t.relnamespace
+WHERE c.contype = 'f' AND n.nspname <> 'public' AND tn.nspname = 'public'
+  AND s.relname IN ('rustango_api_keys', 'rustango_role_permissions',
+                    'rustango_user_roles', 'rustango_user_permissions');
+```
+
+Drop each one (`ALTER TABLE "<schema>"."<table>" DROP CONSTRAINT "<name>"`).
+For the three permission tables, `manage seed-permissions --slug <slug>`
+then re-creates them inside the tenant. For `rustango_api_keys`, re-add it
+by hand:
+
+```sql
+ALTER TABLE "<schema>"."rustango_api_keys"
+  ADD CONSTRAINT "rustango_api_keys_user_id_fkey" FOREIGN KEY ("user_id")
+  REFERENCES "<schema>"."rustango_users" ("id") ON DELETE CASCADE;
+```
+
 ### Tenant admin and operator console POSTs need the CSRF token
 
 Every POST to the tenant admin (#1713) and the operator console (#1710)

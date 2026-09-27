@@ -1634,6 +1634,7 @@ pub(crate) async fn detail_view(
         .await
         .unwrap_or_default();
     inline_panels.extend(generic_panels);
+    inline_panels.retain(|p| lookup_model(&state, &p.child_table).is_some());
     let inline_panels_ctx: Vec<serde_json::Value> = inline_panels
         .into_iter()
         .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
@@ -1924,6 +1925,10 @@ pub(crate) async fn edit_form(
             .await
             .unwrap_or_default();
     inline_panels.extend(generic_panels);
+    // Only children this user may edit get a FormSet.
+    inline_panels.retain(|p| {
+        lookup_model(&state, &p.child_table).is_some() && !state.is_read_only(&p.child_table)
+    });
     // Same preload as `create_form`, so the edit form also gets the
     // ContentType `<select>`.
     let gfk_cts = preload_gfk_cts(&state, model).await;
@@ -2008,6 +2013,17 @@ pub(crate) async fn update_submit(
     // back to a plain snapshot.
     let before_row = pre_update_row.clone();
 
+    // Gate every inline row before anything is written, the parent included.
+    let inline_plan = match super::inlines::plan_post(&state, &parts, model, &pk_value, &form).await
+    {
+        Ok(plan) => plan,
+        Err(super::inlines::InlinePlanError::Admin(e)) => return Err(e),
+        Err(super::inlines::InlinePlanError::Gone(msg)) => {
+            let html = render_form(&state, model, Some(&form), true, Some(&msg));
+            return Ok(Html(html).into_response());
+        }
+    };
+
     let query = UpdateQuery {
         model,
         set: assignments,
@@ -2034,16 +2050,9 @@ pub(crate) async fn update_submit(
     })
     .await;
 
-    // Apply the inline FormSet payloads, generic ones last. The
-    // parent UPDATE has already committed here, and there is no
-    // transaction across rows: a per-row write failure is counted
-    // and logged, not rolled back.
-    let parent_pk_for_inlines =
-        forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
-    let _ =
-        super::inlines::apply_post(&state.pool, model, parent_pk_for_inlines.clone(), &form).await;
-    let _ =
-        super::inlines::apply_post_generic(&state.pool, model, parent_pk_for_inlines, &form).await;
+    // Apply the inline writes. There is no transaction across rows: a
+    // per-row write failure is counted, not rolled back.
+    let _ = super::inlines::apply_plan(&state.pool, inline_plan).await;
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())

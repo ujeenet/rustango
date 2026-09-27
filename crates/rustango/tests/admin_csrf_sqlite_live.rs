@@ -197,6 +197,70 @@ async fn a_get_seeds_the_csrf_cookie() {
     );
 }
 
+/// The `rustango_csrf` values a response sets.
+fn csrf_cookies(resp: &axum::response::Response) -> Vec<String> {
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| v.strip_prefix("rustango_csrf="))
+        .map(|rest| rest.split(';').next().unwrap_or("").to_owned())
+        .collect()
+}
+
+/// #1711 — a first visit sets one CSRF cookie, not two different ones,
+/// and a login posted with it goes through.
+#[tokio::test]
+async fn a_first_visit_sets_one_csrf_cookie_that_logs_in() {
+    use rustango::admin::AdminUser;
+    // One connection: each `sqlite::memory:` connection is its own DB.
+    let pool: Pool = rustango::sql::sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite")
+        .into();
+    rustango::testkit::create_tables_for::<AdminUser>(&pool)
+        .await
+        .unwrap();
+    // Login fails closed without the TOTP table.
+    #[cfg(feature = "totp")]
+    rustango::admin::totp_store::ensure_table(&pool)
+        .await
+        .unwrap();
+    let mut u = AdminUser::new_with_password("alice", "correct-horse", true).unwrap();
+    u.insert_pool(&pool).await.unwrap();
+    let app = app_with_session_auth(pool);
+
+    let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let first = app.clone().oneshot(get("/csrf_post")).await.unwrap();
+    let cookies = csrf_cookies(&first);
+    assert_eq!(
+        cookies.len(),
+        1,
+        "one CSRF cookie per response: {cookies:?}"
+    );
+    let login_page = app.clone().oneshot(get("/login")).await.unwrap();
+    assert_eq!(csrf_cookies(&login_page).len(), 1);
+
+    let token = &cookies[0];
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={token}"))
+                .body(Body::from(format!(
+                    "_csrf={token}&username=alice&password=correct-horse"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "login must succeed");
+}
+
 /// Every POST form in every admin template renders a token.
 ///
 /// Source-level on purpose. The regression this guards is not "the

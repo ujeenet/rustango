@@ -168,9 +168,9 @@ ejecutado. Conviene saberlo antes de leer un resultado en verde como cobertura.
 
 | Variable | Suites | Qué necesitan |
 |---|---:|---|
-| *(ninguna)* | 212 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
-| `DATABASE_URL` | 96 | Un servidor PostgreSQL accesible. |
-| `MYSQL_TEST_URL` | 28 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
+| *(ninguna)* | 213 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
+| `DATABASE_URL` | 98 | Un servidor PostgreSQL accesible. |
+| `MYSQL_TEST_URL` | 29 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis accesible. |
 
 Una suite que lee dos variables se cuenta en ambas, así que la columna no suma el
