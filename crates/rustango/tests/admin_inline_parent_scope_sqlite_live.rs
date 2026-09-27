@@ -252,3 +252,199 @@ async fn read_only_child_table_refuses_inline_writes() {
     assert!(edit_page(app(pool.clone())).await.contains(formset));
     assert!(!edit_page(ro_app()).await.contains(formset));
 }
+
+/// Denies `change` on child rows titled `locked`.
+fn not_locked(_parts: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
+    row.is_none_or(|r| r["title"] != "locked")
+}
+rustango::register_admin_object_permission!("ips_child", "change", not_locked);
+
+async fn raw(pool: &Pool, sql: &str) {
+    rustango::sql::raw_execute_pool(pool, sql, Vec::new())
+        .await
+        .expect("raw sql");
+}
+
+/// Posts one existing-row slot for child 1 plus a parent rename.
+fn one_row(title: &str, delete: bool) -> Vec<(&str, &str)> {
+    let mut form = vec![
+        ("name", "p1 renamed"),
+        ("ips_child-0-id", "1"),
+        ("ips_child-0-title", title),
+    ];
+    if delete {
+        form.push(("ips_child-0-DELETE", "on"));
+    }
+    form.extend(MGMT);
+    form
+}
+
+const INSERT_ONE: [(&str, &str); 5] = [
+    ("name", "p1 renamed"),
+    ("ips_child-TOTAL_FORMS", "1"),
+    ("ips_child-INITIAL_FORMS", "0"),
+    ("ips_child-MAX_NUM_FORMS", ""),
+    ("ips_child-0-title", "new"),
+];
+
+fn app_with_perms(pool: &Pool, child_perms: &[&str]) -> axum::Router {
+    let mut perms: Vec<String> = ["view", "change", "add", "delete"]
+        .iter()
+        .map(|p| format!("ips_parent.{p}"))
+        .collect();
+    perms.extend(child_perms.iter().map(|p| format!("ips_child.{p}")));
+    rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .with_user_perms(perms)
+        .build()
+}
+
+#[tokio::test]
+async fn missing_add_perm_refuses_insert_only() {
+    let pool = fresh_pool().await;
+    let perms = ["view", "change", "delete"];
+    let status = post(app_with_perms(&pool, &perms), "/ips_parent/1", &INSERT_ONE).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(children(&pool).await.len(), 2);
+    assert_eq!(parent_name(&pool, 1).await, "p1");
+
+    let status = post(
+        app_with_perms(&pool, &perms),
+        "/ips_parent/1",
+        &one_row("c1 renamed", false),
+    )
+    .await;
+    assert!(is_redirect(status), "update still allowed, got {status}");
+    assert_eq!(children(&pool).await[0].2, "c1 renamed");
+}
+
+#[tokio::test]
+async fn missing_change_perm_refuses_update_only() {
+    let pool = fresh_pool().await;
+    let perms = ["view", "add", "delete"];
+    let status = post(
+        app_with_perms(&pool, &perms),
+        "/ips_parent/1",
+        &one_row("changed", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(children(&pool).await[0].2, "c1");
+    assert_eq!(parent_name(&pool, 1).await, "p1");
+
+    let status = post(app_with_perms(&pool, &perms), "/ips_parent/1", &INSERT_ONE).await;
+    assert!(is_redirect(status), "insert still allowed, got {status}");
+    assert_eq!(children(&pool).await.len(), 3);
+}
+
+#[tokio::test]
+async fn missing_delete_perm_refuses_delete_only() {
+    let pool = fresh_pool().await;
+    let perms = ["view", "change", "add"];
+    let status = post(
+        app_with_perms(&pool, &perms),
+        "/ips_parent/1",
+        &one_row("c1", true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(children(&pool).await.len(), 2);
+    assert_eq!(parent_name(&pool, 1).await, "p1");
+
+    let status = post(
+        app_with_perms(&pool, &perms),
+        "/ips_parent/1",
+        &one_row("c1 renamed", false),
+    )
+    .await;
+    assert!(is_redirect(status), "update still allowed, got {status}");
+    assert_eq!(children(&pool).await[0].2, "c1 renamed");
+}
+
+#[tokio::test]
+async fn hook_denies_a_changed_row() {
+    let pool = fresh_pool().await;
+    raw(
+        &pool,
+        r#"UPDATE "ips_child" SET "title" = 'locked' WHERE "id" = 1"#,
+    )
+    .await;
+    let status = post(app(pool.clone()), "/ips_parent/1", &one_row("open", false)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(children(&pool).await[0].2, "locked");
+    assert_eq!(parent_name(&pool, 1).await, "p1");
+}
+
+#[tokio::test]
+async fn unchanged_denied_row_does_not_block_the_save() {
+    let pool = fresh_pool().await;
+    raw(
+        &pool,
+        r#"INSERT INTO "ips_child" ("id", "parent_id", "title") VALUES (3, 1, 'locked')"#,
+    )
+    .await;
+    let form = [
+        ("name", "p1 renamed"),
+        ("ips_child-TOTAL_FORMS", "2"),
+        ("ips_child-INITIAL_FORMS", "2"),
+        ("ips_child-MAX_NUM_FORMS", ""),
+        ("ips_child-0-id", "1"),
+        ("ips_child-0-title", "c1 renamed"),
+        ("ips_child-1-id", "3"),
+        ("ips_child-1-title", "locked"),
+    ];
+    let status = post(app(pool.clone()), "/ips_parent/1", &form).await;
+    assert!(is_redirect(status), "got {status}");
+    assert_eq!(parent_name(&pool, 1).await, "p1 renamed");
+    assert_eq!(
+        children(&pool).await,
+        vec![
+            (1, 1, "c1 renamed".into()),
+            (2, 2, "c2".into()),
+            (3, 1, "locked".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_already_gone_row_still_saves() {
+    let pool = fresh_pool().await;
+    raw(&pool, r#"DELETE FROM "ips_child" WHERE "id" = 1"#).await;
+    let status = post(app(pool.clone()), "/ips_parent/1", &one_row("c1", true)).await;
+    assert!(is_redirect(status), "got {status}");
+    assert_eq!(parent_name(&pool, 1).await, "p1 renamed");
+}
+
+#[tokio::test]
+async fn editing_an_already_gone_row_explains_and_writes_nothing() {
+    let pool = fresh_pool().await;
+    raw(&pool, r#"DELETE FROM "ips_child" WHERE "id" = 1"#).await;
+    let res = app(pool.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/ips_parent/1")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "name=p1+renamed&ips_child-TOTAL_FORMS=1&ips_child-INITIAL_FORMS=1\
+                     &ips_child-MAX_NUM_FORMS=&ips_child-0-id=1&ips_child-0-title=edited",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        body.contains("was deleted after this page loaded"),
+        "{body}"
+    );
+    assert!(
+        body.contains("p1 renamed"),
+        "the parent edit is kept in the form"
+    );
+    assert_eq!(parent_name(&pool, 1).await, "p1");
+}

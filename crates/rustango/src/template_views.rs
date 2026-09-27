@@ -5897,6 +5897,57 @@ mod tests {
         }
     }
 
+    /// Every `tenant_router` with a POST route rejects a write without the
+    /// token, before tenant resolution (#1669).
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn cbv_tenant_post_without_csrf_token_is_forbidden() {
+        let schema = schema_two_fields();
+        let tera = Arc::new(Tera::default());
+        let routers = || -> Vec<(&str, Router<()>)> {
+            vec![
+                (
+                    "/c/new",
+                    CreateView::for_model(schema).tenant_router("/c", tera.clone()),
+                ),
+                (
+                    "/u/1/edit",
+                    UpdateView::for_model(schema).tenant_router("/u", tera.clone()),
+                ),
+                (
+                    "/d/1/delete",
+                    DeleteView::for_model(schema).tenant_router("/d", tera.clone()),
+                ),
+                (
+                    "/l",
+                    ListView::for_model(schema)
+                        .bulk_actions(true)
+                        .tenant_router("/l", tera.clone()),
+                ),
+            ]
+        };
+        let body = "action=delete_selected&_selected_action=1";
+        for (uri, app) in routers() {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+        // With the token the request gets past CSRF (and fails on the missing tenant).
+        for (uri, app) in routers() {
+            let res = app.oneshot(csrf_form_post(uri, body)).await.unwrap();
+            assert_ne!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
     #[tokio::test]
     async fn form_view_post_valid_redirects_to_success_url() {
         use crate::forms::{Form, FormErrors};

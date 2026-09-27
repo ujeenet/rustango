@@ -193,9 +193,11 @@ async fn checked_target(url: &reqwest::Url) -> Result<(Option<String>, Vec<Socke
         .ok_or_else(|| JobError::Fatal("target url has no host".into()))?;
     let port = url.port_or_known_default().unwrap_or(80);
     let literal = host.trim_start_matches('[').trim_end_matches(']');
+    // The error never names the address: it may be an internal one.
+    let blocked = || JobError::Fatal("target resolves to a blocked address".into());
     if let Ok(ip) = literal.parse::<IpAddr>() {
         if is_blocked_ip(ip) {
-            return Err(JobError::Fatal(format!("target address not allowed: {ip}")));
+            return Err(blocked());
         }
         return Ok((None, vec![SocketAddr::new(ip, port)]));
     }
@@ -206,11 +208,8 @@ async fn checked_target(url: &reqwest::Url) -> Result<(Option<String>, Vec<Socke
     if addrs.is_empty() {
         return Err(JobError::Retryable(format!("dns: no addresses for {host}")));
     }
-    if let Some(bad) = addrs.iter().find(|a| is_blocked_ip(a.ip())) {
-        return Err(JobError::Fatal(format!(
-            "target address not allowed: {host} -> {}",
-            bad.ip()
-        )));
+    if addrs.iter().any(|a| is_blocked_ip(a.ip())) {
+        return Err(blocked());
     }
     Ok((Some(host.to_owned()), addrs))
 }
@@ -225,13 +224,25 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                 return is_blocked_v4(v4);
             }
             let seg = v6.segments();
-            // NAT64 well-known prefix 64:ff9b::/96.
-            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-                let [a, b] = seg[6].to_be_bytes();
-                let [c, d] = seg[7].to_be_bytes();
-                return is_blocked_v4(Ipv4Addr::new(a, b, c, d));
+            let v4 = |hi: u16, lo: u16| {
+                let [a, b] = hi.to_be_bytes();
+                let [c, d] = lo.to_be_bytes();
+                Ipv4Addr::new(a, b, c, d)
+            };
+            // NAT64 64:ff9b::/96 and IPv4-translated ::ffff:0:0:0/96.
+            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || seg[..6] == [0, 0, 0, 0, 0xffff, 0] {
+                return is_blocked_v4(v4(seg[6], seg[7]));
+            }
+            // 6to4 2002::/16 carries the IPv4 in bits 16..48.
+            if seg[0] == 0x2002 {
+                return is_blocked_v4(v4(seg[1], seg[2]));
+            }
+            // Teredo 2001::/32: server IPv4, then the client IPv4 XOR'd.
+            if seg[0] == 0x2001 && seg[1] == 0 {
+                return is_blocked_v4(v4(seg[2], seg[3])) || is_blocked_v4(v4(!seg[6], !seg[7]));
             }
             v6.is_loopback()
+                || seg[..3] == [0x64, 0xff9b, 1] // local-use NAT64 64:ff9b:1::/48
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || (seg[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
@@ -659,6 +670,18 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:169.254.169.254",
             "64:ff9b::a9fe:a9fe",
+            "::ffff:0:7f00:1",              // IPv4-translated 127.0.0.1
+            "64:ff9b:1::808:808",           // local-use NAT64
+            "2002:7f00:1::1",               // 6to4 of 127.0.0.1
+            "2002:a9fe:a9fe::1",            // 6to4 of 169.254.169.254
+            "2001:0:808:808:0:0:80ff:fffe", // Teredo, client 127.0.0.1
+            "2001:0:a00:1:0:0:f7f7:f7f7",   // Teredo, server 10.0.0.1
+            "fec0::1",
+            "::7f00:1",
+            "100.127.255.255",
+            "192.0.0.8",
+            "198.18.0.1",
+            "240.0.0.1",
         ] {
             assert!(is_blocked_ip(ip.parse().unwrap()), "{ip} should be blocked");
         }
@@ -667,6 +690,9 @@ mod tests {
             "8.8.8.8",
             "2606:4700::1111",
             "::ffff:8.8.8.8",
+            "::ffff:0:808:808",
+            "2002:808:808::1",
+            "2001:0:808:808:0:0:f7f7:f7f7", // Teredo, client 8.8.8.8
         ] {
             assert!(
                 !is_blocked_ip(ip.parse().unwrap()),
@@ -696,6 +722,8 @@ mod tests {
         ] {
             let err = deliver(&event(url.clone(), false)).await.unwrap_err();
             assert!(matches!(err, JobError::Fatal(_)), "{url}: {err:?}");
+            let msg = format!("{err:?}");
+            assert!(!msg.contains("127.0.0.1") && !msg.contains("::1"), "{msg}");
         }
         assert_eq!(
             hits.load(Ordering::SeqCst),
@@ -703,6 +731,46 @@ mod tests {
             "no request reached the server"
         );
         srv.abort();
+    }
+
+    #[tokio::test]
+    async fn subscription_refuses_a_private_target_by_default() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+                async { "ok" }
+            }),
+        );
+        let (base, srv) = serve(app).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        let dead = Arc::new(AtomicUsize::new(0));
+        let d = dead.clone();
+        q.on_dead_letter(move |_| {
+            let d = d.clone();
+            async move {
+                d.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await;
+        q.start().await;
+        WebhookSubscription::new(format!("{base}/hook"), "s")
+            .dispatch(&q, "ping", &serde_json::json!({}))
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            if dead.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(dead.load(Ordering::SeqCst), 1, "dead-lettered at once");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "no request was sent");
+        srv.abort();
+        q.shutdown().await;
     }
 
     #[tokio::test]

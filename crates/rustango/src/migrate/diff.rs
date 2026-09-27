@@ -2150,6 +2150,30 @@ mod sql_type_tests {
         assert!(out.deferred_fks[2].contains(r#"REFERENCES "t1"."parent" ("a_id", "b_id")"#));
     }
 
+    /// #1645 — the plain per-field FK arm qualifies its target.
+    #[test]
+    fn in_schema_render_qualifies_a_field_fk() {
+        let table: TableSnapshot = serde_json::from_value(serde_json::json!({
+            "name": "child", "model": "Child", "fields": [{
+                "name": "user_id", "column": "user_id", "ty": "i64",
+                "nullable": false, "primary_key": false,
+                "fk": { "kind": "fk", "to": "rustango_users", "on": "id" },
+            }],
+        }))
+        .unwrap();
+        let pg = &crate::sql::Postgres;
+        let fk = constraints_sql_from_snapshot(&table, pg, Some("t1"));
+        assert!(
+            fk[0].contains(r#"REFERENCES "t1"."rustango_users" ("id")"#),
+            "{fk:?}"
+        );
+        let fk = constraints_sql_from_snapshot(&table, pg, None);
+        assert!(
+            fk[0].contains(r#"REFERENCES "rustango_users" ("id")"#),
+            "{fk:?}"
+        );
+    }
+
     #[cfg(feature = "mysql")]
     #[test]
     fn add_composite_fk_mysql_uses_backticks() {

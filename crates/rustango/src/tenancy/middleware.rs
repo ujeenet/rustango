@@ -40,6 +40,7 @@ use crate::sql::Pool;
 
 use super::auth_backends::{AuthError, AuthUser, BoxedBackend};
 use super::permissions;
+use super::{Org, TenancyError};
 
 // ------------------------------------------------------------------ AuthenticatedUser
 
@@ -91,66 +92,108 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
 
 // ------------------------------------------------------------------ Tenant pool resolution
 
-/// The pool this request's credential must be checked against — the
-/// tenant resolved from **this request's** host, never one captured
-/// when the router was built.
-///
-/// Erased over the backend because the two context types are generic
-/// and this middleware is not; whichever the app mounted answers.
-///
-/// **Fails closed.** No context, no tenant, or a resolver error all
-/// reject — an unresolvable tenant is exactly the case where guessing
-/// is what the vulnerability was.
-async fn tenant_pool(parts: &Parts, ext: &axum::http::Extensions) -> Result<Pool, Response> {
+/// This request's Org, from whichever tenant context the app mounted.
+/// `None` when no context is mounted; `Some(Ok(None))` for an unknown tenant.
+pub(crate) async fn request_org(
+    parts: &Parts,
+    ext: &axum::http::Extensions,
+) -> Option<Result<Option<Org>, TenancyError>> {
     use crate::extractors::{DatabaseTenantContext, TenantContext};
     use crate::tenancy::resolver::OrgResolver as _;
 
     macro_rules! try_ctx {
         ($db:ty) => {
             if let Some(ctx) = ext.get::<Arc<TenantContext<$db>>>() {
-                let org = ctx
-                    .resolver
-                    .resolve(parts, &ctx.pools.registry_pool())
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "require_auth: tenant resolution failed");
-                        (StatusCode::INTERNAL_SERVER_ERROR, "tenant resolution failed")
-                            .into_response()
-                    })?
-                    .ok_or_else(|| {
-                        (StatusCode::NOT_FOUND, "unknown tenant").into_response()
-                    })?;
-                return ctx.pools.scoped_pool_dyn(&org).await.map_err(|e| {
-                    tracing::error!(error = %e, slug = %org.slug, "require_auth: tenant pool failed");
-                    (StatusCode::INTERNAL_SERVER_ERROR, "tenant pool unavailable").into_response()
-                });
+                return Some(
+                    ctx.resolver
+                        .resolve(parts, &ctx.pools.registry_pool())
+                        .await,
+                );
+            }
+        };
+    }
+    // The pure-SQLite / MySQL stack mounts `DatabaseTenantContext`
+    // instead, with its own registry handle and no schema mode.
+    macro_rules! try_db_ctx {
+        ($db:ty) => {
+            if let Some(ctx) = ext.get::<Arc<DatabaseTenantContext<$db>>>() {
+                return Some(ctx.resolver.resolve(parts, &ctx.registry).await);
             }
         };
     }
 
-    // The pure-SQLite / MySQL stack mounts `DatabaseTenantContext`
-    // instead, with its own registry handle and no schema mode. Missing
-    // it out would fail those deployments closed — safe, but broken.
+    #[cfg(feature = "postgres")]
+    try_ctx!(sqlx::Postgres);
+    #[cfg(feature = "sqlite")]
+    try_ctx!(sqlx::Sqlite);
+    #[cfg(feature = "mysql")]
+    try_ctx!(sqlx::MySql);
+    #[cfg(feature = "postgres")]
+    try_db_ctx!(sqlx::Postgres);
+    #[cfg(feature = "sqlite")]
+    try_db_ctx!(sqlx::Sqlite);
+    #[cfg(feature = "mysql")]
+    try_db_ctx!(sqlx::MySql);
+    None
+}
+
+/// The tenant and pool this request's credential must be checked
+/// against — resolved from **this request**, never captured when the
+/// router was built.
+///
+/// **Fails closed.** No context, no tenant, or a resolver error all
+/// reject — an unresolvable tenant is exactly the case where guessing
+/// is what the vulnerability was.
+async fn tenant_pool(parts: &Parts, ext: &axum::http::Extensions) -> Result<(Org, Pool), Response> {
+    use crate::extractors::{DatabaseTenantContext, TenantContext};
+
+    let org = match request_org(parts, ext).await {
+        Some(Ok(Some(org))) => org,
+        Some(Ok(None)) => return Err((StatusCode::NOT_FOUND, "unknown tenant").into_response()),
+        Some(Err(e)) => {
+            tracing::error!(error = %e, "require_auth: tenant resolution failed");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "tenant resolution failed",
+            )
+                .into_response());
+        }
+        None => {
+            tracing::error!(
+                "require_auth ran without a tenant context in request extensions — \
+                 mount the tenancy layer (server::Builder::tenant_pools) ahead of it"
+            );
+            return Err(
+                (StatusCode::INTERNAL_SERVER_ERROR, "tenant context missing").into_response(),
+            );
+        }
+    };
+    let pool_failed = |e: &dyn std::fmt::Display, slug: &str| {
+        tracing::error!(error = %e, slug = %slug, "require_auth: tenant pool failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "tenant pool unavailable").into_response()
+    };
+
+    // Same context order as `request_org`, so the pool matches the Org.
+    macro_rules! try_ctx {
+        ($db:ty) => {
+            if let Some(ctx) = ext.get::<Arc<TenantContext<$db>>>() {
+                return match ctx.pools.scoped_pool_dyn(&org).await {
+                    Ok(pool) => Ok((org, pool)),
+                    Err(e) => Err(pool_failed(&e, &org.slug)),
+                };
+            }
+        };
+    }
     macro_rules! try_db_ctx {
         ($db:ty, $variant:path) => {
             if let Some(ctx) = ext.get::<Arc<DatabaseTenantContext<$db>>>() {
-                let org = ctx
-                    .resolver
-                    .resolve(parts, &ctx.registry)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "require_auth: tenant resolution failed");
-                        (StatusCode::INTERNAL_SERVER_ERROR, "tenant resolution failed")
-                            .into_response()
-                    })?
-                    .ok_or_else(|| {
-                        (StatusCode::NOT_FOUND, "unknown tenant").into_response()
-                    })?;
-                let dbp = ctx.pools.pool_for_org(&org).await.map_err(|e| {
-                    tracing::error!(error = %e, slug = %org.slug, "require_auth: tenant pool failed");
-                    (StatusCode::INTERNAL_SERVER_ERROR, "tenant pool unavailable").into_response()
-                })?;
-                return Ok($variant(dbp.pool().clone()));
+                return match ctx.pools.pool_for_org(&org).await {
+                    Ok(dbp) => {
+                        let pool = $variant(dbp.pool().clone());
+                        Ok((org, pool))
+                    }
+                    Err(e) => Err(pool_failed(&e, &org.slug)),
+                };
             }
         };
     }
@@ -169,10 +212,6 @@ async fn tenant_pool(parts: &Parts, ext: &axum::http::Extensions) -> Result<Pool
     #[cfg(feature = "mysql")]
     try_db_ctx!(sqlx::MySql, Pool::Mysql);
 
-    tracing::error!(
-        "require_auth ran without a tenant context in request extensions — \
-         mount the tenancy layer (server::Builder::tenant_pools) ahead of it"
-    );
     Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant context missing").into_response())
 }
 
@@ -210,8 +249,8 @@ async fn auth_middleware(
     let (dummy_parts, _) = dummy.into_parts();
 
     // The tenant for THIS request, not for the router.
-    let pool = match tenant_pool(&dummy_parts, req.extensions()).await {
-        Ok(p) => p,
+    let (org, pool) = match tenant_pool(&dummy_parts, req.extensions()).await {
+        Ok(t) => t,
         Err(resp) => return resp,
     };
 
@@ -243,6 +282,7 @@ async fn auth_middleware(
     match authenticated {
         Some(user) => {
             req.extensions_mut().insert(AuthenticatedUser::from(user));
+            req.extensions_mut().insert(super::TenantSlug(org.slug));
             next.run(req).await
         }
         None if state.required => {
@@ -266,7 +306,7 @@ async fn perm_middleware(
     // admin became tenant B's admin.
     let (parts, body) = req.into_parts();
     let pool = match tenant_pool(&parts, &parts.extensions).await {
-        Ok(p) => p,
+        Ok((_, p)) => p,
         Err(resp) => return resp,
     };
     let req = Request::from_parts(parts, body);
