@@ -4,6 +4,33 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — tenant FKs from ensure helpers stay in the tenant schema (#1645)
+
+On PostgreSQL, the tables that permissions, API keys, audit, TOTP and
+passkeys create for themselves now schema-qualify every FK target. A
+schema-mode tenant without `rustango_users` could get an FK bound to
+`public.rustango_users`, so a delete in `public` cascaded into the
+tenant. It now gets a "relation does not exist" error. MySQL and SQLite
+are unchanged.
+
+### Security — admin inline formsets stay under their parent (#1667)
+
+Inline updates and deletes are keyed on the parent (the FK, or content
+type and object pk), and inserts always set the parent, ignoring a
+submitted FK. Each inline row passes the child table's own admin gates
+first. A child PK from another parent returns 404; a refused gate
+returns 403 and the parent is not saved. Inline and child
+`readonly_fields` are no longer written.
+
+### Security — webhook delivery checks its target (#1670)
+
+Delivery sends only to http/https, does not follow redirects, and
+refuses loopback, private, link-local, CGNAT, multicast and unspecified
+addresses, checked after DNS and pinned for the connection. A failed
+delivery stores the status code, not the response body. Use
+`WebhookSubscription::allow_private_targets(true)` for intranet or test
+receivers.
+
 ### Changed — schema structs are `#[non_exhaustive]`, with `const fn` constructors (#1661)
 
 **Breaking** for hand-built schemas; see UPGRADING. `FieldSchema`,

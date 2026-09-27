@@ -150,6 +150,35 @@ untouched.
 
 ## Unreleased
 
+### Webhooks to private addresses are dead-lettered
+
+Receivers on localhost, private or link-local addresses (tests,
+intranet) now fail unless the subscription calls
+`.allow_private_targets(true)` (#1670). Delivery ignores
+`HTTP(S)_PROXY`. `WebhookEvent` gained a public field,
+`allow_private_targets`; a hand-built `WebhookEvent { .. }` must set it.
+
+### Admin inline helpers are removed
+
+`admin::inlines::apply_post` and `apply_post_generic` wrote child rows
+with no permission check (#1667). The admin's parent update applies
+inlines itself; there is no public replacement.
+
+### Check schema-mode tenants for FKs into `public`
+
+Tenants created before #1645 may already have an FK into `public`. Drop
+and re-add every constraint this returns:
+
+```sql
+SELECT n.nspname, c.conname
+FROM pg_constraint c
+JOIN pg_class s ON s.oid = c.conrelid
+JOIN pg_namespace n ON n.oid = s.relnamespace
+JOIN pg_class t ON t.oid = c.confrelid
+JOIN pg_namespace tn ON tn.oid = t.relnamespace
+WHERE c.contype = 'f' AND n.nspname <> 'public' AND tn.nspname = 'public';
+```
+
 ### Tenant admin and operator console POSTs need the CSRF token
 
 Every POST to the tenant admin (#1713) and the operator console (#1710)
