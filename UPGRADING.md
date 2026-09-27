@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+### Sessions carry a password fingerprint
+
+Bare-admin, tenant, member and operator sessions sign out once after
+the upgrade (#1338). `TenantSessionPayload::new`,
+`tenancy::session::SessionPayload::new` and `MemberSessionPayload::new`
+take a `PasswordFingerprint`
+(`PasswordFingerprint::of(&secret, &user.password_hash)`);
+`HandoffPayload::new` and `TenantSessionPayload::impersonation` take the
+operator's. `member_auth::mint_cookie` takes `&User` instead of `uid`
+and `password_hash`. `TestClient::force_login_tenant_user` and
+`force_login_operator` take `&User` / `&Operator`. `SessionPayload` is
+no longer `Copy`.
+
 ### Idempotency keys stored before the upgrade are not replayed
 
 The key format changed (#1668). Add your auth layer after

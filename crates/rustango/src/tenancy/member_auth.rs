@@ -61,11 +61,11 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::extractors::{Tenant, TenantContext};
-use crate::session::{secure_cookies, sign, SessionSecret};
+use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::{Auto, Pool};
 use crate::sso::provider::resolve_by_slug;
 use crate::sso::{build_provider, open_flow, seal_flow, verified_email, NormalizedUser};
-use crate::tenancy::{OrgResolver as _, User};
+use crate::tenancy::User;
 
 // ===================================================================
 // A. Member session codec — SECURITY-CRITICAL, domain-separated.
@@ -105,19 +105,23 @@ pub struct MemberSessionPayload {
     pub slug: String,
     /// Expiry as Unix seconds.
     pub exp: i64,
-    /// Issued-at as Unix seconds. Compared against
-    /// `rustango_users.password_changed_at` so a password rotation
-    /// invalidates live member sessions (parity with `SessionUser`).
+    /// Issued-at as Unix seconds. A session issued before
+    /// `rustango_users.password_changed_at` is rejected.
     pub iat: i64,
     /// Audience tag — always `"member"` for this codec.
     pub aud: String,
+    /// Fingerprint of the user's `password_hash` at login. Any password
+    /// change makes it stop matching (#1338).
+    #[serde(default)]
+    pub pwf: PasswordFingerprint,
 }
 
 impl MemberSessionPayload {
     /// Mint a fresh member payload. `aud` is fixed to `"member"`; `iat`
-    /// is now and `exp` is `iat + ttl_secs`.
+    /// is now and `exp` is `iat + ttl_secs`. `pwf` is the
+    /// [`PasswordFingerprint`] of the user's current hash.
     #[must_use]
-    pub fn new(uid: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
+    pub fn new(uid: i64, slug: impl Into<String>, ttl_secs: i64, pwf: PasswordFingerprint) -> Self {
         let iat = chrono::Utc::now().timestamp();
         Self {
             uid,
@@ -125,6 +129,7 @@ impl MemberSessionPayload {
             exp: iat + ttl_secs,
             iat,
             aud: "member".to_owned(),
+            pwf,
         }
     }
 
@@ -220,12 +225,22 @@ fn secure_suffix() -> &'static str {
     }
 }
 
-/// Build a `Set-Cookie` value minting a fresh member session for `uid`
+/// Build a `Set-Cookie` value minting a fresh member session for `user`
 /// on `slug`, valid for `ttl` seconds. `HttpOnly; SameSite=Lax; Path=/`
-/// with `; Secure` added on the prod tier.
+/// with `; Secure` added on the prod tier. Changing the user's password
+/// ends the session.
+///
+/// # Panics
+/// If `user` has no id (was never saved).
 #[must_use]
-pub fn mint_cookie(secret: &SessionSecret, uid: i64, slug: &str, ttl: i64) -> String {
-    let value = encode(secret, &MemberSessionPayload::new(uid, slug, ttl));
+pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) -> String {
+    let uid = user
+        .id
+        .get()
+        .copied()
+        .expect("mint_cookie needs a saved user row");
+    let pwf = PasswordFingerprint::of(secret, &user.password_hash);
+    let value = encode(secret, &MemberSessionPayload::new(uid, slug, ttl, pwf));
     format!(
         "{MEMBER_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={ttl}{s}",
         s = secure_suffix(),
@@ -257,16 +272,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
+        use crate::tenancy::middleware::{request_org, request_pool, session_keys};
+
+        let Some(keys) = session_keys(&parts.extensions) else {
             return Ok(CurrentMember(None));
         };
 
-        let org = match ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-        {
-            Ok(Some(o)) => o,
+        let org = match request_org(parts, &parts.extensions).await {
+            Some(Ok(Some(o))) => o,
             _ => return Ok(CurrentMember(None)),
         };
 
@@ -275,14 +288,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
             None => return Ok(CurrentMember(None)),
         };
 
-        let payload = match decode(&ctx.session_secret, &org.slug, &cookie_value) {
+        let payload = match decode(keys.session, &org.slug, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(CurrentMember(None)),
         };
 
-        let pool = match ctx.pools.scoped_pool_dyn(&org).await {
-            Ok(p) => p,
-            Err(_) => return Ok(CurrentMember(None)),
+        let pool = match request_pool(&parts.extensions, &org).await {
+            Some(Ok(p)) => p,
+            _ => return Ok(CurrentMember(None)),
         };
 
         use crate::core::Column as _;
@@ -295,11 +308,15 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
 
         let user = users.into_iter().next().filter(|u| u.active);
         // Reject a session minted before the user's last password
-        // change (parity with `SessionUser`). `password_changed_at IS
-        // NULL` (never rotated) stays valid.
-        let user = user.filter(|u| match u.password_changed_at {
-            Some(changed) => payload.iat >= changed.timestamp(),
-            None => true,
+        // change (parity with `SessionUser`).
+        let user = user.filter(|u| {
+            crate::tenancy::session::survives_password_change(
+                keys.session,
+                &payload.pwf,
+                payload.iat,
+                &u.password_hash,
+                u.password_changed_at,
+            )
         });
         Ok(CurrentMember(user))
     }
@@ -568,9 +585,25 @@ async fn sso_callback(
             }
         };
 
+    let member = {
+        use crate::core::Column as _;
+        use crate::sql::FetcherPool as _;
+        match User::objects()
+            .where_(User::id.eq(member_id))
+            .fetch(&pool)
+            .await
+            .map(|rows| rows.into_iter().next())
+        {
+            Ok(Some(u)) => u,
+            Ok(None) | Err(_) => {
+                tracing::error!(member_id, "member row missing after find-or-provision");
+                return clear_flow(sso_error("Could not complete sign-in.", login_base));
+            }
+        }
+    };
     let cookie = mint_cookie(
         &ctx.session_secret,
-        member_id,
+        &member,
         &t.org.slug,
         config.session_ttl,
     );
@@ -776,12 +809,16 @@ mod tests {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())
     }
 
+    fn fp() -> PasswordFingerprint {
+        PasswordFingerprint::of(&secret(), "$argon2id$test")
+    }
+
     // ---- A. domain separation (security-critical) -------------------
 
     #[test]
     fn member_cookie_round_trips() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let back = decode(&s, "acme", &value).expect("round-trips");
         assert_eq!(back.uid, 7);
         assert_eq!(back.slug, "acme");
@@ -794,7 +831,7 @@ mod tests {
         // the domain tag makes the signed message disjoint, so the HMAC
         // never matches.
         let s = secret();
-        let member_value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let member_value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let err = tenant_console::decode(&s, "acme", &member_value).unwrap_err();
         assert!(
             matches!(err, SessionError::BadSignature),
@@ -807,7 +844,7 @@ mod tests {
         let s = secret();
         let tenant_value = tenant_console::encode(
             &s,
-            &tenant_console::TenantSessionPayload::new(7, "acme", 3600),
+            &tenant_console::TenantSessionPayload::new(7, "acme", 3600, fp()),
         );
         let err = decode(&s, "acme", &tenant_value).unwrap_err();
         assert!(
@@ -819,7 +856,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_wrong_slug() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         assert_eq!(
             decode(&s, "globex", &value).unwrap_err(),
             MemberSessionError::WrongTenant
@@ -829,7 +866,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_expired() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", -10));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", -10, fp()));
         assert_eq!(
             decode(&s, "acme", &value).unwrap_err(),
             MemberSessionError::Expired
@@ -839,7 +876,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_tampered_signature() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let (_, sig) = value.split_once('.').unwrap();
         let evil = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(br#"{"uid":999,"slug":"acme","exp":9999999999,"iat":0,"aud":"member"}"#);
@@ -861,6 +898,7 @@ mod tests {
             exp: chrono::Utc::now().timestamp() + 3600,
             iat: chrono::Utc::now().timestamp(),
             aud: "admin".to_owned(),
+            pwf: fp(),
         };
         let value = encode(&s, &payload);
         assert_eq!(

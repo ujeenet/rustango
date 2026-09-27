@@ -397,25 +397,8 @@ async fn deactivating_takes_effect_on_the_next_request() {
     );
 }
 
-/// Wait until the wall clock crosses into the next second.
-///
-/// Session `iat` and `password_changed_at` are both second-granularity,
-/// and `require_session` rejects on `iat < password_changed_at` —
-/// strictly less than, deliberately: `change_password_submit` does not
-/// re-mint the cookie, so `<=` would sign an operator out the instant
-/// they changed their own password. The consequence is that a reset in
-/// the *same second* as a login leaves that session valid, which made
-/// this test pass or fail depending on where the second boundary fell.
-async fn cross_a_second_boundary() {
-    let start = chrono::Utc::now().timestamp();
-    while chrono::Utc::now().timestamp() == start {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-/// A reset rotates `password_changed_at`, and `require_session` rejects
-/// sessions issued before it. The page promises this; the promise has
-/// to be true.
+/// A reset writes a new hash, and `require_session` rejects sessions
+/// minted under the old one. The page promises this.
 #[tokio::test]
 async fn resetting_a_password_signs_that_operator_out() {
     let b = boot().await;
@@ -455,7 +438,6 @@ async fn resetting_a_password_signs_that_operator_out() {
         .unwrap()
         .to_owned();
 
-    cross_a_second_boundary().await;
     b.post(
         &format!("/operators/{id}/reset-password"),
         "password=totally-new-one&confirm_password=totally-new-one",
@@ -480,7 +462,92 @@ async fn resetting_a_password_signs_that_operator_out() {
     );
     assert!(
         b.find(&name).await.unwrap().password_changed_at.is_some(),
-        "password_changed_at is what does it, so it must be set"
+        "a reset still stamps password_changed_at"
+    );
+}
+
+/// #1338: a reset stamped in the same second as the login still signs
+/// that operator out, and they can log in again with the new password.
+#[tokio::test]
+async fn a_reset_in_the_login_second_still_signs_that_operator_out() {
+    let b = boot().await;
+    let name = unique("same-second");
+    b.post(
+        "/operators",
+        &format!("username={name}&password=hunter2hunter2&confirm_password=hunter2hunter2"),
+    )
+    .await;
+    let id = b.find(&name).await.unwrap().id.get().copied().unwrap();
+
+    let login = |password: &'static str| {
+        let app = b.app.clone();
+        let name = name.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .header("cookie", "rustango_csrf=t")
+                        .header("x-csrf-token", "t")
+                        .uri("/login")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(format!("username={name}&password={password}")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            resp.headers()
+                .get("set-cookie")
+                .expect("login sets a session cookie")
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let orgs_status = |cookie: String| {
+        let app = b.app.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .uri("/orgs")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+
+    let their_cookie = login("hunter2hunter2").await;
+    let issued_at =
+        rustango::tenancy::session::decode(&b.secret, their_cookie.split_once('=').unwrap().1)
+            .unwrap()
+            .iat;
+
+    b.post(
+        &format!("/operators/{id}/reset-password"),
+        "password=totally-new-one&confirm_password=totally-new-one",
+    )
+    .await;
+    // Pin the reset into the second the session was issued in.
+    let mut row = b.find(&name).await.unwrap();
+    row.password_changed_at = chrono::DateTime::from_timestamp(issued_at, 999_000_000);
+    row.save_pool(&b.registry).await.unwrap();
+
+    assert!(
+        orgs_status(their_cookie).await.is_redirection(),
+        "a session from the reset's own second must be rejected"
+    );
+    let fresh = login("totally-new-one").await;
+    assert_eq!(
+        orgs_status(fresh).await,
+        StatusCode::OK,
+        "a login after the reset must work"
     );
 }
 

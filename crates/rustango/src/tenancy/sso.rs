@@ -25,7 +25,6 @@ use crate::admin::sso::{
     ResolvedSso, SsoError, SSO_FLOW_COOKIE,
 };
 use crate::admin::sso_provider::SsoProvider;
-use crate::core::Model as _; // brings `User::SCHEMA` into scope
 use crate::sql::Pool;
 
 /// IdP callback params (`?code=…&state=…` or `?error=…`).
@@ -341,18 +340,23 @@ pub(super) async fn tenant_sso_callback(
         Err(_) => return login_error(routes, "unverified"),
     };
 
-    let Some((uid, active)) = find_tenant_user_by_email(tenant_pool, &email).await else {
+    let Some((uid, user)) = find_tenant_user_by_email(tenant_pool, &email).await else {
         tracing::warn!(target: "rustango::tenancy::sso", "no tenant user for {email} in {}", org.slug);
         return login_error(routes, "nouser");
     };
-    if !active {
+    if !user.active {
         return login_error(routes, "inactive");
     }
 
     // Mint the tenant session — same shape as a password login.
     let ttl = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
-    let payload = TenantSessionPayload::new(uid, &org.slug, ttl);
+    let payload = TenantSessionPayload::new(
+        uid,
+        &org.slug,
+        ttl,
+        super::session::PasswordFingerprint::of(secret, &user.password_hash),
+    );
     let cookie_value = tenant_console::encode(secret, &payload);
     let session_cookie = format!(
         "{}={cookie_value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{}",
@@ -369,22 +373,18 @@ pub(super) async fn tenant_sso_callback(
     resp
 }
 
-/// Look up a tenant user's `(id, active)` by lowercased email in the
-/// tenant's scoped pool. `None` when no row matches (link-to-existing).
-async fn find_tenant_user_by_email(pool: &crate::sql::Pool, email: &str) -> Option<(i64, bool)> {
-    use crate::core::{SelectQuery, SqlValue};
-    let select = SelectQuery::by_pk(User::SCHEMA, "email", SqlValue::String(email.to_owned()));
-    let fields: Vec<&'static crate::core::FieldSchema> = User::SCHEMA.fields.iter().collect();
-    let row = crate::sql::select_one_row_as_json(pool, &select, &fields)
+/// Look up a saved tenant user by lowercased email in the tenant's
+/// scoped pool, as `(id, row)`. `None` when no row matches (link-to-existing).
+async fn find_tenant_user_by_email(pool: &crate::sql::Pool, email: &str) -> Option<(i64, User)> {
+    use crate::sql::FetcherPool as _;
+    let user = User::objects()
+        .filter("email", email.to_owned())
+        .fetch(pool)
         .await
-        .ok()
-        .flatten()?;
-    let id = row.get("id").and_then(serde_json::Value::as_i64)?;
-    let active = row
-        .get("active")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    Some((id, active))
+        .ok()?
+        .into_iter()
+        .next()?;
+    Some((user.id.get().copied()?, user))
 }
 
 #[cfg(test)]

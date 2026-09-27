@@ -4,6 +4,25 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — session extractors on SQLite and MySQL
+
+`SessionUser`, `SessionOperator` and `CurrentMember` looked only for
+the Postgres `TenantContext`, so with the `postgres` feature on (the
+default) a stack that mounts `TenantContext<Sqlite>`,
+`TenantContext<MySql>` or `DatabaseTenantContext` saw every request as
+anonymous. They now find the tenant context of any backend.
+
+### Security — a password change ends sessions from the same second (#1338)
+
+Tenant admin, member, `SessionUser` and operator-console sessions now
+carry a fingerprint of the password hash, so any change or reset ends
+every older session, even one issued in the same second.
+`SessionOperator` now checks this too; it used to ignore password
+changes. An open impersonation in the tenant admin ends when that
+operator's password changes (#1735). The fingerprint is domain-tagged,
+so it never matches another MAC made with the session secret. See
+UPGRADING.
+
 ### Security — password hashing no longer blocks the async runtime (#1709)
 
 Login, change-password, API-key and agent checks ran argon2 inline on
