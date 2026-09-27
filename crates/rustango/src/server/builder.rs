@@ -770,21 +770,21 @@ impl<DB: Database> Builder<DB> {
             }
             None => app,
         };
-        // Outside the headers, as on the single-tenant router, so a
-        // refused Host or the HTTPS redirect is answered first.
-        #[cfg(feature = "admin")]
-        let app = match self.allowed_hosts {
-            Some(layer) => {
-                use crate::host_validation::AllowedHostsRouterExt as _;
-                app.allowed_hosts(layer)
-            }
-            None => app,
-        };
+        // Same order as the single-tenant router: the Host allowlist is
+        // outermost, so a bad Host is refused, never redirected to.
         #[cfg(feature = "admin")]
         let app = match self.ssl_redirect {
             Some(layer) => {
                 use crate::ssl_redirect::SslRedirectRouterExt as _;
                 app.ssl_redirect(layer)
+            }
+            None => app,
+        };
+        #[cfg(feature = "admin")]
+        let app = match self.allowed_hosts {
+            Some(layer) => {
+                use crate::host_validation::AllowedHostsRouterExt as _;
+                app.allowed_hosts(layer)
             }
             None => app,
         };

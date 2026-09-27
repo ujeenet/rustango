@@ -81,8 +81,24 @@ async fn nothing_is_added_without_the_setter() {
     assert_eq!(xfo(&app, "acme.localhost", "/login").await, None);
 }
 
+/// #1700 — an allowlist without the apex refuses the operator console
+/// too, so the layer cannot sit on the tenant branch alone.
+#[tokio::test]
+async fn the_host_allowlist_covers_the_console() {
+    use rustango::host_validation::AllowedHostsLayer;
+    let (app, _tmp) = build(|b| b.allowed_hosts(AllowedHostsLayer::new(["acme.localhost"]))).await;
+    assert_eq!(
+        status(&app, "localhost", "/login").await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_ne!(
+        status(&app, "acme.localhost", "/login").await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
 /// #1700 — a disallowed Host is refused on the tenant login and admin,
-/// not only on the api routes. (The console answers only the apex.)
+/// not only on the api routes.
 #[tokio::test]
 async fn the_host_allowlist_covers_both_branches() {
     use rustango::host_validation::AllowedHostsLayer;
