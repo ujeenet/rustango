@@ -10,8 +10,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 through one `JtiStore::mark_used` call, so two concurrent refreshes of
 one token no longer both succeed. An admin TOTP code is accepted once:
 the device stores the last accepted time step (`last_used_step`) and a
-code must be for a later one. Account lockout counts failures in a
-fixed window from the first failure; a failure no longer extends it.
+code must be for a later one. New `totp::matched_step` /
+`matched_step_at` return the step a code matched, and
+`admin::totp_store::redeem_code` / `confirm_with_code` accept a code
+once. Account lockout counts failures in a fixed window from the first
+failure; a failure no longer extends it.
 
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 

@@ -39,7 +39,7 @@ pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,
     render_changes_split_with_dialect, RenderedBatch, SchemaChange,
 };
-#[cfg(feature = "totp")]
+#[cfg(all(feature = "admin", feature = "totp"))]
 pub(crate) use ensure::add_columns_idempotent;
 pub(crate) use ensure::apply_idempotent;
 pub use error::MigrateError;

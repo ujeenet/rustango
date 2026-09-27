@@ -156,7 +156,9 @@ untouched.
 `totp_store::ensure_table`, or the first code accepted after the upgrade,
 adds it to an existing table. `AdminTotp` literals need the new field. A
 code that already signed in is refused, so users wait for the next one.
-`Lockout::counter_ttl` is now a fixed window from the first failure.
+`Lockout::counter_ttl` is now a fixed window from the first failure. The
+lockout cache keys changed, so failure counts in progress at the
+upgrade start again from zero; active locks are kept.
 
 ### The trusted client IP is the rightmost untrusted hop
 

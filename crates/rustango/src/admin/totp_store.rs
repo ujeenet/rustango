@@ -85,6 +85,30 @@ pub async fn redeem_code(
     secret: &TotpSecret,
     code: &str,
 ) -> Result<bool, crate::sql::ExecError> {
+    redeem(pool, user_id, secret, code, false).await
+}
+
+/// Finish enrollment with `code`: confirms the device and records the
+/// code's step in one UPDATE, so a failed write leaves the code unused.
+///
+/// # Errors
+/// Driver or SQL failures.
+pub async fn confirm_with_code(
+    pool: &Pool,
+    user_id: i64,
+    secret: &TotpSecret,
+    code: &str,
+) -> Result<bool, crate::sql::ExecError> {
+    redeem(pool, user_id, secret, code, true).await
+}
+
+async fn redeem(
+    pool: &Pool,
+    user_id: i64,
+    secret: &TotpSecret,
+    code: &str,
+    confirm: bool,
+) -> Result<bool, crate::sql::ExecError> {
     use crate::query::Q;
     use crate::sql::UpdaterPool as _;
     let Some(step) = crate::totp::matched_step(secret, code, STEP_SECS, DIGITS, WINDOW) else {
@@ -92,12 +116,16 @@ pub async fn redeem_code(
     };
     let step = i64::try_from(step).unwrap_or(i64::MAX);
     let update = || {
-        AdminTotp::objects()
+        // Pinned to the secret the code was checked against, so a
+        // re-enrollment in between cannot be confirmed by the old one.
+        let q = AdminTotp::objects()
             .filter("user_id", user_id)
+            .filter("secret_base32", secret.to_base32())
             .where_(Q::is_null("last_used_step") | Q::lt("last_used_step", step))
             .update()
-            .set("last_used_step", step)
-            .execute_pool(pool)
+            .set("last_used_step", step);
+        let q = if confirm { q.set("confirmed", true) } else { q };
+        q.execute_pool(pool)
     };
     let updated = match update().await {
         Ok(n) => n,

@@ -149,7 +149,15 @@ impl Lockout {
         // open is deliberate: a cache outage that locks every account
         // is its own denial of service.
         let counted = match self.count_failure(account).await {
-            Ok(n) => n,
+            Ok(Some(n)) => n,
+            Ok(None) => {
+                tracing::warn!(
+                    account,
+                    "account-lockout window could not be opened; this failed attempt is \
+                     NOT counted"
+                );
+                0
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -174,11 +182,17 @@ impl Lockout {
         next
     }
 
-    async fn count_failure(&self, account: &str) -> Result<i64, CacheError> {
-        let Some(key) = self.counter_key(account, true).await? else {
-            return Err(CacheError::Connection("no failure window".into()));
+    /// `Ok(None)` when no window could be opened. The counter expires with
+    /// its window, even where `incr` resets the TTL on every call.
+    async fn count_failure(&self, account: &str) -> Result<Option<i64>, CacheError> {
+        let Some(id) = self.window(account, true).await? else {
+            return Ok(None);
         };
-        self.cache.incr(&key, 1, Some(self.counter_ttl)).await
+        let key = self.window_counter_key(account, &id);
+        self.cache
+            .incr(&key, 1, Some(self.window_left(&id)))
+            .await
+            .map(Some)
     }
 
     /// Drop the current window and its counter.
@@ -244,6 +258,14 @@ impl Lockout {
     /// window when there is none. The window key's TTL is set once, by
     /// `add`, so it is fixed on every backend; `incr`'s is not.
     async fn counter_key(&self, account: &str, open: bool) -> Result<Option<String>, CacheError> {
+        Ok(self
+            .window(account, open)
+            .await?
+            .map(|id| self.window_counter_key(account, &id)))
+    }
+
+    /// The id (start time in µs) of the account's current window.
+    async fn window(&self, account: &str, open: bool) -> Result<Option<String>, CacheError> {
         let window_key = self.window_key(account);
         for _ in 0..2 {
             if open {
@@ -253,17 +275,29 @@ impl Lockout {
                     .add(&window_key, &id, Some(self.counter_ttl))
                     .await?
                 {
-                    return Ok(Some(self.window_counter_key(account, &id)));
+                    return Ok(Some(id));
                 }
             }
             if let Some(id) = self.cache.get(&window_key).await? {
-                return Ok(Some(self.window_counter_key(account, &id)));
+                return Ok(Some(id));
             }
             if !open {
                 break;
             }
         }
         Ok(None)
+    }
+
+    /// Time left in the window that started at `window_id`, at least 1ms.
+    fn window_left(&self, window_id: &str) -> Duration {
+        let started = window_id.parse::<i64>().unwrap_or(i64::MAX);
+        let elapsed = chrono::Utc::now()
+            .timestamp_micros()
+            .saturating_sub(started);
+        let elapsed = Duration::from_micros(u64::try_from(elapsed).unwrap_or(0));
+        self.counter_ttl
+            .saturating_sub(elapsed)
+            .max(Duration::from_millis(1))
     }
 
     fn window_counter_key(&self, account: &str, window_id: &str) -> String {
@@ -426,6 +460,31 @@ mod tests {
         let cache = crate::cache::DatabaseCache::new(pool, "rustango_cache");
         cache.ensure_table().await.unwrap();
         slow_failures_never_lock(Arc::new(cache)).await;
+    }
+
+    /// On a cache whose `incr` resets the TTL, the counter must still
+    /// expire with its window rather than linger past it.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_counter_expires_with_its_window() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let db = crate::cache::DatabaseCache::new(pool, "rustango_cache");
+        db.ensure_table().await.unwrap();
+        let cache: Arc<dyn Cache> = Arc::new(db);
+        let l = Lockout::new(cache.clone())
+            .max_attempts(10)
+            .counter_ttl(Duration::from_millis(300));
+        l.record_failure("alice").await;
+        let id = cache.get("lockout:window:alice").await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        l.record_failure("alice").await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let counter = format!("lockout:attempts:alice:{id}");
+        assert_eq!(
+            cache.get(&counter).await.unwrap(),
+            None,
+            "counter outlived its window"
+        );
     }
 
     #[tokio::test]

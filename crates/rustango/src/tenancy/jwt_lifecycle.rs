@@ -275,7 +275,8 @@ impl JwtLifecycle {
     /// [`Self::refresh_with`] instead and supply fresh claims.
     ///
     /// Returns `None` if the refresh token is invalid, expired, or already
-    /// blacklisted.
+    /// blacklisted. A refresh token is single use: of two refreshes of
+    /// one token, even concurrent ones, the second returns `None`.
     pub async fn refresh(&self, refresh_token: &str) -> Option<JwtTokenPair> {
         // Rotate: redeem the old refresh, issue a new pair carrying the
         // same custom payload (preserves `scope` / `roles` / `tenant`).
@@ -290,7 +291,8 @@ impl JwtLifecycle {
     /// custom payload — useful when permissions may have changed since
     /// the refresh token was issued (e.g. role revoked, scope downgraded).
     ///
-    /// The old refresh JTI is still blacklisted to prevent replay.
+    /// The old refresh token is single use here too: a second refresh
+    /// of it returns `Ok(None)`.
     ///
     /// # Errors
     /// [`JwtIssueError::ReservedClaim`] if `new_custom` overlaps reserved names.

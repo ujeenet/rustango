@@ -173,6 +173,104 @@ async fn a_used_code_cannot_sign_in_again() {
     assert!(!sess, "a replayed TOTP code granted a second session");
 }
 
+/// The session cookie (`name=value`) a successful password login sets.
+async fn session_cookie(app: &axum::Router, csrf: &str, username: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/login"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={csrf}"))
+                .body(Body::from(format!(
+                    "_csrf={csrf}&username={username}&password=correct%20horse&totp_code="
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .find_map(|v| {
+            let s = v.to_str().ok()?;
+            s.starts_with("rustango_admin_session=")
+                .then(|| s.split(';').next().unwrap_or("").to_owned())
+        })
+        .expect("session cookie")
+}
+
+/// #1672 — the code that confirms enrollment cannot then sign in.
+#[tokio::test]
+async fn the_enrollment_code_cannot_sign_in() {
+    let (pool, _secret) = seed().await;
+    // A superuser without 2FA: only superusers reach the admin.
+    AdminUser::new_with_password("carol", "correct horse", true)
+        .unwrap()
+        .insert_pool(&pool)
+        .await
+        .unwrap();
+    let app = router(pool.clone());
+    let csrf = fetch_csrf(&app).await;
+    let session = session_cookie(&app, &csrf, "carol").await;
+    let cookies = format!("rustango_csrf={csrf}; {session}");
+
+    // GET starts enrollment and stores a pending secret.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{PREFIX}/account/totp"))
+                .header(header::COOKIE, &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let carol_id = *AdminUser::objects()
+        .filter("username", "carol")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id
+        .get()
+        .unwrap();
+    let device = totp_store::device(&pool, carol_id)
+        .await
+        .expect("pending device");
+    let secret = TotpSecret::from_base32(&device.secret_base32).unwrap();
+    let code = rustango::totp::generate(&secret, 30, 6);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/account/totp"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookies)
+                .body(Body::from(format!("_csrf={csrf}&totp_code={code}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        totp_store::confirmed_secret(&pool, carol_id)
+            .await
+            .is_some(),
+        "enrollment confirmed"
+    );
+
+    let (_s, sess) = login(&app, &csrf, "carol", "correct horse", &code).await;
+    assert!(!sess, "the enrollment code signed in a second time");
+}
+
 #[tokio::test]
 async fn non_enrolled_user_logs_in_without_a_code() {
     let (pool, _secret) = seed().await;
