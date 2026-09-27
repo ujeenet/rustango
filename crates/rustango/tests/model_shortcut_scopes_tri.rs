@@ -2,7 +2,7 @@
 //! the same as its `QuerySet` twin (#1675).
 //!
 //! Seed: three in-scope rows (amounts 3, 5, 7) and two out-of-scope
-//! rows (amounts 40, 60). A shortcut that skips the scope sees 115.
+//! rows (amounts 1, 60), which hold the min and the max.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -36,7 +36,7 @@ async fn seed(pool: &Pool) -> Vec<i64> {
     let mut hidden = Vec::new();
     for (tag, amount, visible) in [
         ("a", 3_i64, true),
-        ("h", 40, false),
+        ("h", 1, false),
         ("b", 5, true),
         ("h", 60, false),
         ("c", 7, true),
@@ -123,7 +123,7 @@ async fn writes_apply_the_scope(pool: &Pool) {
         .sum("amount", pool)
         .await
         .unwrap();
-    assert_eq!(unscoped, Some(2 * 3 + 40 + 60));
+    assert_eq!(unscoped, Some(2 * 3 + 1 + 60));
 }
 
 tri_dialect_test! {
