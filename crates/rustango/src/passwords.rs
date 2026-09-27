@@ -230,6 +230,28 @@ const KNOWN_WEAK: &[&str] = &[
     "passw0rd",
 ];
 
+/// Awaits `fut` next to a 1 ms ticker and returns its output with the
+/// ticks seen meanwhile. On a current-thread runtime inline argon2 sees 0.
+#[cfg(test)]
+pub(crate) async fn ticks_while<F: std::future::Future>(fut: F) -> (F::Output, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let t = Arc::clone(&ticks);
+    let ticker = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            t.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    tokio::task::yield_now().await;
+    let before = ticks.load(Ordering::Relaxed);
+    let out = fut.await;
+    let n = ticks.load(Ordering::Relaxed) - before;
+    ticker.abort();
+    (out, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,35 +288,23 @@ mod tests {
     /// task; off the runtime a 1 ms ticker keeps running (#1709).
     #[tokio::test(flavor = "current_thread")]
     async fn async_variants_do_not_block_the_runtime() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-        let ticks = Arc::new(AtomicUsize::new(0));
-        let t = Arc::clone(&ticks);
-        let ticker = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                t.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-        tokio::task::yield_now().await;
-        let before = ticks.load(Ordering::Relaxed);
-        let h = hash_async("correct horse battery staple").await.unwrap();
-        assert!(verify_async("correct horse battery staple", &h)
-            .await
-            .unwrap());
-        verify_dummy_async("nobody").await;
-        let during = ticks.load(Ordering::Relaxed) - before;
-        ticker.abort();
-        assert!(
-            during >= 2,
-            "runtime stalled while hashing ({during} ticks)"
-        );
+        let (h, n) = ticks_while(hash_async("correct horse battery staple")).await;
+        assert!(n >= 2, "hash_async stalled the runtime ({n} ticks)");
+        let h = h.unwrap();
+        let (ok, n) = ticks_while(verify_async("correct horse battery staple", &h)).await;
+        assert!(ok.unwrap());
+        assert!(n >= 2, "verify_async stalled the runtime ({n} ticks)");
+        let ((), n) = ticks_while(verify_dummy_async("nobody")).await;
+        assert!(n >= 2, "verify_dummy_async stalled the runtime ({n} ticks)");
     }
 
     #[tokio::test]
-    #[should_panic(expected = "boom")]
-    async fn off_runtime_resumes_a_panic() {
-        off_runtime(|| panic!("boom")).await;
+    async fn off_runtime_resumes_the_original_panic() {
+        struct Marker;
+        let err = tokio::spawn(off_runtime(|| std::panic::panic_any(Marker)))
+            .await
+            .unwrap_err();
+        assert!(err.into_panic().downcast::<Marker>().is_ok());
     }
 
     #[test]

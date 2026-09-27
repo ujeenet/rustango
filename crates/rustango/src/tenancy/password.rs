@@ -138,6 +138,18 @@ pub async fn verify_dummy_async(plaintext: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::passwords::ticks_while;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_variants_do_not_block_the_runtime() {
+        let (h, n) = ticks_while(hash_async("hunter2")).await;
+        assert!(n >= 2, "hash_async stalled the runtime ({n} ticks)");
+        let (ok, n) = ticks_while(verify_async("hunter2", &h.unwrap())).await;
+        assert!(ok.unwrap());
+        assert!(n >= 2, "verify_async stalled the runtime ({n} ticks)");
+        let ((), n) = ticks_while(verify_dummy_async("hunter2")).await;
+        assert!(n >= 2, "verify_dummy_async stalled the runtime ({n} ticks)");
+    }
 
     #[test]
     fn hash_and_verify_round_trip() {
