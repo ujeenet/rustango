@@ -26,9 +26,9 @@
 //!
 //! ## Passwords
 //!
-//! A reset rotates `password_changed_at`, and `require_session` rejects
-//! any session issued before it, so a reset signs that operator out
-//! everywhere. The page says so, because an operator resetting a
+//! A reset writes a new password hash, and `require_session` rejects
+//! any session minted under the old one, so a reset signs that operator
+//! out everywhere. The page says so, because an operator resetting a
 //! colleague's password should know it will interrupt them.
 //!
 //! A generated password is rendered **directly in the POST response**
@@ -356,9 +356,9 @@ pub(super) async fn operator_reset_password(
         Err(e) => return back_err(&state, &op, &format!("Could not hash password: {e}")).await,
     };
 
+    // The new hash is what signs them out: sessions carry a fingerprint
+    // of the old one.
     target.password_hash = hash;
-    // What actually signs them out: `require_session` rejects any
-    // session whose `iat` predates this.
     target.password_changed_at = Some(chrono::Utc::now());
     if let Err(e) = target.save_pool(&state.registry).await {
         return back_err(&state, &op, &format!("Could not save: {e}")).await;

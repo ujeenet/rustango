@@ -371,6 +371,39 @@ pub fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
     out
 }
 
+/// HMAC of a user's `password_hash`, carried in a session cookie. Every
+/// password write makes a new salted hash, so the old sessions stop matching.
+///
+/// `Default` is the empty value that older cookies decode to; it never matches.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct PasswordFingerprint(String);
+
+impl PasswordFingerprint {
+    /// Fingerprint `password_hash` under `secret`.
+    #[must_use]
+    pub fn of(secret: &SessionSecret, password_hash: &str) -> Self {
+        Self(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sign(secret, password_hash.as_bytes())),
+        )
+    }
+
+    /// `true` when this was minted from `password_hash`. Constant time.
+    #[must_use]
+    pub fn matches(&self, secret: &SessionSecret, password_hash: &str) -> bool {
+        let current = Self::of(secret, password_hash);
+        use subtle::ConstantTimeEq as _;
+        self.0.as_bytes().ct_eq(current.0.as_bytes()).into()
+    }
+
+    /// `true` for the empty value, so a payload can skip serializing it.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

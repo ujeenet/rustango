@@ -194,7 +194,7 @@ async fn sso_callback(
 
     // Mint the normal admin session, bound to the user's stored
     // password hash, exactly as a successful password login does.
-    let auth_hash = session::password_fingerprint(secret, &user.password_hash);
+    let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
     let cookie_value = session::encode(
         secret,
         AdminSession {

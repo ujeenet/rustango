@@ -914,12 +914,14 @@ async fn require_session(
                 return redirect_to_login(&safe_next).into_response();
             };
             // Drop sessions issued before the last password change.
-            // NULL means the password was never changed, so the
-            // session stays valid.
-            if let Some(ts) = op.password_changed_at {
-                if payload.iat < ts.timestamp() {
-                    return redirect_to_login(&safe_next).into_response();
-                }
+            if !session::survives_password_change(
+                &state.session_secret,
+                &payload.pwf,
+                payload.iat,
+                &op.password_hash,
+                op.password_changed_at,
+            ) {
+                return redirect_to_login(&safe_next).into_response();
             }
             // Chrome for `op_layout.html`, so a generic view mounted
             // here renders with the console layout. Gated because
@@ -1175,7 +1177,11 @@ async fn login_submit(
     crate::account_lockout::shared()
         .clear(&format!("op:{oid}"))
         .await;
-    let payload = SessionPayload::new(oid, SESSION_TTL_SECS);
+    let payload = SessionPayload::new(
+        oid,
+        SESSION_TTL_SECS,
+        session::PasswordFingerprint::of(&state.session_secret, &principal.password_hash),
+    );
     let cookie_value = session::encode(&state.session_secret, &payload);
     let cookie = Cookie::build((COOKIE_NAME, cookie_value))
         .path("/")
@@ -1275,7 +1281,7 @@ struct OpChangePasswordForm {
 /// `POST /change-password`: check the current password, hash the new
 /// one, save it and bump `password_changed_at`.
 ///
-/// `require_session` rejects cookies older than `password_changed_at`,
+/// `require_session` rejects cookies minted under the old password,
 /// so this request is the last one the current cookie can serve; the
 /// next click goes to login.
 async fn change_password_submit(

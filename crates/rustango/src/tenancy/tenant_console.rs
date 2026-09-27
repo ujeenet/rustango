@@ -27,8 +27,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-pub use super::session::SessionSecret;
 use super::session::{sign, SessionError};
+pub use super::session::{PasswordFingerprint, SessionSecret};
 
 /// Default tenant cookie name. Distinct from the operator console's
 /// `rustango_op_session` so the two never collide on a host that
@@ -85,20 +85,26 @@ pub struct TenantSessionPayload {
     /// servers parseable when the user upgrades.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imp: Option<i64>,
-    /// Issued-at as Unix seconds (v0.28.4, #77 follow-up). The
-    /// session middleware compares this to `rustango_users.password_changed_at`
-    /// — sessions issued before the latest password rotation are
-    /// rejected. `0` for cookies minted on pre-0.28.4 servers
-    /// (`#[serde(default)]` keeps them parseable; the comparison
-    /// treats `0` as "issued at the dawn of time" so they're
-    /// invalidated by any password change).
+    /// Issued-at as Unix seconds. A session issued before
+    /// `rustango_users.password_changed_at` is rejected. `0` for
+    /// cookies minted on pre-0.28.4 servers.
     #[serde(default)]
     pub iat: i64,
+    /// Fingerprint of the user's `password_hash` at login. Any password
+    /// change makes it stop matching (#1338). Empty for impersonation.
+    #[serde(default, skip_serializing_if = "PasswordFingerprint::is_empty")]
+    pub pwf: PasswordFingerprint,
 }
 
 impl TenantSessionPayload {
+    /// `pwf` is the [`PasswordFingerprint`] of the user's current hash.
     #[must_use]
-    pub fn new(user_id: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
+    pub fn new(
+        user_id: i64,
+        slug: impl Into<String>,
+        ttl_secs: i64,
+        pwf: PasswordFingerprint,
+    ) -> Self {
         let now = chrono::Utc::now().timestamp();
         Self {
             uid: user_id,
@@ -106,6 +112,7 @@ impl TenantSessionPayload {
             exp: now + ttl_secs,
             imp: None,
             iat: now,
+            pwf,
         }
     }
 
@@ -121,6 +128,7 @@ impl TenantSessionPayload {
             exp: now + ttl_secs,
             imp: Some(operator_id),
             iat: now,
+            pwf: PasswordFingerprint::default(),
         }
     }
 
@@ -193,10 +201,14 @@ mod tests {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())
     }
 
+    fn fp() -> PasswordFingerprint {
+        PasswordFingerprint::of(&key(), "$argon2id$test")
+    }
+
     #[test]
     fn round_trip_valid_payload() {
         let secret = key();
-        let payload = TenantSessionPayload::new(7, "acme", 3600);
+        let payload = TenantSessionPayload::new(7, "acme", 3600, fp());
         let cookie = encode(&secret, &payload);
         let back = decode(&secret, "acme", &cookie).unwrap();
         assert_eq!(back, payload);
@@ -205,7 +217,7 @@ mod tests {
     #[test]
     fn rejects_cookie_minted_for_a_different_tenant() {
         let secret = key();
-        let payload = TenantSessionPayload::new(7, "acme", 3600);
+        let payload = TenantSessionPayload::new(7, "acme", 3600, fp());
         let cookie = encode(&secret, &payload);
         let err = decode(&secret, "globex", &cookie).unwrap_err();
         assert!(matches!(err, SessionError::WrongTenant));
@@ -226,7 +238,7 @@ mod tests {
 
     #[test]
     fn regular_payload_has_no_imp_field() {
-        let p = TenantSessionPayload::new(7, "acme", 3600);
+        let p = TenantSessionPayload::new(7, "acme", 3600, fp());
         assert_eq!(p.imp, None);
         assert!(!p.is_impersonation());
     }
@@ -272,7 +284,7 @@ mod tests {
     #[test]
     fn rejects_tampered_payload() {
         let secret = key();
-        let payload = TenantSessionPayload::new(7, "acme", 3600);
+        let payload = TenantSessionPayload::new(7, "acme", 3600, fp());
         let cookie = encode(&secret, &payload);
         let (_, sig) = cookie.split_once('.').unwrap();
         let evil = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -286,7 +298,7 @@ mod tests {
     fn rejects_wrong_secret() {
         let s1 = SessionSecret::from_bytes(b"first-test-secret-thirty-2-bytes".to_vec());
         let s2 = SessionSecret::from_bytes(b"second-test-secret-thirty2-bytes".to_vec());
-        let cookie = encode(&s1, &TenantSessionPayload::new(1, "acme", 3600));
+        let cookie = encode(&s1, &TenantSessionPayload::new(1, "acme", 3600, fp()));
         let err = decode(&s2, "acme", &cookie).unwrap_err();
         assert!(matches!(err, SessionError::BadSignature));
     }
@@ -294,17 +306,15 @@ mod tests {
     #[test]
     fn rejects_expired() {
         let secret = key();
-        let cookie = encode(&secret, &TenantSessionPayload::new(1, "acme", -10));
+        let cookie = encode(&secret, &TenantSessionPayload::new(1, "acme", -10, fp()));
         let err = decode(&secret, "acme", &cookie).unwrap_err();
         assert!(matches!(err, SessionError::Expired));
     }
 
-    /// v0.28.4 (#77) — `iat` is set on every newly-minted payload so
-    /// the session middleware can compare it against
-    /// `rustango_users.password_changed_at`.
+    /// v0.28.4 (#77) — `iat` is set on every newly-minted payload.
     #[test]
     fn new_payload_stamps_iat_at_construction_time() {
-        let p = TenantSessionPayload::new(7, "acme", 3600);
+        let p = TenantSessionPayload::new(7, "acme", 3600, fp());
         let now = chrono::Utc::now().timestamp();
         // iat lands within ±2s of "now" — wide enough to absorb
         // schedule jitter, tight enough to fail if we forgot to
@@ -314,13 +324,8 @@ mod tests {
         assert_eq!(p.exp - p.iat, 3600);
     }
 
-    /// Pre-0.28.4 cookies don't carry `iat`. `#[serde(default)]` on
-    /// the field keeps them parseable; `iat` decodes as `0`. The
-    /// session middleware treats `0 < password_changed_at.timestamp()`
-    /// as "issued at the dawn of time, invalidate", so any
-    /// post-rotation login wins. This test pins the parse
-    /// behavior — losing it would silently break the security
-    /// guarantee on upgrade.
+    /// Pre-0.28.4 cookies don't carry `iat` or `pwf`. They still parse,
+    /// with `iat = 0` and an empty fingerprint that never matches.
     #[test]
     fn legacy_pre_v0_28_4_cookie_decodes_with_iat_zero() {
         // Hand-write a payload JSON without `iat` to simulate a
@@ -335,5 +340,6 @@ mod tests {
         let p = decode(&secret, "acme", &cookie).expect("legacy cookie still parses");
         assert_eq!(p.uid, 7);
         assert_eq!(p.iat, 0, "missing iat should default to 0");
+        assert!(p.pwf.is_empty());
     }
 }

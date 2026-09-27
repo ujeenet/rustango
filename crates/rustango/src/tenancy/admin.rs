@@ -785,13 +785,15 @@ async fn validate_session(
     if !user.active {
         return SessionCheck::Anonymous;
     }
-    // v0.28.4 — invalidate sessions issued before the latest password
-    // rotation. `password_changed_at IS NULL` means the account
-    // predates v0.28.4 and never rotated; we don't enforce.
-    if let Some(ts) = user.password_changed_at {
-        if payload.iat < ts.timestamp() {
-            return SessionCheck::Anonymous;
-        }
+    // Invalidate sessions minted before the latest password change.
+    if !super::session::survives_password_change(
+        &cfg.secret,
+        &payload.pwf,
+        payload.iat,
+        &user.password_hash,
+        user.password_changed_at,
+    ) {
+        return SessionCheck::Anonymous;
     }
     SessionCheck::Authenticated {
         is_superuser: user.is_superuser,
@@ -1057,7 +1059,12 @@ async fn login_submit(
     crate::account_lockout::shared().clear(&lock_key).await;
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
-    let payload = TenantSessionPayload::new(uid, &org.slug, ttl_secs);
+    let payload = TenantSessionPayload::new(
+        uid,
+        &org.slug,
+        ttl_secs,
+        super::session::PasswordFingerprint::of(&cfg.secret, &user.password_hash),
+    );
     let cookie_value = tenant_console::encode(&cfg.secret, &payload);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")

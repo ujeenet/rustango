@@ -341,7 +341,8 @@ pub(super) async fn tenant_sso_callback(
         Err(_) => return login_error(routes, "unverified"),
     };
 
-    let Some((uid, active)) = find_tenant_user_by_email(tenant_pool, &email).await else {
+    let Some((uid, active, password_hash)) = find_tenant_user_by_email(tenant_pool, &email).await
+    else {
         tracing::warn!(target: "rustango::tenancy::sso", "no tenant user for {email} in {}", org.slug);
         return login_error(routes, "nouser");
     };
@@ -352,7 +353,12 @@ pub(super) async fn tenant_sso_callback(
     // Mint the tenant session — same shape as a password login.
     let ttl = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
-    let payload = TenantSessionPayload::new(uid, &org.slug, ttl);
+    let payload = TenantSessionPayload::new(
+        uid,
+        &org.slug,
+        ttl,
+        super::session::PasswordFingerprint::of(secret, &password_hash),
+    );
     let cookie_value = tenant_console::encode(secret, &payload);
     let session_cookie = format!(
         "{}={cookie_value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{}",
@@ -371,7 +377,10 @@ pub(super) async fn tenant_sso_callback(
 
 /// Look up a tenant user's `(id, active)` by lowercased email in the
 /// tenant's scoped pool. `None` when no row matches (link-to-existing).
-async fn find_tenant_user_by_email(pool: &crate::sql::Pool, email: &str) -> Option<(i64, bool)> {
+async fn find_tenant_user_by_email(
+    pool: &crate::sql::Pool,
+    email: &str,
+) -> Option<(i64, bool, String)> {
     use crate::core::{SelectQuery, SqlValue};
     let select = SelectQuery::by_pk(User::SCHEMA, "email", SqlValue::String(email.to_owned()));
     let fields: Vec<&'static crate::core::FieldSchema> = User::SCHEMA.fields.iter().collect();
@@ -384,7 +393,12 @@ async fn find_tenant_user_by_email(pool: &crate::sql::Pool, email: &str) -> Opti
         .get("active")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    Some((id, active))
+    let password_hash = row
+        .get("password_hash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Some((id, active, password_hash))
 }
 
 #[cfg(test)]

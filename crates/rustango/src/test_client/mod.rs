@@ -122,8 +122,8 @@ impl TestClient {
 
     /// Mint a tenant session cookie directly into the jar. Bypasses
     /// the login form entirely: subsequent requests look authenticated to
-    /// the [`crate::extractors::SessionUser`] extractor as long as the
-    /// row at `user_id` is `active = true` in the tenant DB.
+    /// the [`crate::extractors::SessionUser`] extractor as long as
+    /// `user`'s row is `active = true` and its password hash is unchanged.
     ///
     /// Useful when the login flow is incidental to what's being tested
     /// (typing through the form per test is slow, and tests of
@@ -141,11 +141,16 @@ impl TestClient {
         &self,
         secret: &crate::tenancy::session::SessionSecret,
         slug: impl Into<String>,
-        user_id: i64,
+        user: &crate::tenancy::User,
         ttl_secs: i64,
     ) -> &Self {
         use crate::tenancy::tenant_console;
-        let payload = tenant_console::TenantSessionPayload::new(user_id, slug, ttl_secs);
+        let payload = tenant_console::TenantSessionPayload::new(
+            user.id.get().copied().unwrap_or_default(),
+            slug,
+            ttl_secs,
+            tenant_console::PasswordFingerprint::of(secret, &user.password_hash),
+        );
         let cookie = tenant_console::encode(secret, &payload);
         self.set_cookie(tenant_console::COOKIE_NAME, cookie);
         self
@@ -165,11 +170,15 @@ impl TestClient {
     pub fn force_login_operator(
         &self,
         secret: &crate::tenancy::session::SessionSecret,
-        operator_id: i64,
+        operator: &crate::tenancy::Operator,
         ttl_secs: i64,
     ) -> &Self {
         use crate::tenancy::session;
-        let payload = session::SessionPayload::new(operator_id, ttl_secs);
+        let payload = session::SessionPayload::new(
+            operator.id.get().copied().unwrap_or_default(),
+            ttl_secs,
+            session::PasswordFingerprint::of(secret, &operator.password_hash),
+        );
         let cookie = session::encode(secret, &payload);
         self.set_cookie(session::COOKIE_NAME, cookie);
         self
@@ -1083,6 +1092,14 @@ mod tests {
     // ---------------- force_login (tenancy) ----------------
 
     #[cfg(feature = "tenancy")]
+    fn user_with_id(id: i64) -> crate::tenancy::User {
+        crate::tenancy::User {
+            id: crate::sql::Auto::Set(id),
+            ..crate::testkit::user()
+        }
+    }
+
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn force_login_tenant_user_writes_decodable_cookie() {
         use crate::tenancy::session::SessionSecret;
@@ -1090,7 +1107,7 @@ mod tests {
 
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
         let c = TestClient::new(Router::new());
-        c.force_login_tenant_user(&secret, "acme", 42, 3600);
+        c.force_login_tenant_user(&secret, "acme", &user_with_id(42), 3600);
 
         let cookie = c.cookie(COOKIE_NAME).expect("session cookie present");
         let payload = decode(&secret, "acme", &cookie).expect("cookie decodes");
@@ -1107,7 +1124,7 @@ mod tests {
 
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
         let c = TestClient::new(Router::new());
-        c.force_login_tenant_user(&secret, "acme", 42, 3600);
+        c.force_login_tenant_user(&secret, "acme", &user_with_id(42), 3600);
         let cookie = c
             .cookie(crate::tenancy::tenant_console::COOKIE_NAME)
             .unwrap();
@@ -1123,7 +1140,15 @@ mod tests {
 
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
         let c = TestClient::new(Router::new());
-        c.force_login_operator(&secret, 7, 3600);
+        let op = crate::tenancy::Operator {
+            id: crate::sql::Auto::Set(7),
+            username: "op".into(),
+            password_hash: "$argon2id$test".into(),
+            active: true,
+            created_at: chrono::Utc::now(),
+            password_changed_at: None,
+        };
+        c.force_login_operator(&secret, &op, 3600);
 
         let cookie = c.cookie(COOKIE_NAME).expect("operator cookie present");
         let payload = decode(&secret, &cookie).expect("cookie decodes");
@@ -1140,7 +1165,7 @@ mod tests {
         let wrong_secret = SessionSecret::from_bytes(b"wrong-secret-thirty-two-bytes-xx".to_vec());
 
         let c = TestClient::new(Router::new());
-        c.force_login_tenant_user(&mint_secret, "acme", 1, 3600);
+        c.force_login_tenant_user(&mint_secret, "acme", &user_with_id(1), 3600);
         let cookie = c
             .cookie(crate::tenancy::tenant_console::COOKIE_NAME)
             .unwrap();

@@ -102,12 +102,15 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
 
         let user = users.into_iter().next().filter(|u| u.active);
         // Reject a session minted before the user's last password
-        // change, as `tenancy::admin::validate_session` does. A null
-        // `password_changed_at` means it never changed, so it stays
-        // valid.
-        let user = user.filter(|u| match u.password_changed_at {
-            Some(changed) => payload.iat >= changed.timestamp(),
-            None => true,
+        // change, as `tenancy::admin::validate_session` does.
+        let user = user.filter(|u| {
+            crate::tenancy::session::survives_password_change(
+                &ctx.session_secret,
+                &payload.pwf,
+                payload.iat,
+                &u.password_hash,
+                u.password_changed_at,
+            )
         });
         Ok(SessionUser(user))
     }
@@ -149,7 +152,16 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
             .await
             .unwrap_or_default();
 
-        let op = ops.into_iter().next().filter(|o| o.active);
+        let op = ops.into_iter().next().filter(|o| {
+            o.active
+                && crate::tenancy::session::survives_password_change(
+                    &ctx.operator_secret,
+                    &payload.pwf,
+                    payload.iat,
+                    &o.password_hash,
+                    o.password_changed_at,
+                )
+        });
         Ok(SessionOperator(op))
     }
 }

@@ -123,6 +123,104 @@ async fn session_user_anon_path_returns_none_on_sqlite() {
     );
 }
 
+/// #1338: a password change in the same second as the login still ends
+/// that session, and a login made after the change works.
+#[tokio::test]
+async fn a_password_change_in_the_login_second_ends_that_session() {
+    use rustango::tenancy::tenant_console::{
+        encode, PasswordFingerprint, TenantSessionPayload, COOKIE_NAME,
+    };
+
+    let url = "sqlite:file:session_user_1338?mode=memory&cache=shared";
+    let tenant = rustango::sql::Pool::connect(url).await.expect("tenant db");
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&tenant)
+        .await
+        .expect("users table");
+    let mut user = rustango::tenancy::User {
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&tenant).await.expect("seed user");
+    let uid = user.id.get().copied().unwrap();
+
+    let secret = rustango::tenancy::session::SessionSecret::from_bytes(
+        b"test_tenant_session_secret_32by!".to_vec(),
+    );
+    let registry = sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("registry pool");
+    let org = Org {
+        database_url: Some(url.into()),
+        ..fake_sqlite_org()
+    };
+    let ctx = Arc::new(TenantContext {
+        pools: Arc::new(TenantPools::<sqlx::Sqlite>::new(registry)),
+        resolver: ChainResolver::new().push(FixedResolver(org)),
+        session_secret: secret.clone(),
+        operator_secret: rustango::tenancy::session::SessionSecret::from_bytes(
+            b"test_oper_session_secret____32b!".to_vec(),
+        ),
+    });
+    let app: Router = Router::new()
+        .route("/whoami", get(whoami))
+        .layer(axum::middleware::from_fn(
+            move |mut req: Request, next: axum::middleware::Next| {
+                let ctx = ctx.clone();
+                async move {
+                    req.extensions_mut().insert(ctx);
+                    next.run(req).await
+                }
+            },
+        ));
+    let whoami_with = |cookie: String| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .uri("/whoami")
+                .header("Cookie", format!("{COOKIE_NAME}={cookie}"))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        }
+    };
+
+    let login = TenantSessionPayload::new(
+        uid,
+        "acme",
+        3600,
+        PasswordFingerprint::of(&secret, &user.password_hash),
+    );
+    let old_cookie = encode(&secret, &login);
+    assert_eq!(whoami_with(old_cookie.clone()).await, "user:alice");
+
+    // Change the password, stamped in the same second the session was issued.
+    user.password_hash = rustango::tenancy::password::hash("second-password").unwrap();
+    user.password_changed_at = chrono::DateTime::from_timestamp(login.iat, 999_000_000);
+    user.save_pool(&tenant).await.expect("change password");
+
+    assert_eq!(
+        whoami_with(old_cookie).await,
+        "anon",
+        "a session from before the change must not survive it"
+    );
+
+    let relogin = TenantSessionPayload::new(
+        uid,
+        "acme",
+        3600,
+        PasswordFingerprint::of(&secret, &user.password_hash),
+    );
+    assert_eq!(
+        whoami_with(encode(&secret, &relogin)).await,
+        "user:alice",
+        "a login after the change must work"
+    );
+}
+
 #[tokio::test]
 async fn session_user_malformed_cookie_returns_none_on_sqlite() {
     let registry = sqlx::SqlitePool::connect("sqlite::memory:")

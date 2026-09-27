@@ -4,10 +4,9 @@
 //! and a signature. Server validates the signature on every request;
 //! no server-side session table for v1. Trade-offs:
 //!
-//! * **No revocation** — once issued, a cookie is valid until `exp`.
-//!   Operator deletion / password change doesn't invalidate live
-//!   cookies. Acceptable for v1; v2 can add a short-lived cookie +
-//!   server-side revocation list.
+//! * **No revocation list** — a cookie is valid until `exp`, unless the
+//!   operator is deactivated or changes password (the console checks
+//!   both on every request).
 //! * **Secret rotation invalidates all cookies** — a server restart
 //!   with auto-generated secret signs everyone out. With
 //!   `RUSTANGO_SESSION_SECRET` set in env, sessions survive restarts.
@@ -16,7 +15,7 @@
 //!
 //! ```text
 //! Cookie: rustango_op_session=<base64(payload)>.<base64(hmac_sha256)>
-//! payload  = JSON {"oid": <i64>, "exp": <unix_seconds>}
+//! payload  = JSON {"oid": <i64>, "exp": <unix_seconds>, "iat": .., "pwf": ..}
 //! signature = HMAC-SHA256(secret, payload_base64) [first 32 bytes]
 //! ```
 
@@ -29,7 +28,7 @@ use subtle::ConstantTimeEq;
 // reuse the same HMAC primitives without compiling in `tenancy`.
 // The re-exports below keep every pre-existing `crate::tenancy::session::SessionSecret`
 // caller working.
-pub use crate::session::{SessionSecret, SessionSecretError};
+pub use crate::session::{PasswordFingerprint, SessionSecret, SessionSecretError};
 // `sign` re-exported at crate-internal visibility so existing
 // callers (`tenant_console`, `impersonation_handoff`) keep working
 // after the v0.45 move to `crate::session`.
@@ -61,31 +60,33 @@ pub enum SessionError {
 
 /// Principal payload carried inside the cookie. Compact field names
 /// to keep the cookie short (browsers truncate aggressively).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionPayload {
     /// Operator id (from `rustango_operators.id`).
     pub oid: i64,
     /// Expiry as Unix seconds.
     pub exp: i64,
-    /// Issued-at as Unix seconds (v0.28.4, #77 follow-up).
-    /// Compared to `rustango_operators.password_changed_at` —
-    /// sessions issued before the latest password rotation are
-    /// rejected. `0` for cookies minted on pre-0.28.4 servers
-    /// (`#[serde(default)]` keeps them parseable; the comparison
-    /// treats `0` as "issued at the dawn of time" so they're
-    /// invalidated by any password change).
+    /// Issued-at as Unix seconds. A session issued before
+    /// `rustango_operators.password_changed_at` is rejected. `0` for
+    /// cookies minted on pre-0.28.4 servers.
     #[serde(default)]
     pub iat: i64,
+    /// Fingerprint of the operator's `password_hash` at login. Any
+    /// password change makes it stop matching (#1338).
+    #[serde(default)]
+    pub pwf: PasswordFingerprint,
 }
 
 impl SessionPayload {
+    /// `pwf` is the [`PasswordFingerprint`] of the operator's current hash.
     #[must_use]
-    pub fn new(operator_id: i64, ttl_secs: i64) -> Self {
+    pub fn new(operator_id: i64, ttl_secs: i64, pwf: PasswordFingerprint) -> Self {
         let now = chrono::Utc::now().timestamp();
         Self {
             oid: operator_id,
             exp: now + ttl_secs,
             iat: now,
+            pwf,
         }
     }
 
@@ -133,14 +134,32 @@ pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, Ses
 
 // `sign` moved to `crate::session` in v0.45 (#253) — `use` above.
 
+/// `true` when a session minted with `pwf` at `iat` is still valid for
+/// a principal whose password is now `password_hash`. The fingerprint
+/// is exact; the timestamp keeps a bare `password_changed_at` bump working.
+#[must_use]
+pub(crate) fn survives_password_change(
+    secret: &SessionSecret,
+    pwf: &PasswordFingerprint,
+    iat: i64,
+    password_hash: &str,
+    password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    pwf.matches(secret, password_hash) && password_changed_at.is_none_or(|ts| iat >= ts.timestamp())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn fp() -> PasswordFingerprint {
+        PasswordFingerprint::default()
+    }
+
     #[test]
     fn round_trip_valid_payload() {
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
-        let payload = SessionPayload::new(42, 3600);
+        let payload = SessionPayload::new(42, 3600, PasswordFingerprint::of(&secret, "$h"));
         let cookie = encode(&secret, &payload);
         let back = decode(&secret, &cookie).unwrap();
         assert_eq!(back, payload);
@@ -149,7 +168,7 @@ mod tests {
     #[test]
     fn rejects_tampered_payload() {
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
-        let payload = SessionPayload::new(42, 3600);
+        let payload = SessionPayload::new(42, 3600, fp());
         let cookie = encode(&secret, &payload);
         // Replace payload but keep signature → BadSignature.
         let (_, sig) = cookie.split_once('.').unwrap();
@@ -164,7 +183,7 @@ mod tests {
     fn rejects_wrong_secret() {
         let s1 = SessionSecret::from_bytes(b"first-test-secret-thirty-2-bytes".to_vec());
         let s2 = SessionSecret::from_bytes(b"second-test-secret-thirty2-bytes".to_vec());
-        let cookie = encode(&s1, &SessionPayload::new(1, 3600));
+        let cookie = encode(&s1, &SessionPayload::new(1, 3600, fp()));
         let err = decode(&s2, &cookie).unwrap_err();
         assert!(matches!(err, SessionError::BadSignature));
     }
@@ -172,7 +191,7 @@ mod tests {
     #[test]
     fn rejects_expired() {
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
-        let payload = SessionPayload::new(1, -10);
+        let payload = SessionPayload::new(1, -10, fp());
         let cookie = encode(&secret, &payload);
         let err = decode(&secret, &cookie).unwrap_err();
         assert!(matches!(err, SessionError::Expired));
@@ -183,5 +202,35 @@ mod tests {
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
         let err = decode(&secret, "not-a-cookie").unwrap_err();
         assert!(matches!(err, SessionError::Malformed));
+    }
+
+    /// A new hash ends the session even when `iat` equals the change second.
+    #[test]
+    fn a_new_password_hash_ends_a_same_second_session() {
+        let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
+        let now = chrono::Utc::now();
+        let pwf = PasswordFingerprint::of(&secret, "$old");
+        assert!(survives_password_change(
+            &secret,
+            &pwf,
+            now.timestamp(),
+            "$old",
+            Some(now)
+        ));
+        assert!(!survives_password_change(
+            &secret,
+            &pwf,
+            now.timestamp(),
+            "$new",
+            Some(now)
+        ));
+        // A cookie from before this field decodes empty and never matches.
+        assert!(!survives_password_change(
+            &secret,
+            &fp(),
+            now.timestamp(),
+            "$old",
+            None
+        ));
     }
 }

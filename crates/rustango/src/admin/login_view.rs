@@ -326,7 +326,7 @@ async fn login_submit(
 
     // Bind the cookie to a fingerprint of the current password hash, so
     // a password change or reset invalidates it.
-    let auth_hash = session::password_fingerprint(&secret, stored_hash);
+    let auth_hash = crate::session::PasswordFingerprint::of(&secret, stored_hash);
     let cookie_value = session::encode(
         &secret,
         AdminSession {
@@ -480,7 +480,7 @@ async fn change_password_submit(
     ))
     .into_response();
     if let Some(secret) = state.config.session_secret.as_ref() {
-        let auth_hash = session::password_fingerprint(secret, &new_hash);
+        let auth_hash = crate::session::PasswordFingerprint::of(secret, &new_hash);
         let cookie_value = session::encode(
             secret,
             AdminSession {
@@ -840,7 +840,7 @@ fn forbidden_page(session: &AdminSession) -> Response {
 fn read_session_cookie(
     req: &Request<Body>,
     secret: &AdminSessionSecret,
-) -> Option<(AdminSession, String)> {
+) -> Option<(AdminSession, crate::session::PasswordFingerprint)> {
     let val = crate::cookies::cookie_from_headers(req.headers(), SESSION_COOKIE)?;
     session::decode_full(secret, val)
 }
@@ -861,7 +861,11 @@ enum GateCheck {
 /// Re-read the user's live state in one lookup: the password
 /// fingerprint, which rejects cookies minted before a password change,
 /// plus live `active` and `is_superuser`.
-async fn gate_live_check(gate: &SessionGate, user_id: i64, cookie_auth_hash: &str) -> GateCheck {
+async fn gate_live_check(
+    gate: &SessionGate,
+    user_id: i64,
+    cookie_auth_hash: &crate::session::PasswordFingerprint,
+) -> GateCheck {
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let select = SelectQuery::by_pk(AdminUser::SCHEMA, "id", SqlValue::I64(user_id));
     match crate::sql::select_one_row_as_json(&gate.pool, &select, &fields).await {
@@ -870,7 +874,7 @@ async fn gate_live_check(gate: &SessionGate, user_id: i64, cookie_auth_hash: &st
                 .get("password_hash")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            if session::password_fingerprint(&gate.secret, current) != cookie_auth_hash {
+            if !cookie_auth_hash.matches(&gate.secret, current) {
                 return GateCheck::Reject; // password changed since login
             }
             // `active` defaults to true, as in the login check, so a
