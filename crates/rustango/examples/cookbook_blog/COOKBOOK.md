@@ -2281,13 +2281,8 @@ the `rustango_csrf` cookie when missing, so templates can render:
 </form>
 ```
 
-POST validation is a separate layer. The recommended
-shortcut is `Cli::with_csrf()` — see
-[Auto-mounting CSRF](#auto-mounting-csrf--for-form-driven-cbvs).
-For projects not using `Cli`, mount `forms::csrf::layer()` directly
-on the router to enforce that the `_csrf` form field matches the
-cookie value. Without it the `csrf_token` context var still
-populates, but POSTs aren't validated.
+Every view router with a POST route checks the token itself: a POST
+whose `_csrf` field does not match the cookie gets `403`.
 
 ### Bulk actions on `ListView`
 Row checkboxes + an action `<select>` that applies the same
@@ -2615,9 +2610,9 @@ For finer control (immutable hash-named bundles, `.well-known`
 whitelisting), keep mounting `static_router` directly on your own
 router and skip the shortcut.
 
-### Auto-mounting CSRF — for form-driven CBVs
-`template_views` `CreateView` / `UpdateView` / `DeleteView` need the
-`_csrf` cookie + form field cycle wired. Same shape:
+### Auto-mounting CSRF — for hand-written form handlers
+The `template_views` routers check the token themselves. Your own
+form-posting handlers need the layer on the API router:
 
 ```rust,ignore
 rustango::manage::Cli::new()

@@ -947,49 +947,7 @@ fn urlizetrunc(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
             _ => None,
         })
         .unwrap_or(usize::MAX);
-    let urlized = crate::text::urlize(s, false);
-    let out = truncate_link_text(&urlized, limit);
-    Ok(to_value(out)?)
-}
-
-/// Cut the visible text of each `<a>` in a urlized string to `limit`
-/// characters, appending `...`. The `href` is left alone.
-fn truncate_link_text(html: &str, limit: usize) -> String {
-    if limit == usize::MAX {
-        return html.to_owned();
-    }
-    let mut out = String::with_capacity(html.len());
-    let bytes = html.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            if let Some(close) = html[i..].find('>') {
-                let tag = &html[i..i + close + 1];
-                out.push_str(tag);
-                i += close + 1;
-                if tag.starts_with("<a ") || tag == "<a>" {
-                    // Take the anchor text up to </a>.
-                    if let Some(end) = html[i..].find("</a>") {
-                        let anchor_text = &html[i..i + end];
-                        if anchor_text.chars().count() > limit {
-                            let truncated: String =
-                                anchor_text.chars().take(limit.saturating_sub(3)).collect();
-                            out.push_str(&truncated);
-                            out.push_str("...");
-                        } else {
-                            out.push_str(anchor_text);
-                        }
-                        out.push_str("</a>");
-                        i += end + 4;
-                    }
-                }
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
+    Ok(to_value(crate::text::urlize_trunc(s, false, limit))?)
 }
 
 /// `widthratio` — compute `round((value / max) * width)`, for bar

@@ -277,8 +277,8 @@ añadir un alias más amigable junto a `object_list` / `object`.
 
 Cada entrada de `form.fields` lleva `name`, `column`, `ty`, `required`, `max_length` y
 `value`. `form.errors` está indexado por nombre de campo y contiene un mensaje por campo, no
-una lista. Con la característica `csrf` activada, cada vista estampa además `csrf_token` y
-`csrf_input`.
+una lista. Cada vista estampa además `csrf_token` y `csrf_input`, y cada router de vista
+rechaza un POST sin un token que coincida.
 
 `CreateView` no estampa ningún `object`, así que `{{ object.title }}` en un formulario de
 creación queda indefinido en lugar de vacío — usa `{{ field.value }}` de `form.fields`, que

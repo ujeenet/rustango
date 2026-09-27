@@ -412,8 +412,8 @@ impl ListView {
     /// Form shape the POST handler expects:
     /// - `action`: the name of one registered action
     /// - `_selected_action`: one or more values, each a row's PK
-    /// - `_csrf`: the CSRF token (when [`crate::manage::Cli::with_csrf`]
-    ///   is on, which is the recommended setup for form-driven CBVs)
+    /// - `_csrf`: the CSRF token (`{{ csrf_input | safe }}`); the
+    ///   router rejects a POST without it
     ///
     /// Successful action runs return `303 See Other` to the same
     /// prefix so a refresh after the redirect doesn't replay the
@@ -615,7 +615,7 @@ impl ListView {
         } else {
             get(handle_list)
         };
-        Router::new().route(prefix, route).with_state(state)
+        csrf_protected(Router::new().route(prefix, route).with_state(state))
     }
 
     /// Tenant-aware variant — each request resolves its own
@@ -634,7 +634,7 @@ impl ListView {
         } else {
             get(handle_list_tenant)
         };
-        Router::new().route(prefix, route).with_state(state)
+        csrf_protected(Router::new().route(prefix, route).with_state(state))
     }
 }
 
@@ -805,7 +805,7 @@ async fn handle_list(
 
     // v0.30.17 — stamp the CSRF token into the context AND set the
     // cookie on the response. ListView's bulk-action POST is gated
-    // by the project's CSRF middleware (when on); without this the
+    // by the router's CSRF layer; without this the
     // form-rendered token is empty and every legitimate POST 403s.
     let set_cookie = stamp_csrf(&headers, &mut ctx);
     let mut resp = render(&state.tera, &state.vs.template, &ctx);
@@ -1084,9 +1084,8 @@ fn resolve_lookup_field(
 /// page, `POST <prefix>/{pk}/delete` executes the delete and 303s to
 /// `success_url`.
 ///
-/// CSRF protection is the project's responsibility — mount this view
-/// under a CSRF-protected scope (`rustango::forms::csrf`) when the
-/// POST is reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 #[derive(Clone)]
 pub struct DeleteView {
     schema: &'static ModelSchema,
@@ -1120,12 +1119,14 @@ impl DeleteView {
             pool,
         });
         let path = mount_path(prefix, "/{pk}/delete");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1134,12 +1135,15 @@ impl DeleteView {
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let state = Arc::new(TenantDeleteViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}/delete");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_delete_confirm_tenant).post(handle_delete_submit_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_delete_confirm_tenant)
+                        .post(handle_delete_submit_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -1228,8 +1232,8 @@ async fn handle_delete_submit(
 /// DEFAULT fires). Validation errors render the form back with
 /// `errors: { field_name: "message" }` in the context.
 ///
-/// CSRF protection is the project's responsibility — mount under
-/// a CSRF-protected scope when the POST is reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 #[derive(Clone)]
 pub struct CreateView {
     schema: &'static ModelSchema,
@@ -1338,12 +1342,14 @@ impl CreateView {
             validator: self.validator.clone(),
         });
         let path = mount_path(prefix, "/new");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_create_get).post(handle_create_post),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_create_get).post(handle_create_post),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1359,12 +1365,14 @@ impl CreateView {
             validator: self.validator,
         });
         let path = mount_path(prefix, "/new");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_create_get_tenant).post(handle_create_post_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_create_get_tenant).post(handle_create_post_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -1434,12 +1442,14 @@ impl UpdateView {
             validator: self.validator.clone(),
         });
         let path = mount_path(prefix, "/{pk}/edit");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_update_get).post(handle_update_post),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_update_get).post(handle_update_post),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1455,12 +1465,14 @@ impl UpdateView {
             validator: self.validator,
         });
         let path = mount_path(prefix, "/{pk}/edit");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_update_get_tenant).post(handle_update_post_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_update_get_tenant).post(handle_update_post_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -2397,25 +2409,15 @@ fn build_list_where(
     }
 }
 
-fn stamp_csrf(_headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
-    #[cfg(feature = "csrf")]
-    {
-        // Delegate to the public helper so the CBV-side context shape
-        // matches what hand-rolled handlers get from
-        // `forms::csrf::stamp_into_context` (issue #15). Stamps both
-        // `csrf_token` (raw) and `csrf_input` (HTML).
-        crate::forms::csrf::stamp_into_context(_headers, ctx)
-    }
-    #[cfg(not(feature = "csrf"))]
-    {
-        // CSRF feature off — render with empty token so templates that
-        // reference `{{ csrf_token }}` don't error. Validation isn't
-        // enforced in this configuration; the empty hidden input is
-        // harmless.
-        ctx.insert("csrf_token", "");
-        ctx.insert("csrf_input", "");
-        None
-    }
+/// Stamp `csrf_token` and `csrf_input` into the context (issue #15).
+fn stamp_csrf(headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
+    crate::forms::csrf::stamp_into_context(headers, ctx)
+}
+
+/// Every CBV router with a POST route goes through here, so each
+/// write must carry the token [`stamp_csrf`] rendered (#1669).
+fn csrf_protected(router: Router<()>) -> Router<()> {
+    router.route_layer(crate::forms::csrf::layer())
 }
 
 /// Append a `Set-Cookie` header to a ready response when
@@ -3235,8 +3237,8 @@ async fn handle_redirect_view(State(state): State<Arc<RedirectView>>) -> Respons
 /// - `values: HashMap<String, String>` — empty on GET, raw POST values
 ///   on validation failure so the form can repopulate.
 ///
-/// CSRF protection is the project's responsibility — mount under a
-/// CSRF-protected scope when reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 pub struct FormView<F>
 where
     F: crate::forms::Form,
@@ -3293,12 +3295,14 @@ where
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let state = Arc::new(StandaloneFormViewState { vs: self, tera });
-        Router::new()
-            .route(
-                prefix,
-                get(handle_form_view_get::<F>).post(handle_form_view_post::<F>),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    prefix,
+                    get(handle_form_view_get::<F>).post(handle_form_view_post::<F>),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -4346,7 +4350,6 @@ mod tests {
     /// rendered hidden input matches what the browser will send
     /// back on POST). Returns `None` for the Set-Cookie since the
     /// cookie was already there.
-    #[cfg(feature = "csrf")]
     #[test]
     fn stamp_csrf_reuses_existing_cookie() {
         let mut headers = axum::http::HeaderMap::new();
@@ -4370,7 +4373,6 @@ mod tests {
 
     /// `stamp_csrf` mints a fresh token when the cookie is absent
     /// and returns the Set-Cookie header for the caller to attach.
-    #[cfg(feature = "csrf")]
     #[test]
     fn stamp_csrf_mints_fresh_when_absent() {
         let headers = axum::http::HeaderMap::new();
@@ -4389,21 +4391,6 @@ mod tests {
         assert_eq!(rendered, token_in_cookie);
         // Token shape: 32 random bytes → base64url no-pad → 43 chars.
         assert_eq!(rendered.len(), 43);
-    }
-
-    /// Without the `csrf` feature, `stamp_csrf` is a no-op that
-    /// stamps an empty `csrf_token`. The hidden input renders as
-    /// `<input value="">` — harmless when CSRF isn't enforced.
-    #[cfg(not(feature = "csrf"))]
-    #[test]
-    fn stamp_csrf_noop_when_feature_off() {
-        let headers = axum::http::HeaderMap::new();
-        let mut ctx = Context::new();
-        let set_cookie = stamp_csrf(&headers, &mut ctx);
-        assert!(set_cookie.is_none());
-        let mut tera = Tera::default();
-        tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
-        assert_eq!(tera.render("t", &ctx).unwrap(), "");
     }
 
     /// `apply_csrf_cookie` appends a Set-Cookie header when given
@@ -4589,7 +4576,10 @@ mod tests {
         // where a backticked mention is followed by the field list.
         let start = text
             .match_indices("`form.fields`")
-            .find(|(i, _)| text[*i..text.len().min(i + 200)].contains("`max_length`"))
+            .find(|(i, _)| {
+                let window: String = text[*i..].chars().take(200).collect();
+                window.contains("`max_length`")
+            })
             .map(|(i, _)| i)
             .expect("no `form.fields` field-list sentence on this page");
         // The list ends at the full stop directly after a closing backtick.
@@ -5821,20 +5811,90 @@ mod tests {
             .template("f.html")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("name="))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "name=")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "name:1");
+    }
+
+    const TEST_CSRF: &str = "existing-token-existing-token-existing-toke";
+
+    /// A form POST carrying a matching CSRF cookie and `_csrf` field.
+    fn csrf_form_post(uri: &str, body: &str) -> Request<Body> {
+        let body = if body.is_empty() {
+            format!("_csrf={TEST_CSRF}")
+        } else {
+            format!("_csrf={TEST_CSRF}&{body}")
+        };
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("rustango_csrf={TEST_CSRF}"))
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    /// Every CBV router with a POST route rejects a write without the token (#1669).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cbv_post_without_csrf_token_is_forbidden() {
+        use crate::forms::{Form, FormErrors};
+
+        struct OkForm;
+        impl Form for OkForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                Ok(OkForm)
+            }
+        }
+
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+        let schema = schema_two_fields();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let tera = Arc::new(tera);
+        let routers: Vec<(&str, Router<()>)> = vec![
+            (
+                "/form",
+                FormView::<OkForm>::for_form(|_| async { Ok(()) })
+                    .template("f.html")
+                    .router("/form", tera.clone()),
+            ),
+            (
+                "/c/new",
+                CreateView::for_model(schema).router("/c", tera.clone(), pool.clone()),
+            ),
+            (
+                "/u/1/edit",
+                UpdateView::for_model(schema).router("/u", tera.clone(), pool.clone()),
+            ),
+            (
+                "/d/1/delete",
+                DeleteView::for_model(schema).router("/d", tera.clone(), pool.clone()),
+            ),
+            (
+                "/l",
+                ListView::for_model(schema).bulk_actions(true).router(
+                    "/l",
+                    tera.clone(),
+                    pool.clone(),
+                ),
+            ),
+        ];
+        for (uri, app) in routers {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from("action=delete_selected&_selected_action=1"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
     }
 
     #[tokio::test]
@@ -5856,17 +5916,7 @@ mod tests {
             .success_url("/thanks")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(""))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "")).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             res.headers()
@@ -5898,17 +5948,7 @@ mod tests {
             .success_url("/thanks\r\nSet-Cookie: pwned=1")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(""))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "")).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert!(
             res.headers().get(axum::http::header::LOCATION).is_none(),

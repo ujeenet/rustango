@@ -272,8 +272,8 @@ neben `object_list` / `object` einen freundlicheren Alias hinzuzufügen.
 
 Jeder Eintrag in `form.fields` trägt `name`, `column`, `ty`, `required`, `max_length` und
 `value`. `form.errors` ist nach Feldnamen indiziert und enthält eine Meldung pro Feld, keine
-Liste. Mit aktiviertem `csrf`-Feature stempelt jeder View zusätzlich `csrf_token` und
-`csrf_input` ein.
+Liste. Jeder View stempelt zusätzlich `csrf_token` und `csrf_input` ein, und jeder
+View-Router weist einen POST ohne passendes Token ab.
 
 `CreateView` stempelt kein `object` ein, daher ist `{{ object.title }}` in einem
 Erstellformular undefiniert statt leer — verwende `{{ field.value }}` aus `form.fields`, das

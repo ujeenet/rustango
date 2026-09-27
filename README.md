@@ -242,7 +242,7 @@ let app = Router::new().merge(PostViewSet::router("/api/posts", pool.clone()));
 
 ## HTML views & forms
 
-Class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. CSRF auto-mounts for form-driven views.
+Class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. Every view router with a POST route checks the CSRF token.
 
 📖 [HTML views](docs/html-views.md)
 

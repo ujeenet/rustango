@@ -363,8 +363,9 @@ csrf = ["forms", "_axum", "dep:base64", "dep:cookie", "dep:hmac", "dep:sha2", "_
 # Generic class-based views for HTML templates (`rustango::template_views`)
 # — `ListView` / `DetailView` / `CreateView` / `UpdateView` /
 # `DeleteView` over `#[derive(Model)]` types, rendered through Tera.
-# The JSON-API counterpart is `rustango::viewset` (always on).
-template_views = ["forms", "_axum", "_tera", "dep:serde_urlencoded"]
+# The JSON-API counterpart is `rustango::viewset` (always on). Every POST
+# route checks the CSRF token, so `csrf` comes with it.
+template_views = ["forms", "csrf", "_axum", "_tera", "dep:serde_urlencoded"]
 
 # Auto-admin HTTP layer (`rustango::admin`). Pulls in axum + Tera +
 # the supporting middleware deps. Implies `forms` + `csrf` so the
