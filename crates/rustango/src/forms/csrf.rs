@@ -491,7 +491,10 @@ where
             // and the stored cookie disagreed, and their first submit was
             // a 403. Reloading masked it, which is why it survived: only
             // brand-new visitors ever saw it.
-            if cookie_value.is_none() && !sets_cookie(&response, &cfg.cookie_name) {
+            if cookie_value.is_none()
+                && !sets_cookie(&response, &cfg.cookie_name)
+                && !is_publicly_cacheable(response.headers())
+            {
                 let token = mint_token();
                 let cookie_str = format!(
                     "{}={token}; Path=/; SameSite=Lax{}",
@@ -509,13 +512,11 @@ where
     }
 }
 
-/// Cap the form-body buffer the CSRF middleware will consume
-/// while extracting the `_csrf` field. 64 KiB is generous for any
-/// realistic HTML form (typical forms are < 4 KiB; file uploads
-/// don't use form-encoded bodies). Bodies larger than this 403
-/// — the middleware can't safely buffer megabyte-scale form
-/// payloads in memory just to verify a token.
-const BODY_BUFFER_LIMIT: usize = 64 * 1024;
+/// Cap the form-body buffer the CSRF middleware will consume while
+/// extracting the `_csrf` field. axum's default request body limit
+/// (2 MB), which the handler buffers up to anyway: a lower cap here
+/// turned a large admin edit (a long text field) into a 403 (#1714).
+const BODY_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 
 /// `true` when `path` starts with any configured exempt prefix. Used to
 /// skip CSRF enforcement for beacon/collector endpoints.
@@ -543,6 +544,17 @@ fn method_is_csrf_exempt(m: &Method, cfg: &CsrfConfig) -> bool {
 ///
 /// Checked before the layer seeds its own, so a handler that stamped a
 /// token into its template keeps the value it rendered.
+/// `true` when a shared cache may store the response (`Cache-Control:
+/// public`). A `Set-Cookie` on it would hand one token to every visitor.
+pub(crate) fn is_publicly_cacheable(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get_all(axum::http::header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|d| d.trim().eq_ignore_ascii_case("public"))
+}
+
 fn sets_cookie<B>(response: &Response<B>, name: &str) -> bool {
     response
         .headers()
@@ -1277,6 +1289,59 @@ mod tests {
             .unwrap();
         assert!(sets_cookie(&resp, "rustango_csrf"));
         assert!(!sets_cookie(&resp, "other_cookie"));
+    }
+
+    /// #1714 — no CSRF cookie rides on a publicly cacheable response.
+    #[tokio::test]
+    async fn no_cookie_is_seeded_on_a_public_cacheable_response() {
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route(
+                "/asset",
+                axum::routing::get(|| async { ([("cache-control", "public, max-age=300")], "x") }),
+            )
+            .route("/page", axum::routing::get(|| async { "x" }))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()));
+        let get = |uri: &'static str| {
+            app.clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        };
+        assert!(get("/asset")
+            .await
+            .unwrap()
+            .headers()
+            .get("set-cookie")
+            .is_none());
+        assert!(get("/page")
+            .await
+            .unwrap()
+            .headers()
+            .get("set-cookie")
+            .is_some());
+    }
+
+    /// #1714 — a large form (a long text field) is not refused for its
+    /// size when it carries a valid token.
+    #[tokio::test]
+    async fn a_large_form_with_a_valid_token_passes() {
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(|| async { "saved" }))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()));
+        let body = format!("_csrf=tok&text={}", "a".repeat(200 * 1024));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/save")
+                    .header("cookie", "rustango_csrf=tok")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[test]
