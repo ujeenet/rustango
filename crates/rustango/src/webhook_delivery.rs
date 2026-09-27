@@ -46,11 +46,21 @@
 //! Add more retryable codes with
 //! [`WebhookSubscription::retry_status_codes`].
 //!
+//! ## Target checks
+//!
+//! Only `http` and `https`. Redirects are not followed. Every resolved
+//! address must be public; loopback, private, link-local, CGNAT and
+//! multicast targets are dead-lettered, and the connection is pinned to
+//! the checked addresses. [`WebhookSubscription::allow_private_targets`]
+//! turns the address check off. Only the status code is kept on failure.
+//!
 //! [`SignatureFormat`]: crate::webhook::SignatureFormat
 //! [`WebhookSubscription::header`]: crate::webhook_delivery::WebhookSubscription::header
 //! [`WebhookSubscription::retry_status_codes`]: crate::webhook_delivery::WebhookSubscription::retry_status_codes
+//! [`WebhookSubscription::allow_private_targets`]: crate::webhook_delivery::WebhookSubscription::allow_private_targets
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -87,6 +97,9 @@ pub struct WebhookEvent {
     pub timeout_secs: u64,
     /// Extra status codes to retry, on top of 408, 429 and 5xx.
     pub retry_status_codes: Vec<u16>,
+    /// Allow loopback, private and link-local targets. Off by default.
+    #[serde(default)]
+    pub allow_private_targets: bool,
 }
 
 #[async_trait::async_trait]
@@ -113,14 +126,32 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         &body,
     );
 
-    let client = reqwest::Client::builder()
+    let url = reqwest::Url::parse(&event.target_url)
+        .map_err(|e| JobError::Fatal(format!("bad target url: {e}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(JobError::Fatal(format!(
+            "scheme not allowed: {}",
+            url.scheme()
+        )));
+    }
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(event.timeout_secs.max(1)))
         .user_agent(USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none());
+    if !event.allow_private_targets {
+        let (host, addrs) = checked_target(&url).await?;
+        // Connect only to the checked addresses; a proxy would re-resolve the host.
+        builder = builder.no_proxy();
+        if let Some(host) = host {
+            builder = builder.resolve_to_addrs(&host, &addrs);
+        }
+    }
+    let client = builder
         .build()
         .map_err(|e| JobError::Queue(format!("build http client: {e}")))?;
 
     let mut req = client
-        .post(&event.target_url)
+        .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(HEADER_ID, &event.id)
         .header(HEADER_EVENT, &event.event)
@@ -141,18 +172,12 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     if (200..300).contains(&status) {
         return Ok(());
     }
+    // Status only: the response body is never stored.
+    let msg = format!("status {status}");
     if event.retry_status_codes.contains(&status) || is_default_retryable(status) {
-        let body = resp.text().await.unwrap_or_default();
-        Err(JobError::Retryable(format!(
-            "status {status}: {}",
-            truncate(&body, 200)
-        )))
+        Err(JobError::Retryable(msg))
     } else {
-        let body = resp.text().await.unwrap_or_default();
-        Err(JobError::Fatal(format!(
-            "status {status}: {}",
-            truncate(&body, 200)
-        )))
+        Err(JobError::Fatal(msg))
     }
 }
 
@@ -160,14 +185,75 @@ fn is_default_retryable(status: u16) -> bool {
     status == 408 || status == 429 || (500..600).contains(&status)
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_owned()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
+/// Check every resolved address of `url`. Returns the host name (None
+/// for an IP literal) and the addresses to pin it to.
+async fn checked_target(url: &reqwest::Url) -> Result<(Option<String>, Vec<SocketAddr>), JobError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| JobError::Fatal("target url has no host".into()))?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        if is_blocked_ip(ip) {
+            return Err(JobError::Fatal(format!("target address not allowed: {ip}")));
+        }
+        return Ok((None, vec![SocketAddr::new(ip, port)]));
     }
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| JobError::Retryable(format!("dns: {e}")))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(JobError::Retryable(format!("dns: no addresses for {host}")));
+    }
+    if let Some(bad) = addrs.iter().find(|a| is_blocked_ip(a.ip())) {
+        return Err(JobError::Fatal(format!(
+            "target address not allowed: {host} -> {}",
+            bad.ip()
+        )));
+    }
+    Ok((Some(host.to_owned()), addrs))
+}
+
+/// Loopback, private, link-local, CGNAT, multicast, unspecified and
+/// other non-public ranges. IPv4 embedded in IPv6 is checked as IPv4.
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_blocked_v4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_blocked_v4(v4);
+            }
+            let seg = v6.segments();
+            // NAT64 well-known prefix 64:ff9b::/96.
+            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = seg[6].to_be_bytes();
+                let [c, d] = seg[7].to_be_bytes();
+                return is_blocked_v4(Ipv4Addr::new(a, b, c, d));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (seg[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (seg[0] & 0xffc0) == 0xfec0 // site-local fec0::/10
+                || seg[..6] == [0, 0, 0, 0, 0, 0] // IPv4-compatible ::/96
+        }
+    }
+}
+
+fn is_blocked_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    a == 0 // this network 0.0.0.0/8
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || (a == 100 && (b & 0xc0) == 64) // CGNAT 100.64.0.0/10
+        || (a == 192 && b == 0 && c == 0) // 192.0.0.0/24
+        || (a == 198 && (b & 0xfe) == 18) // benchmarking 198.18.0.0/15
+        || a >= 240 // reserved 240.0.0.0/4
 }
 
 /// Config for one webhook subscriber, plus methods to register the
@@ -182,6 +268,7 @@ pub struct WebhookSubscription {
     headers: HashMap<String, String>,
     timeout: Duration,
     retry_status_codes: Vec<u16>,
+    allow_private_targets: bool,
 }
 
 impl WebhookSubscription {
@@ -193,6 +280,7 @@ impl WebhookSubscription {
             headers: HashMap::new(),
             timeout: Duration::from_secs(10),
             retry_status_codes: Vec::new(),
+            allow_private_targets: false,
         }
     }
 
@@ -218,6 +306,14 @@ impl WebhookSubscription {
     #[must_use]
     pub fn retry_status_codes(mut self, codes: impl IntoIterator<Item = u16>) -> Self {
         self.retry_status_codes.extend(codes);
+        self
+    }
+
+    /// Allow delivery to loopback, private and link-local addresses, for
+    /// tests and intranet receivers. Off by default.
+    #[must_use]
+    pub fn allow_private_targets(mut self, allow: bool) -> Self {
+        self.allow_private_targets = allow;
         self
     }
 
@@ -251,6 +347,7 @@ impl WebhookSubscription {
             headers: self.headers.clone(),
             timeout_secs: self.timeout.as_secs().max(1),
             retry_status_codes: self.retry_status_codes.clone(),
+            allow_private_targets: self.allow_private_targets,
         };
         queue.dispatch(&event).await?;
         Ok(id)
@@ -331,6 +428,7 @@ mod tests {
         q.start().await;
 
         let id = WebhookSubscription::new(url, "secret-bytes")
+            .allow_private_targets(true)
             .header("X-Tenant", "acme")
             .dispatch(&q, "order.created", &serde_json::json!({"order_id": 42}))
             .await
@@ -370,6 +468,7 @@ mod tests {
         q.start().await;
 
         WebhookSubscription::new(url, "secret-bytes")
+            .allow_private_targets(true)
             .signature_format(SignatureFormat::HexSha256WithPrefix)
             .dispatch(&q, "ping", &serde_json::json!({"x": 1}))
             .await
@@ -412,6 +511,7 @@ mod tests {
         q.start().await;
 
         WebhookSubscription::new(url, "secret-bytes")
+            .allow_private_targets(true)
             .dispatch(&q, "ping", &serde_json::json!({}))
             .await
             .unwrap();
@@ -485,6 +585,7 @@ mod tests {
         q.start().await;
 
         WebhookSubscription::new(url, "s")
+            .allow_private_targets(true)
             .dispatch(&q, "ping", &serde_json::json!({}))
             .await
             .unwrap();
@@ -515,12 +616,144 @@ mod tests {
         assert!(!is_default_retryable(301));
     }
 
+    fn event(url: String, allow_private_targets: bool) -> WebhookEvent {
+        WebhookEvent {
+            id: "id".into(),
+            event: "ping".into(),
+            target_url: url,
+            signing_secret: "s".into(),
+            signature_format: SignatureFormat::HexSha256WithPrefix,
+            payload: serde_json::json!({}),
+            headers: HashMap::new(),
+            timeout_secs: 5,
+            retry_status_codes: Vec::new(),
+            allow_private_targets,
+        }
+    }
+
+    async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let h = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, h)
+    }
+
     #[test]
-    fn truncate_appends_ellipsis_only_when_over_max() {
-        assert_eq!(truncate("short", 100), "short");
-        let long = "a".repeat(300);
-        let t = truncate(&long, 50);
-        assert_eq!(t.chars().count(), 51); // 50 chars + ellipsis
-        assert!(t.ends_with('…'));
+    fn blocked_ip_ranges() {
+        for ip in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+        ] {
+            assert!(is_blocked_ip(ip.parse().unwrap()), "{ip} should be blocked");
+        }
+        for ip in [
+            "93.184.216.34",
+            "8.8.8.8",
+            "2606:4700::1111",
+            "::ffff:8.8.8.8",
+        ] {
+            assert!(
+                !is_blocked_ip(ip.parse().unwrap()),
+                "{ip} should be allowed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_private_targets_by_default() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+                async { "ok" }
+            }),
+        );
+        let (base, srv) = serve(app).await;
+        let port = base.rsplit(':').next().unwrap();
+        for url in [
+            format!("{base}/hook"),
+            format!("http://localhost:{port}/hook"),
+            format!("http://[::ffff:127.0.0.1]:{port}/hook"),
+            "ftp://example.com/hook".to_owned(),
+        ] {
+            let err = deliver(&event(url.clone(), false)).await.unwrap_err();
+            assert!(matches!(err, JobError::Fatal(_)), "{url}: {err:?}");
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no request reached the server"
+        );
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new()
+            .route(
+                "/hook",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, "/internal")],
+                    )
+                }),
+            )
+            .route(
+                "/internal",
+                post(move || {
+                    h.fetch_add(1, Ordering::SeqCst);
+                    async { "secret" }
+                }),
+            );
+        let (base, srv) = serve(app).await;
+        let err = deliver(&event(format!("{base}/hook"), true))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, JobError::Fatal(m) if m == "status 307"),
+            "{err:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "redirect was followed");
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn response_body_is_not_stored() {
+        let app = Router::new().route(
+            "/hook",
+            post(|| async { (axum::http::StatusCode::BAD_REQUEST, "INTERNAL-SECRET") }),
+        );
+        let (base, srv) = serve(app).await;
+        let err = deliver(&event(format!("{base}/hook"), true))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(!msg.contains("INTERNAL-SECRET"), "{msg}");
+        assert!(
+            matches!(&err, JobError::Fatal(m) if m == "status 400"),
+            "{err:?}"
+        );
+        srv.abort();
     }
 }
