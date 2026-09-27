@@ -57,14 +57,7 @@ fn index_method_postgres_only_classification() {
 #[test]
 fn index_schema_default_method_is_btree() {
     // Compile-time guarantee: omitting `method` yields BTree.
-    let idx = IndexSchema {
-        name: "idx_foo",
-        columns: &["foo"],
-        unique: false,
-        method: IndexMethod::default(),
-        where_clause: None,
-        include: &[],
-    };
+    let idx = IndexSchema::new("idx_foo", &["foo"]);
     assert_eq!(idx.method, IndexMethod::BTree);
 }
 

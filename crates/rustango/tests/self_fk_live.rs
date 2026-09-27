@@ -50,7 +50,7 @@ fn schema_self_fk_resolves_to_own_table() {
         .expect("parent_id field present in schema");
     let rel = parent.relation.expect("parent_id has a relation");
     match rel {
-        rustango::core::Relation::Fk { to, on } => {
+        rustango::core::Relation::Fk { to, on, .. } => {
             assert_eq!(to, Page::SCHEMA.table, "self-FK target == own table");
             assert_eq!(on, "id");
         }

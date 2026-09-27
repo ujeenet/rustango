@@ -108,30 +108,7 @@ fn postgres_null_cast_decimal_binary_time() {
 fn form_parser_decimal() {
     use rustango::core::FieldSchema;
     use rustango::forms::parse_form_value;
-    let f = FieldSchema {
-        name: "amount",
-        column: "amount",
-        ty: FieldType::Decimal,
-        nullable: false,
-        primary_key: false,
-        auto: false,
-        unique: false,
-        max_length: None,
-        min: None,
-        max: None,
-        default: None,
-        relation: None,
-        generated_as: None,
-        help_text: None,
-        choices: None,
-        db_comment: None,
-        verbose_name: None,
-        editable: true,
-        blank: false,
-        case_insensitive: false,
-        fk_on_delete: None,
-        validators: &[],
-    };
+    let f = FieldSchema::new("amount", "amount", FieldType::Decimal);
     let v = parse_form_value(&f, Some("123.45")).unwrap();
     assert!(matches!(v, SqlValue::Decimal(d) if d == Decimal::from_str("123.45").unwrap()));
 
@@ -143,30 +120,7 @@ fn form_parser_decimal() {
 fn form_parser_binary_hex() {
     use rustango::core::FieldSchema;
     use rustango::forms::parse_form_value;
-    let f = FieldSchema {
-        name: "blob",
-        column: "blob",
-        ty: FieldType::Binary,
-        nullable: false,
-        primary_key: false,
-        auto: false,
-        unique: false,
-        max_length: None,
-        min: None,
-        max: None,
-        default: None,
-        relation: None,
-        generated_as: None,
-        help_text: None,
-        choices: None,
-        db_comment: None,
-        verbose_name: None,
-        editable: true,
-        blank: false,
-        case_insensitive: false,
-        fk_on_delete: None,
-        validators: &[],
-    };
+    let f = FieldSchema::new("blob", "blob", FieldType::Binary);
     let v = parse_form_value(&f, Some("deadbeef")).unwrap();
     assert!(matches!(v, SqlValue::Binary(b) if b == vec![0xde, 0xad, 0xbe, 0xef]));
 
@@ -180,30 +134,7 @@ fn form_parser_binary_hex() {
 fn form_parser_time() {
     use rustango::core::FieldSchema;
     use rustango::forms::parse_form_value;
-    let f = FieldSchema {
-        name: "opens_at",
-        column: "opens_at",
-        ty: FieldType::Time,
-        nullable: false,
-        primary_key: false,
-        auto: false,
-        unique: false,
-        max_length: None,
-        min: None,
-        max: None,
-        default: None,
-        relation: None,
-        generated_as: None,
-        help_text: None,
-        choices: None,
-        db_comment: None,
-        verbose_name: None,
-        editable: true,
-        blank: false,
-        case_insensitive: false,
-        fk_on_delete: None,
-        validators: &[],
-    };
+    let f = FieldSchema::new("opens_at", "opens_at", FieldType::Time);
     // Full HH:MM:SS form.
     let v = parse_form_value(&f, Some("14:30:45")).unwrap();
     assert!(matches!(v, SqlValue::Time(_)));
