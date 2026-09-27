@@ -4,6 +4,7 @@ use crate::core::QueryError;
 
 /// Raised while lowering a `SelectQuery` to a parameterized statement.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SqlError {
     /// `Op::In` was used with something other than `SqlValue::List`.
     #[error("`Op::In` requires `SqlValue::List`")]
@@ -226,6 +227,7 @@ pub enum SqlError {
 
 /// Raised while compiling, writing, or executing a query end-to-end.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExecError {
     #[error(transparent)]
     Query(#[from] QueryError),

@@ -206,6 +206,27 @@ it fails with `E0638`. Reading and assigning fields still works. Code
 that only uses the `QuerySet` API or `#[derive(Model)]` is unaffected.
 `OrderClause`, `Join` and the other clause structs are not changed yet.
 
+### Schema structs are `#[non_exhaustive]`
+
+`FieldSchema`, `ModelSchema`, `AdminConfig`, `IndexSchema`,
+`GlobalScope`, `Fieldset`, `PrepopulatedField`, the relation and
+constraint structs, and `Relation::Fk` / `Relation::O2O` (#1661). A hand-built schema now fails with `E0639`. Start from `new`
+(or `AdminConfig::DEFAULT`) and assign fields:
+
+```rust
+const ID: FieldSchema = {
+    let mut f = FieldSchema::new("id", "id", FieldType::I64);
+    f.primary_key = true;
+    f
+};
+let rel = Relation::fk("user", "id");
+```
+
+A pattern on a variant needs `..` (`Relation::Fk { to, on, .. }`), or
+it fails with `E0638`.
+`SqlError` and `ExecError` are also `#[non_exhaustive]`; add a `_ =>`
+arm. `#[derive(Model)]` users are unaffected.
+
 ### `migrate` refuses a callback migration without `"atomic": false`
 
 Any migration file with a `{"callback": …}` op now needs

@@ -984,14 +984,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #manager_trait
 
         #root::core::inventory::submit! {
-            #root::core::ModelEntry {
-                schema: <#struct_name as #root::core::Model>::SCHEMA,
-                // `module_path!()` evaluates at the registration site,
-                // so a Model declared in `crate::blog::models` records
-                // `"<crate>::blog::models"` and `resolved_app_label()`
-                // can infer "blog" without an explicit attribute.
-                module_path: ::core::module_path!(),
-            }
+            // `module_path!()` evaluates at the registration site,
+            // so a Model declared in `crate::blog::models` records
+            // `"<crate>::blog::models"` and `resolved_app_label()`
+            // can infer "blog" without an explicit attribute.
+            #root::core::ModelEntry::new(
+                <#struct_name as #root::core::Model>::SCHEMA,
+                ::core::module_path!(),
+            )
         }
     })
 }
@@ -2518,26 +2518,19 @@ fn model_impl_tokens(
             None => quote!(::core::option::Option::None),
         };
         let include_lits: Vec<&str> = idx.include.iter().map(String::as_str).collect();
-        quote! {
-            #root::core::IndexSchema {
-                name: #name,
-                columns: &[ #(#cols),* ],
-                unique: #unique,
-                method: #method_variant,
-                where_clause: #where_clause,
-                include: &[ #(#include_lits),* ],
-            }
-        }
+        quote! {{
+            let mut i = #root::core::IndexSchema::new(#name, &[ #(#cols),* ]);
+            i.unique = #unique;
+            i.method = #method_variant;
+            i.where_clause = #where_clause;
+            i.include = &[ #(#include_lits),* ];
+            i
+        }}
     });
     let checks_tokens = checks.iter().map(|c| {
         let name = c.name.as_str();
         let expr = c.expr.as_str();
-        quote! {
-            #root::core::CheckConstraint {
-                name: #name,
-                expr: #expr,
-            }
-        }
+        quote!(#root::core::CheckConstraint::new(#name, #expr))
     });
     let excludes_tokens = excludes.iter().map(|e| {
         let name = e.name.as_str();
@@ -2551,14 +2544,15 @@ fn model_impl_tokens(
             Some(w) => quote!(::core::option::Option::Some(#w)),
             None => quote!(::core::option::Option::None),
         };
-        quote! {
-            #root::core::ExclusionConstraint {
-                name: #name,
-                using: #using,
-                elements: &[ #(#element_tokens),* ],
-                where_clause: #where_tokens,
-            }
-        }
+        quote! {{
+            let mut e = #root::core::ExclusionConstraint::new(
+                #name,
+                #using,
+                &[ #(#element_tokens),* ],
+            );
+            e.where_clause = #where_tokens;
+            e
+        }}
     });
     let composite_fk_tokens = composite_fks.iter().map(|rel| {
         let name = rel.name.as_str();
@@ -2566,25 +2560,19 @@ fn model_impl_tokens(
         let from_cols: Vec<&str> = rel.from.iter().map(String::as_str).collect();
         let on_cols: Vec<&str> = rel.on.iter().map(String::as_str).collect();
         quote! {
-            #root::core::CompositeFkRelation {
-                name: #name,
-                to: #to,
-                from: &[ #(#from_cols),* ],
-                on: &[ #(#on_cols),* ],
-            }
+            #root::core::CompositeFkRelation::new(
+                #name,
+                #to,
+                &[ #(#from_cols),* ],
+                &[ #(#on_cols),* ],
+            )
         }
     });
     let generic_fk_tokens = generic_fks.iter().map(|rel| {
         let name = rel.name.as_str();
         let ct_col = rel.ct_column.as_str();
         let pk_col = rel.pk_column.as_str();
-        quote! {
-            #root::core::GenericRelation {
-                name: #name,
-                ct_column: #ct_col,
-                pk_column: #pk_col,
-            }
-        }
+        quote!(#root::core::GenericRelation::new(#name, #ct_col, #pk_col))
     });
     // Issue #291 / T2.5 — `default_order` slice literal. Empty when
     // no `#[rustango(default_order = "...")]` attribute was supplied.
@@ -2599,13 +2587,14 @@ fn model_impl_tokens(
     // consumer's scope; the name is stored as a string literal.
     let global_scope_tokens = global_scopes.iter().map(|s| {
         let name = s.name.as_str();
-        let apply = &s.apply;
-        quote! {
-            #root::core::GlobalScope {
-                name: #name,
-                apply: #apply,
+        // The slice sits in a nested `const`, where `Self` does not resolve.
+        let mut apply = s.apply.clone();
+        if let Some(first) = apply.segments.first_mut() {
+            if first.ident == "Self" {
+                first.ident = struct_name.clone();
             }
         }
+        quote!(#root::core::GlobalScope::new(#name, #apply))
     });
 
     let m2m_tokens = m2m_relations.iter().map(|rel| {
@@ -2615,16 +2604,11 @@ fn model_impl_tokens(
         let src = rel.src.as_str();
         let dst = rel.dst.as_str();
         let auto_create = rel.auto_create;
-        quote! {
-            #root::core::M2MRelation {
-                name: #name,
-                to: #to,
-                through: #through,
-                src_col: #src,
-                dst_col: #dst,
-                auto_create: #auto_create,
-            }
-        }
+        quote! {{
+            let mut m = #root::core::M2MRelation::new(#name, #to, #through, #src, #dst);
+            m.auto_create = #auto_create;
+            m
+        }}
     });
     // Issue #830 sub-piece: emit `Model::reverse_relations()` override
     // when the model declares `#[rustango(reverse_has(...))]`. Each
@@ -2640,12 +2624,12 @@ fn model_impl_tokens(
             let child_fk_column = rel.child_fk_column.as_str();
             let self_pk_column = rel.self_pk_column.as_str();
             quote! {
-                #root::core::ReverseRelation {
-                    name: #name,
-                    child_schema: <#child as #root::core::Model>::SCHEMA,
-                    child_fk_column: #child_fk_column,
-                    self_pk_column: #self_pk_column,
-                }
+                #root::core::ReverseRelation::new(
+                    #name,
+                    <#child as #root::core::Model>::SCHEMA,
+                    #child_fk_column,
+                    #self_pk_column,
+                )
             }
         });
         quote! {
@@ -2667,13 +2651,13 @@ fn model_impl_tokens(
             let pk_column = rel.pk_column.as_str();
             let self_pk_column = rel.self_pk_column.as_str();
             quote! {
-                #root::core::GenericReverseRelation {
-                    name: #name,
-                    child_schema: <#child as #root::core::Model>::SCHEMA,
-                    ct_column: #ct_column,
-                    pk_column: #pk_column,
-                    self_pk_column: #self_pk_column,
-                }
+                #root::core::GenericReverseRelation::new(
+                    #name,
+                    <#child as #root::core::Model>::SCHEMA,
+                    #ct_column,
+                    #pk_column,
+                    #self_pk_column,
+                )
             }
         });
         quote! {
@@ -2683,41 +2667,55 @@ fn model_impl_tokens(
             }
         }
     };
+    let fields_slice = const_slice(
+        &quote!(#root::core::FieldSchema),
+        field_schemas.iter().cloned(),
+    );
+    let m2m_slice = const_slice(&quote!(#root::core::M2MRelation), m2m_tokens);
+    let indexes_slice = const_slice(&quote!(#root::core::IndexSchema), indexes_tokens);
+    let checks_slice = const_slice(&quote!(#root::core::CheckConstraint), checks_tokens);
+    let excludes_slice = const_slice(&quote!(#root::core::ExclusionConstraint), excludes_tokens);
+    let composite_fk_slice = const_slice(
+        &quote!(#root::core::CompositeFkRelation),
+        composite_fk_tokens,
+    );
+    let generic_fk_slice = const_slice(&quote!(#root::core::GenericRelation), generic_fk_tokens);
+    let global_scope_slice = const_slice(&quote!(#root::core::GlobalScope), global_scope_tokens);
     quote! {
         impl #root::core::Model for #struct_name {
-            const SCHEMA: &'static #root::core::ModelSchema = &#root::core::ModelSchema {
-                name: #model_name,
-                table: #table,
-                fields: &[ #(#field_schemas),* ],
-                display: #display_tokens,
-                app_label: #app_label_tokens,
-                admin: #admin_tokens,
-                soft_delete_column: #soft_delete_tokens,
-                permissions: #permissions,
-                audit_track: #audit_track_tokens,
-                m2m: &[ #(#m2m_tokens),* ],
-                indexes: &[ #(#indexes_tokens),* ],
-                check_constraints: &[ #(#checks_tokens),* ],
-                exclusion_constraints: &[ #(#excludes_tokens),* ],
-                composite_relations: &[ #(#composite_fk_tokens),* ],
-                generic_relations: &[ #(#generic_fk_tokens),* ],
-                scope: #scope_tokens,
-                default_order: &[ #(#default_order_tokens),* ],
-                is_view: #is_view,
-                verbose_name: #verbose_name_tokens,
-                verbose_name_plural: #verbose_name_plural_tokens,
-                managed: #managed,
-                base_manager_name: #base_manager_name_tokens,
-                order_with_respect_to: #order_with_respect_to_tokens,
-                proxy: #proxy,
-                required_db_features: &[ #(#required_db_features_lits),* ],
-                required_db_vendor: #required_db_vendor_tokens,
-                default_related_name: #default_related_name_tokens,
-                db_table_comment: #db_table_comment_tokens,
-                get_latest_by: #get_latest_by_tokens,
-                extra_permissions: &[ #(#extra_permission_tokens),* ],
-                default_permissions: &[ #(#default_permission_tokens),* ],
-                global_scopes: &[ #(#global_scope_tokens),* ],
+            const SCHEMA: &'static #root::core::ModelSchema = &{
+                let mut s = #root::core::ModelSchema::new(#model_name, #table);
+                s.fields = #fields_slice;
+                s.display = #display_tokens;
+                s.app_label = #app_label_tokens;
+                s.admin = #admin_tokens;
+                s.soft_delete_column = #soft_delete_tokens;
+                s.permissions = #permissions;
+                s.audit_track = #audit_track_tokens;
+                s.m2m = #m2m_slice;
+                s.indexes = #indexes_slice;
+                s.check_constraints = #checks_slice;
+                s.exclusion_constraints = #excludes_slice;
+                s.composite_relations = #composite_fk_slice;
+                s.generic_relations = #generic_fk_slice;
+                s.scope = #scope_tokens;
+                s.default_order = &[ #(#default_order_tokens),* ];
+                s.is_view = #is_view;
+                s.verbose_name = #verbose_name_tokens;
+                s.verbose_name_plural = #verbose_name_plural_tokens;
+                s.managed = #managed;
+                s.base_manager_name = #base_manager_name_tokens;
+                s.order_with_respect_to = #order_with_respect_to_tokens;
+                s.proxy = #proxy;
+                s.required_db_features = &[ #(#required_db_features_lits),* ];
+                s.required_db_vendor = #required_db_vendor_tokens;
+                s.default_related_name = #default_related_name_tokens;
+                s.db_table_comment = #db_table_comment_tokens;
+                s.get_latest_by = #get_latest_by_tokens;
+                s.extra_permissions = &[ #(#extra_permission_tokens),* ];
+                s.default_permissions = &[ #(#default_permission_tokens),* ];
+                s.global_scopes = #global_scope_slice;
+                s
             };
 
             #reverse_relations_override
@@ -2775,14 +2773,14 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .as_ref()
         .map(|(v, _)| v.as_slice())
         .unwrap_or(&[]);
-    let fieldset_tokens = fieldsets.iter().map(|(title, fields)| {
-        let title = title.as_str();
-        let field_lits = fields.iter().map(|s| s.as_str());
-        quote!(#root::core::Fieldset {
-            title: #title,
-            fields: &[ #( #field_lits ),* ],
-        })
-    });
+    let fieldset_tokens = const_slice(
+        &quote!(#root::core::Fieldset),
+        fieldsets.iter().map(|(title, fields)| {
+            let title = title.as_str();
+            let field_lits = fields.iter().map(String::as_str);
+            quote!(#root::core::Fieldset::new(#title, &[ #( #field_lits ),* ]))
+        }),
+    );
 
     let list_display_links = admin
         .list_display_links
@@ -2801,14 +2799,14 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .as_ref()
         .map(|(v, _)| v.as_slice())
         .unwrap_or(&[]);
-    let prepopulated_tokens = prepopulated.iter().map(|(target, sources)| {
-        let target = target.as_str();
-        let source_lits = sources.iter().map(|s| s.as_str());
-        quote!(#root::core::PrepopulatedField {
-            target: #target,
-            sources: &[ #( #source_lits ),* ],
-        })
-    });
+    let prepopulated_tokens = const_slice(
+        &quote!(#root::core::PrepopulatedField),
+        prepopulated.iter().map(|(target, sources)| {
+            let target = target.as_str();
+            let source_lits = sources.iter().map(String::as_str);
+            quote!(#root::core::PrepopulatedField::new(#target, &[ #( #source_lits ),* ]))
+        }),
+    );
 
     let raw_id_fields = admin
         .raw_id_fields
@@ -2865,25 +2863,30 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     });
 
     quote! {
-        ::core::option::Option::Some(&#root::core::AdminConfig {
-            list_display: &[ #( #list_display_lits ),* ],
-            search_fields: &[ #( #search_fields_lits ),* ],
-            list_per_page: #list_per_page,
-            ordering: &[ #( #ordering_tokens ),* ],
-            readonly_fields: &[ #( #readonly_fields_lits ),* ],
-            list_filter: &[ #( #list_filter_lits ),* ],
-            actions: &[ #( #actions_lits ),* ],
-            fieldsets: &[ #( #fieldset_tokens ),* ],
-            list_display_links: &[ #( #list_display_links_lits ),* ],
-            search_help_text: #search_help_text,
-            actions_on_top: #actions_on_top,
-            actions_on_bottom: #actions_on_bottom,
-            date_hierarchy: #date_hierarchy,
-            prepopulated_fields: &[ #( #prepopulated_tokens ),* ],
-            raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
-            autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
-            list_select_related: #list_select_related_tokens,
-            formfield_overrides: &[ #( #formfield_tokens ),* ],
+        ::core::option::Option::Some({
+            const ADMIN: &#root::core::AdminConfig = &{
+                let mut a = #root::core::AdminConfig::DEFAULT;
+                a.list_display = &[ #( #list_display_lits ),* ];
+                a.search_fields = &[ #( #search_fields_lits ),* ];
+                a.list_per_page = #list_per_page;
+                a.ordering = &[ #( #ordering_tokens ),* ];
+                a.readonly_fields = &[ #( #readonly_fields_lits ),* ];
+                a.list_filter = &[ #( #list_filter_lits ),* ];
+                a.actions = &[ #( #actions_lits ),* ];
+                a.fieldsets = #fieldset_tokens;
+                a.list_display_links = &[ #( #list_display_links_lits ),* ];
+                a.search_help_text = #search_help_text;
+                a.actions_on_top = #actions_on_top;
+                a.actions_on_bottom = #actions_on_bottom;
+                a.date_hierarchy = #date_hierarchy;
+                a.prepopulated_fields = #prepopulated_tokens;
+                a.raw_id_fields = &[ #( #raw_id_fields_lits ),* ];
+                a.autocomplete_fields = &[ #( #autocomplete_fields_lits ),* ];
+                a.list_select_related = #list_select_related_tokens;
+                a.formfield_overrides = &[ #( #formfield_tokens ),* ];
+                a
+            };
+            ADMIN
         })
     }
 }
@@ -11223,32 +11226,29 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             ))
         }
     };
-    let schema = quote! {
-        #root::core::FieldSchema {
-            name: #name,
-            column: #column_lit,
-            ty: #field_type_tokens,
-            nullable: #nullable,
-            primary_key: #primary_key,
-            relation: #relation,
-            max_length: #max_length,
-            min: #min,
-            max: #max,
-            default: #default,
-            auto: #auto,
-            unique: #unique,
-            generated_as: #generated_as,
-            help_text: #help_text,
-            choices: #choices,
-            db_comment: #db_comment,
-            verbose_name: #verbose_name,
-            editable: #editable,
-            blank: #blank,
-            case_insensitive: #case_insensitive,
-            fk_on_delete: #fk_on_delete,
-            validators: &[ #(#validators_lits),* ],
-        }
-    };
+    let schema = quote! {{
+        let mut f = #root::core::FieldSchema::new(#name, #column_lit, #field_type_tokens);
+        f.nullable = #nullable;
+        f.primary_key = #primary_key;
+        f.relation = #relation;
+        f.max_length = #max_length;
+        f.min = #min;
+        f.max = #max;
+        f.default = #default;
+        f.auto = #auto;
+        f.unique = #unique;
+        f.generated_as = #generated_as;
+        f.help_text = #help_text;
+        f.choices = #choices;
+        f.db_comment = #db_comment;
+        f.verbose_name = #verbose_name;
+        f.editable = #editable;
+        f.blank = #blank;
+        f.case_insensitive = #case_insensitive;
+        f.fk_on_delete = #fk_on_delete;
+        f.validators = &[ #(#validators_lits),* ];
+        f
+    }};
 
     let from_row_init = quote! {
         #ident: #root::sql::sqlx::Row::try_get(row, #column_lit)?
@@ -11318,6 +11318,15 @@ fn check_bound_compatibility(
     Ok(())
 }
 
+/// A `&'static [ty]` of `const fn` results. The slice needs its own
+/// `const`: a `&[..]` assigned in a statement is not extended to `'static`.
+fn const_slice(ty: &TokenStream2, items: impl Iterator<Item = TokenStream2>) -> TokenStream2 {
+    quote!({
+        const ITEMS: &[#ty] = &[ #(#items),* ];
+        ITEMS
+    })
+}
+
 fn optional_u32(value: Option<u32>) -> TokenStream2 {
     if let Some(v) = value {
         quote!(::core::option::Option::Some(#v))
@@ -11367,10 +11376,10 @@ fn relation_tokens(
         }
         let on = attrs.on.as_deref().unwrap_or("id");
         return Ok(quote! {
-            ::core::option::Option::Some(#root::core::Relation::Fk {
-                to: <#inner as #root::core::Model>::SCHEMA.table,
-                on: #on,
-            })
+            ::core::option::Option::Some(#root::core::Relation::fk(
+                <#inner as #root::core::Model>::SCHEMA.table,
+                #on,
+            ))
         });
     }
     match (&attrs.fk, &attrs.o2o) {
@@ -11387,14 +11396,14 @@ fn relation_tokens(
             // inside Self::SCHEMA's own initializer.
             let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(#root::core::Relation::Fk { to: #resolved, on: #on })
+                ::core::option::Option::Some(#root::core::Relation::fk(#resolved, #on))
             })
         }
         (None, Some(to)) => {
             let on = attrs.on.as_deref().unwrap_or("id");
             let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(#root::core::Relation::O2O { to: #resolved, on: #on })
+                ::core::option::Option::Some(#root::core::Relation::o2o(#resolved, #on))
             })
         }
         (None, None) => {

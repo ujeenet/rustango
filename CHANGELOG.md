@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — schema structs are `#[non_exhaustive]`, with `const fn` constructors (#1661)
+
+**Breaking** for hand-built schemas; see UPGRADING. `FieldSchema`,
+`ModelSchema` and the other structs in `core::schema`, the
+`Relation` variants, `SqlError` and `ExecError` can now grow without a
+breaking release. `clippy::exhaustive_structs` is denied in
+`core::schema`, so a new struct there cannot slip in exhaustive.
+
 ### Security — tenant admin writes are CSRF-protected (#1713)
 
 The tenant admin's create, update, delete, bulk actions, change-password

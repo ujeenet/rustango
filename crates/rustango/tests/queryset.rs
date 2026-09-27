@@ -37,7 +37,7 @@ pub struct UserProfile {
 fn fk_relation_lands_on_field_schema() {
     let f = BlogPost::SCHEMA.field("author_id").unwrap();
     match f.relation {
-        Some(Relation::Fk { to, on }) => {
+        Some(Relation::Fk { to, on, .. }) => {
             assert_eq!(to, "user");
             assert_eq!(on, "id");
         }
@@ -49,7 +49,7 @@ fn fk_relation_lands_on_field_schema() {
 fn o2o_defaults_on_to_id() {
     let f = UserProfile::SCHEMA.field("user_id").unwrap();
     match f.relation {
-        Some(Relation::O2O { to, on }) => {
+        Some(Relation::O2O { to, on, .. }) => {
             assert_eq!(to, "user");
             assert_eq!(on, "id");
         }
