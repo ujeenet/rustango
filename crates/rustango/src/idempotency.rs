@@ -31,6 +31,9 @@
 //! short-lived error can still reach a healthy replica. Change this
 //! with [`IdempotencyLayer::cache_status_codes`].
 //!
+//! A response that sets a cookie is never stored: it carries per-client
+//! state, and a replay must be the original response or nothing.
+//!
 //! ## What gets checked
 //!
 //! POST, PUT, PATCH and DELETE by default. GET, HEAD and OPTIONS skip
@@ -38,9 +41,13 @@
 //!
 //! ## Cache keys
 //!
-//! `idem:<scope>:<idempotency_key>`. Set `<scope>` with
-//! [`IdempotencyLayer::scope`] to keep two endpoints' keys apart, for
-//! example `"charges"` and `"refunds"`.
+//! `idem:<sha256>` over the [`IdempotencyLayer::scope`], host, tenant,
+//! principal, the `Authorization` and `Cookie` headers, method, path and
+//! query, and the client's key. The same key from another caller or on
+//! another route is a different entry. Add the auth layer after
+//! `.idempotency(..)`, so it runs first and the principal is resolved.
+//!
+//! A reused key with a different request body gets `422`.
 //!
 //! [`IdempotencyLayer::scope`]: crate::idempotency::IdempotencyLayer::scope
 //! [`IdempotencyLayer::cache_status_codes`]: crate::idempotency::IdempotencyLayer::cache_status_codes
@@ -49,12 +56,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
-use axum::extract::Request;
+use axum::extract::{OriginalUri, Request};
+use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HOST, SET_COOKIE};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
 use axum::middleware::Next;
+use axum::response::IntoResponse;
 use axum::Router;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use crate::api_errors::ApiError;
 use crate::cache::BoxedCache;
 
 const DEFAULT_HEADER: &str = "idempotency-key";
@@ -63,6 +75,8 @@ const DEFAULT_BODY_CAP: usize = 4 * 1024 * 1024;
 /// A stored response, kept until its TTL runs out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredResponse {
+    /// SHA-256 of the request body that produced this response.
+    request_sha256: String,
     status: u16,
     headers: Vec<(String, String)>,
     body_b64: String,
@@ -107,8 +121,8 @@ impl IdempotencyLayer {
         self
     }
 
-    /// Prefix the cache keys, so two routers on one cache cannot
-    /// replay each other's responses.
+    /// Add a name to the cache keys, so two routers on one cache
+    /// cannot replay each other's responses.
     #[must_use]
     pub fn scope(mut self, scope: impl Into<String>) -> Self {
         self.scope = Arc::new(scope.into());
@@ -129,8 +143,8 @@ impl IdempotencyLayer {
         self
     }
 
-    /// Largest body the layer will store, 4 MiB by default. A bigger
-    /// one is not stored, so a retry runs the handler again.
+    /// Largest request or response body the layer handles, 4 MiB by
+    /// default. A bigger one is not stored, so a retry runs the handler again.
     #[must_use]
     pub fn body_cap(mut self, n: usize) -> Self {
         self.body_cap = n;
@@ -183,15 +197,43 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         // handler, which may answer with its own 4xx.
         return next.run(req).await;
     }
-    let cache_key = format!("idem:{}:{}", cfg.scope, key);
+    let (parts, body) = req.into_parts();
+    let declared_len = parts
+        .headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok());
+    if declared_len.is_some_and(|n| n > cfg.body_cap) {
+        return next.run(Request::from_parts(parts, body)).await;
+    }
+    let Ok(req_bytes) = to_bytes(body, cfg.body_cap).await else {
+        return ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "request body too large",
+        )
+        .into_response();
+    };
+    let cache_key = cache_key(&cfg.scope, &parts, &key);
+    let request_sha256 = hex(&Sha256::digest(&req_bytes));
 
-    // Hit: replay the stored response.
+    // Hit: replay the stored response, if it answered this same body.
     if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
+        if stored.request_sha256 != request_sha256 {
+            return ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "idempotency_key_reused",
+                "idempotency key was used with a different request body",
+            )
+            .into_response();
+        }
         return rebuild(stored);
     }
 
     // Miss: run the handler, then store the result if it succeeded.
-    let response = next.run(req).await;
+    let response = next
+        .run(Request::from_parts(parts, Body::from(req_bytes)))
+        .await;
     let (parts, body) = response.into_parts();
     let status = parts.status;
     let bytes = match to_bytes(body, cfg.body_cap).await {
@@ -204,8 +246,9 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         }
     };
 
-    if (cfg.cache_status)(status) {
+    if (cfg.cache_status)(status) && !parts.headers.contains_key(SET_COOKIE) {
         let stored = StoredResponse {
+            request_sha256,
             status: status.as_u16(),
             headers: parts
                 .headers
@@ -227,6 +270,94 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
     }
 
     Response::from_parts(parts, Body::from(bytes))
+}
+
+/// Feeds length-prefixed fields to SHA-256, so no two field lists hash alike.
+struct KeyHasher(Sha256);
+
+impl KeyHasher {
+    fn field(&mut self, bytes: &[u8]) {
+        self.0.update((bytes.len() as u64).to_le_bytes());
+        self.0.update(bytes);
+    }
+
+    fn opt(&mut self, bytes: Option<&[u8]>) {
+        match bytes {
+            None => self.0.update([0]),
+            Some(b) => {
+                self.0.update([1]);
+                self.field(b);
+            }
+        }
+    }
+
+    fn all(&mut self, parts: &Parts, name: HeaderName) {
+        let values: Vec<&HeaderValue> = parts.headers.get_all(name).iter().collect();
+        self.0.update((values.len() as u64).to_le_bytes());
+        for v in values {
+            self.field(v.as_bytes());
+        }
+    }
+}
+
+/// Cache key for who sent the request, where, and with which client key.
+fn cache_key(scope: &str, parts: &Parts, key: &str) -> String {
+    let mut h = KeyHasher(Sha256::new());
+    h.field(scope.as_bytes());
+    let host = parts
+        .uri
+        .authority()
+        .map(|a| a.as_str().as_bytes())
+        .or_else(|| parts.headers.get(HOST).map(HeaderValue::as_bytes));
+    h.opt(host);
+    principal_fields(&mut h, parts);
+    h.all(parts, AUTHORIZATION);
+    h.all(parts, COOKIE);
+    h.field(parts.method.as_str().as_bytes());
+    // A nested router strips its prefix from `uri`; key on the full path.
+    let uri = parts
+        .extensions
+        .get::<OriginalUri>()
+        .map_or(&parts.uri, |o| &o.0);
+    h.opt(uri.path_and_query().map(|pq| pq.as_str().as_bytes()));
+    h.field(key.as_bytes());
+    format!("idem:{}", hex(&h.0.finalize()))
+}
+
+#[cfg(feature = "tenancy")]
+fn principal_fields(h: &mut KeyHasher, parts: &Parts) {
+    use crate::tenancy::{Principal, PrincipalKind, TenantSlug};
+    h.opt(
+        parts
+            .extensions
+            .get::<TenantSlug>()
+            .map(|TenantSlug(s)| s.as_bytes()),
+    );
+    match Principal::from_parts(parts) {
+        None => h.field(b"anonymous"),
+        Some(p) => {
+            h.field(match p.kind {
+                PrincipalKind::User => b"user",
+                PrincipalKind::Agent => b"agent",
+            });
+            h.field(&p.user_id.to_le_bytes());
+            h.opt(p.agent_id.map(i64::to_le_bytes).as_ref().map(|b| &b[..]));
+            h.opt(p.tenant.as_deref().map(str::as_bytes));
+        }
+    }
+}
+
+#[cfg(not(feature = "tenancy"))]
+fn principal_fields(h: &mut KeyHasher, _parts: &Parts) {
+    h.field(b"anonymous");
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 async fn read_stored(cache: &BoxedCache, cache_key: &str) -> Option<StoredResponse> {
@@ -610,6 +741,164 @@ mod tests {
             Some("true")
         );
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    /// A counting app on two paths; each call answers `call-<n>`.
+    fn counting_app(counter: StdArc<AtomicUsize>, layer: IdempotencyLayer) -> Router {
+        let handler = move |body: String| {
+            let c = counter.clone();
+            async move { format!("call-{}:{body}", c.fetch_add(1, Ordering::SeqCst)) }
+        };
+        Router::new()
+            .route("/a", post(handler.clone()))
+            .route("/b", post(handler))
+            .idempotency(layer)
+    }
+
+    fn keyed(path: &str) -> axum::http::request::Builder {
+        Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("host", "shop.example")
+            .header("idempotency-key", "k1")
+    }
+
+    #[tokio::test]
+    async fn same_key_from_two_credentials_does_not_replay() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = counting_app(counter.clone(), IdempotencyLayer::new(cache()));
+        let send = |auth: &'static str| {
+            keyed("/a")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r1 = app.clone().oneshot(send("Bearer alice")).await.unwrap();
+        assert_eq!(body_string(r1).await, "call-0:");
+        let r2 = app.clone().oneshot(send("Bearer bob")).await.unwrap();
+        assert!(r2.headers().get("idempotent-replayed").is_none());
+        assert_eq!(body_string(r2).await, "call-1:");
+        let r3 = app.oneshot(send("Bearer alice")).await.unwrap();
+        assert_eq!(body_string(r3).await, "call-0:");
+    }
+
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn same_key_from_two_principals_does_not_replay() {
+        use crate::tenancy::Principal;
+        let counter = StdArc::new(AtomicUsize::new(0));
+        // Stands in for an auth layer mounted outside the idempotency layer.
+        let app = counting_app(counter.clone(), IdempotencyLayer::new(cache())).layer(
+            axum::middleware::from_fn(|mut req: Request<Body>, next: Next| async move {
+                let user = req
+                    .headers()
+                    .get("x-test-user")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<i64>().ok());
+                if let Some(id) = user {
+                    req.extensions_mut()
+                        .insert(Principal::user(id, false, None));
+                }
+                next.run(req).await
+            }),
+        );
+        let send = |user: Option<&'static str>| {
+            let b = keyed("/a");
+            let b = match user {
+                Some(u) => b.header("x-test-user", u),
+                None => b,
+            };
+            b.body(Body::empty()).unwrap()
+        };
+        let r = app.clone().oneshot(send(Some("1"))).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        let r = app.clone().oneshot(send(Some("2"))).await.unwrap();
+        assert_eq!(body_string(r).await, "call-1:");
+        let r = app.clone().oneshot(send(None)).await.unwrap();
+        assert_eq!(
+            body_string(r).await,
+            "call-2:",
+            "anonymous is its own caller"
+        );
+        let r = app.oneshot(send(Some("1"))).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn same_key_on_two_paths_does_not_replay() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = counting_app(counter.clone(), IdempotencyLayer::new(cache()));
+        let r = app
+            .clone()
+            .oneshot(keyed("/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        let r = app
+            .oneshot(keyed("/b").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(r.headers().get("idempotent-replayed").is_none());
+        assert_eq!(body_string(r).await, "call-1:");
+    }
+
+    #[tokio::test]
+    async fn set_cookie_response_is_never_replayed() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let app = Router::new()
+            .route(
+                "/",
+                post(move || {
+                    let c = c.clone();
+                    async move {
+                        c.fetch_add(1, Ordering::SeqCst);
+                        ([(SET_COOKIE, "session=secret; HttpOnly")], "ok")
+                    }
+                }),
+            )
+            .idempotency(IdempotencyLayer::new(cache()));
+        for _ in 0..2 {
+            let r = app
+                .clone()
+                .oneshot(keyed("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert!(r.headers().get("idempotent-replayed").is_none());
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn reused_key_with_different_body_is_422() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = counting_app(counter.clone(), IdempotencyLayer::new(cache()));
+        let send = |body: &'static str| keyed("/a").body(Body::from(body)).unwrap();
+        let r = app.clone().oneshot(send("amount=10")).await.unwrap();
+        assert_eq!(
+            body_string(r).await,
+            "call-0:amount=10",
+            "body reaches handler"
+        );
+        let r = app.clone().oneshot(send("amount=99")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let r = app.oneshot(send("amount=10")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:amount=10");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn key_fields_cannot_shift_across_a_separator() {
+        let p = Request::builder()
+            .method(Method::POST)
+            .uri("/a")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert_ne!(cache_key("x:y", &p, "z"), cache_key("x", &p, "y:z"));
+        assert_eq!(cache_key("x", &p, "z").len(), "idem:".len() + 64);
     }
 
     #[tokio::test]
