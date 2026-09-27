@@ -1032,8 +1032,8 @@ impl Cli {
     ///
     /// Mounting here rather than in the settings layers is still the
     /// point: that path only runs when the app calls
-    /// `.with_settings_from_env()`, which no scaffolder template does,
-    /// so the tenant field was unreachable by default (#1480).
+    /// `.with_settings_from_env()`, which the api template does not call,
+    /// so the tenant field would be unreachable there (#1480).
     ///
     /// `TracingLayer` had a worse version of the same problem: it built
     /// a correct span carrying tenant, method, path and status, and
@@ -1506,8 +1506,8 @@ fn warn_if_settings_inert() {
         "these settings are configured but NOT being applied — no settings layer is \
          installed. Add `.with_settings_from_env()` to the `Cli` builder chain to \
          activate them (CORS, body limit, request timeout, security headers). \
-         Note that enabling them also turns on a strict CSP, which can break a \
-         server-rendered app that was fine without it."
+         A `[security] csp` you set also takes effect then, and can break \
+         pages that use inline script."
     );
 }
 
@@ -1537,7 +1537,7 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> (Router, O
     // `Cli::mount_observability`, which runs whether or not the app
     // calls `.with_settings_from_env()` — mounting it here made the
     // request log, and with it the tenant field, conditional on a
-    // builder call no scaffolder template makes (#1480). The redact
+    // builder call the api template does not make (#1480). The redact
     // list from `[audit] redact_query_params` still reaches the layer;
     // `mount_observability` reads the same settings.
 
