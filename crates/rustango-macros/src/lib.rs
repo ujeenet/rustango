@@ -3271,12 +3271,13 @@ fn inherent_impl_tokens(
     // Builds `_audit_entry`; `written` is the soft-delete column's new
     // value, recorded in place of the stale `self` field.
     let make_entry = |op_path: TokenStream2, written: Option<TokenStream2>| -> TokenStream2 {
-        match (written, fields.soft_delete_column.as_deref()) {
-            (Some(v), Some(col)) => quote! {
+        if let (Some(v), Some(col)) = (written, fields.soft_delete_column.as_deref()) {
+            quote! {
                 let mut _audit_entry = self.__rustango_audit_entry(#op_path);
                 _audit_entry.set_tracked(#col, #v);
-            },
-            _ => quote!(let _audit_entry = self.__rustango_audit_entry(#op_path);),
+            }
+        } else {
+            quote!(let _audit_entry = self.__rustango_audit_entry(#op_path);)
         }
     };
     let soft_deleted_json = quote!(#root::__serde_json::to_value(&_now)
