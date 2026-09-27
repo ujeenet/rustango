@@ -596,8 +596,8 @@ pub struct SecuritySettings {
     /// Extra origins that pass the CSRF Origin check, on top of
     /// same-host requests. Each
     /// entry is scheme plus host, such as `"https://app.example.com"`
-    /// or `"https://*.example.com"`. Empty skips the Origin check.
-    /// Used by
+    /// or `"https://*.example.com"`. Empty still checks Origin, against
+    /// the request's own Host only. Used by
     /// [`crate::forms::csrf::CsrfConfig::with_trusted_origins`].
     pub csrf_trusted_origins: Vec<String>,
     /// `true` mounts [`crate::ssl_redirect::SslRedirectLayer`], which

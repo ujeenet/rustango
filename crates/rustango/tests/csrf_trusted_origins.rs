@@ -3,10 +3,8 @@
 //! double-submit-cookie token check.
 //!
 //! Behavior:
-//! * Default `trusted_origins: []` → Origin-header check disabled
-//!   (back-compat). Only the token check runs.
-//! * Non-empty list → on unsafe methods, request's Origin must be
-//!   either same-host or match one of the trusted entries.
+//! * On unsafe methods the Origin must be same-host or match a
+//!   trusted entry. An empty list means same-host only (#1529).
 //! * `https://*.example.com` wildcard matches any subdomain.
 
 #![cfg(feature = "csrf")]
