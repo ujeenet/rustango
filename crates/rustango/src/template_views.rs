@@ -440,16 +440,19 @@ impl ListView {
     /// = delete_selected` POST arrives without a `confirmed = true`
     /// flag. v0.31 candidate.
     ///
+    /// A custom action gets only the selected PKs the model's global
+    /// scopes let through.
+    ///
     /// ```rust,ignore
     /// ListView::for_model(Post::SCHEMA)
     ///     .bulk_actions(true)               // enables built-in delete_selected
     ///     .action("publish_selected", "Publish selected", Arc::new(|pool, pks| {
     ///         Box::pin(async move {
-    ///             let pks: Vec<i64> = pks.iter().filter_map(|v| match v {
-    ///                 SqlValue::I64(n) => Some(*n), _ => None,
-    ///             }).collect();
-    ///             sqlx::query("UPDATE posts SET status = 'published' WHERE id = ANY($1)")
-    ///                 .bind(&pks).execute(pool).await
+    ///             Post::objects()
+    ///                 .filter("id__in", SqlValue::List(pks.to_vec()))
+    ///                 .update()
+    ///                 .set("status", "published")
+    ///                 .execute_pool(pool).await
     ///                 .map(|_| ()).map_err(|e| e.to_string())
     ///         })
     ///     }))
@@ -867,6 +870,10 @@ async fn handle_list_action(
         .iter()
         .find(|a| same_action_name(&a.name, &action))
     {
+        let pks = match visible_pks_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
+            Ok(v) => v,
+            Err(e) => return template_error(&format!("scope selected rows: {e}")),
+        };
         match &custom.handler {
             BulkActionHandler::Pool(f) => f(&state.pool, &pks).await,
             #[cfg(all(feature = "tenancy", feature = "postgres"))]
@@ -2781,7 +2788,8 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
     // SQL writer project against the IN clause.
     let target = lookup_target_schema(fk.target_table)
         .expect("target table existed when collecting lookups");
-    // #810 — IN-list lookup via the `by_pk_in` constructor.
+    // #810 — IN-list lookup via the `by_pk_in` constructor; a target
+    // row its own global scopes hide gets no `_display`.
     SelectQuery::by_pk_in(
         target,
         fk.target_pk_column,
@@ -2790,6 +2798,7 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
             .map(json_value_to_sql_for_fk_pk)
             .collect(),
     )
+    .with_global_scopes()
 }
 
 /// Convert a JSON-shaped value (read out of an object_list row)
@@ -2947,6 +2956,36 @@ async fn fetch_pks_as_objects_pool(
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/// `pks` narrowed to the rows the model's global scopes let through,
+/// in submitted order — what a custom bulk action receives.
+async fn visible_pks_pool(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pool: &Pool,
+    pks: &[SqlValue],
+) -> Result<Vec<SqlValue>, String> {
+    if pks.is_empty() || schema.global_scopes.is_empty() {
+        return Ok(pks.to_vec());
+    }
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
+    let rows = select_rows_as_json(pool, &q, &[pk_field])
+        .await
+        .map_err(|e| e.to_string())?;
+    let visible: Vec<SqlValue> = rows
+        .iter()
+        .filter_map(|r| r.get(pk_field.name))
+        .filter_map(|v| {
+            let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+            coerce_pk_typed(pk_field, &raw).ok()
+        })
+        .collect();
+    Ok(pks
+        .iter()
+        .filter(|p| visible.contains(p))
+        .cloned()
+        .collect())
 }
 
 /// Run the built-in `delete_selected` action: `DELETE FROM <table>
@@ -3538,6 +3577,10 @@ mod tenant {
             .iter()
             .find(|a| super::same_action_name(&a.name, &action))
         {
+            let pks = match super::visible_pks_pool(state.vs.schema, pk_field, &pool, &pks).await {
+                Ok(v) => v,
+                Err(e) => return template_error(&format!("scope selected rows: {e}")),
+            };
             match &custom.handler {
                 #[cfg(feature = "postgres")]
                 super::BulkActionHandler::Tenant(f) => {
