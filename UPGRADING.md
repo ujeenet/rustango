@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### SSO signs in by link, not by email
+
+Existing SSO users are refused until they are linked. Either turn on
+`allow_email_link` for a provider (a normal user is linked on the next
+login), or add an `SsoLink` row in the admin; superusers, staff and every
+bare-admin account need the row (the refusal log names the subject).
+Run `makemigrations` + `migrate` for the new `allow_email_link` column on
+`rustango_sso_providers` and `rustango_shared_sso_providers`; until then
+email linking reads as off. `rustango_sso_links` is created on first use.
+`find_or_provision_member(pool, email, profile, auto)` is now
+`(pool, &ProviderKey, allow_email_link, profile, auto)`.
+
 ### The trusted client IP is the rightmost untrusted hop
 
 Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the

@@ -2,10 +2,9 @@
 //! (`admin-sso` feature).
 //!
 //! Reuses the shared handshake core in [`crate::admin::sso`]
-//! ([`build_provider`], [`verified_email`], flow sealing) and mints the
-//! tenant session (`rustango_tenant_session`) bound to an existing
-//! `rustango_users.email` in the tenant's own storage. Access is
-//! link-to-existing — SSO never auto-provisions a tenant user.
+//! ([`build_provider`], flow sealing) and mints the tenant session
+//! (`rustango_tenant_session`) for the tenant user linked to the IdP
+//! subject ([`crate::sso::link`]). SSO never auto-provisions a tenant user.
 //!
 //! Providers are rows, managed from the admin UI: each tenant's own
 //! [`crate::admin::sso_provider::SsoProvider`] table (per-tenant, granular)
@@ -21,11 +20,13 @@ use axum::{
 };
 
 use crate::admin::sso::{
-    build_provider, open_flow, parse_scopes, seal_flow, verified_email, ProviderButton,
-    ResolvedSso, SsoError, SSO_FLOW_COOKIE,
+    build_provider, open_flow, seal_flow, ProviderButton, SsoError, SSO_FLOW_COOKIE,
 };
 use crate::admin::sso_provider::SsoProvider;
+use crate::query::QuerySet;
 use crate::sql::Pool;
+use crate::sso::link::{LinkSource, ProviderKey};
+use crate::sso::provider::{load_rows, resolve_row, ResolvedProvider};
 
 /// IdP callback params (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize, Default)]
@@ -35,7 +36,7 @@ struct CallbackParams {
     error: Option<String>,
 }
 
-use super::auth::User;
+use super::member_auth;
 use super::org::Org;
 use super::routes::RouteConfig;
 use super::tenant_console::{self, SessionSecret, TenantSessionPayload};
@@ -83,6 +84,9 @@ pub struct SharedSsoProvider {
     pub sort_order: i32,
     #[rustango(max_length = 255)]
     pub scopes: Option<String>,
+    /// See [`SsoProvider::allow_email_link`].
+    #[rustango(default = "false")]
+    pub allow_email_link: bool,
     #[rustango(auto_now_add)]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
     #[rustango(auto_now)]
@@ -98,13 +102,10 @@ pub(crate) async fn list_enabled(
     registry_pool: &Pool,
     routes: &RouteConfig,
 ) -> Vec<ProviderButton> {
-    use crate::sql::FetcherPool as _;
-    let tenant_rows: Vec<SsoProvider> = SsoProvider::objects()
-        .fetch(tenant_pool)
+    let tenant_rows = load_rows(QuerySet::<SsoProvider>::new(), tenant_pool)
         .await
         .unwrap_or_default();
-    let shared_rows: Vec<SharedSsoProvider> = SharedSsoProvider::objects()
-        .fetch(registry_pool)
+    let shared_rows = load_rows(QuerySet::<SharedSsoProvider>::new(), registry_pool)
         .await
         .unwrap_or_default();
     merge_provider_buttons(
@@ -148,61 +149,26 @@ fn merge_provider_buttons(
 }
 
 /// Resolve one provider by `slug` — the tenant's own table first, then the
-/// registry-wide shared set — into a ready-to-build [`ResolvedSso`], with
-/// the secret dereferenced by the tenancy [`SecretsResolver`]. `Ok(None)`
-/// when no enabled row matches.
+/// registry-wide shared set — with its link key. `Ok(None)` when no enabled
+/// row matches.
 async fn resolve_by_slug(
     tenant_pool: &Pool,
     registry_pool: &Pool,
     slug: &str,
     redirect_uri: String,
-) -> Result<Option<ResolvedSso>, SsoError> {
-    use crate::sql::FetcherPool as _;
-    let tenant_row = SsoProvider::objects()
-        .filter("slug", slug.to_owned())
-        .fetch(tenant_pool)
-        .await
-        .map_err(|e| SsoError::Config(format!("db: {e}")))?
-        .into_iter()
-        .find(|r| r.enabled);
-    // The secret is stored encrypted at rest and decrypted transparently on
-    // load; `into_inner()` yields the plaintext to send to the IdP's token
-    // endpoint (over TLS).
-    let (kind, issuer_url, client_id, client_secret, scopes) = if let Some(r) = tenant_row {
-        (
-            r.kind,
-            r.issuer_url,
-            r.client_id,
-            r.client_secret.into_inner(),
-            r.scopes,
-        )
-    } else {
-        let shared = SharedSsoProvider::objects()
-            .filter("slug", slug.to_owned())
-            .fetch(registry_pool)
-            .await
-            .map_err(|e| SsoError::Config(format!("db: {e}")))?
-            .into_iter()
-            .find(|r| r.enabled);
-        let Some(r) = shared else {
-            return Ok(None);
-        };
-        (
-            r.kind,
-            r.issuer_url,
-            r.client_id,
-            r.client_secret.into_inner(),
-            r.scopes,
-        )
-    };
-    Ok(Some(ResolvedSso {
-        provider: kind,
-        issuer_url,
-        client_id,
-        client_secret,
-        redirect_uri,
-        scopes: parse_scopes(scopes.as_deref()),
-    }))
+) -> Result<Option<(ResolvedProvider, ProviderKey)>, SsoError> {
+    if let Some(p) = resolve_row::<SsoProvider>(tenant_pool, slug, redirect_uri.clone()).await? {
+        let key = p.key(LinkSource::Tenant);
+        return Ok(Some((p, key)));
+    }
+    Ok(
+        resolve_row::<SharedSsoProvider>(registry_pool, slug, redirect_uri)
+            .await?
+            .map(|p| {
+                let key = p.key(LinkSource::Shared);
+                (p, key)
+            }),
+    )
 }
 
 /// Derive the absolute per-provider callback URL for this tenant from the
@@ -258,7 +224,7 @@ pub(super) async fn tenant_sso_begin(
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
         return login_error(routes, "config");
     };
-    let cfg = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
+    let (cfg, _key) = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
         Ok(Some(c)) => c,
         Ok(None) => return login_error(routes, "disabled"),
         Err(e) => {
@@ -266,7 +232,7 @@ pub(super) async fn tenant_sso_begin(
             return login_error(routes, "config");
         }
     };
-    let provider = match build_provider(&cfg).await {
+    let provider = match build_provider(&cfg.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::tenancy::sso", "begin build: {e}");
@@ -284,8 +250,8 @@ pub(super) async fn tenant_sso_begin(
     resp
 }
 
-/// `GET {login_url}/sso/{slug}/callback` — finish the handshake, link by
-/// email, mint the tenant session.
+/// `GET {login_url}/sso/{slug}/callback` — finish the handshake, sign in
+/// the linked tenant user, mint the tenant session.
 pub(super) async fn tenant_sso_callback(
     org: &Org,
     slug: &str,
@@ -313,7 +279,7 @@ pub(super) async fn tenant_sso_callback(
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
         return login_error(routes, "config");
     };
-    let cfg = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
+    let (cfg, key) = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
         Ok(Some(c)) => c,
         Ok(None) => return login_error(routes, "disabled"),
         Err(e) => {
@@ -321,7 +287,7 @@ pub(super) async fn tenant_sso_callback(
             return login_error(routes, "config");
         }
     };
-    let provider = match build_provider(&cfg).await {
+    let provider = match build_provider(&cfg.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::tenancy::sso", "callback build: {e}");
@@ -335,13 +301,25 @@ pub(super) async fn tenant_sso_callback(
             return login_error(routes, "handshake");
         }
     };
-    let email = match verified_email(&normalized) {
-        Ok(e) => e.to_ascii_lowercase(),
-        Err(_) => return login_error(routes, "unverified"),
+    let uid = match crate::sso::link::sign_in(
+        tenant_pool,
+        &key,
+        cfg.allow_email_link,
+        &normalized,
+        |email| member_auth::tenant_email_match(tenant_pool, email),
+    )
+    .await
+    {
+        Ok(uid) => uid,
+        Err(e) => {
+            tracing::warn!(
+                target: "rustango::tenancy::sso",
+                tenant = %org.slug, slug, subject = %normalized.provider_user_id, "sso refused: {e}"
+            );
+            return login_error(routes, "nouser");
+        }
     };
-
-    let Some((uid, user)) = find_tenant_user_by_email(tenant_pool, &email).await else {
-        tracing::warn!(target: "rustango::tenancy::sso", "no tenant user for {email} in {}", org.slug);
+    let Some(user) = member_auth::tenant_user(tenant_pool, uid).await else {
         return login_error(routes, "nouser");
     };
     if !user.active {
@@ -371,20 +349,6 @@ pub(super) async fn tenant_sso_callback(
     set_cookie(&mut resp, &session_cookie);
     set_cookie(&mut resp, &clear_flow);
     resp
-}
-
-/// Look up a saved tenant user by lowercased email in the tenant's
-/// scoped pool, as `(id, row)`. `None` when no row matches (link-to-existing).
-async fn find_tenant_user_by_email(pool: &crate::sql::Pool, email: &str) -> Option<(i64, User)> {
-    use crate::sql::FetcherPool as _;
-    let user = User::objects()
-        .filter("email", email.to_owned())
-        .fetch(pool)
-        .await
-        .ok()?
-        .into_iter()
-        .next()?;
-    Some((user.id.get().copied()?, user))
 }
 
 #[cfg(test)]

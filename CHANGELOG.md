@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — SSO links accounts by provider subject, email linking opt-in
+
+SSO logins (bare admin, tenant admin, member) now sign in the user linked
+to the IdP's `(provider, sub)` in the new `rustango_sso_links` table. A
+matching email links a first-time user only when the provider has the new
+`allow_email_link` (default off), and never a superuser or staff account.
+`sso::resolve_by_slug` returns `ResolvedProvider`, and
+`member_auth::find_or_provision_member` takes a `ProviderKey`.
+
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 
 `RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`
