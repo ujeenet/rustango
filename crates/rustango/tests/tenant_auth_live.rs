@@ -667,11 +667,51 @@ async fn admin_write_records_user_source_via_with_source_install() {
         ("label", "after-edit"),
     ])
     .unwrap();
+
+    // #1713 — a forged update riding the session cookie is refused: no
+    // token, or the full pair planted from a sibling tenant's Origin.
+    for extra in [
+        vec![],
+        vec![
+            ("cookie", format!("rustango_csrf={token}")),
+            ("x-csrf-token", token.clone()),
+            ("host", "t01.example.com".to_owned()),
+            ("origin", "http://t02.example.com".to_owned()),
+        ],
+    ] {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(format!("/tenauth_widget/{widget_pk}"))
+            .header("x-org", &slug)
+            .header("cookie", &cookie)
+            .header("content-type", "application/x-www-form-urlencoded");
+        for (k, v) in &extra {
+            req = req.header(*k, v);
+        }
+        let forged = req.body(Body::from(update_form.clone())).unwrap();
+        let resp = app.clone().oneshot(forged).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{extra:?}");
+    }
+    let rows: Vec<Widget> = {
+        use rustango::sql::FetcherPool as _;
+        Widget::objects()
+            .fetch(&rustango::sql::Pool::from(pool.clone()))
+            .await
+            .unwrap()
+    };
+    assert!(
+        rows.iter().all(|w| w.label == "before-edit"),
+        "a refused write must change nothing"
+    );
+
     let update_req = Request::builder()
         .method("POST")
         .uri(format!("/tenauth_widget/{widget_pk}"))
         .header("x-org", &slug)
         .header("cookie", &cookie)
+        // Admin writes need the CSRF pair too (#1713).
+        .header("cookie", format!("rustango_csrf={token}"))
+        .header("x-csrf-token", &token)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(update_form))
         .unwrap();
