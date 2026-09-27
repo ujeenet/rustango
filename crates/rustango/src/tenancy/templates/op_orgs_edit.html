@@ -35,12 +35,14 @@
   {% if provisioning_enabled %}
   <form method="post" action="/orgs/{{ slug }}/migrate" class="inline-form"
         onsubmit="return confirm('Run migrations for {{ slug }}?');">
+    {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Run migrations</button>
   </form>
   {% endif %}
 </div>
 
 <form method="post" action="/orgs/{{ slug }}/edit" class="edit-form">
+  {{ csrf_input | default(value='') | safe }}
 
   <fieldset class="section locked">
     <legend>Locked</legend>
@@ -75,7 +77,7 @@
   </div>
 </form>
 
-<form method="post" action="/orgs/{{ slug }}/edit/branding" enctype="multipart/form-data" class="edit-form">
+<form method="post" action="/orgs/{{ slug }}/edit/branding" enctype="multipart/form-data" class="edit-form" id="branding-form">
   <fieldset class="section">
     <legend>Branding assets</legend>
     <table>
@@ -111,6 +113,7 @@
    mounts when the tenant session secret is shared). #}
 {% if impersonate_enabled %}
 <form method="post" action="/orgs/{{ slug }}/impersonate" class="edit-form">
+  {{ csrf_input | default(value='') | safe }}
   <fieldset class="section">
     <legend>Impersonate (sign in as superuser)</legend>
     <p style="margin: 0 0 var(--space-3) 0; color: var(--color-fg-muted); font-size: 13px">
@@ -137,6 +140,7 @@
 
   <form method="post" action="/orgs/{{ slug }}/deactivate" class="inline-form"
         onsubmit="return confirm('Deactivate {{ slug }}? It stops serving immediately; nothing is destroyed.');">
+    {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Deactivate</button>
   </form>
   <div class="field-helper">Stops serving on the next request. The data
@@ -145,6 +149,7 @@
   <hr class="danger-rule">
 
   <form method="post" action="/orgs/{{ slug }}/purge" class="edit-form">
+    {{ csrf_input | default(value='') | safe }}
     <p class="danger-lead"><strong>Purge — permanent.</strong>
     Drops this tenant's schema or database and removes its registry row.
     There is no undo and no backup taken.</p>
@@ -183,13 +188,28 @@
     e.target.disabled = true;
     out.textContent = "checking…";
     try {
-      const res = await fetch("/orgs/{{ slug }}/test-connection", { method: "POST" });
+      const res = await fetch("/orgs/{{ slug }}/test-connection", {
+        method: "POST",
+        headers: { "X-CSRF-Token": {{ csrf_token | default(value='') | json_encode | safe }} },
+      });
       out.innerHTML = await res.text();
     } catch (err) {
       out.textContent = "could not reach the console: " + err;
     } finally {
       e.target.disabled = false;
     }
+  });
+
+  // A multipart body is one `CsrfLayer` cannot read, so the upload sends
+  // the token as a header and follows the handler's redirect (#1710).
+  document.getElementById("branding-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const res = await fetch(e.target.action, {
+      method: "POST",
+      headers: { "X-CSRF-Token": {{ csrf_token | default(value='') | json_encode | safe }} },
+      body: new FormData(e.target),
+    });
+    window.location = res.redirected ? res.url : e.target.action.replace(/\/branding$/, "");
   });
 </script>
 {% endblock %}

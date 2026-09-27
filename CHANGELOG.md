@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — the operator console is CSRF-protected (#1710)
+
+None of its POSTs checked a token or `Origin`, and a tenant subdomain
+is same-site with the apex, so `SameSite=Lax` did not help: a page on
+any tenant host could act as a signed-in operator — purge tenants, or
+add a shared SSO provider and sign in as any tenant user. Every console
+POST now needs the CSRF token and a same-host `Origin`; every console
+form carries the token, and the branding upload sends it as a header.
+Scripts that POST to the console must send `X-CSRF-Token`.
+
 ### Fixed — a new tenant project loads its settings (#1702)
 
 `cargo rustango new --template tenant` wrote `config/*.toml` but its

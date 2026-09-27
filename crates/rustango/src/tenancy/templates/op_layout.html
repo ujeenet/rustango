@@ -29,6 +29,7 @@
       </nav>
       <div class="who">Signed in as <strong>{{ operator_username }}</strong></div>
       <form class="logout" method="post" action="/logout">
+        {{ csrf_input | default(value='') | safe }}
         <button type="submit">Sign out</button>
       </form>
     </aside>

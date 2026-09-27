@@ -79,6 +79,8 @@ async fn boot() -> Booted {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -120,6 +122,8 @@ impl Booted {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .uri(uri)
                     .header("cookie", &self.cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -190,6 +194,8 @@ async fn a_tenant(b: &Booted) -> String {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -346,6 +352,8 @@ async fn the_migrate_routes_require_a_session() {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .uri(uri)
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::empty())

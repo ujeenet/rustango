@@ -12,6 +12,7 @@ connection check passes.</p>
 {% endif %}
 
 <form method="post" action="/orgs/new" class="edit-form">
+  {{ csrf_input | default(value='') | safe }}
   <fieldset class="section">
     <legend>Identity</legend>
     <table>
@@ -254,7 +255,10 @@ connection check passes.</p>
       // different one.
       const res = await fetch("/orgs/test-connection", {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-CSRF-Token": {{ csrf_token | default(value='') | json_encode | safe }},
+        },
         body: new URLSearchParams({
           database_url: document.getElementById("database_url").value,
           database_name: document.getElementById("database_name").value,

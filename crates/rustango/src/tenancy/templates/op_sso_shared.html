@@ -37,6 +37,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
       <td class="actions-col">
         <form method="post" action="/sso-shared/{{ p.id }}/delete"
               onsubmit="return confirm('Delete shared provider {{ p.slug }}?');">
+          {{ csrf_input | default(value='') | safe }}
           <button type="submit" class="btn-row-action">Delete</button>
         </form>
       </td>
@@ -48,6 +49,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
 
 <h2>Add a shared provider</h2>
 <form method="post" action="/sso-shared" class="op-form">
+  {{ csrf_input | default(value='') | safe }}
   <label>Slug <input name="slug" required pattern="[a-z0-9-]+" placeholder="acme-google"></label>
   <label>Button label <input name="label" required placeholder="Sign in with Google"></label>
   <label>Kind

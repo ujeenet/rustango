@@ -85,6 +85,8 @@ async fn boot() -> Booted {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -143,6 +145,8 @@ impl Booted {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .uri(uri)
                     .header("cookie", &self.cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -216,6 +220,8 @@ async fn an_operator_created_through_the_form_can_sign_in() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -339,6 +345,8 @@ async fn deactivating_takes_effect_on_the_next_request() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -425,6 +433,8 @@ async fn resetting_a_password_signs_that_operator_out() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -544,6 +554,8 @@ async fn the_write_routes_require_a_session() {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .uri(&uri)
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(body))
@@ -600,6 +612,8 @@ async fn a_read_only_console_lists_but_does_not_manage() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/operators")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -624,5 +638,123 @@ async fn the_page_never_renders_a_password_hash() {
     assert!(
         !html.contains("$argon2") && !html.contains("password_hash"),
         "the hash must not reach the page: {html}"
+    );
+}
+
+/// #1710 — a signed-in operator's browser posting from another page.
+/// `extra` are the headers the forger controls.
+async fn forged_create(b: &Booted, name: &str, extra: &[(&str, &str)]) -> StatusCode {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/operators")
+        .header("cookie", &b.cookie)
+        .header("content-type", "application/x-www-form-urlencoded");
+    for (k, v) in extra {
+        req = req.header(*k, *v);
+    }
+    let body = format!("username={name}&password=hunter2hunter2&confirm_password=hunter2hunter2");
+    b.app
+        .clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+/// #1710 — without the token, or from a foreign Origin, a console POST
+/// that rides the session cookie is refused and changes nothing.
+#[tokio::test]
+async fn a_forged_console_post_is_refused() {
+    let b = boot().await;
+    let name = unique("forged");
+    assert_eq!(forged_create(&b, &name, &[]).await, StatusCode::FORBIDDEN);
+    // A planted cookie half from a sibling tenant host, same token in
+    // the form, but the page it came from is not the console.
+    let planted = [
+        ("cookie", "rustango_csrf=t"),
+        ("x-csrf-token", "t"),
+        ("origin", "http://t01.example.com"),
+        ("host", "localhost"),
+    ];
+    assert_eq!(
+        forged_create(&b, &name, &planted).await,
+        StatusCode::FORBIDDEN
+    );
+    assert!(b.find(&name).await.is_none(), "no operator may be created");
+}
+
+/// #1710 — the browser path: the page seeds the cookie and renders the
+/// same token in the form, and posting that form field back works.
+#[tokio::test]
+async fn the_rendered_form_token_is_accepted() {
+    let b = boot().await;
+    let page = b.get("/operators").await;
+    let seeded: Vec<String> = page
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| v.split(';').next()?.strip_prefix("rustango_csrf="))
+        .map(str::to_owned)
+        .collect();
+    // One cookie: two differing ones leave the form's token to luck.
+    assert_eq!(seeded.len(), 1, "exactly one CSRF cookie: {seeded:?}");
+    let set_cookie = seeded[0].clone();
+    let html = body_of(page).await;
+    assert!(
+        html.contains(&format!(r#"name="_csrf" value="{set_cookie}""#)),
+        "every form carries the cookie's token"
+    );
+    let name = unique("real");
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators")
+                .header("cookie", &b.cookie)
+                .header("cookie", format!("rustango_csrf={set_cookie}"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "_csrf={set_cookie}&username={name}&password=hunter2hunter2&confirm_password=hunter2hunter2"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "{}", resp.status());
+    assert!(b.find(&name).await.is_some());
+}
+
+/// #1710 — every POST form in a console template carries the token, or
+/// sends it as a header from script (the multipart branding form).
+#[test]
+fn every_console_post_form_carries_the_token() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tenancy/templates");
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.starts_with("op_") {
+            continue;
+        }
+        let html = std::fs::read_to_string(&path).unwrap();
+        for form in html.split("<form").skip(1) {
+            let form = form.split("</form>").next().unwrap_or(form);
+            let head = form.split('>').next().unwrap_or("");
+            if !head.contains(r#"method="post""#) {
+                continue;
+            }
+            let by_header = head.contains(r#"id="branding-form""#) && html.contains("X-CSRF-Token");
+            if !form.contains("csrf_input") && !by_header {
+                missing.push(format!("{name}: <form{head}>"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "POST forms without a CSRF token:\n{}",
+        missing.join("\n")
     );
 }

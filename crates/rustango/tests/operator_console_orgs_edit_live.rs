@@ -97,6 +97,8 @@ async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -224,6 +226,8 @@ async fn post_edit_updates_only_editable_fields() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri(format!("/orgs/{slug}/edit"))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -272,6 +276,8 @@ async fn post_edit_with_blank_database_url_keeps_existing() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri(format!("/orgs/{slug}/edit"))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -315,6 +321,8 @@ async fn post_edit_active_toggle_off() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri(format!("/orgs/{slug}/edit"))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")

@@ -42,7 +42,7 @@
 mod audit;
 mod auth;
 pub mod computed_fields;
-mod csrf_context;
+pub(crate) mod csrf_context;
 pub mod custom_views;
 mod date_hierarchy;
 mod docs;
