@@ -2,7 +2,7 @@
 //!
 //! `explain_pool_tri` and `bulk_upsert_tri` both use the common shape —
 //! `model:` plus in-memory SQLite. This file covers the other two, which
-//! exist because a minority of the 191 `*_sqlite_live.rs` suites cannot
+//! exist because a minority of the 194 `*_sqlite_live.rs` suites cannot
 //! use either:
 //!
 //! * **`setup:`** — the suite builds its own tables. The job queue calls
