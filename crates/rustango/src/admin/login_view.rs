@@ -138,9 +138,11 @@ struct LoginInput {
 
 async fn login_submit(
     State(state): State<AppState>,
+    ip: crate::login_throttle::ClientIp,
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginInput>,
 ) -> Response {
+    use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -167,6 +169,16 @@ async fn login_submit(
         .await;
     }
 
+    // Rate limits and the account lock, before the lookup, so the
+    // answer is the same whether or not the username exists.
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(&LoginScope::Admin, &ip, &form.username)
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
+
     // Schema-driven lookup: the bare admin compiles without `tenancy`,
     // so it cannot use tenancy's typed query helpers.
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
@@ -183,7 +195,13 @@ async fn login_submit(
     let Some(row) = row else {
         // Spend a verify's worth of work on the unknown-user path, so
         // timing does not reveal whether the username exists.
-        crate::passwords::verify_dummy_async(&form.password).await;
+        if crate::passwords::verify_dummy_async(&form.password)
+            .await
+            .is_err()
+        {
+            return LoginRefused::Busy.into_response();
+        }
+        attempt.failed().await;
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -193,6 +211,13 @@ async fn login_submit(
         .await;
         return login_response(&state, &headers, Some("Invalid credentials.")).await;
     };
+    let stored_name = row
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or(form.username.as_str());
+    if let Err(refused) = attempt.resolve(stored_name).await {
+        return refused.into_response();
+    }
     let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or_default();
     let stored_hash = row
         .get("password_hash")
@@ -204,38 +229,16 @@ async fn login_submit(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Per-account brute-force lockout, on by default. The key is scoped
-    // (`admin:<id>`) so it cannot collide with operator or tenant ids,
-    // and it uses the resolved id, not the raw username, so an attacker
-    // cannot lock accounts at will. A locked account stops here, before
-    // the password verify.
-    #[cfg(feature = "cache")]
-    if crate::account_lockout::shared()
-        .is_locked(&format!("admin:{id}"))
-        .await
-    {
-        send_user_login_failed(UserLoginFailedContext {
-            source: "admin",
-            attempted_username: Some(form.username.clone()),
-            reason: AuthFailureReason::InvalidCredentials,
-            request: meta.clone(),
-        })
-        .await;
-        return login_response(
-            &state,
-            &headers,
-            Some("Too many failed attempts. Please try again later."),
-        )
-        .await;
-    }
-
     // Verify before the active check, so active and inactive accounts
     // take the same time.
-    let password_ok = crate::passwords::verify_async(&form.password, stored_hash)
-        .await
-        .unwrap_or(false);
+    let password_ok = match crate::passwords::verify_async(&form.password, stored_hash).await {
+        Ok(ok) => ok,
+        Err(crate::passwords::PasswordError::Busy) => return LoginRefused::Busy.into_response(),
+        Err(_) => false,
+    };
 
     if !is_active {
+        attempt.failed().await;
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -250,13 +253,7 @@ async fn login_submit(
         return login_response(&state, &headers, Some("Invalid credentials.")).await;
     }
     if !password_ok {
-        // Count this failure toward the per-account lockout.
-        #[cfg(feature = "cache")]
-        {
-            let _ = crate::account_lockout::shared()
-                .record_failure(&format!("admin:{id}"))
-                .await;
-        }
+        attempt.failed().await;
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -301,6 +298,10 @@ async fn login_submit(
             // 30s step, 6 digits, ±1 window: the authenticator-app
             // defaults, which allow one step of clock skew.
             if code.is_empty() || !crate::totp::verify(&totp_secret, code, 30, 6, 1) {
+                // A wrong code counts; a missing one is just the prompt.
+                if !code.is_empty() {
+                    attempt.failed().await;
+                }
                 send_user_login_failed(UserLoginFailedContext {
                     source: "admin",
                     attempted_username: Some(form.username.clone()),
@@ -319,10 +320,7 @@ async fn login_submit(
     }
 
     // A successful login clears the failure counter and any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared()
-        .clear(&format!("admin:{id}"))
-        .await;
+    attempt.succeeded().await;
 
     // Bind the cookie to a fingerprint of the current password hash, so
     // a password change or reset invalidates it.
@@ -421,10 +419,14 @@ async fn change_password_submit(
         .get("password_hash")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if !crate::passwords::verify_async(&form.current_password, stored_hash)
-        .await
-        .unwrap_or(false)
-    {
+    let ok = match crate::passwords::verify_async(&form.current_password, stored_hash).await {
+        Ok(ok) => ok,
+        Err(crate::passwords::PasswordError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
+        Err(_) => false,
+    };
+    if !ok {
         return Html(render_change_password_form(
             &state,
             None,
@@ -435,6 +437,9 @@ async fn change_password_submit(
 
     let new_hash = match crate::passwords::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(crate::passwords::PasswordError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(_) => {
             return Html(render_change_password_form(
                 &state,

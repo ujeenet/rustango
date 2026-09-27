@@ -536,6 +536,9 @@ impl Cli {
         // per-Builder wiring; first call wins, like the other boot globals.
         let _ = crate::session::set_secure_cookies(s.security.secure_cookies.unwrap_or(true));
 
+        // #1609 / #1732 — login limits and the hash-slot wait; code-side config wins.
+        apply_login_settings(&s.auth);
+
         // Stash a clone for `runserver` to apply layered settings
         // (security_headers, CORS, access_log, body_limit) on top
         // of the user's `api` Router. Done at run time rather than
@@ -1630,6 +1633,54 @@ fn outer_layers(s: &crate::config::SecuritySettings) -> OuterLayers {
         allowed_hosts,
         ssl_redirect,
     }
+}
+
+/// Install the `[auth]` login limits, lockout policy and hash-slot wait,
+/// each only when one of its keys is set. A value the app installed in
+/// code wins; the ignored keys are logged.
+#[cfg(feature = "config")]
+fn apply_login_settings(a: &crate::config::AuthSettings) {
+    let ignored = |what: &str| {
+        tracing::warn!(
+            target: "rustango::manage",
+            "[auth] {what} keys are ignored: the app already configured it in code"
+        );
+    };
+    #[cfg(feature = "passwords")]
+    if let Some(ms) = a.hash_wait_ms {
+        let wait = std::time::Duration::from_millis(ms);
+        if !crate::passwords::configure_hash_wait_from_settings(wait) {
+            ignored("hash_wait_ms");
+        }
+    }
+    #[cfg(feature = "admin")]
+    if a.login_ip_limit.is_some()
+        || a.login_ip_window_secs.is_some()
+        || a.login_global_limit.is_some()
+        || a.login_global_window_secs.is_some()
+    {
+        use crate::login_throttle::{configure_from_settings, LoginLimits, LoginThrottle};
+        if !configure_from_settings(LoginThrottle::new(LoginLimits::from_settings(a))) {
+            ignored("login_*");
+        }
+    }
+    #[cfg(feature = "cache")]
+    if a.lockout_threshold.is_some() || a.lockout_duration_secs.is_some() {
+        use crate::account_lockout::{
+            configure_from_settings, Lockout, DEFAULT_LOCKOUT_DURATION_SECS, DEFAULT_MAX_ATTEMPTS,
+        };
+        let lockout = Lockout::new(std::sync::Arc::new(crate::cache::InMemoryCache::new()))
+            .max_attempts(a.lockout_threshold.unwrap_or(DEFAULT_MAX_ATTEMPTS))
+            .lockout_duration(std::time::Duration::from_secs(
+                a.lockout_duration_secs
+                    .unwrap_or(DEFAULT_LOCKOUT_DURATION_SECS),
+            ));
+        if !configure_from_settings(lockout) {
+            ignored("lockout_*");
+        }
+    }
+    #[cfg(not(any(feature = "passwords", feature = "admin", feature = "cache")))]
+    let _ = (a, ignored);
 }
 
 /// Build a [`crate::tenancy::RouteConfig`] from a

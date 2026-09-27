@@ -483,7 +483,11 @@ where
                     resp
                 }
                 axum::http::Method::POST => {
-                    login_submit(&org, cfg, &pool, routes, parts.headers, body).await
+                    let ip = crate::login_throttle::ClientIp::from_parts(
+                        &parts.extensions,
+                        &parts.headers,
+                    );
+                    login_submit(&org, cfg, &pool, routes, ip, parts.headers, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -952,10 +956,12 @@ async fn login_submit(
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
+    ip: crate::login_throttle::ClientIp,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     use crate::core::Column as _;
+    use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -983,6 +989,19 @@ async fn login_submit(
     if !crate::forms::csrf::verify_form_token(&headers, form.csrf.as_deref()) {
         return (StatusCode::FORBIDDEN, "CSRF token missing or mismatched").into_response();
     }
+
+    // Rate limits and the account lock, before the lookup (#1609).
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &ip,
+            &form.username,
+        )
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
 
     // v0.38 — auth check via the tri-dialect ORM. The query targets
     // the tenant's `rustango_users` table on the user-supplied pool;
@@ -1021,40 +1040,31 @@ async fn login_submit(
         // wasn't covered by the authenticate_*_pool timing fix); spend a
         // verify's worth of work on the unknown-user path so timing
         // doesn't reveal whether the username exists.
-        super::password::verify_dummy_async(&form.password).await;
+        if super::password::verify_dummy_async(&form.password)
+            .await
+            .is_err()
+        {
+            return LoginRefused::Busy.into_response();
+        }
+        attempt.failed().await;
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
-    let uid: i64 = user.id.get().copied().unwrap_or(0);
-
-    // Audit M1 (console) — per-account brute-force lockout, on by
-    // default, keyed by tenant slug + resolved user id (no
-    // arbitrary-name DoS, no cross-tenant id collision). A locked
-    // account is rejected before the password verify.
-    #[cfg(feature = "cache")]
-    let lock_key = format!("tenant:{}:{}", org.slug, uid);
-    #[cfg(feature = "cache")]
-    if uid != 0 && crate::account_lockout::shared().is_locked(&lock_key).await {
-        fire_failed(AuthFailureReason::InvalidCredentials).await;
-        return bad_creds();
+    if let Err(refused) = attempt.resolve(&user.username).await {
+        return refused.into_response();
     }
+    let uid: i64 = user.id.get().copied().unwrap_or(0);
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
-    let ok = matches!(
-        super::password::verify_async(&form.password, &user.password_hash).await,
-        Ok(true)
-    );
+    let ok = match super::password::verify_async(&form.password, &user.password_hash).await {
+        Ok(ok) => ok,
+        Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
+        Err(_) => false,
+    };
 
     if !user.active || !ok || uid == 0 {
-        // Audit M1 — count the failure against the resolved id (existing
-        // accounts only).
-        #[cfg(feature = "cache")]
-        if uid != 0 {
-            let _ = crate::account_lockout::shared()
-                .record_failure(&lock_key)
-                .await;
-        }
+        attempt.failed().await;
         let reason = if !user.active {
             AuthFailureReason::Inactive
         } else {
@@ -1064,9 +1074,7 @@ async fn login_submit(
         return bad_creds();
     }
 
-    // Audit M1 — successful login clears the failure counter + any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared().clear(&lock_key).await;
+    attempt.succeeded().await;
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
     let payload = TenantSessionPayload::new(
@@ -1387,14 +1395,22 @@ async fn change_password_submit(
     let Some(mut user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
-    let ok = super::password::verify_async(&form.current_password, &user.password_hash)
-        .await
-        .unwrap_or(false);
+    let ok = match super::password::verify_async(&form.current_password, &user.password_hash).await
+    {
+        Ok(ok) => ok,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
+        Err(_) => false,
+    };
     if !ok {
         return redir_err("Current password did not match.");
     }
     let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(e) => {
             return redir_err(&format!("hash failed: {e}"));
         }

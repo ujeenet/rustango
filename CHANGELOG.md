@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — login rate limits and a bounded hashing queue (#1609, #1732)
+
+Every built-in password login (admin, operator console, tenant admin,
+JWT, HTTP Basic) passes one gate before the user lookup: a global
+ceiling, a per-IP limit, and a per-username lock that counts unknown
+usernames like real ones. A refused login gets `429` with
+`Retry-After`, the same whether or not the account exists; a locked
+account no longer answers differently from an unknown one. Hashing
+waits at most `[auth] hash_wait_ms` (default 5 s) for a slot, then
+answers `503`, the same for known and unknown users. New `[auth]`
+keys: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`,
+`login_global_window_secs`, `hash_wait_ms`; `lockout_threshold` and
+`lockout_duration_secs` now take effect.
+
+The gate checks the account lock, then the per-IP limit, then a
+global limit per login scope (admin, operator console, each tenant); a
+refused request spends nothing from later limits, and successful logins
+are free. IPv6 clients are limited per /64. Once the row is found the
+lock also follows the stored username, so spellings MySQL treats as
+equal share one lock. HTTP Basic and API keys have their own scopes,
+count only failures per IP, and use at most half the hashing slots. A
+failure while locked no longer extends the lock. A busy hash queue
+answers 503 on the password-change pages and agent `/token`.
+
 ### Fixed — session extractors on SQLite and MySQL
 
 `SessionUser`, `SessionOperator` and `CurrentMember` looked only for

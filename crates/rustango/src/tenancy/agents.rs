@@ -13,6 +13,7 @@
 //! creation layer — the tables exist because migrations ran, exactly like
 //! the rest of the framework's own tables.
 
+use super::password::HashLane;
 use crate::sql::{Auto, ExecError, Pool};
 
 /// A tenant-scoped MCP agent. Authenticates with a `prefix.secret`
@@ -198,8 +199,8 @@ pub async fn list_agents_pool(pool: &Pool) -> Result<Vec<Agent>, AgentError> {
 /// mismatch (unknown name, inactive, or bad secret) — fail-closed.
 ///
 /// # Errors
-/// Propagates DB errors only; an unverifiable secret is `Ok(None)`, not an
-/// error, so callers can return a uniform `401`.
+/// DB errors, and [`super::TenancyError::Busy`] when no hashing slot frees
+/// up; an unverifiable secret is `Ok(None)`, so callers can return a uniform `401`.
 pub async fn authenticate_agent_pool(
     pool: &Pool,
     name: &str,
@@ -224,12 +225,17 @@ pub async fn authenticate_agent_pool(
         // Unknown / inactive agent: still spend an argon2 verification against a
         // fixed dummy hash so the response time doesn't reveal whether the agent
         // name exists (timing oracle → agent enumeration). #1099.
-        super::password::verify_dummy_async(secret_half).await;
+        super::password::verify_dummy_async_in(HashLane::Credential, secret_half).await?;
         return Ok(None);
     };
+    check_agent_secret(agent, secret_half).await
+}
 
-    match super::password::verify_async(secret_half, &agent.secret_hash).await {
+/// `Some(agent)` when `secret` matches; hashing busy is an error.
+async fn check_agent_secret(agent: Agent, secret: &str) -> Result<Option<Agent>, AgentError> {
+    match super::password::verify_async_in(HashLane::Credential, secret, &agent.secret_hash).await {
         Ok(true) => Ok(Some(agent)),
+        Err(super::TenancyError::Busy) => Err(super::TenancyError::Busy.into()),
         _ => Ok(None),
     }
 }
@@ -241,7 +247,7 @@ pub async fn authenticate_agent_pool(
 /// contract as [`authenticate_agent_pool`].
 ///
 /// # Errors
-/// Propagates DB errors only; an unverifiable secret is `Ok(None)`.
+/// As [`authenticate_agent_pool`].
 pub async fn authenticate_agent_by_prefix_pool(
     pool: &Pool,
     prefix: &str,
@@ -260,14 +266,10 @@ pub async fn authenticate_agent_by_prefix_pool(
         .filter(|a| a.active)
     else {
         // Timing-neutral for unknown prefixes (#1099).
-        super::password::verify_dummy_async(secret).await;
+        super::password::verify_dummy_async_in(HashLane::Credential, secret).await?;
         return Ok(None);
     };
-
-    match super::password::verify_async(secret, &agent.secret_hash).await {
-        Ok(true) => Ok(Some(agent)),
-        _ => Ok(None),
-    }
+    check_agent_secret(agent, secret).await
 }
 
 // ============================================================= skills (Slice 4)
