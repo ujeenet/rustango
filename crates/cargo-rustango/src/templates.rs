@@ -379,6 +379,9 @@ COPY config /app/config
 RUN useradd --uid 10001 --create-home app && chown -R 10001 /app
 USER 10001
 WORKDIR /app
+# A release image runs the prod tier. Unset, the dev tier would load and
+# bind 127.0.0.1, which the port mapping cannot reach.
+ENV RUSTANGO_ENV=prod
 EXPOSE 8080
 # `.with_health()` mounts /health; drop this line if you removed it.
 HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=12 \
@@ -964,6 +967,8 @@ bind = "127.0.0.1:8080"
 # browser into HSTS.
 headers_preset    = "dev"
 hsts_max_age_secs = 0
+# Plain-HTTP dev server: a `Secure` login cookie would be dropped.
+secure_cookies    = false
 
 [brand]
 # Make the dev tier visually distinguishable from prod.

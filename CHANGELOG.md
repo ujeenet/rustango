@@ -11,6 +11,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 did nothing and the login, admin and console sent no security headers.
 Existing projects: add that call to the `Cli` chain in `main.rs`.
 
+With settings loaded, two template defaults mattered. The dev tier now
+sets `secure_cookies = false`, so login works over plain HTTP. The
+release `Dockerfile` sets `RUSTANGO_ENV=prod`; unset, the image loaded
+the dev tier and bound 127.0.0.1 (the fullstack image already did).
+
 ### Security — `allowed_hosts` and the HTTPS redirect cover the whole tenancy server (#1700)
 
 Under `Cli::tenancy()`, `[security] allowed_hosts` and

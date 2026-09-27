@@ -713,6 +713,12 @@ mod tests {
                 "{template:?} main.rs does not load its settings"
             );
         }
+        // Once loaded: dev serves plain HTTP, so its cookies must not be
+        // `Secure`; the release image must not fall back to the dev tier.
+        let dev = templates::config_dev_settings_toml("demo", Backend::Postgres);
+        assert!(dev.contains("secure_cookies    = false"), "{dev}");
+        let image = templates::dockerfile_prod("demo");
+        assert!(image.contains("ENV RUSTANGO_ENV=prod"), "{image}");
     }
 
     /// Regression guard for #79: every scaffold template must pin
