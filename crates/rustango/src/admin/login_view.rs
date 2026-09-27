@@ -412,10 +412,14 @@ async fn change_password_submit(
         .get("password_hash")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if !crate::passwords::verify_async(&form.current_password, stored_hash)
-        .await
-        .unwrap_or(false)
-    {
+    let ok = match crate::passwords::verify_async(&form.current_password, stored_hash).await {
+        Ok(ok) => ok,
+        Err(crate::passwords::PasswordError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
+        Err(_) => false,
+    };
+    if !ok {
         return Html(render_change_password_form(
             &state,
             None,
@@ -426,6 +430,9 @@ async fn change_password_submit(
 
     let new_hash = match crate::passwords::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(crate::passwords::PasswordError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(_) => {
             return Html(render_change_password_form(
                 &state,

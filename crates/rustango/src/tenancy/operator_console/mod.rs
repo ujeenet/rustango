@@ -1294,14 +1294,22 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let ok = super::password::verify_async(&form.current_password, &op_row.password_hash)
-        .await
-        .unwrap_or(false);
+    let ok =
+        match super::password::verify_async(&form.current_password, &op_row.password_hash).await {
+            Ok(ok) => ok,
+            Err(super::TenancyError::Busy) => {
+                return crate::login_throttle::LoginRefused::Busy.into_response()
+            }
+            Err(_) => false,
+        };
     if !ok {
         return redir_err("Current password did not match.");
     }
     let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(e) => return redir_err(&format!("hash failed: {e}")),
     };
     op_row.password_hash = new_hash;
