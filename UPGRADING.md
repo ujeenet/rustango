@@ -153,8 +153,9 @@ untouched.
 ### Idempotency keys stored before the upgrade are not replayed
 
 The key format changed (#1668). Add your auth layer after
-`.idempotency(..)` so the principal is resolved first. A chunked body
-over `body_cap` now gets `413`.
+`.idempotency(..)` so the caller is resolved first. A keyed request
+with a body over `body_cap` (4 MiB by default) now gets `413`, with or
+without `Content-Length`; raise `body_cap` for large uploads.
 
 ### `template_views` POSTs need the CSRF token; `urlize` escapes
 

@@ -6,10 +6,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — idempotency replays are scoped to the caller and route (#1668)
 
-`IdempotencyLayer` now keys a stored response on host, tenant,
-principal, the `Authorization` and `Cookie` headers, method, path and
-query, then the client's key. A response that sets a cookie is not
-stored. A reused key with a different body gets `422`.
+`IdempotencyLayer` now keys a stored response on host, the request's
+tenant, the resolved caller, method, path and query, then the client's
+key. With no resolved caller it hashes `Authorization`, `Cookie` and
+`X-Api-Key` instead, so a token refresh between retries still replays
+when auth runs first. A response that sets a cookie is not stored. A
+reused key with a different body gets `422`; a body over `body_cap`
+gets `413`, other body errors `400`. `require_auth` now records the
+tenant slug.
 
 ### Security — ViewSet create keeps a client-supplied primary key (#1671)
 
@@ -67,7 +71,9 @@ editing it re-renders the form with a message.
 
 Delivery sends only to http/https, does not follow redirects, and
 refuses loopback, private, link-local, CGNAT, multicast and unspecified
-addresses, checked after DNS and pinned for the connection. A failed
+addresses, including IPv4 inside 6to4, Teredo and NAT64, checked after
+DNS and pinned for the connection. The refusal does not name the
+resolved address. A failed
 delivery stores the status code, not the response body. Use
 `WebhookSubscription::allow_private_targets(true)` for intranet or test
 receivers.
