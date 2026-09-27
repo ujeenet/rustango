@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — `urlize` escapes its output; built-in HTML views check CSRF (#1669)
+
+`urlize` and `urlizetrunc` now HTML-escape the href, the link text and
+the text around links, so `{{ x | urlize | safe }}` is safe on user
+input. Every `template_views` router with a POST route now refuses a
+POST without a matching CSRF token; before, the token was rendered but
+nothing checked it unless `Cli::with_csrf()` was on. `urlizetrunc` no
+longer breaks non-ASCII text.
+
 ### Security — tenant FKs from ensure helpers stay in the tenant schema (#1645)
 
 On PostgreSQL, the tables that permissions, API keys, audit, TOTP and

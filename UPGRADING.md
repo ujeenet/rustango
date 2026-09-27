@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### `template_views` POSTs need the CSRF token; `urlize` escapes
+
+`template_views` POST routes return 403 without a token (#1669): put
+`{{ csrf_input | safe }}` in every form. The feature now enables `csrf`.
+`urlize` escapes its input, so stop passing it pre-escaped text or `&`
+shows as `&amp;amp;`.
+
 ### Webhooks to private addresses are dead-lettered
 
 Receivers on localhost, private or link-local addresses (tests,
