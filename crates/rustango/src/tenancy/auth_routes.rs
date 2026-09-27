@@ -365,8 +365,12 @@ async fn login(
 
     // Rate limits and the account lock, before the lookup (#1609). Same
     // scope as the tenant admin login, which shares the user table.
-    let attempt = crate::login_throttle::shared()
-        .begin(&format!("tenant:{}", t.org.slug), &ip, &body.username)
+    let mut attempt = crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Tenant(t.org.slug.clone()),
+            &ip,
+            &body.username,
+        )
         .await
         .map_err(LoginRefused::into_response)?;
     let busy = |e: crate::tenancy::TenancyError| match e {
@@ -390,6 +394,10 @@ async fn login(
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
         return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     };
+    attempt
+        .resolve(&user.username)
+        .await
+        .map_err(LoginRefused::into_response)?;
     let uid = user.id.get().copied().unwrap_or(0);
 
     // Verify before the active check so active vs inactive accounts take

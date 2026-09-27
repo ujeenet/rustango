@@ -134,6 +134,10 @@ impl Lockout {
     /// - Or your own `uid:{id}` key, built only when the user exists.
     /// - Plus per-IP rate limiting upstream.
     pub async fn record_failure(&self, account: &str) -> u32 {
+        // A failure while locked neither extends nor restarts the lock.
+        if self.is_locked(account).await {
+            return self.max_attempts;
+        }
         let counter_key = self.counter_key(account);
         // Atomic increment, never get-parse-set. A read-modify-write
         // loses updates under concurrent failed logins: several
@@ -169,6 +173,9 @@ impl Lockout {
                 .cache
                 .set(&self.lock_key(account), "1", Some(self.lockout_duration))
                 .await;
+            // Start from zero once the lock ends, so one more failure
+            // does not lock again at once.
+            let _ = self.cache.delete(&counter_key).await;
         }
         next
     }
@@ -232,7 +239,7 @@ impl Lockout {
 
 /// Process-wide default lockout, lazily initialized to an in-memory
 /// tracker with the default policy (5 attempts → 15-min lock).
-static SHARED_LOCKOUT: std::sync::OnceLock<Lockout> = std::sync::OnceLock::new();
+static SHARED_LOCKOUT: crate::boot_slot::BootSlot<Lockout> = crate::boot_slot::BootSlot::new();
 
 /// The built-in login flows (admin, operator, tenant, JWT API) use
 /// this, so per-account brute-force protection is on by default with
@@ -244,15 +251,20 @@ static SHARED_LOCKOUT: std::sync::OnceLock<Lockout> = std::sync::OnceLock::new()
 /// [`configure_shared`].
 #[must_use]
 pub fn shared() -> &'static Lockout {
-    SHARED_LOCKOUT.get_or_init(|| Lockout::new(Arc::new(crate::cache::InMemoryCache::new())))
+    SHARED_LOCKOUT.get(|| Lockout::new(Arc::new(crate::cache::InMemoryCache::new())))
 }
 
-/// Install the process-wide [`shared`] lockout. Call it once at boot
-/// to back the lockout with a shared cache or a different policy.
-/// First call wins: returns `false` when [`shared`] was already built,
-/// for example because a login ran first.
+/// Install the process-wide [`shared`] lockout at boot, to back it with a
+/// shared cache or a different policy. It replaces the default and the
+/// one built from `[auth]` settings; `false` if an earlier call won.
 pub fn configure_shared(lockout: Lockout) -> bool {
-    SHARED_LOCKOUT.set(lockout).is_ok()
+    SHARED_LOCKOUT.set_explicit(lockout)
+}
+
+/// The `[auth]` settings lockout; `false` if app code already set one.
+#[cfg(feature = "config")]
+pub(crate) fn configure_from_settings(lockout: Lockout) -> bool {
+    SHARED_LOCKOUT.set_from_settings(lockout)
 }
 
 #[cfg(test)]
@@ -323,6 +335,25 @@ mod tests {
         assert!(l.is_locked("alice").await);
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(!l.is_locked("alice").await);
+    }
+
+    /// Failures while locked do not extend the lock, and after it ends
+    /// the count starts again from zero.
+    #[tokio::test]
+    async fn failures_while_locked_do_not_relock() {
+        let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
+        let l = Lockout::new(cache)
+            .max_attempts(2)
+            .lockout_duration(Duration::from_millis(150));
+        l.record_failure("alice").await;
+        l.record_failure("alice").await;
+        assert!(l.is_locked("alice").await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        l.record_failure("alice").await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!l.is_locked("alice").await, "a failure extended the lock");
+        l.record_failure("alice").await;
+        assert!(!l.is_locked("alice").await, "one failure locked again");
     }
 
     #[tokio::test]

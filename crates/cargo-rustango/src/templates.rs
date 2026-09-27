@@ -898,9 +898,9 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # argon2_iterations  = 2
 # lockout_threshold  = 5
 # lockout_duration_secs = 900
-# login_ip_limit     = 20       # login attempts per IP per window
+# login_ip_limit     = 20       # failed logins per IP per window
 # login_ip_window_secs = 60
-# login_global_limit = 600      # login attempts across all clients per window
+# login_global_limit = 600      # failed logins across all clients, per login, per window
 # login_global_window_secs = 60
 # hash_wait_ms       = 5000     # wait for a hashing slot before 503
 

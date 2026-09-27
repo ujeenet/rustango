@@ -142,7 +142,7 @@ async fn login_submit(
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginInput>,
 ) -> Response {
-    use crate::login_throttle::LoginRefused;
+    use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -171,8 +171,8 @@ async fn login_submit(
 
     // Rate limits and the account lock, before the lookup, so the
     // answer is the same whether or not the username exists.
-    let attempt = match crate::login_throttle::shared()
-        .begin("admin", &ip, &form.username)
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(&LoginScope::Admin, &ip, &form.username)
         .await
     {
         Ok(a) => a,
@@ -211,6 +211,13 @@ async fn login_submit(
         .await;
         return login_response(&state, &headers, Some("Invalid credentials.")).await;
     };
+    let stored_name = row
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or(form.username.as_str());
+    if let Err(refused) = attempt.resolve(stored_name).await {
+        return refused.into_response();
+    }
     let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or_default();
     let stored_hash = row
         .get("password_hash")
@@ -412,10 +419,14 @@ async fn change_password_submit(
         .get("password_hash")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if !crate::passwords::verify_async(&form.current_password, stored_hash)
-        .await
-        .unwrap_or(false)
-    {
+    let ok = match crate::passwords::verify_async(&form.current_password, stored_hash).await {
+        Ok(ok) => ok,
+        Err(crate::passwords::PasswordError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
+        Err(_) => false,
+    };
+    if !ok {
         return Html(render_change_password_form(
             &state,
             None,
@@ -426,6 +437,9 @@ async fn change_password_submit(
 
     let new_hash = match crate::passwords::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(crate::passwords::PasswordError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(_) => {
             return Html(render_change_password_form(
                 &state,
