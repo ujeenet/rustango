@@ -10,7 +10,10 @@ Tenant admin, member, `SessionUser` and operator-console sessions now
 carry a fingerprint of the password hash, so any change or reset ends
 every older session, even one issued in the same second.
 `SessionOperator` now checks this too; it used to ignore password
-changes. See UPGRADING.
+changes. An open impersonation in the tenant admin ends when that
+operator's password changes (#1735). The fingerprint is domain-tagged,
+so it never matches another MAC made with the session secret. See
+UPGRADING.
 
 ### Security — password hashing no longer blocks the async runtime (#1709)
 
