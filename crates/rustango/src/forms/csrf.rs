@@ -118,12 +118,6 @@ pub struct CsrfConfig {
     /// which left the default deployment on bare unsigned
     /// double-submit — forgeable by anyone able to write a cookie on
     /// the parent domain (#1529).
-    ///
-    /// When non-empty, the layer ALSO accepts the request's own
-    /// Host header as an implicit trusted origin (same-origin
-    /// requests always pass). Defense-in-depth: even if an XSS
-    /// attacker steals the cookie token, they can't submit from a
-    /// different origin.
     pub trusted_origins: Vec<String>,
     /// URL path prefixes exempt from CSRF enforcement on unsafe
     /// methods. Default `[]`. Intended for `navigator.sendBeacon`
@@ -428,8 +422,8 @@ where
             let req = if !method_is_csrf_exempt(req.method(), &cfg)
                 && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
             {
-                // Origin-header defense-in-depth. Skipped when
-                // `trusted_origins` is empty (back-compat default).
+                // Origin-header defense-in-depth. Always runs; an empty
+                // `trusted_origins` means same-host only (#1529).
                 if !origin_allowed(&req, &cfg.trusted_origins) {
                     return Ok(forbid_response(
                         "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS \
