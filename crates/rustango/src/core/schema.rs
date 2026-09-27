@@ -742,6 +742,10 @@ pub struct ModelSchema {
     /// `#[rustango(global_scope(name = "...", apply = fn_path))]`,
     /// where `fn_path` names a `fn() -> WhereExpr` in scope. Use them
     /// for soft-delete hiding and tenant isolation.
+    ///
+    /// `ViewSet` and the template views apply them too. The admin does
+    /// not, so staff can reach every row; narrow it with
+    /// `register_admin_queryset!`.
     pub global_scopes: &'static [GlobalScope],
 }
 
@@ -773,6 +777,34 @@ impl GlobalScope {
     #[must_use]
     pub const fn new(name: &'static str, apply: fn() -> crate::core::WhereExpr) -> Self {
         Self { name, apply }
+    }
+}
+
+impl ModelSchema {
+    /// Every global scope's filter, minus the scopes named in `skip`.
+    pub(crate) fn global_scope_exprs(&self, skip: &[&str]) -> Vec<crate::core::WhereExpr> {
+        self.global_scopes
+            .iter()
+            .filter(|s| !skip.contains(&s.name))
+            .map(|s| (s.apply)())
+            .collect()
+    }
+
+    /// `where_clause` ANDed with every global scope. For queries built
+    /// straight from the schema rather than through a `QuerySet`.
+    #[must_use]
+    pub fn with_global_scopes(
+        &self,
+        where_clause: crate::core::WhereExpr,
+    ) -> crate::core::WhereExpr {
+        let mut all = self.global_scope_exprs(&[]);
+        if all.is_empty() {
+            return where_clause;
+        }
+        if !matches!(&where_clause, crate::core::WhereExpr::And(v) if v.is_empty()) {
+            all.push(where_clause);
+        }
+        crate::core::WhereExpr::And(all)
     }
 }
 

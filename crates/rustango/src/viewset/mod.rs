@@ -1519,19 +1519,22 @@ macro_rules! or_400 {
     };
 }
 
-/// The predicates every filter backend contributes for this request,
-/// to be ANDed into whatever query the action runs.
+/// The model's global scopes plus every filter backend's predicates for
+/// this request, to be ANDed into whatever query the action runs.
 fn scope_filters(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
-    state
-        .vs
-        .filter_backends
-        .iter()
-        .flat_map(|b| b.filter_with(parts, params, state.vs.schema))
-        .collect()
+    let mut all = state.vs.schema.global_scope_exprs(&[]);
+    all.extend(
+        state
+            .vs
+            .filter_backends
+            .iter()
+            .flat_map(|b| b.filter_with(parts, params, state.vs.schema)),
+    );
+    all
 }
 
 /// `expr` narrowed by `extra`. An empty `extra` returns `expr`

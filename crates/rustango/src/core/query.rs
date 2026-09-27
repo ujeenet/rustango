@@ -659,6 +659,13 @@ pub struct SelectQuery {
 }
 
 impl SelectQuery {
+    /// This query narrowed by the model's global scopes.
+    #[must_use]
+    pub fn with_global_scopes(mut self) -> Self {
+        self.where_clause = self.model.with_global_scopes(self.where_clause);
+        self
+    }
+
     /// Construct an empty `SelectQuery` against `model`: no filters
     /// (`WhereExpr::And(vec![])`, vacuously true), empty lists, `None`
     /// options. Set the rest with the builders or by assigning a field:
@@ -1411,6 +1418,13 @@ pub struct UpdateQuery {
 }
 
 impl UpdateQuery {
+    /// This query narrowed by the model's global scopes.
+    #[must_use]
+    pub fn with_global_scopes(mut self) -> Self {
+        self.where_clause = self.model.with_global_scopes(self.where_clause);
+        self
+    }
+
     /// `UPDATE <model> SET <set> WHERE <where_clause>`.
     #[must_use]
     pub fn new(model: &'static ModelSchema, set: Vec<Assignment>, where_clause: WhereExpr) -> Self {
@@ -1458,6 +1472,13 @@ pub struct DeleteQuery {
 }
 
 impl DeleteQuery {
+    /// This query narrowed by the model's global scopes.
+    #[must_use]
+    pub fn with_global_scopes(mut self) -> Self {
+        self.where_clause = self.model.with_global_scopes(self.where_clause);
+        self
+    }
+
     /// `DELETE FROM <model> WHERE <where_clause>`.
     #[must_use]
     pub fn new(model: &'static ModelSchema, where_clause: WhereExpr) -> Self {
@@ -1517,6 +1538,13 @@ pub struct CountQuery {
 }
 
 impl CountQuery {
+    /// This query narrowed by the model's global scopes.
+    #[must_use]
+    pub fn with_global_scopes(mut self) -> Self {
+        self.where_clause = self.model.with_global_scopes(self.where_clause);
+        self
+    }
+
     /// `SELECT COUNT(*) FROM <model> WHERE <where_clause>`, no search.
     #[must_use]
     pub fn new(model: &'static ModelSchema, where_clause: WhereExpr) -> Self {
