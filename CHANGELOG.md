@@ -4,6 +4,25 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — ViewSet create keeps a client-supplied primary key (#1671)
+
+ViewSet create and bulk create now write the PK a client sends for a
+model whose PK is not `Auto<T>` (a `String` slug, say). Before, it was
+dropped: the create failed, and on SQLite with a nullable PK column it
+committed an unreachable NULL-key row. A create with no PK is now a 400
+on every backend. Update still ignores a PK in the body.
+
+### Security — CSRF refuses an empty token (#1693)
+
+An empty `rustango_csrf` cookie with an empty `_csrf` field or
+`X-CSRF-Token` header passed the double-submit check. The CSRF layer
+and `verify_form_token` now share one check that refuses it.
+
+### Fixed — the admin sets one CSRF cookie on a first visit (#1711)
+
+A first visit to a protected admin page set two different
+`rustango_csrf` cookies; it worked only because browsers keep the last.
+
 ### Security — `urlize` escapes its output; built-in HTML views check CSRF (#1669)
 
 `urlize` and `urlizetrunc` now HTML-escape the href, the link text and
