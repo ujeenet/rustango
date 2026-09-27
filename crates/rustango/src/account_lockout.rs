@@ -134,6 +134,10 @@ impl Lockout {
     /// - Or your own `uid:{id}` key, built only when the user exists.
     /// - Plus per-IP rate limiting upstream.
     pub async fn record_failure(&self, account: &str) -> u32 {
+        // A failure while locked neither extends nor restarts the lock.
+        if self.is_locked(account).await {
+            return self.max_attempts;
+        }
         let counter_key = self.counter_key(account);
         // Atomic increment, never get-parse-set. A read-modify-write
         // loses updates under concurrent failed logins: several
@@ -169,6 +173,9 @@ impl Lockout {
                 .cache
                 .set(&self.lock_key(account), "1", Some(self.lockout_duration))
                 .await;
+            // Start from zero once the lock ends, so one more failure
+            // does not lock again at once.
+            let _ = self.cache.delete(&counter_key).await;
         }
         next
     }
@@ -323,6 +330,25 @@ mod tests {
         assert!(l.is_locked("alice").await);
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(!l.is_locked("alice").await);
+    }
+
+    /// Failures while locked do not extend the lock, and after it ends
+    /// the count starts again from zero.
+    #[tokio::test]
+    async fn failures_while_locked_do_not_relock() {
+        let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
+        let l = Lockout::new(cache)
+            .max_attempts(2)
+            .lockout_duration(Duration::from_millis(150));
+        l.record_failure("alice").await;
+        l.record_failure("alice").await;
+        assert!(l.is_locked("alice").await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        l.record_failure("alice").await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!l.is_locked("alice").await, "a failure extended the lock");
+        l.record_failure("alice").await;
+        assert!(!l.is_locked("alice").await, "one failure locked again");
     }
 
     #[tokio::test]
