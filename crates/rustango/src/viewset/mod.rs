@@ -1148,21 +1148,34 @@ impl AcquiredConn {
         crate::sql::select_rows_pool_with_related::<T>(&self.pool, q).await
     }
 
-    /// Insert a row and return its primary key. PG and SQLite use
-    /// RETURNING; MySQL uses `LAST_INSERT_ID()`.
+    /// Insert a row and return its primary key (see [`created_pk`]).
     async fn insert_returning_pk(
         &mut self,
         q: &InsertQuery,
         pk_field: &crate::core::FieldSchema,
     ) -> Result<SqlValue, crate::sql::ExecError> {
         let returning = crate::sql::insert_returning_pool(&self.pool, q).await?;
-        Ok(pk_from_returning(returning, pk_field))
+        Ok(created_pk(q, returning, pk_field))
     }
 }
 
-/// Read the primary key out of an INSERT's RETURNING, or MySQL's
-/// `LAST_INSERT_ID()`. Shared by the single-row and bulk paths.
-fn pk_from_returning(
+/// The PK of the row `q` just inserted: the submitted value when the PK
+/// column is in the INSERT, else the database-generated one.
+/// Shared by the single-row and bulk paths.
+fn created_pk(
+    q: &InsertQuery,
+    returning: crate::sql::InsertReturningPool,
+    pk_field: &crate::core::FieldSchema,
+) -> SqlValue {
+    match q.columns.iter().position(|c| *c == pk_field.column) {
+        Some(i) => q.values[i].clone(),
+        None => generated_pk(returning, pk_field),
+    }
+}
+
+/// Read a generated PK out of an INSERT's RETURNING, or MySQL's
+/// `LAST_INSERT_ID()`.
+fn generated_pk(
     returning: crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
 ) -> SqlValue {
@@ -2612,7 +2625,7 @@ async fn create_many(
             on_conflict: None,
         };
         match crate::sql::insert_returning_tx(&mut tx, &query).await {
-            Ok(returning) => pks.push(pk_from_returning(returning, pk_field)),
+            Ok(returning) => pks.push(created_pk(&query, returning, pk_field)),
             Err(e) => {
                 // Drop every row this request wrote, including the ones
                 // that succeeded before entry `i`.
@@ -3221,6 +3234,34 @@ mod tenant_router_tests {
         let vs = static_state.read_only();
         let _r = vs.clone().tenant_router("/api/users");
         // If this compiles, the variant + builder are wired.
+    }
+}
+
+/// A submitted PK wins over MySQL's `LAST_INSERT_ID()`, which is 0 for a
+/// non-auto PK and would read back `WHERE pk = 0` (#1671).
+#[cfg(all(test, feature = "mysql", feature = "tenancy"))]
+mod created_pk_tests {
+    use super::*;
+    use crate::core::Model as _;
+
+    #[test]
+    fn a_submitted_string_pk_is_not_replaced_by_last_insert_id() {
+        let schema = crate::tenancy::auth::User::SCHEMA;
+        let pk = schema
+            .fields
+            .iter()
+            .find(|f| f.ty == FieldType::String)
+            .expect("a String field");
+        let q = InsertQuery::new(
+            schema,
+            vec![pk.column],
+            vec![SqlValue::String("rust".into())],
+        );
+        let got = created_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk);
+        assert!(
+            matches!(got, SqlValue::String(ref s) if s == "rust"),
+            "{got:?}"
+        );
     }
 }
 
