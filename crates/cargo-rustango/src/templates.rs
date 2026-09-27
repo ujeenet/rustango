@@ -672,6 +672,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready hit the registry pool
+        // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
+        // then RUSTANGO__* env overrides. Without it the files the
+        // scaffolder writes are inert, and the login, admin and operator
+        // console send no security headers.
+        .with_settings_from_env()
         .run()
         .await
 }

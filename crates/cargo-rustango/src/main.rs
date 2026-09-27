@@ -702,6 +702,19 @@ mod tests {
         );
     }
 
+    /// #1702 — the templates that ship `config/*.toml` load them, or the
+    /// `[security]` headers (and every other setting) never apply.
+    #[test]
+    fn templates_with_config_files_load_them() {
+        for template in [Template::Fullstack, Template::Tenant] {
+            let main = templates::main_rs(template, "demo");
+            assert!(
+                main.contains(".with_settings_from_env()"),
+                "{template:?} main.rs does not load its settings"
+            );
+        }
+    }
+
     /// Regression guard for #79: every scaffold template must pin
     /// rustango to the same major.minor as the scaffolder build,
     /// not a hardcoded literal that rots silently as the framework

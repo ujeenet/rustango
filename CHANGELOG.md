@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a new tenant project loads its settings (#1702)
+
+`cargo rustango new --template tenant` wrote `config/*.toml` but its
+`main.rs` never called `.with_settings_from_env()`, so the tier files
+did nothing and the login, admin and console sent no security headers.
+Existing projects: add that call to the `Cli` chain in `main.rs`.
+
 ### Security — `allowed_hosts` and the HTTPS redirect cover the whole tenancy server (#1700)
 
 Under `Cli::tenancy()`, `[security] allowed_hosts` and
