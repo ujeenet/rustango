@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — `allowed_hosts` and the HTTPS redirect cover the whole tenancy server (#1700)
+
+Under `Cli::tenancy()`, `[security] allowed_hosts` and
+`secure_ssl_redirect` reached only the api router, so the tenant login
+and admin took any `Host` and answered plain HTTP. Both now go on the
+server's outermost router, as the headers do since #1699
+(`server::Builder::allowed_hosts`, `::ssl_redirect`). On every server a
+bad `Host` is now refused (400) before the redirect; it used to get a
+301 to `https://<that host>`.
+
 ### Security — tenant login, admin and console get the security headers (#1699)
 
 Under `Cli::tenancy()` the `[security]` headers reached only the api

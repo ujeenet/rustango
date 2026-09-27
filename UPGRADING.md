@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### Tenancy: `allowed_hosts` and the HTTPS redirect now cover `/health`
+
+Under `Cli::tenancy()` they now wrap every route (#1700). A load
+balancer that probes `/health` by IP needs that host in
+`allowed_hosts`, and `/health` in `secure_redirect_exempt` if it
+probes over plain HTTP. The single-tenant server already worked so.
+
 ### Login returns 403 behind a proxy that rewrites Host
 
 The admin and tenant logins now require `Origin` to match `Host`

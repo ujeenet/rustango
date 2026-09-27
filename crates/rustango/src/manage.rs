@@ -942,18 +942,30 @@ impl Cli {
             None => api,
         };
         #[cfg(feature = "config")]
-        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let settings = self.settings_for_layers.as_ref();
+        #[cfg(feature = "config")]
+        let api = wrap_outer(apply_settings_layers_or_warn(api, settings));
         let api = self.mount_observability(api);
         api.layer(axum::Extension(pool))
     }
 
-    /// `[security]` headers for the tenancy builder's outermost router,
-    /// which the api-router layer never reaches (#1699).
-    #[cfg(all(feature = "tenancy", feature = "config", feature = "admin"))]
-    fn tenancy_security_headers(&self) -> Option<crate::security_headers::SecurityHeadersLayer> {
-        self.settings_for_layers
-            .as_ref()
-            .map(|s| crate::security_headers::SecurityHeadersLayer::from_settings(&s.security))
+    /// Everything the tenancy builder must put on its outermost router:
+    /// observability and the `[security]` outer layers, which layers on
+    /// the api router never reach (#1480, #1699, #1700). Both tenancy
+    /// serving paths go through here.
+    #[cfg(feature = "tenancy")]
+    fn tenancy_builder<DB: sqlx::Database>(
+        &self,
+        builder: crate::server::Builder<DB>,
+        outer: Option<OuterLayers>,
+    ) -> crate::server::Builder<DB> {
+        let builder = builder
+            .observability(self.access_log_layer())
+            .span_redact(self.span_redact_params());
+        match outer {
+            Some(o) => o.apply_to(builder),
+            None => builder,
+        }
     }
 
     /// The configured access-log layer, or `None` when
@@ -1219,19 +1231,17 @@ impl Cli {
             None => api,
         };
         #[cfg(feature = "config")]
-        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let settings = self.settings_for_layers.as_ref();
+        #[cfg(feature = "config")]
+        let (api, outer) = apply_settings_layers_or_warn(api, settings);
+        #[cfg(not(feature = "config"))]
+        let outer = None;
         // Not `mount_observability` here: this router is about to be
         // merged with the tenant admin and dispatched beside the
         // operator console, and layers applied now would reach neither.
         // The builder applies them to the outermost router instead.
         let mut builder = crate::server::Builder::from_env().await?.api(api);
-        builder = builder
-            .observability(self.access_log_layer())
-            .span_redact(self.span_redact_params());
-        #[cfg(all(feature = "config", feature = "admin"))]
-        if let Some(sec) = self.tenancy_security_headers() {
-            builder = builder.security_headers(sec);
-        }
+        builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1286,7 +1296,11 @@ impl Cli {
             None => api,
         };
         #[cfg(feature = "config")]
-        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let settings = self.settings_for_layers.as_ref();
+        #[cfg(feature = "config")]
+        let (api, outer) = apply_settings_layers_or_warn(api, settings);
+        #[cfg(not(feature = "config"))]
+        let outer = None;
         // Not `mount_observability` — see the dispatch path above. The
         // builder applies these to the outermost router.
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
@@ -1307,13 +1321,7 @@ impl Cli {
             apex,
         )
         .api(api);
-        builder = builder
-            .observability(self.access_log_layer())
-            .span_redact(self.span_redact_params());
-        #[cfg(all(feature = "config", feature = "admin"))]
-        if let Some(sec) = self.tenancy_security_headers() {
-            builder = builder.security_headers(sec);
-        }
+        builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1438,12 +1446,15 @@ fn mount_static_dirs(api: Router, dirs: &[(String, PathBuf)]) -> Router {
 fn apply_settings_layers_or_warn(
     api: Router,
     settings: Option<&crate::config::Settings>,
-) -> Router {
+) -> (Router, Option<OuterLayers>) {
     match settings {
-        Some(s) => apply_settings_layers(api, s),
+        Some(s) => {
+            let (api, outer) = apply_settings_layers(api, s);
+            (api, Some(outer))
+        }
         None => {
             warn_if_settings_inert();
-            api
+            (api, None)
         }
     }
 }
@@ -1501,11 +1512,10 @@ fn warn_if_settings_inert() {
 }
 
 #[cfg(feature = "config")]
-fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
+fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> (Router, OuterLayers) {
     use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
     use crate::cors::{CorsLayer, CorsRouterExt as _};
     use crate::request_timeout::{RequestTimeoutLayer, RequestTimeoutRouterExt as _};
-    use crate::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt as _};
 
     let mut app = api;
 
@@ -1536,47 +1546,92 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
         app = app.cors(cors);
     }
 
-    // security_headers (outermost — every response goes through).
-    // SecuritySettings::default() produces strict() so this mounts
-    // even when the [security] section is missing entirely.
-    let sec = SecurityHeadersLayer::from_settings(&s.security);
-    app = app.security_headers(sec);
+    // The caller owns where these go: the whole router for one tenant,
+    // the builder's outermost router under tenancy (#1700).
+    (app, outer_layers(&s.security))
+}
 
-    // Host-header allowlist. Mounts when the list is non-empty; an
-    // empty list is the opt-out, and the layer would enforce
-    // nothing anyway.
-    if !s.security.allowed_hosts.is_empty() {
-        use crate::host_validation::{AllowedHostsLayer, AllowedHostsRouterExt as _};
-        app = app.allowed_hosts(AllowedHostsLayer::from_settings_list(
-            s.security.allowed_hosts.iter().map(String::as_str),
-        ));
+/// The `[security]` layers that must wrap every route, the tenant login,
+/// admin and operator console included (#1699, #1700).
+#[cfg(any(feature = "config", feature = "tenancy"))]
+#[must_use = "these must wrap the served router, or the server has none of them"]
+pub(crate) struct OuterLayers {
+    headers: crate::security_headers::SecurityHeadersLayer,
+    allowed_hosts: Option<crate::host_validation::AllowedHostsLayer>,
+    ssl_redirect: Option<crate::ssl_redirect::SslRedirectLayer>,
+}
+
+#[cfg(any(feature = "config", feature = "tenancy"))]
+impl OuterLayers {
+    /// Innermost first: headers, the HTTPS redirect, then the Host
+    /// allowlist, so a bad Host is refused before it is redirected to.
+    #[cfg(feature = "config")]
+    fn apply(self, mut app: Router) -> Router {
+        use crate::host_validation::AllowedHostsRouterExt as _;
+        use crate::security_headers::SecurityHeadersRouterExt as _;
+        use crate::ssl_redirect::SslRedirectRouterExt as _;
+        app = app.security_headers(self.headers);
+        if let Some(l) = self.ssl_redirect {
+            app = app.ssl_redirect(l);
+        }
+        if let Some(l) = self.allowed_hosts {
+            app = app.allowed_hosts(l);
+        }
+        app
     }
 
-    // HTTP → HTTPS redirect, with exempt prefixes and a trusted
-    // proxy header.
-    // Opt-in: only mounts when explicitly enabled in settings —
-    // operators behind TLS-terminating LBs typically don't need
-    // it, so don't surprise them.
-    if matches!(s.security.secure_ssl_redirect, Some(true)) {
-        use crate::ssl_redirect::{SslRedirectLayer, SslRedirectRouterExt as _};
+    #[cfg(feature = "tenancy")]
+    fn apply_to<DB: sqlx::Database>(
+        self,
+        mut b: crate::server::Builder<DB>,
+    ) -> crate::server::Builder<DB> {
+        b = b.security_headers(self.headers);
+        if let Some(l) = self.ssl_redirect {
+            b = b.ssl_redirect(l);
+        }
+        if let Some(l) = self.allowed_hosts {
+            b = b.allowed_hosts(l);
+        }
+        b
+    }
+}
+
+/// Wrap the single-tenant router in the outer layers, when settings
+/// produced any.
+#[cfg(feature = "config")]
+fn wrap_outer((app, outer): (Router, Option<OuterLayers>)) -> Router {
+    match outer {
+        Some(o) => o.apply(app),
+        None => app,
+    }
+}
+
+#[cfg(feature = "config")]
+fn outer_layers(s: &crate::config::SecuritySettings) -> OuterLayers {
+    use crate::host_validation::AllowedHostsLayer;
+    use crate::ssl_redirect::SslRedirectLayer;
+    // An empty list is the opt-out; the layer would enforce nothing.
+    let allowed_hosts = (!s.allowed_hosts.is_empty())
+        .then(|| AllowedHostsLayer::from_settings_list(s.allowed_hosts.iter().map(String::as_str)));
+    // Opt-in: behind a TLS-terminating LB it is usually not wanted.
+    let ssl_redirect = matches!(s.secure_ssl_redirect, Some(true)).then(|| {
         let mut layer = SslRedirectLayer::new();
-        // SECURE_PROXY_SSL_HEADER — expect length-2 `[header, value]`.
-        // Malformed shapes are flagged by `manage check --deploy`;
-        // here we just ignore wrong-length entries to keep boot
-        // resilient.
-        if s.security.secure_proxy_ssl_header.len() == 2 {
-            layer = layer.proxy_ssl_header(
-                &s.security.secure_proxy_ssl_header[0],
-                &s.security.secure_proxy_ssl_header[1],
-            );
+        // Expect `[header, value]`; `check --deploy` flags other shapes.
+        if s.secure_proxy_ssl_header.len() == 2 {
+            layer = layer
+                .proxy_ssl_header(&s.secure_proxy_ssl_header[0], &s.secure_proxy_ssl_header[1]);
         }
-        if !s.security.secure_redirect_exempt.is_empty() {
-            layer = layer.exempt(s.security.secure_redirect_exempt.iter().cloned());
+        if !s.secure_redirect_exempt.is_empty() {
+            layer = layer.exempt(s.secure_redirect_exempt.iter().cloned());
         }
-        app = app.ssl_redirect(layer);
+        layer
+    });
+    OuterLayers {
+        // `SecuritySettings::default()` is strict(), so this always mounts.
+        headers: crate::security_headers::SecurityHeadersLayer::from_settings(s),
+        allowed_hosts,
+        ssl_redirect,
     }
-
-    app
 }
 
 /// Build a [`crate::tenancy::RouteConfig`] from a
@@ -1828,19 +1883,52 @@ mod tests {
         assert!(inert_layer_settings(&s).is_empty());
     }
 
-    /// #1699 — the tenancy server gets `[security]` headers only when
-    /// settings are loaded, and then from those settings.
-    #[cfg(all(feature = "tenancy", feature = "config", feature = "admin"))]
-    #[test]
-    fn tenancy_security_headers_follow_the_settings() {
-        assert!(Cli::new().tenancy_security_headers().is_none());
+    /// #1699, #1700 — what both tenancy paths hand the builder, checked
+    /// by request: headers, Host allowlist outermost, HTTPS redirect with
+    /// its proxy header and exempt paths.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenancy_builder_hands_over_every_outer_layer() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
         let mut s = crate::config::Settings::default();
-        s.security.headers_preset = Some("relaxed".into());
-        let got = Cli::new().with_settings(&s).tenancy_security_headers();
-        assert_eq!(
-            got.map(|l| l.xfo),
-            Some(crate::security_headers::SecurityHeadersLayer::relaxed().xfo)
-        );
+        s.security.allowed_hosts = vec![".localhost".into()];
+        s.security.secure_ssl_redirect = Some(true);
+        s.security.secure_proxy_ssl_header = vec!["x-forwarded-proto".into(), "https".into()];
+        s.security.secure_redirect_exempt = vec!["/app".into()];
+        let cli = Cli::new().with_settings(&s);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+        let (_, outer) = apply_settings_layers(Router::new(), &s);
+        let builder = crate::server::Builder::from_pool(pool, url, "localhost");
+        let app = cli
+            .tenancy_builder(builder, Some(outer))
+            .into_router()
+            .await
+            .expect("assemble");
+
+        let send = |host: &str, uri: &str, https: bool| {
+            let mut req = Request::builder().uri(uri).header("host", host);
+            if https {
+                req = req.header("x-forwarded-proto", "https");
+            }
+            app.clone().oneshot(req.body(Body::empty()).unwrap())
+        };
+        // Refused, not redirected to: the allowlist is outermost.
+        let r = send("evil.example", "/login", false).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // Plain HTTP is redirected; the proxy header and exempt path are not.
+        let r = send("acme.localhost", "/login", false).await.unwrap();
+        assert_eq!(r.status(), StatusCode::MOVED_PERMANENTLY);
+        let r = send("acme.localhost", "/login", true).await.unwrap();
+        assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
+        assert!(r.headers().contains_key("x-frame-options"));
+        let r = send("acme.localhost", "/app", false).await.unwrap();
+        assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
     }
 
     #[cfg(feature = "config")]
@@ -2243,5 +2331,31 @@ mod assemble_app_tests {
             "health endpoints must be opt-in; mounting them always would make \
              the positive test above vacuous"
         );
+    }
+
+    /// #1700 — the single-tenant server keeps its `[security]` outer
+    /// layers: headers on, and a bad Host refused.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn assemble_app_applies_the_outer_layers() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.allowed_hosts = vec!["example.com".into()];
+        let app = Cli::new()
+            .with_settings(&s)
+            .with_health()
+            .assemble_app(pool);
+        let send = |host: &str| {
+            let req = Request::builder().uri("/health").header("host", host);
+            app.clone().oneshot(req.body(Body::empty()).unwrap())
+        };
+        let ok = send("example.com").await.expect("request");
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert!(ok.headers().contains_key("x-frame-options"));
+        let bad = send("evil.example").await.expect("request");
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
     }
 }
