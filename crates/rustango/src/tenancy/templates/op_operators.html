@@ -72,6 +72,7 @@ reach every tenant, so this list is the console's access control.</p>
         <span class="field-helper">last active operator</span>
         {% else %}
         <form method="post" action="/operators/{{ op.id }}/active" class="inline-form">
+          {{ csrf_input | default(value='') | safe }}
           {% if op.active %}
           <button type="submit" class="btn btn-secondary"
                   onclick="return confirm('Deactivate {{ op.username }}? They are signed out on their next request.');">Deactivate</button>
@@ -89,6 +90,7 @@ reach every tenant, so this list is the console's access control.</p>
     <tr id="reset-{{ op.id }}" class="reset-row">
       <td colspan="6">
         <form method="post" action="/operators/{{ op.id }}/reset-password" class="inline-reset">
+          {{ csrf_input | default(value='') | safe }}
           <strong>Reset <code>{{ op.username }}</code>:</strong>
           <input type="password" name="password" placeholder="new password"
                  minlength="8" autocomplete="new-password">
@@ -112,6 +114,7 @@ reach every tenant, so this list is the console's access control.</p>
 
 {% if manage_enabled %}
 <form method="post" action="/operators" class="edit-form">
+  {{ csrf_input | default(value='') | safe }}
   <fieldset class="section">
     <legend>Add an operator</legend>
     <table>

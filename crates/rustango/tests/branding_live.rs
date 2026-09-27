@@ -144,6 +144,8 @@ async fn upload_then_serve_round_trip() {
     );
     let login_req = Request::builder()
         .method("POST")
+        .header("cookie", "rustango_csrf=t")
+        .header("x-csrf-token", "t")
         .uri("/login")
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(login_form))
@@ -174,6 +176,8 @@ async fn upload_then_serve_round_trip() {
 
     let upload_req = Request::builder()
         .method("POST")
+        .header("cookie", "rustango_csrf=t")
+        .header("x-csrf-token", "t")
         .uri(format!("/orgs/{slug}/edit/branding"))
         .header(
             header::CONTENT_TYPE,

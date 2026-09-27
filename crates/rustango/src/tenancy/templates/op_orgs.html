@@ -22,12 +22,14 @@
   <a href="/orgs/provision" class="btn btn-secondary">Runs</a>
   <form method="post" action="/orgs/migrate" class="inline-form"
         onsubmit="return confirm('Run migrations for every active tenant?');">
+    {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Migrate all tenants</button>
   </form>
   {% endif %}
   {% if edit_enabled %}
   <form method="post" action="/orgs/prewarm" class="inline-form"
         onsubmit="return confirm('Open a connection for every active database-mode tenant? This can take a moment.');">
+    {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Pre-warm pools</button>
   </form>
   {% endif %}

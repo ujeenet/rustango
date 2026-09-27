@@ -2,6 +2,13 @@
 <html lang="en" data-theme="{{ theme_mode | default(value='auto') }}">
 <head>
   <meta charset="utf-8">
+  {#- Scripts read the CSRF token here (autoescaped), never inline. -#}
+  <meta name="csrf-token" content="{{ csrf_token | default(value='') }}">
+  <script>
+    function csrfToken() {
+      return document.querySelector('meta[name="csrf-token"]').content;
+    }
+  </script>
   <title>{% block title %}{{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}</title>
   <script>
   // No-flash theme application — see _theme_toggle.html for the cycle UI.
@@ -29,6 +36,7 @@
       </nav>
       <div class="who">Signed in as <strong>{{ operator_username }}</strong></div>
       <form class="logout" method="post" action="/logout">
+        {{ csrf_input | default(value='') | safe }}
         <button type="submit">Sign out</button>
       </form>
     </aside>

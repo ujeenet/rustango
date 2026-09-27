@@ -111,6 +111,8 @@ async fn boot(edit: bool) -> Booted {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -165,6 +167,8 @@ impl Booted {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .uri(uri)
                     .header("cookie", &self.cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -242,6 +246,8 @@ async fn prewarm_requires_a_session() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/prewarm")
                 .body(Body::empty())
                 .unwrap(),

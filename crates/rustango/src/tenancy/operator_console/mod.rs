@@ -525,7 +525,10 @@ fn router_inner(
     // reachable from un-authenticated tenant pages.
     let public = Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", post(logout))
+        .route("/logout", post(logout));
+    // Cacheable GET-only assets stay outside the CSRF layers, so no
+    // shared cache stores a `Set-Cookie` with them.
+    let assets = Router::new()
         .route("/__static__/rustango.png", get(static_rustango_png))
         .route("/__brand__/{slug}/{filename}", get(serve_brand_asset));
 
@@ -671,11 +674,26 @@ fn router_inner(
     // the login bounce carries the whole attempted URL, and `token`
     // because the impersonation handoff puts one in the query string.
     use crate::access_log::AccessLogRouterExt as _;
-    public.merge(private).with_state(state).access_log(
-        crate::access_log::AccessLogLayer::new()
-            .redact_additional("next")
-            .redact_additional("token"),
-    )
+    // CSRF on every console POST, login included (#1710): a tenant
+    // subdomain is same-site with the apex, so `SameSite=Lax` does not
+    // stop it. The layer checks token and Origin first; inside it,
+    // `csrf_context` mints the token `render` puts in each form and sets
+    // its cookie, so the layer sees it set and adds no second one.
+    // Origin is the check that stops a tenant host: it can plant the
+    // cookie, and so knows the token.
+    public
+        .merge(private)
+        .route_layer(middleware::from_fn(
+            crate::admin::csrf_context::csrf_context,
+        ))
+        .route_layer(crate::forms::csrf::layer())
+        .merge(assets)
+        .with_state(state)
+        .access_log(
+            crate::access_log::AccessLogLayer::new()
+                .redact_additional("next")
+                .redact_additional("token"),
+        )
 }
 
 /// Rows per page, for every list the console renders. One number for
@@ -816,7 +834,15 @@ pub(super) struct ListQuery {
 /// Prefer this to `.unwrap_or_default()`, which turns a template error
 /// into a blank `200` with no clue what went wrong.
 fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body> {
-    match state.tera.render(template, ctx) {
+    // Every console form posts this back; `csrf::layer()` checks it (#1710).
+    let mut ctx = ctx.clone();
+    // `csrf_token` is for scripts that send `X-CSRF-Token` (fetch, and
+    // the multipart branding form, whose body the layer cannot read).
+    if let Some(token) = crate::admin::session::current_csrf_token() {
+        ctx.insert("csrf_input", &crate::forms::csrf::csrf_input_html(&token));
+        ctx.insert("csrf_token", &token);
+    }
+    match state.tera.render(template, &ctx) {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             let mut detail = e.to_string();
@@ -1045,12 +1071,12 @@ struct LoginQuery {
 async fn login_form(
     State(state): State<ConsoleState>,
     Query(q): Query<LoginQuery>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("next", &q.next.unwrap_or_else(|| "/".into()));
     ctx.insert("error", &q.error);
-    Html(state.tera.render("op_login.html", &ctx).unwrap_or_default())
+    render(&state, "op_login.html", &ctx)
 }
 
 #[derive(Deserialize)]
@@ -1228,22 +1254,14 @@ async fn change_password_form(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "change_password");
     ctx.insert("operator_username", &op.username);
     ctx.insert("error", &params.get("error"));
     ctx.insert("success", &params.get("ok"));
-    Html(
-        state
-            .tera
-            .render("op_change_password.html", &ctx)
-            .unwrap_or_else(|e| {
-                tracing::error!(target: "rustango::tenancy::operator_console", error = %e, "op_change_password.html render");
-                "<!doctype html><h1>Change-password page unavailable</h1>".to_owned()
-            }),
-    )
+    render(&state, "op_change_password.html", &ctx)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1328,17 +1346,12 @@ async fn change_password_submit(
 async fn welcome(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "home");
     ctx.insert("operator_username", &op.username);
-    Html(
-        state
-            .tera
-            .render("op_welcome.html", &ctx)
-            .unwrap_or_default(),
-    )
+    render(&state, "op_welcome.html", &ctx)
 }
 
 async fn orgs_list(
@@ -1446,13 +1459,7 @@ async fn sso_shared_list(
     ctx.insert("section", "sso");
     ctx.insert("operator_username", &op.username);
     ctx.insert("providers", &view);
-    Html(
-        state
-            .tera
-            .render("op_sso_shared.html", &ctx)
-            .unwrap_or_default(),
-    )
-    .into_response()
+    render(&state, "op_sso_shared.html", &ctx)
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1640,13 +1647,7 @@ async fn org_edit_form(
         "impersonate_enabled",
         &state.tenant_session_secret.is_some(),
     );
-    Html(
-        state
-            .tera
-            .render("op_orgs_edit.html", &ctx)
-            .unwrap_or_default(),
-    )
-    .into_response()
+    render(&state, "op_orgs_edit.html", &ctx)
 }
 
 /// `POST /orgs/{slug}/edit`: parse the form with
