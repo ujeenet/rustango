@@ -71,6 +71,23 @@ impl<'a> PoolTx<'a> {
         }
     }
 
+    /// Open a nested transaction on the same connection: sqlx issues a
+    /// `SAVEPOINT`, and commit / rollback release or roll back to it.
+    ///
+    /// # Errors
+    /// `sqlx::Error` from the underlying `SAVEPOINT`.
+    pub async fn savepoint(&mut self) -> Result<PoolTx<'_>, sqlx::Error> {
+        use sqlx::Connection as _;
+        Ok(match self {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(tx) => PoolTx::Postgres((**tx).begin().await?),
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(tx) => PoolTx::Mysql((**tx).begin().await?),
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(tx) => PoolTx::Sqlite((**tx).begin().await?),
+        })
+    }
+
     /// Return the dialect for this transaction's backend — same
     /// dispatch as [`crate::sql::Pool::dialect`] but sourced from the
     /// `PoolTx` variant rather than the pool. Used internally by the

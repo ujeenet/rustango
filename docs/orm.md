@@ -1480,7 +1480,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For a hook that runs only after the commit lands, the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback.
+Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For a hook that runs only after the commit lands, the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback. To nest, use `rustango::atomic_tx!(tx, |sp| { … })`: it runs in a savepoint on the same connection, and its hooks wait for the outermost commit. A second `atomic(&pool, …)` on the same pool inside the block returns `ExecError::NestedAtomic`.
 
 ---
 

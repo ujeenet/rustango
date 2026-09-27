@@ -48,6 +48,12 @@ impl Dialect for MySql {
         Some(" LIMIT 18446744073709551615")
     }
 
+    /// The derived table also lifts error 1093 when the subquery reads
+    /// the UPDATE/DELETE target table.
+    fn in_subquery_limit_needs_derived_table(&self) -> bool {
+        true
+    }
+
     /// MySQL quotes with backticks, and an embedded backtick is
     /// doubled, so any name comes out valid.
     fn quote_ident(&self, name: &str) -> String {

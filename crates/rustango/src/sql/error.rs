@@ -243,6 +243,11 @@ pub enum ExecError {
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
     EmptyReturning,
 
+    /// `atomic(&pool, …)` was called inside an `atomic` block on the same
+    /// pool. Nest with `atomic_tx(tx, …)`, which uses a savepoint.
+    #[error("nested `atomic()` on the same pool; use `atomic_tx(tx, …)` for a savepoint")]
+    NestedAtomic,
+
     /// `ForeignKey::get` resolved a PK that didn't match any row in
     /// the target table. Means the parent was deleted under a
     /// non-CASCADE constraint, or the FK was constructed by hand with

@@ -55,7 +55,7 @@ pub use executor::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use executor::row_to_json_sqlite;
 pub use executor::{
-    atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
+    atomic, atomic_tx, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
     explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
     fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
     fetch_with_prefetch_pool, get_or_create, insert_pool, insert_returning_pool,

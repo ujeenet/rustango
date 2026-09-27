@@ -3347,7 +3347,19 @@ pub(super) fn write_where_expr(
             let qualified = render_qualified_col(b.d, qualify_with, column);
             b.sql.push_str(&qualified);
             b.sql.push_str(if *negated { " NOT IN (" } else { " IN (" });
+            let limited = subquery.limit.is_some()
+                || subquery.offset.is_some()
+                || subquery.compound_limit.is_some()
+                || subquery.compound_offset.is_some();
+            let wrap = limited && b.d.in_subquery_limit_needs_derived_table();
+            if wrap {
+                b.sql.push_str("SELECT * FROM (");
+            }
             write_select(b, subquery)?;
+            if wrap {
+                b.sql.push_str(") AS ");
+                b.write_ident("_rustango_in");
+            }
             b.sql.push(')');
             Ok(())
         }
@@ -4125,9 +4137,8 @@ fn write_order_limit_offset(
     if let Some(n) = limit {
         let _ = write!(b.sql, " LIMIT {n}");
     } else if offset.is_some() {
-        // MySQL rejects `OFFSET` with no `LIMIT`, so it supplies a
-        // stand-in LIMIT here. PG and SQLite return `None` and take
-        // the bare OFFSET.
+        // MySQL and SQLite reject `OFFSET` with no `LIMIT`, so they
+        // supply a stand-in LIMIT here. PG takes the bare OFFSET.
         if let Some(clause) = b.d.offset_without_limit_clause() {
             b.sql.push_str(clause);
         }

@@ -9,11 +9,74 @@
 use super::{transaction_pool, ExecError, PoolTx};
 use crate::sql::Pool;
 
+type Callback = Box<dyn FnOnce() + Send>;
+
+/// Callback queue of one `atomic` scope: one frame per open savepoint.
+struct Scope {
+    pool: usize,
+    frames: Vec<Vec<Callback>>,
+}
+
 tokio::task_local! {
     /// Active callback queue for the current `atomic` scope. Set by
     /// [`atomic`] before running its closure; read by [`on_commit`]
     /// from anywhere inside that closure's call tree.
-    static ON_COMMIT: std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>;
+    static ON_COMMIT: std::sync::Mutex<Scope>;
+}
+
+/// Identity of a pool; clones of one pool share it.
+fn pool_key(pool: &Pool) -> usize {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(p) => std::sync::Arc::as_ptr(&p.connect_options()) as usize,
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(p) => std::sync::Arc::as_ptr(&p.connect_options()) as usize,
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(p) => std::sync::Arc::as_ptr(&p.connect_options()) as usize,
+    }
+}
+
+/// A savepoint's callback frame. Dropped unreleased, its callbacks drop too.
+struct Frame(Option<usize>);
+
+impl Frame {
+    fn open() -> Self {
+        Self(
+            ON_COMMIT
+                .try_with(|s| {
+                    let mut s = s.lock().expect("on_commit mutex");
+                    s.frames.push(Vec::new());
+                    s.frames.len() - 1
+                })
+                .ok(),
+        )
+    }
+
+    /// Hand this frame's callbacks to the enclosing frame.
+    fn release(mut self) {
+        if let Some(at) = self.0.take() {
+            let _ = ON_COMMIT.try_with(|s| {
+                let mut s = s.lock().expect("on_commit mutex");
+                let inner: Vec<Callback> = s.frames.drain(at..).flatten().collect();
+                if let Some(parent) = s.frames.last_mut() {
+                    parent.extend(inner);
+                }
+            });
+        }
+    }
+}
+
+impl Drop for Frame {
+    fn drop(&mut self) {
+        if let Some(at) = self.0 {
+            // No `expect`: this may run while unwinding.
+            let _ = ON_COMMIT.try_with(|s| {
+                if let Ok(mut s) = s.lock() {
+                    s.frames.truncate(at);
+                }
+            });
+        }
+    }
 }
 
 /// Closure-scoped transaction with after-commit hooks.
@@ -68,6 +131,10 @@ tokio::task_local! {
 /// subsequent callbacks won't run. Wrap in `std::panic::catch_unwind`
 /// if you need per-callback resilience.
 ///
+/// **Nesting** goes through the open transaction: [`atomic_tx`] runs a
+/// block in a savepoint on the same connection. Calling `atomic` again
+/// on the same pool inside the block returns [`ExecError::NestedAtomic`].
+///
 /// # Errors
 /// Returns the first `ExecError` produced by `f`, or a driver error
 /// from `BEGIN` / `COMMIT` / `ROLLBACK`.
@@ -79,7 +146,19 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    let queue = std::sync::Mutex::new(Vec::<Box<dyn FnOnce() + Send>>::new());
+    let key = pool_key(pool);
+    // A second transaction on the same pool would escape the outer
+    // rollback, and deadlock a one-connection pool.
+    if ON_COMMIT
+        .try_with(|s| s.lock().expect("on_commit mutex").pool == key)
+        .unwrap_or(false)
+    {
+        return Err(ExecError::NestedAtomic);
+    }
+    let queue = std::sync::Mutex::new(Scope {
+        pool: key,
+        frames: vec![Vec::new()],
+    });
     ON_COMMIT
         .scope(queue, async move {
             let mut tx = transaction_pool(pool).await?;
@@ -87,8 +166,13 @@ where
                 Ok(val) => {
                     tx.commit().await?;
                     // Drain queue + fire callbacks in registration order.
-                    let callbacks = ON_COMMIT
-                        .with(|q| std::mem::take(&mut *q.lock().expect("on_commit mutex")));
+                    let callbacks: Vec<Callback> = ON_COMMIT.with(|s| {
+                        let mut s = s.lock().expect("on_commit mutex");
+                        std::mem::take(&mut s.frames)
+                            .into_iter()
+                            .flatten()
+                            .collect()
+                    });
                     for cb in callbacks {
                         cb();
                     }
@@ -102,6 +186,60 @@ where
             }
         })
         .await
+}
+
+/// Run `f` in a savepoint on `tx`'s connection. `Ok` releases it, `Err`
+/// rolls back to it; the enclosing transaction goes on either way.
+///
+/// [`on_commit`] callbacks queued inside wait for the outermost
+/// [`atomic`] commit, and drop if this savepoint or any outer level
+/// rolls back.
+///
+/// ```ignore
+/// rustango::atomic!(&pool, |tx| {
+///     insert_tx(tx, &order).await?;
+///     let _ = rustango::atomic_tx!(tx, |sp| {
+///         insert_tx(sp, &optional_audit_row).await
+///     })
+///     .await; // a failure here keeps `order`
+///     Ok(())
+/// })
+/// .await?;
+/// ```
+///
+/// # Errors
+/// The first `ExecError` from `f`, or a driver error from `SAVEPOINT` /
+/// `RELEASE SAVEPOINT`.
+pub async fn atomic_tx<F, T>(tx: &mut PoolTx<'_>, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx mut PoolTx<'_>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
+    let mut sp = tx.savepoint().await?;
+    let frame = Frame::open();
+    match f(&mut sp).await {
+        Ok(val) => {
+            sp.commit().await?;
+            frame.release();
+            Ok(val)
+        }
+        Err(e) => {
+            // The frame's callbacks drop with it.
+            let _ = sp.rollback().await;
+            Err(e)
+        }
+    }
+}
+
+/// Sugar over [`atomic_tx`], as [`atomic!`](crate::atomic) is over [`atomic`].
+#[macro_export]
+macro_rules! atomic_tx {
+    ($tx:expr, |$sp:ident| $body:block) => {
+        $crate::sql::atomic_tx($tx, |$sp| ::std::boxed::Box::pin(async move { $body }))
+    };
 }
 
 /// Sugar over [`atomic`] that wraps the body in `Box::pin(async move { … })`
@@ -134,8 +272,9 @@ macro_rules! atomic {
     };
 }
 
-/// Queue `f` to run after the enclosing [`atomic`] block commits. If
-/// the transaction rolls back instead, `f` is dropped unfired.
+/// Queue `f` to run after the outermost [`atomic`] block commits. If
+/// the transaction, or an enclosing [`atomic_tx`] savepoint, rolls
+/// back instead, `f` is dropped unfired.
 ///
 /// `f` is sync (`FnOnce() + Send + 'static`). For async work, spawn
 /// from inside:
@@ -154,8 +293,12 @@ where
     F: FnOnce() + Send + 'static,
 {
     ON_COMMIT
-        .try_with(|q| {
-            q.lock().expect("on_commit mutex").push(Box::new(f));
+        .try_with(|s| {
+            let mut s = s.lock().expect("on_commit mutex");
+            match s.frames.last_mut() {
+                Some(frame) => frame.push(Box::new(f)),
+                None => s.frames.push(vec![Box::new(f)]),
+            }
         })
         .unwrap_or_else(|_| {
             panic!(
@@ -172,6 +315,13 @@ where
 #[must_use]
 pub fn on_commit_pending() -> usize {
     ON_COMMIT
-        .try_with(|q| q.lock().expect("on_commit mutex").len())
+        .try_with(|s| {
+            s.lock()
+                .expect("on_commit mutex")
+                .frames
+                .iter()
+                .map(Vec::len)
+                .sum()
+        })
         .unwrap_or(0)
 }

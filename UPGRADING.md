@@ -150,6 +150,16 @@ untouched.
 
 ## Unreleased
 
+### Bounded update/delete; nested `atomic()` becomes `atomic_tx`
+
+`update()` / `delete()` now honour `limit`, `offset` and `order_by`
+(#1666); a queryset that relied on them being ignored now touches fewer
+rows. With a composite or missing PK, or after `union()`, a bounded one
+returns `QueryError::BoundedDmlUnsupported`. Nesting `atomic(&pool, …)`
+inside another on the same pool returns `ExecError::NestedAtomic`: use
+`atomic_tx!(tx, |sp| { … })`, a savepoint on the outer transaction.
+Inner `on_commit` callbacks now wait for the outermost commit.
+
 ### The trusted client IP is the rightmost untrusted hop
 
 Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the

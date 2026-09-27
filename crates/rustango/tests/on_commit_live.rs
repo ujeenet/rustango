@@ -177,11 +177,8 @@ async fn on_commit_outside_atomic_panics() {
 
 // ---------- nested atomic blocks ----------
 //
-// Each `atomic!` call sets its own task-local queue, so callbacks
-// registered inside an inner block belong to the INNER atomic and
-// follow ITS commit/rollback decision. The outer block's queue is
-// shielded — restored when the inner scope ends. These tests pin
-// the property since it's load-bearing for any nested-tx user code.
+// Nesting is a savepoint (`atomic_tx!`). Its callbacks wait for the
+// outermost commit and drop if any enclosing level rolls back.
 
 #[tokio::test]
 async fn nested_atomic_inner_rollback_isolated_from_outer() {
@@ -193,12 +190,12 @@ async fn nested_atomic_inner_rollback_isolated_from_outer() {
     let outer_clone = Arc::clone(&outer);
     let inner_clone = Arc::clone(&inner);
 
-    rustango::atomic!(&pool, |_outer_tx| {
+    rustango::atomic!(&pool, |outer_tx| {
         on_commit(move || {
             outer_clone.fetch_add(1, Ordering::SeqCst);
         });
         // Inner block fails → rollback → inner callback dropped.
-        let inner_res: Result<(), ExecError> = rustango::atomic!(&pool, |_inner_tx| {
+        let inner_res: Result<(), ExecError> = rustango::atomic_tx!(outer_tx, |_inner_tx| {
             on_commit(move || {
                 inner_clone.fetch_add(1, Ordering::SeqCst);
             });
@@ -234,12 +231,12 @@ async fn nested_atomic_outer_rollback_drops_both_queues() {
     let outer_clone = Arc::clone(&outer);
     let inner_clone = Arc::clone(&inner);
 
-    let result: Result<(), ExecError> = rustango::atomic!(&pool, |_outer_tx| {
+    let result: Result<(), ExecError> = rustango::atomic!(&pool, |outer_tx| {
         on_commit(move || {
             outer_clone.fetch_add(1, Ordering::SeqCst);
         });
-        // Inner commits successfully — its callback fires.
-        rustango::atomic!(&pool, |_inner_tx| {
+        // Inner savepoint releases; its callback waits for the outer commit.
+        rustango::atomic_tx!(outer_tx, |_inner_tx| {
             on_commit(move || {
                 inner_clone.fetch_add(1, Ordering::SeqCst);
             });
@@ -247,7 +244,12 @@ async fn nested_atomic_outer_rollback_drops_both_queues() {
         })
         .await
         .unwrap();
-        // Outer then bails out — its OWN callback drops.
+        assert_eq!(
+            on_commit_pending(),
+            2,
+            "inner callback moved to the outer queue"
+        );
+        // Outer then bails out — both callbacks drop.
         Err(ExecError::Sql(rustango::sql::SqlError::EmptyInList))
     })
     .await;
@@ -255,8 +257,8 @@ async fn nested_atomic_outer_rollback_drops_both_queues() {
     assert!(result.is_err(), "outer should roll back");
     assert_eq!(
         inner.load(Ordering::SeqCst),
-        1,
-        "inner already fired before outer rolled back (correct — inner had its own scope)"
+        0,
+        "inner callback must NOT fire — the outer transaction rolled back"
     );
     assert_eq!(
         outer.load(Ordering::SeqCst),
