@@ -3242,30 +3242,92 @@ fn inherent_impl_tokens(
     } else {
         quote!(::std::string::String::new())
     };
-    let make_op_emit = |op_path: TokenStream2| -> TokenStream2 {
-        if audited_fields.is_some() {
-            let pairs = audit_pair_tokens.iter();
-            let pk_str = audit_pk_to_string.clone();
-            quote! {
-                let _audit_entry = #root::audit::PendingEntry {
+    // `__rustango_audit_entry`: the one place a snapshot `PendingEntry`
+    // is built, so every audited write path records the same shape.
+    let audit_entry_method = if audited_fields.is_some() {
+        let pairs = audit_pair_tokens.iter();
+        let pk_str = audit_pk_to_string.clone();
+        quote! {
+            /// Snapshot audit entry for `operation` on this row.
+            #[doc(hidden)]
+            pub fn __rustango_audit_entry(
+                &self,
+                operation: #root::audit::AuditOp,
+            ) -> #root::audit::PendingEntry {
+                #root::audit::PendingEntry {
                     entity_table: <Self as #root::core::Model>::SCHEMA.table,
                     entity_pk: #pk_str,
-                    operation: #op_path,
+                    operation,
                     source: #root::audit::current_source(),
                     changes: #root::audit::snapshot_changes(&[
                         #( #pairs ),*
                     ]),
-                };
-                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
+    // Builds `_audit_entry`; `written` is the soft-delete column's new
+    // value, recorded in place of the stale `self` field.
+    let make_entry = |op_path: TokenStream2, written: Option<TokenStream2>| -> TokenStream2 {
+        if let (Some(v), Some(col)) = (written, fields.soft_delete_column.as_deref()) {
+            quote! {
+                let mut _audit_entry = self.__rustango_audit_entry(#op_path);
+                _audit_entry.set_tracked(#col, #v);
             }
         } else {
-            quote!()
+            quote!(let _audit_entry = self.__rustango_audit_entry(#op_path);)
         }
     };
-    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create));
-    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete));
-    let audit_softdelete_emit = make_op_emit(quote!(#root::audit::AuditOp::SoftDelete));
-    let audit_restore_emit = make_op_emit(quote!(#root::audit::AuditOp::Restore));
+    let soft_deleted_json = quote!(#root::__serde_json::to_value(&_now)
+        .unwrap_or(#root::__serde_json::Value::Null));
+    let restored_json = quote!(#root::__serde_json::Value::Null);
+    // `_on` emit; `affected` paths skip the row when nothing changed.
+    let make_op_emit =
+        |op_path: TokenStream2, written: Option<TokenStream2>, affected: bool| -> TokenStream2 {
+            if audited_fields.is_none() {
+                return quote!();
+            }
+            let entry = make_entry(op_path, written);
+            let emit = quote! {
+                #entry
+                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+            };
+            if affected {
+                quote!(if _affected > 0 { #emit })
+            } else {
+                emit
+            }
+        };
+    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create), None, false);
+    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete), None, true);
+    let audit_softdelete_emit = make_op_emit(
+        quote!(#root::audit::AuditOp::SoftDelete),
+        Some(soft_deleted_json.clone()),
+        true,
+    );
+    let audit_restore_emit = make_op_emit(
+        quote!(#root::audit::AuditOp::Restore),
+        Some(restored_json.clone()),
+        true,
+    );
+    // `&Pool` update runner for soft_delete / restore: one tx with the
+    // audit row when audited, a plain UPDATE otherwise.
+    let make_pool_update = |op_path: TokenStream2, written: TokenStream2| -> TokenStream2 {
+        if audited_fields.is_some() {
+            let entry = make_entry(op_path, Some(written));
+            quote! {
+                #entry
+                #root::audit::save_one_with_audit(pool, &_query, &_audit_entry).await
+            }
+        } else {
+            quote!(#root::sql::update_pool(pool, &_query).await)
+        }
+    };
+    let pool_softdelete_run =
+        make_pool_update(quote!(#root::audit::AuditOp::SoftDelete), soft_deleted_json);
+    let pool_restore_run = make_pool_update(quote!(#root::audit::AuditOp::Restore), restored_json);
 
     // `save_pool(&Pool)` — emitted for every model with a PK.
     // Audited Auto-PK models are deferred (the Auto::Unset →
@@ -3671,8 +3733,6 @@ fn inherent_impl_tokens(
                     })
                     .unwrap_or_default()
             };
-            let pairs = audit_pair_tokens.iter();
-            let pk_str = audit_pk_to_string.clone();
             quote! {
                 /// Insert this row against either backend with audit
                 /// emission inside the same transaction. Bi-dialect
@@ -3697,19 +3757,10 @@ fn inherent_impl_tokens(
                         _values,
                     )
                     .returning(::std::vec![ #( #returning_cols ),* ]);
-                    let _audit_entry = #root::audit::PendingEntry {
-                        entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                        entity_pk: #pk_str,
-                        operation: #root::audit::AuditOp::Create,
-                        source: #root::audit::current_source(),
-                        changes: #root::audit::snapshot_changes(&[
-                            #( #pairs ),*
-                        ]),
-                    };
-                    let _result = #root::audit::insert_one_with_audit(
-                        pool, &_query, &_audit_entry,
-                    ).await?;
-                    #root::sql::apply_auto_pk(_result, self)
+                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
+                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
+                    })
+                    .await
                 }
             }
         } else {
@@ -3880,8 +3931,6 @@ fn inherent_impl_tokens(
         let pk_ident_for_pool = primary_key.map(|(ident, _)| ident);
         if let Some(pk_ident) = pk_ident_for_pool {
             if audited_fields.is_some() {
-                let pairs = audit_pair_tokens.iter();
-                let pk_str = audit_pk_to_string.clone();
                 quote! {
                     /// Delete this row against either backend with audit
                     /// emission inside the same transaction. Bi-dialect
@@ -3900,15 +3949,8 @@ fn inherent_impl_tokens(
                                 ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
                         );
-                        let _audit_entry = #root::audit::PendingEntry {
-                            entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                            entity_pk: #pk_str,
-                            operation: #root::audit::AuditOp::Delete,
-                            source: #root::audit::current_source(),
-                            changes: #root::audit::snapshot_changes(&[
-                                #( #pairs ),*
-                            ]),
-                        };
+                        let _audit_entry =
+                            self.__rustango_audit_entry(#root::audit::AuditOp::Delete);
                         #root::audit::delete_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await
@@ -4100,12 +4142,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Sum(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .sum::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4131,12 +4170,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Avg(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .avg::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4162,12 +4198,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Min(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .min::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4193,12 +4226,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Max(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .max::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4800,18 +4830,18 @@ fn inherent_impl_tokens(
                 if _values.is_empty() {
                     return ::core::result::Result::Ok(0);
                 }
-                let _query = #root::core::DeleteQuery::by_pk_in(
-                    <Self as #root::core::Model>::SCHEMA,
-                    <Self as #root::core::Model>::SCHEMA
-                        .primary_key()
-                        .ok_or_else(|| {
-                            #root::sql::ExecError::Sql(
-                                #root::sql::SqlError::MissingPrimaryKey,
-                            )
-                        })?
-                        .column,
-                    _values,
-                );
+                let _pk = <Self as #root::core::Model>::SCHEMA
+                    .primary_key()
+                    .ok_or_else(|| {
+                        #root::sql::ExecError::Sql(#root::sql::SqlError::MissingPrimaryKey)
+                    })?;
+                let _query = #root::query::QuerySet::<Self>::default()
+                    .filter_op(
+                        _pk.name,
+                        #root::core::Op::In,
+                        #root::core::SqlValue::List(_values),
+                    )
+                    .compile_delete()?;
                 #root::sql::delete_pool(pool, &_query).await
             }
 
@@ -5606,9 +5636,6 @@ fn inherent_impl_tokens(
             /// Eloquent
             /// `Model::where($where_col, $where_val)->delete()` parity.
             ///
-            /// For more complex filters drop into the queryset
-            /// builder + `Self::query().filter(...).delete().execute_pool(&pool)`.
-            ///
             /// # Errors
             /// As [`#root::sql::delete_pool`].
             pub async fn delete_where(
@@ -5616,25 +5643,9 @@ fn inherent_impl_tokens(
                 where_val: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                let _column = <Self as #root::core::Model>::SCHEMA
-                    .field(where_col)
-                    .ok_or_else(|| {
-                        #root::sql::ExecError::Query(
-                            #root::core::QueryError::UnknownField {
-                                model: <Self as #root::core::Model>::SCHEMA.name,
-                                field: ::std::string::ToString::to_string(where_col),
-                            },
-                        )
-                    })?
-                    .column;
-                let _query = #root::core::DeleteQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                        _column,
-                        #root::core::Op::Eq,
-                        ::core::convert::Into::into(where_val),
-                    )),
-                );
+                let _query = #root::query::QuerySet::<Self>::default()
+                    .filter_op(where_col, #root::core::Op::Eq, where_val)
+                    .compile_delete()?;
                 #root::sql::delete_pool(pool, &_query).await
             }
 
@@ -5927,29 +5938,6 @@ fn inherent_impl_tokens(
             #avg_method
             #min_method
             #max_method
-
-            /// Internal: forward to
-            /// [`#root::sql::model_shortcuts::aggregate_one_pool`].
-            /// Backs `sum` / `avg` / `min` / `max`.
-            #[doc(hidden)]
-            pub async fn __aggregate_one_pool<U>(
-                col: &str,
-                build: fn(&'static str) -> #root::core::AggregateExpr,
-                pool: &#root::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                #root::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): #root::sql::MaybePgFromRow
-                    + #root::sql::MaybeMyFromRow
-                    + #root::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                #root::sql::model_shortcuts::aggregate_one_pool::<Self, U>(col, build, pool)
-                    .await
-            }
 
             /// Fetch every row of this model from `pool`. Eloquent
             /// `Model::all()` parity — a thin wrapper over
@@ -6789,13 +6777,12 @@ fn inherent_impl_tokens(
                 ) -> ::core::result::Result<u64, #root::sql::ExecError>
                 #executor_where
                 {
+                    let _now = #root::__chrono::Utc::now();
                     let _query = #root::core::UpdateQuery::new(
                         <Self as #root::core::Model>::SCHEMA,
                         ::std::vec![#root::core::Assignment::new(
                             #col_lit,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                #root::__chrono::Utc::now()
-                            ),
+                            ::core::convert::Into::<#root::core::SqlValue>::into(_now),
                         )],
                         #root::core::WhereExpr::Predicate(#root::core::Filter::new(
                             #pk_column_lit,
@@ -6866,13 +6853,12 @@ fn inherent_impl_tokens(
                     &self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    let _now = #root::__chrono::Utc::now();
                     let _query = #root::core::UpdateQuery::new(
                         <Self as #root::core::Model>::SCHEMA,
                         ::std::vec![#root::core::Assignment::new(
                             #col_lit,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                #root::__chrono::Utc::now()
-                            ),
+                            ::core::convert::Into::<#root::core::SqlValue>::into(_now),
                         )],
                         #root::core::WhereExpr::Predicate(#root::core::Filter::new(
                             #pk_column_lit,
@@ -6882,7 +6868,7 @@ fn inherent_impl_tokens(
                             ),
                         )),
                     );
-                    #root::sql::update_pool(pool, &_query).await
+                    #pool_softdelete_run
                 }
 
                 /// Tri-dialect counterpart of [`Self::restore_on`].
@@ -6910,7 +6896,7 @@ fn inherent_impl_tokens(
                             ),
                         )),
                     );
-                    #root::sql::update_pool(pool, &_query).await
+                    #pool_restore_run
                 }
 
                 /// Hard-delete this row, ignoring the soft-delete
@@ -7093,6 +7079,7 @@ fn inherent_impl_tokens(
             }
             #pool_delete_method
             #pool_insert_method
+            #audit_entry_method
             #pool_save_method
             #refresh_replicate_methods
             #tx_delete_method

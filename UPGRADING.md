@@ -150,6 +150,27 @@ untouched.
 
 ## Unreleased
 
+### The trusted client IP is the rightmost untrusted hop
+
+Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the
+rightmost hop that is not a trusted proxy (#1673). List every proxy hop
+(CDN egress, load balancer, nginx) in `trust_proxies`, or the client IP
+will be one of your proxies. If your proxy sets `X-Real-IP`,
+`CF-Connecting-IP` or `Forwarded` instead of appending to XFF, name
+that strategy; `Auto` behind a trusted proxy reads only XFF.
+`BodyLimitLayer` now also limits bodies without `Content-Length`; over
+the limit a body extractor answers axum's plain 413.
+
+### Model shortcuts respect global scopes
+
+`Model::sum/avg/min/max/destroy/delete_where` now apply global scopes
+(#1675); to act on every row use `Model::objects().without_global_scopes()`.
+`delete_where` type-checks its value like `update_where`
+(`QueryError::TypeMismatch`). `audit::insert_one_with_audit` takes
+`(pool, &query, &mut model, |m| entry)` and sets the PK on `model`. The
+hidden `Model::__aggregate_one_pool` and
+`sql::model_shortcuts::aggregate_one_pool` are removed.
+
 ### Logins are rate limited; lockout keys on the username
 
 A locked or throttled login answers `429` with `Retry-After` (#1609);

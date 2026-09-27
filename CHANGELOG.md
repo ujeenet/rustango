@@ -4,6 +4,29 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
+
+`RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`
+/ `Forwarded` hop that is not a trusted proxy; it took the leftmost,
+which the client writes. Behind a trusted proxy `HeaderStrategy::Auto`
+reads only `X-Forwarded-For`. `ip_filter` and `trust_proxies` match
+IPv4-mapped IPv6 peers against IPv4 rules, so a v4 blocklist no longer
+fails open on a dual-stack listener. `BodyLimitLayer` caps chunked and
+HTTP/2 bodies as they stream (413) and checks `QUERY` by default. An
+all-trusted chain resolves to the rightmost hop.
+
+### Security — Model shortcuts honour global scopes; Pool writes are audited (#1675)
+
+`Model::sum`, `avg`, `min`, `max`, `destroy` and `delete_where` now
+apply the model's global scopes, like their `QuerySet` versions. On
+audited models `soft_delete(&Pool)` and `restore(&Pool)` write their
+audit row in the same transaction as the UPDATE, and `insert_pool`
+records the assigned PK instead of an empty `entity_pk`. On MySQL only
+the first `Auto` field is read back after an insert, so other tracked
+`Auto` fields (such as `auto_now_add`) and generated columns are
+recorded as `null` in the create row there. Audited writes that change no row write no audit row, and soft-delete
+and restore rows record the value written.
+
 ### Security — login rate limits and a bounded hashing queue (#1609, #1732)
 
 Every built-in password login (admin, operator console, tenant admin,
