@@ -190,7 +190,7 @@
     try {
       const res = await fetch("/orgs/{{ slug }}/test-connection", {
         method: "POST",
-        headers: { "X-CSRF-Token": {{ csrf_token | default(value='') | json_encode | safe }} },
+        headers: { "X-CSRF-Token": csrfToken() },
       });
       out.innerHTML = await res.text();
     } catch (err) {
@@ -206,10 +206,14 @@
     e.preventDefault();
     const res = await fetch(e.target.action, {
       method: "POST",
-      headers: { "X-CSRF-Token": {{ csrf_token | default(value='') | json_encode | safe }} },
+      headers: { "X-CSRF-Token": csrfToken() },
       body: new FormData(e.target),
     });
-    window.location = res.redirected ? res.url : e.target.action.replace(/\/branding$/, "");
+    if (!res.redirected) {
+      alert("Upload failed (" + res.status + "): " + (await res.text()));
+      return;
+    }
+    window.location = res.url;
   });
 </script>
 {% endblock %}

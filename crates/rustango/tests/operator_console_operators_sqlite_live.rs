@@ -681,6 +681,50 @@ async fn a_forged_console_post_is_refused() {
         StatusCode::FORBIDDEN
     );
     assert!(b.find(&name).await.is_none(), "no operator may be created");
+
+    // Login CSRF: correct credentials, no token — no session is minted.
+    let login = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "username={}&password=letmein-please",
+                    b.me
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::FORBIDDEN);
+    assert!(
+        !login
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|v| v.to_str().unwrap_or("").starts_with("rustango_op_session=")),
+        "a forged login must not mint a session"
+    );
+
+    // Forced logout: refused, and the session still works.
+    let logout = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/logout")
+                .header("cookie", &b.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::FORBIDDEN);
+    assert_eq!(b.get("/operators").await.status(), StatusCode::OK);
 }
 
 /// #1710 — the browser path: the page seeds the cookie and renders the
@@ -727,6 +771,87 @@ async fn the_rendered_form_token_is_accepted() {
     assert!(b.find(&name).await.is_some());
 }
 
+/// #1710 — the browser login: `/login` seeds one cookie, its form and the
+/// page's `<meta>` carry that token, and posting the form signs in.
+#[tokio::test]
+async fn the_login_form_round_trip_signs_in() {
+    let b = boot().await;
+    let page = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let seeded: Vec<String> = page
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| v.split(';').next()?.strip_prefix("rustango_csrf="))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(seeded.len(), 1, "{seeded:?}");
+    let token = &seeded[0];
+    let html = body_of(page).await;
+    assert!(
+        html.contains(&format!(r#"name="_csrf" value="{token}""#)),
+        "login form token"
+    );
+    let login = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("cookie", format!("rustango_csrf={token}"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "_csrf={token}&username={}&password=letmein-please",
+                    b.me
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        login
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|v| v.to_str().unwrap_or("").starts_with("rustango_op_session=")),
+        "the real form signs in: {}",
+        login.status()
+    );
+
+    // Pages the layout wraps expose the same token to scripts.
+    let page = b.get("/operators").await;
+    let html = body_of(page).await;
+    assert!(
+        html.contains(r#"<meta name="csrf-token" content=""#) && !html.contains(r#"content="">"#),
+        "the layout's csrf-token meta is filled"
+    );
+
+    // Cacheable assets carry no cookie a shared cache could store.
+    let asset = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/__static__/rustango.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(asset.headers().get("set-cookie").is_none());
+}
+
 /// #1710 — every POST form in a console template carries the token, or
 /// sends it as a header from script (the multipart branding form).
 #[test]
@@ -739,22 +864,50 @@ fn every_console_post_form_carries_the_token() {
         if !name.starts_with("op_") {
             continue;
         }
-        let html = std::fs::read_to_string(&path).unwrap();
+        let html = strip_tera_comments(&std::fs::read_to_string(&path).unwrap());
         for form in html.split("<form").skip(1) {
             let form = form.split("</form>").next().unwrap_or(form);
-            let head = form.split('>').next().unwrap_or("");
+            let head = form.split('>').next().unwrap_or("").to_ascii_lowercase();
+            let head = head.replace('\'', "\"");
             if !head.contains(r#"method="post""#) {
                 continue;
             }
-            let by_header = head.contains(r#"id="branding-form""#) && html.contains("X-CSRF-Token");
-            if !form.contains("csrf_input") && !by_header {
+            // The multipart branding form: its own submit handler must
+            // send the header, not just any script in the file.
+            let by_header = head.contains(r#"id="branding-form""#)
+                && html
+                    .split(r#"getElementById("branding-form")"#)
+                    .nth(1)
+                    .and_then(|h| h.split("</script>").next())
+                    .is_some_and(|h| h.contains(r#""X-CSRF-Token": csrfToken()"#));
+            if !form.contains("{{ csrf_input") && !by_header {
                 missing.push(format!("{name}: <form{head}>"));
+            }
+        }
+        // And every script POST sends the header.
+        for call in html.split("fetch(").skip(1) {
+            let call = call.split("});").next().unwrap_or(call);
+            if call.contains(r#"method: "POST""#)
+                && !call.contains(r#""X-CSRF-Token": csrfToken()"#)
+            {
+                missing.push(format!("{name}: fetch({}", &call[..call.len().min(60)]));
             }
         }
     }
     assert!(
         missing.is_empty(),
-        "POST forms without a CSRF token:\n{}",
+        "console POSTs without a CSRF token:\n{}",
         missing.join("\n")
     );
+}
+
+fn strip_tera_comments(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("{#") {
+        out.push_str(&rest[..i]);
+        rest = rest[i..].find("#}").map_or("", |j| &rest[i + j + 2..]);
+    }
+    out.push_str(rest);
+    out
 }

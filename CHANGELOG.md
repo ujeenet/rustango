@@ -14,6 +14,11 @@ POST now needs the CSRF token and a same-host `Origin`; every console
 form carries the token, and the branding upload sends it as a header.
 Scripts that POST to the console must send `X-CSRF-Token`.
 
+`csrf::ensure_token` now reuses a `rustango_csrf` cookie only if it has
+the shape of a minted token, and mints a fresh one otherwise. A sibling
+subdomain can plant any cookie value, and the token is rendered into
+pages.
+
 ### Fixed — a new tenant project loads its settings (#1702)
 
 `cargo rustango new --template tenant` wrote `config/*.toml` but its

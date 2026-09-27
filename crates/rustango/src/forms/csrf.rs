@@ -616,6 +616,13 @@ fn mint_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// `true` for the shape [`mint_token`] produces: 43 base64url chars.
+fn is_minted_token(t: &str) -> bool {
+    t.len() == 43
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Read the existing CSRF cookie from request headers, or mint a
 /// fresh token. Returns `(token, Some(set_cookie_header_value))`
 /// when the cookie was missing — caller is responsible for adding
@@ -651,8 +658,13 @@ pub fn ensure_token(
     headers: &axum::http::HeaderMap,
     cookie_name: &str,
 ) -> (String, Option<String>) {
+    // Reuse only a token this module could have minted. A sibling
+    // subdomain can plant any cookie value, and the token is rendered
+    // into pages (#1712 review).
     if let Some(existing) = read_csrf_cookie_from_headers(headers, cookie_name) {
-        return (existing, None);
+        if is_minted_token(&existing) {
+            return (existing, None);
+        }
     }
     let token = mint_token();
     // `Secure` from the same policy the session cookies use: the boot
@@ -1005,6 +1017,30 @@ mod tests {
         );
     }
 
+    /// A planted cookie that is not a minted token is replaced, not
+    /// reused — it is rendered into pages, `<script>` included.
+    #[test]
+    fn ensure_token_replaces_a_planted_cookie() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "rustango_csrf=</script><svg/onload=alert(1)>"
+                .parse()
+                .unwrap(),
+        );
+        let (token, set_cookie) = ensure_token(&headers, CSRF_COOKIE);
+        assert!(is_minted_token(&token), "{token}");
+        assert!(set_cookie.is_some(), "the planted cookie is overwritten");
+
+        let good = mint_token();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("rustango_csrf={good}").parse().unwrap(),
+        );
+        assert_eq!(ensure_token(&headers, CSRF_COOKIE), (good, None));
+    }
+
     /// `is_form_encoded` recognizes the canonical content type +
     /// the `; charset=utf-8` variant browsers sometimes append.
     /// Other types (multipart, JSON) return false.
@@ -1192,7 +1228,9 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_static("rustango_csrf=fixed_value"),
+            axum::http::HeaderValue::from_static(
+                "rustango_csrf=fixed_value-fixed_value-fixed_value-fixed_v",
+            ),
         );
         let mut ctx = tera::Context::new();
         let set_cookie = stamp_into_context(&headers, &mut ctx);
@@ -1201,7 +1239,7 @@ mod tests {
         let json = ctx.into_json();
         assert_eq!(
             json.get("csrf_token").and_then(|v| v.as_str()),
-            Some("fixed_value")
+            Some("fixed_value-fixed_value-fixed_value-fixed_v")
         );
     }
 

@@ -4352,7 +4352,9 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_static("session=abc; rustango_csrf=existing-token"),
+            axum::http::HeaderValue::from_static(
+                "session=abc; rustango_csrf=existing-token-existing-token-existing-toke",
+            ),
         );
         let mut ctx = Context::new();
         let set_cookie = stamp_csrf(&headers, &mut ctx);
@@ -4363,7 +4365,7 @@ mod tests {
         let mut tera = Tera::default();
         tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
         let rendered = tera.render("t", &ctx).unwrap();
-        assert_eq!(rendered, "existing-token");
+        assert_eq!(rendered, "existing-token-existing-token-existing-toke");
     }
 
     /// `stamp_csrf` mints a fresh token when the cookie is absent

@@ -525,7 +525,10 @@ fn router_inner(
     // reachable from un-authenticated tenant pages.
     let public = Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", post(logout))
+        .route("/logout", post(logout));
+    // Cacheable GET-only assets stay outside the CSRF layers, so no
+    // shared cache stores a `Set-Cookie` with them.
+    let assets = Router::new()
         .route("/__static__/rustango.png", get(static_rustango_png))
         .route("/__brand__/{slug}/{filename}", get(serve_brand_asset));
 
@@ -676,12 +679,15 @@ fn router_inner(
     // stop it. The layer checks token and Origin first; inside it,
     // `csrf_context` mints the token `render` puts in each form and sets
     // its cookie, so the layer sees it set and adds no second one.
+    // Origin is the check that stops a tenant host: it can plant the
+    // cookie, and so knows the token.
     public
         .merge(private)
         .route_layer(middleware::from_fn(
             crate::admin::csrf_context::csrf_context,
         ))
         .route_layer(crate::forms::csrf::layer())
+        .merge(assets)
         .with_state(state)
         .access_log(
             crate::access_log::AccessLogLayer::new()
