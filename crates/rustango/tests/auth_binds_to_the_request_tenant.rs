@@ -65,6 +65,13 @@ async fn whoami(CurrentUser(user): CurrentUser) -> impl IntoResponse {
     }
 }
 
+/// The tenant `require_auth` resolved, as seen by `Principal`.
+async fn tenant_of(parts: axum::http::request::Parts) -> String {
+    rustango::tenancy::Principal::from_parts(&parts)
+        .and_then(|p| p.tenant)
+        .unwrap_or_default()
+}
+
 /// Minimal base64 for the Basic header — no extra dependency.
 fn b64(input: &str) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -135,6 +142,7 @@ fn build_app(ns: &str) -> (Router, String) {
     let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend)];
     let app = Router::new()
         .route("/whoami", get(whoami))
+        .route("/tenant", get(tenant_of))
         .require_auth(backends)
         .layer(axum::Extension(ctx));
     (app, template)
@@ -167,6 +175,19 @@ async fn the_credential_works_on_its_own_tenant() {
         StatusCode::OK,
         "ann exists in alpha and must authenticate there"
     );
+
+    let req = Request::builder()
+        .uri("/tenant")
+        .header(HOST, "alpha.localhost")
+        .header(
+            header::AUTHORIZATION,
+            format!("Basic {}", b64("ann:s3cret")),
+        )
+        .body(Body::empty())
+        .expect("request");
+    let resp = app.oneshot(req).await.expect("response");
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    assert_eq!(&body[..], b"alpha", "require_auth records the tenant slug");
 }
 
 /// The same credential must be refused on another tenant's host.
