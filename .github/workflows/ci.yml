@@ -1207,6 +1207,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.
