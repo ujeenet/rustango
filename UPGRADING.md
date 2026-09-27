@@ -150,6 +150,17 @@ untouched.
 
 ## Unreleased
 
+### Logins are rate limited; lockout keys on the username
+
+A locked or throttled login answers `429` with `Retry-After` (#1609);
+it used to re-render the form. Lockout counts the submitted username,
+not the user id. Behind a reverse proxy set `RealIpLayer::trust_proxies`,
+or every client shares one per-IP bucket (20 a minute). The `admin`
+feature now enables `cache`. `passwords::verify_dummy_async` and
+`tenancy::password::verify_dummy_async` return `Result`; handle `Busy`
+as on the known-user path. New variants: `PasswordError::Busy`,
+`TenancyError::Busy`, `tenancy::auth_backends::AuthError::Refused`.
+
 ### Sessions carry a password fingerprint
 
 Bare-admin, tenant, member and operator sessions sign out once after

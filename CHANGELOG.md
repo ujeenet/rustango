@@ -4,6 +4,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — login rate limits and a bounded hashing queue (#1609, #1732)
+
+Every built-in password login (admin, operator console, tenant admin,
+JWT, HTTP Basic) passes one gate before the user lookup: a global
+ceiling, a per-IP limit, and a per-username lock that counts unknown
+usernames like real ones. A refused login gets `429` with
+`Retry-After`, the same whether or not the account exists; a locked
+account no longer answers differently from an unknown one. Hashing
+waits at most `[auth] hash_wait_ms` (default 5 s) for a slot, then
+answers `503`, the same for known and unknown users. New `[auth]`
+keys: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`,
+`login_global_window_secs`, `hash_wait_ms`; `lockout_threshold` and
+`lockout_duration_secs` now take effect.
+
 ### Security — a password change ends sessions from the same second (#1338)
 
 Tenant admin, member, `SessionUser` and operator-console sessions now
