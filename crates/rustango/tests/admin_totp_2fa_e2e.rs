@@ -160,6 +160,19 @@ async fn enrolled_user_is_gated_by_the_totp_code() {
     assert_eq!(status, StatusCode::SEE_OTHER, "success redirects");
 }
 
+/// #1672 — a code that signed in once cannot sign in again.
+#[tokio::test]
+async fn a_used_code_cannot_sign_in_again() {
+    let (pool, secret) = seed().await;
+    let app = router(pool);
+    let csrf = fetch_csrf(&app).await;
+    let code = rustango::totp::generate(&secret, 30, 6);
+    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", &code).await;
+    assert!(sess, "first use signs in");
+    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", &code).await;
+    assert!(!sess, "a replayed TOTP code granted a second session");
+}
+
 #[tokio::test]
 async fn non_enrolled_user_logs_in_without_a_code() {
     let (pool, _secret) = seed().await;

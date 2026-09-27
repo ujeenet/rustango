@@ -13,13 +13,13 @@
 
 use crate::sql::Pool;
 
-/// MySQL `ER_TABLE_EXISTS_ERROR`, `ER_DUP_KEYNAME`, `ER_FK_DUP_NAME`.
-/// Error *numbers*, not `SQLSTATE`s — see [`is_already_exists`].
+/// MySQL `ER_TABLE_EXISTS_ERROR`, `ER_DUP_FIELDNAME`, `ER_DUP_KEYNAME`,
+/// `ER_FK_DUP_NAME`. Error *numbers*, not `SQLSTATE`s — see [`is_already_exists`].
 ///
 /// Reachable from the tests on every feature set, which is the point:
 /// the trap it guards does not need the `mysql` feature to explain.
 #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
-const MYSQL_DUPLICATES: &[u16] = &[1050, 1061, 1826];
+const MYSQL_DUPLICATES: &[u16] = &[1050, 1060, 1061, 1826];
 
 /// `true` when `number` is MySQL's way of saying the object is there.
 ///
@@ -77,12 +77,17 @@ fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     if dialect != "postgres" {
         return std::borrow::Cow::Borrowed(stmt);
     }
-    match stmt.strip_prefix("CREATE TABLE ") {
-        Some(rest) if !rest.starts_with("IF NOT EXISTS") => {
-            std::borrow::Cow::Owned(format!("CREATE TABLE IF NOT EXISTS {rest}"))
+    if let Some(rest) = stmt.strip_prefix("CREATE TABLE ") {
+        if !rest.starts_with("IF NOT EXISTS") {
+            return std::borrow::Cow::Owned(format!("CREATE TABLE IF NOT EXISTS {rest}"));
         }
-        _ => std::borrow::Cow::Borrowed(stmt),
     }
+    if stmt.starts_with("ALTER TABLE ") && !stmt.contains(" ADD COLUMN IF NOT EXISTS ") {
+        if let Some((head, tail)) = stmt.split_once(" ADD COLUMN ") {
+            return std::borrow::Cow::Owned(format!("{head} ADD COLUMN IF NOT EXISTS {tail}"));
+        }
+    }
+    std::borrow::Cow::Borrowed(stmt)
 }
 
 /// Create every table in `snapshot`, tolerating objects that already
@@ -100,6 +105,36 @@ pub(crate) async fn apply_idempotent(
 ) -> Result<(), sqlx::Error> {
     let schema = creation_schema(pool).await?;
     let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
+    let batch = super::diff::render_changes_split_in_schema(
+        &changes,
+        snapshot,
+        pool.dialect(),
+        schema.as_deref(),
+    )
+    .map_err(sqlx::Error::Protocol)?;
+    apply_batch(pool, &batch).await
+}
+
+/// Add each `(table, column)` of `snapshot` that a table created by an
+/// older release lacks. Never creates the table.
+///
+/// # Errors
+/// Any driver failure that is not "already exists", including a
+/// missing table.
+#[cfg_attr(not(feature = "totp"), allow(dead_code))]
+pub(crate) async fn add_columns_idempotent(
+    pool: &Pool,
+    snapshot: &super::SchemaSnapshot,
+    columns: &[(&str, &str)],
+) -> Result<(), sqlx::Error> {
+    let changes: Vec<_> = columns
+        .iter()
+        .map(|(table, column)| super::SchemaChange::AddColumn {
+            table: (*table).to_owned(),
+            column: (*column).to_owned(),
+        })
+        .collect();
+    let schema = creation_schema(pool).await?;
     let batch = super::diff::render_changes_split_in_schema(
         &changes,
         snapshot,
@@ -180,6 +215,15 @@ mod tests {
         assert_eq!(idempotent(s, "postgres"), s);
         let idx = r#"CREATE UNIQUE INDEX "i" ON "t" ("a")"#;
         assert_eq!(idempotent(idx, "postgres"), idx);
+    }
+
+    #[test]
+    fn add_column_gains_if_not_exists_on_postgres_only() {
+        let s = r#"ALTER TABLE "t" ADD COLUMN "c" BIGINT"#;
+        let guarded = r#"ALTER TABLE "t" ADD COLUMN IF NOT EXISTS "c" BIGINT"#;
+        assert_eq!(idempotent(s, "postgres"), guarded);
+        assert_eq!(idempotent(guarded, "postgres"), guarded);
+        assert_eq!(idempotent(s, "mysql"), s);
     }
 
     /// The tests above feed in hand-written SQL, so they would pass even
@@ -272,6 +316,7 @@ mod tests {
     #[test]
     fn mysql_duplicates_are_numbers() {
         assert!(is_mysql_duplicate(1050), "ER_TABLE_EXISTS_ERROR");
+        assert!(is_mysql_duplicate(1060), "ER_DUP_FIELDNAME");
         assert!(is_mysql_duplicate(1061), "ER_DUP_KEYNAME");
         assert!(is_mysql_duplicate(1826), "ER_FK_DUP_NAME");
         // ER_DUP_ENTRY: a unique index that genuinely could not be

@@ -32,7 +32,15 @@ pub struct AdminTotp {
     pub confirmed: bool,
     #[rustango(default = "now()")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Time step of the last accepted code. A code is accepted only for
+    /// a later step, so each code works once.
+    pub last_used_step: Option<i64>,
 }
+
+/// Authenticator-app defaults: 30s step, 6 digits, ±1 step of clock skew.
+const STEP_SECS: u64 = 30;
+const DIGITS: u32 = 6;
+const WINDOW: i64 = 1;
 
 /// Create the `rustango_admin_totp` table for the active backend. Safe
 /// to call repeatedly.
@@ -49,7 +57,57 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
     use crate::core::Model as _;
     let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA]);
     crate::migrate::apply_idempotent(pool, &snapshot).await?;
-    Ok(())
+    add_new_columns(pool).await
+}
+
+/// Columns newer than the table, added to one created by an older
+/// release. Never creates the table: an empty new one would read as
+/// "no second factor" (#1644).
+async fn add_new_columns(pool: &Pool) -> Result<(), sqlx::Error> {
+    use crate::core::Model as _;
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA]);
+    crate::migrate::add_columns_idempotent(
+        pool,
+        &snapshot,
+        &[(AdminTotp::SCHEMA.table, "last_used_step")],
+    )
+    .await
+}
+
+/// Accept `code` for `user_id` at most once. Its time step must be later
+/// than the last accepted one, checked and recorded in one UPDATE.
+///
+/// # Errors
+/// Driver or SQL failures.
+pub async fn redeem_code(
+    pool: &Pool,
+    user_id: i64,
+    secret: &TotpSecret,
+    code: &str,
+) -> Result<bool, crate::sql::ExecError> {
+    use crate::query::Q;
+    use crate::sql::UpdaterPool as _;
+    let Some(step) = crate::totp::matched_step(secret, code, STEP_SECS, DIGITS, WINDOW) else {
+        return Ok(false);
+    };
+    let step = i64::try_from(step).unwrap_or(i64::MAX);
+    let update = || {
+        AdminTotp::objects()
+            .filter("user_id", user_id)
+            .where_(Q::is_null("last_used_step") | Q::lt("last_used_step", step))
+            .update()
+            .set("last_used_step", step)
+            .execute_pool(pool)
+    };
+    let updated = match update().await {
+        Ok(n) => n,
+        // A table from before `last_used_step`: add it and try again.
+        Err(first) => match add_new_columns(pool).await {
+            Ok(()) => update().await?,
+            Err(_) => return Err(first),
+        },
+    };
+    Ok(updated == 1)
 }
 
 /// Fetch the device row for `user_id`, if any.
@@ -88,18 +146,14 @@ pub async fn confirmed_secret_checked(
     pool: &Pool,
     user_id: i64,
 ) -> Result<Option<TotpSecret>, crate::sql::ExecError> {
-    use crate::sql::FetcherPool as _;
-    let rows = AdminTotp::objects()
+    // Only the secret, so a table from before `last_used_step` still reads.
+    let secrets: Vec<String> = AdminTotp::objects()
         .filter("user_id", user_id)
+        .filter("confirmed", true)
+        .values_list_flat("secret_base32")
         .fetch(pool)
         .await?;
-    let Some(d) = rows.into_iter().next() else {
-        return Ok(None);
-    };
-    if !d.confirmed {
-        return Ok(None);
-    }
-    Ok(TotpSecret::from_base32(&d.secret_base32))
+    Ok(secrets.first().and_then(|s| TotpSecret::from_base32(s)))
 }
 
 /// Start or restart enrollment: store a fresh unconfirmed secret for
@@ -122,6 +176,7 @@ pub async fn start_enrollment(
         secret_base32: secret.to_base32(),
         confirmed: false,
         created_at: chrono::Utc::now(),
+        last_used_step: None,
     };
     row.insert_pool(pool).await?;
     Ok(())

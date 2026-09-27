@@ -295,9 +295,13 @@ async fn login_submit(
         };
         if let Some(totp_secret) = enrolled {
             let code = form.totp_code.as_deref().unwrap_or("").trim();
-            // 30s step, 6 digits, ±1 window: the authenticator-app
-            // defaults, which allow one step of clock skew.
-            if code.is_empty() || !crate::totp::verify(&totp_secret, code, 30, 6, 1) {
+            // Single use: a replayed code fails like a wrong one. A
+            // store error fails closed.
+            let accepted = !code.is_empty()
+                && super::totp_store::redeem_code(&state.pool, id, &totp_secret, code)
+                    .await
+                    .unwrap_or(false);
+            if !accepted {
                 // A wrong code counts; a missing one is just the prompt.
                 if !code.is_empty() {
                     attempt.failed().await;
@@ -667,7 +671,12 @@ async fn totp_enroll_submit(
         .into_response();
     };
     let code = form.totp_code.as_deref().unwrap_or("").trim();
-    if code.is_empty() || !crate::totp::verify(&secret, code, 30, 6, 1) {
+    // Redeemed, so the confirming code cannot sign in again.
+    let accepted = !code.is_empty()
+        && super::totp_store::redeem_code(&state.pool, session.user_id, &secret, code)
+            .await
+            .unwrap_or(false);
+    if !accepted {
         let otpauth = enroll_otpauth(&state, &session.username, &secret);
         return Html(render_totp_enroll(
             &state,

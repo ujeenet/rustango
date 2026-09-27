@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Admin TOTP codes are single use
+
+`rustango_admin_totp` gains a nullable `last_used_step` column (#1672).
+`totp_store::ensure_table`, or the first code accepted after the upgrade,
+adds it to an existing table. `AdminTotp` literals need the new field. A
+code that already signed in is refused, so users wait for the next one.
+`Lockout::counter_ttl` is now a fixed window from the first failure.
+
 ### The trusted client IP is the rightmost untrusted hop
 
 Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the

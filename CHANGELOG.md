@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — single-use refresh rotation, TOTP replay guard, fixed lockout window (#1672)
+
+`JwtLifecycle::refresh` and `refresh_with` redeem the old refresh token
+through one `JtiStore::mark_used` call, so two concurrent refreshes of
+one token no longer both succeed. An admin TOTP code is accepted once:
+the device stores the last accepted time step (`last_used_step`) and a
+code must be for a later one. Account lockout counts failures in a
+fixed window from the first failure; a failure no longer extends it.
+
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 
 `RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`
