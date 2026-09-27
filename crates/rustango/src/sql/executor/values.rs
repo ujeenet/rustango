@@ -768,8 +768,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     }
 
     /// `SELECT SUM(col)` over the matching rows, or `Ok(None)` when
-    /// none match. Unlike `Model::sum`, this respects the queryset's
-    /// filters.
+    /// none match. `Model::sum` is this over the default queryset.
     ///
     /// # Errors
     /// As [`crate::sql::fetch_aggregate_pool`], plus
