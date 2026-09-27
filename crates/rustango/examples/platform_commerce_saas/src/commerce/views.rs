@@ -39,14 +39,20 @@ pub async fn storefront(t: Tenant<DefaultTenantDb>) -> Html<String> {
         t.org.slug, t.org.slug
     );
     for p in &products {
-        body.push_str(&format!(
-            "  <li><code>{}</code> — {} — {}.{:02}</li>\n",
-            p.sku,
-            p.name,
-            p.price_cents / 100,
-            p.price_cents % 100
-        ));
+        body.push_str(&product_item(p));
     }
     body.push_str("</ul>\n");
     Html(body)
+}
+
+/// One `<li>` of the listing, with the text fields HTML-escaped.
+pub(super) fn product_item(p: &Product) -> String {
+    use rustango::text::html_escape;
+    format!(
+        "  <li><code>{}</code> — {} — {}.{:02}</li>\n",
+        html_escape(&p.sku),
+        html_escape(&p.name),
+        p.price_cents / 100,
+        p.price_cents % 100
+    )
 }
