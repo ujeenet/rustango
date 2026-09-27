@@ -155,7 +155,10 @@ untouched.
 A model with a `global_scope` served through `ViewSet` or the template
 views now hides the scoped-out rows there too, and a PK request for one
 is a 404 (#1746). An endpoint that must reach them should use
-`Model::objects().without_global_scopes()` in its own handler.
+`Model::objects().without_global_scopes()` in its own handler. A
+ViewSet PUT/PATCH that moves its row out of a scope or filter backend
+answers `204 No Content`; a create whose row lands outside answers
+`201` with no body (`null` at that index in a bulk create).
 
 ### The trusted client IP is the rightmost untrusted hop
 
