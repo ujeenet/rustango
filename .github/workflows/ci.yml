@@ -440,6 +440,10 @@ jobs:
   # so each dialect has an explicitly-named job: `postgres_test`,
   # `mysql_live`, `sqlite_live`.
   postgres_test:
+    # Service images come from the GHCR mirror (#1688).
+    permissions:
+      contents: read
+      packages: read
     needs: gate
     runs-on: ubuntu-latest
     services:
@@ -449,13 +453,12 @@ jobs:
         # `CREATE EXTENSION vector`). A superset of the stock image, so
         # every existing PG test runs unchanged.
         #
-        # NOTE: the other PG services here pull from the AWS Public ECR
-        # mirror (`public.ecr.aws/docker/library/`) to dodge the
-        # intermittent `registry-1.docker.io context deadline exceeded`
-        # flakes (PR #848 / #866). That mirror only carries Docker Hub's
-        # official `library/` namespace; pgvector lives in a user
-        # namespace, so this one image comes straight from Docker Hub.
-        image: pgvector/pgvector:pg16
+        # Every service image is a GHCR copy made by mirror-images.yml:
+        # anonymous Docker Hub and public.ecr.aws pulls hit rate limits (#1688).
+        image: ghcr.io/ujeenet/ci-pgvector:pg16
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           POSTGRES_USER: rustango
           POSTGRES_PASSWORD: rustango
@@ -1051,6 +1054,10 @@ jobs:
   # The matrix is the point: run the SAME suite against 6 and 7. A
   # 7-only job passes on the broken code and proves nothing.
   redis_live:
+    # Service images come from the GHCR mirror (#1688).
+    permissions:
+      contents: read
+      packages: read
     needs: gate
     runs-on: ubuntu-latest
     strategy:
@@ -1059,9 +1066,11 @@ jobs:
         redis: ["6", "7"]
     services:
       redis:
-        # AWS Public ECR mirror — same Docker Hub rate-limit reason as
-        # the `postgres_test` / `mysql_live` services.
-        image: public.ecr.aws/docker/library/redis:${{ matrix.redis }}
+        # GHCR mirror, see `postgres_test`.
+        image: ghcr.io/ujeenet/ci-redis:${{ matrix.redis }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         ports:
           - 6379:6379
         options: >-
@@ -1088,20 +1097,21 @@ jobs:
   # MinIO is started as a step rather than a `services:` container: the
   # image needs `server /data` as its command, which `services:` cannot
   # supply.
-  #
-  # Pulled from quay.io, not Docker Hub — an unauthenticated runner gets
-  # "pull access denied for minio/minio" there. Same rate-limit reason
-  # the Postgres/MySQL/Redis services use the AWS ECR mirror, but MinIO
-  # is not an official library image so that mirror has no copy; quay is
-  # MinIO's own registry.
   s3_live:
+    # Service images come from the GHCR mirror (#1688).
+    permissions:
+      contents: read
+      packages: read
     needs: gate
     runs-on: ubuntu-latest
     services:
       # The media suites store rows in `rustango_media` alongside the
       # bucket, so they need both halves.
       postgres:
-        image: public.ecr.aws/docker/library/postgres:16-alpine
+        image: ghcr.io/ujeenet/ci-postgres:16-alpine
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           POSTGRES_USER: rustango
           POSTGRES_PASSWORD: rustango
@@ -1138,13 +1148,30 @@ jobs:
       # The wait loop now fails instead of falling through: it used to
       # `break` on success and carry on regardless, so an unhealthy server
       # surfaced later as an unexplained test failure.
+      #
+      # Pulled from the GHCR mirror (#1688), falling back to Bitnami with
+      # retries if the mirror copy is missing.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Start MinIO
         run: |
+          img=ghcr.io/ujeenet/ci-minio:2025.7.23-debian-12-r5
+          if ! docker pull "$img"; then
+            img=bitnamilegacy/minio:2025.7.23-debian-12-r5
+            for i in 1 2 3 4 5; do
+              docker pull "$img" && break
+              [ "$i" = 5 ] && exit 1
+              sleep $((i * 20))
+            done
+          fi
           docker run -d --name minio -p 9100:9000 \
             -e MINIO_ROOT_USER=$RUSTANGO_S3_TEST_KEY \
             -e MINIO_ROOT_PASSWORD=$RUSTANGO_S3_TEST_SECRET \
             -e MINIO_DEFAULT_BUCKETS=$RUSTANGO_S3_TEST_BUCKET \
-            bitnamilegacy/minio:2025.7.23-debian-12-r5
+            "$img"
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:9100/minio/health/live >/dev/null; then
               echo "MinIO healthy after ${i}s"
@@ -1174,13 +1201,19 @@ jobs:
   # query strings that PG/SQLite accept (e.g. `LIMIT` vs `FOR UPDATE
   # SKIP LOCKED` order in v0.38's jobs pickup).
   mysql_live:
+    # Service images come from the GHCR mirror (#1688).
+    permissions:
+      contents: read
+      packages: read
     needs: gate
     runs-on: ubuntu-latest
     services:
       mysql:
-        # See `postgres_test`'s comment — same reason for the
-        # AWS Public ECR mirror.
-        image: public.ecr.aws/docker/library/mysql:8.0
+        # GHCR mirror, see `postgres_test`.
+        image: ghcr.io/ujeenet/ci-mysql:8.0
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           MYSQL_ROOT_PASSWORD: rustango
           MYSQL_DATABASE: rustango_test
@@ -1343,15 +1376,20 @@ jobs:
   # geometry round-trip test there skips (CREATE EXTENSION postgis fails →
   # graceful skip). This job runs `postgis/postgis:16-3.4` so the
   # `Point` column EWKB encode/decode is exercised end-to-end against a
-  # real PostGIS. Like pgvector, the postgis image is a Docker Hub user-
-  # namespace image (not on the AWS ECR `library/` mirror), so it's
-  # pulled straight from Docker Hub.
+  # real PostGIS (a GHCR mirror copy, see `postgres_test`).
   postgis_live:
+    # Service images come from the GHCR mirror (#1688).
+    permissions:
+      contents: read
+      packages: read
     needs: gate
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgis/postgis:16-3.4
+        image: ghcr.io/ujeenet/ci-postgis:16-3.4
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           POSTGRES_USER: rustango
           POSTGRES_PASSWORD: rustango
@@ -1383,6 +1421,10 @@ jobs:
   # one-of-three backend feature selector; the matrix flips it per
   # row so the binary's `runserver` picks the right Pool constructor.
   e2e:
+    # Service images come from the GHCR mirror (#1688).
+    permissions:
+      contents: read
+      packages: read
     needs: gate
     runs-on: ubuntu-latest
     strategy:
@@ -1391,18 +1433,20 @@ jobs:
         include:
           - backend: postgres
             database_url: postgres://rustango:rustango@127.0.0.1:5432/showcase
-            service_image: public.ecr.aws/docker/library/postgres:16-alpine
+            service_image: ghcr.io/ujeenet/ci-postgres:16-alpine
           - backend: mysql
             database_url: mysql://rustango:rustango@127.0.0.1:3306/showcase
-            service_image: public.ecr.aws/docker/library/mysql:8
+            service_image: ghcr.io/ujeenet/ci-mysql:8
           - backend: sqlite
             database_url: sqlite:///tmp/rustango-showcase-e2e.db
             service_image: ''
     services:
-      # See `postgres_test`'s comment for the AWS Public ECR mirror
-      # rationale (CI Docker Hub timeouts after PR #848 / #866).
+      # GHCR mirror, see `postgres_test`.
       postgres:
-        image: ${{ matrix.backend == 'postgres' && 'public.ecr.aws/docker/library/postgres:16-alpine' || '' }}
+        image: ${{ matrix.backend == 'postgres' && 'ghcr.io/ujeenet/ci-postgres:16-alpine' || '' }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           POSTGRES_USER: rustango
           POSTGRES_PASSWORD: rustango
@@ -1414,7 +1458,10 @@ jobs:
           --health-timeout 2s
           --health-retries 30
       mysql:
-        image: ${{ matrix.backend == 'mysql' && 'public.ecr.aws/docker/library/mysql:8' || '' }}
+        image: ${{ matrix.backend == 'mysql' && 'ghcr.io/ujeenet/ci-mysql:8' || '' }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           MYSQL_ROOT_PASSWORD: rustango
           MYSQL_USER: rustango
@@ -1483,6 +1530,10 @@ jobs:
   # getting_started_blog runs `migrate` first to create its schema;
   # orm_cookbook resets the `public` schema inside the test itself.
   doc_examples:
+    # Service images come from the GHCR mirror (#1688).
+    permissions:
+      contents: read
+      packages: read
     needs: gate
     runs-on: ubuntu-latest
     strategy:
@@ -1525,10 +1576,12 @@ jobs:
           - example: tenant_user_extension
             migrate: false
     services:
-      # See `postgres_test`'s comment for the AWS Public ECR mirror
-      # rationale (CI Docker Hub timeouts after PR #848 / #866).
+      # GHCR mirror, see `postgres_test`.
       postgres:
-        image: public.ecr.aws/docker/library/postgres:16-alpine
+        image: ghcr.io/ujeenet/ci-postgres:16-alpine
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           POSTGRES_USER: rustango
           POSTGRES_PASSWORD: rustango
