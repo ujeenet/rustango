@@ -9,11 +9,15 @@ as a row (no config file, no rebuild). A provider's endpoints are
 auto-discovered from its OIDC issuer URL at login; social providers use
 built-in presets.
 
-SSO is **link-to-existing** for the admin: the verified email the IdP
-returns must match an existing admin user. It authenticates the person;
-it never creates accounts and never grants access on its own. An unknown
-or unverified email is refused. (The member flow, below, auto-provisions
-by default; see below to turn it off.)
+SSO signs in the user **linked** to the IdP identity: one
+`rustango_sso_links` row per `(provider, sub)`. The email the IdP sends is
+never enough on its own. A first-time user is linked by verified email
+only when the provider has **`allow_email_link`** on (default off), and
+never when the account is a superuser or staff (tenant: holds any
+permission; bare admin: every account). Those accounts are linked by an
+admin, who adds the `SsoLink` row in the admin; the refusal log line names
+the subject. (The member flow, below, auto-provisions by default; see
+below to turn it off.)
 
 > **Source:** the admin-independent core `rustango::sso` (`SsoProvider`,
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), the
@@ -60,14 +64,20 @@ feature emits an `AddColumn` / `DropColumn` migration for that column.
 2. Clicking one (`GET <login>/sso/<slug>`) redirects to the IdP with a
    signed, short-lived flow cookie (PKCE + CSRF `state`).
 3. The IdP sends the user back to `<login>/sso/<slug>/callback`.
-4. rustango verifies the flow, exchanges the code, reads `/userinfo`,
-   and requires **`email_verified`**.
-5. It looks up an admin user by that email. If one exists and is active,
-   it mints the **same signed-cookie session** a password login
-   produces, bound to that user — so every existing gate (superuser /
-   permissions, live password-change invalidation) still applies.
-6. No match → the user is bounced back to the login page with a generic
+4. rustango verifies the flow, exchanges the code and reads `/userinfo`.
+5. It looks up the link for this provider and the IdP `sub`. With no
+   link, and `allow_email_link` on, a **verified** email that matches a
+   non-privileged user creates the link.
+6. If the linked user is active, it mints the **same signed-cookie
+   session** a password login produces — so every existing gate
+   (superuser / permissions, live password-change invalidation) still
+   applies.
+7. Otherwise the user is bounced back to the login page with a generic
    error (details go to the server log, never the browser).
+
+The link table is created on first use (`managed = false`), in the
+tenant's storage for tenant logins and in the admin database for the bare
+admin.
 
 The client **secret is encrypted at rest** — the `client_secret` column
 is an [`EncryptedString`](#secret-storage) cast, decrypted in-memory only
@@ -153,9 +163,10 @@ Differences from the admin flow:
 - **Auto-provisioning.** With `auto_provision = true` (the default), a
   verified IdP email with no matching `rustango_users` row **creates**
   one — username from the email local-part (deduped on a clash), a real
-  but unusable random password hash (SSO users can't password-login).
-  Set it to `false` for admin-style link-to-existing (unknown email
-  refused).
+  but unusable random password hash (SSO users can't password-login) —
+  and links it. An email that matches an existing account follows the
+  `allow_email_link` rule above. Set it to `false` to refuse unknown
+  emails.
 - **Its own session cookie.** The member cookie
   (`rustango_member_session`) is **domain-separated** from the tenant /
   admin session cookies: the signed message carries a per-domain tag and

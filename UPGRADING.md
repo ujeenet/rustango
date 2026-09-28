@@ -187,6 +187,17 @@ gets `&AtomicTx`, not `&mut PoolTx`: write `insert_tx(&mut *tx.lock().await?, &q
 A nested `atomic(&pool, …)` on the same pool is now a savepoint on the
 outer transaction, and its `on_commit` callbacks wait for the outermost
 commit. Drop the `TxGuard` before nesting, or get `ExecError::NestedAtomic`.
+### SSO signs in by link, not by email
+
+Existing SSO users are refused until they are linked. Either turn on
+`allow_email_link` for a provider (a normal user is linked on the next
+login), or add an `SsoLink` row in the admin; superusers, staff and every
+bare-admin account need the row (the refusal log names the subject).
+Run `makemigrations` + `migrate` for the new `allow_email_link` column on
+`rustango_sso_providers` and `rustango_shared_sso_providers`; until then
+email linking reads as off. `rustango_sso_links` is created on first use.
+`find_or_provision_member(pool, email, profile, auto)` is now
+`(pool, &ProviderKey, allow_email_link, profile, auto)`.
 
 ### The trusted client IP is the rightmost untrusted hop
 

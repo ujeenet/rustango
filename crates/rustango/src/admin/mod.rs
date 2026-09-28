@@ -57,8 +57,8 @@ pub mod object_permissions;
 pub mod queryset_hooks;
 pub mod session;
 /// OpenID Connect and social-OAuth login for the admin. The core is
-/// shared with the tenant admin. Access is link-to-existing: SSO never
-/// creates an account.
+/// shared with the tenant admin. It signs in by `(provider, sub)` link and
+/// never creates an account.
 #[cfg(feature = "admin-sso")]
 pub mod sso;
 /// `SsoProvider` model: one OIDC or social provider per row, managed

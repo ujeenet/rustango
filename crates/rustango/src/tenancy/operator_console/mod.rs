@@ -1410,6 +1410,7 @@ struct SharedSsoForm {
     scopes: Option<String>,
     sort_order: Option<i32>,
     enabled: Option<String>,
+    allow_email_link: Option<String>,
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1466,6 +1467,7 @@ async fn sso_shared_create(
         enabled: form.enabled.as_deref() == Some("on"),
         sort_order: form.sort_order.unwrap_or(0),
         scopes: form.scopes.filter(|s| !s.trim().is_empty()),
+        allow_email_link: form.allow_email_link.as_deref() == Some("on"),
         created_at: crate::sql::Auto::Unset,
         updated_at: crate::sql::Auto::Unset,
     };

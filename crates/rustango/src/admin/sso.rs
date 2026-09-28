@@ -5,11 +5,11 @@
 //! it to the bare admin: it builds a
 //! [`ResolvedSso`](crate::sso::ResolvedSso) from an
 //! [`SsoProvider`](crate::sso::SsoProvider) row, runs the handshake,
-//! links the verified email to an [`AdminUser`], and mints the admin
-//! session cookie.
+//! signs in the [`AdminUser`] linked to the IdP subject, and mints the
+//! admin session cookie.
 //!
-//! Access is **link-to-existing**: SSO never creates an admin account.
-//! An unknown or unverified email is refused.
+//! SSO never creates an admin account or links one by email: an admin
+//! adds the [`SsoLink`](crate::sso::SsoLink) row. The refusal log names the subject.
 //!
 //! The re-export below keeps the older `crate::admin::sso::…` paths
 //! working for callers such as [`crate::tenancy::sso`].
@@ -28,6 +28,8 @@ use super::session::{self, AdminSession, SESSION_COOKIE};
 use super::urls::AppState;
 use super::user::AdminUser;
 use crate::core::Model as _; // brings `AdminUser::SCHEMA` into scope
+use crate::core::SqlValue;
+use crate::sso::link::EmailMatch;
 
 /// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize)]
@@ -108,7 +110,7 @@ async fn sso_begin(
             return login_error(&state, "config");
         }
     };
-    let provider = match build_provider(&cfg).await {
+    let provider = match build_provider(&cfg.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::admin::sso", "begin: {e}");
@@ -164,7 +166,7 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     };
-    let provider = match build_provider(&cfg).await {
+    let provider = match build_provider(&cfg.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::admin::sso", "callback build: {e}");
@@ -178,14 +180,31 @@ async fn sso_callback(
             return login_error(&state, "handshake");
         }
     };
-    let email = match verified_email(&normalized) {
-        Ok(e) => e.to_ascii_lowercase(),
-        Err(_) => return login_error(&state, "unverified"),
-    };
-
-    // Link to an existing admin user by email. Never create one.
-    let Some(user) = find_admin_user_by_email(&state.pool, &email).await else {
-        tracing::warn!(target: "rustango::admin::sso", "no admin account for {email}");
+    // Sign in by (provider, sub) link only: every admin account is staff,
+    // so a verified email never creates a link here.
+    let key = cfg.key(LinkSource::Admin);
+    let pool = state.pool.clone();
+    let uid =
+        match crate::sso::link::sign_in(&state.pool, &key, false, &normalized, |email| async move {
+            Ok(find_admin_user(&pool, "email", SqlValue::String(email))
+                .await
+                .map(|u| EmailMatch {
+                    user_id: u.id,
+                    privileged: true,
+                }))
+        })
+        .await
+        {
+            Ok(uid) => uid,
+            Err(e) => {
+                tracing::warn!(
+                    target: "rustango::admin::sso",
+                    slug, subject = %normalized.provider_user_id, "sso refused: {e}"
+                );
+                return login_error(&state, "nouser");
+            }
+        };
+    let Some(user) = find_admin_user(&state.pool, "id", SqlValue::I64(uid)).await else {
         return login_error(&state, "nouser");
     };
     if !user.active {
@@ -225,7 +244,7 @@ async fn sso_callback(
     resp
 }
 
-/// Minimal admin-user identity resolved by email for SSO linking.
+/// Minimal admin-user identity for the SSO session.
 struct LinkedAdmin {
     id: i64,
     username: String,
@@ -234,15 +253,14 @@ struct LinkedAdmin {
     active: bool,
 }
 
-/// Look up an [`AdminUser`] by its lowercased email. `None` means no
-/// row matched, and the caller must refuse the login.
-async fn find_admin_user_by_email(pool: &crate::sql::Pool, email: &str) -> Option<LinkedAdmin> {
-    use crate::core::{SelectQuery, SqlValue};
-    let select = SelectQuery::by_pk(
-        AdminUser::SCHEMA,
-        "email",
-        SqlValue::String(email.to_owned()),
-    );
+/// Look up an [`AdminUser`] where `column = value`. `None` when no row matches.
+async fn find_admin_user(
+    pool: &crate::sql::Pool,
+    column: &'static str,
+    value: SqlValue,
+) -> Option<LinkedAdmin> {
+    use crate::core::SelectQuery;
+    let select = SelectQuery::by_pk(AdminUser::SCHEMA, column, value);
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let row = crate::sql::select_one_row_as_json(pool, &select, &fields)
         .await
