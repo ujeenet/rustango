@@ -157,3 +157,62 @@ async fn without_the_layer_a_forwarded_header_is_ignored() {
         "an unmounted RealIpLayer must mean the header is not trusted at all"
     );
 }
+
+/// nginx's `$proxy_add_x_forwarded_for` appends the peer to whatever the
+/// client sent, so only the hop the proxy wrote is the client (#1673).
+#[tokio::test]
+async fn a_client_prefix_on_an_appended_xff_does_not_pick_the_bucket() {
+    for layer in [
+        trusting(),
+        RealIpLayer::default()
+            .trust_proxies(["10.0.0.0/8"])
+            .unwrap(),
+    ] {
+        let app = app(Some(layer));
+        assert_eq!(get_as(&app, "1.1.1.1, 203.0.113.7").await, StatusCode::OK);
+        assert_eq!(
+            get_as(&app, "2.2.2.2, 203.0.113.7").await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the client wrote the left hops; the proxy wrote 203.0.113.7"
+        );
+    }
+}
+
+/// Trusted hops are skipped from the right; a proxy's own line counts.
+#[tokio::test]
+async fn trusted_hops_are_skipped_from_the_right() {
+    let app = app(Some(trusting()));
+    assert_eq!(
+        get_as(&app, "9.9.9.9, 203.0.113.7, 10.0.0.2").await,
+        StatusCode::OK
+    );
+    let mut req = Request::builder()
+        .uri("/")
+        .header("x-forwarded-for", "8.8.8.8")
+        .header("x-forwarded-for", "203.0.113.7")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(ConnectInfo(PROXY.parse::<SocketAddr>().unwrap()));
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "same client as the first request, behind two trusted hops"
+    );
+}
+
+/// A dual-stack listener reports a v4 proxy as `::ffff:a.b.c.d`; it must
+/// still match a v4 `trust_proxies` entry.
+#[tokio::test]
+async fn an_ipv4_mapped_proxy_is_still_trusted() {
+    let app = app(Some(trusting()));
+    assert_eq!(
+        get_via(&app, "[::ffff:10.0.0.1]:443", "203.0.113.7").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_via(&app, "[::ffff:10.0.0.1]:443", "203.0.113.8").await,
+        StatusCode::OK,
+        "a second client behind the mapped proxy gets its own bucket"
+    );
+}

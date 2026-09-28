@@ -1481,7 +1481,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Abandonnez le `tx` sans appeler `commit()` (p. ex. sur un retour anticipé via `?`) et la transaction est annulée. Pour un hook après commit, la portée est `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, qui valide en cas de `Ok` et annule en cas de `Err` — et le hook lui-même est `rustango::sql::on_commit(|| { … })`, appelé **à l'intérieur** de cette closure. `atomic` vide la file une fois le commit passé ; appeler `on_commit` hors d'une portée `atomic` panique au lieu d'abandonner le callback.
+Abandonnez le `tx` sans appeler `commit()` (p. ex. sur un retour anticipé via `?`) et la transaction est annulée. Pour un hook après commit, la portée est `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, qui valide en cas de `Ok` et annule en cas de `Err` — et le hook lui-même est `rustango::sql::on_commit(|| { … })`, appelé **à l'intérieur** de cette closure. `atomic` vide la file une fois le commit passé ; appeler `on_commit` hors d'une portée `atomic` panique au lieu d'abandonner le callback. Dans la closure, `tx` est un `AtomicTx` : verrouillez-le à chaque instruction, `insert_tx(&mut *tx.lock().await?, &q)`. Un `atomic(&pool, …)` imbriqué sur le même pool s'exécute dans un savepoint sur la même connexion, et ses hooks attendent le commit le plus externe. L'imbrication se fait par objet pool : transmettez le pool de la requête. Deux blocs imbriqués en même temps (`join!`) ou un `TxGuard` gardé pendant l'appel renvoient `ExecError::NestedAtomic` ; un savepoint en échec annule tout avec `ExecError::AtomicAborted`. Une tâche lancée par `tokio::spawn` n'hérite pas du bloc.
 
 ---
 

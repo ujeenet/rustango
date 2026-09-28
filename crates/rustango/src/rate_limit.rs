@@ -65,12 +65,13 @@ fn warn_missing_discriminator(what: &str) {
 /// the limiter, or no proxies were marked trusted.
 ///
 /// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
-fn warn_forwarded_but_unresolved(req: &Request<Body>) {
+fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
 
-    let forwarded =
-        req.headers().contains_key("x-forwarded-for") || req.headers().contains_key("x-real-ip");
+    let forwarded = headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-real-ip")
+        || headers.contains_key("forwarded");
     if forwarded && !WARNED.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             target: "rustango::rate_limit",
@@ -90,8 +91,9 @@ fn warn_forwarded_but_unresolved(req: &Request<Body>) {
 /// This uses [`TrustedRealIp`], never [`RealIp`]. A `RealIp` is only a
 /// claim by whoever sent the header. Keying on it would let any client
 /// pick its own bucket and skip the limit entirely. Only
-/// [`RealIpLayer::trust_proxies`] produces the trusted form, so an
-/// operator must name the proxy hops; nothing is guessed.
+/// [`RealIpLayer::trust_proxies`] produces the trusted form: the
+/// rightmost hop outside the named proxies. It is only as sound as
+/// that list and the header strategy your proxy actually writes.
 ///
 /// All header parsing lives in `RealIpLayer`. The limiters never read
 /// `X-Forwarded-For` themselves.
@@ -100,18 +102,41 @@ fn warn_forwarded_but_unresolved(req: &Request<Body>) {
 /// [`RealIp`]: crate::real_ip::RealIp
 /// [`RealIpLayer::trust_proxies`]: crate::real_ip::RealIpLayer::trust_proxies
 pub(crate) fn client_ip_key(req: &Request<Body>) -> String {
-    if let Some(ip) = req.extensions().get::<crate::real_ip::TrustedRealIp>() {
-        return ip.0.to_string();
-    }
-    match req.extensions().get::<ConnectInfo<SocketAddr>>() {
-        Some(ci) => {
-            warn_forwarded_but_unresolved(req);
-            ci.ip().to_string()
-        }
-        None => {
+    client_ip(req.extensions(), req.headers()).map_or_else(
+        || {
             warn_missing_discriminator("IP (ConnectInfo missing)");
             "<no-ip>".to_owned()
-        }
+        },
+        |ip| ip.to_string(),
+    )
+}
+
+/// [`client_ip_key`] from request parts; `None` when no address is known.
+pub(crate) fn client_ip(
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+) -> Option<std::net::IpAddr> {
+    if let Some(ip) = extensions.get::<crate::real_ip::TrustedRealIp>() {
+        return Some(ip.0);
+    }
+    let ci = extensions.get::<ConnectInfo<SocketAddr>>()?;
+    warn_forwarded_but_unresolved(headers);
+    Some(ci.ip())
+}
+
+/// The bucket key for one address: IPv4 as is, IPv6 by its /64, since
+/// one IPv6 client usually holds the whole /64.
+pub(crate) fn ip_bucket(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                let net = std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0);
+                format!("{net}/64")
+            }
+        },
     }
 }
 
@@ -257,7 +282,7 @@ impl RateLimitLayer {
 
     /// Take one token. Returns `Ok((remaining, retry_after_secs))` on success,
     /// `Err(retry_after_secs)` when the bucket is empty.
-    async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
+    pub(crate) async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
         let now = Instant::now();
         let cap = self.capacity as f64;
         let rate = self.rate_per_sec();
@@ -281,15 +306,42 @@ impl RateLimitLayer {
             bucket.tokens -= 1.0;
             Ok((bucket.tokens.floor() as u32, 0))
         } else {
-            // How many seconds until 1 token is available?
-            let need = 1.0 - bucket.tokens;
-            let retry = if rate > 0.0 {
-                (need / rate).ceil() as u64
-            } else {
-                u64::MAX
-            };
-            Err(retry.max(1))
+            Err(self.retry_after(bucket.tokens))
         }
+    }
+
+    /// [`Self::take`] without spending: `Err(retry_after_secs)` when
+    /// the bucket is empty. Never adds a bucket.
+    pub(crate) async fn peek(&self, key: &str) -> Result<(), u64> {
+        let store = self.store.lock().await;
+        let Some(b) = store.get(key) else {
+            return Ok(());
+        };
+        let elapsed = Instant::now().duration_since(b.last_refill).as_secs_f64();
+        let tokens = (b.tokens + elapsed * self.rate_per_sec()).min(f64::from(self.capacity));
+        if tokens >= 1.0 {
+            Ok(())
+        } else {
+            Err(self.retry_after(tokens))
+        }
+    }
+
+    /// Return one token spent by [`Self::take`].
+    pub(crate) async fn give_back(&self, key: &str) {
+        if let Some(b) = self.store.lock().await.get_mut(key) {
+            b.tokens = (b.tokens + 1.0).min(f64::from(self.capacity));
+        }
+    }
+
+    /// Seconds until a bucket holding `tokens` has one to spend.
+    fn retry_after(&self, tokens: f64) -> u64 {
+        let rate = self.rate_per_sec();
+        let retry = if rate > 0.0 {
+            ((1.0 - tokens) / rate).ceil() as u64
+        } else {
+            u64::MAX
+        };
+        retry.max(1)
     }
 
     fn extract_key(&self, req: &Request<Body>) -> String {
@@ -389,6 +441,26 @@ mod tests {
         assert!(l.take("alice").await.is_err());
         // Different key — fresh bucket
         assert!(l.take("bob").await.is_ok());
+    }
+
+    #[test]
+    fn ipv6_buckets_by_64_and_ipv4_by_address() {
+        let b = |s: &str| ip_bucket(s.parse().unwrap());
+        assert_eq!(b("2001:db8:1:2:aaaa::1"), b("2001:db8:1:2:ffff::9"));
+        assert_ne!(b("2001:db8:1:2::1"), b("2001:db8:1:3::1"));
+        assert_ne!(b("10.0.0.1"), b("10.0.0.2"));
+        assert_eq!(b("::ffff:10.0.0.1"), b("10.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn peek_spends_nothing_and_give_back_refunds() {
+        let l = RateLimitLayer::global(1, Duration::from_secs(60));
+        assert!(l.peek("k").await.is_ok());
+        assert!(l.take("k").await.is_ok());
+        assert!(l.peek("k").await.is_err());
+        l.give_back("k").await;
+        assert!(l.peek("k").await.is_ok());
+        assert!(l.take("k").await.is_ok());
     }
 
     #[tokio::test]

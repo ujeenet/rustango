@@ -277,18 +277,11 @@ impl<T: Model> QuerySet<T> {
         if self.disable_all_global_scopes {
             return;
         }
-        let schema = T::SCHEMA;
-        if schema.global_scopes.is_empty() {
-            return;
-        }
-        let mut prefixed: Vec<PendingFilter> = Vec::new();
-        for scope in schema.global_scopes {
-            if self.disabled_global_scopes.contains(&scope.name) {
-                continue;
-            }
-            let expr = (scope.apply)();
-            prefixed.push(PendingFilter::Expr(expr));
-        }
+        let mut prefixed: Vec<PendingFilter> = T::SCHEMA
+            .global_scope_exprs(&self.disabled_global_scopes)
+            .into_iter()
+            .map(PendingFilter::Expr)
+            .collect();
         if !prefixed.is_empty() {
             prefixed.append(&mut self.pending);
             self.pending = prefixed;
@@ -2168,9 +2161,11 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Lower this queryset to a `DeleteQuery` — same WHERE clause, no projection.
+    /// `limit` / `offset` / `order_by` bound it by primary key.
     ///
     /// # Errors
-    /// As [`QuerySet::compile`].
+    /// As [`QuerySet::compile`], plus [`QueryError::BoundedDmlUnsupported`]
+    /// when a limit or offset cannot be bounded.
     pub fn compile_delete(mut self) -> Result<DeleteQuery, QueryError> {
         // Fold global scopes into the WHERE, so a bulk delete honours
         // the same filters as a fetch. A `published_only` scope means
@@ -2185,6 +2180,14 @@ impl<T: Model> QuerySet<T> {
         } else {
             where_clause
         };
+        let where_clause = bound_dml_where(
+            model,
+            where_clause,
+            self.order_by,
+            self.limit,
+            self.offset,
+            !self.compound.is_empty(),
+        )?;
         Ok(DeleteQuery {
             model,
             where_clause,
@@ -2382,8 +2385,10 @@ impl<T: Model> UpdateBuilder<T> {
     ///
     /// # Errors
     /// Returns [`QueryError::UnknownField`] if any `set` or filter names an
-    /// unknown field, and [`QueryError::TypeMismatch`] if any bound value's
-    /// type doesn't match the field's declared type.
+    /// unknown field, [`QueryError::TypeMismatch`] if any bound value's
+    /// type doesn't match the field's declared type, and
+    /// [`QueryError::BoundedDmlUnsupported`] if the queryset's limit or
+    /// offset cannot be bounded by primary key.
     pub fn compile(mut self) -> Result<UpdateQuery, QueryError> {
         // As on the SELECT and DELETE paths: an `.update().set(...)`
         // must not escape the model's global scopes.
@@ -2408,6 +2413,14 @@ impl<T: Model> UpdateBuilder<T> {
         } else {
             where_clause
         };
+        let where_clause = bound_dml_where(
+            model,
+            where_clause,
+            self.qs.order_by,
+            self.qs.limit,
+            self.qs.offset,
+            !self.qs.compound.is_empty(),
+        )?;
 
         Ok(UpdateQuery {
             model,
@@ -3042,6 +3055,68 @@ fn never_match_clause(
             WhereExpr::And(nodes)
         }
         other => WhereExpr::And(vec![other, never]),
+    })
+}
+
+/// Bound an UPDATE/DELETE: `<where> AND pk IN (SELECT pk … ORDER BY …, pk LIMIT … OFFSET …)`.
+/// The outer `<where>` stays so a row changed by a concurrent writer is not claimed.
+/// Without a limit or offset the order cannot change the row set, so it is left out.
+fn bound_dml_where(
+    model: &'static ModelSchema,
+    where_clause: WhereExpr,
+    order_by: Vec<PendingOrderItem>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    has_compound: bool,
+) -> Result<WhereExpr, QueryError> {
+    use crate::core::BoundedDmlReason as Why;
+    if limit.is_none() && offset.is_none() {
+        return Ok(where_clause);
+    }
+    let refuse = |reason| {
+        Err(QueryError::BoundedDmlUnsupported {
+            model: model.name,
+            reason,
+        })
+    };
+    // SQLite reads `LIMIT -1` as no limit at all.
+    if limit.is_some_and(|n| n < 0) || offset.is_some_and(|n| n < 0) {
+        return refuse(Why::Negative);
+    }
+    if has_compound {
+        return refuse(Why::SetOperation);
+    }
+    let mut pks = model.fields.iter().filter(|f| f.primary_key);
+    let pk = match (pks.next(), pks.next()) {
+        (Some(pk), None) => pk,
+        _ => return refuse(Why::NoSinglePrimaryKey),
+    };
+    let (mut order_by, joins) = lower_order_items(model, order_by)?;
+    if !joins.is_empty() {
+        return refuse(Why::RelationOrderBy);
+    }
+    // PK tiebreaker: ties must not pick a different row set each run.
+    let has_pk = order_by.iter().any(
+        |o| matches!(o, crate::core::OrderItem::Column { column, .. } if *column == pk.column),
+    );
+    if !has_pk {
+        order_by.push(crate::core::OrderItem::column(pk.column, false));
+    }
+    let mut inner = SelectQuery::new(model);
+    inner.where_clause = where_clause.clone();
+    inner.order_by = order_by;
+    inner.limit = limit;
+    inner.offset = offset;
+    inner.projection = Some(vec![pk.column]);
+    let bound = WhereExpr::InSubquery {
+        column: pk.column,
+        negated: false,
+        subquery: Box::new(inner),
+    };
+    Ok(if where_clause.is_empty() {
+        bound
+    } else {
+        WhereExpr::And(vec![where_clause, bound])
     })
 }
 

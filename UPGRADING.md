@@ -152,6 +152,130 @@ untouched.
 
 ## 0.58.0
 
+### ViewSet and template views hide scoped-out rows
+
+A model with a `global_scope` served through `ViewSet` or the template
+views now hides the scoped-out rows there too, and a PK request for one
+is a 404 (#1746). An endpoint that must reach them should use
+`Model::objects().without_global_scopes()` in its own handler. A
+ViewSet PUT/PATCH that moves its row out of a scope or filter backend
+answers `204 No Content`; a create whose row lands outside answers
+`201` with no body (`null` at that index in a bulk create).
+
+### SSO signs in by link, not by email
+
+Existing SSO users are refused until they are linked. Run
+`makemigrations` + `migrate`: it adds `allow_email_link` to
+`rustango_sso_providers` / `rustango_shared_sso_providers` and creates
+`rustango_sso_links` (until then email linking reads as off and SSO is
+refused). Then either turn on `allow_email_link` (a normal user is linked
+on the next login; for a shared provider it applies to every tenant), or
+have a superuser add an `SsoLink` row. Superusers, staff and every
+bare-admin account need the row: `provider_source` `tenant`/`shared`/
+`admin`, `provider_id` the provider row id, `issuer` `kind` or
+`kind|issuer_url` without a trailing slash, `subject`, `user_id`; the
+admin computes `key_sha256`. The `sso refused` log
+line carries `provider_id`, `issuer` and `subject`. Only superusers can
+now add, change or delete `SsoProvider` and `SsoLink` rows in the admin.
+A read-only operator console can no longer change shared providers.
+(Pre-release soak databases built from an earlier 0.58.0 draft have a
+`subject_sha256` column instead of `key_sha256`: drop and re-migrate
+`rustango_sso_links`. Released versions never had it.)
+`find_or_provision_member(pool, email, profile, auto)` is now
+`(pool, &ProviderKey, allow_email_link, profile, auto)` and returns
+`MemberSignIn`: map `NotLinked` (an existing account, not linkable by
+email) apart from `NoAccount`, or every existing member looks "closed".
+
+### Bounded update/delete; `atomic()` hands out a lockable `AtomicTx`
+
+`update()` / `delete()` now honour `limit`, `offset` and `order_by`
+(#1666); a queryset that relied on them being ignored now touches fewer
+rows. With a composite or missing PK, or after `union()`, a bounded one
+returns `QueryError::BoundedDmlUnsupported`. The `atomic` closure now
+gets `&AtomicTx`, not `&mut PoolTx`: write `insert_tx(&mut *tx.lock().await?, &q)`.
+A nested `atomic(&pool, …)` on the same pool is now a savepoint on the
+outer transaction, and its `on_commit` callbacks wait for the outermost
+commit. Drop the `TxGuard` before nesting, or get `ExecError::NestedAtomic`.
+
+Nested writes that used to survive an outer rollback (an audit row, say)
+are now rolled back with it, silently. For an independent commit, use a
+different pool or `tokio::spawn`. Nesting is per pool object: pass the
+request's pool down instead of looking it up again. On MySQL before
+8.0.21 and MariaDB before 11.1 a bounded update/delete may scan the whole
+table. On MySQL, DDL / `TRUNCATE` / `LOCK TABLES` inside `atomic` commit
+implicitly: `atomic` returns `ExecError::AtomicEndedEarly` with writes
+already committed, so a retry can write twice. On MySQL and SQLite a
+failed statement undoes only itself; if the closure ignores it, the rest
+commits (PG aborts the whole transaction).
+
+### Admin TOTP codes are single use
+
+`rustango_admin_totp` gains a nullable `last_used_step` column (#1672).
+`totp_store::ensure_table`, or the first code accepted after the upgrade,
+adds it to an existing table. `AdminTotp` literals need the new field. A
+code that already signed in is refused, so users wait for the next one.
+`Lockout::counter_ttl` is now a fixed window from the first failure. The
+lockout cache keys changed, so failure counts in progress at the
+upgrade start again from zero; active locks are kept.
+
+### Page cache keys include the tenant
+
+Page cache keys now include the tenant (#1674), so cached pages miss
+once after upgrade.
+
+### The page cache stops caching outside the tenancy layer
+
+Under `tenancy`, a `CachePageLayer` that cannot see the tenant context
+no longer caches. Mount it on a router passed to the server builder,
+or add `.tenant_agnostic(true)` for routes that are the same for every
+tenant. A CDN in front must vary on the tenant header itself.
+
+### Long database cache keys change stored form
+
+`DatabaseCache` keys over 255 bytes, or ending in `#` plus 64 hex, are
+now stored hashed, so those entries miss once. Run `cache.clear()`
+after upgrading to drop the old rows.
+
+### The trusted client IP is the rightmost untrusted hop
+
+Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the
+rightmost hop that is not a trusted proxy (#1673). List every proxy hop
+(CDN egress, load balancer, nginx) in `trust_proxies`, or the client IP
+will be one of your proxies. If your proxy sets `X-Real-IP`,
+`CF-Connecting-IP` or `Forwarded` instead of appending to XFF, name
+that strategy; `Auto` behind a trusted proxy reads only XFF.
+`BodyLimitLayer` now also limits bodies without `Content-Length`; over
+the limit a body extractor answers axum's plain 413.
+
+### Model shortcuts respect global scopes
+
+`Model::sum/avg/min/max/destroy/delete_where` now apply global scopes
+(#1675); to act on every row use `Model::objects().without_global_scopes()`.
+`delete_where` type-checks its value like `update_where`
+(`QueryError::TypeMismatch`). `audit::insert_one_with_audit` takes
+`(pool, &query, &mut model, |m| entry)` and sets the PK on `model`. The
+hidden `Model::__aggregate_one_pool` and
+`sql::model_shortcuts::aggregate_one_pool` are removed.
+
+### Logins are rate limited; lockout keys on the username
+
+A locked or throttled login answers `429` with `Retry-After` (#1609);
+it used to re-render the form. Lockout counts the submitted username,
+not the user id. Behind a reverse proxy set `RealIpLayer::trust_proxies`,
+or every client shares one per-IP bucket (20 a minute). The `admin`
+feature now enables `cache`. `passwords::verify_dummy_async` and
+`tenancy::password::verify_dummy_async` return `Result`; handle `Busy`
+as on the known-user path. New variants: `PasswordError::Busy`,
+`TenancyError::Busy`, `tenancy::auth_backends::AuthError::Refused`.
+`LoginThrottle::begin` takes a `&LoginScope`; `LoginThrottle::account`
+is gone (use `LoginScope::TenantBasic`); call
+`LoginAttempt::resolve(stored_username)` after the user lookup.
+`login_throttle::configure_shared`, `account_lockout::configure_shared`
+and `passwords::configure_hash_wait` now win over `[auth]` values in
+either order. `login_ip_limit` and `login_global_limit` count failed
+logins only; the global limit applies per scope. `ModelBackend` and
+`ApiKeyBackend` refuse without a `TenantSlug`.
+
 ### Sessions carry a password fingerprint
 
 Bare-admin, tenant, member and operator sessions sign out once after

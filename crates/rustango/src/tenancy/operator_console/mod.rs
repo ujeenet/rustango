@@ -546,14 +546,20 @@ fn router_inner(
             "/change-password",
             get(change_password_form).post(change_password_submit),
         );
-    // Registry-wide shared SSO providers (admin-sso) — always available to
-    // authenticated operators; writes go to the registry pool the console
-    // already holds.
+    // Registry-wide shared SSO providers (admin-sso): every operator sees
+    // the list; changing it needs an editable console.
     #[cfg(feature = "admin-sso")]
     {
-        private = private
-            .route("/sso-shared", get(sso_shared_list).post(sso_shared_create))
-            .route("/sso-shared/{id}/delete", post(sso_shared_delete));
+        private = private.route("/sso-shared", get(sso_shared_list));
+        if edit_enabled {
+            private = private
+                .route("/sso-shared", post(sso_shared_create))
+                .route("/sso-shared/{id}/delete", post(sso_shared_delete))
+                .route(
+                    "/sso-shared/{id}/email-link",
+                    post(sso_shared_set_email_link),
+                );
+        }
     }
     if edit_enabled {
         private = private
@@ -1091,9 +1097,11 @@ struct LoginSubmit {
 
 async fn login_submit(
     State(state): State<ConsoleState>,
+    ip: crate::login_throttle::ClientIp,
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginSubmit>,
 ) -> Response<Body> {
+    use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -1101,82 +1109,52 @@ async fn login_submit(
     let meta = meta_from_headers(&headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
 
-    // Audit M1 (console) — per-account brute-force lockout, on by
-    // default. Resolve the operator id up front so the lockout is keyed
-    // by id (`op:<id>`), not the raw username: only an *existing* account
-    // accrues failures, so an attacker can't lock arbitrary names. A
-    // locked account is rejected before `authenticate` runs the verify.
-    #[cfg(feature = "cache")]
-    let pre_id: Option<i64> = {
-        use crate::core::Column as _;
-        use crate::sql::FetcherPool as _;
-        auth::Operator::objects()
-            .where_(auth::Operator::username.eq(form.username.clone()))
-            .fetch(&state.registry)
-            .await
-            .ok()
-            .and_then(|rows: Vec<auth::Operator>| rows.into_iter().next())
-            .and_then(|op| op.id.get().copied())
+    // Rate limits and the account lock, before the lookup (#1609).
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(&LoginScope::Operator, &ip, &form.username)
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
     };
-    #[cfg(feature = "cache")]
-    if let Some(id) = pre_id {
-        if crate::account_lockout::shared()
-            .is_locked(&format!("op:{id}"))
-            .await
-        {
+    let found = match auth::find_operator(&state.registry, &form.username).await {
+        Ok(op) => op,
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
+    };
+    if let Some(op) = &found {
+        if let Err(refused) = attempt.resolve(&op.username).await {
+            return refused.into_response();
+        }
+    }
+
+    let principal = match auth::check_operator_password(found, &form.password).await {
+        Ok(Some(op)) => op,
+        Ok(None) => {
+            attempt.failed().await;
             send_user_login_failed(UserLoginFailedContext {
                 source: "operator",
                 attempted_username: Some(form.username.clone()),
                 reason: AuthFailureReason::InvalidCredentials,
-                request: meta.clone(),
+                request: meta,
             })
             .await;
             return Redirect::to(&format!(
-                "/login?error=Too+many+failed+attempts.+Try+again+later.&next={}",
+                "/login?error=Invalid+credentials&next={}",
                 urlencoding_lite(&next)
             ))
             .into_response();
         }
-    }
-
-    let principal =
-        match auth::authenticate_operator_pool(&state.registry, &form.username, &form.password)
-            .await
-        {
-            Ok(Some(op)) => op,
-            Ok(None) => {
-                // Audit M1 — count the failure against the resolved id
-                // (existing accounts only, so no arbitrary-name DoS).
-                #[cfg(feature = "cache")]
-                if let Some(id) = pre_id {
-                    let _ = crate::account_lockout::shared()
-                        .record_failure(&format!("op:{id}"))
-                        .await;
-                }
-                send_user_login_failed(UserLoginFailedContext {
-                    source: "operator",
-                    attempted_username: Some(form.username.clone()),
-                    reason: AuthFailureReason::InvalidCredentials,
-                    request: meta,
-                })
-                .await;
-                return Redirect::to(&format!(
-                    "/login?error=Invalid+credentials&next={}",
-                    urlencoding_lite(&next)
-                ))
-                .into_response();
-            }
-            Err(e) => {
-                tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
-            }
-        };
+        Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
+    };
     let oid = principal.id.get().copied().unwrap_or_default();
-    // Audit M1 — successful login clears the failure counter + any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared()
-        .clear(&format!("op:{oid}"))
-        .await;
+    attempt.succeeded().await;
     let payload = SessionPayload::new(
         oid,
         SESSION_TTL_SECS,
@@ -1331,14 +1309,22 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let ok = super::password::verify_async(&form.current_password, &op_row.password_hash)
-        .await
-        .unwrap_or(false);
+    let ok =
+        match super::password::verify_async(&form.current_password, &op_row.password_hash).await {
+            Ok(ok) => ok,
+            Err(super::TenancyError::Busy) => {
+                return crate::login_throttle::LoginRefused::Busy.into_response()
+            }
+            Err(_) => false,
+        };
     if !ok {
         return redir_err("Current password did not match.");
     }
     let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(e) => return redir_err(&format!("hash failed: {e}")),
     };
     op_row.password_hash = new_hash;
@@ -1430,6 +1416,7 @@ struct SharedSsoForm {
     scopes: Option<String>,
     sort_order: Option<i32>,
     enabled: Option<String>,
+    allow_email_link: Option<String>,
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1457,6 +1444,7 @@ async fn sso_shared_list(
                 "issuer_url": p.issuer_url,
                 "client_id": p.client_id,
                 "enabled": p.enabled,
+                "allow_email_link": p.allow_email_link,
                 "sort_order": p.sort_order,
             })
         })
@@ -1466,6 +1454,7 @@ async fn sso_shared_list(
     ctx.insert("section", "sso");
     ctx.insert("operator_username", &op.username);
     ctx.insert("providers", &view);
+    ctx.insert("edit_enabled", &state.pools.is_some());
     render(&state, "op_sso_shared.html", &ctx)
 }
 
@@ -1486,6 +1475,7 @@ async fn sso_shared_create(
         enabled: form.enabled.as_deref() == Some("on"),
         sort_order: form.sort_order.unwrap_or(0),
         scopes: form.scopes.filter(|s| !s.trim().is_empty()),
+        allow_email_link: form.allow_email_link.as_deref() == Some("on"),
         created_at: crate::sql::Auto::Unset,
         updated_at: crate::sql::Auto::Unset,
     };
@@ -1497,6 +1487,50 @@ async fn sso_shared_create(
             .into_response();
     }
     Redirect::to("/sso-shared").into_response()
+}
+
+/// The wanted `allow_email_link` value, `on` or `off`.
+#[cfg(feature = "admin-sso")]
+#[derive(serde::Deserialize)]
+struct EmailLinkForm {
+    allow_email_link: String,
+}
+
+/// Set `allow_email_link` in place (only that column), so the id and its links survive.
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_set_email_link(
+    State(state): State<ConsoleState>,
+    Extension(_op): Extension<auth::Operator>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Form(form): Form<EmailLinkForm>,
+) -> Response<Body> {
+    use crate::sql::UpdaterPool as _;
+    let allow = match form.allow_email_link.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "allow_email_link must be on or off",
+            )
+                .into_response()
+        }
+    };
+    match super::sso::SharedSsoProvider::objects()
+        .filter("id", id)
+        .update()
+        .set("allow_email_link", allow)
+        .execute_pool(&state.registry)
+        .await
+    {
+        Ok(1) => Redirect::to("/sso-shared").into_response(),
+        Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("update failed: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(feature = "admin-sso")]

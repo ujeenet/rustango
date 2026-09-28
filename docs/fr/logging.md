@@ -141,6 +141,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::shutdown` | Gestion des signaux et hooks d'arrêt |
 | `rustango::sql` | Exécution des requêtes |
 | `rustango::sql::lock` | Clauses de verrou de ligne |
+| `rustango::sso` | Liaison de comptes SSO |
 | `rustango::template_views` | Vues adossées à des templates |
 | `rustango::tenancy` | Multi-tenancy, général |
 | `rustango::tenancy::admin` | Admin de locataire |

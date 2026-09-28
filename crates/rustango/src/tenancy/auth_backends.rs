@@ -43,6 +43,8 @@ use crate::sql::Pool;
 
 use super::auth::parse_basic_auth;
 use super::password;
+use super::password::HashLane;
+use crate::login_throttle::{ClientIp, LoginAttempt, LoginScope};
 
 // ------------------------------------------------------------------ AuthUser
 
@@ -71,6 +73,44 @@ pub enum AuthError {
     InvalidToken,
     #[error("account is inactive")]
     Inactive,
+    /// Locked out or password hashing busy; answer with its response.
+    #[error("login refused: {0:?}")]
+    Refused(crate::login_throttle::LoginRefused),
+}
+
+impl AuthError {
+    /// A hashing error: busy is [`LoginRefused::Busy`], anything else an
+    /// invalid credential.
+    ///
+    /// [`LoginRefused::Busy`]: crate::login_throttle::LoginRefused::Busy
+    fn from_hash(e: super::TenancyError) -> Self {
+        match e {
+            super::TenancyError::Busy => Self::Refused(crate::login_throttle::LoginRefused::Busy),
+            _ => Self::InvalidToken,
+        }
+    }
+}
+
+/// Admit one per-request credential check for this request's tenant and
+/// client. Refuses without a tenant, so tenants never share limits.
+async fn begin(
+    parts: &Parts,
+    scope: fn(String) -> LoginScope,
+    username: &str,
+) -> Result<LoginAttempt, AuthError> {
+    let Some(slug) = parts.extensions.get::<super::TenantSlug>() else {
+        tracing::error!("auth backend ran without a TenantSlug; use require_auth / optional_auth");
+        return Err(AuthError::InvalidToken);
+    };
+    let ip = parts
+        .extensions
+        .get::<ClientIp>()
+        .cloned()
+        .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers));
+    crate::login_throttle::shared()
+        .begin(&scope(slug.0.clone()), &ip, username)
+        .await
+        .map_err(AuthError::Refused)
 }
 
 // ------------------------------------------------------------------ Trait
@@ -118,6 +158,9 @@ impl AuthBackend for ModelBackend {
             None => return Ok(None),
         };
 
+        // Own lock scope, apart from the login forms; only failures count.
+        let mut attempt = begin(parts, LoginScope::TenantBasic, &username).await?;
+
         let users = super::auth::User::objects()
             .where_(super::auth::User::username.eq(username.clone()))
             .fetch(pool)
@@ -127,16 +170,24 @@ impl AuthBackend for ModelBackend {
             // Audit H1/N4 — spend a verify's worth of work on the
             // unknown-user path so timing doesn't reveal whether the
             // username exists.
-            password::verify_dummy_async(&password).await;
+            password::verify_dummy_async_in(HashLane::Credential, &password)
+                .await
+                .map_err(AuthError::from_hash)?;
+            attempt.failed().await;
             return Ok(None);
         };
+        attempt
+            .resolve(&user.username)
+            .await
+            .map_err(AuthError::Refused)?;
 
         // Verify before the active check so active vs inactive accounts
         // take the same time (audit H1/N4).
-        let ok = password::verify_async(&password, &user.password_hash)
+        let ok = password::verify_async_in(HashLane::Credential, &password, &user.password_hash)
             .await
-            .map_err(|_| AuthError::InvalidToken)?;
+            .map_err(AuthError::from_hash)?;
         if !user.active || !ok {
+            attempt.failed().await;
             // Audit N4 — an inactive account must look identical to a
             // wrong password at this (username-keyed, pre-credential)
             // boundary: same `Ok(None)`, not a distinguishable
@@ -146,6 +197,7 @@ impl AuthBackend for ModelBackend {
             return Ok(None);
         }
 
+        attempt.succeeded().await;
         Ok(Some(AuthUser {
             id: user.id.get().copied().unwrap_or(0),
             username: user.username,
@@ -276,6 +328,8 @@ impl AuthBackend for ApiKeyBackend {
         // types). One round-trip per ApiKey lookup + one per user
         // resolve; both indexed (key_prefix UNIQUE + id PK) so the
         // total latency on the hot path is two index seeks.
+        // Failures per IP and per tenant; no lock, the prefix is no account.
+        let attempt = begin(parts, LoginScope::TenantApiKey, "").await?;
         let keys = ApiKey::objects()
             .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
             .fetch(pool)
@@ -283,7 +337,10 @@ impl AuthBackend for ApiKeyBackend {
         let Some(key) = keys.into_iter().next() else {
             // Audit N4 — equalize timing on the unknown-prefix path so it
             // doesn't reveal whether a key prefix exists.
-            password::verify_dummy_async(secret).await;
+            password::verify_dummy_async_in(HashLane::Credential, secret)
+                .await
+                .map_err(AuthError::from_hash)?;
+            attempt.failed().await;
             return Ok(None);
         };
 
@@ -293,12 +350,14 @@ impl AuthBackend for ApiKeyBackend {
             }
         }
 
-        let ok = password::verify_async(secret, &key.key_hash)
+        let ok = password::verify_async_in(HashLane::Credential, secret, &key.key_hash)
             .await
-            .map_err(|_| AuthError::InvalidToken)?;
+            .map_err(AuthError::from_hash)?;
         if !ok {
+            attempt.failed().await;
             return Ok(None);
         }
+        attempt.succeeded().await;
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::id.eq(key.user_id))

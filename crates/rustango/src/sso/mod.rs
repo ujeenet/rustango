@@ -12,11 +12,10 @@
 //!
 //! It reuses the existing [`crate::oauth2`] handshake
 //! ([`OAuth2Provider::begin`]/[`complete`](crate::oauth2::OAuth2Provider::complete) +
-//! [`seal_flow`]/[`open_flow`]) to prove identity, then the *caller*
-//! links the verified email to an existing user and mints that surface's
-//! normal session cookie. The admin flow is **link-to-existing** — SSO
-//! never auto-provisions an admin; an unknown or unverified email is
-//! refused. (The member flow may opt into auto-provisioning.)
+//! [`seal_flow`]/[`open_flow`]) to prove identity, then signs in the user
+//! linked to the IdP subject ([`link`]) and mints that surface's normal
+//! session cookie. SSO never auto-provisions an admin. (The member flow
+//! may opt into auto-provisioning.)
 //!
 //! The client secret is resolved from a reference (`env://…`) by the
 //! caller before building the provider, so the raw secret never lands in
@@ -28,8 +27,10 @@
 //! [`seal_flow`]: crate::oauth2::seal_flow
 //! [`open_flow`]: crate::oauth2::open_flow
 
+pub mod link;
 pub mod provider;
-pub use provider::{list_enabled, resolve_by_slug, SsoProvider};
+pub use link::{LinkSource, ProviderKey, SsoLink};
+pub use provider::{list_enabled, resolve_by_slug, ResolvedProvider, SsoProvider};
 
 use crate::oauth2::{providers, OAuth2Provider, OAuthError};
 
@@ -183,8 +184,8 @@ pub fn resolve_secret_ref_env(reference: &str) -> Result<String, SsoError> {
 }
 
 /// The verified email from a completed handshake, or an error when the
-/// IdP didn't return a verified email address. Both surfaces link on
-/// this value.
+/// IdP didn't return a verified email address. Only opt-in email
+/// linking ([`link::sign_in`]) uses it.
 ///
 /// # Errors
 /// [`SsoError::EmailNotVerified`] when `email_verified` is false or no

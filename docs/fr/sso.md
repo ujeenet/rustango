@@ -12,16 +12,21 @@ découverts automatiquement à partir de son URL d'émetteur (issuer) OIDC
 lors de la connexion ; les providers sociaux utilisent des préréglages
 intégrés.
 
-Pour l'admin, le SSO fonctionne en **liaison à un compte existant** :
-l'email vérifié renvoyé par l'IdP doit correspondre à un utilisateur
-admin existant. Il authentifie la personne ; il ne crée jamais de comptes
-et n'accorde jamais d'accès par lui-même. Un email inconnu ou non vérifié
-est refusé. (Le flux membre, ci-dessous, peut opter pour le
-provisionnement automatique.)
+Le SSO connecte l'utilisateur **lié** à l'identité de l'IdP : une ligne
+`rustango_sso_links` par `(provider, sub)`. L'email envoyé par l'IdP ne
+suffit jamais à lui seul. Un utilisateur qui se connecte pour la première
+fois n'est lié par son email vérifié que si le provider a
+**`allow_email_link`** activé (désactivé par défaut), et jamais si le
+compte est un superutilisateur ou du staff (tenant : détient une
+permission quelconque ; bare admin : tout compte). Ces comptes sont liés
+par un admin, qui ajoute la ligne `SsoLink` dans l'admin ; la ligne de
+journal du refus indique le subject. (Le flux membre, ci-dessous,
+provisionne automatiquement par défaut ; voir plus bas pour le désactiver.)
 
 > **Source :** le cœur `rustango::sso`, indépendant de l'admin
 > (`SsoProvider`, `build_provider`, `verified_email`, `ResolvedSso`,
-> `SsoError`), le câblage bare-admin `rustango::admin::sso`, le SSO
+> `SsoError`), la table de liens `rustango::sso::link` (`SsoLink`,
+> `ProviderKey`, `sign_in`), le câblage bare-admin `rustango::admin::sso`, le SSO
 > par tenant / console `rustango::tenancy::sso`
 > (`SharedSsoProvider`), et le SSO membre
 > `rustango::tenancy::member_auth`.
@@ -50,10 +55,11 @@ désormais des **shims de ré-export** au-dessus de `sso::provider` /
 `sso::*`, donc les imports existants
 `crate::admin::sso::{build_provider, ResolvedSso, …}` et
 `crate::admin::sso_provider::SsoProvider` continuent de résoudre
-inchangés (le nom de table `rustango_sso_providers` et tous ses champs
-sont intacts — les migrations ne sont pas affectées).
+inchangés. Depuis la 0.58, `rustango_sso_providers` a une colonne
+`allow_email_link` et il existe une table `rustango_sso_links` ;
+`makemigrations` émet les deux.
 
-L'email sur lequel un utilisateur est lié est la colonne `email`. Sur le
+L'email que compare la liaison optionnelle par email est la colonne `email`. Sur le
 modèle `User` du tenant, elle est conditionnée à la fonctionnalité
 **`sso`** (déplacée hors de `admin-sso` en 0.49, pour que les builds
 membre-SSO-seul obtiennent quand même la colonne) ; le `AdminUser.email`
@@ -68,17 +74,22 @@ nu reste derrière `admin-sso`. Activer ou désactiver la fonctionnalité
    avec un cookie de flux signé et à courte durée de vie (PKCE + `state`
    CSRF).
 3. L'IdP renvoie l'utilisateur vers `<login>/sso/<slug>/callback`.
-4. rustango vérifie le flux, échange le code, lit `/userinfo`, et exige
-   **`email_verified`**.
-5. Il recherche un utilisateur admin par cet email. S'il en existe un et
-   qu'il est actif, rustango émet la **même session à cookie signé**
-   qu'une connexion par mot de passe produit, liée à cet utilisateur —
-   ainsi chaque garde-fou existant (superutilisateur / permissions,
-   invalidation en direct au changement de mot de passe) s'applique
-   toujours.
-6. Aucune correspondance → l'utilisateur est renvoyé vers la page de
-   connexion avec une erreur générique (les détails vont dans le journal
-   serveur, jamais dans le navigateur).
+4. rustango vérifie le flux, échange le code et lit `/userinfo`.
+5. Il cherche le lien pour ce provider et le `sub` de l'IdP. Sans lien, et
+   si `allow_email_link` est activé, un email **vérifié** correspondant à
+   un utilisateur non privilégié crée le lien.
+6. Si l'utilisateur lié est actif, rustango émet la **même session à
+   cookie signé** qu'une connexion par mot de passe — ainsi chaque
+   garde-fou existant (superutilisateur / permissions, invalidation en
+   direct au changement de mot de passe) s'applique toujours.
+7. Sinon, l'utilisateur est renvoyé vers la page de connexion avec une
+   erreur générique (les détails vont dans le journal serveur, jamais dans
+   le navigateur).
+
+La table de liens est un modèle migré normal : dans le stockage du tenant
+pour les connexions tenant, et dans la base de l'admin pour le bare admin.
+Un lien est comparé exactement (issuer et subject clés par un SHA-256 ;
+l'email n'ignore que la casse ASCII), quelle que soit la collation de la base.
 
 Le secret client est **chiffré au repos** — la colonne `client_secret`
 est un cast [`EncryptedString`](#stockage-des-secrets), déchiffré en
@@ -101,6 +112,11 @@ d'admin, sans redéploiement. Champs :
 | `enabled` | Indique si le bouton s'affiche sur la page de connexion. |
 | `sort_order` | Ordre d'affichage des boutons (croissant). |
 | `scopes` | Substitution optionnelle des scopes, séparés par des espaces (par défaut `openid email profile`). |
+| `allow_email_link` | Lier un utilisateur qui se connecte pour la première fois par son email vérifié (désactivé par défaut). Ne lie jamais un compte superutilisateur ou staff ; ignoré par le bare admin. |
+
+Seul un superutilisateur peut ajouter, modifier ou supprimer des lignes
+`SsoProvider` et `SsoLink` dans l'admin ; le reste du staff peut seulement
+les lister.
 
 Pour ajouter un provider : saisissez le `client_id` + `client_secret`,
 choisissez un `kind` (ou `oidc` + une `issuer_url`), et enregistrez. Les
@@ -119,7 +135,9 @@ câblage de points de terminaison par provider n'est nécessaire.
 - **Console opérateur** (multi-tenancy) : un opérateur définit un
   **`SharedSsoProvider`** une seule fois, et il est proposé à **tous**
   les tenants (un Google à l'échelle de l'entreprise, par exemple). Géré
-  depuis le panneau *Shared SSO* de la console.
+  depuis le panneau *Shared SSO* de la console, où *Allow email linking*
+  bascule `allow_email_link` sur place (l'id et ses liens restent). Le
+  drapeau s'applique à **tous** les tenants.
 
 Sur la page de connexion d'un tenant, les deux ensembles fusionnent, et
 en cas de collision de slug, c'est le **propre provider du tenant qui
@@ -128,9 +146,16 @@ provider partagé pour lui-même.
 
 L'URL de callback est dérivée par requête à partir de l'hôte + du slug
 (`https://<host><login>/sso/<slug>/callback`), c'est donc celle-là qu'il
-faut enregistrer auprès de l'IdP. Liez un utilisateur en définissant la
-colonne `email` sur sa ligne `rustango_users` (tenant) /
-`rustango_admin_users` (nu) à l'adresse renvoyée par l'IdP.
+faut enregistrer auprès de l'IdP. Un utilisateur est lié par la liaison
+optionnelle par email (utilisateurs tenant non privilégiés), ou par un
+superutilisateur qui ajoute une ligne `SsoLink` : `provider_source`
+(`tenant`, `shared` ou `admin`), `provider_id` (l'id de la ligne du
+provider), `issuer` (`kind`, ou `kind|issuer_url` sans barre oblique
+finale), `subject` et `user_id`. L'admin calcule `key_sha256`. La ligne de journal du refus (`sso refused`) porte
+`provider_id`, `issuer` et `subject`. Ajouter une ligne exige
+l'authentification par session de l'admin (`Builder::with_session_auth`,
+ou `with_session` de l'admin tenant) ; sans elle, personne ne peut ajouter
+de liens.
 
 ## SSO membre (utilisateur final)
 
@@ -173,9 +198,12 @@ Différences avec le flux admin :
   correspondante en **crée** une — nom d'utilisateur issu de la partie
   locale de l'email (dédupliqué en cas de collision), avec un hash de mot
   de passe aléatoire réel mais inutilisable (les utilisateurs SSO ne
-  peuvent pas se connecter par mot de passe). Mettez-le à `false` pour
-  une liaison à un compte existant à la manière de l'admin (email inconnu
-  refusé).
+  peuvent pas se connecter par mot de passe) — et la lie. Un email qui
+  correspond à un compte existant suit la règle `allow_email_link`
+  ci-dessus. Mettez-le à `false` pour refuser les emails inconnus. Une
+  connexion native appelle directement `find_or_provision_member` ; son
+  résultat `MemberSignIn` distingue `NotLinked` (un compte a cet email
+  mais ne peut pas être lié par lui) de `NoAccount`.
 - **Son propre cookie de session.** Le cookie membre
   (`rustango_member_session`) est **séparé par domaine** des cookies de
   session tenant / admin : le message signé porte une étiquette
@@ -233,11 +261,14 @@ préréglage ; il nécessite une vérification id_token/JWKS.)
 
 ## Notes de sécurité
 
-- **Email vérifié uniquement** — les emails non vérifiés de l'IdP sont
-  rejetés.
-- **Pas de provisionnement automatique** — un email inconnu ne peut pas
-  entrer ; créez d'abord l'utilisateur admin (et définissez son
-  `email`).
+- **Le lien d'abord** — le lien `(provider, sub)` décide ; l'email ne sert
+  qu'à la liaison optionnelle par email, et seulement s'il est vérifié.
+- **Pas de liens privilégiés par email** — seuls les superutilisateurs lient
+  les superutilisateurs et le staff. Un lien créé par email continue de
+  fonctionner après la promotion de l'utilisateur ; supprimez-le si ce
+  n'est pas voulu.
+- **Pas de provisionnement automatique** pour les admins — un email inconnu
+  ne peut pas entrer.
 - **Secrets chiffrés au repos** (`RUSTANGO_SECRET_KEY`), déchiffrés
   uniquement en mémoire au moment de la connexion ; les formulaires
   d'édition masquent le secret stocké.

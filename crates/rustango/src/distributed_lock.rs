@@ -452,4 +452,41 @@ mod tests {
             "`acme-corp` must not be blocked by `acme`'s lock"
         );
     }
+
+    /// A tenant cache clear must not free a lock a running job holds.
+    #[tokio::test]
+    async fn tenant_cache_clear_keeps_tenant_locks() {
+        use crate::cache::{Cache as _, ScopedCache};
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let acme = DistributedLock::new(cache.clone()).for_tenant("acme");
+        let ttl = Duration::from_secs(30);
+        let _held = acme.try_acquire("j", ttl).await.expect("acme");
+
+        ScopedCache::for_tenant(cache, "acme")
+            .clear()
+            .await
+            .unwrap();
+
+        assert!(acme.try_acquire("j", ttl).await.is_none(), "lock freed");
+    }
+
+    /// `scoped` names its own keyspace, apart from unscoped and other scopes.
+    #[tokio::test]
+    async fn scoped_locks_use_their_namespace() {
+        use crate::cache::Cache as _;
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let ttl = Duration::from_secs(30);
+        let ns = DistributedLock::new(cache.clone()).scoped("reports");
+        let _held = ns.try_acquire("j", ttl).await.expect("scoped");
+
+        assert!(cache.exists("lock:reports:j").await.unwrap());
+        assert!(
+            ns.try_acquire("j", ttl).await.is_none(),
+            "same scope contends"
+        );
+        let other = DistributedLock::new(cache.clone()).scoped("billing");
+        assert!(other.try_acquire("j", ttl).await.is_some());
+        let unscoped = DistributedLock::new(cache);
+        assert!(unscoped.try_acquire("j", ttl).await.is_some());
+    }
 }

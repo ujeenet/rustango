@@ -392,6 +392,9 @@ admin = [
     # Tokio was already in the admin closure; signals adds only the
     # in-process registry helpers.
     "signals",
+    # #1609 — every login's account lock lives in `account_lockout`,
+    # so no admin/tenancy build can compile a login without it.
+    "cache",
     "_axum",
     "_tera",
     "_signing",
@@ -551,7 +554,7 @@ subtle           = { workspace = true }
 # and the event bus are all built on `tokio::task_local!` / `tokio::sync`.
 # Gating those would have silently removed transaction hooks from a bare-ORM
 # build; making the dependency honest costs no extra crate.
-tokio            = { workspace = true }
+tokio            = { workspace = true, features = ["time"] }
 tower            = { workspace = true, optional = true }
 redis            = { workspace = true, optional = true }
 

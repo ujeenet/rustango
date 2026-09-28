@@ -928,6 +928,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test m2m_through_model
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows --test password_reset_confirm
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,cache,config --test file_cache_backend
+      # No `tenancy`: the default page cache layer still caches (#1674).
+      - run: cargo test -p rustango --no-default-features --features sqlite,cache-page --test cache_page
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test factories
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,config,email --test file_email_backend
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,cache,sessions --test file_backed_sessions
@@ -938,6 +940,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test database_routers_sqlite_live
       # `not(postgres)`, so `--all-features` skips it; the #1190 logout guard.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,admin --test owned_by_bearer_sqlite_live
+      # #1746 — template views' tenant_router copies apply global scopes; `not(postgres)`.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,template_views --test view_global_scopes_tenant_sqlite_live
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This
@@ -979,6 +983,9 @@ jobs:
             --test admin_simple_list_filter_sqlite_live \
             --test admin_list_display_jsonpath_sqlite_live \
             --test audit_pool_sqlite_live \
+            --test audit_pool_writes_tri \
+            --test atomic_savepoints_tri \
+            --test orm_bounded_dml_tri \
             --test bulk_update_api_sqlite_live \
             --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
@@ -1002,6 +1009,7 @@ jobs:
             --test m2m_sqlite_live \
             --test media_sqlite_live \
             --test migrate_registry_pool_sqlite_live \
+            --test model_shortcut_scopes_tri \
             --test orm_advanced_sqlite_live \
             --test permissions_sqlite_live \
             --test prefetch_filtered_sqlite_live \
@@ -1018,6 +1026,7 @@ jobs:
             --test viewset_natural_pk_tri \
             --test admin_totp_2fa_sqlite_live \
             --test admin_totp_2fa_e2e \
+            --test admin_totp_replay_tri \
             --test orm_aggregation \
             --test orm_subquery \
             --test orm_window \
@@ -1026,6 +1035,11 @@ jobs:
             --test orm_json_dates \
             --test orm_writes \
             --test orm_delta
+      - run: cargo test -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri
+      - run: >-
+          cargo test -p rustango --no-default-features
+          --features sqlite,tenancy,admin-sso,testkit
+          --test sso_link_tenancy_sqlite_live --test sso_link_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
@@ -1204,9 +1218,17 @@ jobs:
       # `every_live_suite_runs_in_ci` now fails when a `*_tri` or
       # `*_mysql_live` target is absent from this job.
       - run: cargo test -p rustango --features mysql,testkit --test values_tri
+      - run: cargo test -p rustango --features mysql,testkit --test model_shortcut_scopes_tri
+      - run: cargo test -p rustango --features mysql,testkit --test audit_pool_writes_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
+      - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
+      - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
+      - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
+      - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.
@@ -1274,6 +1296,8 @@ jobs:
       # These read `MYSQL_TEST_URL` but no job set it for them, so their
       # MySQL arm never ran (#1678).
       - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_delete_prefix_live
+      # VARCHAR(255) truncated long keys only on MySQL (#1674).
+      - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_long_keys_tri
       - run: cargo test -p rustango --features mysql --test like_escape_live
       - run: cargo test -p rustango --features mysql --test migrate_progress_live
       - run: cargo test -p rustango --features mysql,tenancy --test preflight_live

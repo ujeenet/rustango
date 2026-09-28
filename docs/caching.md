@@ -260,7 +260,7 @@ Two things worth knowing:
 | | |
 |---|---|
 | **It is a namespace, not a boundary** | Everything still lives in one backend, and code holding the *unscoped* cache can read any key. The point is that the ergonomic path is the correct one. |
-| **`clear()` needs key enumeration** | It routes through `Cache::delete_prefix`, and every built-in backend implements it: `InMemoryCache` filters its map, `DatabaseCache` issues `DELETE … LIKE 'prefix%'` with `%`, `_` and the escape character themselves escaped, `RedisCache` uses `SCAN`+`MATCH` with glob metacharacters escaped, and `FileCache` scans its directory and matches the key stored in each entry. A backend that does not implement it now gets an **error** rather than a fallback. |
+| **`clear()` needs key enumeration** | It routes through `Cache::delete_prefix`, and every built-in backend implements it: `InMemoryCache` filters its map, `DatabaseCache` issues `DELETE … LIKE 'prefix%'` with `%`, `_` and the escape character themselves escaped, `RedisCache` uses `SCAN`+`MATCH` with glob metacharacters escaped, and `FileCache` scans its directory and matches the key stored in each entry. A backend that does not implement it now gets an **error** rather than a fallback. `DatabaseCache` stores keys over 255 bytes hashed and matches a prefix over 190 bytes on its first 190 bytes, so it may delete extra keys, never fewer. |
 
 The unscoped `Cache::clear()` is still process-global, so reach for the scoped
 view whenever a single tenant's change is what triggered the invalidation.

@@ -1480,7 +1480,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Descarta la `tx` sin llamar a `commit()` (p. ej. en un retorno anticipado con `?`) y la transacción hace rollback. Para un hook post-commit, el ámbito es `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, que auto-confirma en `Ok` y hace rollback en `Err` — y el hook en sí es `rustango::sql::on_commit(|| { … })`, llamado **dentro** de esa closure. `atomic` vacía la cola una vez confirmado el commit; llamar a `on_commit` fuera de un ámbito `atomic` hace panic en vez de descartar el callback.
+Descarta la `tx` sin llamar a `commit()` (p. ej. en un retorno anticipado con `?`) y la transacción hace rollback. Para un hook post-commit, el ámbito es `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, que auto-confirma en `Ok` y hace rollback en `Err` — y el hook en sí es `rustango::sql::on_commit(|| { … })`, llamado **dentro** de esa closure. `atomic` vacía la cola una vez confirmado el commit; llamar a `on_commit` fuera de un ámbito `atomic` hace panic en vez de descartar el callback. Dentro de la closure, `tx` es un `AtomicTx`: bloquéalo en cada sentencia, `insert_tx(&mut *tx.lock().await?, &q)`. Un `atomic(&pool, …)` anidado sobre el mismo pool corre en un savepoint sobre la misma conexión, y sus hooks esperan al commit más externo. El anidamiento es por objeto pool: pasa el pool de la petición. Dos bloques anidados a la vez (`join!`) o un `TxGuard` retenido durante la llamada devuelven `ExecError::NestedAtomic`; un savepoint fallido revierte todo con `ExecError::AtomicAborted`. Una tarea lanzada con `tokio::spawn` no hereda el bloque.
 
 ---
 

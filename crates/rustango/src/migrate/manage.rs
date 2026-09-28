@@ -879,6 +879,10 @@ async fn migrate<W: Write>(
     // migrations are applied — the user never hand-creates it. Cheap and
     // safe to re-run on every `migrate`.
     crate::audit::ensure_table_pool(pool).await?;
+    // The admin login fails closed on a missing TOTP table (#1644), so a
+    // fresh install needs it before the first login, not at enrollment.
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    crate::admin::totp_store::ensure_table(pool).await?;
 
     // #1464 — rows written by the pre-fix SQLite default are stored as
     // `YYYY-MM-DD HH:MM:SS` and do not compare or sort against a

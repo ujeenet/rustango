@@ -934,7 +934,7 @@ mod tx;
 pub use tx::{transaction_pool, PoolTx};
 
 mod atomic;
-pub use atomic::{atomic, on_commit, on_commit_pending};
+pub use atomic::{atomic, on_commit, on_commit_pending, AtomicTx, TxGuard};
 
 // `&Pool` dispatch. The `_pool` functions below take a [`Pool`],
 // compile SQL through `pool.dialect()` and run it on the matching
@@ -1185,36 +1185,45 @@ pub async fn raw_execute_tx(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
-    // Counts toward `assert_num_queries`; a no-op outside tests.
-    crate::test_assertions::query_counter::bump();
-    match tx {
-        #[cfg(feature = "postgres")]
-        tx::PoolTx::Postgres(t) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
-            for v in binds {
-                q = bind_query(q, v);
+    let gate = atomic::gate(tx).await?;
+    gate.check(
+        async {
+            // Counts toward `assert_num_queries`; a no-op outside tests.
+            crate::test_assertions::query_counter::bump();
+            match tx {
+                #[cfg(feature = "postgres")]
+                tx::PoolTx::Postgres(t) => {
+                    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+                    for v in binds {
+                        q = bind_query(q, v);
+                    }
+                    Ok(q.execute(&mut **t).await?.rows_affected())
+                }
+                #[cfg(feature = "mysql")]
+                tx::PoolTx::Mysql(t) => {
+                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                        sqlx::query(sql);
+                    for v in binds {
+                        q = bind_query_my(q, v);
+                    }
+                    Ok(q.execute(&mut **t).await?.rows_affected())
+                }
+                #[cfg(feature = "sqlite")]
+                tx::PoolTx::Sqlite(t) => {
+                    let mut q: sqlx::query::Query<
+                        '_,
+                        sqlx::Sqlite,
+                        sqlx::sqlite::SqliteArguments<'_>,
+                    > = sqlx::query(sql);
+                    for v in binds {
+                        q = bind_query_sqlite(q, v);
+                    }
+                    Ok(q.execute(&mut **t).await?.rows_affected())
+                }
             }
-            Ok(q.execute(&mut **t).await?.rows_affected())
         }
-        #[cfg(feature = "mysql")]
-        tx::PoolTx::Mysql(t) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(sql);
-            for v in binds {
-                q = bind_query_my(q, v);
-            }
-            Ok(q.execute(&mut **t).await?.rows_affected())
-        }
-        #[cfg(feature = "sqlite")]
-        tx::PoolTx::Sqlite(t) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(sql);
-            for v in binds {
-                q = bind_query_sqlite(q, v);
-            }
-            Ok(q.execute(&mut **t).await?.rows_affected())
-        }
-    }
+        .await,
+    )
 }
 
 /// Run a `;`-separated DDL script on any backend, safe to re-run.
@@ -1301,35 +1310,44 @@ async fn execute_tx(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
-    crate::test_assertions::query_counter::bump();
-    match tx {
-        #[cfg(feature = "postgres")]
-        PoolTx::Postgres(t) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
-            for v in binds {
-                q = bind_query(q, v);
+    let gate = atomic::gate(tx).await?;
+    gate.check(
+        async {
+            crate::test_assertions::query_counter::bump();
+            match tx {
+                #[cfg(feature = "postgres")]
+                PoolTx::Postgres(t) => {
+                    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+                    for v in binds {
+                        q = bind_query(q, v);
+                    }
+                    Ok(q.execute(&mut **t).await?.rows_affected())
+                }
+                #[cfg(feature = "mysql")]
+                PoolTx::Mysql(t) => {
+                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                        sqlx::query(sql);
+                    for v in binds {
+                        q = bind_query_my(q, v);
+                    }
+                    Ok(q.execute(&mut **t).await?.rows_affected())
+                }
+                #[cfg(feature = "sqlite")]
+                PoolTx::Sqlite(t) => {
+                    let mut q: sqlx::query::Query<
+                        '_,
+                        sqlx::Sqlite,
+                        sqlx::sqlite::SqliteArguments<'_>,
+                    > = sqlx::query(sql);
+                    for v in binds {
+                        q = bind_query_sqlite(q, v);
+                    }
+                    Ok(q.execute(&mut **t).await?.rows_affected())
+                }
             }
-            Ok(q.execute(&mut **t).await?.rows_affected())
         }
-        #[cfg(feature = "mysql")]
-        PoolTx::Mysql(t) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(sql);
-            for v in binds {
-                q = bind_query_my(q, v);
-            }
-            Ok(q.execute(&mut **t).await?.rows_affected())
-        }
-        #[cfg(feature = "sqlite")]
-        PoolTx::Sqlite(t) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(sql);
-            for v in binds {
-                q = bind_query_sqlite(q, v);
-            }
-            Ok(q.execute(&mut **t).await?.rows_affected())
-        }
-    }
+        .await,
+    )
 }
 
 /// [`insert_pool`] inside an open transaction, so the write joins the
@@ -1354,53 +1372,62 @@ pub async fn insert_returning_tx(
     tx: &mut PoolTx<'_>,
     query: &InsertQuery,
 ) -> Result<InsertReturningPool, ExecError> {
-    crate::test_assertions::query_counter::bump();
-    query.validate()?;
-    if query.returning.is_empty() {
-        return Err(ExecError::EmptyReturning);
-    }
-    match tx {
-        #[cfg(feature = "postgres")]
-        PoolTx::Postgres(t) => {
-            let row = insert_returning_on(&mut **t, query).await?;
-            Ok(InsertReturningPool::PgRow(row))
-        }
-        #[cfg(feature = "mysql")]
-        PoolTx::Mysql(t) => {
-            let plain = InsertQuery {
-                model: query.model,
-                columns: query.columns.clone(),
-                values: query.values.clone(),
-                returning: ::std::vec::Vec::new(),
-                on_conflict: query.on_conflict.clone(),
-            };
-            let stmt = super::mysql::DIALECT.compile_insert(&plain)?;
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
+    let gate = atomic::gate(tx).await?;
+    gate.check(
+        async {
+            crate::test_assertions::query_counter::bump();
+            query.validate()?;
+            if query.returning.is_empty() {
+                return Err(ExecError::EmptyReturning);
             }
-            q.execute(&mut **t).await?;
-            use sqlx::Row as _;
-            let row = sqlx::query("SELECT LAST_INSERT_ID()")
-                .fetch_one(&mut **t)
-                .await?;
-            let id_u64: u64 = row.try_get::<u64, _>(0)?;
-            let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
-            Ok(InsertReturningPool::MySqlAutoId(id))
-        }
-        #[cfg(feature = "sqlite")]
-        PoolTx::Sqlite(t) => {
-            let stmt = super::sqlite::DIALECT.compile_insert(query)?;
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
+            match tx {
+                #[cfg(feature = "postgres")]
+                PoolTx::Postgres(t) => {
+                    let row = insert_returning_on(&mut **t, query).await?;
+                    Ok(InsertReturningPool::PgRow(row))
+                }
+                #[cfg(feature = "mysql")]
+                PoolTx::Mysql(t) => {
+                    let plain = InsertQuery {
+                        model: query.model,
+                        columns: query.columns.clone(),
+                        values: query.values.clone(),
+                        returning: ::std::vec::Vec::new(),
+                        on_conflict: query.on_conflict.clone(),
+                    };
+                    let stmt = super::mysql::DIALECT.compile_insert(&plain)?;
+                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                        sqlx::query(&stmt.sql);
+                    for v in stmt.params {
+                        q = bind_query_my(q, v);
+                    }
+                    q.execute(&mut **t).await?;
+                    use sqlx::Row as _;
+                    let row = sqlx::query("SELECT LAST_INSERT_ID()")
+                        .fetch_one(&mut **t)
+                        .await?;
+                    let id_u64: u64 = row.try_get::<u64, _>(0)?;
+                    let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
+                    Ok(InsertReturningPool::MySqlAutoId(id))
+                }
+                #[cfg(feature = "sqlite")]
+                PoolTx::Sqlite(t) => {
+                    let stmt = super::sqlite::DIALECT.compile_insert(query)?;
+                    let mut q: sqlx::query::Query<
+                        '_,
+                        sqlx::Sqlite,
+                        sqlx::sqlite::SqliteArguments<'_>,
+                    > = sqlx::query(&stmt.sql);
+                    for v in stmt.params {
+                        q = bind_query_sqlite(q, v);
+                    }
+                    let row = q.fetch_one(&mut **t).await?;
+                    Ok(InsertReturningPool::SqliteRow(row))
+                }
             }
-            let row = q.fetch_one(&mut **t).await?;
-            Ok(InsertReturningPool::SqliteRow(row))
         }
-    }
+        .await,
+    )
 }
 
 /// `UPDATE` inside an open transaction; returns rows affected.
@@ -1441,94 +1468,108 @@ where
         + Send
         + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
-    let stmt = tx.dialect().compile_select(query)?;
-    let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
-    // Stitch from leaf aliases so each FK chain is decoded once.
-    let leaves = select_related_leaves(&aliases);
-    match tx {
-        #[cfg(feature = "postgres")]
-        PoolTx::Postgres(t) => {
-            if aliases.is_empty() {
-                let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
-                    sqlx::query_as::<_, T>(&stmt.sql);
-                for v in stmt.params {
-                    q = bind_query_as(q, v);
+    let gate = atomic::gate(tx).await?;
+    gate.check(
+        async {
+            crate::test_assertions::query_counter::bump();
+            let stmt = tx.dialect().compile_select(query)?;
+            let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+            // Stitch from leaf aliases so each FK chain is decoded once.
+            let leaves = select_related_leaves(&aliases);
+            match tx {
+                #[cfg(feature = "postgres")]
+                PoolTx::Postgres(t) => {
+                    if aliases.is_empty() {
+                        let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                            sqlx::query_as::<_, T>(&stmt.sql);
+                        for v in stmt.params {
+                            q = bind_query_as(q, v);
+                        }
+                        return Ok(q.fetch_all(&mut **t).await?);
+                    }
+                    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+                    for v in stmt.params {
+                        q = bind_query(q, v);
+                    }
+                    let raw_rows = q.fetch_all(&mut **t).await?;
+                    let mut out = Vec::with_capacity(raw_rows.len());
+                    for row in &raw_rows {
+                        let mut item = T::from_row(row)?;
+                        for &(alias, first_hop) in &leaves {
+                            let _ = item.__rustango_load_related(row, alias, first_hop)?;
+                        }
+                        out.push(item);
+                    }
+                    Ok(out)
                 }
-                return Ok(q.fetch_all(&mut **t).await?);
-            }
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            let raw_rows = q.fetch_all(&mut **t).await?;
-            let mut out = Vec::with_capacity(raw_rows.len());
-            for row in &raw_rows {
-                let mut item = T::from_row(row)?;
-                for &(alias, first_hop) in &leaves {
-                    let _ = item.__rustango_load_related(row, alias, first_hop)?;
+                #[cfg(feature = "mysql")]
+                PoolTx::Mysql(t) => {
+                    if aliases.is_empty() {
+                        let mut q: sqlx::query::QueryAs<
+                            '_,
+                            sqlx::MySql,
+                            T,
+                            sqlx::mysql::MySqlArguments,
+                        > = sqlx::query_as::<_, T>(&stmt.sql);
+                        for v in stmt.params {
+                            q = bind_query_as_my(q, v);
+                        }
+                        return Ok(q.fetch_all(&mut **t).await?);
+                    }
+                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                        sqlx::query(&stmt.sql);
+                    for v in stmt.params {
+                        q = bind_query_my(q, v);
+                    }
+                    let raw_rows = q.fetch_all(&mut **t).await?;
+                    let mut out = Vec::with_capacity(raw_rows.len());
+                    for row in &raw_rows {
+                        let mut item = <T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?;
+                        for &(alias, first_hop) in &leaves {
+                            let _ = item.__rustango_load_related_my(row, alias, first_hop)?;
+                        }
+                        out.push(item);
+                    }
+                    Ok(out)
                 }
-                out.push(item);
+                #[cfg(feature = "sqlite")]
+                PoolTx::Sqlite(t) => {
+                    if aliases.is_empty() {
+                        let mut q: sqlx::query::QueryAs<
+                            '_,
+                            sqlx::Sqlite,
+                            T,
+                            sqlx::sqlite::SqliteArguments<'_>,
+                        > = sqlx::query_as::<_, T>(&stmt.sql);
+                        for v in stmt.params {
+                            q = bind_query_as_sqlite(q, v);
+                        }
+                        return Ok(q.fetch_all(&mut **t).await?);
+                    }
+                    let mut q: sqlx::query::Query<
+                        '_,
+                        sqlx::Sqlite,
+                        sqlx::sqlite::SqliteArguments<'_>,
+                    > = sqlx::query(&stmt.sql);
+                    for v in stmt.params {
+                        q = bind_query_sqlite(q, v);
+                    }
+                    let raw_rows = q.fetch_all(&mut **t).await?;
+                    let mut out = Vec::with_capacity(raw_rows.len());
+                    for row in &raw_rows {
+                        let mut item =
+                            <T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(row)?;
+                        for &(alias, first_hop) in &leaves {
+                            let _ = item.__rustango_load_related_sqlite(row, alias, first_hop)?;
+                        }
+                        out.push(item);
+                    }
+                    Ok(out)
+                }
             }
-            Ok(out)
         }
-        #[cfg(feature = "mysql")]
-        PoolTx::Mysql(t) => {
-            if aliases.is_empty() {
-                let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
-                    sqlx::query_as::<_, T>(&stmt.sql);
-                for v in stmt.params {
-                    q = bind_query_as_my(q, v);
-                }
-                return Ok(q.fetch_all(&mut **t).await?);
-            }
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            let raw_rows = q.fetch_all(&mut **t).await?;
-            let mut out = Vec::with_capacity(raw_rows.len());
-            for row in &raw_rows {
-                let mut item = <T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?;
-                for &(alias, first_hop) in &leaves {
-                    let _ = item.__rustango_load_related_my(row, alias, first_hop)?;
-                }
-                out.push(item);
-            }
-            Ok(out)
-        }
-        #[cfg(feature = "sqlite")]
-        PoolTx::Sqlite(t) => {
-            if aliases.is_empty() {
-                let mut q: sqlx::query::QueryAs<
-                    '_,
-                    sqlx::Sqlite,
-                    T,
-                    sqlx::sqlite::SqliteArguments<'_>,
-                > = sqlx::query_as::<_, T>(&stmt.sql);
-                for v in stmt.params {
-                    q = bind_query_as_sqlite(q, v);
-                }
-                return Ok(q.fetch_all(&mut **t).await?);
-            }
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            let raw_rows = q.fetch_all(&mut **t).await?;
-            let mut out = Vec::with_capacity(raw_rows.len());
-            for row in &raw_rows {
-                let mut item = <T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(row)?;
-                for &(alias, first_hop) in &leaves {
-                    let _ = item.__rustango_load_related_sqlite(row, alias, first_hop)?;
-                }
-                out.push(item);
-            }
-            Ok(out)
-        }
-    }
+        .await,
+    )
 }
 
 /// Run a SELECT that returns one `i64` scalar, per backend so each
@@ -1824,40 +1865,51 @@ pub async fn raw_query_tx<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    // Counts toward `assert_num_queries`; a no-op outside tests.
-    crate::test_assertions::query_counter::bump();
-    match tx {
-        #[cfg(feature = "postgres")]
-        tx::PoolTx::Postgres(t) => {
-            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> = sqlx::query_as::<_, T>(sql);
-            for v in binds {
-                q = bind_query_as(q, v);
+    let gate = atomic::gate(tx).await?;
+    gate.check(
+        async {
+            // Counts toward `assert_num_queries`; a no-op outside tests.
+            crate::test_assertions::query_counter::bump();
+            match tx {
+                #[cfg(feature = "postgres")]
+                tx::PoolTx::Postgres(t) => {
+                    let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                        sqlx::query_as::<_, T>(sql);
+                    for v in binds {
+                        q = bind_query_as(q, v);
+                    }
+                    Ok(q.fetch_all(&mut **t).await?)
+                }
+                #[cfg(feature = "mysql")]
+                tx::PoolTx::Mysql(t) => {
+                    let mut q: sqlx::query::QueryAs<
+                        '_,
+                        sqlx::MySql,
+                        T,
+                        sqlx::mysql::MySqlArguments,
+                    > = sqlx::query_as::<_, T>(sql);
+                    for v in binds {
+                        q = bind_query_as_my(q, v);
+                    }
+                    Ok(q.fetch_all(&mut **t).await?)
+                }
+                #[cfg(feature = "sqlite")]
+                tx::PoolTx::Sqlite(t) => {
+                    let mut q: sqlx::query::QueryAs<
+                        '_,
+                        sqlx::Sqlite,
+                        T,
+                        sqlx::sqlite::SqliteArguments<'_>,
+                    > = sqlx::query_as::<_, T>(sql);
+                    for v in binds {
+                        q = bind_query_as_sqlite(q, v);
+                    }
+                    Ok(q.fetch_all(&mut **t).await?)
+                }
             }
-            Ok(q.fetch_all(&mut **t).await?)
         }
-        #[cfg(feature = "mysql")]
-        tx::PoolTx::Mysql(t) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
-                sqlx::query_as::<_, T>(sql);
-            for v in binds {
-                q = bind_query_as_my(q, v);
-            }
-            Ok(q.fetch_all(&mut **t).await?)
-        }
-        #[cfg(feature = "sqlite")]
-        tx::PoolTx::Sqlite(t) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::Sqlite,
-                T,
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_as::<_, T>(sql);
-            for v in binds {
-                q = bind_query_as_sqlite(q, v);
-            }
-            Ok(q.fetch_all(&mut **t).await?)
-        }
-    }
+        .await,
+    )
 }
 
 /// Run a `.dates(field, kind)` queryset. Wraps its SELECT in

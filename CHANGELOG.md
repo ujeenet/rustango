@@ -4,7 +4,127 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-## [0.58.0] — 2026-09-27
+## [0.58.0] — 2026-09-28
+
+### Security — ViewSet and template views apply global scopes (#1746)
+
+`ViewSet` and `ListView` / `DetailView` / `UpdateView` / `DeleteView`
+now apply the model's `global_scope(...)` filters, like a `QuerySet`:
+lists, counts, filters, search, pagination and the built-in
+`delete_selected` skip scoped-out rows, and a PK read, update or delete
+of one is a 404. Custom bulk actions get only the selected PKs the
+scopes let through, and FK `_display` lookups apply the target's scopes.
+A write that leaves its row outside the scope is not echoed: an update
+answers `204`, a create `201` with no body (`null` in a bulk array).
+`?search=` is now ANDed with the whole filter, also when it is an `OR`.
+The admin still sees every row; narrow it with
+`register_admin_queryset!`. New `ModelSchema::with_global_scopes` and
+`.with_global_scopes()` on `SelectQuery`, `CountQuery`, `UpdateQuery`
+and `DeleteQuery` for queries built from a schema.
+
+### Security — SSO links accounts by provider subject, email linking opt-in
+
+SSO logins (bare admin, tenant admin, member) now sign in the user linked
+to the IdP's `(provider, sub)` in the new `rustango_sso_links` table. A
+matching email links a first-time user only when the provider has the new
+`allow_email_link` (default off), and never a superuser or staff account.
+Links and emails match exactly on every collation. Only superusers write
+provider and link rows in the admin; an editable operator console sets the
+shared flag in place. `sso::resolve_by_slug` returns
+`ResolvedProvider`; `member_auth::find_or_provision_member` takes a
+`ProviderKey` and returns `MemberSignIn`.
+
+### Security — bounded update/delete; nested `atomic()` uses savepoints (#1666)
+
+`QuerySet::update()` and `delete()` dropped `limit`, `offset` and
+`order_by`, so `.limit(1).delete()` deleted every matching row. They
+now bound the statement by primary key on every backend, and refuse
+(`QueryError::BoundedDmlUnsupported`, reason `BoundedDmlReason`) when
+they cannot, including a negative limit or offset. A nested `atomic()`
+on the same pool opened a second transaction that survived the outer
+rollback and deadlocked a one-connection pool; it now runs in a
+savepoint on the outer connection. `on_commit` callbacks fire only at
+the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
+emits invalid SQL. A transaction the server already ended (a PG
+statement error the closure ignored, a MySQL deadlock) makes `atomic`
+return `ExecError::AtomicAborted` instead of `Ok`; a MySQL DDL implicit
+commit returns `ExecError::AtomicEndedEarly`.
+
+**Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
+statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
+`ExecError::NestedAtomic`, `ExecError::AtomicAborted`, `ExecError::AtomicEndedEarly`,
+`QueryError::BoundedDmlUnsupported`, `BoundedDmlReason`.
+
+### Security — single-use refresh rotation, TOTP replay guard, fixed lockout window (#1672)
+
+`JwtLifecycle::refresh` and `refresh_with` redeem the old refresh token
+through one `JtiStore::mark_used` call, so two concurrent refreshes of
+one token no longer both succeed. An admin TOTP code is accepted once:
+the device stores the last accepted time step (`last_used_step`) and a
+code must be for a later one. New `totp::matched_step` /
+`matched_step_at` return the step a code matched, and
+`admin::totp_store::redeem_code` / `confirm_with_code` accept a code
+once. Account lockout counts failures in a fixed window from the first
+failure; a failure no longer extends it.
+
+`migrate` now creates `rustango_admin_totp`, so a fresh install with
+`totp` no longer refuses every admin login before enrollment.
+
+### Security — page cache keys on the resolved tenant; long DB cache keys hashed (#1674)
+
+`CachePageLayer` resolves the request's tenant and puts its slug in the
+key, so tenants picked by `X-Org` on one Host no longer share a page.
+With `tenancy` on and no tenant context it does not cache; opt out per
+route with `tenant_agnostic(true)`. `DatabaseCache` stores keys over
+255 bytes as a 190-byte head plus SHA-256, so they round-trip on MySQL
+instead of truncating and colliding.
+
+### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
+
+`RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`
+/ `Forwarded` hop that is not a trusted proxy; it took the leftmost,
+which the client writes. Behind a trusted proxy `HeaderStrategy::Auto`
+reads only `X-Forwarded-For`. `ip_filter` and `trust_proxies` match
+IPv4-mapped IPv6 peers against IPv4 rules, so a v4 blocklist no longer
+fails open on a dual-stack listener. `BodyLimitLayer` caps chunked and
+HTTP/2 bodies as they stream (413) and checks `QUERY` by default. An
+all-trusted chain resolves to the rightmost hop.
+
+### Security — Model shortcuts honour global scopes; Pool writes are audited (#1675)
+
+`Model::sum`, `avg`, `min`, `max`, `destroy` and `delete_where` now
+apply the model's global scopes, like their `QuerySet` versions. On
+audited models `soft_delete(&Pool)` and `restore(&Pool)` write their
+audit row in the same transaction as the UPDATE, and `insert_pool`
+records the assigned PK instead of an empty `entity_pk`. On MySQL only
+the first `Auto` field is read back after an insert, so other tracked
+`Auto` fields (such as `auto_now_add`) and generated columns are
+recorded as `null` in the create row there. Audited writes that change no row write no audit row, and soft-delete
+and restore rows record the value written.
+
+### Security — login rate limits and a bounded hashing queue (#1609, #1732)
+
+Every built-in password login (admin, operator console, tenant admin,
+JWT, HTTP Basic) passes one gate before the user lookup: a global
+ceiling, a per-IP limit, and a per-username lock that counts unknown
+usernames like real ones. A refused login gets `429` with
+`Retry-After`, the same whether or not the account exists; a locked
+account no longer answers differently from an unknown one. Hashing
+waits at most `[auth] hash_wait_ms` (default 5 s) for a slot, then
+answers `503`, the same for known and unknown users. New `[auth]`
+keys: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`,
+`login_global_window_secs`, `hash_wait_ms`; `lockout_threshold` and
+`lockout_duration_secs` now take effect.
+
+The gate checks the account lock, then the per-IP limit, then a
+global limit per login scope (admin, operator console, each tenant); a
+refused request spends nothing from later limits, and successful logins
+are free. IPv6 clients are limited per /64. Once the row is found the
+lock also follows the stored username, so spellings MySQL treats as
+equal share one lock. HTTP Basic and API keys have their own scopes,
+count only failures per IP, and use at most half the hashing slots. A
+failure while locked no longer extends the lock. A busy hash queue
+answers 503 on the password-change pages and agent `/token`.
 
 ### Fixed — session extractors on SQLite and MySQL
 

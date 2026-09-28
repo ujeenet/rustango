@@ -440,16 +440,19 @@ impl ListView {
     /// = delete_selected` POST arrives without a `confirmed = true`
     /// flag. v0.31 candidate.
     ///
+    /// A custom action gets only the selected PKs the model's global
+    /// scopes let through.
+    ///
     /// ```rust,ignore
     /// ListView::for_model(Post::SCHEMA)
     ///     .bulk_actions(true)               // enables built-in delete_selected
     ///     .action("publish_selected", "Publish selected", Arc::new(|pool, pks| {
     ///         Box::pin(async move {
-    ///             let pks: Vec<i64> = pks.iter().filter_map(|v| match v {
-    ///                 SqlValue::I64(n) => Some(*n), _ => None,
-    ///             }).collect();
-    ///             sqlx::query("UPDATE posts SET status = 'published' WHERE id = ANY($1)")
-    ///                 .bind(&pks).execute(pool).await
+    ///             Post::objects()
+    ///                 .filter("id__in", SqlValue::List(pks.to_vec()))
+    ///                 .update()
+    ///                 .set("status", "published")
+    ///                 .execute_pool(pool).await
     ///                 .map(|_| ()).map_err(|e| e.to_string())
     ///         })
     ///     }))
@@ -749,15 +752,10 @@ async fn handle_list(
         limit: Some(page_size),
         offset: Some(offset),
         ..SelectQuery::new(state.vs.schema)
-    };
-    let count_q = crate::core::CountQuery {
-        model: state.vs.schema,
-        where_clause,
-        // template_views folds the search-fields ILIKE predicates
-        // into where_clause via build_list_where, so the dedicated
-        // SearchClause is unused here.
-        search: None,
-    };
+    }
+    .with_global_scopes();
+    // Search predicates are folded into where_clause by build_list_where.
+    let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let (rows_result, count_result) = tokio::join!(
@@ -872,6 +870,10 @@ async fn handle_list_action(
         .iter()
         .find(|a| same_action_name(&a.name, &action))
     {
+        let pks = match visible_pks_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
+            Ok(v) => v,
+            Err(e) => return template_error(&format!("scope selected rows: {e}")),
+        };
         match &custom.handler {
             BulkActionHandler::Pool(f) => f(&state.pool, &pks).await,
             #[cfg(all(feature = "tenancy", feature = "postgres"))]
@@ -1030,7 +1032,8 @@ async fn handle_detail(
     };
     // #562 — use the `SelectQuery::by_pk` constructor instead of
     // spelling out the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk));
+    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk))
+        .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1166,7 +1169,8 @@ async fn handle_delete_confirm(
         ));
     };
     // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk));
+    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+        .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1191,14 +1195,9 @@ async fn handle_delete_submit(
             state.vs.schema.table
         ));
     };
-    let delete_q = crate::core::DeleteQuery {
-        model: state.vs.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
-        }),
-    };
+    let delete_q =
+        crate::core::DeleteQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+            .with_global_scopes();
     match crate::sql::delete_pool(&state.pool, &delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
@@ -1976,7 +1975,8 @@ async fn handle_update_get(
     };
     // #562 — `SelectQuery::by_pk` replaces the 11-field struct
     // literal.
-    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk));
+    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk))
+        .with_global_scopes();
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
@@ -2036,15 +2036,13 @@ async fn handle_update_post(
             value: value.into(),
         })
         .collect();
-    let update_q = crate::core::UpdateQuery {
-        model: state.schema,
-        set: assignments,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
-        }),
-    };
+    let pk_match = WhereExpr::Predicate(Filter {
+        column: pk_field.column,
+        op: Op::Eq,
+        value: coerce_pk(pk_field, &pk),
+    });
+    let update_q =
+        crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
     match crate::sql::update_pool(&state.pool, &update_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
@@ -2790,7 +2788,8 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
     // SQL writer project against the IN clause.
     let target = lookup_target_schema(fk.target_table)
         .expect("target table existed when collecting lookups");
-    // #810 — IN-list lookup via the `by_pk_in` constructor.
+    // #810 — IN-list lookup via the `by_pk_in` constructor; a target
+    // row its own global scopes hide gets no `_display`.
     SelectQuery::by_pk_in(
         target,
         fk.target_pk_column,
@@ -2799,6 +2798,7 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
             .map(json_value_to_sql_for_fk_pk)
             .collect(),
     )
+    .with_global_scopes()
 }
 
 /// Convert a JSON-shaped value (read out of an object_list row)
@@ -2950,12 +2950,42 @@ async fn fetch_pks_as_objects_pool(
     pks: &[SqlValue],
 ) -> Result<Vec<Value>, String> {
     // #810 — IN-list lookup via the `by_pk_in` constructor.
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
     let rows = select_rows_as_json(pool, &q, &fields)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/// `pks` narrowed to the rows the model's global scopes let through,
+/// in submitted order — what a custom bulk action receives.
+async fn visible_pks_pool(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pool: &Pool,
+    pks: &[SqlValue],
+) -> Result<Vec<SqlValue>, String> {
+    if pks.is_empty() || schema.global_scopes.is_empty() {
+        return Ok(pks.to_vec());
+    }
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
+    let rows = select_rows_as_json(pool, &q, &[pk_field])
+        .await
+        .map_err(|e| e.to_string())?;
+    let visible: Vec<SqlValue> = rows
+        .iter()
+        .filter_map(|r| r.get(pk_field.name))
+        .filter_map(|v| {
+            let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+            coerce_pk_typed(pk_field, &raw).ok()
+        })
+        .collect();
+    Ok(pks
+        .iter()
+        .filter(|p| visible.contains(p))
+        .cloned()
+        .collect())
 }
 
 /// Run the built-in `delete_selected` action: `DELETE FROM <table>
@@ -2969,7 +2999,8 @@ async fn run_delete_selected_pool(
     pks: &[SqlValue],
 ) -> Result<(), String> {
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
-    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec())
+        .with_global_scopes();
     crate::sql::delete_pool(pool, &q)
         .await
         .map(|_| ())
@@ -3428,12 +3459,10 @@ mod tenant {
             limit: Some(page_size),
             offset: Some(offset),
             ..SelectQuery::new(state.vs.schema)
-        };
-        let count_q = crate::core::CountQuery {
-            model: state.vs.schema,
-            where_clause,
-            search: None,
-        };
+        }
+        .with_global_scopes();
+        let count_q =
+            crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
 
         // v0.38 — use the tenant's tri-dialect Pool enum; runs the
         // same code on PG / MySQL / SQLite. Routes through
@@ -3548,6 +3577,10 @@ mod tenant {
             .iter()
             .find(|a| super::same_action_name(&a.name, &action))
         {
+            let pks = match super::visible_pks_pool(state.vs.schema, pk_field, &pool, &pks).await {
+                Ok(v) => v,
+                Err(e) => return template_error(&format!("scope selected rows: {e}")),
+            };
             match &custom.handler {
                 #[cfg(feature = "postgres")]
                 super::BulkActionHandler::Tenant(f) => {
@@ -3613,7 +3646,8 @@ mod tenant {
                 Err(e) => return template_error(&e),
             };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk));
+        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk))
+            .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3651,7 +3685,8 @@ mod tenant {
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
         let select_q =
-            SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk));
+            SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+                .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3677,14 +3712,12 @@ mod tenant {
                 state.vs.schema.table
             ));
         };
-        let delete_q = crate::core::DeleteQuery {
-            model: state.vs.schema,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
-            }),
-        };
+        let delete_q = crate::core::DeleteQuery::by_pk(
+            state.vs.schema,
+            pk_field.column,
+            coerce_pk(pk_field, &pk),
+        )
+        .with_global_scopes();
         match crate::sql::delete_pool(t.pool(), &delete_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
@@ -3788,7 +3821,8 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk));
+        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk))
+            .with_global_scopes();
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
         let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await
@@ -3852,15 +3886,13 @@ mod tenant {
                 value: value.into(),
             })
             .collect();
-        let update_q = crate::core::UpdateQuery {
-            model: state.schema,
-            set: assignments,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
-            }),
-        };
+        let pk_match = WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::Eq,
+            value: coerce_pk(pk_field, &pk),
+        });
+        let update_q =
+            crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
         match crate::sql::update_pool(t.pool(), &update_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {

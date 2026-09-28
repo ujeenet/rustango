@@ -44,7 +44,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::cache::Cache;
+use crate::cache::{Cache, CacheError};
 
 /// Default attempts before lockout.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
@@ -61,8 +61,8 @@ pub struct Lockout {
 }
 
 impl Lockout {
-    /// New tracker with default thresholds (5 attempts → 15 min lock,
-    /// counter expires after 1 hour of inactivity).
+    /// New tracker with default thresholds (5 attempts in a fixed 1 hour
+    /// window → 15 min lock).
     #[must_use]
     pub fn new(cache: Arc<dyn Cache>) -> Self {
         Self {
@@ -88,9 +88,8 @@ impl Lockout {
         self
     }
 
-    /// Override how long the failure counter persists between attempts.
-    /// Defaults to 1 hour — counters reset themselves if the user goes
-    /// quiet for a while.
+    /// Override the fixed window failures are counted in. Defaults to
+    /// 1 hour; a new window starts from zero.
     #[must_use]
     pub fn counter_ttl(mut self, d: Duration) -> Self {
         self.counter_ttl = d;
@@ -104,6 +103,12 @@ impl Lockout {
     pub fn key_prefix(mut self, p: impl Into<String>) -> Self {
         self.key_prefix = p.into();
         self
+    }
+
+    /// How long a lock lasts once set.
+    #[must_use]
+    pub fn lock_duration(&self) -> Duration {
+        self.lockout_duration
     }
 
     /// Check whether `account` is currently locked. Returns `true` to
@@ -128,7 +133,10 @@ impl Lockout {
     /// - Or your own `uid:{id}` key, built only when the user exists.
     /// - Plus per-IP rate limiting upstream.
     pub async fn record_failure(&self, account: &str) -> u32 {
-        let counter_key = self.counter_key(account);
+        // A failure while locked neither extends nor restarts the lock.
+        if self.is_locked(account).await {
+            return self.max_attempts;
+        }
         // Atomic increment, never get-parse-set. A read-modify-write
         // loses updates under concurrent failed logins: several
         // attempts read the same value and write back the same `+1`,
@@ -140,12 +148,16 @@ impl Lockout {
         // lockout quietly stops engaging, so log it loudly. Failing
         // open is deliberate: a cache outage that locks every account
         // is its own denial of service.
-        let counted = match self
-            .cache
-            .incr(&counter_key, 1, Some(self.counter_ttl))
-            .await
-        {
-            Ok(n) => n,
+        let counted = match self.count_failure(account).await {
+            Ok(Some(n)) => n,
+            Ok(None) => {
+                tracing::warn!(
+                    account,
+                    "account-lockout window could not be opened; this failed attempt is \
+                     NOT counted"
+                );
+                0
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -163,21 +175,48 @@ impl Lockout {
                 .cache
                 .set(&self.lock_key(account), "1", Some(self.lockout_duration))
                 .await;
+            // Start from zero once the lock ends, so one more failure
+            // does not lock again at once.
+            self.clear_window(account).await;
         }
         next
+    }
+
+    /// `Ok(None)` when no window could be opened. The counter expires with
+    /// its window, even where `incr` resets the TTL on every call.
+    async fn count_failure(&self, account: &str) -> Result<Option<i64>, CacheError> {
+        let Some(id) = self.window(account, true).await? else {
+            return Ok(None);
+        };
+        let key = self.window_counter_key(account, &id);
+        self.cache
+            .incr(&key, 1, Some(self.window_left(&id)))
+            .await
+            .map(Some)
+    }
+
+    /// Drop the current window and its counter.
+    async fn clear_window(&self, account: &str) {
+        if let Ok(Some(key)) = self.counter_key(account, false).await {
+            let _ = self.cache.delete(&key).await;
+        }
+        let _ = self.cache.delete(&self.window_key(account)).await;
     }
 
     /// Clear the failure counter and any active lock. Call on successful
     /// authentication.
     pub async fn clear(&self, account: &str) {
-        let _ = self.cache.delete(&self.counter_key(account)).await;
+        self.clear_window(account).await;
         let _ = self.cache.delete(&self.lock_key(account)).await;
     }
 
     /// Read the current failure count for an account. 0 when absent.
     pub async fn attempt_count(&self, account: &str) -> u32 {
+        let Ok(Some(key)) = self.counter_key(account, false).await else {
+            return 0;
+        };
         self.cache
-            .get(&self.counter_key(account))
+            .get(&key)
             .await
             .ok()
             .flatten()
@@ -215,8 +254,58 @@ impl Lockout {
         self.clear(&format!("uid:{user_id}")).await
     }
 
-    fn counter_key(&self, account: &str) -> String {
-        format!("{}attempts:{}", self.key_prefix, account)
+    /// The counter key of the account's current window. `open` starts a
+    /// window when there is none. The window key's TTL is set once, by
+    /// `add`, so it is fixed on every backend; `incr`'s is not.
+    async fn counter_key(&self, account: &str, open: bool) -> Result<Option<String>, CacheError> {
+        Ok(self
+            .window(account, open)
+            .await?
+            .map(|id| self.window_counter_key(account, &id)))
+    }
+
+    /// The id (start time in µs) of the account's current window.
+    async fn window(&self, account: &str, open: bool) -> Result<Option<String>, CacheError> {
+        let window_key = self.window_key(account);
+        for _ in 0..2 {
+            if open {
+                let id = chrono::Utc::now().timestamp_micros().to_string();
+                if self
+                    .cache
+                    .add(&window_key, &id, Some(self.counter_ttl))
+                    .await?
+                {
+                    return Ok(Some(id));
+                }
+            }
+            if let Some(id) = self.cache.get(&window_key).await? {
+                return Ok(Some(id));
+            }
+            if !open {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    /// Time left in the window that started at `window_id`, at least 1ms.
+    fn window_left(&self, window_id: &str) -> Duration {
+        let started = window_id.parse::<i64>().unwrap_or(i64::MAX);
+        let elapsed = chrono::Utc::now()
+            .timestamp_micros()
+            .saturating_sub(started);
+        let elapsed = Duration::from_micros(u64::try_from(elapsed).unwrap_or(0));
+        self.counter_ttl
+            .saturating_sub(elapsed)
+            .max(Duration::from_millis(1))
+    }
+
+    fn window_counter_key(&self, account: &str, window_id: &str) -> String {
+        format!("{}attempts:{account}:{window_id}", self.key_prefix)
+    }
+
+    fn window_key(&self, account: &str) -> String {
+        format!("{}window:{account}", self.key_prefix)
     }
 
     fn lock_key(&self, account: &str) -> String {
@@ -226,7 +315,7 @@ impl Lockout {
 
 /// Process-wide default lockout, lazily initialized to an in-memory
 /// tracker with the default policy (5 attempts → 15-min lock).
-static SHARED_LOCKOUT: std::sync::OnceLock<Lockout> = std::sync::OnceLock::new();
+static SHARED_LOCKOUT: crate::boot_slot::BootSlot<Lockout> = crate::boot_slot::BootSlot::new();
 
 /// The built-in login flows (admin, operator, tenant, JWT API) use
 /// this, so per-account brute-force protection is on by default with
@@ -238,15 +327,20 @@ static SHARED_LOCKOUT: std::sync::OnceLock<Lockout> = std::sync::OnceLock::new()
 /// [`configure_shared`].
 #[must_use]
 pub fn shared() -> &'static Lockout {
-    SHARED_LOCKOUT.get_or_init(|| Lockout::new(Arc::new(crate::cache::InMemoryCache::new())))
+    SHARED_LOCKOUT.get(|| Lockout::new(Arc::new(crate::cache::InMemoryCache::new())))
 }
 
-/// Install the process-wide [`shared`] lockout. Call it once at boot
-/// to back the lockout with a shared cache or a different policy.
-/// First call wins: returns `false` when [`shared`] was already built,
-/// for example because a login ran first.
+/// Install the process-wide [`shared`] lockout at boot, to back it with a
+/// shared cache or a different policy. It replaces the default and the
+/// one built from `[auth]` settings; `false` if an earlier call won.
 pub fn configure_shared(lockout: Lockout) -> bool {
-    SHARED_LOCKOUT.set(lockout).is_ok()
+    SHARED_LOCKOUT.set_explicit(lockout)
+}
+
+/// The `[auth]` settings lockout; `false` if app code already set one.
+#[cfg(feature = "config")]
+pub(crate) fn configure_from_settings(lockout: Lockout) -> bool {
+    SHARED_LOCKOUT.set_from_settings(lockout)
 }
 
 #[cfg(test)]
@@ -319,6 +413,80 @@ mod tests {
         assert!(!l.is_locked("alice").await);
     }
 
+    /// Failures while locked do not extend the lock, and after it ends
+    /// the count starts again from zero.
+    #[tokio::test]
+    async fn failures_while_locked_do_not_relock() {
+        let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
+        let l = Lockout::new(cache)
+            .max_attempts(2)
+            .lockout_duration(Duration::from_millis(150));
+        l.record_failure("alice").await;
+        l.record_failure("alice").await;
+        assert!(l.is_locked("alice").await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        l.record_failure("alice").await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!l.is_locked("alice").await, "a failure extended the lock");
+        l.record_failure("alice").await;
+        assert!(!l.is_locked("alice").await, "one failure locked again");
+    }
+
+    /// Three failures spaced 150ms apart never share one 200ms window, so
+    /// they never lock. A counter whose TTL each failure refreshes does.
+    async fn slow_failures_never_lock(cache: Arc<dyn Cache>) {
+        let l = Lockout::new(cache)
+            .max_attempts(3)
+            .counter_ttl(Duration::from_millis(200));
+        for _ in 0..6 {
+            l.record_failure("alice").await;
+            assert!(
+                !l.is_locked("alice").await,
+                "a failure extended the counter window"
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_counter_window_is_fixed_in_memory() {
+        slow_failures_never_lock(Arc::new(InMemoryCache::new())).await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_counter_window_is_fixed_in_the_database_cache() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let cache = crate::cache::DatabaseCache::new(pool, "rustango_cache");
+        cache.ensure_table().await.unwrap();
+        slow_failures_never_lock(Arc::new(cache)).await;
+    }
+
+    /// On a cache whose `incr` resets the TTL, the counter must still
+    /// expire with its window rather than linger past it.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_counter_expires_with_its_window() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let db = crate::cache::DatabaseCache::new(pool, "rustango_cache");
+        db.ensure_table().await.unwrap();
+        let cache: Arc<dyn Cache> = Arc::new(db);
+        let l = Lockout::new(cache.clone())
+            .max_attempts(10)
+            .counter_ttl(Duration::from_millis(300));
+        l.record_failure("alice").await;
+        let id = cache.get("lockout:window:alice").await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        l.record_failure("alice").await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let counter = format!("lockout:attempts:alice:{id}");
+        assert_eq!(
+            cache.get(&counter).await.unwrap(),
+            None,
+            "counter outlived its window"
+        );
+    }
+
     #[tokio::test]
     async fn separate_accounts_dont_share_state() {
         let l = lockout(2);
@@ -361,7 +529,7 @@ mod tests {
     async fn by_id_namespace_is_isolated_from_username() {
         // The by_id variants always stamp the `uid:` prefix. Today a
         // literal username of `uid:42` produces the same key
-        // (`lockout:attempts:uid:42`); this test pins the behaviour
+        // (`lockout:window:uid:42`); this test pins the behaviour
         // and would catch a real isolation prefix being added later.
         let l = lockout(3);
         l.record_failure_by_id(42).await;

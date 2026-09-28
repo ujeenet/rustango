@@ -353,21 +353,16 @@ fn audited_plain_pk_model_gets_insert_pool() {
 #[test]
 fn audit_insert_one_with_audit_pool_is_callable() {
     use rustango::core::{InsertQuery, Model, SqlValue};
-    fn _probe(pool: &rustango::sql::Pool) {
+    fn _probe(pool: &rustango::sql::Pool, rec: &mut AuditedAutoRecord) {
         let q = InsertQuery::new(
             <AuditedAutoRecord as Model>::SCHEMA,
             vec!["name"],
             vec![SqlValue::String("seed".into())],
         )
         .returning(vec!["id"]);
-        let entry = rustango::audit::PendingEntry {
-            entity_table: "mysql_from_row_audited_auto",
-            entity_pk: String::new(),
-            operation: rustango::audit::AuditOp::Create,
-            source: rustango::audit::AuditSource::System,
-            changes: serde_json::json!({}),
-        };
-        let _fut = rustango::audit::insert_one_with_audit(pool, &q, &entry);
+        let _fut = rustango::audit::insert_one_with_audit(pool, &q, rec, |r| {
+            r.__rustango_audit_entry(rustango::audit::AuditOp::Create)
+        });
     }
 }
 

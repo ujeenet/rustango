@@ -313,7 +313,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 L'authentification est la manière dont vous confirmez qui effectue une requête. **Rustango** fournit trois backends prêts à l'emploi (Basic auth, clés d'API et JWT) et vous laisse écrire les vôtres en implémentant un seul trait. Vous les attachez aux routes, et les requêtes sans identifiant reconnu reçoivent un `401`.
 
-> **SSO admin.** Pour permettre aux opérateurs de se connecter à l'admin avec un IdP externe (Google, Microsoft/Azure AD, GitHub, ou tout fournisseur OpenID Connect) au lieu d'un mot de passe, activez la feature `admin-sso` — voir le [guide SSO](sso.md). Les fournisseurs sont **gérés depuis l'interface admin sous forme de lignes** (plusieurs par surface ; par tenant, ou un ensemble partagé entre tenants), avec le secret client **chiffré au repos**. C'est un rattachement à l'existant (l'email vérifié de l'IdP doit correspondre à un utilisateur admin ; pas d'auto-provisionnement) et cela réutilise la session existante.
+> **SSO admin.** Pour permettre aux opérateurs de se connecter à l'admin avec un IdP externe (Google, Microsoft/Azure AD, GitHub, ou tout fournisseur OpenID Connect) au lieu d'un mot de passe, activez la feature `admin-sso` — voir le [guide SSO](sso.md). Les fournisseurs sont **gérés depuis l'interface admin sous forme de lignes** (plusieurs par surface ; par tenant, ou un ensemble partagé entre tenants), avec le secret client **chiffré au repos**. Il connecte le compte lié au subject de l'IdP (la liaison par email est optionnelle par fournisseur et ne s'applique jamais aux superusers ni au staff ; pas d'auto-provisionnement) et réutilise la session existante.
 
 ### Trois backends prêts à l'emploi
 
@@ -506,6 +506,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 ```
 
 Fonctionne avec Google Authenticator, Authy, 1Password, Bitwarden et d'autres applications d'authentification standard.
+
+`verify` accepte le même code à nouveau jusqu'à son expiration. Pour des codes à usage unique, appelez plutôt `matched_step`, stockez le pas qu'il renvoie et n'acceptez un code que si son pas est postérieur au pas stocké. La connexion admin intégrée fait ainsi.
 
 **Codes de récupération** (codes de secours à usage unique pour quand un utilisateur perd son téléphone) pas encore fournis. Le motif courant est de stocker 8 à 10 codes hachés par utilisateur et d'en brûler un à chaque utilisation.
 
