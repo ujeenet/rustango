@@ -332,3 +332,38 @@ async fn wrong_password_never_reaches_the_totp_step() {
     let (_s, sess) = login(&app, &csrf, "alice", "wrong", &code).await;
     assert!(!sess, "wrong password is rejected regardless of the code");
 }
+
+/// Fresh install: `migrate` creates the TOTP table, so a password login
+/// works before anyone has opened the enroll page.
+#[tokio::test]
+async fn fresh_install_login_works_without_the_enroll_page() {
+    let p = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite");
+    let pool: Pool = p.into();
+    let dir = tempfile::tempdir().unwrap();
+    rustango::migrate::manage::run_with_writer(
+        &pool,
+        dir.path(),
+        ["migrate".to_owned()],
+        &mut Vec::new(),
+    )
+    .await
+    .expect("migrate");
+    let mut u = AdminUser::new_with_password("dora", "correct horse", true).unwrap();
+    u.insert_pool(&pool).await.unwrap();
+    let id = *u.id.get().unwrap();
+
+    let app = router(pool.clone());
+    let csrf = fetch_csrf(&app).await;
+    let (status, sess) = login(&app, &csrf, "dora", "correct horse", "").await;
+    assert!(
+        sess,
+        "fresh install refused a valid login (status {status})"
+    );
+    assert!(totp_store::confirmed_secret_checked(&pool, id)
+        .await
+        .is_ok());
+}

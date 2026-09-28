@@ -15,6 +15,8 @@ code must be for a later one. New `totp::matched_step` /
 `admin::totp_store::redeem_code` / `confirm_with_code` accept a code
 once. Account lockout counts failures in a fixed window from the first
 failure; a failure no longer extends it.
+`migrate` now creates `rustango_admin_totp`, so a fresh install with
+`totp` no longer refuses every admin login before enrollment.
 
 ### Security — page cache keys on the resolved tenant; long DB cache keys hashed (#1674)
 
