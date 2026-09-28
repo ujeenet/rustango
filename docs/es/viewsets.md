@@ -740,8 +740,8 @@ ViewSet::for_model(Post::SCHEMA)
 ```
 
 Sobre el límite → `429 Too Many Requests` + `Retry-After`. Los contadores son por
-proceso; la clave del cliente es la IP de conexión (o `X-Forwarded-For` /
-`X-Real-IP`).
+proceso; la clave del cliente es la IP de cliente de confianza (`TrustedRealIp`,
+si no el socket; ver [security.md](security.md)).
 
 ---
 

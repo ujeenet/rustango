@@ -353,7 +353,7 @@ AccessLogLayer::default()
     .errors_only()               // skip 2xx/3xx entirely
     .slow_threshold_ms(250)      // what counts as slow
     .without_ip()                // omit the client IP
-    .trust_proxy_headers(true)   // X-Forwarded-For, behind a trusted proxy only
+    .trust_proxy_headers(true)   // TrustedRealIp from RealIpLayer, never raw headers
 ```
 
 Credential-bearing query params are masked with `[redacted]` before the line is

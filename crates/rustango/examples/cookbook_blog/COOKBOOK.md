@@ -3174,9 +3174,9 @@ For projects behind a reverse proxy:
 ```rust,ignore
 AccessLogLayer::default().trust_proxy_headers(true)
 ```
-honors `X-Forwarded-For` (leftmost = original client) → fall
-back to `X-Real-IP` → fall back to ConnectInfo. Off by default
-(both headers are spoofable by direct clients).
+logs the `TrustedRealIp` that `RealIpLayer::trust_proxies` resolved,
+else ConnectInfo. Raw forwarding headers are never read: a direct
+client can forge them.
 
 **API**: [`config::LoggingSettings`](../../src/config/sections.rs),
 [`logging::Setup::from_settings`](../../src/logging.rs),

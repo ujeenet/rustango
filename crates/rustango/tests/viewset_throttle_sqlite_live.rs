@@ -1,12 +1,15 @@
 //! End-to-end live test for `ViewSet` per-action throttling on SQLite
 //! (issue #1010). Fixed-window, process-local,
-//! keyed by client (ConnectInfo → X-Forwarded-For → global). Asserts the
+//! keyed by client (trusted IP → socket → global). Asserts the
 //! limit trips with a 429 + `Retry-After`, buckets are per-client, and
 //! throttles are per-action.
 
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "serializer"))]
 
+use std::net::SocketAddr;
+
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::core::Model as _;
 use rustango::sql::{sqlx, Auto, Pool};
@@ -41,13 +44,18 @@ async fn router(throttle: ViewSetThrottle) -> axum::Router {
         .router_pool("/posts", Pool::Sqlite(sq))
 }
 
-/// A GET with an optional `X-Forwarded-For` client identity.
-fn get(xff: Option<&str>) -> Request<Body> {
-    let mut b = Request::builder().method(Method::GET).uri("/posts");
-    if let Some(ip) = xff {
-        b = b.header("x-forwarded-for", ip);
+/// A GET from the socket address `ip`, if any.
+fn get(ip: Option<&str>) -> Request<Body> {
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/posts")
+        .body(Body::empty())
+        .unwrap();
+    if let Some(ip) = ip {
+        let addr: SocketAddr = format!("{ip}:4000").parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
     }
-    b.body(Body::empty()).unwrap()
+    req
 }
 
 async fn status(app: &axum::Router, req: Request<Body>) -> StatusCode {
@@ -104,13 +112,15 @@ async fn throttle_is_per_action() {
     );
 
     // create is a different action — not throttled.
-    let create = Request::builder()
+    let mut create = Request::builder()
         .method(Method::POST)
         .uri("/posts")
-        .header("x-forwarded-for", "3.3.3.3")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"title":"hi"}"#))
         .unwrap();
+    create
+        .extensions_mut()
+        .insert(ConnectInfo("3.3.3.3:4000".parse::<SocketAddr>().unwrap()));
     assert!(
         app.clone()
             .oneshot(create)
@@ -120,4 +130,34 @@ async fn throttle_is_per_action() {
             .is_success(),
         "create must not be throttled by the list rule"
     );
+}
+
+/// A forged `X-Forwarded-For` does not pick a fresh bucket (#1745).
+#[tokio::test]
+async fn forged_forwarded_for_does_not_escape_the_throttle() {
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    let forged = |xff: &str| {
+        let mut req = get(Some("4.4.4.4"));
+        req.headers_mut()
+            .insert("x-forwarded-for", xff.parse().unwrap());
+        req
+    };
+    assert_eq!(status(&app, forged("5.5.5.1")).await, StatusCode::OK);
+    assert_eq!(status(&app, forged("5.5.5.2")).await, StatusCode::OK);
+    assert_eq!(
+        status(&app, forged("5.5.5.3")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // With no socket address either, the header still names no bucket.
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    for n in 1..=2 {
+        let mut req = get(None);
+        req.headers_mut()
+            .insert("x-forwarded-for", format!("6.6.6.{n}").parse().unwrap());
+        assert_eq!(status(&app, req).await, StatusCode::OK);
+    }
+    let mut req = get(None);
+    req.headers_mut()
+        .insert("x-forwarded-for", "6.6.6.3".parse().unwrap());
+    assert_eq!(status(&app, req).await, StatusCode::TOO_MANY_REQUESTS);
 }

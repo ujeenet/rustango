@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+### Forwarded IPs need `RealIpLayer::trust_proxies`
+
+The ViewSet throttle, auth signals and `AccessLogLayer::trust_proxy_headers`
+now read only `TrustedRealIp` (else the socket). Behind a proxy, mount
+`RealIpLayer` with `.trust_proxies([...])`, or every client shares one
+ViewSet bucket. Replace `meta_from_headers(&h, p)` with
+`meta_from_parts(&extensions, &h, p)`.
+
+### `verify_raw_agent_credential` returns a `Result`
+
+It is now `Result<Option<McpAgent>, AgentError>`: `Ok(None)` is a
+refused key, `Err(AgentError::Tenancy(TenancyError::Busy))` means 503.
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token

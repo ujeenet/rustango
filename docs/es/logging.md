@@ -332,7 +332,7 @@ AccessLogLayer::default()
     .errors_only()               // omitir 2xx/3xx por completo
     .slow_threshold_ms(250)      // qué cuenta como lento
     .without_ip()                // omitir la IP del cliente
-    .trust_proxy_headers(true)   // X-Forwarded-For, solo tras un proxy de confianza
+    .trust_proxy_headers(true)   // TrustedRealIp de RealIpLayer, nunca cabeceras crudas
 ```
 
 Los parámetros de consulta que llevan credenciales se enmascaran con

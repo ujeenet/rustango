@@ -336,7 +336,7 @@ AccessLogLayer::default()
     .errors_only()               // 2xx/3xx ganz überspringen
     .slow_threshold_ms(250)      // was als langsam gilt
     .without_ip()                // Client-IP weglassen
-    .trust_proxy_headers(true)   // X-Forwarded-For, nur hinter vertrauenswürdigem Proxy
+    .trust_proxy_headers(true)   // TrustedRealIp aus RealIpLayer, nie rohe Header
 ```
 
 Query-Parameter, die Zugangsdaten tragen, werden vor dem Schreiben mit

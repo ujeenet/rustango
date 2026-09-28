@@ -4,6 +4,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — every IP reader uses the trusted client IP (#1745)
+
+The ViewSet throttle, the auth signals' `ip_address` and the access log
+no longer read the leftmost `X-Forwarded-For` / `X-Real-IP`; they use
+`TrustedRealIp`, else the socket, like the rate limiters.
+`signals::auth::meta_from_headers` is replaced by `meta_from_parts`.
+
+### Security — login-limit leftovers (#1748)
+
+`RateLimitLayer::per_ip` groups IPv6 by /64. A raw MCP key on a busy
+hash queue answers 503, not 401, and `verify_raw_agent_credential`
+returns `Result<Option<McpAgent>, AgentError>`. The admin 2FA prompt no
+longer spends login limit tokens.
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token

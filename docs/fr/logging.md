@@ -336,7 +336,7 @@ AccessLogLayer::default()
     .errors_only()               // ignorer complètement les 2xx/3xx
     .slow_threshold_ms(250)      // ce qui compte comme lent
     .without_ip()                // omettre l'IP du client
-    .trust_proxy_headers(true)   // X-Forwarded-For, derrière un proxy de confiance seulement
+    .trust_proxy_headers(true)   // TrustedRealIp de RealIpLayer, jamais les en-têtes bruts
 ```
 
 Les paramètres de requête porteurs d'identifiants sont masqués par `[redacted]`

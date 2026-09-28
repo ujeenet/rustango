@@ -60,11 +60,9 @@ pub struct AccessLogLayer {
     /// The default list covers the usual credential names such as
     /// `password`, `token`, `secret`, `api_key` and `access_token`.
     pub redact_query_params: Vec<String>,
-    /// Trust `X-Forwarded-For` (or `X-Real-IP`) over the TCP peer
-    /// address. Default `false`, because any client talking to the
-    /// server directly can forge those headers. Turn it on only behind
-    /// a trusted proxy (nginx, Cloudflare, AWS ALB) that overwrites
-    /// them with the real client IP.
+    /// Log the `TrustedRealIp` that `RealIpLayer::trust_proxies`
+    /// resolved, over the TCP peer. Raw forwarding headers are never
+    /// read. Default `false`.
     pub trust_proxy_headers: bool,
     /// Which tenant identifier goes on the line. Default
     /// [`TenantField::Slug`], and `-` when no tenant resolved.
@@ -118,10 +116,8 @@ impl AccessLogLayer {
         self
     }
 
-    /// Use `X-Forwarded-For` / `X-Real-IP` for the client IP. Off by
-    /// default, because a direct client can forge them. Turn it on
-    /// ONLY behind a trusted reverse proxy (nginx, Cloudflare, AWS
-    /// ALB) that overwrites them.
+    /// Log the `TrustedRealIp` from `RealIpLayer` instead of the TCP
+    /// peer. Off by default. Raw forwarding headers are never read.
     #[must_use]
     pub fn trust_proxy_headers(mut self, on: bool) -> Self {
         self.trust_proxy_headers = on;
@@ -388,43 +384,18 @@ fn tenant_label(field: TenantField, tenant: Option<crate::tenant_log::TenantLabe
     }
 }
 
-/// Resolve the client IP, in this order:
-///
-/// 1. With `trust_proxy_headers` on, the first hop of
-///    `X-Forwarded-For` (the original client). Comma-separated,
-///    whitespace trimmed.
-/// 2. With `trust_proxy_headers` on and no XFF, `X-Real-IP`.
-/// 3. The TCP peer from `ConnectInfo<SocketAddr>`, which axum only
-///    sets for an app mounted with
-///    `into_make_service_with_connect_info::<SocketAddr>()`.
-/// 4. `None`, which the access log renders as `"-"`.
+/// The client IP for the line. With `trust_proxy_headers` on it is
+/// [`crate::rate_limit::client_ip`] (a `TrustedRealIp`, else the
+/// socket); off, the socket. Never a raw forwarding header (#1745).
 fn resolve_client_ip(req: &Request, trust_proxy: bool) -> Option<String> {
-    if trust_proxy {
-        if let Some(xff) = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(first) = xff.split(',').next() {
-                let ip = first.trim();
-                if !ip.is_empty() {
-                    return Some(ip.to_owned());
-                }
-            }
-        }
-        if let Some(real) = req
-            .headers()
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(real.to_owned());
-        }
-    }
-    req.extensions()
-        .get::<ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.ip().to_string())
+    let ip = if trust_proxy {
+        crate::rate_limit::client_ip(req.extensions(), req.headers())
+    } else {
+        req.extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.ip())
+    };
+    ip.map(|ip| ip.to_string())
 }
 
 /// Query parameters whose values are redacted by default.
@@ -507,52 +478,31 @@ mod tests {
         assert!(l.trust_proxy_headers);
     }
 
-    /// `X-Forwarded-For` counts only when `trust_proxy_headers` is
-    /// on. Otherwise we fall through to ConnectInfo, which this test
-    /// does not set.
+    /// A forged `X-Forwarded-For` / `X-Real-IP` never names the client,
+    /// trust on or off: only `TrustedRealIp` or the socket do (#1745).
     #[test]
-    fn resolve_client_ip_xff_only_when_proxy_trusted() {
+    fn resolve_client_ip_ignores_raw_forwarding_headers() {
         use axum::body::Body;
+        use std::net::SocketAddr;
         let mut req = Request::builder()
             .uri("/")
-            .header("x-forwarded-for", "203.0.113.7, 198.51.100.1, 10.0.0.5")
+            .header("x-forwarded-for", "203.0.113.7, 198.51.100.1")
+            .header("x-real-ip", "192.0.2.99")
             .body(Body::empty())
             .unwrap();
-        // Trust off: header ignored, no ConnectInfo, so None.
-        assert_eq!(resolve_client_ip(&req, false), None);
-        // Trust on: the first hop wins, i.e. the original client.
+        assert_eq!(resolve_client_ip(&req, true), None);
+        req.extensions_mut()
+            .insert(ConnectInfo("10.0.0.5:4000".parse::<SocketAddr>().unwrap()));
+        assert_eq!(resolve_client_ip(&req, false).as_deref(), Some("10.0.0.5"));
+        assert_eq!(resolve_client_ip(&req, true).as_deref(), Some("10.0.0.5"));
+        req.extensions_mut().insert(crate::real_ip::TrustedRealIp(
+            "198.51.100.1".parse().unwrap(),
+        ));
         assert_eq!(
             resolve_client_ip(&req, true).as_deref(),
-            Some("203.0.113.7")
+            Some("198.51.100.1")
         );
-        // Drop XFF, set X-Real-IP: the same trust gate applies.
-        req.headers_mut().remove("x-forwarded-for");
-        req.headers_mut()
-            .insert("x-real-ip", "192.0.2.99".parse().unwrap());
-        assert_eq!(resolve_client_ip(&req, false), None);
-        assert_eq!(resolve_client_ip(&req, true).as_deref(), Some("192.0.2.99"));
-    }
-
-    /// `X-Forwarded-For` whitespace is trimmed, and a leading empty
-    /// entry just falls through instead of breaking the parse.
-    #[test]
-    fn resolve_client_ip_xff_handles_whitespace_and_empty() {
-        use axum::body::Body;
-        let req = Request::builder()
-            .uri("/")
-            .header("x-forwarded-for", "  192.0.2.1  ,  10.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(resolve_client_ip(&req, true).as_deref(), Some("192.0.2.1"));
-
-        let req = Request::builder()
-            .uri("/")
-            .header("x-forwarded-for", " ,10.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        // An empty first hop falls through, and the access log
-        // renders "-".
-        assert_eq!(resolve_client_ip(&req, true), None);
+        assert_eq!(resolve_client_ip(&req, false).as_deref(), Some("10.0.0.5"));
     }
 
     /// With no proxy headers, the ConnectInfo extension wins. This is
