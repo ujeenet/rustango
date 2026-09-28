@@ -2680,6 +2680,15 @@ fn model_impl_tokens(
         composite_fk_tokens,
     );
     let generic_fk_slice = const_slice(&quote!(#root::core::GenericRelation), generic_fk_tokens);
+    let audited_update_override = if audit_track.is_some() {
+        quote! {
+            fn __rustango_audited_update() -> ::core::option::Option<#root::audit::AuditedUpdate> {
+                ::core::option::Option::Some(Self::__rustango_update_audited)
+            }
+        }
+    } else {
+        quote!()
+    };
     let global_scope_slice = const_slice(&quote!(#root::core::GlobalScope), global_scope_tokens);
     quote! {
         impl #root::core::Model for #struct_name {
@@ -2720,6 +2729,7 @@ fn model_impl_tokens(
 
             #reverse_relations_override
             #generic_reverse_relations_override
+            #audited_update_override
         }
     }
 }
@@ -3248,6 +3258,24 @@ fn inherent_impl_tokens(
     };
     // `__rustango_audit_entry`: the one place a snapshot `PendingEntry`
     // is built, so every audited write path records the same shape.
+    let update_audited_body = if primary_key.is_some() {
+        quote! {
+            ::std::boxed::Box::pin(#root::audit::update_many_with_audit::<Self>(
+                pool,
+                query,
+                |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Update),
+            ))
+        }
+    } else {
+        quote! {
+            let _ = (pool, query);
+            ::std::boxed::Box::pin(async {
+                ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                })
+            })
+        }
+    };
     let audit_entry_method = if audited_fields.is_some() {
         let pairs = audit_pair_tokens.iter();
         let pk_str = audit_pk_to_string.clone();
@@ -3267,6 +3295,19 @@ fn inherent_impl_tokens(
                         #( #pairs ),*
                     ]),
                 }
+            }
+
+            /// Audited bulk `UPDATE`, behind `Model::__rustango_audited_update`.
+            #[doc(hidden)]
+            pub fn __rustango_update_audited<'a>(
+                pool: &'a #root::sql::Pool,
+                query: &'a #root::core::UpdateQuery,
+            ) -> ::std::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<
+                    Output = ::core::result::Result<u64, #root::sql::ExecError>,
+                > + ::core::marker::Send + 'a,
+            >> {
+                #update_audited_body
             }
         }
     } else {
@@ -7425,6 +7466,16 @@ fn inherent_impl_tokens(
     // Auto<T> PKs are required to be `Auto::Unset` for every row so the
     // sequence picks the PK for fresh inserts; the UPDATE branch never
     // touches the Auto column.
+    // No RETURNING on MySQL, so which rows landed is unknown: refuse on
+    // audited models rather than write unaudited (#1747).
+    let refuse_unaudited_bulk_insert = quote! {
+        if <Self as #root::core::Model>::SCHEMA.audit_track.is_some() {
+            return ::core::result::Result::Err(#root::sql::ExecError::AuditUnsupported {
+                table: <Self as #root::core::Model>::SCHEMA.table,
+                reason: "conflict-handling bulk inserts cannot tell which rows landed",
+            });
+        }
+    };
     let bulk_upsert_pool_method = {
         // Pick the "no Auto" columns when the model has Auto fields,
         // else every column.
@@ -7471,6 +7522,7 @@ fn inherent_impl_tokens(
                 update_cols: &[&'static str],
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_unaudited_bulk_insert
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7505,6 +7557,7 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_unaudited_bulk_insert
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7536,6 +7589,14 @@ fn inherent_impl_tokens(
     // column list into rows of `[pk, col_vals…]` so callers don't
     // hand-build the IR. Emitted only when the model has a primary key
     // (the PK is the join key and can't itself be updated).
+    let bulk_update_rows_run = if audited_fields.is_some() {
+        quote!(#root::audit::bulk_update_with_audit::<Self>(pool, &_query, |_r: &Self| {
+            _r.__rustango_audit_entry(#root::audit::AuditOp::Update)
+        })
+        .await)
+    } else {
+        quote!(#root::sql::bulk_update_pool(pool, &_query).await)
+    };
     let bulk_update_method = match &fields.primary_key {
         None => quote! {},
         Some((pk_ident, pk_col)) => {
@@ -7657,7 +7718,7 @@ fn inherent_impl_tokens(
                         _update_columns,
                         _rows,
                     );
-                    #root::sql::bulk_update_pool(pool, &_query).await
+                    #bulk_update_rows_run
                 }
             }
         }

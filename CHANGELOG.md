@@ -7,8 +7,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Security — bulk writes on audited models write audit rows (#1747)
 
 `destroy`, `delete_where`, `update_where`, `update_all`, `increment_each`,
-`upsert` and non-`Auto` `bulk_insert` now audit each affected row in the
-write's transaction; `truncate` writes one bulk `delete` entry.
+`bulk_update`, `upsert`, non-`Auto` `bulk_insert` and
+`QuerySet::update().execute_pool` now audit each affected row in the
+write's transaction; `truncate` writes one bulk `delete` entry. Writes
+that cannot audit return `ExecError::AuditUnsupported` on audited models.
 
 ## [0.58.0] — 2026-09-28
 

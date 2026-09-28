@@ -1158,7 +1158,10 @@ where
 {
     let mut select = crate::core::SelectQuery::new(model).where_clause(where_clause);
     if lock {
-        select.lock_mode = Some(crate::core::LockMode::default());
+        select.lock_mode = Some(crate::core::LockMode {
+            silent_on_sqlite: true,
+            ..crate::core::LockMode::default()
+        });
     }
     crate::sql::select_rows_tx_with_related::<M>(tx, &select).await
 }
@@ -1185,7 +1188,7 @@ where
         + Send
         + Unpin,
 {
-    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
     let rows: Vec<M> = rows_in_tx(&mut tx, query.model, query.where_clause.clone(), true).await?;
     let mut affected = 0;
     for chunk in rows.chunks(BULK_AUDIT_CHUNK) {
@@ -1224,7 +1227,20 @@ where
         + Send
         + Unpin,
 {
-    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let pk = query
+        .model
+        .primary_key()
+        .ok_or(crate::sql::ExecError::MissingPrimaryKey {
+            table: query.model.table,
+        })?;
+    // The after-write re-read is by PK, so a PK change would go unaudited.
+    if query.set.iter().any(|a| a.column == pk.column) {
+        return Err(crate::sql::ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "a bulk update cannot change the primary key",
+        });
+    }
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
     let rows: Vec<M> = rows_in_tx(&mut tx, query.model, query.where_clause.clone(), true).await?;
     let mut affected = 0;
     for chunk in rows.chunks(BULK_AUDIT_CHUNK) {
@@ -1245,6 +1261,62 @@ where
     Ok(affected)
 }
 
+/// Audited `UPDATE` runner a model hands to generic code, through
+/// `Model::__rustango_audited_update`.
+pub type AuditedUpdate = for<'a> fn(
+    &'a crate::sql::Pool,
+    &'a crate::core::UpdateQuery,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
+>;
+
+/// Run a `BulkUpdateQuery` (`Model::bulk_update`) and one `Update` entry
+/// per updated row, re-read after the write, in one transaction.
+///
+/// # Errors
+/// As [`crate::sql::bulk_update_pool`], plus the re-read and the emit.
+pub async fn bulk_update_with_audit<M>(
+    pool: &crate::sql::Pool,
+    query: &crate::core::BulkUpdateQuery,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<u64, crate::sql::ExecError>
+where
+    M: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    if query.rows.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let stmt = tx.dialect().compile_bulk_update(query)?;
+    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    // Each row is `[pk, …update cols]`.
+    let pks: Vec<crate::core::SqlValue> = query
+        .rows
+        .iter()
+        .filter_map(|r| r.first().cloned())
+        .collect();
+    for chunk in pks.chunks(BULK_AUDIT_CHUNK) {
+        let after: Vec<M> = rows_in_tx(
+            &mut tx,
+            query.model,
+            pk_in(query.model, chunk.to_vec())?,
+            false,
+        )
+        .await?;
+        let entries: Vec<PendingEntry> = after.iter().map(&entry).collect();
+        emit_many_tx(&mut tx, &entries).await?;
+    }
+    tx.commit().await?;
+    Ok(affected)
+}
+
 /// Run a table-wide statement (`Model::truncate`) and one bulk `Delete`
 /// entry naming it, in one transaction. No per-row PK is known here.
 ///
@@ -1255,7 +1327,7 @@ pub async fn truncate_with_audit(
     entity_table: &'static str,
     sql: &str,
 ) -> Result<u64, crate::sql::ExecError> {
-    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, sql, Vec::new()).await?;
     let entry = PendingEntry {
         entity_table,

@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signa
 # `rust_decimal` fans out `rust_decimal::Decimal ↔ NUMERIC/DECIMAL`
 # for every backend so the universal `FieldType::Decimal` round-
 # trips through bind/decode without per-dialect special-cases.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "chrono", "uuid", "json", "rust_decimal"] }
+sqlx = { version = "0.8.4", default-features = false, features = ["runtime-tokio", "chrono", "uuid", "json", "rust_decimal"] }
 
 # Schema collection + collections
 inventory = "0.3"

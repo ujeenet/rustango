@@ -5,7 +5,7 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::audit::{self, AuditLog};
-use rustango::sql::{Auto, CounterPool as _, Pool};
+use rustango::sql::{Auto, CounterPool as _, ExecError, FetcherPool as _, Pool, UpdaterPool as _};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -30,7 +30,7 @@ pub struct Item {
 pub struct Tag {
     #[rustango(primary_key, max_length = 32)]
     pub slug: String,
-    #[rustango(max_length = 64)]
+    #[rustango(max_length = 64, unique)]
     pub label: String,
 }
 
@@ -149,24 +149,78 @@ async fn failed_bulk_write_writes_no_audit_row(pool: &Pool) {
     for slug in ["a", "b"] {
         Tag {
             slug: slug.into(),
-            label: "x".into(),
+            label: slug.into(),
         }
         .insert_pool(pool)
         .await
         .expect("insert");
     }
-    // Both rows to one PK: a key violation on every backend.
-    let err = Tag::update_all("slug", "dup", pool).await.unwrap_err();
-    assert!(matches!(err, rustango::sql::ExecError::Driver(_)), "{err}");
+    // Both rows to one unique label: a violation on every backend.
+    let err = Tag::update_all("label", "dup", pool).await.unwrap_err();
+    assert!(matches!(err, ExecError::Driver(_)), "{err}");
     assert_eq!(ops(pool, TAG, "update").await, 0);
     assert_eq!(
         Tag::objects()
-            .filter("slug", "a")
+            .filter("label", "a")
             .count(pool)
             .await
             .unwrap(),
         1
     );
+}
+
+async fn bulk_update_audits_each_row(pool: &Pool) {
+    let pks = seed(pool).await;
+    let mut items = Item::objects().fetch(pool).await.unwrap();
+    for item in &mut items {
+        item.score = 40;
+    }
+    assert_eq!(
+        Item::bulk_update(&items, &["score"], pool).await.unwrap(),
+        3
+    );
+    assert_eq!(ops(pool, ITEM, "update").await, 3);
+    assert_eq!(
+        latest(pool, ITEM, &pks[2].to_string()).await.changes["score"],
+        40
+    );
+}
+
+async fn queryset_update_audits_each_row(pool: &Pool) {
+    let pks = seed(pool).await;
+    let n = Item::objects()
+        .filter("name", "b")
+        .update()
+        .set("score", 11_i64)
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(ops(pool, ITEM, "update").await, 2);
+    assert_eq!(
+        latest(pool, ITEM, &pks[1].to_string()).await.changes["score"],
+        11
+    );
+}
+
+/// Writes that cannot audit are refused, and write nothing.
+async fn unauditable_bulk_writes_are_refused(pool: &Pool) {
+    let tags = [Tag {
+        slug: "r".into(),
+        label: "r".into(),
+    }];
+    let refused = |r: Result<(), ExecError>| {
+        assert!(
+            matches!(r, Err(ExecError::AuditUnsupported { .. })),
+            "{r:?}"
+        );
+    };
+    refused(Tag::bulk_insert_or_ignore_pool(&tags, pool).await);
+    refused(Tag::bulk_upsert_pool(&tags, &["label"], &["label"], pool).await);
+    let pk_change = Tag::update_all("slug", "z", pool).await.map(|_| ());
+    refused(pk_change);
+    assert_eq!(Tag::objects().count(pool).await.unwrap(), 0);
+    assert_eq!(ops(pool, TAG, "create").await, 0);
 }
 
 /// `bulk_insert` and `upsert` are PostgreSQL-only methods.
@@ -215,6 +269,9 @@ tri_dialect_test! {
         increment_each_audits_the_new_values,
         truncate_writes_one_bulk_entry,
         failed_bulk_write_writes_no_audit_row,
+        bulk_update_audits_each_row,
+        queryset_update_audits_each_row,
+        unauditable_bulk_writes_are_refused,
         bulk_insert_and_upsert_audit_on_postgres,
     ],
 }

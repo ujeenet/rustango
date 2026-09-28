@@ -596,6 +596,7 @@ impl<T: Model + Send> QuerySet<T> {
     where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     {
+        refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
         let query = self.compile_delete()?;
         delete_on(executor, &query).await
     }
@@ -612,6 +613,7 @@ impl<T: Model + Send> UpdateBuilder<T> {
     where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     {
+        refuse_audited::<T>("`execute_on` cannot audit; use `execute_pool`")?;
         let query = self.compile()?;
         update_on(executor, &query).await
     }
@@ -636,8 +638,24 @@ pub trait UpdaterPool<T: Model + Send> {
 impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
     async fn execute_pool(self, pool: &Pool) -> Result<u64, ExecError> {
         let query = self.compile()?;
+        // Audited models audit each updated row (#1747).
+        if let Some(run) = T::__rustango_audited_update() {
+            return run(pool, &query).await;
+        }
         update_pool(pool, &query).await
     }
+}
+
+/// Refuse a write that cannot audit on an audited model.
+#[cfg(feature = "postgres")]
+fn refuse_audited<T: Model>(reason: &'static str) -> Result<(), ExecError> {
+    if T::SCHEMA.audit_track.is_some() {
+        return Err(ExecError::AuditUnsupported {
+            table: T::SCHEMA.table,
+            reason,
+        });
+    }
+    Ok(())
 }
 
 /// A NULL with no type attached, so PostgreSQL infers the type from
@@ -931,6 +949,7 @@ where
 }
 
 mod tx;
+pub(crate) use tx::write_transaction_pool;
 pub use tx::{transaction_pool, PoolTx};
 
 mod atomic;
