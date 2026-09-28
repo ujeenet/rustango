@@ -95,6 +95,8 @@ async fn add_new_columns(pool: &Pool) -> Result<(), sqlx::Error> {
 
 /// Accept `code` for `user_id` at most once. Its time step must be later
 /// than the last accepted one, checked and recorded in one UPDATE.
+/// Success also drops an unfinished re-enroll, so a stale pending key
+/// does not outlive the next sign-in (#1756).
 ///
 /// # Errors
 /// Driver or SQL failures.
@@ -183,7 +185,11 @@ async fn write_step(
         .where_(Q::is_null("last_used_step") | Q::lt("last_used_step", step))
         .update()
         .set("last_used_step", step);
-    let q = if confirm { q.set("confirmed", true) } else { q };
+    let q = if confirm {
+        q.set("confirmed", true)
+    } else {
+        q.set("pending_secret_base32", None::<String>)
+    };
     q.execute_pool(pool).await
 }
 
@@ -274,18 +280,26 @@ pub async fn start_enrollment(
     Ok(())
 }
 
-/// Mark the user's device confirmed, once a code has verified during
-/// enrollment. Does nothing when there is no pending device.
+/// Confirm the user's enrollment without a code, promoting a pending
+/// re-enroll secret if there is one. Prefer [`confirm_with_code`].
 ///
 /// # Errors
 /// Driver or SQL failures.
 pub async fn confirm(pool: &Pool, user_id: i64) -> Result<(), crate::sql::ExecError> {
     use crate::sql::UpdaterPool as _;
-    AdminTotp::objects()
-        .filter("user_id", user_id)
-        .update()
-        .set("confirmed", true)
-        .execute_pool(pool)
-        .await?;
+    let q = AdminTotp::objects().filter("user_id", user_id);
+    let pending = device(pool, user_id)
+        .await
+        .and_then(|d| d.pending_secret_base32);
+    // Pinned to the pending value read, so a newer re-enroll is not promoted.
+    let q = match pending {
+        Some(p) => q
+            .filter("pending_secret_base32", p.clone())
+            .update()
+            .set("secret_base32", p)
+            .set("pending_secret_base32", None::<String>),
+        None => q.update(),
+    };
+    q.set("confirmed", true).execute_pool(pool).await?;
     Ok(())
 }

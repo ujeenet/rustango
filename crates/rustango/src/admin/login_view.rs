@@ -596,14 +596,16 @@ async fn totp_enroll_form(State(state): State<AppState>) -> Response {
     };
     let _ = super::totp_store::ensure_table(&state.pool).await;
     let device = super::totp_store::device(&state.pool, session.user_id).await;
-    let pending = device
-        .as_ref()
-        .and_then(super::totp_store::AdminTotp::pending_secret);
-    if pending.is_none() && device.as_ref().is_some_and(|d| d.confirmed) {
+    // A re-enroll's pending key is shown only in the reset response, so
+    // a session alone cannot read it back (#1756).
+    if device.as_ref().is_some_and(|d| d.confirmed) {
         return Html(render_totp_enroll(&state, true, "", "", None, None)).into_response();
     }
     // Reuse a pending secret if there is one, else store a fresh
     // unconfirmed one, so a page reload shows the same setup.
+    let pending = device
+        .as_ref()
+        .and_then(super::totp_store::AdminTotp::pending_secret);
     let secret = match pending {
         Some(s) => s,
         None => {
@@ -660,8 +662,9 @@ async fn totp_enroll_submit(
     }
 
     // Confirm: verify the submitted code against the pending secret.
-    let pending = super::totp_store::device(&state.pool, session.user_id)
-        .await
+    let device = super::totp_store::device(&state.pool, session.user_id).await;
+    let reenroll = device.as_ref().is_some_and(|d| d.confirmed);
+    let pending = device
         .as_ref()
         .and_then(super::totp_store::AdminTotp::pending_secret);
     let Some(secret) = pending else {
@@ -684,11 +687,17 @@ async fn totp_enroll_submit(
         super::totp_store::confirm_with_code(&state.pool, session.user_id, &secret, code).await
     };
     if matches!(confirmed, Ok(false)) {
-        let otpauth = enroll_otpauth(&state, &session.username, &secret);
+        // Never echo a re-enroll's key: that would hand it to any session.
+        let (key, otpauth) = if reenroll {
+            (String::new(), String::new())
+        } else {
+            let url = enroll_otpauth(&state, &session.username, &secret);
+            (secret.to_base32(), url)
+        };
         return Html(render_totp_enroll(
             &state,
             false,
-            &secret.to_base32(),
+            &key,
             &otpauth,
             Some("That code didn't match. Try again."),
             None,

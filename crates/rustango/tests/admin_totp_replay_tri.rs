@@ -258,6 +258,57 @@ async fn ensure_table_adds_the_pending_column(pool: &Pool) {
     assert_eq!(gate.to_base32(), old.to_base32());
 }
 
+/// #1756 — the old factor signing in drops an unfinished re-enroll.
+async fn signing_in_drops_a_pending_reenroll(pool: &Pool) {
+    let old = enroll(pool).await;
+    let new = TotpSecret::generate();
+    totp_store::start_enrollment(pool, UID, &new).await.unwrap();
+    let t = now();
+    assert!(
+        totp_store::redeem_code(pool, UID, &old, &totp::generate_at(&old, t, 30, 6))
+            .await
+            .unwrap()
+    );
+    assert!(totp_store::device(pool, UID)
+        .await
+        .unwrap()
+        .pending_secret_base32
+        .is_none());
+    let code = totp::generate_at(&new, t, 30, 6);
+    assert!(!totp_store::confirm_with_code(pool, UID, &new, &code)
+        .await
+        .unwrap());
+}
+
+/// `confirm` promotes a pending re-enroll secret, as a code would.
+async fn confirm_promotes_a_pending_secret(pool: &Pool) {
+    enroll(pool).await;
+    let new = TotpSecret::generate();
+    totp_store::start_enrollment(pool, UID, &new).await.unwrap();
+    totp_store::confirm(pool, UID).await.unwrap();
+    let dev = totp_store::device(pool, UID).await.unwrap();
+    assert!(dev.confirmed);
+    assert_eq!(dev.secret_base32, new.to_base32());
+    assert!(dev.pending_secret_base32.is_none());
+}
+
+/// Confirming on a table without `pending_secret_base32` adds it and retries.
+async fn confirming_on_an_old_table_adds_the_column(pool: &Pool) {
+    let secret = TotpSecret::generate();
+    totp_store::start_enrollment(pool, UID, &secret)
+        .await
+        .unwrap();
+    drop_column(pool, "pending_secret_base32").await;
+    let code = totp::generate(&secret, 30, 6);
+    assert!(totp_store::confirm_with_code(pool, UID, &secret, &code)
+        .await
+        .unwrap());
+    assert!(totp_store::confirmed_secret_checked(pool, UID)
+        .await
+        .unwrap()
+        .is_some());
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -270,5 +321,8 @@ tri_dialect_test! {
         a_pending_reenroll_keeps_the_old_factor,
         finishing_a_reenroll_swaps_the_secret,
         ensure_table_adds_the_pending_column,
+        signing_in_drops_a_pending_reenroll,
+        confirm_promotes_a_pending_secret,
+        confirming_on_an_old_table_adds_the_column,
     ],
 }

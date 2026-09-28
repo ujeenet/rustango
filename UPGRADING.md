@@ -154,7 +154,8 @@ untouched.
 
 `rustango_admin_totp` gains a nullable `pending_secret_base32` column
 (#1756); `totp_store::ensure_table` adds it. `AdminTotp` literals need
-the new field. `start_enrollment` on a confirmed device no longer drops it.
+the new field. `start_enrollment` on a confirmed device no longer drops it;
+`confirm` promotes the pending secret, and a successful `redeem_code` clears it.
 
 ## 0.58.1
 

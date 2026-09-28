@@ -31,6 +31,7 @@
         <button type="submit" name="reset" value="1">Re-enroll</button>
       </form>
     {% else %}
+      {% if secret_base32 %}
       <p>Scan this setup key in your authenticator app (Google Authenticator, 1Password,
          Authy, …), or enter it manually, then confirm with the 6-digit code it shows.</p>
 
@@ -39,6 +40,9 @@
 
       <p><strong>otpauth URI</strong> <span class="hint">(for manual / QR import)</span></p>
       <p class="totp-uri">{{ otpauth_url }}</p>
+      {% else %}
+      <p>Enter the 6-digit code from the new setup in your authenticator app.</p>
+      {% endif %}
 
       <form method="post" action="{{ action }}">
         {{ csrf_input | safe }}

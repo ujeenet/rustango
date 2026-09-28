@@ -9,6 +9,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 Starting a re-enroll no longer replaces the confirmed device: the new
 secret waits in `pending_secret_base32` and a code for it swaps it in,
 so an unfinished re-enroll no longer lets the password alone sign in.
+The new key is shown only in the re-enroll response, and the next
+sign-in with the old factor drops an unfinished re-enroll.
 
 ## [0.58.1] — 2026-09-28
 
