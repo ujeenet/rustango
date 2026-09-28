@@ -325,6 +325,16 @@ impl LoginAttempt {
                 lockout.clear(key).await;
             }
         }
+        self.give_back().await;
+    }
+
+    /// The password was right and the form now asks for a second
+    /// factor: give back the limit tokens, keep the username's failures.
+    pub async fn prompted(self) {
+        self.give_back().await;
+    }
+
+    async fn give_back(&self) {
         if !self.per_request {
             if let Some(ip) = &self.ip {
                 self.buckets.ip.give_back(ip).await;

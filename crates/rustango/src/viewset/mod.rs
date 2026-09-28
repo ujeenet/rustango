@@ -1624,29 +1624,16 @@ fn check_throttle(
     None
 }
 
-/// Best-effort client identity for the throttle key: the peer IP
-/// from `ConnectInfo`, else the first `X-Forwarded-For` / `X-Real-IP`
-/// hop, else one shared `"global"` bucket.
+/// The throttle key: the trusted client IP (IPv6 by /64), else one
+/// shared `"global"` bucket. Never a raw forwarding header (#1745).
 fn client_key(parts: &axum::http::request::Parts) -> String {
-    if let Some(ci) = parts
-        .extensions
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-    {
-        return ci.0.ip().to_string();
-    }
-    for h in ["x-forwarded-for", "x-real-ip"] {
-        if let Some(first) = parts
-            .headers
-            .get(h)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return first.to_owned();
-        }
-    }
-    "global".to_owned()
+    crate::rate_limit::client_ip(&parts.extensions, &parts.headers).map_or_else(
+        || {
+            crate::rate_limit::warn_missing_discriminator("IP (ConnectInfo missing)");
+            "global".to_owned()
+        },
+        crate::rate_limit::ip_bucket,
+    )
 }
 
 /// A `429 Too Many Requests` with a `Retry-After` header.
@@ -3325,6 +3312,7 @@ mod lookup_tests {
             max: None,
             default: None,
             auto: false,
+            auto_now: false,
             unique: false,
             generated_as: None,
             help_text: None,
@@ -3352,6 +3340,7 @@ mod lookup_tests {
             max: None,
             default: None,
             auto: false,
+            auto_now: false,
             unique: false,
             generated_as: None,
             help_text: None,

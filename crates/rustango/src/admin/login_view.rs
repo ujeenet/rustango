@@ -143,15 +143,16 @@ struct LoginInput {
 async fn login_submit(
     State(state): State<AppState>,
     ip: crate::login_throttle::ClientIp,
+    extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginInput>,
 ) -> Response {
     use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
-        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
     };
-    let meta = meta_from_headers(&headers, Some("/login"));
+    let meta = meta_from_parts(&extensions, &headers, Some("/login"));
 
     let Some(secret) = state.config.session_secret.clone() else {
         return (
@@ -306,8 +307,11 @@ async fn login_submit(
                     .await
                     .unwrap_or(false);
             if !accepted {
-                // A wrong code counts; a missing one is just the prompt.
-                if !code.is_empty() {
+                // A wrong code counts; a missing one is just the prompt
+                // and spends no limit tokens (#1748).
+                if code.is_empty() {
+                    attempt.prompted().await;
+                } else {
                     attempt.failed().await;
                 }
                 send_user_login_failed(UserLoginFailedContext {
@@ -715,9 +719,13 @@ async fn totp_enroll_submit(
 
 // ============================================================ Logout (POST)
 
-async fn logout_submit(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
-    let meta = meta_from_headers(&headers, Some("/logout"));
+async fn logout_submit(
+    State(state): State<AppState>,
+    extensions: axum::http::Extensions,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use crate::signals::auth::{meta_from_parts, send_user_logged_out, UserLoggedOutContext};
+    let meta = meta_from_parts(&extensions, &headers, Some("/logout"));
 
     // Best-effort decode, so the signal carries the user id and
     // username when the cookie is still valid.

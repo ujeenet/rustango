@@ -39,6 +39,17 @@ use crate::sql::Pool;
 // stay byte-identical.
 use crate::hex::hex_encode;
 
+/// True when the cell is SQL NULL or missing. sqlx-sqlite decodes NULL
+/// as `0` / `false` / `""` instead of erroring (#1766), so check first.
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+fn cell_is_null<R: sqlx::Row, I: sqlx::ColumnIndex<R>>(row: &R, index: I) -> bool {
+    use sqlx::ValueRef as _;
+    match row.try_get_raw(index) {
+        Ok(v) => v.is_null(),
+        Err(_) => true,
+    }
+}
+
 /// Generic body for the PG + MySQL `row_to_json` variants — they
 /// emit byte-identical match-on-`FieldType` decode tables. Issue
 /// #562: extract into a generic-over-`sqlx::Row` function so the
@@ -77,6 +88,10 @@ where
     use serde_json::{json, Value};
     let mut map = serde_json::Map::new();
     for field in fields {
+        if cell_is_null(row, field.column) {
+            map.insert(field.name.to_owned(), Value::Null);
+            continue;
+        }
         let value = match field.ty {
             FieldType::I16 => row
                 .try_get::<i16, _>(field.column)
@@ -194,6 +209,10 @@ pub fn row_to_json_sqlite(
     use sqlx::Row as _;
     let mut map = serde_json::Map::new();
     for field in fields {
+        if cell_is_null(row, field.column) {
+            map.insert(field.name.to_owned(), Value::Null);
+            continue;
+        }
         let value = match field.ty {
             FieldType::I16 => row
                 .try_get::<i16, _>(field.column)

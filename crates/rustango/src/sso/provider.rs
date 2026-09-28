@@ -33,6 +33,7 @@ use crate::sql::Auto;
         list_display = "slug, label, kind, enabled, sort_order",
         ordering = "sort_order",
         readonly_fields = "created_at, updated_at",
+        formfield_overrides = "client_secret: password",
     )
 )]
 #[allow(dead_code)]
@@ -107,6 +108,30 @@ use super::{parse_scopes, ProviderButton, ResolvedSso, SsoError};
 use crate::core::{Model, SqlValue};
 use crate::query::QuerySet;
 use crate::sql::{ExecError, Pool};
+
+// The admin writes raw form values, so the secret is encrypted here, as
+// `Cast<EncryptedString>` does for ORM writes (#1764).
+#[cfg(feature = "admin")]
+pub(crate) fn admin_encrypt_secret<'a>(
+    values: &'a mut Vec<(&'static str, SqlValue)>,
+    _before: Option<&'a serde_json::Value>,
+) -> crate::admin::derived_fields::DeriveFuture<'a> {
+    let out = match crate::admin::derived_fields::take_secret(values, "client_secret") {
+        None => Ok(()),
+        Some(plain) => crate::casts::encrypt(plain.as_bytes())
+            .map(|c| values.push(("client_secret", SqlValue::String(c))))
+            .map_err(|e| e.to_string()),
+    };
+    Box::pin(async move { out })
+}
+
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_sso_providers",
+        derive: admin_encrypt_secret,
+    }
+}
 
 /// Columns provider reads leave out. `allow_email_link` is read on its own,
 /// so a table not yet migrated still serves logins.

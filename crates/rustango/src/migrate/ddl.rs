@@ -473,6 +473,7 @@ mod tests {
             max: None,
             default,
             auto,
+            auto_now: false,
             unique: false,
             generated_as: None,
             help_text: None,
