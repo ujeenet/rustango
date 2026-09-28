@@ -116,7 +116,7 @@ services:
       - shared_buffers=512MB
       - -c
       - work_mem=8MB
-    ports: ["5433:5432"]
+    ports: ["${SOAK_PG_PORT:-5433}:5432"]
     volumes:
       - pg-data:/var/lib/postgresql/data
       # Runs once, when the volume is first initialised. Creates the
@@ -138,7 +138,7 @@ services:
       MYSQL_USER: rustango
       MYSQL_PASSWORD: rustango
     command: ["--max-connections=1200", "--innodb-buffer-pool-size=768M"]
-    ports: ["3406:3306"]
+    ports: ["${SOAK_MY_PORT:-3406}:3306"]
     volumes:
       - my-data:/var/lib/mysql
       # Every MySQL tenant is database-mode (schema mode is
@@ -153,7 +153,7 @@ services:
 
   redis:
     image: public.ecr.aws/docker/library/redis:7
-    ports: ["6479:6379"]
+    ports: ["${SOAK_REDIS_PORT:-6479}:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -169,7 +169,7 @@ services:
     environment:
       MINIO_ROOT_USER: rustango
       MINIO_ROOT_PASSWORD: rustango123
-    ports: ["9100:9000", "9101:9001"]
+    ports: ["${SOAK_MINIO_PORT:-9100}:9000", "${SOAK_MINIO_CONSOLE_PORT:-9101}:9001"]
     volumes: [minio-data:/data]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
@@ -309,7 +309,7 @@ services:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: single-pg
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
-    ports: ["18081:8080"]
+    ports: ["${SOAK_SINGLE_PG_PORT:-18081}:8080"]
 
   web-single-my:
     <<: *app-common
@@ -321,7 +321,7 @@ services:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: single-my
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce
-    ports: ["18082:8080"]
+    ports: ["${SOAK_SINGLE_MY_PORT:-18082}:8080"]
 
   web-single-sq:
     <<: *app-common
@@ -339,7 +339,7 @@ services:
       # process is what you would actually deploy.
       SOAK_INLINE_WORKERS: "1"
     volumes: [sq-single:/data]
-    ports: ["18083:8080"]
+    ports: ["${SOAK_SINGLE_SQ_PORT:-18083}:8080"]
 
   web-saas-pg:
     <<: *app-common
@@ -352,7 +352,7 @@ services:
       RUSTANGO_CACHE_NAMESPACE: saas-pg
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
       RUSTANGO_APEX_DOMAIN: soak.localhost
-    ports: ["18084:8080"]
+    ports: ["${SOAK_SAAS_PG_PORT:-18084}:8080"]
 
   web-saas-my:
     <<: *app-common
@@ -365,7 +365,7 @@ services:
       RUSTANGO_CACHE_NAMESPACE: saas-my
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce_saas_my
       RUSTANGO_APEX_DOMAIN: soak.localhost
-    ports: ["18085:8080"]
+    ports: ["${SOAK_SAAS_MY_PORT:-18085}:8080"]
 
   web-saas-sq:
     <<: *app-common
@@ -379,7 +379,7 @@ services:
       DATABASE_URL: sqlite:///data/registry.db?mode=rwc
       RUSTANGO_APEX_DOMAIN: soak.localhost
     volumes: [sq-saas:/data]
-    ports: ["18086:8080"]
+    ports: ["${SOAK_SAAS_SQ_PORT:-18086}:8080"]
 
   # --------------------------------------------------------------- worker
   #
