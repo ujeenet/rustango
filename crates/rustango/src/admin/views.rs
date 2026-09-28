@@ -1810,7 +1810,7 @@ pub(crate) async fn create_submit(
     if pk_field.auto {
         skip.push(pk_field.name);
     }
-    let collected = match forms::collect_insert_values(model, &form, &skip) {
+    let mut collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
             // Re-render the form with the error instead of a 4xx.
@@ -1818,6 +1818,7 @@ pub(crate) async fn create_submit(
             return Ok(Html(html).into_response());
         }
     };
+    super::derived_fields::apply(model.table, &mut collected, None);
     let (columns, values): (Vec<&'static str>, Vec<SqlValue>) = collected.into_iter().unzip();
 
     let query = InsertQuery {
@@ -1991,13 +1992,14 @@ pub(crate) async fn update_submit(
     let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&'static str> = vec![pk_field.name];
     skip.extend(admin_cfg.readonly_fields.iter().copied());
-    let collected = match forms::collect_values(model, &form, &skip) {
+    let mut collected = match forms::collect_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
             let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
             return Ok(Html(html).into_response());
         }
     };
+    super::derived_fields::apply(model.table, &mut collected, pre_update_row.as_ref());
     let assignments: Vec<Assignment> = collected
         .into_iter()
         .map(|(column, value)| Assignment {
