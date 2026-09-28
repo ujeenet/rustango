@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.58.1
+
 ### Forwarded IPs need `RealIpLayer::trust_proxies`
 
 The ViewSet throttle, auth signals and `AccessLogLayer::trust_proxy_headers`

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.58.1] — 2026-09-28
+
+Tagged only; not published to crates.io.
+
 ### Security — every IP reader uses the trusted client IP (#1745)
 
 The ViewSet throttle, the auth signals' `ip_address` and the access log
