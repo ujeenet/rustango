@@ -296,6 +296,30 @@ pub(crate) fn admin_config_or_default(model: &'static ModelSchema) -> crate::cor
         .unwrap_or(crate::core::AdminConfig::DEFAULT)
 }
 
+/// `true` for a column with a `password` widget override. Its value is
+/// never echoed: forms render it empty, lists and detail show only whether it is set.
+#[must_use]
+pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) -> bool {
+    admin_cfg
+        .formfield_overrides
+        .iter()
+        .any(|(f, w)| *f == name && *w == "password")
+}
+
+/// A secret column's list/detail cell: whether it is set, never the value.
+pub(crate) fn render_secret_cell(row: &serde_json::Value, field: &FieldSchema) -> String {
+    let set = row
+        .get(field.name)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|v| !v.is_empty());
+    if set {
+        "<em>set</em>"
+    } else {
+        "<em>not set</em>"
+    }
+    .to_owned()
+}
+
 /// Resolve the model's primary-key `FieldSchema`, mapping the
 /// `Option::None` no-PK case to [`AdminError::Internal`]. Folds the
 /// fourth prologue pattern that recurs across every detail / create /
@@ -576,14 +600,26 @@ fn render_form_with_inlines_and_pickers(
     };
 
     let row_for_field = |f: &'static FieldSchema| -> serde_json::Value {
-        let value = prefill
-            .and_then(|m| m.get(f.name))
-            .map_or("", String::as_str);
+        let is_secret = is_secret_field(&admin_cfg, f.name);
+        let value = match prefill.and_then(|m| m.get(f.name)) {
+            _ if is_secret => "",
+            Some(v) => v.as_str(),
+            // A new form pre-checks a checkbox whose model default is true.
+            None if prefill.is_none() && f.ty == crate::core::FieldType::Bool => {
+                match f.default.map(|d| d.trim_matches('\'').to_ascii_lowercase()) {
+                    Some(d) if d == "true" || d == "1" => "true",
+                    _ => "",
+                }
+            }
+            None => "",
+        };
         let is_readonly_field = admin_cfg.readonly_fields.iter().any(|n| *n == f.name);
         let extra = if f.primary_key {
             " <small>(pk)</small>"
         } else if is_readonly_field {
             " <small>read-only</small>"
+        } else if is_secret && pk_locked {
+            " <small>leave empty to keep</small>"
         } else if f.auto {
             " <small>auto</small>"
         } else if gfk_ct_columns.contains(f.column) {
@@ -593,9 +629,9 @@ fn render_form_with_inlines_and_pickers(
         } else {
             ""
         };
-        // PK is locked on edit; readonly_fields are locked on edit.
-        // Auto fields are always locked — they're DB-assigned.
-        let lock_input = f.auto || (pk_locked && (f.primary_key || is_readonly_field));
+        // PK is locked on edit. Auto and readonly fields are always
+        // locked: the server never reads them from the form.
+        let lock_input = f.auto || is_readonly_field || (pk_locked && f.primary_key);
         // `formfield_overrides`: look up a per-field widget override
         // from the AdminConfig before dispatching to the FieldType
         // default. Unknown names fall back automatically —
@@ -609,6 +645,9 @@ fn render_form_with_inlines_and_pickers(
         // on fields named as a `generic_fk` ct_column.
         let mut input_html = if gfk_ct_columns.contains(f.column) {
             render::render_gfk_select(f, value, lock_input, gfk_picker_cts)
+        } else if is_secret {
+            // Required only on create: an empty edit keeps the stored value.
+            render::render_secret_input(f, lock_input, !pk_locked)
         } else {
             render::render_input_with_widget(f, value, lock_input, widget_override)
         };

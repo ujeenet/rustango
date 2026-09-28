@@ -235,6 +235,22 @@ pub(crate) enum BearerRejection {
     /// as "start an OAuth flow" and would chase a sign-in that was
     /// never the issue.
     CheckFailed,
+    /// No password-hashing slot freed up in time: `503`, not a 401.
+    Busy,
+}
+
+/// A raw-key check that failed: busy is 503, anything else 500.
+impl From<crate::tenancy::AgentError> for BearerRejection {
+    fn from(e: crate::tenancy::AgentError) -> Self {
+        if matches!(
+            e,
+            crate::tenancy::AgentError::Tenancy(crate::tenancy::TenancyError::Busy)
+        ) {
+            return Self::Busy;
+        }
+        tracing::warn!(error = %e, "mcp raw-key check failed");
+        Self::CheckFailed
+    }
 }
 
 impl BearerRejection {
@@ -244,6 +260,7 @@ impl BearerRejection {
             Self::CheckFailed => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response()
             }
+            Self::Busy => crate::login_throttle::LoginRefused::Busy.into_response(),
         }
     }
 }
@@ -289,9 +306,11 @@ pub(crate) async fn authenticate_bearer(
                 }
             }
         }
-        None => verify_raw_agent_credential(pool, slug, token)
-            .await
-            .ok_or(BearerRejection::Unauthorized),
+        None => match verify_raw_agent_credential(pool, slug, token).await {
+            Ok(Some(agent)) => Ok(agent),
+            Ok(None) => Err(BearerRejection::Unauthorized),
+            Err(e) => Err(e.into()),
+        },
     }
 }
 
@@ -329,7 +348,9 @@ pub(crate) async fn post_authed(
 
 /// Resolve a raw `prefix.secret` credential used straight as the
 /// bearer token. It returns the same [`McpAgent`] that
-/// [`verify_agent_token`] does, or `None` on any failure.
+/// [`verify_agent_token`] does, `Ok(None)` for a refused credential,
+/// or an error when the check itself failed (a busy hash queue is
+/// `TenancyError::Busy`, answer 503).
 ///
 /// This is the copy-paste path: the show-once key a member generates
 /// works in any MCP client as `Authorization: Bearer
@@ -348,35 +369,35 @@ pub(crate) async fn post_authed(
 /// [`crate::tenancy::authenticate_agent_by_prefix_pool`] runs a
 /// dummy verification for an unknown prefix, so the timing gives
 /// nothing away.
+///
+/// # Errors
+/// [`crate::tenancy::AgentError`] when a lookup or the hash check fails.
 pub async fn verify_raw_agent_credential(
     pool: &crate::sql::Pool,
     slug: &str,
     token: &str,
-) -> Option<McpAgent> {
+) -> Result<Option<McpAgent>, crate::tenancy::AgentError> {
     // A credential is `<8-hex prefix>.<hex secret>`; see
     // `tenancy::agents::generate_credential`. Anything else, a JWT
     // or a random string, is refused before any database or Argon2
     // work happens.
-    let (prefix, secret) = token.split_once('.')?;
+    let Some((prefix, secret)) = token.split_once('.') else {
+        return Ok(None);
+    };
     let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
     if prefix.len() != 8 || !is_hex(prefix) || !is_hex(secret) {
-        return None;
+        return Ok(None);
     }
 
     let cache_key = raw_key_cache_key(slug, token);
     let agent_id = match raw_key_cache_get(&cache_key) {
         Some(id) => id,
         None => {
-            let agent =
-                match crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret).await
-                {
-                    Ok(Some(a)) => a,
-                    Ok(None) => return None,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "mcp raw-key authentication failed");
-                        return None;
-                    }
-                };
+            let Some(agent) =
+                crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret).await?
+            else {
+                return Ok(None);
+            };
             let agent_id = agent.id.get().copied().unwrap_or_default();
             raw_key_cache_put(cache_key, agent_id);
             agent_id
@@ -390,17 +411,12 @@ pub async fn verify_raw_agent_credential(
     // there. `user_id` picks the grant resolver, so it is read from
     // the row; caching it would keep using the wrong resolver for
     // the rest of the TTL after an owner change.
-    let state = match crate::tenancy::agent_auth_state_pool(pool, agent_id).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::warn!(error = %e, "mcp raw-key liveness check failed");
-            return None;
-        }
+    let Some(state) = crate::tenancy::agent_auth_state_pool(pool, agent_id).await? else {
+        return Ok(None);
     };
     if !state.active {
         raw_key_cache_forget(&cache_key);
-        return None;
+        return Ok(None);
     }
     // Check the cached id against the credential actually presented.
     //
@@ -421,19 +437,12 @@ pub async fn verify_raw_agent_credential(
     // verify. A string comparison needs no clock at all.
     if state.secret_prefix != prefix {
         raw_key_cache_forget(&cache_key);
-        return None;
+        return Ok(None);
     }
     let user_id = state.user_id;
     if let Some(uid) = user_id {
-        let owner_active = match crate::tenancy::agent_owner_is_active_pool(pool, uid).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "mcp raw-key owner check failed");
-                return None;
-            }
-        };
-        if !owner_active {
-            return None;
+        if !crate::tenancy::agent_owner_is_active_pool(pool, uid).await? {
+            return Ok(None);
         }
     }
 
@@ -442,21 +451,15 @@ pub async fn verify_raw_agent_credential(
         Some(uid) => crate::tenancy::resolve_user_agent_grants_pool(pool, agent_id, uid).await,
         None => crate::tenancy::resolve_agent_grants_pool(pool, agent_id).await,
     };
-    let (skills, tools) = match grants {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!(error = %e, "mcp raw-key grant resolution failed");
-            return None;
-        }
-    };
-    Some(McpAgent {
+    let (skills, tools) = grants?;
+    Ok(Some(McpAgent {
         agent_id,
         tenant: slug.to_owned(),
         skills,
         tools,
         user_id,
         jti: format!("raw:{agent_id}"),
-    })
+    }))
 }
 
 /// How long a successful raw-key verification lets us skip Argon2.
@@ -674,6 +677,37 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(header::HOST, host.parse().unwrap());
         h
+    }
+
+    /// A busy raw-key check is 503 + Retry-After, through the same
+    /// conversion `authenticate_bearer` uses (#1748).
+    #[test]
+    fn a_busy_raw_key_check_is_503_not_401() {
+        use crate::tenancy::{AgentError, TenancyError};
+        let uri: Uri = "/mcp".parse().unwrap();
+        let r = BearerRejection::from(AgentError::Tenancy(TenancyError::Busy))
+            .into_response(&headers("app.example"), &uri);
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(r.headers().contains_key(header::RETRY_AFTER));
+    }
+
+    /// A raw-key check that errors (here: no agent table) is a 500,
+    /// not a 401 that sends the client off on an OAuth flow (#1748).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_failed_raw_key_check_is_500_not_401() {
+        use crate::tenancy::jwt_lifecycle::JwtLifecycle;
+        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let Err(e) = authenticate_bearer(&jwt, &pool, "acme", "abcdef12.0123456789abcdef").await
+        else {
+            panic!("a failed check must not authenticate");
+        };
+        let uri: Uri = "/mcp".parse().unwrap();
+        let r = e.into_response(&headers("app.example"), &uri);
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

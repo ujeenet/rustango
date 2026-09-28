@@ -58,6 +58,7 @@ use super::tenant_console::{self, SessionSecret, TenantSessionPayload};
         list_display = "slug, label, kind, enabled, sort_order",
         ordering = "sort_order",
         readonly_fields = "created_at, updated_at",
+        formfield_overrides = "client_secret: password",
     )
 )]
 #[allow(dead_code)]
@@ -91,6 +92,13 @@ pub struct SharedSsoProvider {
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
     #[rustango(auto_now)]
     pub updated_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
+}
+
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_shared_sso_providers",
+        derive: crate::sso::provider::admin_encrypt_secret,
+    }
 }
 
 /// Enabled providers for this tenant's login page: the tenant's own

@@ -44,7 +44,7 @@ const MAX_BUCKETS: usize = 100_000;
 /// Warn once per process that the limiter cannot tell clients apart
 /// and is using one shared bucket. That turns the limiter into a
 /// site-wide throttle. Logged once so a hot path cannot flood logs.
-fn warn_missing_discriminator(what: &str) {
+pub(crate) fn warn_missing_discriminator(what: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
@@ -96,7 +96,8 @@ fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
 /// that list and the header strategy your proxy actually writes.
 ///
 /// All header parsing lives in `RealIpLayer`. The limiters never read
-/// `X-Forwarded-For` themselves.
+/// `X-Forwarded-For` themselves. IPv6 is keyed by its /64, as in
+/// [`ip_bucket`].
 ///
 /// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
 /// [`RealIp`]: crate::real_ip::RealIp
@@ -107,11 +108,12 @@ pub(crate) fn client_ip_key(req: &Request<Body>) -> String {
             warn_missing_discriminator("IP (ConnectInfo missing)");
             "<no-ip>".to_owned()
         },
-        |ip| ip.to_string(),
+        ip_bucket,
     )
 }
 
-/// [`client_ip_key`] from request parts; `None` when no address is known.
+/// The client IP from request parts; `None` when no address is known.
+/// Every IP reader goes through here, so none trusts a raw header.
 pub(crate) fn client_ip(
     extensions: &axum::http::Extensions,
     headers: &axum::http::HeaderMap,
@@ -450,6 +452,23 @@ mod tests {
         assert_ne!(b("2001:db8:1:2::1"), b("2001:db8:1:3::1"));
         assert_ne!(b("10.0.0.1"), b("10.0.0.2"));
         assert_eq!(b("::ffff:10.0.0.1"), b("10.0.0.1"));
+    }
+
+    /// One IPv6 client rotating through its /64 stays in one bucket (#1748).
+    #[test]
+    fn per_ip_keys_ipv6_by_its_64() {
+        let l = RateLimitLayer::per_ip(1, Duration::from_secs(60));
+        let key = |addr: &str| {
+            let mut req = axum::http::Request::builder().body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(addr.parse::<SocketAddr>().unwrap()));
+            l.extract_key(&req)
+        };
+        assert_eq!(
+            key("[2001:db8:1:2::1]:4000"),
+            key("[2001:db8:1:2::ffff]:4000")
+        );
+        assert_ne!(key("[2001:db8:1:2::1]:4000"), key("[2001:db8:1:3::1]:4000"));
     }
 
     #[tokio::test]

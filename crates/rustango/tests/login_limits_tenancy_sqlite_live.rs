@@ -577,6 +577,9 @@ async fn a_full_hash_queue_answers_503_everywhere() {
     #[cfg(feature = "mcp")]
     let agent_auth =
         rustango::tenancy::authenticate_agent_pool(&env.tenant, "busy-bot", &agent.token).await;
+    #[cfg(feature = "mcp")]
+    let raw_auth =
+        rustango::mcp::verify_raw_agent_credential(&env.tenant, &env.slug, &agent.token).await;
     run.store(false, Ordering::Relaxed);
     for h in hogs {
         let _ = h.await;
@@ -598,6 +601,14 @@ async fn a_full_hash_queue_answers_503_everywhere() {
             Err(rustango::tenancy::AgentError::Tenancy(TenancyError::Busy))
         ),
         "agent secret check must report busy, not a bad secret: {agent_auth:?}"
+    );
+    #[cfg(feature = "mcp")]
+    assert!(
+        matches!(
+            raw_auth,
+            Err(rustango::tenancy::AgentError::Tenancy(TenancyError::Busy))
+        ),
+        "raw MCP key must report busy (503), not a refused key (401): {raw_auth:?}"
     );
 
     // Once the queue drains, the user logs in again.

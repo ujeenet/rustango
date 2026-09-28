@@ -173,7 +173,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.58.0`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.58.1`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
@@ -886,7 +886,7 @@ cargo build --release
 
 Assurez-vous que votre proxy inverse :
 - Termine le HTTPS
-- Transmet `X-Forwarded-For` pour des IP précises dans `AccessLogLayer`
+- Transmet `X-Forwarded-For`, et l'app monte `RealIpLayer::trust_proxies([...])` avec ce proxy (`server::Builder::real_ip`), pour des IP précises dans `AccessLogLayer` et les throttles (voir [security.md](security.md))
 - Transmet `X-Forwarded-Host`, `X-Forwarded-Proto`
 - Utilise `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` afin que `ConnectInfo` soit renseigné pour la limitation de débit et le filtrage par IP
 

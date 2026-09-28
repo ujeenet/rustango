@@ -1300,6 +1300,7 @@ mod tests {
                 max: None,
                 default: None,
                 auto: false,
+                auto_now: false,
                 unique: false,
                 generated_as: None,
                 help_text: None,

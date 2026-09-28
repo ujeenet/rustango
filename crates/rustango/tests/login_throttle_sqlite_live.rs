@@ -262,3 +262,36 @@ async fn a_wrong_totp_code_counts_as_a_failure() {
     let a = login_code(&app, "10.68.2.1", "thr_fred", "right-pass", WRONG).await;
     assert_eq!(a.status, StatusCode::TOO_MANY_REQUESTS);
 }
+
+/// The 2FA prompt (right password, no code yet) spends no per-IP
+/// tokens, so one address can log in more often than the limit (#1748).
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn the_totp_prompt_spends_no_limit_tokens() {
+    use rustango::admin::totp_store;
+    use rustango::sql::FetcherPool as _;
+    let _g = SUITE.lock().await;
+    let (app, pool) = app_with(&[("thr_gina", true)]).await;
+    let id = AdminUser::objects()
+        .filter("username", "thr_gina")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id;
+    let id = *id.get().unwrap();
+    let secret = rustango::totp::TotpSecret::generate();
+    totp_store::start_enrollment(&pool, id, &secret)
+        .await
+        .unwrap();
+    totp_store::confirm(&pool, id).await.unwrap();
+
+    // Twice the per-IP limit of 3, all from one address.
+    for n in 0..6 {
+        let a = login(&app, "10.69.0.1", "thr_gina", "right-pass").await;
+        assert_eq!(a.status, StatusCode::OK, "prompt {n} must not be throttled");
+        assert!(!a.session, "no session without the code");
+    }
+}
