@@ -25,12 +25,13 @@
     {% if already_enabled %}
       <p>Two-factor authentication is <strong>enabled</strong> for your account.</p>
       <p>To re-enroll (e.g. on a new device), submit the form below with a fresh setup —
-         this replaces your current device.</p>
+         your current device keeps working until the new one is confirmed.</p>
       <form method="post" action="{{ action }}">
         {{ csrf_input | safe }}
         <button type="submit" name="reset" value="1">Re-enroll</button>
       </form>
     {% else %}
+      {% if secret_base32 %}
       <p>Scan this setup key in your authenticator app (Google Authenticator, 1Password,
          Authy, …), or enter it manually, then confirm with the 6-digit code it shows.</p>
 
@@ -39,6 +40,9 @@
 
       <p><strong>otpauth URI</strong> <span class="hint">(for manual / QR import)</span></p>
       <p class="totp-uri">{{ otpauth_url }}</p>
+      {% else %}
+      <p>Enter the 6-digit code from the new setup in your authenticator app.</p>
+      {% endif %}
 
       <form method="post" action="{{ action }}">
         {{ csrf_input | safe }}
