@@ -89,6 +89,7 @@ pub struct SsoProvider {
 
     /// Link a first-time SSO user to the account with the same verified
     /// email. Never links a superuser or staff account; the bare admin ignores it.
+    /// Only a superuser can add or change provider rows in the admin.
     #[rustango(default = "false")]
     pub allow_email_link: bool,
 
@@ -107,20 +108,9 @@ use crate::core::{Model, SqlValue};
 use crate::query::QuerySet;
 use crate::sql::{ExecError, Pool};
 
-/// Columns every provider read selects. `allow_email_link` is read on its
-/// own, so a table not yet migrated still serves logins.
-const ROW_COLUMNS: &[&str] = &[
-    "id",
-    "slug",
-    "label",
-    "kind",
-    "issuer_url",
-    "client_id",
-    "client_secret",
-    "enabled",
-    "sort_order",
-    "scopes",
-];
+/// Columns provider reads leave out. `allow_email_link` is read on its own,
+/// so a table not yet migrated still serves logins.
+const DEFERRED: &[&str] = &["allow_email_link", "created_at", "updated_at"];
 
 /// A provider row, shared by [`SsoProvider`] and `SharedSsoProvider`.
 /// `client_secret` is still encrypted.
@@ -154,31 +144,32 @@ fn int(v: Option<&SqlValue>) -> i64 {
     }
 }
 
-/// Provider rows matching `qs`, read through [`ROW_COLUMNS`].
+/// Provider rows matching `qs`, without the [`DEFERRED`] columns.
 pub(crate) async fn load_rows<T: Model>(
     qs: QuerySet<T>,
     pool: &Pool,
 ) -> Result<Vec<ProviderRow>, ExecError> {
-    let rows = qs.values_list(ROW_COLUMNS).fetch(pool).await?;
+    let rows = qs.defer(DEFERRED).fetch(pool).await?;
     Ok(rows
         .iter()
         .map(|r| ProviderRow {
-            id: int(r.first()),
-            slug: text(r.get(1)).unwrap_or_default(),
-            label: text(r.get(2)).unwrap_or_default(),
-            kind: text(r.get(3)).unwrap_or_default(),
-            issuer_url: text(r.get(4)),
-            client_id: text(r.get(5)).unwrap_or_default(),
-            client_secret: text(r.get(6)).unwrap_or_default(),
-            enabled: int(r.get(7)) != 0,
-            sort_order: i32::try_from(int(r.get(8))).unwrap_or(0),
-            scopes: text(r.get(9)),
+            id: int(r.get("id")),
+            slug: text(r.get("slug")).unwrap_or_default(),
+            label: text(r.get("label")).unwrap_or_default(),
+            kind: text(r.get("kind")).unwrap_or_default(),
+            issuer_url: text(r.get("issuer_url")),
+            client_id: text(r.get("client_id")).unwrap_or_default(),
+            client_secret: text(r.get("client_secret")).unwrap_or_default(),
+            enabled: int(r.get("enabled")) != 0,
+            sort_order: i32::try_from(int(r.get("sort_order"))).unwrap_or(0),
+            scopes: text(r.get("scopes")),
         })
         .collect())
 }
 
 /// A resolved provider plus what the link step needs.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ResolvedProvider {
     pub sso: ResolvedSso,
     /// Provider row id.

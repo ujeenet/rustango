@@ -152,15 +152,23 @@ untouched.
 
 ### SSO signs in by link, not by email
 
-Existing SSO users are refused until they are linked. Either turn on
-`allow_email_link` for a provider (a normal user is linked on the next
-login), or add an `SsoLink` row in the admin; superusers, staff and every
-bare-admin account need the row (the refusal log names the subject).
-Run `makemigrations` + `migrate` for the new `allow_email_link` column on
-`rustango_sso_providers` and `rustango_shared_sso_providers`; until then
-email linking reads as off. `rustango_sso_links` is created on first use.
+Existing SSO users are refused until they are linked. Run
+`makemigrations` + `migrate`: it adds `allow_email_link` to
+`rustango_sso_providers` / `rustango_shared_sso_providers` and creates
+`rustango_sso_links` (until then email linking reads as off and SSO is
+refused). Then either turn on `allow_email_link` (a normal user is linked
+on the next login; for a shared provider it applies to every tenant), or
+have a superuser add an `SsoLink` row. Superusers, staff and every
+bare-admin account need the row: `provider_source` `tenant`/`shared`/
+`admin`, `provider_id` the provider row id, `issuer` `kind` or
+`kind|issuer_url` without a trailing slash, `subject`, `subject_sha256`
+(lowercase hex SHA-256 of the subject), `user_id`. The `sso refused` log
+line carries `provider_id`, `issuer` and `subject`. Only superusers can
+now add or change `SsoProvider` and `SsoLink` rows in the admin.
 `find_or_provision_member(pool, email, profile, auto)` is now
-`(pool, &ProviderKey, allow_email_link, profile, auto)`.
+`(pool, &ProviderKey, allow_email_link, profile, auto)` and returns
+`MemberSignIn`: map `NotLinked` (an existing account, not linkable by
+email) apart from `NoAccount`, or every existing member looks "closed".
 
 ### The trusted client IP is the rightmost untrusted hop
 

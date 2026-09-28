@@ -27,9 +27,7 @@ use axum::{
 use super::session::{self, AdminSession, SESSION_COOKIE};
 use super::urls::AppState;
 use super::user::AdminUser;
-use crate::core::Model as _; // brings `AdminUser::SCHEMA` into scope
-use crate::core::SqlValue;
-use crate::sso::link::EmailMatch;
+use crate::sso::link::{Account, AccountLookup};
 
 /// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize)]
@@ -183,28 +181,23 @@ async fn sso_callback(
     // Sign in by (provider, sub) link only: every admin account is staff,
     // so a verified email never creates a link here.
     let key = cfg.key(LinkSource::Admin);
-    let pool = state.pool.clone();
+    let accounts = AdminAccounts(&state.pool);
     let uid =
-        match crate::sso::link::sign_in(&state.pool, &key, false, &normalized, |email| async move {
-            Ok(find_admin_user(&pool, "email", SqlValue::String(email))
-                .await
-                .map(|u| EmailMatch {
-                    user_id: u.id,
-                    privileged: true,
-                }))
-        })
-        .await
-        {
+        match crate::sso::link::sign_in(&state.pool, &key, false, &normalized, &accounts).await {
             Ok(uid) => uid,
             Err(e) => {
                 tracing::warn!(
                     target: "rustango::admin::sso",
-                    slug, subject = %normalized.provider_user_id, "sso refused: {e}"
+                    slug,
+                    provider_id = cfg.id,
+                    issuer = key.issuer(),
+                    subject = %normalized.provider_user_id,
+                    "sso refused: {e}"
                 );
                 return login_error(&state, "nouser");
             }
         };
-    let Some(user) = find_admin_user(&state.pool, "id", SqlValue::I64(uid)).await else {
+    let Some(user) = accounts.user(uid).await else {
         return login_error(&state, "nouser");
     };
     if !user.active {
@@ -217,7 +210,7 @@ async fn sso_callback(
     let cookie_value = session::encode(
         secret,
         AdminSession {
-            user_id: user.id,
+            user_id: uid,
             username: user.username,
             is_superuser: user.is_superuser,
         },
@@ -244,42 +237,41 @@ async fn sso_callback(
     resp
 }
 
-/// Minimal admin-user identity for the SSO session.
-struct LinkedAdmin {
-    id: i64,
-    username: String,
-    password_hash: String,
-    is_superuser: bool,
-    active: bool,
+/// The bare admin's accounts. Every one is staff, so none links by email.
+struct AdminAccounts<'a>(&'a crate::sql::Pool);
+
+impl AdminAccounts<'_> {
+    async fn user(&self, id: i64) -> Option<AdminUser> {
+        use crate::sql::FetcherPool as _;
+        AdminUser::objects()
+            .filter("id", id)
+            .fetch(self.0)
+            .await
+            .ok()?
+            .into_iter()
+            .next()
+    }
 }
 
-/// Look up an [`AdminUser`] where `column = value`. `None` when no row matches.
-async fn find_admin_user(
-    pool: &crate::sql::Pool,
-    column: &'static str,
-    value: SqlValue,
-) -> Option<LinkedAdmin> {
-    use crate::core::SelectQuery;
-    let select = SelectQuery::by_pk(AdminUser::SCHEMA, column, value);
-    let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
-    let row = crate::sql::select_one_row_as_json(pool, &select, &fields)
-        .await
-        .ok()
-        .flatten()?;
-    Some(LinkedAdmin {
-        id: row.get("id").and_then(serde_json::Value::as_i64)?,
-        username: row.get("username").and_then(|v| v.as_str())?.to_owned(),
-        password_hash: row
-            .get("password_hash")
-            .and_then(|v| v.as_str())?
-            .to_owned(),
-        is_superuser: row
-            .get("is_superuser")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        active: row
-            .get("active")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-    })
+fn admin_account(u: &AdminUser) -> Option<Account> {
+    Some(Account::new(u.id.get().copied()?, true, u.active))
+}
+
+impl AccountLookup for AdminAccounts<'_> {
+    async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
+        Ok(self.user(id).await.as_ref().and_then(admin_account))
+    }
+
+    async fn by_email(&self, email: &str) -> Result<Option<Account>, String> {
+        use crate::sql::FetcherPool as _;
+        let rows = AdminUser::objects()
+            .filter("email", email.to_owned())
+            .fetch(self.0)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .iter()
+            .find(|u| u.email.as_deref() == Some(email))
+            .and_then(admin_account))
+    }
 }
