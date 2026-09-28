@@ -182,7 +182,7 @@ mod sqlite_live {
             .collect();
         assert_eq!(by_name.get("One"), Some(&SqlValue::I64(100)));
         assert_eq!(by_name.get("Three"), Some(&SqlValue::I64(60))); // 10 + 20 + 30
-        // SUM over no rows is NULL, as on PG and MySQL (#1766).
+                                                                    // SUM over no rows is NULL, as on PG and MySQL (#1766).
         assert_eq!(by_name.get("Zero"), Some(&SqlValue::Null));
     }
 
