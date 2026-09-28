@@ -1024,3 +1024,120 @@ async fn member_callback_signs_in_by_link_only() {
     env.deactivate(new).await;
     assert!(!member("sub-new", "new@example.com").await, "inactive");
 }
+
+// ---- upgrade: a framework column lives only in the system chain ----------
+
+/// Strip every `allow_email_link` entry from a migration file, as the
+/// framework before it would have written the file.
+fn without_email_link(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Array(items) => {
+            items.retain(|i| {
+                !["name", "column"]
+                    .iter()
+                    .any(|k| i.get(k).and_then(|n| n.as_str()) == Some("allow_email_link"))
+            });
+            items.iter_mut().for_each(without_email_link);
+        }
+        serde_json::Value::Object(map) => map.values_mut().for_each(without_email_link),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn upgrading_adds_the_framework_column_once() {
+    let _g = SUITE.lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", "sso-link-test-key");
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("app.db").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    let migrations = dir.path().join("migrations");
+    std::fs::create_dir_all(&migrations).unwrap();
+    let manage = |verb: &str| {
+        let (pool, migrations, verb) = (pool.clone(), migrations.clone(), verb.to_owned());
+        async move {
+            let mut out = Vec::new();
+            rustango::migrate::manage::run_with_writer(&pool, &migrations, vec![verb], &mut out)
+                .await
+                .map_err(|e| format!("{e}\n{}", String::from_utf8_lossy(&out)))
+        }
+    };
+    manage("makemigrations").await.unwrap();
+    manage("migrate").await.unwrap();
+
+    // Rewind to a framework without the column: files and database.
+    for sub in ["migrations", "system/migrations"] {
+        for entry in std::fs::read_dir(dir.path().join(sub)).unwrap() {
+            let path = entry.unwrap().path();
+            let mut v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            without_email_link(&mut v);
+            std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        }
+    }
+    // Older projects' app snapshots carry the framework tables too.
+    let latest = |sub: &str| {
+        let mut files: Vec<_> = std::fs::read_dir(dir.path().join(sub))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        files.pop().unwrap()
+    };
+    let read = |p: &std::path::Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+    };
+    let old_table = read(&latest("system/migrations"))["snapshot"]["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "rustango_sso_providers")
+        .cloned()
+        .expect("framework table in the system snapshot");
+    // An app migration (no ops) whose snapshot has the old framework table.
+    let mut app = read(&latest("system/migrations"));
+    app["name"] = "0001_app".into();
+    app["forward"] = serde_json::json!([]);
+    app["snapshot"]["tables"] = serde_json::json!([old_table]);
+    if let Some(m) = app.as_object_mut() {
+        m.remove("prev");
+    }
+    std::fs::write(
+        dir.path().join("migrations/0001_app.json"),
+        serde_json::to_string_pretty(&app).unwrap(),
+    )
+    .unwrap();
+    // Test-only DDL: the old table had no such column.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "ALTER TABLE rustango_sso_providers DROP COLUMN allow_email_link",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    manage("makemigrations").await.unwrap();
+    let mentions = |sub: &str| {
+        std::fs::read_dir(dir.path().join(sub))
+            .unwrap()
+            .filter(|e| {
+                std::fs::read_to_string(e.as_ref().unwrap().path())
+                    .unwrap()
+                    .contains("allow_email_link")
+            })
+            .count()
+    };
+    assert_eq!(mentions("migrations"), 0, "the app chain never adds it");
+    assert!(mentions("system/migrations") > 0, "the system chain does");
+    manage("migrate").await.expect("the column is added once");
+    let p = provider_row("https://idp.example", "corp", true);
+    let mut p = p;
+    p.insert_pool(&pool).await.unwrap();
+    assert!(
+        rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+            .await
+            .unwrap()
+            .unwrap()
+            .allow_email_link
+    );
+}
