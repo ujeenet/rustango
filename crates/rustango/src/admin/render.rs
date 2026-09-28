@@ -216,6 +216,20 @@ pub(crate) fn render_input_with_widget(
     render_input_default(field, value, pk_locked)
 }
 
+/// A `password`-widget input: always empty, `required` only when asked.
+pub(crate) fn render_secret_input(field: &FieldSchema, locked: bool, required: bool) -> String {
+    let name = escape(field.name);
+    let required = if required && !locked && !field.nullable && !field.blank {
+        " required"
+    } else {
+        ""
+    };
+    let readonly = if locked { " readonly" } else { "" };
+    format!(
+        r#"<input type="password" name="{name}" id="{name}" value="" autocomplete="new-password"{required}{readonly}>"#
+    )
+}
+
 /// Default FieldType-derived widget — extracted so
 /// [`render_input_with_widget`] can fall through to it after a
 /// widget-override miss without duplicating the dispatch table.
@@ -225,11 +239,13 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
     // `blank = true` drops the `required` HTML attribute even on
     // NOT-NULL columns: an empty string is still a non-null value, so
     // the form may submit empty.
+    // A locked input is never submitted-for, so it must not block submit.
     let required = if field.nullable
         || field.ty == FieldType::Bool
         || field.auto
         || field.primary_key
         || field.blank
+        || pk_locked
     {
         ""
     } else {
@@ -364,11 +380,13 @@ fn render_named_widget(
 ) -> Option<String> {
     let name = escape(field.name);
     let val = escape(value);
+    // A locked input is never submitted-for, so it must not block submit.
     let required = if field.nullable
         || field.ty == FieldType::Bool
         || field.auto
         || field.primary_key
         || field.blank
+        || pk_locked
     {
         ""
     } else {
@@ -382,9 +400,10 @@ fn render_named_widget(
             r#"<input type="hidden" name="{name}" id="{name}" value="{val}">"#
         )),
         // String-typed widgets.
-        "password" if matches!(field.ty, FieldType::String) => Some(format!(
-            r#"<input type="password" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
-        )),
+        // Never echoes the stored value.
+        "password" if matches!(field.ty, FieldType::String) => {
+            Some(render_secret_input(field, pk_locked, !required.is_empty()))
+        }
         "textarea" if matches!(field.ty, FieldType::String) => {
             let maxlen = field
                 .max_length
@@ -700,6 +719,7 @@ mod tests {
             nullable: true,
             primary_key: false,
             auto: false,
+            auto_now: false,
             unique: false,
             max_length: None,
             min: None,
@@ -864,6 +884,25 @@ mod tests {
         assert!(html.contains("&lt;b&gt;"));
         assert!(!html.contains("<a>"));
         assert!(!html.contains("<b>"));
+    }
+
+    /// A locked input is never read back, so it must not block submit (#1763).
+    #[test]
+    fn locked_input_is_not_required() {
+        let f = field("created_at", "created_at", FieldType::DateTime);
+        let html = render_input(&f, "", true);
+        assert!(html.contains(" readonly"), "{html}");
+        assert!(!html.contains(" required"), "{html}");
+    }
+
+    /// The password widget never echoes the stored value.
+    #[test]
+    fn password_widget_never_echoes_the_value() {
+        let mut f = field("password_hash", "password_hash", FieldType::String);
+        f.nullable = false;
+        let html = render_input_with_widget(&f, "$argon2id$stored", false, Some("password"));
+        assert!(!html.contains("argon2"), "{html}");
+        assert!(html.contains(" required"), "{html}");
     }
 
     /// `#[rustango(blank)]` drops the `required` HTML attribute even

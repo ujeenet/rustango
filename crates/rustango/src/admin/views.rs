@@ -17,8 +17,8 @@ use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
-    lookup_model, pager_suffix, primary_key_or_internal, render_cell_json, render_form,
-    resolve_model, resolve_model_and_pk,
+    is_secret_field, lookup_model, pager_suffix, primary_key_or_internal, render_cell_json,
+    render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
 };
 use super::render;
 use super::templates::render_with_chrome;
@@ -599,6 +599,9 @@ pub(crate) async fn table_view(
                 .enumerate()
                 .map(|(idx, item)| {
                     let inner = match item {
+                        DisplayItem::Field(f) if is_secret_field(&admin_cfg, f.name) => {
+                            render_secret_cell(row, f)
+                        }
                         DisplayItem::Field(f) => render_cell_json(row, f, &fk_map),
                         DisplayItem::Computed(m) => (m.render)(row),
                         DisplayItem::GenericFk(gr) => render_gfk_cell(row, gr, &gfk_ct_map),
@@ -749,6 +752,8 @@ pub(crate) async fn table_view(
         "total": total,
         "plural": if total == 1 { "" } else { "s" },
         "read_only": read_only,
+        "can_add": state.can_add(model.table)
+            && crate::admin::object_permissions::is_allowed(model.table, "add", &parts, None),
         "has_searchable": !search_columns.is_empty(),
         // An empty `search_help_text` hides the caption.
         "search_help_text": admin_cfg.search_help_text,
@@ -1579,13 +1584,16 @@ pub(crate) async fn detail_view(
     // Read joined FK display values from the same row — no extra queries.
     let fk_map = fk_map_from_joined_rows_json(&state, model, std::slice::from_ref(&row));
 
+    let detail_cfg = admin_config_or_default(model);
     let mut cells_ctx: Vec<serde_json::Value> = model
         .scalar_fields()
         .map(|f| {
-            serde_json::json!({
-                "label": f.display_label(),
-                "value": render_cell_json(&row, f, &fk_map),
-            })
+            let value = if is_secret_field(&detail_cfg, f.name) {
+                render_secret_cell(&row, f)
+            } else {
+                render_cell_json(&row, f, &fk_map)
+            };
+            serde_json::json!({ "label": f.display_label(), "value": value })
         })
         .collect();
 
@@ -1818,7 +1826,12 @@ pub(crate) async fn create_submit(
             return Ok(Html(html).into_response());
         }
     };
-    super::derived_fields::apply(model.table, &mut collected, None);
+    stamp_readonly_timestamps(model, &admin_cfg, &mut collected);
+    if let Err(e) = super::derived_fields::apply(model.table, &mut collected, None).await {
+        let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
+        return Ok(Html(html).into_response());
+    }
+    let audit_form = audit_form(model, &admin_cfg, &form, &collected);
     let (columns, values): (Vec<&'static str>, Vec<SqlValue>) = collected.into_iter().unzip();
 
     let query = InsertQuery {
@@ -1856,7 +1869,7 @@ pub(crate) async fn create_submit(
         model,
         &pk_value,
         crate::audit::AuditOp::Create,
-        &form,
+        &audit_form,
     )
     .await;
     // `save_model` hook. It fires only on admin writes, not on every
@@ -1869,6 +1882,99 @@ pub(crate) async fn create_submit(
     .await;
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_value, &form);
     Ok(Redirect::to(&target).into_response())
+}
+
+/// Fill read-only, NOT NULL timestamps with no default: the form never
+/// sends them and the INSERT would fail (#1763).
+fn stamp_readonly_timestamps(
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    values: &mut Vec<(&'static str, SqlValue)>,
+) {
+    let now = chrono::Utc::now();
+    for f in model.scalar_fields() {
+        if f.ty == crate::core::FieldType::DateTime
+            && !f.nullable
+            && !f.auto
+            && f.default.is_none()
+            && admin_cfg.readonly_fields.contains(&f.name)
+            && !values.iter().any(|(c, _)| *c == f.column)
+        {
+            values.push((f.column, SqlValue::DateTime(now)));
+        }
+    }
+}
+
+/// On update: a timestamp the form echoed back (at the input's second
+/// precision) is not rewritten, and `auto_now` columns are restamped.
+fn keep_unchanged(
+    model: &'static crate::core::ModelSchema,
+    form: &HashMap<String, String>,
+    before: Option<&serde_json::Value>,
+    values: &mut Vec<(&'static str, SqlValue)>,
+) {
+    for f in model.scalar_fields() {
+        let submitted = form.get(f.name).map(String::as_str);
+        let unchanged = f.ty == crate::core::FieldType::DateTime
+            && before.zip(submitted).is_some_and(|(row, sent)| {
+                let shown = render::render_value_for_input_json(row, f);
+                // Browsers may drop a zero seconds part.
+                sent == shown || shown.strip_suffix(":00") == Some(sent)
+            });
+        if unchanged {
+            values.retain(|(c, _)| *c != f.column);
+        }
+        if f.auto_now && !values.iter().any(|(c, _)| *c == f.column) {
+            values.push((f.column, SqlValue::DateTime(chrono::Utc::now())));
+        }
+    }
+}
+
+/// Stands in for a secret in the audit log.
+const SECRET_CHANGED: &str = "[changed]";
+const SECRET_SET: &str = "[set]";
+
+/// What the audit log records for a write: the form without secrets, a
+/// marker for each secret written, and timestamps the server stamped.
+fn audit_form(
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    form: &HashMap<String, String>,
+    written: &[(&'static str, SqlValue)],
+) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = form
+        .iter()
+        .filter(|(k, _)| !is_secret_field(admin_cfg, k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (column, value) in written {
+        let Some(f) = model.scalar_fields().find(|f| f.column == *column) else {
+            continue;
+        };
+        if is_secret_field(admin_cfg, f.name) {
+            out.insert(f.name.to_owned(), SECRET_CHANGED.to_owned());
+        } else if let SqlValue::DateTime(at) = value {
+            out.insert(f.name.to_owned(), at.to_rfc3339());
+        }
+    }
+    out
+}
+
+/// `row` with each set secret replaced by a marker, for the audit log.
+fn mask_secrets(
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    row: &serde_json::Value,
+) -> serde_json::Value {
+    let mut row = row.clone();
+    for f in model.scalar_fields() {
+        if is_secret_field(admin_cfg, f.name) {
+            if let Some(v) = row.get_mut(f.name).filter(|v| !v.is_null()) {
+                *v = serde_json::Value::String(SECRET_SET.to_owned());
+            }
+        }
+    }
+    row
 }
 
 // ============================================================== EDIT
@@ -1992,6 +2098,14 @@ pub(crate) async fn update_submit(
     let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&'static str> = vec![pk_field.name];
     skip.extend(admin_cfg.readonly_fields.iter().copied());
+    // An empty secret keeps the stored one.
+    skip.extend(
+        model
+            .scalar_fields()
+            .filter(|f| is_secret_field(&admin_cfg, f.name))
+            .filter(|f| form.get(f.name).is_none_or(String::is_empty))
+            .map(|f| f.name),
+    );
     let mut collected = match forms::collect_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
@@ -1999,7 +2113,14 @@ pub(crate) async fn update_submit(
             return Ok(Html(html).into_response());
         }
     };
-    super::derived_fields::apply(model.table, &mut collected, pre_update_row.as_ref());
+    keep_unchanged(model, &form, pre_update_row.as_ref(), &mut collected);
+    if let Err(e) =
+        super::derived_fields::apply(model.table, &mut collected, pre_update_row.as_ref()).await
+    {
+        let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
+        return Ok(Html(html).into_response());
+    }
+    let audit_form = audit_form(model, &admin_cfg, &form, &collected);
     let assignments: Vec<Assignment> = collected
         .into_iter()
         .map(|(column, value)| Assignment {
@@ -2013,7 +2134,9 @@ pub(crate) async fn update_submit(
     // `{ "field": { "before": v, "after": v } }`. If the fetch
     // returned None, because of a concurrent delete, the emit falls
     // back to a plain snapshot.
-    let before_row = pre_update_row.clone();
+    let before_row = pre_update_row
+        .as_ref()
+        .map(|row| mask_secrets(model, &admin_cfg, row));
 
     // Gate every inline row before anything is written, the parent included.
     let inline_plan = match super::inlines::plan_post(&state, &parts, model, &pk_value, &form).await
@@ -2042,7 +2165,8 @@ pub(crate) async fn update_submit(
     // "Before" comes from the SELECT, "after" from the form. The
     // per-request `with_source(User { id })` that `tenancy::admin`
     // installs gives a "who changed what" trail for free.
-    super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
+    super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &audit_form)
+        .await;
     // The `post_save` hook fires after the UPDATE and the audit
     // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
@@ -2144,12 +2268,14 @@ pub(crate) async fn delete_submit(
         .await?;
     }
 
+    let delete_cfg = admin_config_or_default(model);
     let pairs: Vec<(&str, serde_json::Value)> = before_row
         .as_ref()
+        .map(|row| mask_secrets(model, &delete_cfg, row))
         .map(|row| {
             model
                 .scalar_fields()
-                .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
+                .map(|f| (f.name, render::read_value_as_json_from_json(&row, f)))
                 .collect()
         })
         .unwrap_or_default();
@@ -2354,10 +2480,12 @@ pub(crate) async fn action_submit(
     // Other actions record the pre-action state plus an `__action`
     // marker, so the panel shows who ran what against which rows.
     let source = crate::audit::current_source();
+    let bulk_cfg = admin_config_or_default(model);
     let entries: Vec<crate::audit::PendingEntry> = before_rows
         .iter()
         .map(|row| {
             let pk_str = render::read_value_as_string_json(row, pk_field).unwrap_or_default();
+            let row = &mask_secrets(model, &bulk_cfg, row);
             let mut pairs: Vec<(&str, serde_json::Value)> = model
                 .scalar_fields()
                 .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
