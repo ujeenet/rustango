@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — bare admin logout needs a CSRF token
+
+`POST /logout` on the bare admin now refuses a missing token or a
+foreign Origin, like the tenant admin and console.
+
 ### Security — bounded update/delete; nested `atomic()` uses savepoints (#1666)
 
 `QuerySet::update()` and `delete()` dropped `limit`, `offset` and
@@ -95,6 +100,8 @@ equal share one lock. HTTP Basic and API keys have their own scopes,
 count only failures per IP, and use at most half the hashing slots. A
 failure while locked no longer extends the lock. A busy hash queue
 answers 503 on the password-change pages and agent `/token`.
+The tenant admin behind `server::Builder` now gets the client IP, so
+its per-IP login limit applies (the route wrapper dropped it).
 
 ### Fixed — session extractors on SQLite and MySQL
 

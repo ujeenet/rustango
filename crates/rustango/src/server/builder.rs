@@ -862,19 +862,12 @@ fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfi
     // to clone (just an Arc-of-router under the hood).
     let make = || {
         let svc = tenant_admin.clone();
+        // Forward the request whole: the extensions carry the client IP
+        // (`ConnectInfo`, `TrustedRealIp`) the login limits key on.
         move |req: axum::http::Request<axum::body::Body>| {
             let svc = svc.clone();
             async move {
-                let (parts, body) = req.into_parts();
-                let mut builder = axum::http::Request::builder()
-                    .method(&parts.method)
-                    .uri(&parts.uri);
-                for (k, v) in &parts.headers {
-                    builder = builder.header(k, v);
-                }
-                let fresh = builder.body(body).expect("valid request");
-                svc.clone()
-                    .oneshot(fresh)
+                svc.oneshot(req)
                     .await
                     .unwrap_or_else(|_| unreachable!("Router is Infallible"))
             }
