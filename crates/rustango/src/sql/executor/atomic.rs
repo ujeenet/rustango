@@ -1,39 +1,63 @@
 //! `atomic()` + `on_commit()` — a closure-scoped transaction and its
 //! after-commit hooks, rolled into one helper. Issue #44.
 //!
-//! The outermost block owns the transaction in a task-local slot; a
-//! nested block on the same pool finds it and runs in a savepoint (#1666).
+//! The outermost block owns the transaction; a nested block on the same
+//! pool runs in a savepoint on it (#1666). Each block's future carries its
+//! own context in a task-local, so `join!`ed blocks cannot see each other's.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::any::Any;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+
+use tokio::sync::OwnedMutexGuard;
 
 use super::{transaction_pool, ExecError, PoolTx};
 use crate::sql::Pool;
 
 type Callback = Box<dyn FnOnce() + Send>;
 
-/// The transaction of one outermost [`atomic`] block.
+/// Identity of a pool: the options `Arc` its clones share. Held, so the
+/// address cannot be reused while a block is open.
+#[derive(Clone)]
+struct PoolId(Arc<dyn Any + Send + Sync>);
+
+impl PoolId {
+    fn of(pool: &Pool) -> Self {
+        match pool {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(p) => Self(p.connect_options()),
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => Self(p.connect_options()),
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => Self(p.connect_options()),
+        }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        std::ptr::eq(
+            Arc::as_ptr(&self.0).cast::<()>(),
+            Arc::as_ptr(&other.0).cast::<()>(),
+        )
+    }
+}
+
+/// The transaction of one outermost block.
 struct Slot {
-    pool: usize,
-    state: tokio::sync::Mutex<TxState>,
+    state: Arc<tokio::sync::Mutex<TxState>>,
     /// Shallowest savepoint whose block was dropped mid-flight (0 = none).
     cancelled: AtomicUsize,
+    /// Live [`TxGuard`]s; a busy lock with none is a background finisher.
+    guards: AtomicUsize,
 }
 
 struct TxState {
     tx: Option<PoolTx<'static>>,
     /// Savepoints currently open.
     depth: usize,
-}
-
-impl Slot {
-    fn mark_cancelled(&self, depth: usize) {
-        let _ = self
-            .cancelled
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
-                Some(if c == 0 { depth } else { c.min(depth) })
-            });
-    }
+    /// A savepoint statement failed; the transaction can only roll back.
+    poisoned: bool,
 }
 
 impl TxState {
@@ -44,20 +68,11 @@ impl TxState {
     async fn savepoint(&mut self, verb: &str, depth: usize) -> Result<(), ExecError> {
         let tx = self.tx();
         let name = tx.dialect().quote_ident(&format!("rustango_sp_{depth}"));
-        tx.execute_unprepared(&format!("{verb} {name}")).await?;
-        Ok(())
-    }
-
-    /// Roll back a savepoint whose block was cancelled, before any other use.
-    async fn settle(&mut self, slot: &Slot) -> Result<(), ExecError> {
-        let d = slot.cancelled.swap(0, Ordering::SeqCst);
-        if d != 0 && d <= self.depth {
-            if let Err(e) = self.rollback_to(d).await {
-                slot.mark_cancelled(d);
-                return Err(e);
-            }
+        let r = tx.execute_unprepared(&format!("{verb} {name}")).await;
+        if r.is_err() {
+            self.poisoned = true;
         }
-        Ok(())
+        Ok(r?)
     }
 
     async fn rollback_to(&mut self, depth: usize) -> Result<(), ExecError> {
@@ -66,12 +81,83 @@ impl TxState {
         self.depth = depth - 1;
         Ok(())
     }
+
+    /// Refuse a poisoned transaction; roll back a cancelled block first.
+    async fn settle(&mut self, slot: &Slot) -> Result<(), ExecError> {
+        if self.poisoned {
+            return Err(ExecError::AtomicAborted);
+        }
+        let d = slot.cancelled.swap(0, Ordering::SeqCst);
+        if d != 0 && d <= self.depth {
+            self.rollback_to(d).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Run `fut` to completion even if the caller is dropped, so a savepoint
+/// statement is never cut off halfway.
+async fn in_background<T: Send + 'static>(
+    fut: impl Future<Output = Result<T, ExecError>> + Send + 'static,
+) -> Result<T, ExecError> {
+    match tokio::spawn(fut).await {
+        Ok(r) => r,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(_) => Err(ExecError::AtomicAborted),
+    }
+}
+
+/// Lock the slot, settled. A lock held by a live guard is misuse, not a wait.
+async fn acquire(slot: &Arc<Slot>) -> Result<OwnedMutexGuard<TxState>, ExecError> {
+    let guard = match Arc::clone(&slot.state).try_lock_owned() {
+        Ok(g) => g,
+        Err(_) if slot.guards.load(Ordering::SeqCst) > 0 => return Err(ExecError::NestedAtomic),
+        Err(_) => Arc::clone(&slot.state).lock_owned().await,
+    };
+    if !guard.poisoned && slot.cancelled.load(Ordering::SeqCst) == 0 {
+        return Ok(guard);
+    }
+    let slot = Arc::clone(slot);
+    in_background(async move {
+        let mut g = guard;
+        g.settle(&slot).await.map(|()| g)
+    })
+    .await
+}
+
+/// One `atomic` call, as seen by the code inside it.
+struct Block {
+    pool: PoolId,
+    slot: Arc<Slot>,
+    /// Savepoint depth this block writes at (0 = the transaction itself).
+    depth: usize,
+    /// The block this one was called from, on any pool.
+    enclosing: Option<Arc<Block>>,
+    callbacks: Mutex<Vec<Callback>>,
+    /// Set after the outermost commit: `on_commit` then runs at once.
+    committed: AtomicBool,
+}
+
+impl Block {
+    fn take_callbacks(&self) -> Vec<Callback> {
+        std::mem::take(
+            &mut self
+                .callbacks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+}
+
+tokio::task_local! {
+    /// The innermost block around the running future.
+    static BLOCK: Arc<Block>;
 }
 
 /// Handle an [`atomic`] block gets. Lock it for each statement; drop
 /// the guard before a nested `atomic()`.
 pub struct AtomicTx {
-    slot: Arc<Slot>,
+    block: Arc<Block>,
 }
 
 impl AtomicTx {
@@ -79,116 +165,69 @@ impl AtomicTx {
     /// `_tx` helpers take `&mut *guard`.
     ///
     /// # Errors
-    /// A driver error rolling back a cancelled nested block.
+    /// [`ExecError::NestedAtomic`] while a guard is held or a nested block
+    /// is open; [`ExecError::AtomicAborted`] after a failed savepoint.
     pub async fn lock(&self) -> Result<TxGuard<'_>, ExecError> {
-        let mut st = self.slot.state.lock().await;
-        st.settle(&self.slot).await?;
-        Ok(TxGuard(st))
+        let slot = &self.block.slot;
+        let guard = acquire(slot).await?;
+        if guard.depth != self.block.depth {
+            return Err(ExecError::NestedAtomic);
+        }
+        slot.guards.fetch_add(1, Ordering::SeqCst);
+        Ok(TxGuard {
+            guard,
+            slot: Arc::clone(slot),
+            _handle: PhantomData,
+        })
     }
 }
 
 /// Exclusive use of an [`atomic`] block's transaction, from [`AtomicTx::lock`].
-pub struct TxGuard<'a>(tokio::sync::MutexGuard<'a, TxState>);
+pub struct TxGuard<'a> {
+    guard: OwnedMutexGuard<TxState>,
+    slot: Arc<Slot>,
+    _handle: PhantomData<&'a AtomicTx>,
+}
+
+impl Drop for TxGuard<'_> {
+    fn drop(&mut self) {
+        self.slot.guards.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl std::ops::Deref for TxGuard<'_> {
     type Target = PoolTx<'static>;
     fn deref(&self) -> &PoolTx<'static> {
-        self.0.tx.as_ref().expect("atomic transaction is open")
+        self.guard.tx.as_ref().expect("atomic transaction is open")
     }
 }
 
 impl std::ops::DerefMut for TxGuard<'_> {
     fn deref_mut(&mut self) -> &mut PoolTx<'static> {
-        self.0.tx()
+        self.guard.tx()
     }
 }
 
-/// Open transactions and callback levels of one task.
-#[derive(Default)]
-struct Scope {
-    slots: Vec<Arc<Slot>>,
-    levels: Vec<Level>,
-}
-
-/// `on_commit` callbacks queued by one block.
-struct Level {
-    pool: usize,
-    callbacks: Vec<Callback>,
-}
-
-tokio::task_local! {
-    /// Set by the first [`atomic`] in a task; nested blocks reuse it.
-    static ON_COMMIT: Mutex<Scope>;
-}
-
-fn with_scope<R>(f: impl FnOnce(&mut Scope) -> R) -> Option<R> {
-    ON_COMMIT
-        .try_with(|s| f(&mut s.lock().unwrap_or_else(PoisonError::into_inner)))
-        .ok()
-}
-
-/// Identity of a pool; clones of one pool share it.
-fn pool_key(pool: &Pool) -> usize {
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(p) => Arc::as_ptr(&p.connect_options()) as usize,
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(p) => Arc::as_ptr(&p.connect_options()) as usize,
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(p) => Arc::as_ptr(&p.connect_options()) as usize,
-    }
-}
-
-/// A block's callback level. Dropped untaken, its callbacks drop too.
-struct LevelGuard(Option<usize>);
-
-impl LevelGuard {
-    fn open(pool: usize) -> Self {
-        Self(with_scope(|s| {
-            s.levels.push(Level {
-                pool,
-                callbacks: Vec::new(),
-            });
-            s.levels.len() - 1
-        }))
-    }
-
-    fn take(mut self) -> Vec<Callback> {
-        self.0
-            .take()
-            .and_then(|at| with_scope(|s| s.levels.drain(at..).flat_map(|l| l.callbacks).collect()))
-            .unwrap_or_default()
-    }
-}
-
-impl Drop for LevelGuard {
-    fn drop(&mut self) {
-        if let Some(at) = self.0 {
-            with_scope(|s| s.levels.truncate(at));
-        }
-    }
-}
-
-/// Unregisters an outermost block's slot, however the block ends.
-struct SlotGuard(Arc<Slot>);
-
-impl Drop for SlotGuard {
-    fn drop(&mut self) {
-        with_scope(|s| s.slots.retain(|x| !Arc::ptr_eq(x, &self.0)));
-    }
-}
-
-/// An open savepoint. Dropped before it ends, it is rolled back on next use.
+/// An open savepoint. Dropped before its end starts, it is rolled back on next use.
 struct OpenSavepoint {
     slot: Arc<Slot>,
     depth: usize,
-    ended: bool,
+    ending: bool,
 }
 
 impl Drop for OpenSavepoint {
     fn drop(&mut self) {
-        if !self.ended {
-            self.slot.mark_cancelled(self.depth);
+        if !self.ending {
+            let _ = self
+                .slot
+                .cancelled
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
+                    Some(if c == 0 {
+                        self.depth
+                    } else {
+                        c.min(self.depth)
+                    })
+                });
         }
     }
 }
@@ -204,18 +243,25 @@ impl Drop for OpenSavepoint {
 /// transaction rolls back, the user record never lands, the email
 /// references a phantom user.
 ///
-/// ```ignore
-/// use rustango::sql::{atomic, on_commit, insert_tx};
+/// ```no_run
+/// # async fn demo(pool: &rustango::sql::Pool, q: &rustango::core::InsertQuery)
+/// # -> Result<(), rustango::sql::ExecError> {
+/// use rustango::sql::{atomic, insert_tx, on_commit};
 ///
-/// atomic(&pool, |tx| Box::pin(async move {
-///     insert_tx(&mut *tx.lock().await?, &user_insert).await?;
-///     on_commit(|| {
-///         // Sync. For async work, spawn here.
-///         tokio::spawn(async move { send_welcome_email(user_id).await });
-///     });
+/// // The closures capture owned values: they must not borrow the caller.
+/// let (p, q1, q2) = (pool.clone(), q.clone(), q.clone());
+/// atomic(pool, move |tx| Box::pin(async move {
+///     insert_tx(&mut *tx.lock().await?, &q1).await?;
+///     // Nested: a savepoint on the same connection.
+///     let _ = atomic(&p, move |sp| Box::pin(async move {
+///         insert_tx(&mut *sp.lock().await?, &q2).await
+///     }))
+///     .await; // its failure keeps the first row
+///     on_commit(|| println!("committed"));
 ///     Ok(())
 /// }))
-/// .await?;
+/// .await
+/// # }
 /// ```
 ///
 /// The [`atomic!`](crate::atomic) macro hides the `Box::pin` ceremony.
@@ -224,16 +270,26 @@ impl Drop for OpenSavepoint {
 /// statement and pass `&mut *guard` to the `_tx` helpers, or match the
 /// guard's [`PoolTx`] variant for raw sqlx.
 ///
-/// **Nesting:** `atomic` on the same pool inside the block runs in a
-/// savepoint on the same connection. Its `Err` rolls back only its own
-/// writes; its callbacks wait for the outermost commit. Holding a
-/// [`TxGuard`] across the nested call returns
-/// [`ExecError::NestedAtomic`]. A different pool gets its own
-/// transaction. A dropped (cancelled) block is rolled back.
+/// **Nesting** is per pool object: `atomic` on the same `Pool` (or a
+/// clone) inside the block runs in a savepoint on the same connection.
+/// Pass the request's pool down rather than looking it up again. Its
+/// `Err` rolls back only its own writes; its callbacks wait for the
+/// outermost commit. A different pool gets its own transaction. A
+/// dropped (cancelled) or panicking nested block is rolled back. Two
+/// nested blocks on one transaction at once (`join!`), or a
+/// [`TxGuard`] held across a nested call, return
+/// [`ExecError::NestedAtomic`]. If a savepoint statement fails, the
+/// whole transaction rolls back and [`ExecError::AtomicAborted`] is
+/// returned.
+///
+/// **Costs:** past 64 open savepoints in one transaction PostgreSQL
+/// spills its subtransaction cache, so avoid nesting in hot loops. On
+/// MySQL a deadlock inside a nested block rolls back the whole outer
+/// transaction.
 ///
 /// **Spawned tasks** do not inherit the block: `atomic` inside
-/// `tokio::spawn` opens a separate transaction, and `on_commit` there
-/// panics.
+/// `tokio::spawn` opens a separate transaction (a real, independent
+/// commit), and `on_commit` there panics.
 ///
 /// **Callbacks fire in registration order**, serially, after the
 /// `COMMIT` returns OK. A panicking callback aborts the chain.
@@ -249,32 +305,22 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    if ON_COMMIT.try_with(|_| ()).is_ok() {
-        run(pool, f).await
-    } else {
-        ON_COMMIT
-            .scope(Mutex::new(Scope::default()), run(pool, f))
-            .await
+    let id = PoolId::of(pool);
+    let current = BLOCK.try_with(Arc::clone).ok();
+    let same_pool =
+        std::iter::successors(current.clone(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id));
+    match same_pool {
+        Some(parent) => nested(parent, current, f).await,
+        None => outermost(pool, id, current, f).await,
     }
 }
 
-async fn run<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
-where
-    F: for<'tx> FnOnce(
-        &'tx AtomicTx,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
-    >,
-{
-    let key = pool_key(pool);
-    let open = with_scope(|s| s.slots.iter().rev().find(|x| x.pool == key).cloned()).flatten();
-    match open {
-        Some(slot) => nested(slot, f).await,
-        None => outermost(pool, key, f).await,
-    }
-}
-
-async fn outermost<F, T>(pool: &Pool, key: usize, f: F) -> Result<T, ExecError>
+async fn outermost<F, T>(
+    pool: &Pool,
+    id: PoolId,
+    enclosing: Option<Arc<Block>>,
+    f: F,
+) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
         &'tx AtomicTx,
@@ -283,41 +329,60 @@ where
     >,
 {
     let slot = Arc::new(Slot {
-        pool: key,
-        state: tokio::sync::Mutex::new(TxState {
+        state: Arc::new(tokio::sync::Mutex::new(TxState {
             tx: Some(transaction_pool(pool).await?),
             depth: 0,
-        }),
+            poisoned: false,
+        })),
         cancelled: AtomicUsize::new(0),
+        guards: AtomicUsize::new(0),
     });
-    with_scope(|s| s.slots.push(Arc::clone(&slot)));
-    let _registered = SlotGuard(Arc::clone(&slot));
-    let level = LevelGuard::open(key);
-    let handle = AtomicTx {
+    let block = Arc::new(Block {
+        pool: id,
         slot: Arc::clone(&slot),
+        depth: 0,
+        enclosing,
+        callbacks: Mutex::new(Vec::new()),
+        committed: AtomicBool::new(false),
+    });
+    let handle = AtomicTx {
+        block: Arc::clone(&block),
     };
-    let res = f(&handle).await;
+    let res = BLOCK.scope(Arc::clone(&block), f(&handle)).await;
+    // Waits for any background savepoint work, then rolls back a
+    // cancelled nested block before deciding.
     let mut st = slot.state.lock().await;
-    let settled = st.settle(&slot).await;
+    let settled = match st.settle(&slot).await {
+        Ok(()) if st.depth != 0 => Err(ExecError::AtomicAborted),
+        other => other,
+    };
     let tx = st.tx.take().expect("atomic transaction is open");
     drop(st);
     match res.and_then(|v| settled.map(|()| v)) {
         Ok(v) => {
             tx.commit().await?;
-            for cb in level.take() {
-                cb();
-            }
+            block.committed.store(true, Ordering::SeqCst);
+            let callbacks = block.take_callbacks();
+            BLOCK.sync_scope(block, || {
+                for cb in callbacks {
+                    cb();
+                }
+            });
             Ok(v)
         }
         Err(e) => {
-            // Callbacks drop with `level`.
+            // Callbacks drop with `block`.
             let _ = tx.rollback().await;
             Err(e)
         }
     }
 }
 
-async fn nested<F, T>(slot: Arc<Slot>, f: F) -> Result<T, ExecError>
+async fn nested<F, T>(
+    parent: Arc<Block>,
+    enclosing: Option<Arc<Block>>,
+    f: F,
+) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
         &'tx AtomicTx,
@@ -325,47 +390,70 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    let depth = {
-        let mut st = slot.state.try_lock().map_err(|_| ExecError::NestedAtomic)?;
-        st.settle(&slot).await?;
-        let depth = st.depth + 1;
-        st.savepoint("SAVEPOINT", depth).await?;
-        st.depth = depth;
-        depth
-    };
+    let slot = Arc::clone(&parent.slot);
+    let guard = acquire(&slot).await?;
+    let parent_depth = parent.depth;
+    let depth = in_background(async move {
+        let mut g = guard;
+        // Only the innermost open block may open a child.
+        if g.depth != parent_depth {
+            return Err(ExecError::NestedAtomic);
+        }
+        g.savepoint("SAVEPOINT", parent_depth + 1).await?;
+        g.depth = parent_depth + 1;
+        Ok(g.depth)
+    })
+    .await?;
     let mut open = OpenSavepoint {
         slot: Arc::clone(&slot),
         depth,
-        ended: false,
+        ending: false,
     };
-    let level = LevelGuard::open(slot.pool);
-    let handle = AtomicTx {
+    let block = Arc::new(Block {
+        pool: parent.pool.clone(),
         slot: Arc::clone(&slot),
+        depth,
+        enclosing,
+        callbacks: Mutex::new(Vec::new()),
+        committed: AtomicBool::new(false),
+    });
+    let handle = AtomicTx {
+        block: Arc::clone(&block),
     };
-    let res = f(&handle).await;
-    let mut st = slot.state.lock().await;
-    st.settle(&slot).await?;
-    match res {
-        Ok(v) => {
-            st.savepoint("RELEASE SAVEPOINT", depth).await?;
-            st.depth = depth - 1;
-            open.ended = true;
-            let callbacks = level.take();
-            with_scope(|s| {
-                if let Some(parent) = s.levels.iter_mut().rev().find(|l| l.pool == slot.pool) {
-                    parent.callbacks.extend(callbacks);
-                }
-            });
-            Ok(v)
+    let res = BLOCK.scope(Arc::clone(&block), f(&handle)).await;
+    let guard = match acquire(&slot).await {
+        Ok(g) => g,
+        // `open` is still armed: the next use rolls this savepoint back.
+        Err(e) => return Err(res.err().unwrap_or(e)),
+    };
+    // From here the background task finishes the savepoint either way.
+    open.ending = true;
+    let release = res.is_ok();
+    let ended = in_background(async move {
+        let mut g = guard;
+        if g.depth != depth {
+            g.poisoned = true;
+            return Err(ExecError::AtomicAborted);
         }
-        Err(e) => {
-            // On failure `open` stays unended, so the next use retries.
-            if st.rollback_to(depth).await.is_ok() {
-                open.ended = true;
-            }
-            Err(e)
+        if release {
+            g.savepoint("RELEASE SAVEPOINT", depth).await?;
+            g.depth = depth - 1;
+            Ok(())
+        } else {
+            g.rollback_to(depth).await
         }
-    }
+    })
+    .await;
+    // A block's own error wins over a failure to end its savepoint.
+    let v = res?;
+    ended?;
+    let callbacks = block.take_callbacks();
+    parent
+        .callbacks
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .extend(callbacks);
+    Ok(v)
 }
 
 /// Sugar over [`atomic`] that wraps the body in `Box::pin(async move { … })`
@@ -419,33 +507,35 @@ pub fn on_commit<F>(f: F)
 where
     F: FnOnce() + Send + 'static,
 {
-    let now = ON_COMMIT
-        .try_with(move |s| {
-            let mut s = s.lock().unwrap_or_else(PoisonError::into_inner);
-            match s.levels.last_mut() {
-                Some(level) => {
-                    level.callbacks.push(Box::new(f));
-                    None
-                }
-                None => Some(f),
-            }
-        })
-        .unwrap_or_else(|_| {
-            panic!(
-                "rustango::sql::on_commit called outside an `atomic` block — \
-                 the callback would never fire. Wrap the caller in \
-                 `atomic(&pool, |tx| async move {{ ... on_commit(...) ... }})`."
-            );
-        });
-    if let Some(f) = now {
+    let block = BLOCK.try_with(Arc::clone).unwrap_or_else(|_| {
+        panic!(
+            "rustango::sql::on_commit called outside an `atomic` block — \
+             the callback would never fire. Wrap the caller in \
+             `atomic(&pool, |tx| async move {{ ... on_commit(...) ... }})`."
+        );
+    });
+    if block.committed.load(Ordering::SeqCst) {
         f();
+    } else {
+        block
+            .callbacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Box::new(f));
     }
 }
 
 /// Returns the number of callbacks queued in the current `atomic`
-/// scope. Useful for tests. Returns 0 when called outside an
-/// `atomic` block.
+/// block and the blocks around it. Useful for tests. Returns 0 when
+/// called outside an `atomic` block.
 #[must_use]
 pub fn on_commit_pending() -> usize {
-    with_scope(|s| s.levels.iter().map(|l| l.callbacks.len()).sum()).unwrap_or(0)
+    std::iter::successors(BLOCK.try_with(Arc::clone).ok(), |b| b.enclosing.clone())
+        .map(|b| {
+            b.callbacks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len()
+        })
+        .sum()
 }

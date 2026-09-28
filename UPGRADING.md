@@ -177,6 +177,7 @@ tenant. A CDN in front must vary on the tenant header itself.
 `DatabaseCache` keys over 255 bytes, or ending in `#` plus 64 hex, are
 now stored hashed, so those entries miss once. Run `cache.clear()`
 after upgrading to drop the old rows.
+
 ### Bounded update/delete; `atomic()` hands out a lockable `AtomicTx`
 
 `update()` / `delete()` now honour `limit`, `offset` and `order_by`
@@ -187,6 +188,7 @@ gets `&AtomicTx`, not `&mut PoolTx`: write `insert_tx(&mut *tx.lock().await?, &q
 A nested `atomic(&pool, …)` on the same pool is now a savepoint on the
 outer transaction, and its `on_commit` callbacks wait for the outermost
 commit. Drop the `TxGuard` before nesting, or get `ExecError::NestedAtomic`.
+
 ### SSO signs in by link, not by email
 
 Existing SSO users are refused until they are linked. Either turn on
@@ -198,6 +200,7 @@ Run `makemigrations` + `migrate` for the new `allow_email_link` column on
 email linking reads as off. `rustango_sso_links` is created on first use.
 `find_or_provision_member(pool, email, profile, auto)` is now
 `(pool, &ProviderKey, allow_email_link, profile, auto)`.
+
 ### ViewSet and template views hide scoped-out rows
 
 A model with a `global_scope` served through `ViewSet` or the template
@@ -207,6 +210,13 @@ is a 404 (#1746). An endpoint that must reach them should use
 ViewSet PUT/PATCH that moves its row out of a scope or filter backend
 answers `204 No Content`; a create whose row lands outside answers
 `201` with no body (`null` at that index in a bulk create).
+
+Nested writes that used to survive an outer rollback (an audit row, say)
+are now rolled back with it, silently. For an independent commit, use a
+different pool or `tokio::spawn`. Nesting is per pool object: pass the
+request's pool down instead of looking it up again. On MySQL before
+8.0.21 and MariaDB before 11.1 a bounded update/delete may scan the whole
+table.
 
 ### The trusted client IP is the rightmost untrusted hop
 

@@ -984,6 +984,8 @@ jobs:
             --test admin_list_display_jsonpath_sqlite_live \
             --test audit_pool_sqlite_live \
             --test audit_pool_writes_tri \
+            --test atomic_savepoints_tri \
+            --test orm_bounded_dml_tri \
             --test bulk_update_api_sqlite_live \
             --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
@@ -1214,6 +1216,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test values_tri
       - run: cargo test -p rustango --features mysql,testkit --test model_shortcut_scopes_tri
       - run: cargo test -p rustango --features mysql,testkit --test audit_pool_writes_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
+      - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
@@ -1325,8 +1329,6 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features mysql --test orm_json_dates
       - run: cargo test -p rustango --no-default-features --features mysql --test orm_writes
       - run: cargo test -p rustango --no-default-features --features mysql --test orm_delta
-      - run: cargo test -p rustango --no-default-features --features mysql --test orm_bounded_dml
-      - run: cargo test -p rustango --no-default-features --features mysql --test atomic_savepoints
 
   # PostGIS geometry live suite (#443). The regular `postgres_test` runs
   # against `pgvector/pgvector:pg16`, which has no PostGIS, so the

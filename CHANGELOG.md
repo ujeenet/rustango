@@ -24,17 +24,25 @@ With `tenancy` on and no tenant context it does not cache; opt out per
 route with `tenant_agnostic(true)`. `DatabaseCache` stores keys over
 255 bytes as a 190-byte head plus SHA-256, so they round-trip on MySQL
 instead of truncating and colliding.
+
 ### Security — bounded update/delete; nested `atomic()` uses savepoints (#1666)
 
 `QuerySet::update()` and `delete()` dropped `limit`, `offset` and
 `order_by`, so `.limit(1).delete()` deleted every matching row. They
 now bound the statement by primary key on every backend, and refuse
-(`QueryError::BoundedDmlUnsupported`) when they cannot. A nested
-`atomic()` on the same pool opened a second transaction that survived
-the outer rollback and deadlocked a one-connection pool; it now runs in
-a savepoint on the outer connection. `on_commit` callbacks fire only at
-the outermost commit. SQLite
-`.offset(n)` without `.limit()` no longer emits invalid SQL.
+(`QueryError::BoundedDmlUnsupported`, reason `BoundedDmlReason`) when
+they cannot, including a negative limit or offset. A nested `atomic()`
+on the same pool opened a second transaction that survived the outer
+rollback and deadlocked a one-connection pool; it now runs in a
+savepoint on the outer connection. `on_commit` callbacks fire only at
+the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
+emits invalid SQL.
+
+**Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
+statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
+`ExecError::NestedAtomic`, `ExecError::AtomicAborted`,
+`QueryError::BoundedDmlUnsupported`, `BoundedDmlReason`.
+
 ### Security — SSO links accounts by provider subject, email linking opt-in
 
 SSO logins (bare admin, tenant admin, member) now sign in the user linked
@@ -43,6 +51,7 @@ matching email links a first-time user only when the provider has the new
 `allow_email_link` (default off), and never a superuser or staff account.
 `sso::resolve_by_slug` returns `ResolvedProvider`, and
 `member_auth::find_or_provision_member` takes a `ProviderKey`.
+
 ### Security — ViewSet and template views apply global scopes (#1746)
 
 `ViewSet` and `ListView` / `DetailView` / `UpdateView` / `DeleteView`
