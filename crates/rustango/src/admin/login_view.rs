@@ -550,8 +550,8 @@ fn render_change_password_form(
 struct TotpEnrollInput {
     #[serde(default)]
     totp_code: Option<String>,
-    /// Set to `reset=1` to re-enroll an already-enabled account, with
-    /// `totp_code` from the current device (#1776).
+    /// Set to `reset=1` with `totp_code` from the current device (#1776) to
+    /// re-enroll; the current device stays active until the new one is confirmed.
     #[serde(default)]
     reset: Option<String>,
 }
@@ -596,12 +596,17 @@ async fn totp_enroll_form(State(state): State<AppState>) -> Response {
     };
     let _ = super::totp_store::ensure_table(&state.pool).await;
     let device = super::totp_store::device(&state.pool, session.user_id).await;
+    // A re-enroll's pending key is shown only in the reset response, so
+    // a session alone cannot read it back (#1756).
     if device.as_ref().is_some_and(|d| d.confirmed) {
         return Html(render_totp_enroll(&state, true, "", "", None, None)).into_response();
     }
     // Reuse a pending secret if there is one, else store a fresh
     // unconfirmed one, so a page reload shows the same setup.
-    let secret = match device.and_then(|d| crate::totp::TotpSecret::from_base32(&d.secret_base32)) {
+    let pending = device
+        .as_ref()
+        .and_then(super::totp_store::AdminTotp::pending_secret);
+    let secret = match pending {
         Some(s) => s,
         None => {
             let s = crate::totp::TotpSecret::generate();
@@ -641,8 +646,8 @@ async fn totp_enroll_submit(
     };
     let _ = super::totp_store::ensure_table(&state.pool).await;
 
-    // Re-enroll: a current code first, then the fresh setup. The code
-    // goes through the login gate, so it cannot be brute-forced.
+    // Re-enroll: a current code first, then stage a fresh secret. The
+    // code goes through the login gate, so it cannot be brute-forced.
     if form.reset.is_some() {
         let attempt = match crate::login_throttle::shared()
             .begin(
@@ -685,24 +690,18 @@ async fn totp_enroll_submit(
     }
 
     // Confirm: verify the submitted code against the pending secret.
-    let Some(device) = super::totp_store::device(&state.pool, session.user_id).await else {
+    let device = super::totp_store::device(&state.pool, session.user_id).await;
+    let reenroll = device.as_ref().is_some_and(|d| d.confirmed);
+    let pending = device
+        .as_ref()
+        .and_then(super::totp_store::AdminTotp::pending_secret);
+    let Some(secret) = pending else {
         return Html(render_totp_enroll(
             &state,
             false,
             "",
             "",
             Some("No enrollment in progress — reload the page."),
-            None,
-        ))
-        .into_response();
-    };
-    let Some(secret) = crate::totp::TotpSecret::from_base32(&device.secret_base32) else {
-        return Html(render_totp_enroll(
-            &state,
-            false,
-            "",
-            "",
-            Some("Stored setup key is invalid — re-enroll."),
             None,
         ))
         .into_response();
@@ -716,11 +715,17 @@ async fn totp_enroll_submit(
         super::totp_store::confirm_with_code(&state.pool, session.user_id, &secret, code).await
     };
     if matches!(confirmed, Ok(false)) {
-        let otpauth = enroll_otpauth(&state, &session.username, &secret);
+        // Never echo a re-enroll's key: that would hand it to any session.
+        let (key, otpauth) = if reenroll {
+            (String::new(), String::new())
+        } else {
+            let url = enroll_otpauth(&state, &session.username, &secret);
+            (secret.to_base32(), url)
+        };
         return Html(render_totp_enroll(
             &state,
             false,
-            &device.secret_base32,
+            &key,
             &otpauth,
             Some("That code didn't match. Try again."),
             None,

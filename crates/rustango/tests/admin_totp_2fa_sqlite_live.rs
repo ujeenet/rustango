@@ -73,17 +73,21 @@ async fn enroll_confirm_verify_lifecycle() {
         "wrong code rejected"
     );
 
-    // Re-enrollment replaces the device and drops back to pending.
+    // Re-enrollment keeps the old secret active until a code confirms
+    // the new one (#1756).
     let secret2 = TotpSecret::generate();
     totp_store::start_enrollment(&pool, uid, &secret2)
         .await
         .expect("re-enroll");
-    assert!(
-        totp_store::confirmed_secret(&pool, uid).await.is_none(),
-        "re-enrollment is pending until confirmed again"
+    let still = totp_store::confirmed_secret(&pool, uid).await.unwrap();
+    assert_eq!(
+        still.0, secret.0,
+        "the old secret gates login until confirmed"
     );
-    // Exactly one device per user (the old row was replaced, not added).
-    totp_store::confirm(&pool, uid).await.unwrap();
+    let code2 = totp::generate(&secret2, 30, 6);
+    assert!(totp_store::confirm_with_code(&pool, uid, &secret2, &code2)
+        .await
+        .unwrap());
     let got2 = totp_store::confirmed_secret(&pool, uid).await.unwrap();
     assert_eq!(got2.0, secret2.0, "new secret is the active one");
     assert_ne!(got2.0, secret.0, "old secret no longer stored");
