@@ -98,6 +98,10 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     allowed_hosts: Option<crate::host_validation::AllowedHostsLayer>,
     #[cfg(feature = "admin")]
     ssl_redirect: Option<crate::ssl_redirect::SslRedirectLayer>,
+    /// Outermost, so the access log and every throttle see its
+    /// `TrustedRealIp` (#1745).
+    #[cfg(feature = "admin")]
+    real_ip: Option<crate::real_ip::RealIpLayer>,
     _phantom: PhantomData<DB>,
 }
 
@@ -167,6 +171,8 @@ impl<DB: Database> Builder<DB> {
             allowed_hosts: None,
             #[cfg(feature = "admin")]
             ssl_redirect: None,
+            #[cfg(feature = "admin")]
+            real_ip: None,
             _phantom: PhantomData,
         }
     }
@@ -199,6 +205,15 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn ssl_redirect(mut self, layer: crate::ssl_redirect::SslRedirectLayer) -> Self {
         self.ssl_redirect = Some(layer);
+        self
+    }
+
+    /// Resolve the client IP from a trusted proxy on every route. A
+    /// `RealIpLayer` on the api router runs after the access log reads it.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn real_ip(mut self, layer: crate::real_ip::RealIpLayer) -> Self {
+        self.real_ip = Some(layer);
         self
     }
 
@@ -806,6 +821,14 @@ impl<DB: Database> Builder<DB> {
             crate::access_log::mount_observability(app, self.access_log, redact)
         } else {
             app
+        };
+        #[cfg(feature = "admin")]
+        let app = match self.real_ip {
+            Some(layer) => {
+                use crate::real_ip::RealIpRouterExt as _;
+                app.real_ip(layer)
+            }
+            None => app,
         };
 
         Ok(app)

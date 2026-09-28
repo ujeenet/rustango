@@ -26,6 +26,8 @@ use crate::Model;
         list_display = "username, is_superuser, active, created_at",
         search_fields = "username",
         ordering = "username",
+        readonly_fields = "created_at",
+        formfield_overrides = "password_hash: password",
     )
 )]
 pub struct AdminUser {
@@ -55,6 +57,34 @@ pub struct AdminUser {
     #[rustango(default = "true")]
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+// The admin form's password is hashed here, off the runtime.
+fn admin_hash_password<'a>(
+    values: &'a mut Vec<(&'static str, crate::core::SqlValue)>,
+    before: Option<&'a serde_json::Value>,
+) -> super::derived_fields::DeriveFuture<'a> {
+    Box::pin(async move {
+        let Some(plain) = super::derived_fields::take_secret(values, "password_hash") else {
+            return Ok(());
+        };
+        // A model on this table without the password widget echoes the hash.
+        if before.and_then(|r| r.get("password_hash")?.as_str()) == Some(plain.as_str()) {
+            return Ok(());
+        }
+        let hash = crate::passwords::hash_async(&plain)
+            .await
+            .map_err(|e| e.to_string())?;
+        values.push(("password_hash", crate::core::SqlValue::String(hash)));
+        Ok::<(), String>(())
+    })
+}
+
+inventory::submit! {
+    super::derived_fields::AdminDerivedField {
+        table: "rustango_admin_users",
+        derive: admin_hash_password,
+    }
 }
 
 impl AdminUser {

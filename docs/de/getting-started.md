@@ -171,7 +171,7 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 cargo rustango --help
 ```
 
-Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.58.0`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.58.1`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 
@@ -878,7 +878,7 @@ cargo build --release
 
 Stelle sicher, dass dein Reverse-Proxy:
 - HTTPS terminiert
-- `X-Forwarded-For` weiterleitet für akkurate IPs im `AccessLogLayer`
+- `X-Forwarded-For` weiterleitet und die App `RealIpLayer::trust_proxies([...])` mit diesem Proxy mountet (`server::Builder::real_ip`), für akkurate IPs im `AccessLogLayer` und in den Throttles (siehe [security.md](security.md))
 - `X-Forwarded-Host`, `X-Forwarded-Proto` weiterleitet
 - `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` verwendet, damit `ConnectInfo` für Rate-Limiting + IP-Filterung befüllt ist
 

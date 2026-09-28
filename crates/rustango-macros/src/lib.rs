@@ -11296,6 +11296,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             ))
         }
     };
+    let auto_now_flag = attrs.auto_now;
     let schema = quote! {{
         let mut f = #root::core::FieldSchema::new(#name, #column_lit, #field_type_tokens);
         f.nullable = #nullable;
@@ -11306,6 +11307,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         f.max = #max;
         f.default = #default;
         f.auto = #auto;
+        f.auto_now = #auto_now_flag;
         f.unique = #unique;
         f.generated_as = #generated_as;
         f.help_text = #help_text;
