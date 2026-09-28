@@ -22,12 +22,16 @@ use axum::response::Json;
 use axum::routing::{get, post};
 use axum::Router;
 use rustango::core::Model as _;
+use rustango::idempotency::{IdempotencyLayer, IdempotencyRouterExt as _};
+use rustango::ip_filter::{IpFilterLayer, IpFilterRouterExt as _};
 use rustango::jobs::{DatabaseJobQueue, JobQueue as _};
 use rustango::sql::Pool;
+use rustango::template_views::{CreateView, DeleteView, DetailView, ListView, UpdateView};
 use rustango::viewset::ViewSet;
 
 use super::jobs::{self, FlakyPaymentCapture, OrderConfirmation};
-use super::models::{Customer, InventoryItem, Order, OrderLine, Product};
+use super::models::{Customer, GiftCard, InventoryItem, Order, OrderLine, Product, Promotion};
+use super::probes::{self, ProbeResult};
 use super::serializers::{CustomerSerializer, OrderSerializer, ProductSerializer};
 use super::views;
 
@@ -65,11 +69,109 @@ pub fn api(
         .merge(order_lines(&pool))
         .merge(customers(&pool))
         .merge(inventory(&pool))
+        .merge(promotions(&pool))
+        .merge(gift_cards(&pool))
+        .merge(promotion_pages(&pool))
         .route("/api/v1/orders/{id}/confirm", post(confirm_order))
+        .merge(payments(cache.clone()))
         .merge(storefront(cache))
         .route("/_soak/info", get(soak_info))
         .route("/_soak/jobs", get(soak_jobs))
+        .merge(probe_routes())
         .with_state(state)
+}
+
+/// Promotions over the API. The global scope hides `visible = false`
+/// rows from list, detail, update and delete (#1746).
+fn promotions(pool: &Pool) -> Router<AppState> {
+    ViewSet::for_model(Promotion::SCHEMA)
+        .filter_fields(&["code", "visible"])
+        .search_fields(&["code"])
+        .limit_offset_pagination()
+        .router_pool("/api/v1/promotions", pool.clone())
+        .with_state(())
+}
+
+/// The card code is the primary key, and a create keeps it (#1671).
+fn gift_cards(pool: &Pool) -> Router<AppState> {
+    ViewSet::for_model(GiftCard::SCHEMA)
+        .router_pool("/api/v1/gift-cards", pool.clone())
+        .with_state(())
+}
+
+/// Server-rendered promotion pages. They apply the global scope like
+/// the API (#1746), and every POST needs the CSRF token (#1669).
+fn promotion_pages(pool: &Pool) -> Router<AppState> {
+    let tera = views::promotion_templates();
+    let s = Promotion::SCHEMA;
+    Router::new()
+        .merge(ListView::for_model(s).router("/promos", tera.clone(), pool.clone()))
+        .merge(CreateView::for_model(s).success_url("/promos").router("/promos", tera.clone(), pool.clone()))
+        .merge(DetailView::for_model(s).router("/promos", tera.clone(), pool.clone()))
+        .merge(UpdateView::for_model(s).success_url("/promos").router("/promos", tera.clone(), pool.clone()))
+        .merge(DeleteView::for_model(s).success_url("/promos").router("/promos", tera, pool.clone()))
+        .with_state(())
+}
+
+/// A retried payment POST must not charge twice, and must not replay
+/// another caller's answer (#1668).
+fn payments(cache: rustango::cache::BoxedCache) -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/payments", post(probes::payment))
+        .route("/api/v1/refunds", post(probes::payment))
+        .idempotency(IdempotencyLayer::new(cache).scope(format!("{}.payments", cache_namespace())))
+}
+
+fn probe_routes() -> Router<AppState> {
+    Router::new()
+        .route("/_soak/ip", get(probes::client_ip))
+        // Refuses every IPv4 client. On a dual-stack listener those
+        // arrive as `::ffff:a.b.c.d` and must still match (#1673).
+        .merge(
+            Router::new()
+                .route("/_soak/v4-blocked", get(|| async { "reached" }))
+                .ip_filter(IpFilterLayer::block(["0.0.0.0/0"]).expect("valid CIDR")),
+        )
+        .route("/_soak/service-token", get(probes::service_token))
+        .route("/_soak/webhooks/probe", post(|Json(b): Json<serde_json::Value>| probes::webhook_probe(b)))
+        .route(
+            "/_soak/hook-sink/{nonce}",
+            get(|Path(n): Path<String>| probes::hook_sink_count(n))
+                .post(|Path(n): Path<String>| probes::hook_sink_hit(n)),
+        )
+        .route("/_soak/scopes/seed", post(|State(st): State<AppState>| async move { probes::scopes_seed(&st.pool).await }))
+        .route("/_soak/scopes/row/{pk}", get(scopes_row))
+        .route("/_soak/scopes/shortcuts", post(|State(st): State<AppState>| async move { probes::scopes_shortcuts(&st.pool).await }))
+        .route("/_soak/audit/probe", post(|State(st): State<AppState>| async move { probes::audit_probe(&st.pool).await }))
+        .route("/_soak/dml/bounded", post(|State(st): State<AppState>| async move { probes::dml_bounded(&st.pool).await }))
+        .route("/_soak/dml/atomic", post(|State(st): State<AppState>| async move { probes::dml_atomic(&st.pool).await }))
+        .route("/_soak/dbcache", post(dbcache))
+}
+
+async fn scopes_row(State(st): State<AppState>, Path(pk): Path<i64>) -> ProbeResult {
+    probes::scopes_row(&st.pool, pk).await
+}
+
+async fn dbcache(State(st): State<AppState>, Json(b): Json<serde_json::Value>) -> ProbeResult {
+    probes::dbcache(&st.pool, b).await
+}
+
+/// The proxies whose `X-Forwarded-For` this deployment believes, from
+/// `TRUSTED_PROXIES` (comma-separated CIDRs). Unset trusts none.
+#[must_use]
+pub fn real_ip_layer() -> rustango::real_ip::RealIpLayer {
+    let nets: Vec<String> = std::env::var("TRUSTED_PROXIES")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let layer = rustango::real_ip::RealIpLayer::default();
+    if nets.is_empty() {
+        return layer;
+    }
+    layer.trust_proxies(nets).expect("TRUSTED_PROXIES holds valid CIDRs")
 }
 
 /// The one cached route.

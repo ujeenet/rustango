@@ -19,7 +19,7 @@ default-run = "platform_commerce_saas"
 # `rustango` re-exports every proc-macro (Model / Form / ViewSet /
 # Serializer / embed_migrations / main), so you do NOT need to depend
 # on `rustango-macros` directly. Use `rustango::Model` etc.
-rustango = { path = "../..", default-features = false, features = ["batteries", "tenancy", "cache-redis", "cache-page"] }
+rustango = { path = "../..", default-features = false, features = ["batteries", "tenancy", "admin-sso", "cache-redis", "cache-page"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
 tower = { version = "0.5", features = ["util"] }
@@ -32,6 +32,8 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 # a project that implements a Job has to name it directly.
 async-trait = "0.1"
 tracing = "0.1"
+# The promotion pages build their own `Tera` (`template_views`).
+tera = { version = "1.20", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 

@@ -46,7 +46,13 @@ app migrate
 log "migrate done"
 
 if [ "$MODE" = "single" ]; then
-    log "single-tenant: nothing else to do"
+    # The admin login the driver and the browser agent use, plus a
+    # second account the login-lock checks may lock (#1609).
+    app create-admin soakadmin --password "${SOAK_ADMIN_PASSWORD:-soak-admin-pw}" --superuser \
+        2>/dev/null || log "admin soakadmin already exists"
+    app create-admin lockprobe --password "${SOAK_LOCKPROBE_PASSWORD:-soak-lockprobe-pw}" \
+        2>/dev/null || log "admin lockprobe already exists"
+    log "single-tenant: done"
     exit 0
 fi
 
@@ -87,6 +93,10 @@ if ! app list-tenants >/dev/null 2>&1; then
 fi
 app create-operator soakops --password "${SOAK_OPERATOR_PASSWORD:-soak-operator-pw}" \
     2>/dev/null || log "operator already exists"
+# Operators the checks may lock or re-password, so `soakops` stays usable.
+for op in lockops pwops; do
+    app create-operator "$op" --password "soak-${op}-pw" 2>/dev/null || log "operator $op already exists"
+done
 
 # ----------------------------------------------------------------- tenants
 #
@@ -140,6 +150,22 @@ log "tenants created: $created (of $TENANTS requested)"
 # same login is refused on t02 (GHSA-c4gg-mvfq-h268).
 app create-user t01 soakadmin --password "${SOAK_TENANT_ADMIN_PASSWORD:-soak-admin-pw}" \
     --superuser 2>/dev/null || log "tenant admin already exists"
+
+# One tenant per check family, so a lock or a password change on one
+# never gets in the way of another (or of the browser agent on t01).
+#   t03  SSO: a plain user, a staff user, a superuser, a spare
+#   t04  login lock and limits      t05  password change (#1338)
+#   t06  JWT                        t07  tenant admin CSRF (#1713)
+for pair in "t03 sso-user" "t03 sso-staff" "t03 sso-other" "t04 lockprobe" "t06 jwtuser"; do
+    slug=${pair%% *}; user=${pair#* }
+    app create-user "$slug" "$user" --password "soak-${user}-pw" 2>/dev/null \
+        || log "user $user on $slug already exists"
+done
+for pair in "t03 sso-super" "t05 pwchange" "t07 csrfadmin"; do
+    slug=${pair%% *}; user=${pair#* }
+    app create-user "$slug" "$user" --password "soak-${user}-pw" --superuser 2>/dev/null \
+        || log "user $user on $slug already exists"
+done
 
 # The two custom hostnames. `add-host` is what writes
 # `rustango_org_hosts`, which is what `RegisteredHostResolver` reads.
