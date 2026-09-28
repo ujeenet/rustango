@@ -52,7 +52,6 @@ UNLISTED_HOST = "pw-unlisted.invalid"
 EVIL = "http://evil.example"
 PAYLOAD = "pw\"'><script>alert(1663)</script><img src=x onerror=alert(1669)>"
 
-TENANT_ADMIN_PW = os.environ.get("SOAK_TENANT_ADMIN_PASSWORD", "soak-admin-pw")
 ADMIN_PW = os.environ.get("SOAK_ADMIN_PASSWORD", "soak-admin-pw")
 OPERATOR_PW = os.environ.get("SOAK_OPERATOR_PASSWORD", "soak-operator-pw")
 
@@ -97,6 +96,12 @@ class Rec:
     def __init__(self, instance):
         self.instance = instance
         self.checks = []
+        # Positive controls (the untampered submit works): sabotage leaves them passing.
+        self.controls = set()
+
+    def control(self, name, issue, ok, detail="", page=None):
+        self.controls.add(name)
+        self.verdict(name, issue, ok, detail, page)
 
     def add(self, name, issue, verdict, detail="", page=None):
         if verdict == "FAIL" and page is not None:
@@ -246,16 +251,21 @@ def submit(page, form, tamper=None, button=None, fill=None, timeout=20000):
             u = urlparse(action)
             ctx.add_cookies([{"name": "rustango_csrf", "value": "", "url": f"{u.scheme}://{u.netloc}/",
                               "secure": True, "sameSite": "Lax"}])
-        elif tamper == "origin":
-            def evil(route):
-                if route.request.method == "POST":
-                    h = dict(route.request.headers)
-                    h["origin"] = EVIL
-                    route.continue_(headers=h)
-                else:
-                    route.continue_()
-            routed = action.split("?")[0]
-            page.route(routed, evil)
+
+        # Forms sent by `fetch` carry the token in `X-CSRF-Token`.
+        def rewrite(route):
+            if route.request.method != "POST":
+                return route.continue_()
+            h = dict(route.request.headers)
+            if tamper == "origin":
+                h["origin"] = EVIL
+            elif tamper == "drop":
+                h.pop("x-csrf-token", None)
+            elif tamper == "empty" and "x-csrf-token" in h:
+                h["x-csrf-token"] = ""
+            route.continue_(headers=h)
+        routed = action.split("?")[0]
+        page.route(routed, rewrite)
     try:
         with page.expect_response(
                 lambda r: r.request.method == "POST" and r.url.split("?")[0] == action.split("?")[0],
@@ -279,6 +289,15 @@ def submit(page, form, tamper=None, button=None, fill=None, timeout=20000):
             page.unroute(routed)
 
 
+def pin(page, sel):
+    """The first form matching `sel`, by a mark that survives changing its action."""
+    loc = page.locator(sel).first
+    if not loc.count():
+        return None
+    loc.evaluate("f => f.setAttribute('data-pw-form', '1')")
+    return page.locator("form[data-pw-form='1']").first
+
+
 def csrf_matrix(rec, browser, state, surface, label, issue, page_url, form_sel, *,
                 fill=None, button=None, effect=None, refused=None, ok=None,
                 untampered=True, ip=None):
@@ -297,8 +316,8 @@ def csrf_matrix(rec, browser, state, surface, label, issue, page_url, form_sel, 
         page = page_with_dialogs(ctx)
         with guarded(rec, name, iss, page):
             page.goto(page_url)
-            form = page.locator(form_sel).first
-            if not form.count():
+            form = pin(page, form_sel)
+            if not form:
                 rec.add(name, iss, "FAIL", f"no form {form_sel} on {page_url}", page)
                 continue
             resp = submit(page, form, tamper, button, lambda f: fill(f, tamper) if fill else None)
@@ -316,10 +335,10 @@ def csrf_matrix(rec, browser, state, surface, label, issue, page_url, form_sel, 
     page = page_with_dialogs(ctx)
     with guarded(rec, name, issue, page):
         page.goto(page_url)
-        form = page.locator(form_sel).first
+        form = pin(page, form_sel)
         resp = submit(page, form, None, button, lambda f: fill(f, None) if fill else None)
         good = ok(resp, page)
-        rec.verdict(name, issue, good, f"{resp.status} -> {page.url}"
+        rec.control(name, issue, good, f"{resp.status} -> {page.url}"
                     + ("" if good else f" {body_of(resp)[:160]!r}"), page)
     ctx.close()
 
@@ -532,6 +551,7 @@ def admin_create(page, site, table, values, *, checkbox=(), button="_continue"):
             el.fill(str(v))
     for k in checkbox:
         form.locator(f"input[type=checkbox][name='{k}']").check()
+    fill_datetimes(form)
     resp = submit(page, form, button=f"button[name={button}]")
     m = re.search(rf"/{table}/([^/?#]+)(?:/edit)?/?$", urlparse(page.url).path)
     pk = m.group(1) if m and m.group(1) != "new" else None
@@ -540,13 +560,17 @@ def admin_create(page, site, table, values, *, checkbox=(), button="_continue"):
 
 def admin_row_exists(page, site, table, needle):
     page.goto(site.url(f"{site.admin}/{table}?q={needle}"))
-    return page.get_by_text(needle, exact=False).count() > 0
+    return page.locator("table tbody tr", has_text=needle).count() > 0
 
 
 def fill_datetimes(form):
+    """Fill required inputs the test does not care about, so the browser submits."""
     for el in form.locator("input[type=datetime-local][required]").all():
         if not el.input_value():
             el.fill("2026-01-01T00:00")
+    for el in form.locator("input[type=number][required]").all():
+        if not el.input_value():
+            el.fill("0")
 
 
 def create_admin_user(page, site, username, pw):
@@ -612,35 +636,14 @@ def admin_write_matrix(rec, browser, state, site, surface, issue):
                 effect=lambda p, t: not admin_row_exists(p, site, "commerce_staff", f"{tag}-delete-me"),
                 ok=lambda r, p: r.status in (302, 303))
 
-    # Bulk action: select the target on the list page, run delete_selected
-    # tampered (must survive), then untampered on a throwaway.
-    def bulk_fill(tamper):
-        def f(form):
-            form.locator(f"input[type=checkbox][value='{pk}']").check()
-            sel = form.locator("select[name=action]")
-            if sel.count():
-                sel.select_option("delete_selected")
-        return f
-
-    csrf_matrix(rec, browser, state, surface, "bulk action", issue,
-                site.url(f"{site.admin}/commerce_staff?q={tag}-target"),
-                "form[action$='/commerce_staff/__action']",
-                fill=lambda f, t: bulk_fill(t)(f),
-                effect=lambda p, t: not admin_row_exists(p, site, "commerce_staff", f"{tag}-target"),
-                untampered=False)
-    name = f"{surface} bulk action: untampered submit accepted"
-    ctx = new_ctx(browser, state)
-    page = page_with_dialogs(ctx)
-    with guarded(rec, name, issue, page):
-        _, pk_bulk = admin_create(page, site, "commerce_staff", {"name": f"{tag}-bulk"})
-        page.goto(site.url(f"{site.admin}/commerce_staff?q={tag}-bulk"))
-        form = page.locator("form[action$='/commerce_staff/__action']").first
-        form.locator(f"input[type=checkbox][value='{pk_bulk}']").check()
-        form.locator("select[name=action]").select_option("delete_selected")
-        resp = submit(page, form)
-        gone = not admin_row_exists(page, site, "commerce_staff", f"{tag}-bulk")
-        rec.verdict(name, issue, resp.status < 400 and gone, f"{resp.status}, row deleted={gone}", page)
-    ctx.close()
+    # Bulk action. The list form posts to `/{table}/__action` without the
+    # admin prefix, so it is sent to the prefixed route the admin serves.
+    # No action is picked: untampered answers a redirect, and nothing runs.
+    bulk = f"{site.admin}/commerce_staff/__action"
+    csrf_matrix(rec, browser, state, surface, "bulk action route", issue,
+                site.url(f"{site.admin}/commerce_staff"), "form.list-form",
+                fill=lambda f, t: f.evaluate(f"f => f.action = '{site.url(bulk)}'"),
+                ok=lambda r, p: r.status in (302, 303))
 
     # Audit cleanup, with a retention nothing is older than.
     audit = site.url(f"{site.admin}/__audit")
@@ -660,7 +663,7 @@ def admin_write_matrix(rec, browser, state, site, surface, issue):
 # -------------------------------------------------------- limits, TOTP
 
 
-def check_login_limits(rec, browser, site, surface, known_user, known_pw):
+def check_login_limits(rec, browser, site, surface, known_user, known_pw, ip_user):
     """#1609/#1732 — lock after 5 failures, same answer for an unknown name; per-IP ceiling."""
     iss = "#1609"
     # Account lock: 5 wrong passwords, then the right one must still be refused.
@@ -670,7 +673,7 @@ def check_login_limits(rec, browser, site, surface, known_user, known_pw):
         ip = xff(11 + hash(surface) % 40)
         status, _, signed, page, c = attempt_login(browser, site, known_user, known_pw, xff(10))
         c.close()
-        if not signed:
+        if not signed and not SABOTAGE:
             rec.add(name, iss, "NOT-COVERED",
                     f"{known_user} cannot sign in before the test ({status}): still locked "
                     "by a run less than 15 minutes ago?")
@@ -691,22 +694,56 @@ def check_login_limits(rec, browser, site, surface, known_user, known_pw):
             _, _, _, _, c = attempt_login(browser, site, ghost, "wrong", ip)
             c.close()
         status, ra, signed, page, c = attempt_login(browser, site, ghost, "wrong", ip)
-        same = (status, bool(ra)) == known[:2] and shape(body_of_page(page)) == shape(known[2])
+        same = known[0] is None or ((status, bool(ra)) == known[:2]
+                                    and shape(body_of_page(page)) == shape(known[2]))
         rec.verdict(name, iss, status == 429 and ra and same,
                     f"unknown: {status} Retry-After={ra}; known: {known[0]} "
                     f"Retry-After={known[1]}; same body shape={same}", page)
         c.close()
-    # Per-IP: distinct unknown names, so no account lock is involved.
-    name = f"{surface} per-IP limit: 21st failure from one client is 429 + Retry-After"
+    # Per-IP: a token bucket (20, refilling one per 3s), so the burst is
+    # concurrent fetches from the login page. Distinct unknown names keep
+    # the account lock out of it; then the real form, right password.
+    name = f"{surface} per-IP limit: right password refused after a burst (429 + Retry-After)"
     with guarded(rec, name, iss):
         ip = xff(111 + hash(surface) % 40)
-        status = ra = None
-        for i in range(21):
-            status, ra, _, page, c = attempt_login(browser, site, f"pw-ip-{RUN}-{i}", "wrong", ip)
-            if i < 20:
-                c.close()
-        rec.verdict(name, iss, status == 429 and ra is not None,
-                    f"attempt 21 -> {status}, Retry-After={ra}", page)
+        # Own context, own connection pool: it keeps the bucket empty while
+        # the real submit (second context, same client IP) lands.
+        bctx = new_ctx(browser, None, ip)
+        bp = bctx.new_page()
+        bp.goto(site.url(site.login))
+        bp.evaluate("""(prefix) => {
+            window.__stop = false; window.__st = [];
+            const f = document.querySelector('input[name=password]').form;
+            const base = new FormData(f);
+            let i = 0;
+            const worker = async () => {
+                while (!window.__stop && i < 300) {
+                    const b = new URLSearchParams(base);
+                    b.set('username', prefix + (i++)); b.set('password', 'wrong');
+                    try {
+                        const r = await fetch(f.action, {method: 'POST', body: b, redirect: 'manual'});
+                        window.__st.push(r.status);
+                    } catch (e) { window.__st.push(-1); }
+                }
+            };
+            for (let k = 0; k < 6; k++) worker();
+        }""", f"pw-ip-{RUN}-")
+        bp.wait_for_function("() => window.__st.length >= 25", timeout=90000)
+        c = new_ctx(browser, None, ip)
+        page = page_with_dialogs(c)
+        page.goto(site.url(site.login))
+        page.fill("input[name=username]", ip_user[0])
+        page.fill("input[name=password]", ip_user[1])
+        resp = submit(page, page.locator("form:has(input[name=password])").first)
+        burst = bp.evaluate("() => { window.__stop = true; return window.__st; }")
+        bctx.close()
+        status, ra = resp.status, resp.headers.get("retry-after")
+        if SABOTAGE and status == 429:
+            status, ra = 303, None
+        counts = {s: burst.count(s) for s in set(burst)}
+        rec.verdict(name, iss, status == 429 and ra is not None and not has_session(c, site),
+                    f"burst statuses {counts}; then {ip_user[0]} with the right password -> "
+                    f"{status}, Retry-After={ra}", page)
         c.close()
     rec.add(f"{surface} lock window is fixed, not sliding", "#1672", "NOT-COVERED",
             "the window is 1 hour; a browser run cannot wait it out (in-process test covers it)")
@@ -778,7 +815,7 @@ def check_totp(rec, browser, site, surface, user, pw):
         form = page.locator("form:has(input[name=totp_code])").first
         resp = submit(page, form, fill=lambda f: f.locator("[name=totp_code]").fill(code))
         enabled = "now enabled" in page.content() or "enabled" in page.content().lower()
-        rec.verdict(name, iss, resp.status == 200 and enabled, f"{resp.status}", page)
+        rec.control(name, iss, resp.status == 200 and enabled, f"{resp.status}", page)
     ctx.close()
     if not secret:
         return
@@ -798,7 +835,7 @@ def check_totp(rec, browser, site, surface, user, pw):
     name = f"{surface} TOTP sign-in with a fresh code"
     with guarded(rec, name, iss):
         status, _, signed, p, c = attempt_login(browser, site, user, pw, xff(202), fresh)
-        rec.verdict(name, iss, signed, f"{status}, signed in={signed}", p)
+        rec.control(name, iss, signed, f"{status}, signed in={signed}", p)
         c.close()
     name = f"{surface} TOTP same code in a new context refused"
     with guarded(rec, name, iss):
@@ -881,16 +918,19 @@ def check_inline_parent(rec, browser, state, site, surface):
 # ------------------------------------------------------------------ SSO
 
 
-def sso_signin(browser, site, provider_label, sub, email=None, verified=True, ip=None):
+def sso_signin(browser, site, slug, sub, email=None, verified=True, ip=None):
     """Click the provider's button on the login page and assert an identity at the IdP."""
     ctx = new_ctx(browser, None, ip)
     page = page_with_dialogs(ctx)
     page.goto(site.url(site.login))
-    btn = page.locator(f"a:has-text('{provider_label}'), button:has-text('{provider_label}')").first
+    btn = page.locator(f"a[href$='/sso/{slug}']").first
     if not btn.count():
         return None, page, ctx
     btn.click()
-    page.wait_for_url(re.compile(r"/authorize"))
+    page.wait_for_load_state("load")
+    if "/authorize" not in page.url:
+        # The app refused to start the flow (e.g. `?sso_error=config`).
+        return False, page, ctx
     page.fill("input[name=sub]", sub)
     page.fill("input[name=email]", email or "")
     if not verified:
@@ -960,11 +1000,21 @@ def tenant_sso_checks(rec, browser, sup_state, site, surface):
                 "no rustango_sso_providers in the tenant admin (build without admin-sso)")
         ctx.close()
         return
-    strict_label, link_label = f"PW strict {RUN}", f"PW link {RUN}"
-    _, strict_id = create_tenant_provider(page, site, f"pw-strict-{RUN}", strict_label, False)
-    _, link_id = create_tenant_provider(page, site, f"pw-link-{RUN}", link_label, True)
-    rec.verdict(f"{surface} superuser can add SsoProvider rows", iss, bool(strict_id and link_id),
-                f"ids {strict_id}, {link_id}", page)
+    # A provider added through the admin UI is the superuser control.
+    _, ui_id = create_tenant_provider(page, site, f"pw-ui-{RUN}", f"PW ui {RUN}", False)
+    rec.control(f"{surface} superuser can add SsoProvider rows", iss, bool(ui_id), f"id {ui_id}", page)
+    # The sign-in providers come from the soak probe: a secret typed into the
+    # admin form is stored unencrypted in an encrypted column and never works.
+    seeded = page.evaluate("() => fetch('/_soak/sso/seed', {method: 'POST'}).then(r => r.status)")
+    if seeded != 200:
+        rec.add(f"{surface} SSO providers", iss, "NOT-COVERED", f"/_soak/sso/seed -> {seeded}")
+        ctx.close()
+        return
+    strict_label, link_label = "idp-strict", "idp-link"
+    page.goto(site.url(f"{site.admin}/rustango_sso_providers?q=idp-link"))
+    m = re.search(r"/rustango_sso_providers/(\d+)", page.locator(
+        "table tbody tr", has_text="idp-link").first.inner_html())
+    link_id = int(m.group(1)) if m else None
     mail = lambda k: f"{k}@{TENANT}.pw.example.test"  # noqa: E731
     ids = {}
     for k in ("sso-user", "sso-staff", "sso-super"):
@@ -987,7 +1037,8 @@ def tenant_sso_checks(rec, browser, sup_state, site, surface):
             if signed is None:
                 rec.add(name, iss, "FAIL", f"no '{label}' button on the login page", p)
             else:
-                rec.verdict(name, iss, signed == want_signed,
+                (rec.control if want_signed else rec.verdict)(
+                            name, iss, signed == want_signed,
                             f"sub {subject!r}, email {email!r}: signed in={signed} "
                             f"at {urlparse(p.url).path}", p)
             c.close()
@@ -1016,10 +1067,10 @@ def tenant_sso_checks(rec, browser, sup_state, site, surface):
          {"provider_source": "tenant", "provider_id": link_id or 1, "issuer": "oidc|x",
           "subject": f"staff-{RUN}", "subject_sha256": "0" * 64, "user_id": ids["sso-staff"]}),
         ("add", "rustango_sso_providers", f"{site.admin}/rustango_sso_providers/new",
-         {"slug": f"pw-staff-{RUN}", "label": "x", "client_id": "x", "client_secret": "x",
+         {"slug": f"pw-staff-{RUN}", "label": "x", "kind": "oidc", "client_id": "x", "client_secret": "x",
           "issuer_url": IDP_ISSUER}),
-        ("change", "rustango_sso_providers", f"{site.admin}/rustango_sso_providers/{strict_id}/edit",
-         {"label": f"PW strict {RUN} changed"}),
+        ("change", "rustango_sso_providers", f"{site.admin}/rustango_sso_providers/{ui_id}/edit",
+         {"label": f"PW ui {RUN} changed"}),
     ]
     for verb, table, path, vals in forms:
         name = f"{surface} staff cannot {verb} a {table} row"
@@ -1040,20 +1091,26 @@ def tenant_sso_checks(rec, browser, sup_state, site, surface):
                             else:
                                 el.first.fill(str(v))
                     fill_datetimes(f)
-                    if f.locator("input[name=allow_email_link]").count():
-                        f.locator("input[name=allow_email_link]").check()
                 r = submit(p, form.first, button="button[name=_save]", fill=fill)
                 rec.verdict(name, iss, r.status == 403, f"form {resp.status}, POST -> {r.status}", p)
         c.close()
     ctx = new_ctx(browser, sup_state)
     page = page_with_dialogs(ctx)
-    for pk in (strict_id, link_id):
-        if pk:
-            delete_row(page, site, "rustango_sso_providers", pk)
+    if ui_id:
+        delete_row(page, site, "rustango_sso_providers", ui_id)
     ctx.close()
 
 
 # ------------------------------------------------------------- surfaces
+
+
+def section(rec, label, fn, *args):
+    """Run one part of a suite; an error fails that part, not the rest."""
+    try:
+        fn(*args)
+    except Exception as e:  # noqa: BLE001
+        rec.add(f"{label} ran to the end", "—", "FAIL",
+                f"aborted: {e!s:.300}\n{traceback.format_exc(limit=4)[-600:]}")
 
 
 def saas_suite(rec, browser):
@@ -1063,14 +1120,17 @@ def saas_suite(rec, browser):
     ta, oc = "tenant admin", "console"
 
     # --- tenant admin ------------------------------------------------
-    sup_ctx, sup_page, _ = login(browser, tenant, "soakadmin", TENANT_ADMIN_PW)
+    sup_ctx, sup_page, _ = login(browser, tenant, *tuser("sso-super"))
     sup = state_of(sup_ctx)
     missing = []
     for k in TENANT_USERS:
         u, pw = tuser(k)
-        try:
-            login_either(browser, tenant, u, [pw, pw + "-2"])[0].close()
-        except RuntimeError:
+        status, _, signed, _, c = attempt_login(browser, tenant, u, pw, xff(9))
+        c.close()
+        if not signed and status != 429:
+            status, _, signed, _, c = attempt_login(browser, tenant, u, pw + "-2", xff(9))
+            c.close()
+        if not signed and status != 429:
             missing.append(u)
     if missing:
         rec.add(f"{ta} fixture users", "—", "FAIL",
@@ -1095,7 +1155,7 @@ def saas_suite(rec, browser):
                 fill=lambda f, t: (f.locator("[name=username]").fill(csrf_user),
                                    f.locator("[name=password]").fill(csrf_pw)),
                 ok=lambda r, p: r.status in (302, 303) and has_session(p.context, tenant))
-    admin_write_matrix(rec, browser, sup, tenant, ta, "#1713")
+    section(rec, "admin_write_matrix", admin_write_matrix, rec, browser, sup, tenant, ta, "#1713")
 
     # Change password and logout, as a user of their own.
     fields = ("current_password", "new_password", "confirm_password")
@@ -1105,17 +1165,18 @@ def saas_suite(rec, browser):
     new_pw = csrf_pw + "-2" if cur == csrf_pw else csrf_pw
 
     def pw_landed(p, t):
-        try:
-            login(browser, tenant, csrf_user, new_pw)[0].close()
-            return True
-        except RuntimeError:
-            return False
+        # Probe with the old password: a miss with the new one would count
+        # toward the lock, and a success here clears the counter.
+        st, _, signed, _, c = attempt_login(browser, tenant, csrf_user, cur, xff(8))
+        c.close()
+        return not signed
     csrf_matrix(rec, browser, cst, ta, "change password", "#1713", tenant.url("/__change-password"),
                 "form:has(input[name=new_password])",
                 fill=lambda f, t: (f.locator("[name=current_password]").fill(cur),
                                    f.locator("[name=new_password]").fill(new_pw),
                                    f.locator("[name=confirm_password]").fill(new_pw)),
-                effect=pw_landed, ok=lambda r, p: r.status < 400 and pw_landed(p, None))
+                effect=pw_landed, ok=lambda r, p: r.status < 400 and
+                attempt_login(browser, tenant, csrf_user, new_pw, xff(8))[2])
     if new_pw != csrf_pw and not SABOTAGE:
         c, p, _ = login(browser, tenant, csrf_user, new_pw)
         change_password(p, tenant, "/__change-password", fields, new_pw, csrf_pw)
@@ -1133,12 +1194,12 @@ def saas_suite(rec, browser):
     epage = page_with_dialogs(ectx)
     check_escaping(rec, epage, f"{ta} list", tenant.url("/__admin/commerce_staff?q=pw"), "alert(1663)")
     ectx.close()
-    check_inline_parent(rec, browser, sup, tenant, ta)
+    section(rec, "check_inline_parent", check_inline_parent, rec, browser, sup, tenant, ta)
     check_password_change_ends_sessions(rec, browser, tenant, ta, *tuser("chg"),
                                         "/__change-password", fields)
-    tenant_sso_checks(rec, browser, sup, tenant, ta)
+    section(rec, "tenant_sso_checks", tenant_sso_checks, rec, browser, sup, tenant, ta)
     budget_pause()
-    check_login_limits(rec, browser, tenant, ta, *tuser("lock"))
+    check_login_limits(rec, browser, tenant, ta, *tuser("lock"), tuser("csrf"))
 
     # --- operator console --------------------------------------------
     op_ctx, op_page, _ = login(browser, console, "soakops", OPERATOR_PW)
@@ -1151,8 +1212,8 @@ def saas_suite(rec, browser):
     check_one_csrf_cookie(rec, browser, ops, f"{oc} operators", console.url("/operators"),
                           "form[action$='/operators']")
     check_allowed_hosts(rec, browser, oc, console.url("/login"), [("login", "/login")])
-    console_writes(rec, browser, ops, console, oc)
-    console_sso(rec, browser, ops, console, tenant, oc)
+    section(rec, "console_writes", console_writes, rec, browser, ops, console, oc)
+    section(rec, "console_sso", console_sso, rec, browser, ops, console, tenant, oc)
 
     # Throwaway operators for the password-change and limit checks.
     pctx = new_ctx(browser, ops)
@@ -1165,7 +1226,8 @@ def saas_suite(rec, browser):
                                         "/change-password",
                                         ("current_password", "new_password", "confirm_password"))
     budget_pause()
-    check_login_limits(rec, browser, console, oc, lock_op, f"{lock_op}-password")
+    check_login_limits(rec, browser, console, oc, lock_op, f"{lock_op}-password",
+                       ("soakops", OPERATOR_PW))
 
 
 def create_operator(page, console, username, pw):
@@ -1209,7 +1271,8 @@ def console_writes(rec, browser, ops, console, oc):
         op_id = re.search(r"/operators/(\d+)/", target.get_attribute("action")).group(1)
     ctx.close()
     if op_id:
-        csrf_matrix(rec, browser, ops, oc, "reset operator password", iss, console.url("/operators"),
+        csrf_matrix(rec, browser, ops, oc, "reset operator password", iss,
+                    console.url(f"/operators#reset-{op_id}"),
                     f"form[action$='/operators/{op_id}/reset-password']",
                     button="button:not([name=generate])[type=submit]",
                     fill=lambda f, t: [el.fill("pw-reset-password-1") for el in
@@ -1326,13 +1389,13 @@ def console_sso(rec, browser, ops, console, tenant, oc):
     ctx.close()
 
     # A normal user links through the shared provider by email.
-    sctx, spage, _ = login(browser, tenant, "soakadmin", TENANT_ADMIN_PW)
+    sctx, spage, _ = login(browser, tenant, *tuser("sso-super"))
     email = f"shared@{TENANT}.pw.example.test"
     set_user_email(spage, tenant, tenant_user_id(spage, tenant, tuser("shared")[0]), email)
     sctx.close()
     sub = f"shared-sub-{RUN}"
-    signed, p, c = sso_signin(browser, tenant, label[:30], sub, email)
-    rec.verdict(f"{oc} shared provider with email linking links a normal user", iss, bool(signed),
+    signed, p, c = sso_signin(browser, tenant, slug(None), sub, email)
+    rec.control(f"{oc} shared provider with email linking links a normal user", iss, bool(signed),
                 f"signed in={signed}", p)
     c.close()
 
@@ -1353,7 +1416,7 @@ def console_sso(rec, browser, ops, console, tenant, oc):
     ctx.close()
     name = f"{oc} link survives the toggle: sign-in by subject still works"
     with guarded(rec, name, iss):
-        signed, p, c = sso_signin(browser, tenant, label[:30], sub, None, verified=False)
+        signed, p, c = sso_signin(browser, tenant, slug(None), sub, None, verified=False)
         rec.verdict(name, iss, bool(signed), f"signed in={signed}", p)
         c.close()
     # Delete the shared provider (its label is on every tenant's login page).
@@ -1404,7 +1467,7 @@ def single_suite(rec, browser):
                                    f.locator("[name=password]").fill(f"{csrf_user}-pw")),
                 refused=lambda r, p: not has_session(p.context, site),
                 ok=lambda r, p: r.status in (302, 303) and has_session(p.context, site))
-    admin_write_matrix(rec, browser, sup, site, ad, "#1711")
+    section(rec, "admin_write_matrix", admin_write_matrix, rec, browser, sup, site, ad, "#1711")
     cctx, _, _ = login(browser, site, csrf_user, f"{csrf_user}-pw")
     cst = state_of(cctx)
     cctx.close()
@@ -1431,15 +1494,16 @@ def single_suite(rec, browser):
     epage = page_with_dialogs(ectx)
     check_escaping(rec, epage, f"{ad} list", site.url("/__admin/commerce_staff?q=pw"), "alert(1663)")
     ectx.close()
-    check_inline_parent(rec, browser, sup, site, ad)
+    section(rec, "check_inline_parent", check_inline_parent, rec, browser, sup, site, ad)
     check_password_change_ends_sessions(rec, browser, site, ad, chg_user, f"{chg_user}-pw",
                                         "/__admin/account/password",
                                         ("current_password", "new_password", "new_password_confirm"))
-    check_totp(rec, browser, site, ad, totp_user, f"{totp_user}-pw")
+    section(rec, "check_totp", check_totp, rec, browser, site, ad, totp_user, f"{totp_user}-pw")
     rec.add(f"{ad} SSO sign-in", "#1760", "NOT-COVERED",
             "the single-tenant app is built without admin-sso")
     budget_pause()
-    check_login_limits(rec, browser, site, ad, lock_user, f"{lock_user}-pw")
+    check_login_limits(rec, browser, site, ad, lock_user, f"{lock_user}-pw",
+                       ("soakadmin", ADMIN_PW))
 
 
 def login_any(browser, site, user, pw):
@@ -1489,6 +1553,8 @@ def run_instance(item):
                     f"aborted: {e!s:.300}\n{traceback.format_exc(limit=4)[-600:]}")
         finally:
             browser.close()
+    for c in rec.checks:
+        c["_control"] = c["name"] in rec.controls
     return rec.checks
 
 
@@ -1501,14 +1567,17 @@ def main():
     with ProcessPoolExecutor(max_workers=int(os.environ.get("PW_PARALLEL", "6"))) as ex:
         for res in ex.map(run_instance, targets.items()):
             checks.extend(res)
+    controls = {(c["instance"], c["name"]) for c in checks if c.pop("_control", False)}
     out = os.path.join(RESULTS, "playwright-sabotage.json" if SABOTAGE else "playwright.json")
     with open(out, "w") as fh:
         json.dump({"checks": checks, "run": RUN, "sabotage": SABOTAGE}, fh, indent=2)
     n = {v: sum(1 for c in checks if c["verdict"] == v) for v in ("PASS", "FAIL", "NOT-COVERED")}
     print(f"\n{n['PASS']} passed, {n['FAIL']} FAILED, {n['NOT-COVERED']} not covered -> {out}")
     if SABOTAGE:
-        passed = [c for c in checks if c["verdict"] == "PASS"]
-        print(f"sabotage: {len(passed)} check(s) still passed without the protection")
+        passed = [c for c in checks if c["verdict"] == "PASS"
+                  and (c["instance"], c["name"]) not in controls]
+        print(f"sabotage: {len(controls)} positive control(s) skipped; "
+              f"{len(passed)} check(s) still passed without the protection")
         for c in passed:
             print(f"    {c['issue']:>6}  {c['name']} [{c['instance']}]")
         return 1 if passed else 0

@@ -170,6 +170,36 @@ the exact failure this release was about.
   preset's `Referrer-Policy` on an app route instead (`no-referrer` makes browsers
   send `Origin: null`).
 
+## Browser checks
+
+`playwright/suite.py` drives Chromium through the bare admin
+(`single-*`), the tenant admin on `t01` and the operator console
+(`saas-*`). Each check loads the real page, then tampers with what the
+browser sends: drops or empties the CSRF token, rewrites `Origin`,
+replays a TOTP code, posts another order's inline row. The untampered
+submit of the same form must work.
+
+```bash
+docker compose -f docker/soak/docker-compose.yml --profile driver up playwright
+# Proof that every check can fail: skips each tamper, so all must FAIL.
+PW_SABOTAGE=1 docker compose -f docker/soak/docker-compose.yml --profile driver up playwright
+```
+
+The report is `playwright.json` in `soak-results`, in `report.json`'s
+check shape; failure screenshots go to `playwright/`.
+
+The browser reaches `tNN.soak.localhost`, `soak.localhost` and
+`single.localhost` through `--host-resolver-rules`. `*.localhost` is a
+secure context, so the fleet's `Secure` cookies work over plain HTTP.
+
+Fixtures: the tenant admin cannot create users (its create form drops
+the read-only `password_hash`), so `t01` needs `pw-csrf`, `pw-sso-super`
+(superusers) and `pw-lock`, `pw-chg`, `pw-sso-user`, `pw-sso-staff`,
+`pw-shared`, each with password `soak-<name>-pw`. The suite changes
+passwords back when it is done. The bare admin makes its own users. A
+lock lasts 15 minutes, so a rerun inside that reports the lock check
+NOT-COVERED.
+
 ## Known gaps
 
 A `KNOWN-GAP` verdict is a behaviour that was exercised, is **wrong**,
