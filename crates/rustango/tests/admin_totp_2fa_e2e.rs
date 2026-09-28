@@ -173,8 +173,8 @@ async fn a_used_code_cannot_sign_in_again() {
     assert!(!sess, "a replayed TOTP code granted a second session");
 }
 
-/// The session cookie (`name=value`) a successful password login sets.
-async fn session_cookie(app: &axum::Router, csrf: &str, username: &str) -> String {
+/// The session cookie (`name=value`) a successful login sets.
+async fn session_cookie(app: &axum::Router, csrf: &str, username: &str, code: &str) -> String {
     let resp = app
         .clone()
         .oneshot(
@@ -184,7 +184,7 @@ async fn session_cookie(app: &axum::Router, csrf: &str, username: &str) -> Strin
                 .header("content-type", "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("rustango_csrf={csrf}"))
                 .body(Body::from(format!(
-                    "_csrf={csrf}&username={username}&password=correct%20horse&totp_code="
+                    "_csrf={csrf}&username={username}&password=correct%20horse&totp_code={code}"
                 )))
                 .unwrap(),
         )
@@ -213,7 +213,7 @@ async fn the_enrollment_code_cannot_sign_in() {
         .unwrap();
     let app = router(pool.clone());
     let csrf = fetch_csrf(&app).await;
-    let session = session_cookie(&app, &csrf, "carol").await;
+    let session = session_cookie(&app, &csrf, "carol", "").await;
     let cookies = format!("rustango_csrf={csrf}; {session}");
 
     // GET starts enrollment and stores a pending secret.
@@ -269,6 +269,40 @@ async fn the_enrollment_code_cannot_sign_in() {
 
     let (_s, sess) = login(&app, &csrf, "carol", "correct horse", &code).await;
     assert!(!sess, "the enrollment code signed in a second time");
+}
+
+/// #1756 — an unfinished re-enroll keeps the old factor in force.
+#[tokio::test]
+async fn an_unfinished_reenroll_keeps_the_old_code() {
+    let (pool, secret) = seed().await;
+    let app = router(pool);
+    let csrf = fetch_csrf(&app).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let code = rustango::totp::generate_at(&secret, now, 30, 6);
+    let session = session_cookie(&app, &csrf, "alice", &code).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/account/totp"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={csrf}; {session}"))
+                .body(Body::from(format!("_csrf={csrf}&reset=1")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", "").await;
+    assert!(!sess, "a pending re-enroll let the password alone sign in");
+    let next = rustango::totp::generate_at(&secret, now + 30, 30, 6);
+    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", &next).await;
+    assert!(sess, "the old factor must still sign in");
 }
 
 #[tokio::test]

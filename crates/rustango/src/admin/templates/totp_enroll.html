@@ -25,7 +25,7 @@
     {% if already_enabled %}
       <p>Two-factor authentication is <strong>enabled</strong> for your account.</p>
       <p>To re-enroll (e.g. on a new device), submit the form below with a fresh setup —
-         this replaces your current device.</p>
+         your current device keeps working until the new one is confirmed.</p>
       <form method="post" action="{{ action }}">
         {{ csrf_input | safe }}
         <button type="submit" name="reset" value="1">Re-enroll</button>

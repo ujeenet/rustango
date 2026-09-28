@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — a TOTP re-enroll keeps the confirmed factor until the new one is confirmed (#1756)
+
+Starting a re-enroll no longer replaces the confirmed device: the new
+secret waits in `pending_secret_base32` and a code for it swaps it in,
+so an unfinished re-enroll no longer lets the password alone sign in.
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token
