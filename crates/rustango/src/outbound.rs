@@ -3,28 +3,98 @@
 //!
 //! [`CheckedTarget`] is the only way to get a client here: it refuses
 //! non-public addresses, pins the connection to the checked ones and
-//! never follows redirects. Set `RUSTANGO_OUTBOUND_ALLOW_PRIVATE=1` to
-//! reach private hosts, such as an IdP on your own network.
+//! never follows redirects. List private hosts and CIDRs in
+//! `RUSTANGO_OUTBOUND_ALLOW` to reach them, such as an IdP on your own
+//! network. Webhook delivery ignores that list.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-/// Env var that lets outbound calls reach private addresses.
-pub(crate) const ALLOW_PRIVATE_ENV: &str = "RUSTANGO_OUTBOUND_ALLOW_PRIVATE";
+use crate::cidr::CidrRange;
 
-/// Whether a target may resolve to a non-public address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Env var: comma-separated hosts and CIDRs that SSO and Slack calls may
+/// reach even when private, e.g. `10.0.5.0/24,idp.internal`.
+#[cfg(any(
+    test,
+    feature = "oauth2",
+    all(feature = "notifications", feature = "http-client")
+))]
+pub(crate) const ALLOW_ENV: &str = "RUSTANGO_OUTBOUND_ALLOW";
+
+/// Private targets an operator allowed. A host entry matches the URL
+/// host; a CIDR entry must cover every address the host resolves to.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Allowlist {
+    hosts: Vec<String>,
+    nets: Vec<CidrRange>,
+}
+
+impl Allowlist {
+    /// Parse a comma-separated list. Bad entries are skipped, so they
+    /// allow nothing.
+    #[cfg(any(
+        test,
+        feature = "oauth2",
+        all(feature = "notifications", feature = "http-client")
+    ))]
+    pub(crate) fn parse(spec: &str) -> Self {
+        let mut list = Self::default();
+        for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            let bare = entry.trim_start_matches('[').trim_end_matches(']');
+            if let Some(net) = CidrRange::parse(bare) {
+                list.nets.push(net);
+            } else if entry.contains(['/', ':', '[', ']', ' ']) {
+                tracing::warn!(entry, "{ALLOW_ENV}: skipping bad entry");
+            } else {
+                list.hosts.push(normalize_host(entry));
+            }
+        }
+        list
+    }
+
+    fn allows_host(&self, host: &str) -> bool {
+        let host = normalize_host(host);
+        self.hosts.iter().any(|h| *h == host)
+    }
+
+    fn allows_ip(&self, ip: IpAddr) -> bool {
+        self.nets.iter().any(|n| n.contains(ip))
+    }
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Held by tests that set or read [`ALLOW_ENV`].
+#[cfg(test)]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Which addresses a target may resolve to.
+#[derive(Debug, Clone)]
 pub(crate) enum TargetPolicy {
-    PublicOnly,
+    /// Public addresses, plus what the allowlist names.
+    Public(Allowlist),
+    /// No address check.
+    #[cfg_attr(not(any(test, feature = "webhook-delivery")), allow(dead_code))]
     AllowPrivate,
 }
 
 impl TargetPolicy {
-    /// `AllowPrivate` only when the operator set [`ALLOW_PRIVATE_ENV`].
+    /// Public addresses only.
+    #[cfg_attr(not(any(test, feature = "webhook-delivery")), allow(dead_code))]
+    pub(crate) fn public_only() -> Self {
+        Self::Public(Allowlist::default())
+    }
+
+    /// Public addresses plus the operator's [`ALLOW_ENV`] list.
+    #[cfg(any(
+        feature = "oauth2",
+        all(feature = "notifications", feature = "http-client")
+    ))]
     pub(crate) fn from_env() -> Self {
-        match std::env::var(ALLOW_PRIVATE_ENV).as_deref() {
-            Ok("1" | "true") => Self::AllowPrivate,
-            _ => Self::PublicOnly,
-        }
+        Self::Public(Allowlist::parse(
+            &std::env::var(ALLOW_ENV).unwrap_or_default(),
+        ))
     }
 }
 
@@ -55,7 +125,7 @@ enum Route {
     Unchecked,
     /// IP literal that passed the check.
     Direct,
-    /// Host name pinned to its checked addresses.
+    /// Host name pinned to its checked (or allowlisted) addresses.
     Pinned(String, Vec<SocketAddr>),
 }
 
@@ -67,7 +137,7 @@ pub(crate) struct CheckedTarget {
 
 impl CheckedTarget {
     /// Parse `url` and check every address it resolves to.
-    pub(crate) async fn check(url: &str, policy: TargetPolicy) -> Result<Self, TargetError> {
+    pub(crate) async fn check(url: &str, policy: &TargetPolicy) -> Result<Self, TargetError> {
         let url = reqwest::Url::parse(url)
             .map_err(|e| TargetError::Invalid(format!("bad target url: {e}")))?;
         if !matches!(url.scheme(), "http" | "https") {
@@ -78,7 +148,7 @@ impl CheckedTarget {
         }
         let route = match policy {
             TargetPolicy::AllowPrivate => Route::Unchecked,
-            TargetPolicy::PublicOnly => checked_route(&url).await?,
+            TargetPolicy::Public(allow) => checked_route(&url, allow).await?,
         };
         Ok(Self { url, route })
     }
@@ -123,14 +193,15 @@ pub(crate) async fn bounded_text(mut resp: reqwest::Response, max: usize) -> Str
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-async fn checked_route(url: &reqwest::Url) -> Result<Route, TargetError> {
+async fn checked_route(url: &reqwest::Url, allow: &Allowlist) -> Result<Route, TargetError> {
     let host = url
         .host_str()
         .ok_or_else(|| TargetError::Invalid("target url has no host".into()))?;
     let port = url.port_or_known_default().unwrap_or(80);
+    let refused = |ip: IpAddr| is_blocked_ip(ip) && !allow.allows_ip(ip);
     let literal = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = literal.parse::<IpAddr>() {
-        if is_blocked_ip(ip) {
+        if refused(ip) {
             return Err(TargetError::Blocked);
         }
         return Ok(Route::Direct);
@@ -142,7 +213,7 @@ async fn checked_route(url: &reqwest::Url) -> Result<Route, TargetError> {
     if addrs.is_empty() {
         return Err(TargetError::Dns(format!("no addresses for {host}")));
     }
-    if addrs.iter().any(|a| is_blocked_ip(a.ip())) {
+    if !allow.allows_host(host) && addrs.iter().any(|a| refused(a.ip())) {
         return Err(TargetError::Blocked);
     }
     Ok(Route::Pinned(host.to_owned(), addrs))
@@ -265,15 +336,47 @@ mod tests {
             "http://localhost/",
             "http://[::1]/",
         ] {
-            let err = CheckedTarget::check(url, TargetPolicy::PublicOnly)
+            let err = CheckedTarget::check(url, &TargetPolicy::public_only())
                 .await
                 .err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
         }
         assert!(
-            CheckedTarget::check("http://10.0.0.1/", TargetPolicy::AllowPrivate)
+            CheckedTarget::check("http://10.0.0.1/", &TargetPolicy::AllowPrivate)
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn allowlist_opens_only_what_it_names() {
+        let policy = TargetPolicy::Public(Allowlist::parse(
+            " 10.0.5.0/24, IdP.Internal., localhost, bad/entry:1 ",
+        ));
+        for url in [
+            "http://10.0.5.7/token",
+            "http://[::ffff:10.0.5.7]/",
+            "http://localhost:9/",
+        ] {
+            assert!(CheckedTarget::check(url, &policy).await.is_ok(), "{url}");
+        }
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.6.1/",
+            "http://127.0.0.1/",
+        ] {
+            let err = CheckedTarget::check(url, &policy).await.err();
+            assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn allowlist_host_match_is_exact() {
+        let list = Allowlist::parse("idp.internal,[fd00::1],idp.internal:8443");
+        assert!(list.allows_host("IDP.internal"));
+        assert!(!list.allows_host("evil.idp.internal"));
+        assert!(!list.allows_host("idp.internal.evil.com"));
+        assert!(list.allows_ip("fd00::1".parse().unwrap()));
+        assert_eq!(list.hosts, ["idp.internal"]);
     }
 }

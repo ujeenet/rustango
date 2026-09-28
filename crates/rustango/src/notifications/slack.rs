@@ -22,8 +22,8 @@
 //! [`ERROR_BODY_MAX`] bytes of the body as the error string.
 //!
 //! [`webhook_callback`] refuses private and metadata addresses and never
-//! follows redirects (#1716); `RUSTANGO_OUTBOUND_ALLOW_PRIVATE=1` lifts the
-//! address check.
+//! follows redirects (#1716). List private hosts or CIDRs it may reach in
+//! `RUSTANGO_OUTBOUND_ALLOW`.
 //!
 //! Requires the `http-client` feature.
 
@@ -54,7 +54,7 @@ fn checked_callback(url: String, policy: fn() -> TargetPolicy) -> BroadcastFn {
         let url = Arc::clone(&url);
         let fut: Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> =
             Box::pin(async move {
-                let target = CheckedTarget::check(&url, policy())
+                let target = CheckedTarget::check(&url, &policy())
                     .await
                     .map_err(|e| format!("slack target refused: {e}"))?;
                 let client = target
@@ -154,7 +154,7 @@ mod tests {
             }),
         );
         let base = serve(app).await;
-        let cb = checked_callback(format!("{base}/hook"), || TargetPolicy::PublicOnly);
+        let cb = checked_callback(format!("{base}/hook"), TargetPolicy::public_only);
         let err = cb(json!("hi")).await.unwrap_err();
         assert!(err.contains("blocked address"), "{err}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);

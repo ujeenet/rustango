@@ -52,7 +52,8 @@
 //! address must be public; loopback, private, link-local, CGNAT and
 //! multicast targets are dead-lettered, and the connection is pinned to
 //! the checked addresses. [`WebhookSubscription::allow_private_targets`]
-//! turns the address check off, as does `RUSTANGO_OUTBOUND_ALLOW_PRIVATE=1`.
+//! turns the address check off; the `RUSTANGO_OUTBOUND_ALLOW` list never
+//! applies, since a tenant may set the URL.
 //! Only the status code is kept on failure.
 //!
 //! [`SignatureFormat`]: crate::webhook::SignatureFormat
@@ -127,12 +128,14 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         &body,
     );
 
+    // Only the subscription opts in: the operator's allowlist is for SSO
+    // and Slack, and a tenant may own this URL.
     let policy = if event.allow_private_targets {
         TargetPolicy::AllowPrivate
     } else {
-        TargetPolicy::from_env()
+        TargetPolicy::public_only()
     };
-    let target = CheckedTarget::check(&event.target_url, policy)
+    let target = CheckedTarget::check(&event.target_url, &policy)
         .await
         .map_err(|e| match e {
             TargetError::Dns(_) => JobError::Retryable(e.to_string()),
@@ -591,6 +594,27 @@ mod tests {
             0,
             "no request reached the server"
         );
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn operator_allowlist_does_not_open_a_subscription() {
+        let _g = crate::outbound::ENV_LOCK.lock().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+                async { "ok" }
+            }),
+        );
+        let (base, srv) = serve(app).await;
+        std::env::set_var(crate::outbound::ALLOW_ENV, "127.0.0.0/8,localhost");
+        let err = deliver(&event(format!("{base}/hook"), false)).await;
+        std::env::remove_var(crate::outbound::ALLOW_ENV);
+        assert!(matches!(err, Err(JobError::Fatal(_))), "{err:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "request reached the server");
         srv.abort();
     }
 
