@@ -86,7 +86,8 @@ pub struct Operator {
         list_display = "username, is_superuser, active, created_at",
         search_fields = "username",
         ordering = "username",
-        readonly_fields = "password_hash, created_at",
+        readonly_fields = "created_at, password_changed_at",
+        formfield_overrides = "password_hash: password",
     )
 )]
 #[allow(dead_code)]
@@ -130,6 +131,45 @@ pub struct User {
     /// rotated since v0.28.4 — those sessions stay valid until
     /// they expire normally.
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+// The admin form's password is hashed here; a change also stamps
+// `password_changed_at`, which ends the user's older sessions.
+#[cfg(feature = "admin")]
+fn admin_hash_password<'a>(
+    values: &'a mut Vec<(&'static str, crate::core::SqlValue)>,
+    before: Option<&'a serde_json::Value>,
+) -> crate::admin::derived_fields::DeriveFuture<'a> {
+    use crate::core::SqlValue;
+    Box::pin(async move {
+        let Some(plain) = crate::admin::derived_fields::take_secret(values, "password_hash") else {
+            return Ok(());
+        };
+        // A model on this table without the password widget echoes the hash.
+        if before.and_then(|r| r.get("password_hash")?.as_str()) == Some(plain.as_str()) {
+            return Ok(());
+        }
+        let hash = password::hash_async(&plain)
+            .await
+            .map_err(|e| e.to_string())?;
+        values.push(("password_hash", SqlValue::String(hash)));
+        if before.is_some() {
+            values.retain(|(c, _)| *c != "password_changed_at");
+            values.push((
+                "password_changed_at",
+                SqlValue::DateTime(chrono::Utc::now()),
+            ));
+        }
+        Ok::<(), String>(())
+    })
+}
+
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_users",
+        derive: admin_hash_password,
+    }
 }
 
 /// Look up an operator by username and verify the password.

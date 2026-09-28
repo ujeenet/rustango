@@ -18,6 +18,31 @@ hash queue answers 503, not 401, and `verify_raw_agent_credential`
 returns `Result<Option<McpAgent>, AgentError>`. The admin 2FA prompt no
 longer spends login limit tokens.
 
+### Fixed — admin create of users, secrets and timestamps (#1763, #1764)
+
+The admin can create and edit tenant and bare-admin users: `password_hash`
+is a password input, hashed off the runtime, and an empty edit keeps it.
+SSO provider `client_secret`s are encrypted on admin writes and never shown.
+Read-only fields render locked and not `required`; read-only NOT NULL
+timestamps are filled on create, `auto_now` is restamped on update, and an
+untouched datetime is no longer truncated to seconds. New forms pre-check
+`default = "true"` checkboxes. API keys and agents are minted by their own
+flows, so the admin no longer offers an Add form for them. The audit log
+records a secret change as `[changed]` and never stores the value.
+
+### Fixed — `bin/bump-version.sh` covers `docs/index.toml` and install pins (#1750)
+
+- A series bump now rewrites `docs/index.toml`, `orm = { package = "rustango", version = … }` and `<crate> = "X.Y"` pins, and leaves example comments alone; the verify step checks what `docs_versions` checks.
+
+### Fixed — CI pulls service images from a GHCR mirror (#1688)
+
+- `mirror-images.yml` copies each CI image to `ghcr.io/ujeenet/ci-*` weekly, so jobs stop failing on `toomanyrequests`.
+
+### Fixed
+
+- `DatabaseCache` keys compare exactly on MySQL: `user:1` no longer reads `User:1`, nor `café` `cafe`.
+  Prefix deletes are exact-case on MySQL and SQLite too (#1757).
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token

@@ -236,8 +236,8 @@ pub trait Cache: Send + Sync + 'static {
     ///
     /// **Every backend in this crate overrides it, and yours must
     /// too**, unless it stores nothing. [`InMemoryCache`] filters its
-    /// map, `DatabaseCache` runs `DELETE … WHERE cache_key LIKE
-    /// 'prefix%'`, `RedisCache` runs `SCAN MATCH` then `DEL`, and
+    /// map, `DatabaseCache` runs an exact-case prefix
+    /// `DELETE`, `RedisCache` runs `SCAN MATCH` then `DEL`, and
     /// [`FileCache`] scans its directory (the filename is a hash, so
     /// the key has to be read from inside each file).
     ///
