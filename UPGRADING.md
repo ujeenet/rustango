@@ -150,6 +150,46 @@ untouched.
 
 ## Unreleased
 
+## 0.58.1
+
+### Forwarded IPs need `RealIpLayer::trust_proxies`
+
+The ViewSet throttle, auth signals and `AccessLogLayer::trust_proxy_headers`
+now read only `TrustedRealIp` (else the socket). Behind a proxy, mount
+`RealIpLayer` with `.trust_proxies([...])`, or every client shares one
+ViewSet bucket. With `server::Builder`, pass it to `.real_ip(layer)`.
+Replace `meta_from_headers(&h, p)` with
+`meta_from_parts(&extensions, &h, p)`; it needs the `admin` feature, and
+without it you build `AuthRequestMeta` yourself.
+
+### `verify_raw_agent_credential` returns a `Result`
+
+It is now `Result<Option<McpAgent>, AgentError>`: `Ok(None)` is a
+refused key, `Err(AgentError::Tenancy(TenancyError::Busy))` means 503.
+
+### SQLite NULLs are `null` in JSON and `values_dict`
+
+Code that read `0` / `false` / `""` for a NULL SQLite cell now gets `null` / `SqlValue::Null`.
+
+### Admin password widget and derived-field hooks
+
+A `formfield_overrides = "col: password"` column is now never echoed: forms
+render it empty, list and detail show only "set", and an empty edit keeps the
+stored value. `admin::derived_fields::DeriveFn` is now async and fallible:
+return `Box::pin(async move { …; Ok(()) })`; an `Err` is shown on the form.
+
+### Re-save SSO provider secrets created in the admin
+
+Before this release the admin stored an SSO provider's `client_secret` in
+plaintext, which no longer decrypts. Re-save each admin-created provider's
+secret after upgrading.
+
+### MySQL cache keys compare exactly
+
+`DatabaseCache` now creates `cache_key` as `VARBINARY(255)` on MySQL (#1757).
+`ensure_table` does not change an existing table; run once per cache table:
+`ALTER TABLE rustango_cache MODIFY cache_key VARBINARY(255) NOT NULL;`
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token

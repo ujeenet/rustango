@@ -353,8 +353,11 @@ AccessLogLayer::default()
     .errors_only()               // skip 2xx/3xx entirely
     .slow_threshold_ms(250)      // what counts as slow
     .without_ip()                // omit the client IP
-    .trust_proxy_headers(true)   // X-Forwarded-For, behind a trusted proxy only
+    .trust_proxy_headers(true)   // TrustedRealIp from RealIpLayer, never raw headers
 ```
+
+`RealIpLayer` must run before the access log. With `server::Builder`, pass it
+to `.real_ip(layer)`; a layer on the api router runs too late.
 
 Credential-bearing query params are masked with `[redacted]` before the line is
 written — `password`, `passwd`, `token`, `secret`, `api_key`, `apikey`,
