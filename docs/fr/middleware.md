@@ -171,6 +171,12 @@ obtenir la méthode.
 | Rechargement à chaud | `LiveReloadLayer` | `.livereload(..)` |
 | Panneau de débogage | `DebugPanelLayer` | `.debug_panel(..)` |
 
+Avec `tenancy`, montez `CachePageLayer` dans la couche tenancy : sur un router
+passé au builder du serveur. Il met le tenant résolu dans la clé ; hors de la
+couche tenancy il ne voit pas le tenant et ne met rien en cache. Un CDN devant
+doit aussi varier selon l'en-tête du tenant (`X-Org`), sinon il mélangera
+lui-même les tenants.
+
 Les sections suivantes détaillent celles que la requête a demandées.
 
 ---

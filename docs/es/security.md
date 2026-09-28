@@ -509,6 +509,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 
 Funciona con Google Authenticator, Authy, 1Password, Bitwarden y otras aplicaciones autenticadoras estándar.
 
+`verify` acepta el mismo código otra vez hasta que caduca. Para códigos de un solo uso, llame a `matched_step`, guarde el paso que devuelve y acepte un código solo si su paso es posterior al guardado. El inicio de sesión integrado del admin lo hace así.
+
 **Códigos de recuperación** (códigos de respaldo de un solo uso para cuando un usuario pierde su teléfono) todavía no se incluyen. El patrón común es almacenar de 8 a 10 códigos hasheados por usuario y consumir uno cada vez que se usa.
 
 ---

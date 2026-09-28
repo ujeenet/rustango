@@ -507,6 +507,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 
 Funktioniert mit Google Authenticator, Authy, 1Password, Bitwarden und anderen Standard-Authenticator-Apps.
 
+`verify` akzeptiert denselben Code erneut, bis er abläuft. Für Einmal-Codes rufen Sie stattdessen `matched_step` auf, speichern den zurückgegebenen Schritt und akzeptieren einen Code nur, wenn sein Schritt später ist als der gespeicherte. Der eingebaute Admin-Login macht das so.
+
 **Recovery-Codes** (einmalige Backup-Codes für den Fall, dass ein Benutzer sein Telefon verliert) werden noch nicht mitgeliefert. Das gängige Muster ist, 8–10 gehashte Codes pro Benutzer zu speichern und einen bei jeder Verwendung zu verbrauchen.
 
 ---

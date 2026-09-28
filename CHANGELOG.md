@@ -16,6 +16,51 @@ shared flag in place. `sso::resolve_by_slug` returns
 `ResolvedProvider`; `member_auth::find_or_provision_member` takes a
 `ProviderKey` and returns `MemberSignIn`.
 
+### Security — bounded update/delete; nested `atomic()` uses savepoints (#1666)
+
+`QuerySet::update()` and `delete()` dropped `limit`, `offset` and
+`order_by`, so `.limit(1).delete()` deleted every matching row. They
+now bound the statement by primary key on every backend, and refuse
+(`QueryError::BoundedDmlUnsupported`, reason `BoundedDmlReason`) when
+they cannot, including a negative limit or offset. A nested `atomic()`
+on the same pool opened a second transaction that survived the outer
+rollback and deadlocked a one-connection pool; it now runs in a
+savepoint on the outer connection. `on_commit` callbacks fire only at
+the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
+emits invalid SQL. A transaction the server already ended (a PG
+statement error the closure ignored, a MySQL deadlock) makes `atomic`
+return `ExecError::AtomicAborted` instead of `Ok`; a MySQL DDL implicit
+commit returns `ExecError::AtomicEndedEarly`.
+
+**Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
+statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
+`ExecError::NestedAtomic`, `ExecError::AtomicAborted`, `ExecError::AtomicEndedEarly`,
+`QueryError::BoundedDmlUnsupported`, `BoundedDmlReason`.
+
+### Security — single-use refresh rotation, TOTP replay guard, fixed lockout window (#1672)
+
+`JwtLifecycle::refresh` and `refresh_with` redeem the old refresh token
+through one `JtiStore::mark_used` call, so two concurrent refreshes of
+one token no longer both succeed. An admin TOTP code is accepted once:
+the device stores the last accepted time step (`last_used_step`) and a
+code must be for a later one. New `totp::matched_step` /
+`matched_step_at` return the step a code matched, and
+`admin::totp_store::redeem_code` / `confirm_with_code` accept a code
+once. Account lockout counts failures in a fixed window from the first
+failure; a failure no longer extends it.
+
+`migrate` now creates `rustango_admin_totp`, so a fresh install with
+`totp` no longer refuses every admin login before enrollment.
+
+### Security — page cache keys on the resolved tenant; long DB cache keys hashed (#1674)
+
+`CachePageLayer` resolves the request's tenant and puts its slug in the
+key, so tenants picked by `X-Org` on one Host no longer share a page.
+With `tenancy` on and no tenant context it does not cache; opt out per
+route with `tenant_agnostic(true)`. `DatabaseCache` stores keys over
+255 bytes as a 190-byte head plus SHA-256, so they round-trip on MySQL
+instead of truncating and colliding.
+
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 
 `RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`

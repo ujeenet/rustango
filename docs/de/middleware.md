@@ -170,6 +170,12 @@ Jeder Eintrag ist ein `tower::Layer` mit einem passenden
 | Live-Reload | `LiveReloadLayer` | `.livereload(..)` |
 | Debug-Panel | `DebugPanelLayer` | `.debug_panel(..)` |
 
+Unter `tenancy` gehört `CachePageLayer` in die Tenancy-Schicht: auf einen
+Router, den du dem Server-Builder übergibst. Er nimmt den aufgelösten Tenant in
+den Key auf; außerhalb der Tenancy-Schicht sieht er keinen Tenant und cacht
+nicht. Ein CDN davor muss ebenfalls nach dem Tenant-Header (`X-Org`) variieren,
+sonst mischt es selbst Tenants.
+
 Die nächsten Abschnitte gehen die im Detail durch, nach denen der Request
 gefragt hat.
 

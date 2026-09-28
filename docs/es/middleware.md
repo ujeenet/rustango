@@ -170,6 +170,11 @@ para obtener el método.
 | Recarga en vivo | `LiveReloadLayer` | `.livereload(..)` |
 | Panel de depuración | `DebugPanelLayer` | `.debug_panel(..)` |
 
+Con `tenancy`, monta `CachePageLayer` dentro de la capa de tenancy: en un
+router que pasas al builder del servidor. Mete el tenant resuelto en la clave;
+fuera de la capa de tenancy no ve el tenant y no cachea. Una CDN delante también
+debe variar según la cabecera del tenant (`X-Org`), o mezclará tenants ella misma.
+
 Las siguientes secciones recorren en detalle las que pidió la petición.
 
 ---

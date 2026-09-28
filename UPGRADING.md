@@ -174,6 +174,56 @@ A read-only operator console can no longer change shared providers.
 `MemberSignIn`: map `NotLinked` (an existing account, not linkable by
 email) apart from `NoAccount`, or every existing member looks "closed".
 
+### Bounded update/delete; `atomic()` hands out a lockable `AtomicTx`
+
+`update()` / `delete()` now honour `limit`, `offset` and `order_by`
+(#1666); a queryset that relied on them being ignored now touches fewer
+rows. With a composite or missing PK, or after `union()`, a bounded one
+returns `QueryError::BoundedDmlUnsupported`. The `atomic` closure now
+gets `&AtomicTx`, not `&mut PoolTx`: write `insert_tx(&mut *tx.lock().await?, &q)`.
+A nested `atomic(&pool, …)` on the same pool is now a savepoint on the
+outer transaction, and its `on_commit` callbacks wait for the outermost
+commit. Drop the `TxGuard` before nesting, or get `ExecError::NestedAtomic`.
+
+Nested writes that used to survive an outer rollback (an audit row, say)
+are now rolled back with it, silently. For an independent commit, use a
+different pool or `tokio::spawn`. Nesting is per pool object: pass the
+request's pool down instead of looking it up again. On MySQL before
+8.0.21 and MariaDB before 11.1 a bounded update/delete may scan the whole
+table. On MySQL, DDL / `TRUNCATE` / `LOCK TABLES` inside `atomic` commit
+implicitly: `atomic` returns `ExecError::AtomicEndedEarly` with writes
+already committed, so a retry can write twice. On MySQL and SQLite a
+failed statement undoes only itself; if the closure ignores it, the rest
+commits (PG aborts the whole transaction).
+
+### Admin TOTP codes are single use
+
+`rustango_admin_totp` gains a nullable `last_used_step` column (#1672).
+`totp_store::ensure_table`, or the first code accepted after the upgrade,
+adds it to an existing table. `AdminTotp` literals need the new field. A
+code that already signed in is refused, so users wait for the next one.
+`Lockout::counter_ttl` is now a fixed window from the first failure. The
+lockout cache keys changed, so failure counts in progress at the
+upgrade start again from zero; active locks are kept.
+
+### Page cache keys include the tenant
+
+Page cache keys now include the tenant (#1674), so cached pages miss
+once after upgrade.
+
+### The page cache stops caching outside the tenancy layer
+
+Under `tenancy`, a `CachePageLayer` that cannot see the tenant context
+no longer caches. Mount it on a router passed to the server builder,
+or add `.tenant_agnostic(true)` for routes that are the same for every
+tenant. A CDN in front must vary on the tenant header itself.
+
+### Long database cache keys change stored form
+
+`DatabaseCache` keys over 255 bytes, or ending in `#` plus 64 hex, are
+now stored hashed, so those entries miss once. Run `cache.clear()`
+after upgrading to drop the old rows.
+
 ### The trusted client IP is the rightmost untrusted hop
 
 Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the

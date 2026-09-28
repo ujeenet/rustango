@@ -507,6 +507,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 
 Fonctionne avec Google Authenticator, Authy, 1Password, Bitwarden et d'autres applications d'authentification standard.
 
+`verify` accepte le même code à nouveau jusqu'à son expiration. Pour des codes à usage unique, appelez plutôt `matched_step`, stockez le pas qu'il renvoie et n'acceptez un code que si son pas est postérieur au pas stocké. La connexion admin intégrée fait ainsi.
+
 **Codes de récupération** (codes de secours à usage unique pour quand un utilisateur perd son téléphone) pas encore fournis. Le motif courant est de stocker 8 à 10 codes hachés par utilisateur et d'en brûler un à chaque utilisation.
 
 ---
