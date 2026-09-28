@@ -47,7 +47,12 @@ fn nonce() -> String {
     )
 }
 
-async fn promotion(pool: &Pool, code: String, amount_cents: i64, visible: bool) -> Result<i64, (StatusCode, String)> {
+async fn promotion(
+    pool: &Pool,
+    code: String,
+    amount_cents: i64,
+    visible: bool,
+) -> Result<i64, (StatusCode, String)> {
     let mut row = Promotion {
         id: Auto::default(),
         label: format!("Promotion {code}"),
@@ -71,7 +76,9 @@ pub async fn scopes_seed(pool: &Pool) -> ProbeResult {
         visible.push(promotion(pool, format!("VIS-{tag}-{i}"), 100, true).await?);
         hidden.push(promotion(pool, format!("HID-{tag}-{i}"), 100, false).await?);
     }
-    Ok(Json(json!({ "tag": tag, "visible": visible, "hidden": hidden })))
+    Ok(Json(
+        json!({ "tag": tag, "visible": visible, "hidden": hidden }),
+    ))
 }
 
 /// A promotion read past the scope, so the driver can see a hidden row
@@ -132,7 +139,9 @@ pub async fn scopes_shortcuts(pool: &Pool) -> ProbeResult {
         .filter("code__endswith", tag)
         .compile_delete()
         .map_err(internal)?;
-    rustango::sql::delete_pool(pool, &q).await.map_err(internal)?;
+    rustango::sql::delete_pool(pool, &q)
+        .await
+        .map_err(internal)?;
     Ok(Json(out))
 }
 
@@ -140,7 +149,9 @@ pub async fn scopes_shortcuts(pool: &Pool) -> ProbeResult {
 /// write one audit row carrying the real PK (#1675).
 pub async fn audit_probe(pool: &Pool) -> ProbeResult {
     gate()?;
-    rustango::audit::ensure_table_pool(pool).await.map_err(internal)?;
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .map_err(internal)?;
     let mut row = Promotion {
         id: Auto::default(),
         code: format!("AUD-{}", nonce()),
@@ -153,14 +164,19 @@ pub async fn audit_probe(pool: &Pool) -> ProbeResult {
     let pk = row.id.get().copied().ok_or_else(|| internal("no pk"))?;
     let deleted = row.soft_delete(pool).await.map_err(internal)?;
     let restored = row.restore(pool).await.map_err(internal)?;
-    let entries = rustango::audit::fetch_for_entity_pool(pool, Promotion::SCHEMA.table, &pk.to_string())
-        .await
-        .map_err(internal)?;
+    let entries =
+        rustango::audit::fetch_for_entity_pool(pool, Promotion::SCHEMA.table, &pk.to_string())
+            .await
+            .map_err(internal)?;
     let ops: Vec<Value> = entries
         .iter()
-        .map(|e| json!({ "operation": e.operation, "entity_pk": e.entity_pk, "changes": e.changes }))
+        .map(
+            |e| json!({ "operation": e.operation, "entity_pk": e.entity_pk, "changes": e.changes }),
+        )
         .collect();
-    Ok(Json(json!({ "pk": pk, "soft_deleted": deleted, "restored": restored, "entries": ops })))
+    Ok(Json(
+        json!({ "pk": pk, "soft_deleted": deleted, "restored": restored, "entries": ops }),
+    ))
 }
 
 /// Three products, then a bounded delete and a bounded update (#1666).
@@ -193,7 +209,9 @@ pub async fn dml_bounded(pool: &Pool) -> ProbeResult {
         .limit(1)
         .compile_delete()
         .map_err(internal)?;
-    let deleted = rustango::sql::delete_pool(pool, &q).await.map_err(internal)?;
+    let deleted = rustango::sql::delete_pool(pool, &q)
+        .await
+        .map_err(internal)?;
     let left: Vec<Product> = tagged()
         .order_by(&[("price_cents", false)])
         .fetch(pool)
@@ -350,7 +368,12 @@ pub async fn hook_sink_hit(nonce: String) -> ProbeResult {
 
 pub async fn hook_sink_count(nonce: String) -> ProbeResult {
     gate()?;
-    let n = sink().lock().map_err(internal)?.get(&nonce).copied().unwrap_or(0);
+    let n = sink()
+        .lock()
+        .map_err(internal)?
+        .get(&nonce)
+        .copied()
+        .unwrap_or(0);
     Ok(Json(json!({ "hits": n })))
 }
 
@@ -366,7 +389,10 @@ pub async fn dbcache(pool: &Pool, body: Value) -> ProbeResult {
         let (Some(k), Some(v)) = (p[0].as_str(), p[1].as_str()) else {
             continue;
         };
-        if let Err(e) = cache.set(k, v, Some(std::time::Duration::from_secs(300))).await {
+        if let Err(e) = cache
+            .set(k, v, Some(std::time::Duration::from_secs(300)))
+            .await
+        {
             return Ok(Json(json!({ "error": e.to_string() })));
         }
     }
@@ -383,7 +409,10 @@ pub async fn dbcache(pool: &Pool, body: Value) -> ProbeResult {
 pub async fn service_token(headers: HeaderMap) -> ProbeResult {
     let secret = std::env::var("SOAK_SERVICE_TOKEN_SECRET").unwrap_or_default();
     if secret.len() < 32 {
-        return Err((StatusCode::FORBIDDEN, "SOAK_SERVICE_TOKEN_SECRET is not set".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "SOAK_SERVICE_TOKEN_SECRET is not set".into(),
+        ));
     }
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -410,7 +439,9 @@ pub async fn client_ip(
 /// A stand-in payment: a fresh id on every real execution, so a replay
 /// is visible. `"remember": true` also sets a cookie, which the
 /// idempotency layer must not store (#1668).
-pub async fn payment(Json(body): Json<Value>) -> Result<axum::response::Response, (StatusCode, String)> {
+pub async fn payment(
+    Json(body): Json<Value>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
     use axum::response::IntoResponse as _;
     gate()?;
     let id = nonce();
@@ -420,7 +451,9 @@ pub async fn payment(Json(body): Json<Value>) -> Result<axum::response::Response
     )
         .into_response();
     if body["remember"].as_bool() == Some(true) {
-        if let Ok(v) = axum::http::HeaderValue::from_str(&format!("last_payment={id}; Path=/; HttpOnly")) {
+        if let Ok(v) =
+            axum::http::HeaderValue::from_str(&format!("last_payment={id}; Path=/; HttpOnly"))
+        {
             resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
         }
     }

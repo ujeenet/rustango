@@ -106,10 +106,22 @@ fn promotion_pages(pool: &Pool) -> Router<AppState> {
     let s = Promotion::SCHEMA;
     Router::new()
         .merge(ListView::for_model(s).router("/promos", tera.clone(), pool.clone()))
-        .merge(CreateView::for_model(s).success_url("/promos").router("/promos", tera.clone(), pool.clone()))
+        .merge(CreateView::for_model(s).success_url("/promos").router(
+            "/promos",
+            tera.clone(),
+            pool.clone(),
+        ))
         .merge(DetailView::for_model(s).router("/promos", tera.clone(), pool.clone()))
-        .merge(UpdateView::for_model(s).success_url("/promos").router("/promos", tera.clone(), pool.clone()))
-        .merge(DeleteView::for_model(s).success_url("/promos").router("/promos", tera, pool.clone()))
+        .merge(UpdateView::for_model(s).success_url("/promos").router(
+            "/promos",
+            tera.clone(),
+            pool.clone(),
+        ))
+        .merge(DeleteView::for_model(s).success_url("/promos").router(
+            "/promos",
+            tera,
+            pool.clone(),
+        ))
         .with_state(())
 }
 
@@ -171,7 +183,9 @@ pub fn real_ip_layer() -> rustango::real_ip::RealIpLayer {
     if nets.is_empty() {
         return layer;
     }
-    layer.trust_proxies(nets).expect("TRUSTED_PROXIES holds valid CIDRs")
+    layer
+        .trust_proxies(nets)
+        .expect("TRUSTED_PROXIES holds valid CIDRs")
 }
 
 /// The one cached route.

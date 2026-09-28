@@ -132,10 +132,22 @@ fn promotion_pages() -> Router<AppState> {
     let s = Promotion::SCHEMA;
     Router::new()
         .merge(ListView::for_model(s).tenant_router("/promos", tera.clone()))
-        .merge(CreateView::for_model(s).success_url("/promos").tenant_router("/promos", tera.clone()))
+        .merge(
+            CreateView::for_model(s)
+                .success_url("/promos")
+                .tenant_router("/promos", tera.clone()),
+        )
         .merge(DetailView::for_model(s).tenant_router("/promos", tera.clone()))
-        .merge(UpdateView::for_model(s).success_url("/promos").tenant_router("/promos", tera.clone()))
-        .merge(DeleteView::for_model(s).success_url("/promos").tenant_router("/promos", tera))
+        .merge(
+            UpdateView::for_model(s)
+                .success_url("/promos")
+                .tenant_router("/promos", tera.clone()),
+        )
+        .merge(
+            DeleteView::for_model(s)
+                .success_url("/promos")
+                .tenant_router("/promos", tera),
+        )
         .with_state(())
 }
 
@@ -247,15 +259,24 @@ async fn sso_seed(t: Tenant<DefaultTenantDb>) -> ProbeResult {
         let id = u.id.get().copied().unwrap_or_default();
         if name == "sso-staff" {
             // Staff: holds permissions, including on the link table itself.
-            for code in ["rustango_sso_links.add", "rustango_sso_links.change", "rustango_sso_links.view"] {
+            for code in [
+                "rustango_sso_links.add",
+                "rustango_sso_links.change",
+                "rustango_sso_links.view",
+            ] {
                 rustango::tenancy::permissions::set_user_perm_pool(id, code, true, pool)
                     .await
                     .map_err(|e| err(&e))?;
             }
         }
-        users.insert(name.into(), serde_json::json!({ "id": id, "email": u.email }));
+        users.insert(
+            name.into(),
+            serde_json::json!({ "id": id, "email": u.email }),
+        );
     }
-    Ok(Json(serde_json::json!({ "issuer": issuer, "users": users })))
+    Ok(Json(
+        serde_json::json!({ "issuer": issuer, "users": users }),
+    ))
 }
 
 /// The proxies whose `X-Forwarded-For` this deployment believes, from
@@ -272,7 +293,9 @@ fn real_ip_layer() -> rustango::real_ip::RealIpLayer {
     if nets.is_empty() {
         return layer;
     }
-    layer.trust_proxies(nets).expect("TRUSTED_PROXIES holds valid CIDRs")
+    layer
+        .trust_proxies(nets)
+        .expect("TRUSTED_PROXIES holds valid CIDRs")
 }
 
 /// The one cached route, and the one place tenancy makes page caching
@@ -288,12 +311,14 @@ fn real_ip_layer() -> rustango::real_ip::RealIpLayer {
 /// `Cookie` or `Authorization` then bypasses the cache entirely, which
 /// is right for a storefront that renders a signed-in user's name.
 fn storefront(cache: rustango::cache::BoxedCache) -> Router<AppState> {
-    Router::new().route("/shop/products", get(views::storefront)).layer(
-        rustango::cache_page::CachePageLayer::new(cache)
-            .timeout(std::time::Duration::from_secs(30))
-            .key_prefix(&cache_namespace())
-            .vary_on(["host"]),
-    )
+    Router::new()
+        .route("/shop/products", get(views::storefront))
+        .layer(
+            rustango::cache_page::CachePageLayer::new(cache)
+                .timeout(std::time::Duration::from_secs(30))
+                .key_prefix(&cache_namespace())
+                .vary_on(["host"]),
+        )
 }
 
 /// The page cache's key prefix, namespaced per deployment.

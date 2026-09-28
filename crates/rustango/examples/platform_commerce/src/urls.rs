@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
-use rustango::real_ip::RealIpRouterExt as _;
 use rustango::jobs::DatabaseJobQueue;
+use rustango::real_ip::RealIpRouterExt as _;
 use rustango::sql::Pool;
 
 use crate::views;
