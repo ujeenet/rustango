@@ -4,8 +4,8 @@
 //! MySQL's grammar requires a `LIMIT` whenever `OFFSET` appears —
 //! `SELECT … OFFSET 10` alone raises `ERROR 1064`. The fix is to
 //! emit `LIMIT 18446744073709551615` (the documented max-`u64`
-//! placeholder) ahead of the OFFSET on MySQL. PG + SQLite accept
-//! the bare OFFSET and the writer leaves the LIMIT off.
+//! placeholder) ahead of the OFFSET on MySQL, and `LIMIT -1` on
+//! SQLite. PG accepts the bare OFFSET.
 
 use rustango::sql::{Dialect, MySql, Postgres, Sqlite};
 use rustango::Model;
@@ -38,16 +38,12 @@ fn postgres_offset_without_limit_emits_bare_offset() {
 }
 
 #[test]
-fn sqlite_offset_without_limit_emits_bare_offset() {
+fn sqlite_offset_without_limit_emits_limit_minus_one() {
+    // SQLite has no bare OFFSET; `LIMIT -1` means unlimited.
     let stmt = Sqlite
         .compile_select(&Post::objects().offset(7).compile().unwrap())
         .unwrap();
-    assert!(stmt.sql.contains("OFFSET 7"), "got: {}", stmt.sql);
-    assert!(
-        !stmt.sql.contains("LIMIT "),
-        "SQLite should NOT add a placeholder LIMIT: {}",
-        stmt.sql
-    );
+    assert!(stmt.sql.contains("LIMIT -1 OFFSET 7"), "got: {}", stmt.sql);
 }
 
 #[test]

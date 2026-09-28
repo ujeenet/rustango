@@ -243,6 +243,11 @@ pub enum ExecError {
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
     EmptyReturning,
 
+    /// A nested `atomic()` started while a `TxGuard` of the outer block
+    /// was still held. Drop the guard first.
+    #[error("nested `atomic()` while the outer transaction is locked; drop the `TxGuard` first")]
+    NestedAtomic,
+
     /// `ForeignKey::get` resolved a PK that didn't match any row in
     /// the target table. Means the parent was deleted under a
     /// non-CASCADE constraint, or the FK was constructed by hand with

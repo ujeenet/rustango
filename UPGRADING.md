@@ -177,6 +177,16 @@ tenant. A CDN in front must vary on the tenant header itself.
 `DatabaseCache` keys over 255 bytes, or ending in `#` plus 64 hex, are
 now stored hashed, so those entries miss once. Run `cache.clear()`
 after upgrading to drop the old rows.
+### Bounded update/delete; `atomic()` hands out a lockable `AtomicTx`
+
+`update()` / `delete()` now honour `limit`, `offset` and `order_by`
+(#1666); a queryset that relied on them being ignored now touches fewer
+rows. With a composite or missing PK, or after `union()`, a bounded one
+returns `QueryError::BoundedDmlUnsupported`. The `atomic` closure now
+gets `&AtomicTx`, not `&mut PoolTx`: write `insert_tx(&mut *tx.lock().await?, &q)`.
+A nested `atomic(&pool, …)` on the same pool is now a savepoint on the
+outer transaction, and its `on_commit` callbacks wait for the outermost
+commit. Drop the `TxGuard` before nesting, or get `ExecError::NestedAtomic`.
 
 ### The trusted client IP is the rightmost untrusted hop
 

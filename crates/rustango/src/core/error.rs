@@ -125,6 +125,14 @@ pub enum QueryError {
     )]
     RelationSpanUnsupportedHere { key: String },
 
+    /// `limit()`/`offset()` on `update()`/`delete()` could not be bounded
+    /// by primary key, so the statement is refused rather than run unbounded.
+    #[error("`{model}`: limit/offset on update()/delete() is not supported with {reason}")]
+    BoundedDmlUnsupported {
+        model: &'static str,
+        reason: &'static str,
+    },
+
     /// The value does not fit the lookup: `__in` without a list,
     /// `__isnull` without a bool, `__between` without exactly two
     /// elements.

@@ -71,6 +71,20 @@ impl<'a> PoolTx<'a> {
         }
     }
 
+    /// Run a bind-free statement unprepared. MySQL refuses `SAVEPOINT`
+    /// as a prepared statement (error 1295).
+    pub(crate) async fn execute_unprepared(&mut self, sql: &str) -> Result<(), sqlx::Error> {
+        use sqlx::Executor as _;
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+        }
+    }
+
     /// Return the dialect for this transaction's backend — same
     /// dispatch as [`crate::sql::Pool::dialect`] but sourced from the
     /// `PoolTx` variant rather than the pool. Used internally by the
@@ -124,7 +138,7 @@ impl<'a> PoolTx<'a> {
 ///
 /// # Errors
 /// Driver errors from `BEGIN`.
-pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'_>, ExecError> {
+pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => Ok(PoolTx::Postgres(pg.begin().await?)),

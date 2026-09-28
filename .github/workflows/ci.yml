@@ -1321,6 +1321,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features mysql --test orm_json_dates
       - run: cargo test -p rustango --no-default-features --features mysql --test orm_writes
       - run: cargo test -p rustango --no-default-features --features mysql --test orm_delta
+      - run: cargo test -p rustango --no-default-features --features mysql --test orm_bounded_dml
+      - run: cargo test -p rustango --no-default-features --features mysql --test atomic_savepoints
 
   # PostGIS geometry live suite (#443). The regular `postgres_test` runs
   # against `pgvector/pgvector:pg16`, which has no PostGIS, so the

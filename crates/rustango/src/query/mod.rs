@@ -2185,6 +2185,14 @@ impl<T: Model> QuerySet<T> {
         } else {
             where_clause
         };
+        let where_clause = bound_dml_where(
+            model,
+            where_clause,
+            self.order_by,
+            self.limit,
+            self.offset,
+            !self.compound.is_empty(),
+        )?;
         Ok(DeleteQuery {
             model,
             where_clause,
@@ -2408,6 +2416,14 @@ impl<T: Model> UpdateBuilder<T> {
         } else {
             where_clause
         };
+        let where_clause = bound_dml_where(
+            model,
+            where_clause,
+            self.qs.order_by,
+            self.qs.limit,
+            self.qs.offset,
+            !self.qs.compound.is_empty(),
+        )?;
 
         Ok(UpdateQuery {
             model,
@@ -3042,6 +3058,48 @@ fn never_match_clause(
             WhereExpr::And(nodes)
         }
         other => WhereExpr::And(vec![other, never]),
+    })
+}
+
+/// Bound an UPDATE/DELETE by `pk IN (SELECT pk … ORDER BY … LIMIT … OFFSET …)`.
+/// Without a limit or offset the order cannot change the row set, so it is left out.
+fn bound_dml_where(
+    model: &'static ModelSchema,
+    where_clause: WhereExpr,
+    order_by: Vec<PendingOrderItem>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    has_compound: bool,
+) -> Result<WhereExpr, QueryError> {
+    if limit.is_none() && offset.is_none() {
+        return Ok(where_clause);
+    }
+    let unsupported = |reason| QueryError::BoundedDmlUnsupported {
+        model: model.name,
+        reason,
+    };
+    if has_compound {
+        return Err(unsupported("a set operation"));
+    }
+    let mut pks = model.fields.iter().filter(|f| f.primary_key);
+    let pk = match (pks.next(), pks.next()) {
+        (Some(pk), None) => pk,
+        _ => return Err(unsupported("no single-column primary key")),
+    };
+    let (order_by, joins) = lower_order_items(model, order_by)?;
+    if !joins.is_empty() {
+        return Err(unsupported("a relation-spanning order_by"));
+    }
+    let mut inner = SelectQuery::new(model);
+    inner.where_clause = where_clause;
+    inner.order_by = order_by;
+    inner.limit = limit;
+    inner.offset = offset;
+    inner.projection = Some(vec![pk.column]);
+    Ok(WhereExpr::InSubquery {
+        column: pk.column,
+        negated: false,
+        subquery: Box::new(inner),
     })
 }
 
