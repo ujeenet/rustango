@@ -200,8 +200,8 @@ on the next login; for a shared provider it applies to every tenant), or
 have a superuser add an `SsoLink` row. Superusers, staff and every
 bare-admin account need the row: `provider_source` `tenant`/`shared`/
 `admin`, `provider_id` the provider row id, `issuer` `kind` or
-`kind|issuer_url` without a trailing slash, `subject`, `user_id`; leave
-`key_sha256` empty, the first sign-in fills it. The `sso refused` log
+`kind|issuer_url` without a trailing slash, `subject`, `user_id`; the
+admin computes `key_sha256`. The `sso refused` log
 line carries `provider_id`, `issuer` and `subject`. Only superusers can
 now add, change or delete `SsoProvider` and `SsoLink` rows in the admin.
 A read-only operator console can no longer change shared providers.

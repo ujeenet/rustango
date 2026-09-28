@@ -139,7 +139,7 @@ IdP. Ein Benutzer wird verknüpft durch das optionale Verknüpfen per E-Mail
 `SsoLink`-Zeile anlegt: `provider_source` (`tenant`, `shared` oder `admin`),
 `provider_id` (die ID der Anbieter-Zeile), `issuer` (`kind` oder
 `kind|issuer_url` ohne abschließenden Schrägstrich), `subject` und `user_id`.
-Lassen Sie `key_sha256` leer: die erste Anmeldung füllt es. Die Log-Zeile der
+Der Admin berechnet `key_sha256`. Die Log-Zeile der
 Abweisung (`sso refused`) enthält `provider_id`, `issuer` und `subject`. Eine
 Zeile anzulegen erfordert die Session-Authentifizierung des Admins
 (`Builder::with_session_auth` oder `with_session` des Tenant-Admins); ohne sie

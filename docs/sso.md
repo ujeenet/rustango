@@ -136,8 +136,8 @@ IdP. A user is linked by opt-in email linking (non-privileged tenant
 users), or by a superuser adding an `SsoLink` row: `provider_source`
 (`tenant`, `shared` or `admin`), `provider_id` (the provider row id),
 `issuer` (`kind`, or `kind|issuer_url` without a trailing slash),
-`subject` and `user_id`. Leave `key_sha256` empty: the first sign-in
-fills it. The refusal log line (`sso refused`) carries `provider_id`,
+`subject` and `user_id`. The admin computes
+`key_sha256`. The refusal log line (`sso refused`) carries `provider_id`,
 `issuer` and `subject`. Adding a row needs the admin's session auth
 (`Builder::with_session_auth`, or the tenant admin's `with_session`);
 without it nobody can add links.

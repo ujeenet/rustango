@@ -113,9 +113,9 @@ pub struct SsoLink {
     #[rustango(max_length = 255)]
     pub subject: String,
     /// [`key_sha256`] of `issuer` and `subject`: the exact, collation-proof
-    /// key. Derived; sign-in fills or repairs it, so the admin leaves it empty.
+    /// key. Computed on every write, the admin's included.
     #[rustango(max_length = 64)]
-    pub key_sha256: Option<String>,
+    pub key_sha256: String,
     /// Local user id, in the user table [`LinkSource`] names.
     pub user_id: i64,
     #[rustango(auto_now_add)]
@@ -142,6 +142,30 @@ crate::register_admin_object_permission!("rustango_sso_providers", "change", sup
 #[cfg(feature = "admin")]
 crate::register_admin_object_permission!("rustango_sso_providers", "delete", superuser_only);
 
+// The admin writes `key_sha256` from the submitted issuer and subject.
+#[cfg(feature = "admin")]
+fn derive_key(
+    values: &mut Vec<(&'static str, crate::core::SqlValue)>,
+    before: Option<&serde_json::Value>,
+) {
+    use crate::admin::derived_fields::text;
+    let issuer = text(values, before, "issuer").unwrap_or_default();
+    let subject = text(values, before, "subject").unwrap_or_default();
+    values.retain(|(c, _)| *c != "key_sha256");
+    values.push((
+        "key_sha256",
+        crate::core::SqlValue::String(key_sha256(&issuer, &subject)),
+    ));
+}
+
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_sso_links",
+        derive: derive_key,
+    }
+}
+
 /// Lowercase hex SHA-256 of `issuer`, a newline and `subject`, as stored in
 /// [`SsoLink::key_sha256`].
 #[must_use]
@@ -165,8 +189,8 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
 }
 
 /// The link for `(key, subject)`, if any. Issuer and subject are compared
-/// exactly, whatever the column collation; a missing or stale `key_sha256`
-/// is repaired.
+/// exactly, whatever the column collation; a stale `key_sha256` (a raw
+/// write) is repaired.
 ///
 /// # Errors
 /// Driver failures (including a missing table), or two rows for one identity.
@@ -193,7 +217,7 @@ pub async fn linked_user(
         return Err(format!("two links for subject {subject:?}"));
     }
     let want = key_sha256(&key.issuer, subject);
-    if link.key_sha256.as_deref() != Some(want.as_str()) {
+    if link.key_sha256 != want {
         let id = link.id.get().copied().unwrap_or_default();
         SsoLink::objects()
             .filter("id", id)
@@ -202,7 +226,7 @@ pub async fn linked_user(
             .execute_pool(pool)
             .await
             .map_err(|e| format!("repair key_sha256 of link {id}: {e}"))?;
-        link.key_sha256 = Some(want);
+        link.key_sha256 = want;
     }
     Ok(Some(link))
 }
@@ -214,7 +238,7 @@ fn link_row(key: &ProviderKey, subject: &str, user_id: i64) -> SsoLink {
         provider_id: key.provider_id,
         issuer: key.issuer.clone(),
         subject: subject.to_owned(),
-        key_sha256: Some(key_sha256(&key.issuer, subject)),
+        key_sha256: key_sha256(&key.issuer, subject),
         user_id,
         created_at: Auto::Unset,
     }

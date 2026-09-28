@@ -151,8 +151,7 @@ optionnelle par email (utilisateurs tenant non privilégiés), ou par un
 superutilisateur qui ajoute une ligne `SsoLink` : `provider_source`
 (`tenant`, `shared` ou `admin`), `provider_id` (l'id de la ligne du
 provider), `issuer` (`kind`, ou `kind|issuer_url` sans barre oblique
-finale), `subject` et `user_id`. Laissez `key_sha256` vide : la première
-connexion le remplit. La ligne de journal du refus (`sso refused`) porte
+finale), `subject` et `user_id`. L'admin calcule `key_sha256`. La ligne de journal du refus (`sso refused`) porte
 `provider_id`, `issuer` et `subject`. Ajouter une ligne exige
 l'authentification par session de l'admin (`Builder::with_session_auth`,
 ou `with_session` de l'admin tenant) ; sans elle, personne ne peut ajouter
