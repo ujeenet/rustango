@@ -16,6 +16,9 @@
 [server]
 bind                 = "0.0.0.0:8080"
 request_timeout_secs = 30
+# 256 KiB covers every API body this app takes. Chunked and HTTP/2
+# bodies are capped as they stream.
+max_body_bytes       = 262144
 
 [security]
 headers_preset    = "strict"
@@ -23,6 +26,8 @@ hsts_max_age_secs = 31536000
 
 [audit]
 retention_days = 365
+# Kept out of the access log and the request span alike.
+redact_query_params = ["invite_token"]
 
 [cache]
 # The storefront page cache. `redis` is the only backend that is shared

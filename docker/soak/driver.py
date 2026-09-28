@@ -72,6 +72,15 @@ SAAS = {
     "saas-my": "http://web-saas-my:8080",
     "saas-sq": "http://web-saas-sq:8080",
 }
+# Run against a subset, e.g. `SOAK_INSTANCES=single-sq,saas-sq,saas-pg-edge`.
+ONLY = {n for n in os.environ.get("SOAK_INSTANCES", "").split(",") if n}
+if ONLY:
+    SINGLE = {n: b for n, b in SINGLE.items() if n in ONLY}
+    SAAS = {n: b for n, b in SAAS.items() if n in ONLY}
+
+
+def wanted(name: str) -> bool:
+    return not ONLY or name in ONLY
 
 
 # ----------------------------------------------------------------- report
@@ -92,6 +101,8 @@ class Report:
     requests: dict = field(default_factory=dict)
     jobs: dict = field(default_factory=dict)
     started: float = field(default_factory=time.time)
+    # What #1610's log scan in finalize.py looks for.
+    redaction: dict = field(default_factory=dict)
 
     def add(self, name, issue, verdict, detail="", instance=""):
         self.checks.append(Check(name, issue, verdict, detail, instance))
@@ -941,6 +952,1595 @@ def report_uncoverable(live_single, live_saas):
     )
 
 
+# ------------------------------------------------------ 0.58.0 checks
+#
+# One or more named checks per fix shipped in 0.58.0. Each asserts the
+# behaviour the fix changed, so the pre-fix code fails it; where a leg
+# cannot tell the two apart it says "control" in its detail.
+
+EDGE_SAAS = ("saas-pg-edge", "http://web-saas-pg-edge:8080")
+EDGE_SINGLE = ("single-pg-edge", "http://web-single-pg-edge:8080")
+IDP = os.environ.get("SOAK_IDP", "http://idp:9000")
+SVC_SECRET = os.environ.get("SOAK_SERVICE_TOKEN_SECRET", "")
+PG_URL = os.environ.get("SOAK_PG_URL", "")
+# The edge instance redirects plain HTTP; this says the hop was TLS.
+TLS = {"X-Forwarded-Proto": "https"}
+
+ADMIN_USER = ("soakadmin", os.environ.get("SOAK_ADMIN_PASSWORD", "soak-admin-pw"))
+OPERATOR = ("soakops", os.environ.get("SOAK_OPERATOR_PASSWORD", "soak-operator-pw"))
+OP_COOKIE = "rustango_op_session"
+ADMIN_COOKIE = "rustango_admin_session"
+
+
+def pw(user: str) -> str:
+    """`bootstrap.sh` gives every probe account `soak-<user>-pw`."""
+    return f"soak-{user}-pw"
+
+
+# Every credential, token and cookie the driver handles: the log scan
+# (#1610) fails the run if any of them shows up in a container log.
+USED_SECRETS: set[str] = set()
+
+
+def secret(v):
+    if isinstance(v, str) and len(v) >= 8:
+        USED_SECRETS.add(v)
+    return v
+
+
+for _v in (ADMIN_USER[1], OPERATOR[1], TENANT_ADMIN[1]):
+    secret(_v)
+
+_ip_rng = random.Random(f"ips-{RUN_ID}")
+
+
+def fresh_ip() -> str:
+    """A public client address nobody else in this run has used."""
+    r = _ip_rng
+    return f"45.{r.randint(1, 254)}.{r.randint(0, 255)}.{r.randint(1, 254)}"
+
+
+def cookie_count(r, name: str) -> int:
+    return sum(1 for h in r.headers.get_list("set-cookie")
+               if h.split(";", 1)[0].startswith(f"{name}="))
+
+
+def host_of(base: str, headers: dict | None) -> str:
+    if headers and "Host" in headers:
+        return headers["Host"]
+    return base.split("://", 1)[1]
+
+
+def origin_of(base: str, headers: dict | None) -> str:
+    return f"http://{host_of(base, headers)}"
+
+
+def verdict(ok: bool) -> str:
+    return "PASS" if ok else "FAIL"
+
+
+def is_refusal(r) -> bool:
+    """A login-gate refusal: 429 with a Retry-After."""
+    return r.status_code == 429 and bool(r.headers.get("retry-after"))
+
+
+# ------------------------------------------------------------- #1673
+
+
+async def check_forwarded_for(client, name, base, headers=None):
+    """#1673 — the client is the rightmost hop no trusted proxy wrote.
+
+    `203.0.113.9` is what a client can write, `::ffff:172.20.0.5` is a
+    trusted proxy in IPv4-mapped form. The old code took the leftmost
+    hop; a code that only fixed that would stop at the mapped proxy.
+    """
+    h = dict(headers or {})
+    h["X-Forwarded-For"] = "203.0.113.9, 198.51.100.7, ::ffff:172.20.0.5"
+    r = await client.get(f"{base}/_soak/ip", headers=h)
+    if r.status_code != 200:
+        REPORT.add("client IP is the rightmost untrusted XFF hop", "#1673", "FAIL",
+                   f"/_soak/ip answered {r.status_code}", name)
+        return
+    got = r.json().get("trusted_ip")
+    why = {"203.0.113.9": "took the leftmost hop, which the client writes",
+           "::ffff:172.20.0.5": "a v4-mapped trusted proxy did not match 172.16.0.0/12"}
+    REPORT.add("client IP is the rightmost untrusted XFF hop", "#1673",
+               verdict(got == "198.51.100.7"),
+               f"trusted_ip={got}" + (f" — {why[got]}" if got in why else ""), name)
+    plain = await client.get(f"{base}/_soak/ip", headers=headers)
+    REPORT.add("no forwarding header, no trusted client IP", "#1673",
+               verdict(plain.status_code == 200 and plain.json().get("trusted_ip") is None),
+               f"{plain.status_code} {plain.text[:100]}", name)
+
+
+async def check_v4_mapped_filter(client, name, base, headers=None):
+    """#1673 — an IPv4 rule matches an IPv4 client on a dual-stack socket."""
+    r = await client.get(f"{base}/_soak/v4-blocked", headers=headers)
+    dual = name == "single-sq"
+    REPORT.add("ip_filter v4 rule blocks a v4-mapped peer", "#1673",
+               verdict(r.status_code == 403),
+               (f"{r.status_code}" + ("" if dual else
+                                      " — control: this listener is IPv4-only")), name)
+
+
+async def raw_status(base, head: str, body_chunks) -> tuple[int | None, str]:
+    """Send one HTTP/1.1 request by hand; return (status, body head).
+
+    httpx gives up when the server answers 413 and closes while the
+    body is still going up; a browser or proxy reads the answer anyway.
+    """
+    from urllib.parse import urlparse
+    u = urlparse(base)
+    reader, writer = await asyncio.open_connection(u.hostname, u.port or 80)
+    # Read while sending: an early answer is followed by a close, and a
+    # reset can discard it if nobody was reading yet.
+    answer = asyncio.create_task(reader.read(4096))
+    try:
+        try:
+            writer.write(head.encode())
+            await writer.drain()
+            for chunk in body_chunks:
+                if answer.done():
+                    break
+                writer.write(chunk)
+                await writer.drain()
+        except (ConnectionError, OSError):
+            pass  # the server answered early and closed; read what it said
+        raw = await asyncio.wait_for(answer, 10)
+        line = raw.split(b"\r\n", 1)[0]
+        status = int(line.split()[1]) if line.startswith(b"HTTP/") else None
+        return status, raw.split(b"\r\n\r\n", 1)[-1][:160].decode(errors="replace")
+    except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+        return None, repr(e)
+    finally:
+        writer.close()
+
+
+async def check_body_limit(client, name, base, headers=None):
+    """#1673 — `max_body_bytes` (256 KiB) caps chunked bodies and QUERY.
+
+    The chunked bodies are valid JSON, so without the cap the handler
+    reads them whole: the ViewSet then answers 400 on the long name, the
+    payment 201.
+    """
+    big = json.dumps({"sku": f"BIG-{RUN_ID}", "name": "x" * 400_000,
+                      "blurb": None, "price_cents": 1, "active": False}).encode()
+    host = host_of(base, headers)
+    chunked = [f"{len(big[i:i + 16_384]):x}\r\n".encode() + big[i:i + 16_384] + b"\r\n"
+               for i in range(0, len(big), 16_384)] + [b"0\r\n\r\n"]
+
+    def post(path):
+        return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
+                "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+
+    st, body = await raw_status(base, post("/api/v1/payments"), chunked)
+    REPORT.add("chunked body over max_body_bytes is 413", "#1673",
+               verdict(st == 413), f"payment (Json extractor): {st} {body[:80]}", name)
+    st, body = await raw_status(base, post("/api/v1/products"), chunked)
+    REPORT.add("chunked body over max_body_bytes is 413 on a ViewSet", "#1673",
+               verdict(st == 413), f"{st} {body[:100]}", name)
+    q, body = await raw_status(base, f"QUERY /api/v1/products HTTP/1.1\r\nHost: {host}\r\n"
+                               f"Content-Type: application/json\r\nContent-Length: {len(big)}\r\n"
+                               "Connection: close\r\n\r\n", [big])
+    REPORT.add("QUERY body over max_body_bytes is 413", "#1673", verdict(q == 413),
+               f"{q} {body[:80]}", name)
+
+
+# ------------------------------------------------------------- #1675
+
+
+async def check_model_shortcut_scopes(client, name, base, headers=None):
+    """#1675 — `Model::sum/min/max/avg/destroy/delete_where` see the scope."""
+    r = await client.post(f"{base}/_soak/scopes/shortcuts", headers=headers)
+    if r.status_code != 200:
+        REPORT.add("Model shortcuts apply global scopes", "#1675", "FAIL",
+                   f"probe answered {r.status_code}: {r.text[:200]}", name)
+        return
+    b = r.json()
+    problems = [f"{k}: shortcut {b[f'shortcut_{k}']} != queryset {b[f'scoped_{k}']}"
+                for k in ("sum", "min", "max", "avg")
+                if b[f"shortcut_{k}"] != b[f"scoped_{k}"]]
+    # Only the max is a tell: visible probe rows elsewhere also cost 1.
+    if b.get("shortcut_max") == 1_000_000_000:
+        problems.append("an aggregate reached a hidden row")
+    if b.get("destroy_hidden") != 0 or b.get("delete_where_hidden") != 0 or b.get("hidden_left") != 2:
+        problems.append(f"destroy/delete_where touched hidden rows: {b}")
+    if b.get("destroy_visible") != 1:
+        problems.append(f"destroy of a visible row removed {b.get('destroy_visible')}")
+    REPORT.add("Model shortcuts apply global scopes", "#1675",
+               "FAIL" if problems else "PASS", "; ".join(problems), name)
+
+
+async def check_audited_pool_writes(client, name, base, headers=None):
+    """#1675 — audited insert/soft_delete/restore on `&Pool` write rows."""
+    r = await client.post(f"{base}/_soak/audit/probe", headers=headers)
+    if r.status_code != 200:
+        REPORT.add("audited Pool writes record the real PK", "#1675", "FAIL",
+                   f"probe answered {r.status_code}: {r.text[:200]}", name)
+        return
+    b = r.json()
+    pk = str(b["pk"])
+    ops = [e["operation"] for e in b["entries"]]
+    pks = {e["entity_pk"] for e in b["entries"]}
+    problems = []
+    if ops != ["restore", "soft_delete", "create"]:
+        problems.append(f"operations {ops}")
+    if pks != {pk}:
+        problems.append(f"entity_pk {sorted(pks)} != {pk}")
+    by_op = {e["operation"]: e["changes"] for e in b["entries"]}
+    if by_op.get("soft_delete", {}).get("deleted_at") in (None, ""):
+        problems.append("soft_delete row has no deleted_at")
+    if by_op.get("restore", {}).get("deleted_at") is not None:
+        problems.append("restore row keeps deleted_at")
+    REPORT.add("audited Pool writes record the real PK", "#1675",
+               "FAIL" if problems else "PASS", "; ".join(problems) or f"pk {pk}: {ops}", name)
+
+
+# ------------------------------------------------------ #1746 / #1751
+
+
+async def check_viewset_scopes(client, name, base, headers=None):
+    """#1746 — the ViewSet and the template views skip scoped-out rows."""
+    issue = "#1746"
+    seed = await client.post(f"{base}/_soak/scopes/seed", headers=headers)
+    if seed.status_code != 200:
+        REPORT.add("ViewSet applies global scopes", issue, "FAIL",
+                   f"seed answered {seed.status_code}: {seed.text[:200]}", name)
+        return
+    s = seed.json()
+    hid, vis = s["hidden"][0], s["visible"][0]
+    api = f"{base}/api/v1/promotions"
+    lst = await client.get(api, headers=headers, params={"search": s["tag"], "limit": 50})
+    codes = [row.get("code", "") for row in (lst.json().get("results", []) if lst.status_code == 200 else [])]
+    problems = []
+    if lst.status_code != 200 or not any(c.startswith("VIS-") for c in codes):
+        problems.append(f"list {lst.status_code}, codes {codes}")
+    if any(c.startswith("HID-") for c in codes):
+        problems.append(f"list shows hidden rows {codes}")
+    det = await client.get(f"{api}/{hid}", headers=headers)
+    if det.status_code != 404:
+        problems.append(f"detail of a hidden row answered {det.status_code}")
+    ok = await client.get(f"{api}/{vis}", headers=headers)
+    if ok.status_code != 200:
+        problems.append(f"detail of a visible row answered {ok.status_code} (control)")
+    up = await client.patch(f"{api}/{hid}", headers=headers, json={"amount_cents": 7})
+    if up.status_code != 404:
+        problems.append(f"PATCH of a hidden row answered {up.status_code}")
+    de = await client.delete(f"{api}/{s['hidden'][1]}", headers=headers)
+    if de.status_code != 404:
+        problems.append(f"DELETE of a hidden row answered {de.status_code}")
+    for pk in s["hidden"]:
+        row = await client.get(f"{base}/_soak/scopes/row/{pk}", headers=headers)
+        if row.status_code != 200 or row.json().get("amount_cents") != 100:
+            problems.append(f"hidden row {pk} changed: {row.status_code} {row.text[:120]}")
+    REPORT.add("ViewSet applies global scopes", issue,
+               "FAIL" if problems else "PASS", "; ".join(problems), name)
+
+    # Template views: detail, edit and delete of a hidden row are 404.
+    pages = f"{base}/promos"
+    problems = []
+    d = await client.get(f"{pages}/{hid}", headers=headers)
+    if d.status_code != 404:
+        problems.append(f"detail {d.status_code}")
+    e = await client.get(f"{pages}/{hid}/edit", headers=headers)
+    if e.status_code != 404:
+        problems.append(f"edit form {e.status_code}")
+    # Newest first, so the seeded rows are on page one; `total` counts
+    # every page and must match the scoped count, not the unscoped one.
+    lp = await client.get(pages, headers=headers)
+    hidden_code = f"HID-{s['tag']}"
+    total = lp.text.rsplit("total=", 1)[-1].split("<", 1)[0].strip()
+    if lp.status_code != 200 or hidden_code in lp.text:
+        problems.append(f"list {lp.status_code}, hidden code present: {hidden_code in lp.text}")
+    if not total.isdigit() or int(total) >= s["all_total"]:
+        problems.append(f"list total {total}, scoped {s['scoped_total']}, all {s['all_total']}")
+    v = await client.get(f"{pages}/{vis}", headers=headers)
+    if v.status_code != 200:
+        problems.append(f"visible detail {v.status_code} (control)")
+    REPORT.add("template views apply global scopes", issue,
+               "FAIL" if problems else "PASS", "; ".join(problems), name)
+
+
+# ------------------------------------------------------------- #1669
+
+
+async def pages_csrf(client, base, headers):
+    """A CSRF token for the template views, off their own form."""
+    r = await client.get(f"{base}/promos/new", headers=headers)
+    return set_cookie_value(r, "rustango_csrf") if r.status_code == 200 else None
+
+
+async def check_urlize_and_cbv_csrf(client, name, base, headers=None):
+    """#1669 — `urlize` escapes its output; template-view POSTs need CSRF."""
+    label = 'see https://x.test/"><script>alert(1)</script> now'
+    code = f"URL-{RUN_ID}-{time.time_ns() % 10**9}"
+    r = await client.post(f"{base}/api/v1/promotions", headers=headers, json={
+        "code": code, "label": label, "amount_cents": 1, "visible": True, "deleted_at": None})
+    if r.status_code not in (200, 201):
+        REPORT.add("urlize escapes user text", "#1669", "FAIL",
+                   f"could not create a promotion: {r.status_code} {r.text[:200]}", name)
+    else:
+        pk = r.json().get("id")
+        page = await client.get(f"{base}/promos/{pk}", headers=headers)
+        body = page.text
+        raw = "<script>alert(1)</script>" in body
+        REPORT.add("urlize escapes user text", "#1669",
+                   verdict(page.status_code == 200 and not raw and "&lt;script&gt;" in body),
+                   f"{page.status_code}; raw script {'present' if raw else 'absent'}: "
+                   f"{body[body.find('class=') : body.find('class=') + 200]!r}", name)
+
+    # `urlizetrunc` cut non-ASCII text on a byte, not a char (#1669).
+    wide = f"ÑAN-{RUN_ID}-{time.time_ns() % 10**9}"
+    r = await client.post(f"{base}/api/v1/promotions", headers=headers, json={
+        "code": wide, "label": "ñandú https://ñandú.example/ábcdéfghíjk fin",
+        "amount_cents": 1, "visible": True, "deleted_at": None})
+    if r.status_code in (200, 201):
+        page = await client.get(f"{base}/promos/{r.json().get('id')}", headers=headers)
+        short = page.text.split('class="short">', 1)[-1][:160]
+        REPORT.add("urlizetrunc keeps non-ASCII text whole", "#1669",
+                   verdict(page.status_code == 200 and "ñandú" in short and "\ufffd" not in short),
+                   f"{page.status_code} {short!r}", name)
+    else:
+        REPORT.add("urlizetrunc keeps non-ASCII text whole", "#1669", "FAIL",
+                   f"could not create a promotion: {r.status_code}", name)
+
+    token = await pages_csrf(client, base, headers)
+    host = origin_of(base, headers)
+    form = {"code": f"CBV-{RUN_ID}-{time.time_ns() % 10**9}", "label": "cbv",
+            "amount_cents": "1", "visible": "true"}
+    no = await client.post(f"{base}/promos/new", headers={**(headers or {}), "Origin": host},
+                           data=form)
+    empty = await client.post(f"{base}/promos/new", headers={
+        **(headers or {}), "Origin": host, "Cookie": "rustango_csrf="}, data={**form, "_csrf": ""})
+    REPORT.add("template-view POST without a CSRF token is 403", "#1669",
+               verdict(no.status_code == 403), f"{no.status_code}", name)
+    REPORT.add("CSRF refuses an empty token pair", "#1693",
+               verdict(empty.status_code == 403), f"template view: {empty.status_code}", name)
+    if token:
+        ok = await client.post(f"{base}/promos/new", headers={
+            **(headers or {}), "Origin": host, "Cookie": f"rustango_csrf={token}"},
+            data={**form, "_csrf": token})
+        REPORT.add("template-view POST with the token goes through", "#1669",
+                   verdict(ok.status_code in (302, 303)), f"{ok.status_code} (control)", name)
+    else:
+        REPORT.add("template-view POST with the token goes through", "#1669", "FAIL",
+                   "GET /promos/new set no CSRF cookie", name)
+
+
+# ------------------------------------------------------------- #1671
+
+
+async def check_natural_pk(client, name, base, headers=None):
+    """#1671 — a ViewSet create keeps the client's primary key."""
+    code = f"GC-{RUN_ID}-{time.time_ns() % 10**9}"
+    r = await client.post(f"{base}/api/v1/gift-cards", headers=headers,
+                          json={"code": code, "balance_cents": 500})
+    got = await client.get(f"{base}/api/v1/gift-cards/{code}", headers=headers)
+    ok = (r.status_code in (200, 201) and got.status_code == 200
+          and got.json().get("code") == code)
+    REPORT.add("ViewSet create keeps a natural PK", "#1671", verdict(ok),
+               f"POST {r.status_code}, GET by code {got.status_code} {got.text[:120]}", name)
+    none = await client.post(f"{base}/api/v1/gift-cards", headers=headers,
+                             json={"balance_cents": 1})
+    REPORT.add("ViewSet create without a PK is 400", "#1671",
+               verdict(none.status_code == 400), f"{none.status_code} {none.text[:120]}", name)
+
+
+# ------------------------------------------------------------- #1668
+
+
+async def check_idempotency_scope(client, name, base, headers=None, other_tenant=None):
+    """#1668 — a replay is for the same caller, tenant and route only."""
+    issue = "#1668"
+    url = f"{base}/api/v1/payments"
+    key = f"idem-{RUN_ID}-{time.time_ns()}"
+    h = headers or {}
+    a = {**h, "Idempotency-Key": key, "Authorization": "Bearer caller-a"}
+    body = {"amount_cents": 1200}
+    first = await client.post(url, headers=a, json=body)
+    again = await client.post(url, headers=a, json=body)
+    if first.status_code != 201:
+        REPORT.add("idempotent replay reaches only its caller", issue, "FAIL",
+                   f"payment answered {first.status_code}: {first.text[:160]}", name)
+        return
+    pid = first.json().get("payment_id")
+    REPORT.add("same caller, same key replays", issue,
+               verdict(again.json().get("payment_id") == pid), "(control)", name)
+    b = await client.post(url, headers={**a, "Authorization": "Bearer caller-b"}, json=body)
+    anon = await client.post(url, headers={**h, "Idempotency-Key": key}, json=body)
+    refund = await client.post(f"{base}/api/v1/refunds", headers=a, json=body)
+    leaks = [label for label, resp in (("another caller", b), ("no caller", anon),
+                                       ("another route", refund))
+             if resp.status_code == 201 and resp.json().get("payment_id") == pid]
+    REPORT.add("idempotent replay reaches only its caller and route", issue,
+               "FAIL" if leaks else "PASS",
+               f"replayed to: {leaks}" if leaks else "", name)
+    if other_tenant:
+        t = await client.post(url, headers={**a, "Host": other_tenant}, json=body)
+        REPORT.add("idempotent replay stays in its tenant", issue,
+                   verdict(t.status_code == 201 and t.json().get("payment_id") != pid),
+                   f"{t.status_code}", name)
+    changed = await client.post(url, headers=a, json={"amount_cents": 1})
+    REPORT.add("reused key with another body is 422", issue,
+               verdict(changed.status_code == 422), f"{changed.status_code}", name)
+    ck = {**h, "Idempotency-Key": f"{key}-cookie", "Authorization": "Bearer caller-a"}
+    c1 = await client.post(url, headers=ck, json={"amount_cents": 5, "remember": True})
+    c2 = await client.post(url, headers=ck, json={"amount_cents": 5, "remember": True})
+    stored = c1.status_code == 201 and c2.json().get("payment_id") == c1.json().get("payment_id")
+    REPORT.add("a response that sets a cookie is not stored", issue, verdict(not stored),
+               "second call was a replay" if stored else "", name)
+
+
+# ------------------------------------------------------------- #1670
+
+
+async def check_webhook_targets(client, name, base, headers=None):
+    """#1670 — deliveries refuse internal targets, and do not redirect."""
+    issue = "#1670"
+    import socket
+    try:
+        idp_ip = socket.gethostbyname("idp")
+    except OSError:
+        idp_ip = "?"
+    n = f"{RUN_ID}{time.time_ns() % 10**9}"
+    blocked = {
+        "loopback (this app)": f"http://127.0.0.1:8080/_soak/hook-sink/{n}-lo",
+        "v4-mapped loopback": f"http://[::ffff:127.0.0.1]:8080/_soak/hook-sink/{n}-map",
+        "private via DNS": f"{IDP}/hook/{n}-dns",
+        "link-local metadata": "http://169.254.169.254/latest/meta-data/",
+        "RFC 1918": "http://10.1.2.3/",
+        "CGNAT": "http://100.64.0.1/",
+        "unspecified": "http://0.0.0.0:8080/",
+        "6to4 of loopback": "http://[2002:7f00:1::1]:8080/",
+        "NAT64 of loopback": "http://[64:ff9b::7f00:1]:8080/",
+        "IPv6 loopback": "http://[::1]:8080/",
+    }
+    problems = []
+    for label, url in blocked.items():
+        r = await client.post(f"{base}/_soak/webhooks/probe", headers=headers,
+                              json={"url": url})
+        out = r.json() if r.status_code == 200 else {}
+        err = out.get("error", "")
+        if out.get("delivered") or "blocked address" not in err:
+            problems.append(f"{label}: {out or r.status_code}")
+        if idp_ip in err:
+            problems.append(f"{label}: the error names the resolved address")
+    await asyncio.sleep(0.5)
+    for sink in (f"{base}/_soak/hook-sink/{n}-lo", f"{base}/_soak/hook-sink/{n}-map"):
+        hits = (await client.get(sink, headers=headers)).json().get("hits")
+        if hits:
+            problems.append(f"loopback sink got {hits} hit(s)")
+    dns_hits = (await client.get(f"{IDP}/hooks/{n}-dns")).json().get("hits")
+    if dns_hits:
+        problems.append(f"private target got {dns_hits} hit(s)")
+    scheme = await client.post(f"{base}/_soak/webhooks/probe", headers=headers,
+                               json={"url": "file:///etc/passwd"})
+    if "scheme not allowed" not in scheme.text:
+        problems.append(f"file:// not refused: {scheme.text[:120]}")
+    REPORT.add("webhook refuses internal targets", issue,
+               "FAIL" if problems else "PASS", "; ".join(problems[:6]), name)
+
+    # Controls and the other two rules, with the address check off.
+    ok = await client.post(f"{base}/_soak/webhooks/probe", headers=headers,
+                           json={"url": f"{IDP}/hook/{n}-ok", "allow_private": True})
+    got = (await client.get(f"{IDP}/hooks/{n}-ok")).json().get("hits")
+    REPORT.add("webhook delivers with allow_private_targets", issue,
+               verdict(ok.json().get("delivered") is True and got == 1),
+               f"{ok.text[:120]}, sink hits {got} (control)", name)
+    red = await client.post(f"{base}/_soak/webhooks/probe", headers=headers, json={
+        "url": f"{IDP}/redirect?to={IDP}/hook/{n}-redir", "allow_private": True})
+    rhits = (await client.get(f"{IDP}/hooks/{n}-redir")).json().get("hits")
+    REPORT.add("webhook does not follow redirects", issue,
+               verdict(red.json().get("delivered") is False and not rhits),
+               f"{red.text[:120]}, redirect target hits {rhits}", name)
+    st = await client.post(f"{base}/_soak/webhooks/probe", headers=headers, json={
+        "url": f"{IDP}/status/500?n={n}", "allow_private": True})
+    REPORT.add("failed webhook keeps the status, not the body", issue,
+               verdict("status 500" in st.text and "BODY-SECRET" not in st.text),
+               st.text[:160], name)
+
+
+# ------------------------------------------------------------- #1674
+
+
+async def check_dbcache_long_keys(client, name, base, headers=None):
+    """#1674 — keys over 255 bytes round-trip instead of colliding."""
+    stem = "k" * 300
+    pairs = [[f"{stem}-{RUN_ID}-a", "value-a"], [f"{stem}-{RUN_ID}-b", "value-b"],
+             [f"short-{RUN_ID}", "value-short"]]
+    r = await client.post(f"{base}/_soak/dbcache", headers=headers, json={"pairs": pairs})
+    got = r.json().get("got") if r.status_code == 200 else None
+    control = "" if name.endswith("-my") else " — control: this backend never truncated"
+    REPORT.add("database cache keeps keys over 255 bytes apart", "#1674",
+               verdict(got == ["value-a", "value-b", "value-short"]),
+               f"{r.status_code} {str(r.json() if r.status_code == 200 else r.text)[:160]}{control}",
+               name)
+
+
+async def check_page_cache_x_org(client, name, base):
+    """#1674 — on a shared Host, `X-Org` tenants get their own page."""
+    shared = {"Host": "shared.example.test"}
+    for _ in range(2):
+        await client.get(f"{base}/shop/products", headers={**shared, "X-Org": "t01"})
+    r = await client.get(f"{base}/shop/products", headers={**shared, "X-Org": "t02"})
+    body = r.text
+    if r.status_code != 200:
+        REPORT.add("page cache keys on the X-Org tenant", "#1674", "FAIL",
+                   f"X-Org t02 on a shared Host answered {r.status_code}: {body[:160]}", name)
+        return
+    REPORT.add("page cache keys on the X-Org tenant", "#1674",
+               verdict("Catalogue — t02" in body and "Catalogue — t01" not in body),
+               body[body.find("<h1>"):body.find("</h1>") + 5], name)
+
+
+# ------------------------------------------------------------- #1759
+
+
+async def check_bounded_dml(client, name, base, headers=None):
+    """#1666 — `.limit(n)` bounds update() and delete()."""
+    r = await client.post(f"{base}/_soak/dml/bounded", headers=headers)
+    b = r.json() if r.status_code == 200 else {}
+    ok = (b.get("updated") == 2 and b.get("deleted") == 1
+          and b.get("left_prices") == [101, 102] and b.get("renamed_left") == 2)
+    REPORT.add("bounded update/delete touch only `limit` rows", "#1666", verdict(ok),
+               f"{r.status_code} {b or r.text[:200]}", name)
+
+
+async def check_nested_atomic(client, name, base, headers=None):
+    """#1666 — nested atomic() is a savepoint; on_commit waits for the top."""
+    r = await client.post(f"{base}/_soak/dml/atomic", headers=headers)
+    b = r.json() if r.status_code == 200 else {}
+    REPORT.add("outer rollback undoes the inner atomic block", "#1666",
+               verdict(b.get("outer_rollback_err") is True
+                       and b.get("outer_rollback_kept_outer") is False
+                       and b.get("outer_rollback_kept_inner") is False),
+               f"{r.status_code} {b or r.text[:200]}", name)
+    REPORT.add("inner rollback keeps the outer write", "#1666",
+               verdict(b.get("inner_rollback_ok") is True
+                       and b.get("inner_rollback_kept_outer") is True
+                       and b.get("inner_rollback_kept_inner") is False),
+               "(control: two transactions behave the same here)", name)
+    REPORT.add("on_commit fires at the outermost commit", "#1666",
+               verdict(b.get("on_commit_fired_before_outer_commit") == 0
+                       and b.get("on_commit_fired_after") == 1),
+               f"before={b.get('on_commit_fired_before_outer_commit')} "
+               f"after={b.get('on_commit_fired_after')}", name)
+
+
+# ------------------------------------------------------------- #1538
+
+
+def b64url(raw: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def forge_jwt(claims: dict, key: str) -> str:
+    import hashlib
+    import hmac
+    head = b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    body = b64url(json.dumps(claims).encode())
+    sig = hmac.new(key.encode(), f"{head}.{body}".encode(), hashlib.sha256).digest()
+    return secret(f"{head}.{body}.{b64url(sig)}")
+
+
+async def check_jwt_requires_exp(client, name, base, headers=None):
+    """#1538 — `jwt::decode` refuses a token with no `exp`."""
+    if len(SVC_SECRET) < 32:
+        REPORT.add("JWT with no exp is refused", "#1538", "NOT-COVERED",
+                   "SOAK_SERVICE_TOKEN_SECRET not given to the driver", name)
+        return
+    now = int(time.time())
+    good = forge_jwt({"sub": "svc", "iat": now, "exp": now + 300}, SVC_SECRET)
+    bare = forge_jwt({"sub": "svc", "iat": now}, SVC_SECRET)
+    g = await client.get(f"{base}/_soak/service-token",
+                         headers={**(headers or {}), "Authorization": f"Bearer {good}"})
+    b = await client.get(f"{base}/_soak/service-token",
+                         headers={**(headers or {}), "Authorization": f"Bearer {bare}"})
+    REPORT.add("JWT with exp is accepted", "#1538", verdict(g.status_code == 200),
+               f"{g.status_code} (control: proves the forged signature is right)", name)
+    REPORT.add("JWT with no exp is refused", "#1538", verdict(b.status_code == 401),
+               f"{b.status_code} {b.text[:100]}", name)
+
+
+# ------------------------------------------------------------- #1636
+
+
+async def check_storefront_escapes(client, name, base, headers=None):
+    """#1636 — product text is escaped on the storefront."""
+    # Sorts before every other SKU, newest first, so it is on page one.
+    sku = f"0<b>{10**12 - int(time.time())}"
+    r = await client.post(f"{base}/api/v1/products", headers=headers, json={
+        "sku": sku, "name": '<script>alert("x")</script>', "blurb": None,
+        "price_cents": 1, "active": True})
+    if r.status_code not in (200, 201):
+        REPORT.add("storefront escapes product text", "#1636", "FAIL",
+                   f"could not create the product: {r.status_code} {r.text[:160]}", name)
+        return
+    page = await client.get(f"{base}/shop/products", headers=headers,
+                            params={"fresh": time.time_ns()})
+    body = page.text
+    raw = "<script>alert" in body or "<b>" in body
+    REPORT.add("storefront escapes product text", "#1636",
+               verdict(page.status_code == 200 and not raw and "&lt;script&gt;" in body),
+               f"{page.status_code}; raw markup {'present' if raw else 'absent'}", name)
+    await client.patch(f"{base}/api/v1/products/{r.json().get('id')}", headers=headers,
+                       json={"active": False})
+
+
+# ------------------------------------------------------------ logins
+
+
+async def admin_token(client, base, headers=None):
+    r = await client.get(f"{base}/__admin/login", headers=headers)
+    return secret(set_cookie_value(r, "rustango_csrf")), r
+
+
+async def admin_login(client, base, user, password, ip=None, headers=None,
+                      origin: str | None = "", token=None):
+    """POST the bare admin login. `origin=None` sends no Origin."""
+    if token is None:
+        token, _ = await admin_token(client, base, headers)
+    h = {**(headers or {}), "Cookie": f"rustango_csrf={token}"}
+    if origin is not None:
+        h["Origin"] = origin or origin_of(base, headers)
+    if ip:
+        h["X-Forwarded-For"] = ip
+    return await client.post(f"{base}/__admin/login", headers=h, data={
+        "_csrf": token, "username": user, "password": secret(password)})
+
+
+async def tenant_login(client, base, host, user, password, extra=None, origin=""):
+    extra = extra or {}
+    r = await client.get(f"{base}/__login", headers={"Host": host, **extra})
+    token = secret(set_cookie_value(r, "rustango_csrf"))
+    h = {"Host": host, "Cookie": f"rustango_csrf={token}", **extra}
+    if origin is not None:
+        h["Origin"] = origin or f"http://{host}"
+    resp = await client.post(f"{base}/__login", headers=h, data={
+        "username": user, "password": secret(password), "next": "/__admin", "_csrf": token})
+    return resp, secret(set_cookie_value(resp, SESSION_COOKIE)), token
+
+
+async def console_login(client, base, user, password, origin=""):
+    apex = {"Host": APEX}
+    r = await client.get(f"{base}/login", headers=apex)
+    token = secret(set_cookie_value(r, "rustango_csrf"))
+    h = {**apex, "Cookie": f"rustango_csrf={token}"}
+    if origin is not None:
+        h["Origin"] = origin or f"http://{APEX}"
+    resp = await client.post(f"{base}/login", headers=h, data={
+        "username": user, "password": secret(password), "next": "/", "_csrf": token})
+    return resp, secret(set_cookie_value(resp, OP_COOKIE)), token
+
+
+async def jwt_login(client, base, host, user, password, ip=None, extra=None):
+    h = {"Host": host, **(extra or {})}
+    if ip:
+        h["X-Forwarded-For"] = ip
+    return await client.post(f"{base}/api/auth/login", headers=h,
+                             json={"username": user, "password": secret(password)})
+
+
+async def basic_auth(client, base, host, user, password, ip=None):
+    import base64
+    cred = base64.b64encode(f"{user}:{secret(password)}".encode()).decode()
+    h = {"Host": host, "Authorization": f"Basic {cred}"}
+    if ip:
+        h["X-Forwarded-For"] = ip
+    return await client.get(f"{base}/api/v1/account", headers=h)
+
+
+def page_csrf(r) -> str | None:
+    """The token a rendered form carries (`name="_csrf" value=...`)."""
+    import re
+    m = re.search(r'name="_csrf"\s+value="([^"]+)"', r.text) or \
+        re.search(r'value="([^"]+)"\s+name="_csrf"', r.text)
+    return secret(m.group(1)) if m else None
+
+
+# ------------------------------------------------------ #1609 / #1732
+
+
+async def lock_probe(attempt, known, surface, name, control=True):
+    """Five failures lock a username, known or not, with the same 429."""
+    issue = "#1609"
+    finals = {}
+    for who, (user, good) in (("known", known), ("unknown", (f"ghost-{RUN_ID}-{surface}", "x"))):
+        first = await attempt(user, "wrong-0", fresh_ip())
+        if is_refusal(first):
+            REPORT.add(f"{surface}: five failures lock the username", issue, "NOT-COVERED",
+                       f"{who} user {user} is still locked from an earlier run", name)
+            return
+        for i in range(1, 5):
+            await attempt(user, f"wrong-{i}", fresh_ip())
+        finals[who] = await attempt(user, good, fresh_ip())
+    k, u = finals["known"], finals["unknown"]
+    REPORT.add(f"{surface}: five failures lock the username", issue,
+               verdict(is_refusal(k) and is_refusal(u)),
+               f"known {k.status_code} Retry-After={k.headers.get('retry-after')}, "
+               f"unknown {u.status_code} Retry-After={u.headers.get('retry-after')}", name)
+    same = (k.status_code == u.status_code and k.text == u.text
+            and bool(k.headers.get("retry-after")) == bool(u.headers.get("retry-after")))
+    REPORT.add(f"{surface}: locked known and unknown users look the same", issue,
+               verdict(same), "" if same else f"{k.text[:80]!r} vs {u.text[:80]!r}", name)
+    if control:
+        c = await attempt(f"fresh-{RUN_ID}-{surface}", "wrong", fresh_ip())
+        REPORT.add(f"{surface}: another username is not locked", issue,
+                   verdict(not is_refusal(c)), f"{c.status_code} (control)", name)
+
+
+async def ip_limit_probe(attempt, known, surface, name, ip=None, tries=26):
+    """Past the per-IP limit a login is refused, even with a right password."""
+    ip = ip or fresh_ip()
+    last = None
+    for i in range(tries):
+        last = await attempt(f"ipl-{RUN_ID}-{surface}-{i}", "wrong", ip)
+        if is_refusal(last):
+            break
+    if not is_refusal(last):
+        REPORT.add(f"{surface}: per-IP login limit", "#1609", "FAIL",
+                   f"no 429 after {tries} failures from one IP", name)
+        return
+    k = await attempt(known[0], known[1], ip)
+    REPORT.add(f"{surface}: per-IP login limit", "#1609",
+               verdict(is_refusal(k) and k.status_code == last.status_code),
+               f"refused after {i + 1} attempt(s); right password then got {k.status_code}", name)
+
+
+async def check_admin_login_limits(client, name, base):
+    """#1609 — the bare admin login: account lock and per-IP limit."""
+    async def attempt(user, password, ip):
+        return await admin_login(client, base, user, password, ip=ip)
+
+    await lock_probe(attempt, ("lockprobe", os.environ.get("SOAK_LOCKPROBE_PASSWORD",
+                                                           "soak-lockprobe-pw")),
+                     "admin login", name)
+    await ip_limit_probe(attempt, ADMIN_USER, "admin login", name)
+
+
+async def check_admin_global_limit(client):
+    """#1609 — the admin scope's global ceiling (30 on the edge)."""
+    name, base = EDGE_SINGLE
+    n, refused = 0, None
+    for _ in range(4):
+        ip = fresh_ip()
+        for _ in range(10):
+            r = await admin_login(client, base, f"glob-{RUN_ID}-{n}", "wrong", ip=ip)
+            n += 1
+            if is_refusal(r):
+                refused = r
+                break
+        if refused is not None:
+            break
+    if refused is None:
+        REPORT.add("admin login: global limit", "#1609", "FAIL",
+                   f"no 429 after {n} failures from 4 IPs (limit 30)", name)
+        return
+    k = await admin_login(client, base, *ADMIN_USER, ip=fresh_ip())
+    REPORT.add("admin login: global limit", "#1609",
+               # A token bucket refills a little while the burst runs.
+               verdict(n <= 36 and is_refusal(k)),
+               f"refused at attempt {n}; a fresh IP with the right password got {k.status_code}",
+               name)
+
+
+async def check_tenancy_login_limits(client, name, base):
+    """#1609 — operator console, tenant (JWT and form), HTTP Basic.
+
+    The tenancy server has no RealIp hook, so its forms share the
+    driver's IP bucket: the console lock (10 failures) plus the per-IP
+    probe fit one 20-failure window. JWT and Basic are on the API router,
+    behind RealIpLayer, so each attempt gets its own address.
+    """
+    host = tenant_host(4)
+    lock_user = ("lockprobe", pw("lockprobe"))
+
+    async def jwt(user, password, ip):
+        return await jwt_login(client, base, host, user, password, ip=ip)
+
+    await lock_probe(jwt, lock_user, "tenant JWT login", name)
+    # Same scope and user table: the lock JWT set holds on the form too.
+    form, _, _ = await tenant_login(client, base, host, *lock_user)
+    REPORT.add("tenant form login shares the JWT lock", "#1609", verdict(is_refusal(form)),
+               f"{form.status_code} Retry-After={form.headers.get('retry-after')}", name)
+
+    async def basic(user, password, ip):
+        return await basic_auth(client, base, host, user, password, ip=ip)
+
+    await lock_probe(basic, lock_user, "HTTP Basic", name)
+    ip = fresh_ip()
+    await ip_limit_probe(jwt, ("jwtuser", pw("jwtuser")), "tenant JWT login", name, ip=ip)
+    b = await basic_auth(client, base, tenant_host(6), "jwtuser", pw("jwtuser"), ip=ip)
+    REPORT.add("HTTP Basic is refused from a throttled IP", "#1609", verdict(is_refusal(b)),
+               f"{b.status_code}", name)
+
+    async def console(user, password, ip):
+        r, _, _ = await console_login(client, base, user, password)
+        return r
+
+    await lock_probe(console, ("lockops", pw("lockops")), "operator console login", name,
+                     control=False)
+    await ip_limit_probe(console, OPERATOR, "operator console login", name)
+
+
+async def check_lock_duration_setting(client):
+    """#1609 — `lockout_duration_secs` takes effect (20 s on the edge)."""
+    name, base = EDGE_SAAS
+    host = tenant_host(4)
+    user = ("lockprobe", pw("lockprobe"))
+    busy = 0
+    for i in range(5):
+        r = await jwt_login(client, base, host, user[0], f"wrong-{i}", ip=fresh_ip(), extra=TLS)
+        busy += r.status_code == 503
+    if busy:
+        # A 503 is not a failure, so it never counts toward the lock.
+        REPORT.add("lockout_duration_secs sets the lock length", "#1609", "NOT-COVERED",
+                   f"{busy} of 5 failures met a busy hash queue (the #1732 burst)", name)
+        return
+    locked = await jwt_login(client, base, host, *user, ip=fresh_ip(), extra=TLS)
+    ra = locked.headers.get("retry-after")
+    REPORT.add("lockout_duration_secs sets the lock length", "#1609",
+               verdict(is_refusal(locked) and ra is not None and int(ra) <= 20),
+               f"{locked.status_code} Retry-After={ra} (configured 20, default 900)", name)
+    await asyncio.sleep(22)
+    after = await jwt_login(client, base, host, *user, ip=fresh_ip(), extra=TLS)
+    REPORT.add("the lock ends when lockout_duration_secs says", "#1609",
+               verdict(after.status_code == 200), f"{after.status_code} after 22 s", name)
+
+
+async def check_hash_queue_bounded(client):
+    """#1732 — a full hash queue answers 503, the same for any user.
+
+    Spread over eight tenants: each tenant pool has 6 connections, so
+    one tenant alone cannot keep every hash slot (one per CPU) busy.
+    """
+    name, base = EDGE_SAAS
+    burst = httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=200))
+
+    async def one(host, user, password):
+        return await burst.post(f"{base}/api/auth/login", headers={
+            "Host": host, "X-Forwarded-For": fresh_ip(), **TLS},
+            json={"username": user, "password": secret(password)})
+
+    tasks = [one(tenant_host(6), "jwtuser", pw("jwtuser")) for _ in range(40)]
+    tasks += [one(tenant_host(1 + i % 8), f"nobody-{RUN_ID}-{i}", "x") for i in range(120)]
+    res = await asyncio.gather(*tasks, return_exceptions=True)
+    await burst.aclose()
+    known = [r for r in res[:40] if not isinstance(r, Exception)]
+    unknown = [r for r in res[40:] if not isinstance(r, Exception)]
+    busy_k = [r for r in known if r.status_code == 503 and r.headers.get("retry-after")]
+    busy_u = [r for r in unknown if r.status_code == 503 and r.headers.get("retry-after")]
+    other5 = sorted({r.status_code for r in known + unknown
+                     if r.status_code >= 500 and r.status_code != 503})
+    REPORT.add("busy hash queue answers 503 + Retry-After", "#1732",
+               verdict(bool(busy_k) and bool(busy_u) and not other5),
+               f"503s: known {len(busy_k)}/40, unknown {len(busy_u)}/120; other 5xx {other5}; "
+               f"errors {sum(isinstance(r, Exception) for r in res)}", name)
+    if busy_k and busy_u:
+        REPORT.add("busy 503 is the same for known and unknown users", "#1732",
+                   verdict(busy_k[0].text == busy_u[0].text), busy_k[0].text[:100], name)
+
+
+async def check_hash_off_runtime(client, name, base):
+    """#1709 — logins hash off the runtime, so other requests stay fast.
+
+    200 right-password admin logins at once (10 per IP, under every
+    limit) while `/_soak/info` is polled. Argon2 on a Tokio worker used
+    to hold that worker for the whole hash.
+    """
+    # Its own client: the storm fills the shared one's connection pool,
+    # and a poll queued there would time the driver, not the server.
+    poller = httpx.AsyncClient(timeout=30)
+
+    async def poll(stop, out):
+        while not stop.is_set():
+            t = time.perf_counter()
+            await poller.get(f"{base}/_soak/info")
+            out.append(time.perf_counter() - t)
+            await asyncio.sleep(0.02)
+
+    base_lat: list[float] = []
+    stop = asyncio.Event()
+    p = asyncio.create_task(poll(stop, base_lat))
+    await asyncio.sleep(1.0)
+    stop.set()
+    await p
+    ips = [fresh_ip() for _ in range(20)]
+    token, _ = await admin_token(client, base)
+    during: list[float] = []
+    stop = asyncio.Event()
+    p = asyncio.create_task(poll(stop, during))
+    res = await asyncio.gather(*[admin_login(client, base, *ADMIN_USER, ip=ips[i % 20],
+                                             token=token) for i in range(200)],
+                               return_exceptions=True)
+    stop.set()
+    await p
+    await poller.aclose()
+    ok = sum(1 for r in res if not isinstance(r, Exception) and r.status_code == 303)
+    during.sort()
+    p95 = during[int(len(during) * 0.95) - 1] if during else 0
+    worst = during[-1] if during else 0
+    b95 = sorted(base_lat)[int(len(base_lat) * 0.95) - 1] if base_lat else 0
+    REPORT.add("hashing leaves the runtime free", "#1709",
+               verdict(ok >= 150 and worst < 0.5),
+               f"{ok}/200 logins ok; /_soak/info p95 {p95 * 1000:.0f} ms, worst "
+               f"{worst * 1000:.0f} ms over {len(during)} polls (idle p95 {b95 * 1000:.0f} ms)",
+               name)
+
+
+# ---------------------------------------------------------- #1338
+
+
+async def change_tenant_password(client, base, host, cookie, token, old, new):
+    h = {"Host": host, "Origin": f"http://{host}",
+         "Cookie": f"rustango_csrf={token}; {SESSION_COOKIE}={cookie}"}
+    return await client.post(f"{base}/__change-password", headers=h, data={
+        "_csrf": token, "current_password": secret(old), "new_password": secret(new),
+        "confirm_password": new})
+
+
+async def check_password_change_tenant(client, name, base):
+    """#1338 — a password change ends sessions issued the same second."""
+    host = tenant_host(5)
+    old, new = pw("pwchange"), pw("pwchange") + "-2"
+    same_second, a_cookie, changed = False, None, None
+    for _ in range(3):
+        start = time.time()
+        _, a_cookie, _ = await tenant_login(client, base, host, "pwchange", old)
+        _, b_cookie, token = await tenant_login(client, base, host, "pwchange", old)
+        if not (a_cookie and b_cookie):
+            break
+        changed = await change_tenant_password(client, base, host, b_cookie, token, old, new)
+        same_second = int(start) == int(time.time())
+        if changed.status_code in (200, 303) and same_second:
+            break
+        if changed.status_code in (200, 303):
+            # Changed but not within one second: put it back and retry.
+            _, c, t = await tenant_login(client, base, host, "pwchange", new)
+            await change_tenant_password(client, base, host, c, t, new, old)
+    if not a_cookie or changed is None or changed.status_code not in (200, 303):
+        REPORT.add("password change ends same-second tenant sessions", "#1338", "FAIL",
+                   f"could not log in or change the password: "
+                   f"{getattr(changed, 'status_code', None)}", name)
+        return
+    admin = await client.get(f"{base}/__admin", headers={
+        "Host": host, "Cookie": f"{SESSION_COOKIE}={a_cookie}"})
+    who = await client.get(f"{base}/_soak/whoami", headers={
+        "Host": host, "Cookie": f"{SESSION_COOKIE}={a_cookie}"})
+    ended = admin.status_code in (302, 303) and who.json().get("user") is None
+    REPORT.add("password change ends same-second tenant sessions", "#1338", verdict(ended),
+               f"old session: admin {admin.status_code}, SessionUser {who.json().get('user')}; "
+               f"same second: {same_second}", name)
+    _, c, t = await tenant_login(client, base, host, "pwchange", new)
+    back = await change_tenant_password(client, base, host, c, t, new, old)
+    if back.status_code not in (200, 303):
+        print(f"  !! could not restore pwchange's password on {name}: {back.status_code}")
+
+
+async def check_password_change_operator(client, name, base):
+    """#1338 — the operator console honours a password change too."""
+    old, new = pw("pwops"), pw("pwops") + "-2"
+    _, a, _ = await console_login(client, base, "pwops", old)
+    _, b, _ = await console_login(client, base, "pwops", old)
+    if not (a and b):
+        REPORT.add("password change ends older operator sessions", "#1338", "FAIL",
+                   "could not sign pwops in", name)
+        return
+
+    async def change(cookie, cur, nxt):
+        page = await client.get(f"{base}/change-password", headers={
+            "Host": APEX, "Cookie": f"{OP_COOKIE}={cookie}"})
+        tok = page_csrf(page) or set_cookie_value(page, "rustango_csrf")
+        return await client.post(f"{base}/change-password", headers={
+            "Host": APEX, "Origin": f"http://{APEX}",
+            "Cookie": f"rustango_csrf={tok}; {OP_COOKIE}={cookie}"}, data={
+            "_csrf": tok, "current_password": secret(cur), "new_password": secret(nxt),
+            "confirm_password": nxt})
+
+    ch = await change(b, old, new)
+    home = await client.get(f"{base}/", headers={"Host": APEX, "Cookie": f"{OP_COOKIE}={a}"})
+    REPORT.add("password change ends older operator sessions", "#1338",
+               verdict(ch.status_code in (200, 303) and home.status_code in (302, 303)),
+               f"change {ch.status_code}; old session then got {home.status_code}", name)
+    _, c, _ = await console_login(client, base, "pwops", new)
+    if c:
+        await change(c, new, old)
+
+
+# ------------------------------------------- bare admin (single app)
+
+
+async def check_bare_admin(client, name, base):
+    """#1711, #1693, #1695, #1699 on the bare admin's login."""
+    first = await client.get(f"{base}/__admin/commerce_product")
+    login = await client.get(f"{base}/__admin/login")
+    n1, n2 = cookie_count(first, "rustango_csrf"), cookie_count(login, "rustango_csrf")
+    REPORT.add("admin sets one CSRF cookie on a first visit", "#1711",
+               verdict(n1 == 1 and n2 == 1),
+               f"protected page {first.status_code}: {n1} cookie(s); login page: {n2}", name)
+    xfo = login.headers.get("x-frame-options")
+    REPORT.add("admin login carries security headers", "#1699", verdict(bool(xfo)),
+               f"X-Frame-Options: {xfo}", name)
+    token = set_cookie_value(login, "rustango_csrf")
+
+    def refused(r):
+        # The admin login re-renders its form on a CSRF failure; the
+        # password is right, so any session cookie means it got through.
+        return (r.status_code in (200, 403) and not set_cookie_value(r, ADMIN_COOKIE)
+                and (r.status_code == 403 or "form was invalid" in r.text))
+
+    empty = await client.post(f"{base}/__admin/login", headers={
+        "Cookie": "rustango_csrf=", "Origin": origin_of(base, None),
+        "X-Forwarded-For": fresh_ip()},
+        data={"_csrf": "", "username": ADMIN_USER[0], "password": ADMIN_USER[1]})
+    REPORT.add("CSRF refuses an empty token pair", "#1693", verdict(refused(empty)),
+               f"admin login: {empty.status_code}, session set: "
+               f"{bool(set_cookie_value(empty, ADMIN_COOKIE))}", name)
+    foreign = await admin_login(client, base, *ADMIN_USER, origin="http://evil.example",
+                                token=token, ip=fresh_ip())
+    REPORT.add("admin login refuses a foreign Origin", "#1695", verdict(refused(foreign)),
+               f"{foreign.status_code}, session set: "
+               f"{bool(set_cookie_value(foreign, ADMIN_COOKIE))}", name)
+    ok = await admin_login(client, base, *ADMIN_USER, token=token, ip=fresh_ip())
+    session = secret(set_cookie_value(ok, ADMIN_COOKIE))
+    REPORT.add("admin login signs a superuser in", "#1609",
+               verdict(ok.status_code == 303 and bool(session)),
+               f"{ok.status_code} (control for the admin login checks)", name)
+    return session
+
+
+async def check_admin_inlines(client, name, base, session_cookie, headers=None,
+                              admin="/__admin"):
+    """#1667 — an inline row from another order is refused, not moved."""
+    issue = "#1667"
+    h = headers or {}
+    cu = await client.post(f"{base}/api/v1/customers", headers=h, json={
+        "contact_email": f"inline-{RUN_ID}-{time.time_ns()}@example.test",
+        "full_name": "Inline", "loyalty_tier": "bronze"})
+    ids = {}
+    try:
+        cid = cu.json()["id"]
+        for k in ("o1", "o2"):
+            o = await client.post(f"{base}/api/v1/orders-raw", headers=h, json={
+                "reference": f"INL-{k}-{time.time_ns() % 10**12}", "customer_id": cid,
+                "status": "pending", "total_cents": 100, "note": None})
+            ids[k] = o.json()["id"]
+            p = await client.post(f"{base}/api/v1/products", headers=h, json={
+                "sku": f"INL-{k}-{time.time_ns()}", "name": "inline", "blurb": None,
+                "price_cents": 1, "active": False})
+            ids[f"p{k[1]}"] = p.json()["id"]
+        for k, o, p in (("l1", "o1", "p1"), ("l2", "o2", "p2")):
+            ln = await client.post(f"{base}/api/v1/order-lines", headers=h, json={
+                "order_id": ids[o], "product_id": ids[p], "quantity": 1, "unit_price_cents": 1})
+            ids[k] = ln.json()["id"]
+    except Exception as e:  # noqa: BLE001
+        REPORT.add("admin inline rows stay under their parent", issue, "FAIL",
+                   f"could not build the fixture: {e!r}", name)
+        return
+    page = await client.get(f"{base}{admin}/commerce_order/{ids['o1']}/edit", headers={
+        **h, "Cookie": f"{ADMIN_COOKIE if not h else SESSION_COOKIE}={session_cookie}"})
+    token = page_csrf(page) or set_cookie_value(page, "rustango_csrf")
+    cookie = (f"rustango_csrf={token}; "
+              f"{ADMIN_COOKIE if not h else SESSION_COOKIE}={session_cookie}")
+    order = await client.get(f"{base}/api/v1/orders-raw/{ids['o1']}", headers=h)
+    parent = {k: ("" if v is None else str(v)) for k, v in order.json().items()
+              if k not in ("id", "placed_at")}
+    # NULL, as a browser form sends it. (SQLite's JSON reads NULL as 0.)
+    parent.update({"assigned_picker_id": "", "note": ""})
+
+    def form(line, product, qty):
+        return {**parent, "_csrf": token,
+                "commerce_order_line-TOTAL_FORMS": "1",
+                "commerce_order_line-INITIAL_FORMS": "1",
+                "commerce_order_line-MAX_NUM_FORMS": "",
+                "commerce_order_line-0-id": str(line),
+                "commerce_order_line-0-product_id": str(product),
+                "commerce_order_line-0-quantity": str(qty),
+                "commerce_order_line-0-unit_price_cents": "1"}
+
+    post_h = {**h, "Cookie": cookie, "Origin": origin_of(base, headers)}
+    own = await client.post(f"{base}{admin}/commerce_order/{ids['o1']}", headers=post_h,
+                            data=form(ids["l1"], ids["p1"], 7))
+    l1 = (await client.get(f"{base}/api/v1/order-lines/{ids['l1']}", headers=h)).json()
+    REPORT.add("admin inline edits its own rows", issue,
+               verdict(own.status_code in (302, 303) and l1.get("quantity") == 7),
+               f"{own.status_code}, line quantity {l1.get('quantity')} (control)", name)
+    hij = await client.post(f"{base}{admin}/commerce_order/{ids['o1']}", headers=post_h,
+                            data=form(ids["l2"], ids["p2"], 999))
+    l2 = (await client.get(f"{base}/api/v1/order-lines/{ids['l2']}", headers=h)).json()
+    REPORT.add("admin inline rows stay under their parent", issue,
+               verdict(hij.status_code == 404 and l2.get("quantity") == 1
+                       and l2.get("order_id") == ids["o2"]),
+               f"{hij.status_code}; other order's line now quantity {l2.get('quantity')}, "
+               f"order {l2.get('order_id')}", name)
+
+
+# --------------------------------------------------- tenancy surfaces
+
+
+async def check_tenant_admin_writes(client, name, base):
+    """#1713, #1529, #1693 — every tenant admin write needs the token."""
+    host = tenant_host(7)
+    r, session, _ = await tenant_login(client, base, host, "csrfadmin", pw("csrfadmin"))
+    if not session:
+        REPORT.add("tenant admin writes need the CSRF token", "#1713", "FAIL",
+                   f"could not sign csrfadmin in: {r.status_code}", name)
+        return
+    s = {"Host": host, "Cookie": f"{SESSION_COOKIE}={session}"}
+    first = await client.get(f"{base}/__admin/commerce_product/new", headers=s)
+    REPORT.add("tenant admin sets one CSRF cookie", "#1711",
+               verdict(cookie_count(first, "rustango_csrf") <= 1),
+               f"{cookie_count(first, 'rustango_csrf')} cookie(s)", name)
+    xfo = first.headers.get("x-frame-options")
+    REPORT.add("tenant admin pages carry security headers", "#1699", verdict(bool(xfo)),
+               f"X-Frame-Options: {xfo}", name)
+    token = page_csrf(first) or set_cookie_value(first, "rustango_csrf")
+    good = {**s, "Cookie": f"rustango_csrf={token}; {SESSION_COOKIE}={session}",
+            "Origin": f"http://{host}"}
+    bare = {**s, "Origin": f"http://{host}"}
+    prod = {"sku": f"TADM-{RUN_ID}-{time.time_ns() % 10**9}", "name": "tenant admin",
+            "description": "", "price_cents": "1", "active": "on"}
+    made = await client.post(f"{base}/__admin/commerce_product", headers=good,
+                             data={**prod, "_csrf": token})
+    loc = made.headers.get("location", "")
+    REPORT.add("tenant admin create with the token works", "#1713",
+               verdict(made.status_code in (302, 303)), f"{made.status_code} {loc} (control)",
+               name)
+    pk = loc.rstrip("/").split("/")[-1] if loc else "1"
+    writes = {
+        "create": ("/__admin/commerce_product", prod),
+        "update": (f"/__admin/commerce_product/{pk}", prod),
+        "delete": (f"/__admin/commerce_product/{pk}/delete", {}),
+        "bulk action": ("/__admin/commerce_product/__action",
+                        {"action": "delete_selected", "_selected": pk}),
+        "change password": ("/__change-password", {
+            "current_password": pw("csrfadmin"), "new_password": "x" * 12,
+            "confirm_password": "x" * 12}),
+        "logout": ("/__logout", {}),
+    }
+    bad = []
+    for label, (path, data) in writes.items():
+        rr = await client.post(f"{base}{path}", headers=bare, data=data)
+        if rr.status_code != 403:
+            bad.append(f"{label} {rr.status_code}")
+    REPORT.add("tenant admin writes need the CSRF token", "#1713",
+               "FAIL" if bad else "PASS",
+               f"answered without a token: {bad}" if bad else f"{len(writes)} writes refused",
+               name)
+    foreign = await client.post(f"{base}/__admin/commerce_product", headers={
+        **good, "Origin": "http://evil.example"}, data={**prod, "_csrf": token})
+    REPORT.add("valid token from a foreign Origin is refused", "#1529",
+               verdict(foreign.status_code == 403), f"tenant admin: {foreign.status_code}", name)
+    empty = await client.post(f"{base}/__admin/commerce_product", headers={
+        **s, "Cookie": f"rustango_csrf=; {SESSION_COOKIE}={session}",
+        "Origin": f"http://{host}"}, data={**prod, "_csrf": ""})
+    REPORT.add("CSRF refuses an empty token pair", "#1693", verdict(empty.status_code == 403),
+               f"tenant admin: {empty.status_code}", name)
+    still = await client.get(f"{base}/__admin", headers=s)
+    REPORT.add("a logout POST without the token does not log out", "#1713",
+               verdict(still.status_code == 200), f"{still.status_code}", name)
+
+
+CONSOLE_POSTS = [
+    "/logout", "/change-password", "/sso-shared", "/sso-shared/999999/delete",
+    "/sso-shared/999999/email-link", "/operators", "/orgs/prewarm",
+    "/operators/999999/active", "/operators/999999/reset-password",
+    "/orgs/no-such-tenant/edit", "/orgs/no-such-tenant/edit/branding",
+    "/orgs/no-such-tenant/deactivate", "/orgs/no-such-tenant/purge",
+    "/orgs/no-such-tenant/test-connection", "/orgs/no-such-tenant/hosts/add",
+    "/orgs/no-such-tenant/hosts/remove", "/orgs/no-such-tenant/hosts/toggle",
+    "/orgs/no-such-tenant/impersonate", "/orgs/new", "/orgs/test-connection",
+    "/orgs/migrate", "/orgs/no-such-tenant/migrate",
+]
+
+
+async def check_console(client, name, base):
+    """#1710 and the console legs of #1695, #1699, #1693, #1663."""
+    apex = {"Host": APEX}
+    page = await client.get(f"{base}/login", headers=apex)
+    REPORT.add("console login carries security headers", "#1699",
+               verdict(bool(page.headers.get("x-frame-options"))),
+               f"X-Frame-Options: {page.headers.get('x-frame-options')}", name)
+    token = set_cookie_value(page, "rustango_csrf")
+    nof = await client.post(f"{base}/login", headers={**apex, "Origin": f"http://{APEX}"},
+                            data={"username": OPERATOR[0], "password": OPERATOR[1]})
+    REPORT.add("console login needs the CSRF token", "#1710",
+               verdict(nof.status_code == 403), f"{nof.status_code}", name)
+    empty = await client.post(f"{base}/login", headers={
+        **apex, "Origin": f"http://{APEX}", "Cookie": "rustango_csrf="},
+        data={"username": OPERATOR[0], "password": OPERATOR[1], "_csrf": ""})
+    REPORT.add("CSRF refuses an empty token pair", "#1693", verdict(empty.status_code == 403),
+               f"console login: {empty.status_code}", name)
+    foreign = await client.post(f"{base}/login", headers={
+        **apex, "Origin": "http://evil.example", "Cookie": f"rustango_csrf={token}"},
+        data={"username": OPERATOR[0], "password": OPERATOR[1], "_csrf": token})
+    REPORT.add("console login refuses a foreign Origin", "#1695",
+               verdict(foreign.status_code == 403), f"{foreign.status_code}", name)
+    nxt = await client.get(f"{base}/orgs", headers=apex)
+    loc = nxt.headers.get("location", "")
+    REPORT.add("console login redirect encodes `next`", "#1663",
+               verdict("next=%2Forgs" in loc), loc, name)
+
+    r, session, _ = await console_login(client, base, *OPERATOR)
+    if not session:
+        REPORT.add("every console POST needs the CSRF token", "#1710", "FAIL",
+                   f"could not sign soakops in: {r.status_code}", name)
+        return
+    s = {**apex, "Cookie": f"{OP_COOKIE}={session}", "Origin": f"http://{APEX}"}
+    home = await client.get(f"{base}/", headers=s)
+    REPORT.add("console pages carry security headers", "#1699",
+               verdict(home.status_code == 200 and bool(home.headers.get("x-frame-options"))),
+               f"{home.status_code} X-Frame-Options: {home.headers.get('x-frame-options')}",
+               name)
+    reached, mounted = [], 0
+    for path in CONSOLE_POSTS:
+        rr = await client.post(f"{base}{path}", headers=s, data={"slug": "no-such-tenant"})
+        if rr.status_code in (404, 405):
+            continue
+        mounted += 1
+        if rr.status_code != 403:
+            reached.append(f"{path} {rr.status_code}")
+    REPORT.add("every console POST needs the CSRF token", "#1710",
+               "FAIL" if reached else "PASS",
+               f"reached a handler without a token: {reached}" if reached
+               else f"{mounted} mounted POST routes refused", name)
+    tok = page_csrf(home) or set_cookie_value(home, "rustango_csrf") or token
+    ok = await client.post(f"{base}/orgs/prewarm", headers={
+        **s, "Cookie": f"rustango_csrf={tok}; {OP_COOKIE}={session}"}, data={"_csrf": tok})
+    REPORT.add("console POST with the token goes through", "#1710",
+               verdict(ok.status_code in (200, 302, 303)), f"prewarm {ok.status_code} (control)",
+               name)
+    still = await client.get(f"{base}/", headers=s)
+    REPORT.add("a console logout without the token does not log out", "#1710",
+               verdict(still.status_code == 200), f"{still.status_code}", name)
+
+
+async def check_hosts_and_settings(client, name, base):
+    """#1700, #1702, #1663 on the tenancy server."""
+    bad = []
+    for path in ("/__login", "/__admin", "/login", "/api/v1/products", "/shop/products",
+                 "/_soak/info"):
+        r = await client.get(f"{base}{path}", headers={"Host": "evil.example"})
+        if r.status_code != 400:
+            bad.append(f"{path} {r.status_code}")
+    REPORT.add("unlisted Host is 400 on every tenancy route", "#1700",
+               "FAIL" if bad else "PASS", f"not refused: {bad}" if bad else "6 routes", name)
+    login = await client.get(f"{base}/__login", headers={"Host": tenant_host(1)})
+    hsts = login.headers.get("strict-transport-security", "")
+    REPORT.add("tenant server applies the settings tier", "#1702",
+               verdict("max-age=31536000" in hsts and login.status_code == 200),
+               f"HSTS {hsts!r} (from prod_settings.toml); allowed_hosts also enforced", name)
+    adm = await client.get(f"{base}/__admin/commerce_product?q=1",
+                           headers={"Host": tenant_host(1)})
+    loc = adm.headers.get("location", "")
+    tail = loc.split("next=", 1)[-1] if "next=" in loc else ""
+    REPORT.add("tenant login redirect encodes `next`", "#1663",
+               verdict(tail.startswith("%2F__admin%2Fcommerce_product") and "/" not in tail),
+               loc, name)
+
+
+async def check_tls_redirect(client):
+    """#1700 — the HTTPS redirect covers login, admin and console."""
+    name, base = EDGE_SAAS
+    bad = []
+    for host, path in ((tenant_host(1), "/__login"), (tenant_host(1), "/__admin"),
+                       (APEX, "/login"), (tenant_host(1), "/api/v1/products")):
+        r = await client.get(f"{base}{path}", headers={"Host": host})
+        loc = r.headers.get("location", "")
+        if r.status_code not in (301, 308) or not loc.startswith(f"https://{host}"):
+            bad.append(f"{host}{path} {r.status_code} {loc}")
+    REPORT.add("plain HTTP is redirected on every tenancy route", "#1700",
+               "FAIL" if bad else "PASS", "; ".join(bad), name)
+    evil = await client.get(f"{base}/__login", headers={"Host": "evil.example"})
+    REPORT.add("bad Host is refused before the redirect", "#1700",
+               verdict(evil.status_code == 400), f"{evil.status_code}", name)
+    no_origin = await client.post(f"{base}/__login", headers={
+        "Host": tenant_host(1), **TLS, "Cookie": "rustango_csrf=abc"},
+        data={"_csrf": "abc", "username": "x", "password": "y"})
+    REPORT.add("over TLS a login POST without Origin is refused", "#1695",
+               verdict(no_origin.status_code == 403), f"{no_origin.status_code}", name)
+
+
+async def check_tenant_session_misc(client, name, base):
+    """Session extractors on every backend; #1663's cookie reader; #1693."""
+    host = tenant_host(1)
+    token = await login_form(client, base, host)
+    empty = await client.post(f"{base}/__login", headers={
+        "Host": host, "Origin": f"http://{host}", "Cookie": "rustango_csrf="},
+        data={"username": TENANT_ADMIN[0], "password": TENANT_ADMIN[1], "_csrf": ""})
+    REPORT.add("CSRF refuses an empty token pair", "#1693", verdict(empty.status_code == 403),
+               f"tenant login: {empty.status_code}", name)
+    r = await post_login(client, base, host, token, origin=f"http://{host}")
+    session = secret(set_cookie_value(r, SESSION_COOKIE))
+    if not session:
+        REPORT.add("SessionUser resolves the signed-in user", "—", "FAIL",
+                   f"tenant login failed: {r.status_code}", name)
+        return
+    who = await client.get(f"{base}/_soak/whoami", headers={
+        "Host": host, "Cookie": f"{SESSION_COOKIE}={session}"})
+    anon = await client.get(f"{base}/_soak/whoami", headers={"Host": host})
+    control = "" if name == "saas-pg" else \
+        " — control: the bug needs a hand-built non-Postgres server with the postgres feature on"
+    REPORT.add("SessionUser resolves the signed-in user", "session extractors",
+               verdict(who.json().get("user") == TENANT_ADMIN[0]
+                       and anon.json().get("user") is None),
+               f"{who.json()} / anonymous {anon.json()}{control}", name)
+    first = await client.get(f"{base}/__admin", headers={
+        "Host": host, "Cookie": f"{SESSION_COOKIE}={session}; {SESSION_COOKIE}=junk"})
+    junk = await client.get(f"{base}/__admin", headers={
+        "Host": host, "Cookie": f"{SESSION_COOKIE}=junk; {SESSION_COOKIE}={session}"})
+    REPORT.add("a repeated cookie resolves to the first one", "#1663",
+               verdict(first.status_code == 200 and junk.status_code in (302, 303)),
+               f"valid first {first.status_code}, junk first {junk.status_code}", name)
+
+
+# ------------------------------------------------------------- JWT
+
+
+async def check_jwt(client, name, base):
+    """#1190 revocation and tenant binding; #1672 single-use refresh."""
+    host = tenant_host(6)
+    r = await jwt_login(client, base, host, "jwtuser", pw("jwtuser"), ip=fresh_ip())
+    if r.status_code != 200:
+        REPORT.add("JWT login", "#1190", "FAIL", f"{r.status_code} {r.text[:160]}", name)
+        return
+    pair = r.json()
+    access, refresh = secret(pair["access"]), secret(pair["refresh"])
+    me = await client.get(f"{base}/api/auth/me",
+                          headers={"Host": host, "Authorization": f"Bearer {access}"})
+    other = await client.get(f"{base}/api/auth/me", headers={
+        "Host": tenant_host(1), "Authorization": f"Bearer {access}"})
+    REPORT.add("JWT is bound to its tenant", "#1190",
+               verdict(me.status_code == 200 and other.status_code == 401),
+               f"own tenant {me.status_code}, t01 {other.status_code}", name)
+    race = await asyncio.gather(*[client.post(f"{base}/api/auth/refresh", headers={
+        "Host": host}, json={"refresh": refresh}) for _ in range(8)])
+    wins = [x for x in race if x.status_code == 200]
+    REPORT.add("a refresh token redeems once under concurrency", "#1672",
+               verdict(len(wins) == 1),
+               f"{len(wins)} of 8 concurrent refreshes succeeded: "
+               f"{sorted(x.status_code for x in race)}", name)
+    if not wins:
+        return
+    new = wins[0].json()
+    secret(new.get("refresh"))
+    again = await client.post(f"{base}/api/auth/refresh", headers={"Host": host},
+                              json={"refresh": refresh})
+    REPORT.add("a used refresh token is refused", "#1672", verdict(again.status_code == 401),
+               f"{again.status_code}", name)
+    a2 = secret(new["access"])
+    out = await client.post(f"{base}/api/auth/logout",
+                            headers={"Host": host, "Authorization": f"Bearer {a2}"})
+    after = await client.get(f"{base}/api/auth/me",
+                             headers={"Host": host, "Authorization": f"Bearer {a2}"})
+    REPORT.add("a logged-out access token is refused", "#1190",
+               verdict(out.status_code in (200, 204) and after.status_code == 401),
+               f"logout {out.status_code}, then me {after.status_code}", name)
+    basic = await basic_auth(client, base, host, "jwtuser", pw("jwtuser"), ip=fresh_ip())
+    REPORT.add("HTTP Basic signs a tenant user in", "#1609",
+               verdict(basic.status_code == 200 and basic.json().get("user") == "jwtuser"),
+               f"{basic.status_code} (control for the Basic limit checks)", name)
+
+
+# ------------------------------------------------------------- SSO
+
+
+async def sso_attempt(client, base, provider, sub, email, verified=True):
+    """One tenant SSO handshake against the fake IdP; the callback response."""
+    host = tenant_host(3)
+    begin = await client.get(f"{base}/__login/sso/{provider}", headers={"Host": host})
+    loc = begin.headers.get("location", "")
+    flow = set_cookie_value(begin, "rustango_admin_sso_flow")
+    if "/authorize" not in loc or not flow:
+        return None, f"begin {begin.status_code} {loc[:120]}"
+    from urllib.parse import parse_qs, urlencode, urlparse
+    q = {k: v[0] for k, v in parse_qs(urlparse(loc).query).items()}
+    q.update({"sub": sub, "email": email, "email_verified": "true" if verified else "false"})
+    auth = await client.get(f"{IDP}/authorize?{urlencode(q)}")
+    back = urlparse(auth.headers.get("location", ""))
+    bq = {k: v[0] for k, v in parse_qs(back.query).items()}
+    secret(bq.get("code"))
+    cb = await client.get(f"{base}{back.path}?{back.query}", headers={
+        "Host": host, "Cookie": f"rustango_admin_sso_flow={flow}"})
+    return cb, ""
+
+
+async def check_sso(client, name, base):
+    """GHSA-3qpg (#1760) — SSO links by subject; email linking is opt-in."""
+    issue = "#1760"
+    seed = await client.post(f"{base}/_soak/sso/seed", headers={"Host": tenant_host(3)})
+    if seed.status_code != 200:
+        REPORT.add("SSO fixture", issue, "FAIL", f"seed {seed.status_code} {seed.text[:200]}",
+                   name)
+        return
+    mail = {u: v["email"] for u, v in seed.json()["users"].items()}
+    tag = f"{RUN_ID}-{time.time_ns() % 10**9}"
+
+    def outcome(cb):
+        if cb is None:
+            return "no handshake", None
+        return cb.headers.get("location", ""), set_cookie_value(cb, SESSION_COOKIE)
+
+    cases = [
+        ("email match without opt-in is refused", "idp-strict", f"s-{tag}-a", mail["sso-user"],
+         True, False),
+        ("email match with opt-in links a normal user", "idp-link", f"s-{tag}-b",
+         mail["sso-user"], True, True),
+        ("a linked subject signs in whatever the email says", "idp-link", f"s-{tag}-b",
+         mail["sso-other"], True, True),
+        ("email linking never reaches a superuser", "idp-link", f"s-{tag}-c", mail["sso-super"],
+         True, False),
+        ("email linking never reaches a staff user", "idp-link", f"s-{tag}-d", mail["sso-staff"],
+         True, False),
+        ("an unverified email never links", "idp-link", f"s-{tag}-e", mail["sso-other"],
+         False, False),
+    ]
+    for label, prov, sub, email, verified, should in cases:
+        cb, why = await sso_attempt(client, base, prov, sub, email, verified)
+        loc, session = outcome(cb)
+        secret(session)
+        who = None
+        if session:
+            w = await client.get(f"{base}/_soak/whoami", headers={
+                "Host": tenant_host(3), "Cookie": f"{SESSION_COOKIE}={session}"})
+            who = w.json().get("user")
+        ok = (who == "sso-user") if should else (session is None and "sso_error=" in loc)
+        REPORT.add(label, issue, verdict(ok),
+                   why or f"-> {loc[:80]}, signed in as {who}", name)
+
+    # Only a superuser may add a link row (the row decides who an IdP
+    # identity signs in as).
+    r, staff, _ = await tenant_login(client, base, tenant_host(3), "sso-staff", pw("sso-staff"))
+    if not staff:
+        REPORT.add("a staff user cannot add an SSO link", issue, "FAIL",
+                   f"sso-staff could not sign in: {r.status_code}", name)
+        return
+    h = {"Host": tenant_host(3), "Cookie": f"{SESSION_COOKIE}={staff}"}
+    form = await client.get(f"{base}/__admin/rustango_sso_links/new", headers=h)
+    tok = page_csrf(form) or set_cookie_value(form, "rustango_csrf") or "x"
+    add = await client.post(f"{base}/__admin/rustango_sso_links", headers={
+        **h, "Origin": f"http://{tenant_host(3)}",
+        "Cookie": f"rustango_csrf={tok}; {SESSION_COOKIE}={staff}"}, data={
+        "_csrf": tok, "provider_source": "tenant", "provider_id": "1",
+        "issuer": "oidc|http://idp:9000", "subject": f"forged-{tag}",
+        "subject_sha256": "0" * 64, "user_id": "1"})
+    REPORT.add("a staff user cannot add an SSO link", issue,
+               verdict(add.status_code == 403),
+               f"form {form.status_code}, POST {add.status_code}", name)
+
+
+# ------------------------------------------------------ #1645 / #1610
+
+
+def check_tenant_fk_schemas():
+    """#1645 — no FK from a tenant schema points into another schema."""
+    name = "saas-pg"
+    if not PG_URL:
+        REPORT.add("tenant FKs stay in the tenant schema", "#1645", "NOT-COVERED",
+                   "SOAK_PG_URL not set", name)
+        return
+    try:
+        import psycopg
+        with psycopg.connect(PG_URL, connect_timeout=10) as conn:
+            # Read-only catalog query: every FK whose table and target
+            # live in different schemas, for the tenant schemas.
+            rows = conn.execute("""
+                SELECT ns.nspname, cl.relname, fns.nspname, fcl.relname
+                FROM pg_constraint c
+                JOIN pg_class cl ON cl.oid = c.conrelid
+                JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+                JOIN pg_class fcl ON fcl.oid = c.confrelid
+                JOIN pg_namespace fns ON fns.oid = fcl.relnamespace
+                WHERE c.contype = 'f' AND ns.nspname ~ '^t[0-9]+$'
+                  AND ns.nspname <> fns.nspname""").fetchall()
+            n_fk = conn.execute("""
+                SELECT count(*) FROM pg_constraint c
+                JOIN pg_class cl ON cl.oid = c.conrelid
+                JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+                WHERE c.contype = 'f' AND ns.nspname ~ '^t[0-9]+$'""").fetchone()[0]
+    except Exception as e:  # noqa: BLE001
+        REPORT.add("tenant FKs stay in the tenant schema", "#1645", "FAIL",
+                   f"catalog query failed: {e}", name)
+        return
+    REPORT.add("tenant FKs stay in the tenant schema", "#1645",
+               "FAIL" if rows else "PASS",
+               f"cross-schema FKs: {rows[:5]}" if rows else
+               f"{n_fk} tenant FKs, none leave their schema. Control: every tenant "
+               f"schema here has rustango_users, which the bug needs absent", name)
+
+
+async def emit_redaction_probe(client):
+    """#1610 — put a secret in `?invite_token=` with the access log off.
+
+    `finalize.py` then scans the logs: the order line is logged inside
+    the request span, so the span's query must be redacted.
+    """
+    name, base = EDGE_SAAS
+    token = secret(f"INVITE-{RUN_ID}-{time.time_ns()}")
+    h = {"Host": tenant_host(1), **TLS}
+    cu = await client.post(f"{base}/api/v1/customers", headers=h, json={
+        "contact_email": f"redact-{RUN_ID}-{time.time_ns()}@example.test",
+        "full_name": "Redaction", "loyalty_tier": "bronze"})
+    o = await client.post(f"{base}/api/v1/orders-raw", headers=h, json={
+        "reference": f"RED-{time.time_ns() % 10**12}", "customer_id": cu.json().get("id"),
+        "status": "pending", "total_cents": 1, "note": None})
+    r = await client.post(f"{base}/api/v1/orders/{o.json().get('id')}/confirm",
+                          headers=h, params={"invite_token": token})
+    REPORT.redaction = {"instance": name, "marker": token, "status": r.status_code}
+
+
+def report_uncoverable_058():
+    """0.58.0 items with no runtime surface an HTTP harness can reach."""
+    for label, why in (
+        ("schema structs, IR structs and core enums are #[non_exhaustive]",
+         "compile-time only; pinned by compile_fail doctests and clippy lints"),
+    ):
+        REPORT.add(label, "#1661", "NOT-COVERED", why)
+    REPORT.add("intcomma(i64::MIN) does not panic", "#1663", "NOT-COVERED",
+               "in-process text helper; no page renders it")
+    REPORT.add("the console provisioning and admin table-missing pages escape `'`", "#1663",
+               "NOT-COVERED", "provisioning is not mounted, and the table-missing page only "
+               "ever shows a model's table name, which has no quote")
+    REPORT.add("distributed locks keep their own cache namespace", "#1674", "NOT-COVERED",
+               "neither app takes a distributed lock")
+    REPORT.add("new tenant project template loads its settings", "#1702", "NOT-COVERED",
+               "scaffolder output; the soak app was not regenerated. The tier files "
+               "reaching the tenancy server is checked as #1702 above")
+    REPORT.add("callback inside an atomic migration is refused", "#1626", "NOT-COVERED",
+               "loader-time refusal; soak migrations carry no callbacks. finalize.py checks "
+               "every bootstrap migrate exited 0")
+    REPORT.add("lockout counts failures in a fixed window", "#1672", "NOT-COVERED",
+               "the counter window is 1 h and not settable from [auth]")
+    REPORT.add("TOTP codes are single use; failed codes count to lockout", "#1672",
+               "NOT-COVERED", "browser flow: the Playwright report covers admin TOTP")
+    REPORT.add("session extractors on SQLite/MySQL", "session extractors", "NOT-COVERED",
+               "the bug needs `server::Builder<Sqlite|MySql>` with the postgres feature "
+               "on; every soak image is built through `Cli`, so the -my/-sq legs above "
+               "are controls")
+    REPORT.add("span redaction with the access log off", "#1610", "NOT-COVERED",
+               "decided by finalize.py's log scan (it replaces this row)")
+
+
+async def guarded(check, *args, name="", **kw):
+    """Run one check; a crash is a FAIL for it, not the end of the run."""
+    try:
+        return await check(*args, **kw)
+    except Exception as e:  # noqa: BLE001
+        REPORT.add(f"{check.__name__} crashed", "—", "FAIL", repr(e)[:300], name)
+        return None
+
+
+async def run_058_common(client, name, base, headers=None):
+    """0.58.0 checks that run the same way on both apps."""
+    for check in (check_forwarded_for, check_v4_mapped_filter, check_body_limit,
+                  check_model_shortcut_scopes, check_audited_pool_writes,
+                  check_viewset_scopes, check_urlize_and_cbv_csrf, check_natural_pk,
+                  check_webhook_targets, check_dbcache_long_keys, check_bounded_dml,
+                  check_nested_atomic, check_jwt_requires_exp, check_storefront_escapes):
+        await guarded(check, client, name, base, headers=headers, name=name)
+    other = tenant_host(2) if headers else None
+    await guarded(check_idempotency_scope, client, name, base, headers=headers,
+                  other_tenant=other, name=name)
+
+
+async def run_058_saas(client, name, base):
+    """0.58.0 checks for the tenancy server: admin, console, SSO, JWT."""
+    await guarded(check_page_cache_x_org, client, name, base, name=name)
+    await guarded(check_hosts_and_settings, client, name, base, name=name)
+    await guarded(check_tenant_session_misc, client, name, base, name=name)
+    await guarded(check_tenant_admin_writes, client, name, base, name=name)
+    _, session, _ = await tenant_login(client, base, tenant_host(7), "csrfadmin", pw("csrfadmin"))
+    if session:
+        await guarded(check_admin_inlines, client, name, base, session,
+                      headers={"Host": tenant_host(7)}, name=name)
+    await guarded(check_console, client, name, base, name=name)
+    await guarded(check_jwt, client, name, base, name=name)
+    await guarded(check_sso, client, name, base, name=name)
+    await guarded(check_password_change_tenant, client, name, base, name=name)
+    await guarded(check_password_change_operator, client, name, base, name=name)
+
+
 # ------------------------------------------------------------------ load
 
 
@@ -1071,6 +2671,10 @@ async def main():
             await check_malformed_cursor_is_400(client, name, base)
             await check_not_found_envelope(client, name, base)
             await check_page_cache(client, name, base)
+            await run_058_common(client, name, base)
+            session = await guarded(check_bare_admin, client, name, base, name=name)
+            if session:
+                await guarded(check_admin_inlines, client, name, base, session, name=name)
 
         print("\n== assertions: multi-tenant ==")
         saas_info = {}
@@ -1094,9 +2698,39 @@ async def main():
             await check_apex_does_not_serve_app(client, name, base)
             await check_unknown_tenant_envelope(client, name, base)
             await check_tenant_login(client, name, base)
+            await run_058_common(client, name, base, headers=hdr)
+            await run_058_saas(client, name, base)
 
         await check_page_cache_does_not_cross_apps(client, live_single, live_saas)
         report_uncoverable(live_single, live_saas)
+
+        print("\n== assertions: edge instances ==")
+        # Started now, awaited before the load: it sleeps 22 s.
+        lock_timer = None
+        if wanted(EDGE_SAAS[0]):
+            lock_timer = asyncio.create_task(
+                guarded(check_lock_duration_setting, client, name=EDGE_SAAS[0]))
+            await guarded(check_tls_redirect, client, name=EDGE_SAAS[0])
+            await guarded(check_hash_queue_bounded, client, name=EDGE_SAAS[0])
+            await guarded(emit_redaction_probe, client, name=EDGE_SAAS[0])
+        if wanted(EDGE_SINGLE[0]):
+            await guarded(check_admin_global_limit, client, name=EDGE_SINGLE[0])
+        if "single-my" in live_single:
+            await guarded(check_hash_off_runtime, client, "single-my", live_single["single-my"],
+                          name="single-my")
+        if "saas-pg" in live_saas:
+            check_tenant_fk_schemas()
+        report_uncoverable_058()
+
+        # Last, because they spend the driver's per-IP login budget on
+        # each instance for a minute; the load phase outlasts that.
+        print("\n== assertions: login limits ==")
+        for name, base in live_single.items():
+            await guarded(check_admin_login_limits, client, name, base, name=name)
+        for name, base in live_saas.items():
+            await guarded(check_tenancy_login_limits, client, name, base, name=name)
+        if lock_timer is not None:
+            await lock_timer
 
         targets = [(n, b, None) for n, b in live_single.items()]
         targets += [(n, b, {"Host": tenant_host(rng.randint(1, TENANTS))})
@@ -1195,12 +2829,18 @@ def write_report():
         "checks": [asdict(c) for c in REPORT.checks],
         "requests": REPORT.requests,
         "jobs": REPORT.jobs,
+        "redaction": REPORT.redaction,
+        "run_id": RUN_ID,
         "duration_secs": round(time.time() - REPORT.started, 1),
     }
     path = os.path.join(RESULTS, "report.json")
     try:
         with open(path, "w") as fh:
             json.dump(out, fh, indent=2)
+        # For finalize.py's log scan only (#1610); test credentials of
+        # this fleet, never real ones.
+        with open(os.path.join(RESULTS, "secrets.json"), "w") as fh:
+            json.dump(sorted(USED_SECRETS), fh)
     except OSError as e:
         print(f"could not write {path}: {e}")
 
