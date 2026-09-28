@@ -277,18 +277,11 @@ impl<T: Model> QuerySet<T> {
         if self.disable_all_global_scopes {
             return;
         }
-        let schema = T::SCHEMA;
-        if schema.global_scopes.is_empty() {
-            return;
-        }
-        let mut prefixed: Vec<PendingFilter> = Vec::new();
-        for scope in schema.global_scopes {
-            if self.disabled_global_scopes.contains(&scope.name) {
-                continue;
-            }
-            let expr = (scope.apply)();
-            prefixed.push(PendingFilter::Expr(expr));
-        }
+        let mut prefixed: Vec<PendingFilter> = T::SCHEMA
+            .global_scope_exprs(&self.disabled_global_scopes)
+            .into_iter()
+            .map(PendingFilter::Expr)
+            .collect();
         if !prefixed.is_empty() {
             prefixed.append(&mut self.pending);
             self.pending = prefixed;

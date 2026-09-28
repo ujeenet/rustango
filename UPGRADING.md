@@ -198,6 +198,15 @@ Run `makemigrations` + `migrate` for the new `allow_email_link` column on
 email linking reads as off. `rustango_sso_links` is created on first use.
 `find_or_provision_member(pool, email, profile, auto)` is now
 `(pool, &ProviderKey, allow_email_link, profile, auto)`.
+### ViewSet and template views hide scoped-out rows
+
+A model with a `global_scope` served through `ViewSet` or the template
+views now hides the scoped-out rows there too, and a PK request for one
+is a 404 (#1746). An endpoint that must reach them should use
+`Model::objects().without_global_scopes()` in its own handler. A
+ViewSet PUT/PATCH that moves its row out of a scope or filter backend
+answers `204 No Content`; a create whose row lands outside answers
+`201` with no body (`null` at that index in a bulk create).
 
 ### The trusted client IP is the rightmost untrusted hop
 

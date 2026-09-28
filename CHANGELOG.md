@@ -43,6 +43,21 @@ matching email links a first-time user only when the provider has the new
 `allow_email_link` (default off), and never a superuser or staff account.
 `sso::resolve_by_slug` returns `ResolvedProvider`, and
 `member_auth::find_or_provision_member` takes a `ProviderKey`.
+### Security — ViewSet and template views apply global scopes (#1746)
+
+`ViewSet` and `ListView` / `DetailView` / `UpdateView` / `DeleteView`
+now apply the model's `global_scope(...)` filters, like a `QuerySet`:
+lists, counts, filters, search, pagination and the built-in
+`delete_selected` skip scoped-out rows, and a PK read, update or delete
+of one is a 404. Custom bulk actions get only the selected PKs the
+scopes let through, and FK `_display` lookups apply the target's scopes.
+A write that leaves its row outside the scope is not echoed: an update
+answers `204`, a create `201` with no body (`null` in a bulk array).
+`?search=` is now ANDed with the whole filter, also when it is an `OR`.
+The admin still sees every row; narrow it with
+`register_admin_queryset!`. New `ModelSchema::with_global_scopes` and
+`.with_global_scopes()` on `SelectQuery`, `CountQuery`, `UpdateQuery`
+and `DeleteQuery` for queries built from a schema.
 
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 
