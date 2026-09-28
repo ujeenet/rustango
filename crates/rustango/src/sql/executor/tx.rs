@@ -132,6 +132,7 @@ impl<'a> PoolTx<'a> {
     /// Remove the hook [`Self::on_sqlite_rollback`] set.
     pub(crate) async fn clear_sqlite_rollback(&mut self) {
         #[cfg(feature = "sqlite")]
+        #[allow(irrefutable_let_patterns)]
         if let PoolTx::Sqlite(tx) = self {
             if let Ok(mut h) = (**tx).lock_handle().await {
                 h.remove_rollback_hook();
