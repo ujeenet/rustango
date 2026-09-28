@@ -1141,3 +1141,48 @@ async fn upgrading_adds_the_framework_column_once() {
             .allow_email_link
     );
 }
+
+#[tokio::test]
+async fn admin_written_links_get_the_key_and_stay_unique() {
+    use rustango::sso::SsoLink;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let root = env.user("root", "root@example.com", true).await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", false).await;
+    let issuer = format!("oidc|{}", env.idp.issuer);
+    let form = |subject: &str| {
+        format!(
+            "provider_source=tenant&provider_id=1&issuer={}&subject={subject}&user_id={ann}",
+            urlencoding::encode(&issuer)
+        )
+    };
+    let links = || async { SsoLink::objects().fetch(env.pool()).await.unwrap() };
+    env.admin_post(root, "/__admin/rustango_sso_links", &form("sub-a"))
+        .await;
+    env.admin_post(root, "/__admin/rustango_sso_links", &form("sub-a"))
+        .await;
+    let rows = links().await;
+    assert_eq!(rows.len(), 1, "the second row for one identity is refused");
+    assert_eq!(
+        rows[0].key_sha256,
+        rustango::sso::link::key_sha256(&issuer, "sub-a")
+    );
+    assert_eq!(env.sso("corp", "sub-a", "x@example.com").await, Ok(ann));
+
+    // Editing the subject rewrites the key; the new identity signs in.
+    let id = rows[0].id.get().copied().unwrap();
+    env.admin_post(
+        root,
+        &format!("/__admin/rustango_sso_links/{id}"),
+        &form("sub-b"),
+    )
+    .await;
+    let rows = links().await;
+    assert_eq!(
+        rows[0].key_sha256,
+        rustango::sso::link::key_sha256(&issuer, "sub-b")
+    );
+    assert_eq!(env.sso("corp", "sub-b", "x@example.com").await, Ok(ann));
+    assert!(env.sso("corp", "sub-a", "x@example.com").await.is_err());
+}

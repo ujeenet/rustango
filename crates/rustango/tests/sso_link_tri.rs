@@ -257,7 +257,7 @@ async fn a_hand_made_link_gets_its_key(pool: &Pool) {
         provider_id: 0,
         issuer: key.issuer().to_owned(),
         subject: "sub-hand".into(),
-        key_sha256: None,
+        key_sha256: "stale".into(),
         user_id: 8,
         created_at: Auto::default(),
     };
@@ -267,8 +267,8 @@ async fn a_hand_made_link_gets_its_key(pool: &Pool) {
     assert_eq!(sign_in(pool, &key, false, &p, &ok).await.unwrap(), 8);
     let stored = SsoLink::objects().fetch(pool).await.unwrap();
     assert_eq!(
-        stored[0].key_sha256.as_deref(),
-        Some(rustango::sso::link::key_sha256(key.issuer(), "sub-hand").as_str())
+        stored[0].key_sha256,
+        rustango::sso::link::key_sha256(key.issuer(), "sub-hand")
     );
 }
 

@@ -45,6 +45,7 @@ pub mod computed_fields;
 pub(crate) mod csrf_context;
 pub mod custom_views;
 mod date_hierarchy;
+pub mod derived_fields;
 mod docs;
 mod errors;
 mod forms;

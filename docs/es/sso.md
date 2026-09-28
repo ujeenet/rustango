@@ -138,7 +138,7 @@ IdP. Un usuario se enlaza mediante el enlace opcional por correo (usuarios de
 tenant no privilegiados), o cuando un superusuario añade una fila `SsoLink`:
 `provider_source` (`tenant`, `shared` o `admin`), `provider_id` (el id de la fila
 del proveedor), `issuer` (`kind`, o `kind|issuer_url` sin barra final), `subject`
-y `user_id`. Deja `key_sha256` vacío: el primer inicio de sesión lo rellena. La
+y `user_id`. El admin calcula `key_sha256`. La
 línea de log del rechazo (`sso refused`) lleva `provider_id`, `issuer` y `subject`.
 Añadir una fila requiere la autenticación por sesión del admin
 (`Builder::with_session_auth`, o `with_session` del admin de tenant); sin ella,
