@@ -383,33 +383,43 @@ fn chain_membership(prior_scoped: &[&Migration]) -> std::collections::HashSet<St
     seen
 }
 
-/// Add every `rustango_*` table the registry knows to `into`. The
-/// `rustango_` prefix is reserved: the framework creates those tables
-/// itself. An app diff must see them as already present, or it emits
-/// `CreateTable` ops that fail on `relation already exists`.
+/// Set every `rustango_*` table in `into` to its current shape. The
+/// prefix is reserved: the system chain creates and changes those tables,
+/// so an app diff must never emit a `CreateTable` or `AddColumn` for one.
 fn fold_in_framework_tables(into: &mut SchemaSnapshot, current: &SchemaSnapshot) {
-    for t in &current.tables {
-        if t.name.starts_with("rustango_") && !into.tables.iter().any(|x| x.name == t.name) {
-            into.tables.push(t.clone());
-        }
-    }
-    for m2m in &current.m2m_tables {
-        if m2m.through.starts_with("rustango_")
-            && !into.m2m_tables.iter().any(|x| x.through == m2m.through)
-        {
-            into.m2m_tables.push(m2m.clone());
-        }
-    }
-    for idx in &current.indexes {
-        if idx.table.starts_with("rustango_") && !into.indexes.iter().any(|x| x.name == idx.name) {
-            into.indexes.push(idx.clone());
-        }
-    }
-    for c in &current.checks {
-        if c.table.starts_with("rustango_") && !into.checks.iter().any(|x| x.name == c.name) {
-            into.checks.push(c.clone());
-        }
-    }
+    let framework = |name: &str| name.starts_with("rustango_");
+    into.tables.retain(|t| !framework(&t.name));
+    into.tables.extend(
+        current
+            .tables
+            .iter()
+            .filter(|t| framework(&t.name))
+            .cloned(),
+    );
+    into.m2m_tables.retain(|m| !framework(&m.through));
+    into.m2m_tables.extend(
+        current
+            .m2m_tables
+            .iter()
+            .filter(|m| framework(&m.through))
+            .cloned(),
+    );
+    into.indexes.retain(|i| !framework(&i.table));
+    into.indexes.extend(
+        current
+            .indexes
+            .iter()
+            .filter(|i| framework(&i.table))
+            .cloned(),
+    );
+    into.checks.retain(|c| !framework(&c.table));
+    into.checks.extend(
+        current
+            .checks
+            .iter()
+            .filter(|c| framework(&c.table))
+            .cloned(),
+    );
 }
 
 /// Copy every table, m2m, index and check from `from` into `into`

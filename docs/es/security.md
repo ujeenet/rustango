@@ -313,8 +313,9 @@ La autenticación es cómo confirmas quién está haciendo una petición. **Rust
 > consulta la [guía de SSO](sso.md). Los proveedores se **gestionan desde la UI
 > del admin como filas** (varios por superficie; por inquilino, o un conjunto
 > compartido entre inquilinos), con el secreto de cliente **cifrado en reposo**.
-> Es enlace-a-existente (el email verificado del IdP debe coincidir con un usuario
-> del admin; sin auto-aprovisionamiento) y reutiliza la sesión existente.
+> Inicia sesión con la cuenta enlazada al subject del IdP (el enlace por email es
+> opcional por proveedor y nunca se aplica a superusuarios ni staff; sin
+> auto-aprovisionamiento) y reutiliza la sesión existente.
 
 ### Tres backends listos para usar
 
@@ -507,6 +508,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 ```
 
 Funciona con Google Authenticator, Authy, 1Password, Bitwarden y otras aplicaciones autenticadoras estándar.
+
+`verify` acepta el mismo código otra vez hasta que caduca. Para códigos de un solo uso, llame a `matched_step`, guarde el paso que devuelve y acepte un código solo si su paso es posterior al guardado. El inicio de sesión integrado del admin lo hace así.
 
 **Códigos de recuperación** (códigos de respaldo de un solo uso para cuando un usuario pierde su teléfono) todavía no se incluyen. El patrón común es almacenar de 8 a 10 códigos hasheados por usuario y consumir uno cada vez que se usa.
 

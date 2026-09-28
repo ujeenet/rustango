@@ -177,7 +177,7 @@ Behind a reverse proxy, mount `RealIpLayer` with your proxies as shown above. Wi
 
 Password hashing runs at most one job per CPU, shared by every login; HTTP Basic, API keys and agent secrets may use at most half the slots. A login that waits longer than `hash_wait_ms` (5 s) for a slot gets `503` with `Retry-After`, for known and unknown users alike.
 
-Tune them under `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. A value set in code (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) wins over these keys. The per-IP and global buckets are per process; the username lock uses `account_lockout::shared()`, which you can back with a shared cache via `account_lockout::configure_shared`.
+Tune them under `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. A value set in code (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) wins over these keys. The per-IP and global buckets are per process; the username lock uses `account_lockout::shared()`, which you can back with a shared cache via `account_lockout::configure_shared`. Failures count in a fixed window (1 hour by default) that starts at the first failure, so an attacker gets `lockout_threshold - 1` guesses per window without a lock; the per-IP and global limits bound the rest.
 
 `RateLimitLayer` is **process-local** — it counts requests only within one running instance, which is fine if you run a single instance. If you run several instances (replicas) behind a load balancer, each would keep its own count, so the real limit multiplies. To share one count across all replicas, use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
 
@@ -323,7 +323,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 Authentication is how you confirm who is making a request. **Rustango** ships three ready-made backends (Basic auth, API keys, and JWTs) and lets you write your own. You attach them to routes, and requests without a recognized credential get a `401`.
 
-> **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). Providers are **managed from the admin UI as rows** (multiple per surface; per-tenant, or a shared set across tenants), with the client secret **encrypted at rest**. It's link-to-existing (the verified IdP email must match an admin user; no auto-provisioning) and reuses the existing session.
+> **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). Providers are **managed from the admin UI as rows** (multiple per surface; per-tenant, or a shared set across tenants), with the client secret **encrypted at rest**. It signs in the account linked to the IdP subject (email linking is opt-in per provider and never applies to superusers or staff; no auto-provisioning) and reuses the existing session.
 
 ### Three ready-made backends
 
@@ -519,6 +519,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 ```
 
 Works with Google Authenticator, Authy, 1Password, Bitwarden, and other standard authenticator apps.
+
+`verify` accepts the same code again until it expires. To make codes single use, call `matched_step` instead, store the step it returns, and accept a code only when its step is later than the stored one. The built-in admin login does this.
 
 **Recovery codes** (one-time backup codes for when a user loses their phone) aren't shipped yet. The common pattern is to store 8–10 hashed codes per user and burn one each time it's used.
 

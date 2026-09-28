@@ -275,12 +275,12 @@ impl JwtLifecycle {
     /// [`Self::refresh_with`] instead and supply fresh claims.
     ///
     /// Returns `None` if the refresh token is invalid, expired, or already
-    /// blacklisted.
+    /// blacklisted. A refresh token is single use: of two refreshes of
+    /// one token, even concurrent ones, the second returns `None`.
     pub async fn refresh(&self, refresh_token: &str) -> Option<JwtTokenPair> {
-        let claims = self.verify_refresh(refresh_token).await?;
-        // Rotate: blacklist the old refresh, issue a new pair carrying the
+        // Rotate: redeem the old refresh, issue a new pair carrying the
         // same custom payload (preserves `scope` / `roles` / `tenant`).
-        self.blacklist_jti(&claims.jti, claims.exp).await;
+        let claims = self.redeem_refresh(refresh_token).await?;
         // Safe to unwrap — the custom claims came from a token we ourselves
         // issued, so they can't contain reserved names (issue_pair_with
         // already rejected those at original issuance).
@@ -291,7 +291,8 @@ impl JwtLifecycle {
     /// custom payload — useful when permissions may have changed since
     /// the refresh token was issued (e.g. role revoked, scope downgraded).
     ///
-    /// The old refresh JTI is still blacklisted to prevent replay.
+    /// The old refresh token is single use here too: a second refresh
+    /// of it returns `Ok(None)`.
     ///
     /// # Errors
     /// [`JwtIssueError::ReservedClaim`] if `new_custom` overlaps reserved names.
@@ -301,10 +302,9 @@ impl JwtLifecycle {
         refresh_token: &str,
         new_custom: serde_json::Map<String, serde_json::Value>,
     ) -> Result<Option<JwtTokenPair>, JwtIssueError> {
-        let Some(claims) = self.verify_refresh(refresh_token).await else {
+        let Some(claims) = self.redeem_refresh(refresh_token).await else {
             return Ok(None);
         };
-        self.blacklist_jti(&claims.jti, claims.exp).await;
         self.issue_pair_with(claims.sub, new_custom).map(Some)
     }
 
@@ -374,17 +374,32 @@ impl JwtLifecycle {
     }
 
     async fn verify_token(&self, token: &str) -> Option<JwtClaims> {
-        let claims = self.decode_unchecked(token)?;
-        // Expiry — checked before the store, so an expired token never costs
-        // a round trip to a durable backend.
-        if chrono::Utc::now().timestamp() >= claims.exp {
-            return None;
-        }
+        let claims = self.decode_unexpired(token)?;
         // Blacklist
         if self.is_blacklisted(&claims.jti).await {
             return None;
         }
         Some(claims)
+    }
+
+    /// Single-use redemption of a refresh token: `mark_used` is the one
+    /// atomic check, so of two concurrent redemptions only one wins.
+    async fn redeem_refresh(&self, token: &str) -> Option<JwtClaims> {
+        let claims = self.decode_unexpired(token)?;
+        if claims.typ != REFRESH_TYP {
+            return None;
+        }
+        self.jti_store
+            .mark_used(&claims.jti, claims.exp)
+            .await
+            .then_some(claims)
+    }
+
+    /// Signature and expiry, no store lookup. Expiry comes first, so an
+    /// expired token never costs a round trip to a durable backend.
+    fn decode_unexpired(&self, token: &str) -> Option<JwtClaims> {
+        let claims = self.decode_unchecked(token)?;
+        (chrono::Utc::now().timestamp() < claims.exp).then_some(claims)
     }
 
     /// Decode + verify signature only — does NOT check expiry or blacklist.
@@ -464,10 +479,9 @@ impl JwtLifecycle {
     }
 
     async fn blacklist_jti(&self, jti: &str, expires_at: i64) {
-        // v0.48 — delegate to the pluggable JtiStore. We ignore the
-        // returned `bool` (newly-inserted vs already-present) because
-        // re-revoking an already-revoked token is idempotent here:
-        // either way the JTI is in the store on return. Pruning is
+        // v0.48 — delegate to the pluggable JtiStore. Revocation only, so
+        // the returned `bool` is ignored: re-revoking is idempotent.
+        // Refresh rotation must not use this; see `redeem_refresh`. Pruning is
         // the store's responsibility (`InMemoryJtiStore` does it
         // opportunistically inside `mark_used`).
         //
@@ -585,6 +599,53 @@ mod tests {
         // The old refresh token can no longer be used.
         assert!(j.refresh(&pair.refresh).await.is_none());
         assert!(j.verify_refresh(&pair.refresh).await.is_none());
+    }
+
+    /// A store whose calls yield, like a database. The in-memory store
+    /// never yields, which hides the check-then-mark race.
+    struct YieldingStore(std::sync::Mutex<std::collections::HashSet<String>>);
+    impl JtiStore for YieldingStore {
+        fn is_used<'a>(&'a self, jti: &'a str) -> crate::jti_store::JtiFuture<'a, bool> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                self.0.lock().unwrap().contains(jti)
+            })
+        }
+        fn mark_used<'a>(&'a self, jti: &'a str, _: i64) -> crate::jti_store::JtiFuture<'a, bool> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                self.0.lock().unwrap().insert(jti.to_owned())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_of_one_token_yield_one_pair() {
+        let j = jwt().with_jti_store(Arc::new(YieldingStore(Default::default())));
+        let pair = j.issue_pair(7);
+        let (a, b) = tokio::join!(j.refresh(&pair.refresh), j.refresh(&pair.refresh));
+        assert!(a.is_some() ^ b.is_some(), "a refresh token redeemed twice");
+        let pair = j.issue_pair(7);
+        let (a, b) = tokio::join!(
+            j.refresh_with(&pair.refresh, serde_json::Map::new()),
+            j.refresh_with(&pair.refresh, serde_json::Map::new()),
+        );
+        assert!(
+            a.unwrap().is_some() ^ b.unwrap().is_some(),
+            "refresh_with redeemed twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_refresh_token_cannot_be_redeemed() {
+        let j = jwt();
+        let pair = j.issue_pair(7);
+        assert!(j.revoke(&pair.refresh).await);
+        assert!(j.refresh(&pair.refresh).await.is_none());
+        assert!(
+            j.refresh(&pair.access).await.is_none(),
+            "an access token is not a refresh token"
+        );
     }
 
     #[tokio::test]

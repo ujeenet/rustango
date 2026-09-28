@@ -9,15 +9,19 @@ verwaltet (keine Konfigurationsdatei, kein Neubau). Die Endpunkte eines Anbieter
 werden bei der Anmeldung automatisch aus seiner OIDC-Issuer-URL ermittelt;
 Social-Anbieter verwenden eingebaute Presets.
 
-SSO ist für den Admin **Verknüpfung mit einem bestehenden Konto**: die verifizierte
-E-Mail, die der IdP zurückgibt, muss mit einem bestehenden Admin-Benutzer
-übereinstimmen. Es authentifiziert die Person; es erstellt niemals Konten und
-gewährt niemals von sich aus Zugriff. Eine unbekannte oder unverifizierte E-Mail
-wird abgewiesen. (Der Member-Ablauf, weiter unten, kann sich für
-Auto-Provisionierung entscheiden.)
+SSO meldet den Benutzer an, der mit der IdP-Identität **verknüpft** ist: eine
+`rustango_sso_links`-Zeile pro `(provider, sub)`. Die E-Mail, die der IdP sendet,
+reicht allein nie aus. Ein Erstbenutzer wird nur dann über seine verifizierte
+E-Mail verknüpft, wenn beim Anbieter **`allow_email_link`** eingeschaltet ist
+(Standard: aus), und nie, wenn das Konto ein Superuser oder Staff ist (Tenant:
+besitzt irgendeine Berechtigung; Bare-Admin: jedes Konto). Solche Konten
+verknüpft ein Admin, der die `SsoLink`-Zeile im Admin anlegt; die Log-Zeile der
+Abweisung nennt das Subject. (Der Member-Ablauf, weiter unten, provisioniert
+standardmäßig automatisch; siehe unten, wie man das abschaltet.)
 
 > **Quelle:** der admin-unabhängige Kern `rustango::sso` (`SsoProvider`,
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), die
+> Link-Tabelle `rustango::sso::link` (`SsoLink`, `ProviderKey`, `sign_in`), die
 > Bare-Admin-Verdrahtung `rustango::admin::sso`, das SSO pro Tenant/Konsole
 > `rustango::tenancy::sso` (`SharedSsoProvider`) und das Member-SSO
 > `rustango::tenancy::member_auth`.
@@ -45,10 +49,10 @@ rustango = { version = "0.57", features = ["tenancy", "sso"] }
 nun **Re-Export-Shims** über `sso::provider` / `sso::*`, sodass bestehende
 Imports von `crate::admin::sso::{build_provider, ResolvedSso, …}` und
 `crate::admin::sso_provider::SsoProvider` unverändert weiter aufgelöst
-werden (der Tabellenname `rustango_sso_providers` und jedes Feld bleiben
-unangetastet — Migrationen sind nicht betroffen).
+werden. Seit 0.58 hat `rustango_sso_providers` eine Spalte `allow_email_link`,
+und es gibt eine Tabelle `rustango_sso_links`; `makemigrations` erzeugt beides.
 
-Die E-Mail, über die ein Benutzer verknüpft wird, ist die `email`-Spalte. Beim
+Die E-Mail, die das optionale Verknüpfen per E-Mail abgleicht, ist die `email`-Spalte. Beim
 Tenant-`User`-Modell hängt sie am Feature **`sso`** (in 0.49 von `admin-sso`
 weggezogen, sodass reine Member-SSO-Builds die Spalte trotzdem erhalten); das
 nackte `AdminUser.email` bleibt hinter `admin-sso`. Das Aktivieren oder
@@ -62,14 +66,22 @@ diese Spalte aus.
 2. Ein Klick darauf (`GET <login>/sso/<slug>`) leitet zum IdP weiter, mit einem
    signierten, kurzlebigen Flow-Cookie (PKCE + CSRF-`state`).
 3. Der IdP schickt den Benutzer zurück an `<login>/sso/<slug>/callback`.
-4. rustango verifiziert den Flow, tauscht den Code ein, liest `/userinfo`
-   und verlangt **`email_verified`**.
-5. Es sucht einen Admin-Benutzer über diese E-Mail. Existiert einer und ist aktiv,
-   prägt es **dieselbe signierte Cookie-Session**, die eine Passwort-Anmeldung
-   erzeugt, gebunden an diesen Benutzer — sodass jedes bestehende Gate (Superuser /
-   Berechtigungen, Live-Passwortänderungs-Invalidierung) weiterhin gilt.
-6. Keine Übereinstimmung → der Benutzer wird mit einem generischen Fehler zur
-   Anmeldeseite zurückgeschickt (Details gehen ins Server-Log, nie in den Browser).
+4. rustango verifiziert den Flow, tauscht den Code ein und liest `/userinfo`.
+5. Es sucht die Verknüpfung für diesen Anbieter und das IdP-`sub`. Gibt es keine
+   und ist `allow_email_link` eingeschaltet, legt eine **verifizierte** E-Mail,
+   die zu einem nicht privilegierten Benutzer passt, die Verknüpfung an.
+6. Ist der verknüpfte Benutzer aktiv, prägt es **dieselbe signierte
+   Cookie-Session**, die eine Passwort-Anmeldung erzeugt — sodass jedes
+   bestehende Gate (Superuser / Berechtigungen, Live-Passwortänderungs-
+   Invalidierung) weiterhin gilt.
+7. Andernfalls wird der Benutzer mit einem generischen Fehler zur Anmeldeseite
+   zurückgeschickt (Details gehen ins Server-Log, nie in den Browser).
+
+Die Link-Tabelle ist ein normales migriertes Modell: im Speicher des Tenants für
+Tenant-Anmeldungen und in der Admin-Datenbank für den Bare-Admin. Eine
+Verknüpfung wird exakt abgeglichen (Issuer und Subject über einen SHA-256
+verschlüsselt; bei der E-Mail wird nur die ASCII-Groß-/Kleinschreibung
+ignoriert), unabhängig von der Kollation der Datenbank.
 
 Das Client-**Secret ist im Ruhezustand verschlüsselt** — die `client_secret`-Spalte
 ist ein [`EncryptedString`](#secret-speicherung)-Cast, erst zur Anmeldezeit im Speicher
@@ -92,6 +104,10 @@ Felder:
 | `enabled` | Ob der Button auf der Anmeldeseite erscheint. |
 | `sort_order` | Button-Reihenfolge (aufsteigend). |
 | `scopes` | Optionale, durch Leerzeichen getrennte Scope-Überschreibung (Standard `openid email profile`). |
+| `allow_email_link` | Einen Erstbenutzer über seine verifizierte E-Mail verknüpfen (Standard: aus). Verknüpft nie ein Superuser- oder Staff-Konto; vom Bare-Admin ignoriert. |
+
+Nur ein Superuser kann `SsoProvider`- und `SsoLink`-Zeilen im Admin anlegen,
+ändern oder löschen; anderes Staff kann sie nur auflisten.
 
 Um einen Anbieter hinzuzufügen: geben Sie `client_id` + `client_secret` ein, wählen
 Sie ein `kind` (oder `oidc` + eine `issuer_url`) und speichern Sie. Die Endpunkte
@@ -108,7 +124,9 @@ werden bei der Anmeldung ermittelt — keine Endpunkt-Verdrahtung pro Anbieter.
 - **Operator-Konsole** (Multi-Tenancy): ein Operator definiert einmal einen
   **`SharedSsoProvider`**, und er wird **jedem** Tenant angeboten
   (etwa ein unternehmensweites Google). Verwaltet über das *Shared SSO*-Panel
-  der Konsole.
+  der Konsole, wo *Allow email linking* `allow_email_link` an Ort und Stelle
+  umschaltet (die ID und ihre Verknüpfungen bleiben). Das Flag gilt für
+  **jeden** Tenant.
 
 Auf der Anmeldeseite eines Tenants verschmelzen die beiden Mengen, und bei einer
 Slug-Kollision **gewinnt der eigene Anbieter des Tenants** gegenüber dem geteilten
@@ -116,9 +134,16 @@ Slug-Kollision **gewinnt der eigene Anbieter des Tenants** gegenüber dem geteil
 
 Die Callback-URL wird pro Anfrage aus Host + Slug abgeleitet
 (`https://<host><login>/sso/<slug>/callback`), registrieren Sie diese also beim
-IdP. Verknüpfen Sie einen Benutzer, indem Sie die `email`-Spalte in seiner
-`rustango_users`- (Tenant) / `rustango_admin_users`- (bare) Zeile auf die vom IdP
-zurückgegebene Adresse setzen.
+IdP. Ein Benutzer wird verknüpft durch das optionale Verknüpfen per E-Mail
+(nicht privilegierte Tenant-Benutzer) oder dadurch, dass ein Superuser eine
+`SsoLink`-Zeile anlegt: `provider_source` (`tenant`, `shared` oder `admin`),
+`provider_id` (die ID der Anbieter-Zeile), `issuer` (`kind` oder
+`kind|issuer_url` ohne abschließenden Schrägstrich), `subject` und `user_id`.
+Der Admin berechnet `key_sha256`. Die Log-Zeile der
+Abweisung (`sso refused`) enthält `provider_id`, `issuer` und `subject`. Eine
+Zeile anzulegen erfordert die Session-Authentifizierung des Admins
+(`Builder::with_session_auth` oder `with_session` des Tenant-Admins); ohne sie
+kann niemand Verknüpfungen anlegen.
 
 ## Member (Endbenutzer) SSO
 
@@ -158,8 +183,12 @@ Unterschiede zum Admin-Ablauf:
   eine verifizierte IdP-E-Mail ohne passende `rustango_users`-Zeile eine solche
   — Benutzername aus dem lokalen Teil der E-Mail (bei Kollision entdupliziert),
   ein echter, aber unbrauchbarer zufälliger Passwort-Hash (SSO-Benutzer können
-  sich nicht per Passwort anmelden). Setzen Sie es auf `false` für die
-  admin-artige Verknüpfung-mit-Bestehendem (unbekannte E-Mail abgewiesen).
+  sich nicht per Passwort anmelden) — und verknüpft sie. Eine E-Mail, die zu
+  einem bestehenden Konto passt, folgt der obigen `allow_email_link`-Regel.
+  Setzen Sie es auf `false`, um unbekannte E-Mails abzuweisen. Eine native
+  Anmeldung ruft `find_or_provision_member` direkt auf; sein Ergebnis
+  `MemberSignIn` unterscheidet `NotLinked` (ein Konto hat die E-Mail, darf
+  aber nicht darüber verknüpft werden) von `NoAccount`.
 - **Ein eigenes Session-Cookie.** Das Member-Cookie
   (`rustango_member_session`) ist von den Tenant- / Admin-Session-Cookies
   **domänengetrennt**: die signierte Nachricht trägt einen Tag pro Domäne und
@@ -212,9 +241,15 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
 
 ## Sicherheitshinweise
 
-- **Nur verifizierte E-Mail** — unverifizierte IdP-E-Mails werden abgewiesen.
-- **Keine Auto-Provisionierung** — eine unbekannte E-Mail kommt nicht hinein;
-  erstellen Sie den Admin-Benutzer (und setzen Sie seine `email`) zuerst.
+- **Zuerst die Verknüpfung** — die `(provider, sub)`-Verknüpfung entscheidet;
+  die E-Mail wird nur vom optionalen Verknüpfen per E-Mail genutzt, und nur
+  wenn sie verifiziert ist.
+- **Keine privilegierten E-Mail-Verknüpfungen** — Superuser und Staff
+  verknüpft nur ein Superuser. Eine per E-Mail angelegte Verknüpfung
+  funktioniert weiter, nachdem der Benutzer befördert wurde; löschen Sie sie,
+  wenn das nicht gewollt ist.
+- **Keine Auto-Provisionierung** für die Admins — eine unbekannte E-Mail
+  kommt nicht hinein.
 - **Secrets im Ruhezustand verschlüsselt** (`RUSTANGO_SECRET_KEY`), nur zur
   Anmeldezeit im Speicher entschlüsselt; Bearbeitungsformulare maskieren das
   gespeicherte Secret.

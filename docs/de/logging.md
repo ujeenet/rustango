@@ -139,6 +139,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::shutdown` | Signalbehandlung und Shutdown-Hooks |
 | `rustango::sql` | Query-Ausführung |
 | `rustango::sql::lock` | Row-Lock-Klauseln |
+| `rustango::sso` | SSO-Kontoverknüpfung |
 | `rustango::template_views` | Template-basierte Views |
 | `rustango::tenancy` | Mandantenfähigkeit, allgemein |
 | `rustango::tenancy::admin` | Mandanten-Admin |

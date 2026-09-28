@@ -139,6 +139,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::shutdown` | Manejo de señales y hooks de apagado |
 | `rustango::sql` | Ejecución de consultas |
 | `rustango::sql::lock` | Cláusulas de bloqueo de fila |
+| `rustango::sso` | Enlace de cuentas SSO |
 | `rustango::template_views` | Vistas basadas en plantillas |
 | `rustango::tenancy` | Multi-tenancy, general |
 | `rustango::tenancy::admin` | Admin de inquilino |

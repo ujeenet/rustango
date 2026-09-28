@@ -984,6 +984,8 @@ jobs:
             --test admin_list_display_jsonpath_sqlite_live \
             --test audit_pool_sqlite_live \
             --test audit_pool_writes_tri \
+            --test atomic_savepoints_tri \
+            --test orm_bounded_dml_tri \
             --test bulk_update_api_sqlite_live \
             --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
@@ -1024,6 +1026,7 @@ jobs:
             --test viewset_natural_pk_tri \
             --test admin_totp_2fa_sqlite_live \
             --test admin_totp_2fa_e2e \
+            --test admin_totp_replay_tri \
             --test orm_aggregation \
             --test orm_subquery \
             --test orm_window \
@@ -1033,6 +1036,10 @@ jobs:
             --test orm_writes \
             --test orm_delta
       - run: cargo test -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri
+      - run: >-
+          cargo test -p rustango --no-default-features
+          --features sqlite,tenancy,admin-sso,testkit
+          --test sso_link_tenancy_sqlite_live --test sso_link_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
@@ -1213,9 +1220,13 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test values_tri
       - run: cargo test -p rustango --features mysql,testkit --test model_shortcut_scopes_tri
       - run: cargo test -p rustango --features mysql,testkit --test audit_pool_writes_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
+      - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
+      - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
