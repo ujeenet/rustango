@@ -239,9 +239,20 @@ pub async fn confirmed_secret_checked(
     Ok(secrets.first().and_then(|s| TotpSecret::from_base32(s)))
 }
 
+/// What [`start_reenrollment`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Reenroll {
+    /// The current code was valid; the new secret is staged.
+    Verified,
+    /// The current code was refused; nothing changed.
+    Refused,
+    /// No confirmed device, so no code was checked; the secret is staged.
+    NoDevice,
+}
+
 /// Re-enroll with `secret`, but only for a fresh `current_code` of the
 /// confirmed device, so a stolen session cannot swap the factor (#1776).
-/// `Ok(false)` when the code is refused; no device needs no code.
 ///
 /// # Errors
 /// Driver or SQL failures.
@@ -250,14 +261,16 @@ pub async fn start_reenrollment(
     user_id: i64,
     current_code: &str,
     secret: &TotpSecret,
-) -> Result<bool, crate::sql::ExecError> {
-    if let Some(current) = confirmed_secret_checked(pool, user_id).await? {
-        if !redeem_code(pool, user_id, &current, current_code).await? {
-            return Ok(false);
+) -> Result<Reenroll, crate::sql::ExecError> {
+    let outcome = match confirmed_secret_checked(pool, user_id).await? {
+        Some(current) if !redeem_code(pool, user_id, &current, current_code).await? => {
+            return Ok(Reenroll::Refused);
         }
-    }
+        Some(_) => Reenroll::Verified,
+        None => Reenroll::NoDevice,
+    };
     start_enrollment(pool, user_id, secret).await?;
-    Ok(true)
+    Ok(outcome)
 }
 
 /// Start or restart enrollment with `secret`. A confirmed device keeps

@@ -331,16 +331,16 @@ async fn reenroll_needs_a_current_code() {
         format!("_csrf={csrf}&reset=1&totp_code={code}"),
     ] {
         let html = totp_page(&app, &cookies, Some(body.clone())).await;
-        assert!(
-            html.contains("enabled</strong>"),
-            "not the 2FA page: {html}"
-        );
-        assert!(!html.contains("Setup key"), "re-enroll started by {body}");
         let device = totp_store::device(&pool, id).await.expect("device");
         assert!(
             device.pending_secret_base32.is_none(),
             "{body} staged a secret"
         );
+        assert!(
+            html.contains("enabled</strong>"),
+            "not the 2FA page: {html}"
+        );
+        assert!(!html.contains("Setup key"), "re-enroll started by {body}");
     }
 
     let next = rustango::totp::generate_at(&secret, now + 30, 30, 6);

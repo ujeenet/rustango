@@ -664,14 +664,18 @@ async fn totp_enroll_submit(
         let code = form.totp_code.as_deref().unwrap_or("").trim();
         let started =
             super::totp_store::start_reenrollment(&state.pool, session.user_id, code, &s).await;
+        use super::totp_store::Reenroll;
+        // Only a real code guess counts; the other arms give the tokens back.
         match (&started, code.is_empty()) {
-            (Ok(true), false) => attempt.succeeded().await,
-            (Ok(false), false) => attempt.failed().await,
-            _ => {}
+            (Ok(Reenroll::Verified), _) => attempt.succeeded().await,
+            (Ok(Reenroll::Refused), false) => attempt.failed().await,
+            _ => attempt.prompted().await,
         }
         let refused = match started {
-            Ok(true) => None,
-            Ok(false) => Some("Enter a current code from your authenticator to re-enroll."),
+            Ok(Reenroll::Refused) => {
+                Some("Enter a current code from your authenticator to re-enroll.")
+            }
+            Ok(_) => None,
             Err(_) => Some("Could not start re-enrollment — please try again."),
         };
         if let Some(msg) = refused {
