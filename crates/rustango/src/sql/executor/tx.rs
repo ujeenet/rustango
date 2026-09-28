@@ -87,7 +87,9 @@ impl<'a> PoolTx<'a> {
 
     /// `false` when the server already ended this transaction: PG after a
     /// failed statement (its COMMIT would silently roll back), MySQL after a
-    /// deadlock or timeout rollback (later statements autocommit).
+    /// deadlock, timeout rollback or implicit DDL commit (later statements
+    /// autocommit). Two round trips on MySQL, one on PG; SQLite reports
+    /// its rollbacks through [`Self::on_sqlite_rollback`] instead.
     pub(crate) async fn still_open(&mut self) -> bool {
         match self {
             #[cfg(feature = "postgres")]
@@ -104,6 +106,36 @@ impl<'a> PoolTx<'a> {
             }
             #[cfg(feature = "sqlite")]
             PoolTx::Sqlite(_) => true,
+        }
+    }
+
+    /// Call `f` whenever SQLite rolls this connection's transaction back
+    /// (not on `ROLLBACK TO`). A no-op on other backends.
+    pub(crate) async fn on_sqlite_rollback(
+        &mut self,
+        f: impl FnMut() + Send + 'static,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(tx) => {
+                (**tx).lock_handle().await?.set_rollback_hook(f);
+                Ok(())
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
+                drop(f);
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove the hook [`Self::on_sqlite_rollback`] set.
+    pub(crate) async fn clear_sqlite_rollback(&mut self) {
+        #[cfg(feature = "sqlite")]
+        if let PoolTx::Sqlite(tx) = self {
+            if let Ok(mut h) = (**tx).lock_handle().await {
+                h.remove_rollback_hook();
+            }
         }
     }
 

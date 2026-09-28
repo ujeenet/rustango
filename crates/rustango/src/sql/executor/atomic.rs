@@ -45,8 +45,31 @@ struct Slot {
     state: Arc<tokio::sync::Mutex<TxState>>,
     /// Shallowest savepoint whose block was dropped mid-flight (0 = none).
     cancelled: AtomicUsize,
-    /// Live [`TxGuard`]s; a busy lock with none is a background finisher.
+    /// Live [`TxGuard`]s.
     guards: AtomicUsize,
+    /// Background savepoint work whose caller still waits for it.
+    claims: AtomicUsize,
+    /// A statement error (MySQL) or an automatic rollback (SQLite) ended
+    /// the transaction on the server.
+    fatal: Arc<AtomicBool>,
+    /// Address of the `PoolTx` inside `state`, so ORM statements find it.
+    tx_key: usize,
+}
+
+/// Counts a caller waiting on background savepoint work, for its lifetime.
+struct Claim<'a>(&'a Slot);
+
+impl<'a> Claim<'a> {
+    fn new(slot: &'a Slot) -> Self {
+        slot.claims.fetch_add(1, Ordering::SeqCst);
+        Self(slot)
+    }
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.0.claims.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct TxState {
@@ -55,8 +78,6 @@ struct TxState {
     depth: usize,
     /// A savepoint statement failed; the transaction can only roll back.
     poisoned: bool,
-    /// A guard was handed out since the last liveness probe.
-    dirty: bool,
 }
 
 impl TxState {
@@ -82,29 +103,24 @@ impl TxState {
     }
 
     /// Poison the transaction if the server already ended it.
-    async fn check_open(&mut self) -> Result<(), ExecError> {
-        self.dirty = false;
+    async fn check_open(&mut self, slot: &Slot) -> Result<(), ExecError> {
         if self.tx().still_open().await {
-            Ok(())
+            return Ok(());
+        }
+        self.poisoned = true;
+        // No failed statement seen: the server ended it on its own, e.g.
+        // a MySQL DDL implicit commit, so some writes may be committed.
+        let mysql = self.tx().dialect().name() == "mysql";
+        Err(if mysql && !slot.fatal.load(Ordering::SeqCst) {
+            ExecError::AtomicEndedEarly
         } else {
-            self.poisoned = true;
-            Err(ExecError::AtomicAborted)
-        }
-    }
-
-    /// MySQL ends the transaction on a deadlock and then autocommits,
-    /// so a statement there must not run before this probe.
-    fn needs_probe(&self) -> bool {
-        #[cfg(feature = "mysql")]
-        if self.dirty && matches!(self.tx, Some(PoolTx::Mysql(_))) {
-            return true;
-        }
-        false
+            ExecError::AtomicAborted
+        })
     }
 
     /// Refuse a poisoned transaction; roll back a cancelled block first.
     async fn settle(&mut self, slot: &Slot) -> Result<(), ExecError> {
-        if self.poisoned {
+        if self.poisoned || slot.fatal.load(Ordering::SeqCst) {
             return Err(ExecError::AtomicAborted);
         }
         let d = slot.cancelled.swap(0, Ordering::SeqCst);
@@ -127,26 +143,83 @@ async fn in_background<T: Send + 'static>(
     }
 }
 
-/// Lock the slot, settled. A lock held by a live guard is misuse, not a wait.
+/// Lock the slot, settled. A lock held or claimed by a live caller is
+/// misuse (`join!`), not a wait; only an orphaned finisher is waited for.
 async fn acquire(slot: &Arc<Slot>) -> Result<OwnedMutexGuard<TxState>, ExecError> {
-    let guard = match Arc::clone(&slot.state).try_lock_owned() {
-        Ok(g) => g,
-        Err(_) if slot.guards.load(Ordering::SeqCst) > 0 => return Err(ExecError::NestedAtomic),
-        Err(_) => Arc::clone(&slot.state).lock_owned().await,
+    let busy =
+        |s: &Slot| s.guards.load(Ordering::SeqCst) > 0 || s.claims.load(Ordering::SeqCst) > 0;
+    // Poll rather than queue: a queued waiter could not be refused if a
+    // live caller takes the lock first, and would wait on it forever.
+    let guard = loop {
+        match Arc::clone(&slot.state).try_lock_owned() {
+            Ok(g) => break g,
+            Err(_) if busy(slot) => return Err(ExecError::NestedAtomic),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(1)).await,
+        }
     };
-    if !guard.poisoned && slot.cancelled.load(Ordering::SeqCst) == 0 && !guard.needs_probe() {
+    if !guard.poisoned
+        && !slot.fatal.load(Ordering::SeqCst)
+        && slot.cancelled.load(Ordering::SeqCst) == 0
+    {
         return Ok(guard);
     }
-    let slot = Arc::clone(slot);
+    let _claim = Claim::new(slot);
+    let task_slot = Arc::clone(slot);
     in_background(async move {
         let mut g = guard;
-        g.settle(&slot).await?;
-        if g.needs_probe() {
-            g.check_open().await?;
-        }
+        g.settle(&task_slot).await?;
         Ok(g)
     })
     .await
+}
+
+/// Refuses ORM statements on a transaction a statement error ended.
+pub(crate) struct Gate(Option<Arc<Slot>>);
+
+/// Look up the `atomic` transaction `tx` belongs to, and refuse to run on it
+/// once the server ended it. Called by every `_tx` statement helper.
+pub(crate) async fn gate(tx: &PoolTx<'_>) -> Result<Gate, ExecError> {
+    let key = std::ptr::from_ref::<PoolTx<'_>>(tx) as usize;
+    let slot = BLOCK
+        .try_with(|b| {
+            std::iter::successors(Some(Arc::clone(b)), |b| b.enclosing.clone())
+                .map(|b| Arc::clone(&b.slot))
+                .find(|s| s.tx_key == key)
+        })
+        .ok()
+        .flatten();
+    if slot
+        .as_ref()
+        .is_some_and(|s| s.fatal.load(Ordering::SeqCst))
+    {
+        return Err(ExecError::AtomicAborted);
+    }
+    Ok(Gate(slot))
+}
+
+impl Gate {
+    /// Record a statement error that ended the whole transaction.
+    pub(crate) fn check<T>(&self, r: Result<T, ExecError>) -> Result<T, ExecError> {
+        if let (Some(slot), Err(ExecError::Driver(e))) = (&self.0, &r) {
+            if ends_transaction(e) {
+                slot.fatal.store(true, Ordering::SeqCst);
+            }
+        }
+        r
+    }
+}
+
+/// MySQL rolls the whole transaction back on a deadlock (1213) and may on a
+/// lock-wait timeout (1205); a lost connection ends it everywhere.
+fn ends_transaction(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => true,
+        #[cfg(feature = "mysql")]
+        sqlx::Error::Database(db) => db
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|m| matches!(m.number(), 1213 | 1205)),
+        _ => false,
+    }
 }
 
 /// One `atomic` call, as seen by the code inside it.
@@ -193,11 +266,10 @@ impl AtomicTx {
     /// is open; [`ExecError::AtomicAborted`] after a failed savepoint.
     pub async fn lock(&self) -> Result<TxGuard<'_>, ExecError> {
         let slot = &self.block.slot;
-        let mut guard = acquire(slot).await?;
+        let guard = acquire(slot).await?;
         if guard.depth != self.block.depth {
             return Err(ExecError::NestedAtomic);
         }
-        guard.dirty = true;
         slot.guards.fetch_add(1, Ordering::SeqCst);
         Ok(TxGuard {
             guard,
@@ -319,12 +391,24 @@ impl Drop for OpenSavepoint {
 /// whole transaction rolls back and [`ExecError::AtomicAborted`] is
 /// returned.
 ///
-/// **Server-ended transactions:** before the outermost COMMIT the block
-/// checks the transaction is still open, so a statement error the closure
-/// ignored on PostgreSQL returns [`ExecError::AtomicAborted`] instead of a
-/// silent rollback. On MySQL, where a deadlock ends the transaction and
-/// later statements autocommit, each [`AtomicTx::lock`] after the first
-/// runs the same check (one extra savepoint round trip).
+/// **Server-ended transactions:** after a statement error that ends the
+/// whole transaction (MySQL deadlock 1213 / timeout 1205, SQLite automatic
+/// rollback, a lost connection) every later ORM statement in the block
+/// returns [`ExecError::AtomicAborted`], and so does `atomic`. Before the
+/// outermost COMMIT the block also checks the transaction is still open
+/// (one round trip on PG, two on MySQL): a PG error the closure ignored
+/// returns `AtomicAborted` instead of a silent rollback. Raw sqlx on the
+/// guard bypasses the per-statement check.
+///
+/// **MySQL implicit commits:** DDL, `TRUNCATE` and `LOCK TABLES` commit
+/// the transaction. `atomic` then returns [`ExecError::AtomicEndedEarly`]
+/// with some writes already committed; do not blindly retry.
+///
+/// **Failed statements differ by backend:** PG aborts the transaction,
+/// but MySQL and SQLite undo only the failed statement (duplicate key
+/// 1062, a lock-wait timeout with `innodb_rollback_on_timeout=OFF`,
+/// `SQLITE_BUSY`). If the closure ignores that error and returns `Ok`,
+/// the other writes commit.
 ///
 /// **Costs:** past 64 open savepoints in one transaction PostgreSQL
 /// spills its subtransaction cache, so avoid nesting in hot loops. On
@@ -372,15 +456,29 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
+    let fatal = Arc::new(AtomicBool::new(false));
+    let mut tx = transaction_pool(pool).await?;
+    let hook = Arc::clone(&fatal);
+    tx.on_sqlite_rollback(move || hook.store(true, Ordering::SeqCst))
+        .await?;
+    let state = Arc::new(tokio::sync::Mutex::new(TxState {
+        tx: Some(tx),
+        depth: 0,
+        poisoned: false,
+    }));
+    // The `PoolTx` never moves inside `state`, so its address identifies it.
+    let tx_key = state
+        .try_lock()
+        .ok()
+        .and_then(|g| g.tx.as_ref().map(|t| std::ptr::from_ref(t) as usize))
+        .unwrap_or(0);
     let slot = Arc::new(Slot {
-        state: Arc::new(tokio::sync::Mutex::new(TxState {
-            tx: Some(transaction_pool(pool).await?),
-            depth: 0,
-            poisoned: false,
-            dirty: false,
-        })),
+        state,
         cancelled: AtomicUsize::new(0),
         guards: AtomicUsize::new(0),
+        claims: AtomicUsize::new(0),
+        fatal,
+        tx_key,
     });
     let block = Arc::new(Block {
         pool: id,
@@ -402,11 +500,12 @@ where
     let settled = match st.settle(&slot).await {
         Ok(()) if st.depth != 0 => Err(ExecError::AtomicAborted),
         // PG turns a COMMIT after a failed statement into a silent ROLLBACK.
-        Ok(()) if res.is_ok() => st.check_open().await,
+        Ok(()) if res.is_ok() => st.check_open(&slot).await,
         other => other,
     };
-    let tx = st.tx.take().expect("atomic transaction is open");
+    let mut tx = st.tx.take().expect("atomic transaction is open");
     drop(st);
+    tx.clear_sqlite_rollback().await;
     match res.and_then(|v| settled.map(|()| v)) {
         Ok(v) => {
             tx.commit().await?;
@@ -452,6 +551,7 @@ where
         ending: false,
     };
     let (task_slot, task_opening) = (Arc::clone(&slot), Arc::clone(&opening));
+    let claim = Claim::new(&slot);
     let opened = in_background(async move {
         let mut g = guard;
         // Only the innermost open block may open a child.
@@ -467,6 +567,7 @@ where
         Ok(())
     })
     .await;
+    drop(claim);
     if let Err(e) = opened {
         open.ending = true;
         return Err(e);
@@ -494,6 +595,7 @@ where
     // included, even if this future is dropped.
     open.ending = true;
     let release = res.is_ok();
+    let claim = Claim::new(&slot);
     let ended = in_background(async move {
         let mut g = guard;
         if g.depth != depth {
@@ -515,6 +617,7 @@ where
         }
     })
     .await;
+    drop(claim);
     // A block's own error wins over a failure to end its savepoint.
     let v = res?;
     ended?;
