@@ -29,6 +29,7 @@ pub(crate) fn apply(
 }
 
 /// The submitted text for `column`, else the stored one.
+#[cfg_attr(not(feature = "sso"), allow(dead_code))]
 pub(crate) fn text(
     values: &[(&'static str, SqlValue)],
     before: Option<&serde_json::Value>,
