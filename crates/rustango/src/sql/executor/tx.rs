@@ -85,6 +85,28 @@ impl<'a> PoolTx<'a> {
         }
     }
 
+    /// `false` when the server already ended this transaction: PG after a
+    /// failed statement (its COMMIT would silently roll back), MySQL after a
+    /// deadlock or timeout rollback (later statements autocommit).
+    pub(crate) async fn still_open(&mut self) -> bool {
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(_) => self.execute_unprepared("SELECT 1").await.is_ok(),
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(tx) => {
+                // sqlx checks the server's in-transaction flag after its
+                // SAVEPOINT; MySQL has no `@@in_transaction` to read.
+                use sqlx::Connection as _;
+                match (**tx).begin().await {
+                    Ok(probe) => probe.commit().await.is_ok(),
+                    Err(_) => false,
+                }
+            }
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(_) => true,
+        }
+    }
+
     /// Return the dialect for this transaction's backend — same
     /// dispatch as [`crate::sql::Pool::dialect`] but sourced from the
     /// `PoolTx` variant rather than the pool. Used internally by the

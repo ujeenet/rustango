@@ -103,6 +103,40 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
+/// Poll `fut` once, then drop it: a cancel at its first await.
+async fn poll_once_then_drop<F: Future>(fut: F) {
+    let mut fut = Box::pin(fut);
+    std::future::poll_fn(|cx| {
+        assert!(
+            fut.as_mut().poll(cx).is_pending(),
+            "finished before the cancel"
+        );
+        Poll::Ready(())
+    })
+    .await;
+}
+
+/// Poll `fut` until `flag` is set by its body, then drop it.
+async fn drop_once_flagged<F: Future>(fut: F, flag: Arc<AtomicBool>) {
+    let mut fut = Box::pin(fut);
+    std::future::poll_fn(|cx| {
+        assert!(
+            fut.as_mut().poll(cx).is_pending(),
+            "finished before the cancel"
+        );
+        if flag.load(Ordering::SeqCst) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+fn dialect(pool: &Pool) -> &'static str {
+    pool.dialect().name()
+}
+
 async fn outer_rollback_drops_inner_write(pool: &Pool) {
     let p = one_conn(pool).await;
     let q = p.clone();
@@ -307,7 +341,11 @@ async fn concurrent_nested_blocks_are_refused(pool: &Pool) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 Ok::<_, ExecError>(())
             }),
-            rustango::atomic!(&b, |sp| { put(sp, 3).await }),
+            async {
+                // Start while `a` runs its body without holding the lock.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                rustango::atomic!(&b, |sp| { put(sp, 3).await }).await
+            },
         );
         let refused = [&ra, &rb]
             .iter()
@@ -414,6 +452,204 @@ async fn failed_savepoint_aborts_the_outer_commit(pool: &Pool) {
     assert_eq!(ids(pool).await, Vec::<i64>::new(), "nothing commits");
 }
 
+async fn swallowed_statement_error_is_not_committed_on_pg(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let fired = Arc::new(AtomicUsize::new(0));
+    let f = Arc::clone(&fired);
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        // Duplicate key; the closure ignores it.
+        assert!(put(tx, 1).await.is_err());
+        on_commit(move || {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
+        Ok(())
+    }))
+    .await;
+    if dialect(pool) == "postgres" {
+        // PG aborted the transaction; its COMMIT would silently roll back.
+        assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "no hook for nothing written"
+        );
+        assert_eq!(ids(pool).await, Vec::<i64>::new());
+    } else {
+        // MySQL and SQLite undo only the failed statement.
+        res.unwrap();
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        assert_eq!(ids(pool).await, vec![1]);
+    }
+}
+
+async fn failed_savepoint_open_poisons_on_pg(pool: &Pool) {
+    if dialect(pool) != "postgres" {
+        return; // Only PG refuses a SAVEPOINT (in an aborted transaction).
+    }
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        assert!(put(tx, 1).await.is_err());
+        let inner: Result<(), ExecError> = rustango::atomic!(&q, |_sp| { Ok(()) }).await;
+        assert!(
+            matches!(inner, Err(ExecError::Driver(_))),
+            "SAVEPOINT fails: {inner:?}"
+        );
+        // Poisoned: our own error now, not PG's.
+        assert!(matches!(
+            tx.lock().await.map(drop),
+            Err(ExecError::AtomicAborted)
+        ));
+        Ok(())
+    }))
+    .await;
+    assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
+    assert_eq!(ids(pool).await, Vec::<i64>::new());
+}
+
+async fn cancel_while_savepoint_opens(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    within(rustango::atomic!(&p, |tx| {
+        poll_once_then_drop(rustango::atomic!(&q, |sp| { put(sp, 2).await })).await;
+        put(tx, 1).await?;
+        put(tx, 3).await?;
+        Ok(())
+    }))
+    .await
+    .expect("the half-opened savepoint is rolled back, not left open");
+    assert_eq!(ids(pool).await, vec![1, 3]);
+}
+
+async fn cancel_while_savepoint_releases_keeps_hooks(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let (f, d) = (Arc::clone(&fired), Arc::clone(&done));
+    within(rustango::atomic!(&p, |tx| {
+        let inner = rustango::atomic!(&q, |_sp| {
+            on_commit(move || {
+                f.fetch_add(1, Ordering::SeqCst);
+            });
+            d.store(true, Ordering::SeqCst);
+            Ok::<_, ExecError>(())
+        });
+        // The body finished; drop the block while its RELEASE is pending.
+        drop_once_flagged(inner, done).await;
+        put(tx, 1).await?;
+        Ok(())
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "a released block keeps its hook"
+    );
+    assert_eq!(ids(pool).await, vec![1]);
+}
+
+async fn nesting_survives_set_connect_options(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        // Credential rotation swaps the options Arc on every clone.
+        match &q {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(s) => s.set_connect_options((*s.connect_options()).clone()),
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(s) => s.set_connect_options((*s.connect_options()).clone()),
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(s) => s.set_connect_options((*s.connect_options()).clone()),
+        }
+        rustango::atomic!(&q, |sp| { put(sp, 2).await }).await
+    }))
+    .await
+    .expect("still a savepoint, not a second connection");
+    assert_eq!(ids(pool).await, vec![1, 2]);
+}
+
+async fn joined_blocks_on_other_pools_keep_their_own_hooks(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let (q, r) = (one_conn(pool).await, one_conn(pool).await);
+    let committed = Arc::new(AtomicUsize::new(0));
+    let rolled_back = Arc::new(AtomicUsize::new(0));
+    let (c, rb) = (Arc::clone(&committed), Arc::clone(&rolled_back));
+    let (seen_c, seen_rb) = (Arc::clone(&committed), Arc::clone(&rolled_back));
+    let go = Arc::new(tokio::sync::Notify::new());
+    let go2 = Arc::clone(&go);
+    within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        let (rr, rq) = tokio::join!(
+            async {
+                // `r` registers its hook first, then waits for `q`.
+                rustango::atomic!(&r, |_t| {
+                    on_commit(move || {
+                        rb.fetch_add(1, Ordering::SeqCst);
+                    });
+                    go2.notified().await;
+                    Err::<(), _>(bail())
+                })
+                .await
+            },
+            rustango::atomic!(&q, |_t| {
+                on_commit(move || {
+                    c.fetch_add(1, Ordering::SeqCst);
+                });
+                go.notify_one();
+                Ok::<_, ExecError>(())
+            }),
+        );
+        assert!(rr.is_err() && rq.is_ok());
+        assert_eq!(
+            seen_c.load(Ordering::SeqCst),
+            1,
+            "q fired on its own commit"
+        );
+        assert_eq!(
+            seen_rb.load(Ordering::SeqCst),
+            0,
+            "r rolled back: its hook drops"
+        );
+        Ok(())
+    }))
+    .await
+    .unwrap();
+    assert_eq!(committed.load(Ordering::SeqCst), 1);
+    assert_eq!(rolled_back.load(Ordering::SeqCst), 0);
+}
+
+async fn on_commit_in_the_closures_sync_part_belongs_to_its_block(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let f = Arc::clone(&fired);
+    within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        let inner = rustango::sql::atomic(&q, move |_sp| {
+            // Runs before the returned future is polled.
+            on_commit(move || {
+                f.fetch_add(1, Ordering::SeqCst);
+            });
+            Box::pin(async move { Err::<(), _>(bail()) })
+        })
+        .await;
+        assert!(inner.is_err());
+        Ok(())
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "the rolled-back block drops it"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -428,5 +664,104 @@ tri_dialect_test! {
         other_pools_in_try_join_stay_independent,
         same_pool_found_from_inside_another_pool,
         failed_savepoint_aborts_the_outer_commit,
+        swallowed_statement_error_is_not_committed_on_pg,
+        failed_savepoint_open_poisons_on_pg,
+        cancel_while_savepoint_opens,
+        cancel_while_savepoint_releases_keeps_hooks,
+        nesting_survives_set_connect_options,
+        joined_blocks_on_other_pools_keep_their_own_hooks,
+        on_commit_in_the_closures_sync_part_belongs_to_its_block,
     ],
+}
+
+/// A MySQL deadlock ends the whole transaction and later statements would
+/// autocommit. The next `lock()` and the commit must both refuse.
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn mysql_deadlock_aborts_the_block() {
+    use rustango::sql::{sqlx, update_tx};
+    use rustango::testkit::matrix::{live_lock, Backend};
+
+    let _guard = live_lock().lock().await;
+    let Some(pool) = Backend::MySql.pool().await else {
+        eprintln!("MYSQL_TEST_URL not set — skipping the MySQL deadlock test");
+        return;
+    };
+    setup(&pool).await;
+    for id in 1..=4 {
+        put_pool(&pool, id).await;
+    }
+    let p = one_conn(&pool).await;
+    let Pool::Mysql(other) = one_conn(&pool).await else {
+        unreachable!()
+    };
+    let (a_locked, b_locked) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    // `b` changes three rows, so MySQL picks the lighter `a` as the victim.
+    let b = {
+        let (a_locked, b_locked) = (Arc::clone(&a_locked), Arc::clone(&b_locked));
+        tokio::spawn(async move {
+            let mut t = other.begin().await.unwrap();
+            a_locked.notified().await;
+            for id in [2, 3, 4] {
+                sqlx::query("UPDATE asp_note SET label = 'b' WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *t)
+                    .await
+                    .unwrap();
+            }
+            b_locked.notify_one();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            sqlx::query("UPDATE asp_note SET label = 'b' WHERE id = 1")
+                .execute(&mut *t)
+                .await
+                .unwrap();
+            t.commit().await.unwrap();
+        })
+    };
+    let relabel = |id: i64| {
+        Note::objects()
+            .filter("id", id)
+            .update()
+            .set("label", "a")
+            .compile()
+            .unwrap()
+    };
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
+        update_tx(&mut *tx.lock().await?, &relabel(1)).await?;
+        a_locked.notify_one();
+        b_locked.notified().await;
+        let dead = update_tx(&mut *tx.lock().await?, &relabel(2)).await;
+        let Err(ExecError::Driver(e)) = &dead else {
+            panic!("expected the deadlock victim, got {dead:?}");
+        };
+        assert!(e.to_string().contains("1213"), "deadlock: {e}");
+        // The closure ignores it; the next statement must not autocommit.
+        let after = put(tx, 9).await;
+        assert!(
+            matches!(after, Err(ExecError::AtomicAborted)),
+            "got {after:?}"
+        );
+        Ok(())
+    }))
+    .await;
+    b.await.unwrap();
+    assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
+    assert!(
+        !ids(&pool).await.contains(&9),
+        "nothing ran after the deadlock"
+    );
+}
+
+#[cfg(feature = "mysql")]
+async fn put_pool(pool: &Pool, id: i64) {
+    Note {
+        id,
+        label: format!("n{id}"),
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
 }

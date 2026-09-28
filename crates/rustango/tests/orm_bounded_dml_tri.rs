@@ -75,7 +75,7 @@ async fn limit_delete_removes_one(pool: &Pool) {
     assert_eq!(
         ids(pool).await,
         vec![2, 3, 4, 5],
-        "pk tiebreaker picks id 1"
+        "one row goes; the smallest pk on every backend"
     );
 }
 
