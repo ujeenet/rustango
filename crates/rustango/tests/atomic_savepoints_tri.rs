@@ -650,6 +650,99 @@ async fn on_commit_in_the_closures_sync_part_belongs_to_its_block(pool: &Pool) {
     );
 }
 
+async fn sqlite_rollback_refuses_later_statements(pool: &Pool) {
+    if dialect(pool) != "sqlite" {
+        return; // The hook is SQLite's; PG and MySQL have their own checks.
+    }
+    use rustango::sql::{sqlx, sqlx::Executor as _, PoolTx};
+    let p = one_conn(pool).await;
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        let mut guard = tx.lock().await?;
+        if let PoolTx::Sqlite(t) = &mut *guard {
+            // Stands in for SQLite rolling back on its own (SQLITE_FULL, IOERR).
+            (&mut **t).execute(sqlx::raw_sql("ROLLBACK")).await?;
+        }
+        let row = Note {
+            id: 2,
+            label: "n2".into(),
+        };
+        let next = row.insert_tx(&mut guard).await;
+        assert!(
+            matches!(next, Err(ExecError::AtomicAborted)),
+            "got {next:?}"
+        );
+        Ok(())
+    }))
+    .await;
+    assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
+    assert_eq!(ids(pool).await, Vec::<i64>::new(), "nothing autocommitted");
+}
+
+async fn mysql_ddl_implicit_commit_is_reported(pool: &Pool) {
+    if dialect(pool) != "mysql" {
+        return; // Only MySQL commits implicitly on DDL.
+    }
+    use rustango::sql::raw_execute_tx;
+    let p = one_conn(pool).await;
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        raw_execute_tx(
+            &mut *tx.lock().await?,
+            "CREATE TABLE asp_ddl_probe (id INT)",
+            vec![],
+        )
+        .await?;
+        Ok(())
+    }))
+    .await;
+    rustango::testkit::matrix::drop_table(pool, "asp_ddl_probe").await;
+    assert!(
+        matches!(res, Err(ExecError::AtomicEndedEarly)),
+        "got {res:?}"
+    );
+    assert_eq!(
+        ids(pool).await,
+        vec![1],
+        "the DDL committed the earlier row"
+    );
+}
+
+async fn join_lock_during_background_settle_is_refused(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    within(rustango::atomic!(&p, |tx| {
+        // Leaves a cancel mark, so the next lock settles in the background.
+        poll_once_then_drop(rustango::atomic!(&q, |sp| { put(sp, 2).await })).await;
+        let go = tokio::sync::Notify::new();
+        // Whichever branch gets the lock holds it until the other is done.
+        let branch = || async {
+            match tx.lock().await {
+                Ok(g) => {
+                    go.notified().await;
+                    drop(g);
+                    Ok(())
+                }
+                Err(e) => {
+                    go.notify_one();
+                    Err(e)
+                }
+            }
+        };
+        let (a, b) = tokio::join!(branch(), branch());
+        let refused = [&a, &b]
+            .iter()
+            .filter(|r| matches!(r, Err(ExecError::NestedAtomic)))
+            .count();
+        assert_eq!(refused, 1, "one branch is refused, none hangs: {a:?} {b:?}");
+        put(tx, 1).await?;
+        Ok(())
+    }))
+    .await
+    .unwrap();
+    assert_eq!(ids(pool).await, vec![1]);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -671,6 +764,9 @@ tri_dialect_test! {
         nesting_survives_set_connect_options,
         joined_blocks_on_other_pools_keep_their_own_hooks,
         on_commit_in_the_closures_sync_part_belongs_to_its_block,
+        sqlite_rollback_refuses_later_statements,
+        mysql_ddl_implicit_commit_is_reported,
+        join_lock_during_background_settle_is_refused,
     ],
 }
 
@@ -733,13 +829,25 @@ async fn mysql_deadlock_aborts_the_block() {
         update_tx(&mut *tx.lock().await?, &relabel(1)).await?;
         a_locked.notify_one();
         b_locked.notified().await;
-        let dead = update_tx(&mut *tx.lock().await?, &relabel(2)).await;
+        let mut guard = tx.lock().await?;
+        let dead = update_tx(&mut guard, &relabel(2)).await;
         let Err(ExecError::Driver(e)) = &dead else {
             panic!("expected the deadlock victim, got {dead:?}");
         };
         assert!(e.to_string().contains("1213"), "deadlock: {e}");
-        // The closure ignores it; the next statement must not autocommit.
-        let after = put(tx, 9).await;
+        // The closure ignores it; a second statement on the SAME guard
+        // must not autocommit.
+        let row = Note {
+            id: 9,
+            label: "n9".into(),
+        };
+        let same_guard = row.insert_tx(&mut guard).await;
+        assert!(
+            matches!(same_guard, Err(ExecError::AtomicAborted)),
+            "got {same_guard:?}"
+        );
+        drop(guard);
+        let after = put(tx, 10).await;
         assert!(
             matches!(after, Err(ExecError::AtomicAborted)),
             "got {after:?}"

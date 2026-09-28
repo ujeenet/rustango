@@ -166,7 +166,11 @@ are now rolled back with it, silently. For an independent commit, use a
 different pool or `tokio::spawn`. Nesting is per pool object: pass the
 request's pool down instead of looking it up again. On MySQL before
 8.0.21 and MariaDB before 11.1 a bounded update/delete may scan the whole
-table.
+table. On MySQL, DDL / `TRUNCATE` / `LOCK TABLES` inside `atomic` commit
+implicitly: `atomic` returns `ExecError::AtomicEndedEarly` with writes
+already committed, so a retry can write twice. On MySQL and SQLite a
+failed statement undoes only itself; if the closure ignores it, the rest
+commits (PG aborts the whole transaction).
 
 ### The trusted client IP is the rightmost untrusted hop
 
