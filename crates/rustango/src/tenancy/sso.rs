@@ -306,7 +306,7 @@ pub(super) async fn tenant_sso_callback(
         &key,
         cfg.allow_email_link,
         &normalized,
-        |email| member_auth::tenant_email_match(tenant_pool, email),
+        &member_auth::TenantAccounts(tenant_pool),
     )
     .await
     {
@@ -314,7 +314,12 @@ pub(super) async fn tenant_sso_callback(
         Err(e) => {
             tracing::warn!(
                 target: "rustango::tenancy::sso",
-                tenant = %org.slug, slug, subject = %normalized.provider_user_id, "sso refused: {e}"
+                tenant = %org.slug,
+                slug,
+                provider_id = cfg.id,
+                issuer = key.issuer(),
+                subject = %normalized.provider_user_id,
+                "sso refused: {e}"
             );
             return login_error(routes, "nouser");
         }

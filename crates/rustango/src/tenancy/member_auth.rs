@@ -61,7 +61,9 @@ use subtle::ConstantTimeEq;
 use crate::extractors::{Tenant, TenantContext};
 use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::{Auto, Pool};
-use crate::sso::link::{create_link, sign_in, EmailMatch, LinkRefusal, LinkSource, ProviderKey};
+use crate::sso::link::{
+    create_link_tx, sign_in, Account, AccountLookup, LinkRefusal, LinkSource, ProviderKey,
+};
 use crate::sso::provider::resolve_by_slug;
 use crate::sso::{build_provider, open_flow, seal_flow, NormalizedUser};
 use crate::tenancy::User;
@@ -567,10 +569,16 @@ async fn sso_callback(
     )
     .await
     {
-        Ok(Some(id)) => id,
-        Ok(None) => {
+        Ok(MemberSignIn::Member(id)) => id,
+        Ok(MemberSignIn::NotLinked) => {
             return clear_flow(sso_error(
-                "This sign-in is not linked to an account. Please contact your administrator.",
+                "This sign-in is not linked to your account. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(_) => {
+            return clear_flow(sso_error(
+                "There is no account for this sign-in. Please contact your administrator.",
                 login_base,
             ));
         }
@@ -594,68 +602,99 @@ async fn sso_callback(
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
 
+/// What [`find_or_provision_member`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberSignIn {
+    /// Signed in (linked, email-linked, or newly provisioned) as this user id.
+    Member(i64),
+    /// An account has this email but may not be linked by it: the provider
+    /// does not allow email linking, or the account is privileged.
+    NotLinked,
+    /// No account has this email, and provisioning is off.
+    NoAccount,
+    /// Refused for another reason: unverified email, no subject, inactive account.
+    Refused,
+}
+
 /// The member linked to `(provider, profile.provider_user_id)`; else see
-/// [`crate::sso::link::sign_in`]; else, with `auto_provision`, a new linked
-/// member. `Ok(None)` means refused.
+/// [`crate::sso::link::sign_in`]; else, with `auto_provision`, a new linked member.
 ///
 /// Public so a native sign-in that verified its own ID token uses the same rule.
+///
+/// # Errors
+/// Storage failures.
 pub async fn find_or_provision_member(
     pool: &Pool,
     provider: &ProviderKey,
     allow_email_link: bool,
     profile: &NormalizedUser,
     auto_provision: bool,
-) -> Result<Option<i64>, String> {
-    let refusal = match sign_in(pool, provider, allow_email_link, profile, |email| {
-        tenant_email_match(pool, email)
-    })
+) -> Result<MemberSignIn, String> {
+    let refusal = match sign_in(
+        pool,
+        provider,
+        allow_email_link,
+        profile,
+        &TenantAccounts(pool),
+    )
     .await
     {
-        Ok(id) => return Ok(Some(id)),
+        Ok(id) => return Ok(MemberSignIn::Member(id)),
         Err(LinkRefusal::NoAccount(email)) if auto_provision => {
-            let id = provision_member(pool, &email, profile).await?;
-            create_link(pool, provider, &profile.provider_user_id, id)
+            return provision_member(pool, provider, &email, profile)
                 .await
-                .map_err(|e| format!("link: {e}"))?;
-            return Ok(Some(id));
+                .map(MemberSignIn::Member);
         }
         Err(LinkRefusal::Storage(e)) => return Err(e),
         Err(e) => e,
     };
     tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {refusal}");
-    Ok(None)
+    Ok(match refusal {
+        LinkRefusal::EmailLinkDisabled | LinkRefusal::Privileged => MemberSignIn::NotLinked,
+        LinkRefusal::NoAccount(_) => MemberSignIn::NoAccount,
+        _ => MemberSignIn::Refused,
+    })
 }
 
-/// The tenant user with this email, and whether it is privileged
-/// (superuser, or holds any admin permission). A permission read error counts as privileged.
-pub(crate) async fn tenant_email_match(
-    pool: &Pool,
-    email: String,
-) -> Result<Option<EmailMatch>, String> {
-    use crate::sql::FetcherPool as _;
-    let Some(user) = User::objects()
-        .filter("email", email)
-        .fetch(pool)
-        .await
-        .map_err(|e| format!("lookup: {e}"))?
-        .into_iter()
-        .next()
-    else {
-        return Ok(None);
-    };
-    let user_id = user
-        .id
-        .get()
-        .copied()
-        .ok_or_else(|| "user missing id".to_owned())?;
-    let privileged = user.is_superuser
-        || crate::tenancy::permissions::user_permissions_pool(user_id, pool)
+/// A tenant's users. Privileged = superuser, or holds any admin permission;
+/// a permission read error counts as privileged.
+pub(crate) struct TenantAccounts<'a>(pub &'a Pool);
+
+impl TenantAccounts<'_> {
+    async fn account(&self, user: &User) -> Result<Option<Account>, String> {
+        let Some(user_id) = user.id.get().copied() else {
+            return Ok(None);
+        };
+        let privileged = user.is_superuser
+            || crate::tenancy::permissions::user_permissions_pool(user_id, self.0)
+                .await
+                .map_or(true, |perms| !perms.is_empty());
+        Ok(Some(Account::new(user_id, privileged, user.active)))
+    }
+}
+
+impl AccountLookup for TenantAccounts<'_> {
+    async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
+        match tenant_user(self.0, id).await {
+            Some(u) => self.account(&u).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn by_email(&self, email: &str) -> Result<Option<Account>, String> {
+        use crate::sql::FetcherPool as _;
+        let rows = User::objects()
+            .filter("email", email.to_owned())
+            .fetch(self.0)
             .await
-            .map_or(true, |perms| !perms.is_empty());
-    Ok(Some(EmailMatch {
-        user_id,
-        privileged,
-    }))
+            .map_err(|e| format!("lookup: {e}"))?;
+        // Exact match: a case- or accent-insensitive collation must not widen it.
+        match rows.iter().find(|u| u.email.as_deref() == Some(email)) {
+            Some(u) => self.account(u).await,
+            None => Ok(None),
+        }
+    }
 }
 
 /// The tenant user with this id, if any.
@@ -677,6 +716,7 @@ pub(crate) async fn tenant_user(pool: &Pool, id: i64) -> Option<User> {
 /// The username is the email local-part, deduped on unique clash.
 async fn provision_member(
     pool: &Pool,
+    provider: &ProviderKey,
     email: &str,
     profile: &NormalizedUser,
 ) -> Result<i64, String> {
@@ -716,13 +756,22 @@ async fn provision_member(
             password_changed_at: None,
         };
 
-        match user.insert_pool(pool).await {
+        // The user and its link commit together, or neither does.
+        let mut tx = crate::sql::transaction_pool(pool)
+            .await
+            .map_err(|e| format!("begin: {e}"))?;
+        match user.insert_tx(&mut tx).await {
             Ok(()) => {
-                return user
+                let id = user
                     .id
                     .get()
                     .copied()
-                    .ok_or_else(|| "insert returned no id".to_owned());
+                    .ok_or_else(|| "insert returned no id".to_owned())?;
+                create_link_tx(&mut tx, provider, &profile.provider_user_id, id)
+                    .await
+                    .map_err(|e| format!("link: {e}"))?;
+                tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+                return Ok(id);
             }
             Err(e) if attempt == 0 => {
                 // Likely a username/email unique clash — retry once with

@@ -553,7 +553,11 @@ fn router_inner(
     {
         private = private
             .route("/sso-shared", get(sso_shared_list).post(sso_shared_create))
-            .route("/sso-shared/{id}/delete", post(sso_shared_delete));
+            .route("/sso-shared/{id}/delete", post(sso_shared_delete))
+            .route(
+                "/sso-shared/{id}/email-link",
+                post(sso_shared_toggle_email_link),
+            );
     }
     if edit_enabled {
         private = private
@@ -1438,6 +1442,7 @@ async fn sso_shared_list(
                 "issuer_url": p.issuer_url,
                 "client_id": p.client_id,
                 "enabled": p.enabled,
+                "allow_email_link": p.allow_email_link,
                 "sort_order": p.sort_order,
             })
         })
@@ -1477,6 +1482,32 @@ async fn sso_shared_create(
             format!("create failed: {e}"),
         )
             .into_response();
+    }
+    Redirect::to("/sso-shared").into_response()
+}
+
+/// Flip `allow_email_link` in place, so the id and its links survive.
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_toggle_email_link(
+    State(state): State<ConsoleState>,
+    Extension(_op): Extension<auth::Operator>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Response<Body> {
+    let row = super::sso::SharedSsoProvider::objects()
+        .filter("id", id)
+        .fetch(&state.registry)
+        .await
+        .ok()
+        .and_then(|v| v.into_iter().next());
+    if let Some(mut r) = row {
+        r.allow_email_link = !r.allow_email_link;
+        if let Err(e) = r.save_pool(&state.registry).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("update failed: {e}"),
+            )
+                .into_response();
+        }
     }
     Redirect::to("/sso-shared").into_response()
 }
