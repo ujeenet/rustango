@@ -9,6 +9,7 @@
 
 pub mod jobs;
 pub mod models;
+pub mod probes;
 pub mod serializers;
 pub mod supervisor;
 pub mod urls;
