@@ -258,6 +258,11 @@ pub struct ApiKey {
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
+// A key is minted by `create-api-key`, which shows the secret once; an admin
+// form could only store a row nobody can use (#1763).
+#[cfg(feature = "admin")]
+crate::register_admin_object_permission!("rustango_api_keys", "add", |_, _| false);
+
 /// Create the `rustango_api_keys` table if it doesn't exist.
 ///
 /// PG-typed back-compat for legacy callers; new code should use

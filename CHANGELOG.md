@@ -9,6 +9,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 On SQLite a NULL cell came back as `0` / `false` / `""` in ViewSet JSON,
 the admin form and `values_dict`; it is `null` now, as on PG and MySQL.
 
+### Fixed — admin create of users, secrets and timestamps (#1763, #1764)
+
+The admin can create and edit tenant and bare-admin users: `password_hash`
+is a password input, hashed off the runtime, and an empty edit keeps it.
+SSO provider `client_secret`s are encrypted on admin writes and never shown.
+Read-only fields render locked and not `required`; read-only NOT NULL
+timestamps are filled on create, `auto_now` is restamped on update, and an
+untouched datetime is no longer truncated to seconds. New forms pre-check
+`default = "true"` checkboxes. API keys and agents are minted by their own
+flows, so the admin no longer offers an Add form for them. The audit log
+records a secret change as `[changed]` and never stores the value.
+
 ### Fixed — `bin/bump-version.sh` covers `docs/index.toml` and install pins (#1750)
 
 - A series bump now rewrites `docs/index.toml`, `orm = { package = "rustango", version = … }` and `<crate> = "X.Y"` pins, and leaves example comments alone; the verify step checks what `docs_versions` checks.
