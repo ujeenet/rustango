@@ -1103,6 +1103,172 @@ where
     Ok(())
 }
 
+/// Emit a batch of entries inside an open `PoolTx`.
+async fn emit_many_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    entries: &[PendingEntry],
+) -> Result<(), sqlx::Error> {
+    match tx {
+        #[cfg(feature = "postgres")]
+        crate::sql::PoolTx::Postgres(t) => emit_many(&mut **t, entries).await,
+        #[allow(unreachable_patterns)]
+        _ => {
+            for entry in entries {
+                emit_one_tx(tx, entry).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// PKs per bulk-write statement: under SQLite's oldest bind limit (999).
+const BULK_AUDIT_CHUNK: usize = 500;
+
+/// `pk IN (pks)` on `model`.
+fn pk_in(
+    model: &'static crate::core::ModelSchema,
+    pks: Vec<crate::core::SqlValue>,
+) -> Result<crate::core::WhereExpr, crate::sql::ExecError> {
+    let pk = model
+        .primary_key()
+        .ok_or(crate::sql::ExecError::MissingPrimaryKey { table: model.table })?;
+    Ok(crate::core::WhereExpr::Predicate(crate::core::Filter::new(
+        pk.column,
+        crate::core::Op::In,
+        crate::core::SqlValue::List(pks),
+    )))
+}
+
+/// Rows matching `where_clause`, read in `tx` (`FOR UPDATE` on PG/MySQL).
+async fn rows_in_tx<M>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    where_clause: crate::core::WhereExpr,
+    lock: bool,
+) -> Result<Vec<M>, crate::sql::ExecError>
+where
+    M: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let mut select = crate::core::SelectQuery::new(model).where_clause(where_clause);
+    if lock {
+        select.lock_mode = Some(crate::core::LockMode::default());
+    }
+    crate::sql::select_rows_tx_with_related::<M>(tx, &select).await
+}
+
+/// Run a bulk `DeleteQuery` with one `Delete` audit row per deleted row,
+/// all in one transaction. The matching rows are read and locked first,
+/// then deleted by PK, so the audit set is exactly the deleted set.
+///
+/// # Errors
+/// As [`delete_one_with_audit`], plus the pre-delete SELECT.
+pub async fn delete_many_with_audit<M>(
+    pool: &crate::sql::Pool,
+    query: &crate::core::DeleteQuery,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<u64, crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let rows: Vec<M> = rows_in_tx(&mut tx, query.model, query.where_clause.clone(), true).await?;
+    let mut affected = 0;
+    for chunk in rows.chunks(BULK_AUDIT_CHUNK) {
+        let pks = chunk.iter().map(M::__rustango_pk_value_impl).collect();
+        let delete = crate::core::DeleteQuery {
+            model: query.model,
+            where_clause: pk_in(query.model, pks)?,
+        };
+        affected += crate::sql::delete_tx(&mut tx, &delete).await?;
+        let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
+        emit_many_tx(&mut tx, &entries).await?;
+    }
+    tx.commit().await?;
+    Ok(affected)
+}
+
+/// Run a bulk `UpdateQuery` with one `Update` audit row per updated row,
+/// all in one transaction. Rows are locked, updated by PK, then re-read
+/// so each entry is an after-write snapshot, as on `save_pool`.
+///
+/// # Errors
+/// As [`save_one_with_audit`], plus the SELECTs around the update.
+pub async fn update_many_with_audit<M>(
+    pool: &crate::sql::Pool,
+    query: &crate::core::UpdateQuery,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<u64, crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let rows: Vec<M> = rows_in_tx(&mut tx, query.model, query.where_clause.clone(), true).await?;
+    let mut affected = 0;
+    for chunk in rows.chunks(BULK_AUDIT_CHUNK) {
+        let pks: Vec<crate::core::SqlValue> =
+            chunk.iter().map(M::__rustango_pk_value_impl).collect();
+        let update = crate::core::UpdateQuery::new(
+            query.model,
+            query.set.clone(),
+            pk_in(query.model, pks.clone())?,
+        );
+        affected += crate::sql::update_tx(&mut tx, &update).await?;
+        let after: Vec<M> =
+            rows_in_tx(&mut tx, query.model, pk_in(query.model, pks)?, false).await?;
+        let entries: Vec<PendingEntry> = after.iter().map(&entry).collect();
+        emit_many_tx(&mut tx, &entries).await?;
+    }
+    tx.commit().await?;
+    Ok(affected)
+}
+
+/// Run a table-wide statement (`Model::truncate`) and one bulk `Delete`
+/// entry naming it, in one transaction. No per-row PK is known here.
+///
+/// # Errors
+/// As [`crate::sql::raw_execute_tx`], plus the audit emit.
+pub async fn truncate_with_audit(
+    pool: &crate::sql::Pool,
+    entity_table: &'static str,
+    sql: &str,
+) -> Result<u64, crate::sql::ExecError> {
+    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let affected = crate::sql::raw_execute_tx(&mut tx, sql, Vec::new()).await?;
+    let entry = PendingEntry {
+        entity_table,
+        entity_pk: String::new(),
+        operation: AuditOp::Delete,
+        source: current_source(),
+        changes: serde_json::json!({ "bulk": "truncate" }),
+    };
+    emit_one_tx(&mut tx, &entry).await?;
+    tx.commit().await?;
+    Ok(affected)
+}
+
 /// Postgres bind helper, exposed so generated bodies on the audited
 /// `save_pool` diff path can bind `SqlValue` arguments to a transaction.
 /// Not part of the public API.

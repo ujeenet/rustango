@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### Bulk writes on audited models write audit rows
+
+On audited models the bulk shortcuts now lock and read the affected rows
+first and write one audit row each (#1747); expect one extra SELECT.
+Audited non-`Auto` `bulk_insert_on` now takes `&mut PgConnection`, like
+the other audited `_on` methods.
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token

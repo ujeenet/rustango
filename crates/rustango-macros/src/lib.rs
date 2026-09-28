@@ -2959,8 +2959,10 @@ fn inherent_impl_tokens(
     };
     let pool_to_bulk_insert_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            Self::bulk_insert_on(rows, &mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            Self::bulk_insert_on(rows, &mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(())
         }
     } else {
         quote!(Self::bulk_insert_on(rows, pool).await)
@@ -2973,8 +2975,10 @@ fn inherent_impl_tokens(
     // compiling.
     let pool_to_upsert_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            self.upsert_on(&mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            self.upsert_on(&mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(())
         }
     } else {
         quote!(self.upsert_on(pool).await)
@@ -3984,6 +3988,28 @@ fn inherent_impl_tokens(
         }
     };
 
+    // Bulk writers on audited models write one audit row per affected
+    // row, in the write's transaction (#1747).
+    let (bulk_delete_run, bulk_update_run, truncate_run) = if audited_fields.is_some() {
+        (
+            quote!(#root::audit::delete_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+                _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
+            })
+            .await),
+            quote!(#root::audit::update_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+                _r.__rustango_audit_entry(#root::audit::AuditOp::Update)
+            })
+            .await),
+            quote!(#root::audit::truncate_with_audit(pool, _table, &_sql).await),
+        )
+    } else {
+        (
+            quote!(#root::sql::delete_pool(pool, &_query).await),
+            quote!(#root::sql::update_pool(pool, &_query).await),
+            quote!(#root::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await),
+        )
+    };
+
     // `refresh_from_db_pool(&mut self, pool)` — re-SELECT the row
     // matching this instance's PK and overwrite the in-memory state
     // with the freshly-fetched columns.
@@ -4425,15 +4451,17 @@ fn inherent_impl_tokens(
                 .await
             }
 
-            /// Internal: forward to
-            /// [`#root::sql::model_shortcuts::increment_all_pool`].
+            /// Internal: run
+            /// [`#root::sql::model_shortcuts::increment_all_query`].
             #[doc(hidden)]
             pub async fn __increment_all(
                 col: &str,
                 by: i64,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #root::sql::model_shortcuts::increment_all_pool::<Self>(col, by, pool).await
+                let _query =
+                    #root::sql::model_shortcuts::increment_all_query::<Self>(col, by)?;
+                #bulk_update_run
             }
 
             /// Internal: forward to
@@ -4784,8 +4812,8 @@ fn inherent_impl_tokens(
             /// **Use only in tests / fixture-reset flows.** Production
             /// writes through this would silently bypass the
             /// `pre_delete` / `post_delete` signals (no per-row hooks
-            /// fire on a TRUNCATE / bulk DELETE FROM) and lose every
-            /// row's audit-log entry.
+            /// fire on a TRUNCATE / bulk DELETE FROM). An audited model
+            /// gets one bulk audit entry, not one per row.
             ///
             /// # Errors
             /// As [`raw_execute_pool`].
@@ -4802,7 +4830,7 @@ fn inherent_impl_tokens(
                 } else {
                     ::std::format!("DELETE FROM {}", _quoted)
                 };
-                #root::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await
+                #truncate_run
             }
 
             /// Bulk-delete every row whose primary key is in
@@ -4842,7 +4870,7 @@ fn inherent_impl_tokens(
                         #root::core::SqlValue::List(_values),
                     )
                     .compile_delete()?;
-                #root::sql::delete_pool(pool, &_query).await
+                #bulk_delete_run
             }
 
             /// Fetch every row where `<col> = <val>`. Eloquent
@@ -5622,13 +5650,12 @@ fn inherent_impl_tokens(
                 set_val: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                use #root::sql::UpdaterPool as _;
-                #root::query::QuerySet::<Self>::default()
+                let _query = #root::query::QuerySet::<Self>::default()
                     .filter(where_col, where_val)
                     .update()
                     .set(set_col, set_val)
-                    .execute_pool(pool)
-                    .await
+                    .compile()?;
+                #bulk_update_run
             }
 
             /// Bulk-delete — remove every row matching
@@ -5646,7 +5673,7 @@ fn inherent_impl_tokens(
                 let _query = #root::query::QuerySet::<Self>::default()
                     .filter_op(where_col, #root::core::Op::Eq, where_val)
                     .compile_delete()?;
-                #root::sql::delete_pool(pool, &_query).await
+                #bulk_delete_run
             }
 
             /// Bulk-update — set `set_col = set_val` on EVERY row of
@@ -5666,12 +5693,11 @@ fn inherent_impl_tokens(
                 set_val: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                use #root::sql::UpdaterPool as _;
-                #root::query::QuerySet::<Self>::default()
+                let _query = #root::query::QuerySet::<Self>::default()
                     .update()
                     .set(set_col, set_val)
-                    .execute_pool(pool)
-                    .await
+                    .compile()?;
+                #bulk_update_run
             }
 
             /// Fetch every row where `<col> NOT LIKE <pattern>`.
@@ -6515,46 +6541,14 @@ fn inherent_impl_tokens(
         (quote!(), quote!())
     };
 
-    // Bulk-insert audit: capture every row's tracked fields after the
-    // RETURNING populates each PK, then push one batched INSERT INTO
-    // audit_log via `emit_many`. One round-trip regardless of N rows.
+    // Bulk-insert audit: one `Create` entry per row once RETURNING has
+    // set its PK, written in one batched INSERT.
     let audit_bulk_insert_emit: TokenStream2 = if audited_fields.is_some() {
-        let row_pk_str = if let Some((pk_ident, _)) = primary_key {
-            if fields.pk_is_auto {
-                quote!(_row.#pk_ident.get().map(|v| ::std::format!("{}", v)).unwrap_or_default())
-            } else {
-                quote!(::std::format!("{}", &_row.#pk_ident))
-            }
-        } else {
-            quote!(::std::string::String::new())
-        };
-        let row_pairs = audited_fields.unwrap_or(&[]).iter().map(|c| {
-            let column_lit = c.column.as_str();
-            let ident = &c.ident;
-            quote! {
-                (
-                    #column_lit,
-                    #root::__serde_json::to_value(&_row.#ident)
-                        .unwrap_or(#root::__serde_json::Value::Null),
-                )
-            }
-        });
         quote! {
-            let _audit_source = #root::audit::current_source();
-            let mut _audit_entries:
-                ::std::vec::Vec<#root::audit::PendingEntry> =
-                    ::std::vec::Vec::with_capacity(rows.len());
-            for _row in rows.iter() {
-                _audit_entries.push(#root::audit::PendingEntry {
-                    entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                    entity_pk: #row_pk_str,
-                    operation: #root::audit::AuditOp::Create,
-                    source: _audit_source.clone(),
-                    changes: #root::audit::snapshot_changes(&[
-                        #( #row_pairs ),*
-                    ]),
-                });
-            }
+            let _audit_entries: ::std::vec::Vec<#root::audit::PendingEntry> = rows
+                .iter()
+                .map(|_row| _row.__rustango_audit_entry(#root::audit::AuditOp::Create))
+                .collect();
             #root::audit::emit_many(&mut *_executor, &_audit_entries).await?;
         }
     } else {
@@ -6593,6 +6587,29 @@ fn inherent_impl_tokens(
                 target: ::std::vec![ #( #upsert_target_lits ),* ],
                 update_columns: ::std::vec![ #( #upsert_cols ),* ],
             })
+        };
+        // An upsert that may hit a conflict is recorded as `Update`; only
+        // an unset PK with a PK-only target is surely a `Create`.
+        let (audit_upsert_pre, audit_upsert_emit) = if audited_fields.is_some() {
+            (
+                if upsert_target_columns == [pk_column.clone()] {
+                    quote! {
+                        let _audit_op = if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
+                            #root::audit::AuditOp::Create
+                        } else {
+                            #root::audit::AuditOp::Update
+                        };
+                    }
+                } else {
+                    quote!(let _audit_op = #root::audit::AuditOp::Update;)
+                },
+                quote! {
+                    let _audit_entry = self.__rustango_audit_entry(_audit_op);
+                    #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                },
+            )
+        } else {
+            (quote!(), quote!())
         };
         Some(quote! {
             /// Insert this row if its `Auto<T>` primary key is
@@ -6734,12 +6751,14 @@ fn inherent_impl_tokens(
                 )
                 .returning(::std::vec![ #( #upsert_returning ),* ])
                 .on_conflict(#conflict_clause);
+                #audit_upsert_pre
                 let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
                 let _returning_row = &_returning_row_v;
                 #( #upsert_auto_assigns )*
+                #audit_upsert_emit
                 ::core::result::Result::Ok(())
             }
         })
@@ -7357,7 +7376,7 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 pool: &#root::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                Self::bulk_insert_on(rows, pool).await
+                #pool_to_bulk_insert_on
             }
 
             /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
@@ -7366,12 +7385,11 @@ fn inherent_impl_tokens(
             /// # Errors
             /// As [`Self::bulk_insert`].
             #[cfg(feature = "postgres")]
-            pub async fn bulk_insert_on<'_c, _E>(
+            pub async fn bulk_insert_on #executor_generics (
                 rows: &[Self],
-                _executor: _E,
+                #executor_param,
             ) -> ::core::result::Result<(), #root::sql::ExecError>
-            where
-                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
+            #executor_where
             {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
@@ -7390,7 +7408,11 @@ fn inherent_impl_tokens(
                     ::std::vec![ #( #cols_all ),* ],
                     _all_rows,
                 );
-                let _ = #root::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
+                let _ = #root::sql::__macro_internals::bulk_insert_on(
+                    #executor_passes_to_data_write,
+                    &_query,
+                ).await?;
+                #audit_bulk_insert_emit
                 ::core::result::Result::Ok(())
             }
         }

@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — bulk writes on audited models write audit rows (#1747)
+
+`destroy`, `delete_where`, `update_where`, `update_all`, `increment_each`,
+`upsert` and non-`Auto` `bulk_insert` now audit each affected row in the
+write's transaction; `truncate` writes one bulk `delete` entry.
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token

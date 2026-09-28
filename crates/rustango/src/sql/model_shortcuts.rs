@@ -18,7 +18,7 @@
 //! `Model::*` methods are the user-facing surface. Callers should
 //! never import from this module directly.
 
-use crate::core::{Expr, Model, QueryError, SqlValue, F};
+use crate::core::{Expr, Model, QueryError, SqlValue, UpdateQuery, F};
 use crate::query::{QuerySet, Q};
 use crate::sql::executor::{
     FetcherPool as _, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow,
@@ -54,7 +54,7 @@ pub fn resolve_col<T: Model>(col: &str) -> Result<&'static str, ExecError> {
 
 /// Build a `<col_static> + signed_by` expression. Subtracts when
 /// `signed_by` is negative. Used by [`increment_one_pool`] /
-/// [`increment_all_pool`] to construct the SET clause without
+/// [`increment_all_query`] to construct the SET clause without
 /// re-doing the `F() + Literal()` boilerplate per-model.
 #[must_use]
 pub fn add_signed_expr(col_static: &'static str, signed_by: i64) -> Expr {
@@ -99,30 +99,17 @@ where
         .await
 }
 
-/// Apply `col = col + by` (signed) on every row of the table.
-/// Backs the bulk `Model::increment_each` /
-/// `Model::decrement_each` static methods.
+/// `UPDATE … SET col = col + by` (signed) over the whole table. Backs
+/// `Model::increment_each` / `decrement_each`.
 ///
 /// # Errors
-/// As [`increment_one_pool`].
-pub async fn increment_all_pool<T>(col: &str, by: i64, pool: &Pool) -> Result<u64, ExecError>
-where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
-{
+/// As [`resolve_col`], plus the update compile.
+pub fn increment_all_query<T: Model>(col: &str, by: i64) -> Result<UpdateQuery, ExecError> {
     let col_static = resolve_col::<T>(col)?;
-    QuerySet::<T>::default()
+    Ok(QuerySet::<T>::default()
         .update()
         .set_expr(col, add_signed_expr(col_static, by))
-        .execute_pool(pool)
-        .await
+        .compile()?)
 }
 
 /// Compose `cols` into an OR (`all = false`) or AND (`all = true`)
