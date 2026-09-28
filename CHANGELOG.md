@@ -20,6 +20,10 @@ records a secret change as `[changed]` and never stores the value.
 
 - A series bump now rewrites `docs/index.toml`, `orm = { package = "rustango", version = … }` and `<crate> = "X.Y"` pins, and leaves example comments alone; the verify step checks what `docs_versions` checks.
 
+### Fixed — CI pulls service images from a GHCR mirror (#1688)
+
+- `mirror-images.yml` copies each CI image to `ghcr.io/ujeenet/ci-*` weekly, so jobs stop failing on `toomanyrequests`.
+
 ### Fixed
 
 - `DatabaseCache` keys compare exactly on MySQL: `user:1` no longer reads `User:1`, nor `café` `cafe`.
