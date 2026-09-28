@@ -161,3 +161,44 @@ async fn forged_forwarded_for_does_not_escape_the_throttle() {
         .insert("x-forwarded-for", "6.6.6.3".parse().unwrap());
     assert_eq!(status(&app, req).await, StatusCode::TOO_MANY_REQUESTS);
 }
+
+/// One IPv6 client rotating inside its /64 stays in one bucket.
+#[tokio::test]
+async fn ipv6_clients_share_a_bucket_per_64() {
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    for n in 1..=2 {
+        let req = get(Some(&format!("[2001:db8:1:2::{n}]")));
+        assert_eq!(status(&app, req).await, StatusCode::OK);
+    }
+    assert_eq!(
+        status(&app, get(Some("[2001:db8:1:2::3]"))).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // The next /64 is another client.
+    assert_eq!(
+        status(&app, get(Some("[2001:db8:1:3::1]"))).await,
+        StatusCode::OK
+    );
+}
+
+/// Behind a trusted proxy each forwarded client gets its own bucket,
+/// not the proxy's (#1745).
+#[cfg(feature = "admin")]
+#[tokio::test]
+async fn trusted_clients_behind_one_proxy_get_their_own_buckets() {
+    use rustango::real_ip::TrustedRealIp;
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    let via_proxy = |client: &str| {
+        let mut req = get(Some("10.0.0.1"));
+        req.extensions_mut()
+            .insert(TrustedRealIp(client.parse().unwrap()));
+        req
+    };
+    assert_eq!(status(&app, via_proxy("7.7.7.1")).await, StatusCode::OK);
+    assert_eq!(status(&app, via_proxy("7.7.7.1")).await, StatusCode::OK);
+    assert_eq!(
+        status(&app, via_proxy("7.7.7.1")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(status(&app, via_proxy("7.7.7.2")).await, StatusCode::OK);
+}

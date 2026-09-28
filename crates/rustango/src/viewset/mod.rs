@@ -1627,8 +1627,13 @@ fn check_throttle(
 /// The throttle key: the trusted client IP (IPv6 by /64), else one
 /// shared `"global"` bucket. Never a raw forwarding header (#1745).
 fn client_key(parts: &axum::http::request::Parts) -> String {
-    crate::rate_limit::client_ip(&parts.extensions, &parts.headers)
-        .map_or_else(|| "global".to_owned(), crate::rate_limit::ip_bucket)
+    crate::rate_limit::client_ip(&parts.extensions, &parts.headers).map_or_else(
+        || {
+            crate::rate_limit::warn_missing_discriminator("IP (ConnectInfo missing)");
+            "global".to_owned()
+        },
+        crate::rate_limit::ip_bucket,
+    )
 }
 
 /// A `429 Too Many Requests` with a `Retry-After` header.

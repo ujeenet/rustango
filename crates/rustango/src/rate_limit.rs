@@ -44,7 +44,7 @@ const MAX_BUCKETS: usize = 100_000;
 /// Warn once per process that the limiter cannot tell clients apart
 /// and is using one shared bucket. That turns the limiter into a
 /// site-wide throttle. Logged once so a hot path cannot flood logs.
-fn warn_missing_discriminator(what: &str) {
+pub(crate) fn warn_missing_discriminator(what: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
