@@ -878,7 +878,7 @@ cargo build --release
 
 Asegúrate de que tu proxy inverso:
 - Termine HTTPS
-- Reenvíe `X-Forwarded-For` para obtener IPs precisas en `AccessLogLayer`
+- Reenvíe `X-Forwarded-For`, y la app monte `RealIpLayer::trust_proxies([...])` con ese proxy (`server::Builder::real_ip`), para obtener IPs precisas en `AccessLogLayer` y en los throttles (vea [security.md](security.md))
 - Reenvíe `X-Forwarded-Host`, `X-Forwarded-Proto`
 - Use `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` para que `ConnectInfo` quede poblado para el límite de tasa + el filtrado de IP
 
