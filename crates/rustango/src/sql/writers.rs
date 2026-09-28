@@ -3263,8 +3263,16 @@ pub(super) fn write_where_with_search(
         return Ok(());
     }
     b.sql.push_str(" WHERE ");
+    // Parenthesized when search follows, so a top-level OR stays inside it.
+    let wrap = has_where && has_search;
     if has_where {
+        if wrap {
+            b.sql.push('(');
+        }
         write_where_expr(b, where_clause, qualify_with, model)?;
+        if wrap {
+            b.sql.push(')');
+        }
     }
     if has_search {
         let s = search.expect("checked above");
