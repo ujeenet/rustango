@@ -158,6 +158,20 @@ async fn editing_a_user_keeps_or_rotates_the_password(pool: &Pool) {
     assert!(logs_in(pool, &name, "pw-1763-new").await);
     assert!(!logs_in(pool, &name, "pw-1763-old").await);
     assert!(user_named(pool, &name).await.password_changed_at.is_some());
+
+    // The audit log records the change, never the hash.
+    let log = rustango::audit::fetch_for_entity_pool(pool, "rustango_users", &pk.to_string())
+        .await
+        .unwrap();
+    let text: Vec<String> = log.iter().map(|e| e.changes.to_string()).collect();
+    assert!(text.iter().all(|t| !t.contains("$argon2")), "{text:?}");
+    assert!(
+        log.iter().any(|e| {
+            e.changes["password_hash"]["after"] == "[changed]"
+                && !e.changes["password_changed_at"].is_null()
+        }),
+        "{text:?}"
+    );
 }
 
 async fn admin_created_provider_secret_is_encrypted(pool: &Pool) {

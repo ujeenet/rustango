@@ -1831,6 +1831,7 @@ pub(crate) async fn create_submit(
         let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
         return Ok(Html(html).into_response());
     }
+    let audit_form = audit_form(model, &admin_cfg, &form, &collected);
     let (columns, values): (Vec<&'static str>, Vec<SqlValue>) = collected.into_iter().unzip();
 
     let query = InsertQuery {
@@ -1868,7 +1869,7 @@ pub(crate) async fn create_submit(
         model,
         &pk_value,
         crate::audit::AuditOp::Create,
-        &without_secrets(&admin_cfg, &form),
+        &audit_form,
     )
     .await;
     // `save_model` hook. It fires only on admin writes, not on every
@@ -1929,15 +1930,51 @@ fn keep_unchanged(
     }
 }
 
-/// The form without secret columns, for the audit log.
-fn without_secrets(
+/// Stands in for a secret in the audit log.
+const SECRET_CHANGED: &str = "[changed]";
+const SECRET_SET: &str = "[set]";
+
+/// What the audit log records for a write: the form without secrets, a
+/// marker for each secret written, and timestamps the server stamped.
+fn audit_form(
+    model: &'static crate::core::ModelSchema,
     admin_cfg: &crate::core::AdminConfig,
     form: &HashMap<String, String>,
+    written: &[(&'static str, SqlValue)],
 ) -> HashMap<String, String> {
-    form.iter()
+    let mut out: HashMap<String, String> = form
+        .iter()
         .filter(|(k, _)| !is_secret_field(admin_cfg, k))
         .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
+        .collect();
+    for (column, value) in written {
+        let Some(f) = model.scalar_fields().find(|f| f.column == *column) else {
+            continue;
+        };
+        if is_secret_field(admin_cfg, f.name) {
+            out.insert(f.name.to_owned(), SECRET_CHANGED.to_owned());
+        } else if let SqlValue::DateTime(at) = value {
+            out.insert(f.name.to_owned(), at.to_rfc3339());
+        }
+    }
+    out
+}
+
+/// `row` with each set secret replaced by a marker, for the audit log.
+fn mask_secrets(
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    row: &serde_json::Value,
+) -> serde_json::Value {
+    let mut row = row.clone();
+    for f in model.scalar_fields() {
+        if is_secret_field(admin_cfg, f.name) {
+            if let Some(v) = row.get_mut(f.name).filter(|v| !v.is_null()) {
+                *v = serde_json::Value::String(SECRET_SET.to_owned());
+            }
+        }
+    }
+    row
 }
 
 // ============================================================== EDIT
@@ -2083,6 +2120,7 @@ pub(crate) async fn update_submit(
         let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
         return Ok(Html(html).into_response());
     }
+    let audit_form = audit_form(model, &admin_cfg, &form, &collected);
     let assignments: Vec<Assignment> = collected
         .into_iter()
         .map(|(column, value)| Assignment {
@@ -2096,7 +2134,9 @@ pub(crate) async fn update_submit(
     // `{ "field": { "before": v, "after": v } }`. If the fetch
     // returned None, because of a concurrent delete, the emit falls
     // back to a plain snapshot.
-    let before_row = pre_update_row.clone();
+    let before_row = pre_update_row
+        .as_ref()
+        .map(|row| mask_secrets(model, &admin_cfg, row));
 
     // Gate every inline row before anything is written, the parent included.
     let inline_plan = match super::inlines::plan_post(&state, &parts, model, &pk_value, &form).await
@@ -2125,7 +2165,6 @@ pub(crate) async fn update_submit(
     // "Before" comes from the SELECT, "after" from the form. The
     // per-request `with_source(User { id })` that `tenancy::admin`
     // installs gives a "who changed what" trail for free.
-    let audit_form = without_secrets(&admin_cfg, &form);
     super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &audit_form)
         .await;
     // The `post_save` hook fires after the UPDATE and the audit
@@ -2229,12 +2268,14 @@ pub(crate) async fn delete_submit(
         .await?;
     }
 
+    let delete_cfg = admin_config_or_default(model);
     let pairs: Vec<(&str, serde_json::Value)> = before_row
         .as_ref()
+        .map(|row| mask_secrets(model, &delete_cfg, row))
         .map(|row| {
             model
                 .scalar_fields()
-                .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
+                .map(|f| (f.name, render::read_value_as_json_from_json(&row, f)))
                 .collect()
         })
         .unwrap_or_default();
@@ -2439,10 +2480,12 @@ pub(crate) async fn action_submit(
     // Other actions record the pre-action state plus an `__action`
     // marker, so the panel shows who ran what against which rows.
     let source = crate::audit::current_source();
+    let bulk_cfg = admin_config_or_default(model);
     let entries: Vec<crate::audit::PendingEntry> = before_rows
         .iter()
         .map(|row| {
             let pk_str = render::read_value_as_string_json(row, pk_field).unwrap_or_default();
+            let row = &mask_secrets(model, &bulk_cfg, row);
             let mut pairs: Vec<(&str, serde_json::Value)> = model
                 .scalar_fields()
                 .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))

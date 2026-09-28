@@ -157,6 +157,12 @@ render it empty, list and detail show only "set", and an empty edit keeps the
 stored value. `admin::derived_fields::DeriveFn` is now async and fallible:
 return `Box::pin(async move { …; Ok(()) })`; an `Err` is shown on the form.
 
+### Re-save SSO provider secrets created in the admin
+
+Before this release the admin stored an SSO provider's `client_secret` in
+plaintext, which no longer decrypts. Re-save each admin-created provider's
+secret after upgrading.
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token

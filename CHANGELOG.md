@@ -13,7 +13,8 @@ Read-only fields render locked and not `required`; read-only NOT NULL
 timestamps are filled on create, `auto_now` is restamped on update, and an
 untouched datetime is no longer truncated to seconds. New forms pre-check
 `default = "true"` checkboxes. API keys and agents are minted by their own
-flows, so the admin no longer offers an Add form for them.
+flows, so the admin no longer offers an Add form for them. The audit log
+records a secret change as `[changed]` and never stores the value.
 
 ## [0.58.0] — 2026-09-28
 
