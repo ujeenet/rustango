@@ -940,6 +940,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test database_routers_sqlite_live
       # `not(postgres)`, so `--all-features` skips it; the #1190 logout guard.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,admin --test owned_by_bearer_sqlite_live
+      # #1746 — template views' tenant_router copies apply global scopes; `not(postgres)`.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,template_views --test view_global_scopes_tenant_sqlite_live
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This
@@ -1033,6 +1035,7 @@ jobs:
             --test orm_json_dates \
             --test orm_writes \
             --test orm_delta
+      - run: cargo test -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri
       - run: >-
           cargo test -p rustango --no-default-features
           --features sqlite,tenancy,admin-sso,testkit
@@ -1225,6 +1228,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
+      - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.

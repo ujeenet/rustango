@@ -1504,19 +1504,22 @@ macro_rules! or_500 {
     };
 }
 
-/// The predicates every filter backend contributes for this request,
-/// to be ANDed into whatever query the action runs.
+/// The model's global scopes plus every filter backend's predicates for
+/// this request, to be ANDed into whatever query the action runs.
 fn scope_filters(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
-    state
-        .vs
-        .filter_backends
-        .iter()
-        .flat_map(|b| b.filter_with(parts, params, state.vs.schema))
-        .collect()
+    let mut all = state.vs.schema.global_scope_exprs(&[]);
+    all.extend(
+        state
+            .vs
+            .filter_backends
+            .iter()
+            .flat_map(|b| b.filter_with(parts, params, state.vs.schema)),
+    );
+    all
 }
 
 /// `expr` narrowed by `extra`. An empty `extra` returns `expr`
@@ -2424,6 +2427,8 @@ async fn handle_create(
         Err(resp) => return resp,
     };
 
+    // The read-back is scoped: a row created outside it is not echoed.
+    let scope = scope_filters(&state, &parts, &HashMap::new());
     // A JSON array body means a bulk create.
     let create_body = match extract_create_body(parts, body).await {
         Ok(b) => b,
@@ -2437,22 +2442,19 @@ async fn handle_create(
 
     match create_body {
         CreateBody::Single(form, json) => {
-            create_one(&state, &mut acq, &form, json.as_ref(), pk_field).await
+            create_one(&state, &mut acq, &form, json.as_ref(), pk_field, &scope).await
         }
-        CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, pk_field).await,
+        CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, pk_field, &scope).await,
     }
 }
 
 /// Run `INSERT … RETURNING <pk>`, then re-fetch the row by its PK as
-/// JSON. The insert-then-fetch tail shared by `create_one` and
-/// `create_many`.
+/// JSON, narrowed by `scope`; `None` when the new row is outside it.
 ///
-/// Returns `(StatusCode, message)` so both callers emit the right
-/// code:
+/// Returns `(StatusCode, message)` so the caller emits the right code:
 /// * `BAD_REQUEST` when the INSERT fails — a constraint violation or
 ///   a bad value, so probably the client's fault.
-/// * `INTERNAL_SERVER_ERROR` when the INSERT works but the re-fetch
-///   misses, which should not happen.
+/// * `INTERNAL_SERVER_ERROR` when the re-fetch errors.
 ///
 /// `columns` and `values` come from an earlier `collect_values`, so
 /// the inbound shape is already validated.
@@ -2463,7 +2465,8 @@ async fn insert_and_fetch_one(
     values: Vec<SqlValue>,
     pk_field: &'static crate::core::FieldSchema,
     fields: &[&'static crate::core::FieldSchema],
-) -> Result<Value, (StatusCode, String)> {
+    scope: &[WhereExpr],
+) -> Result<Option<Value>, (StatusCode, String)> {
     let query = InsertQuery {
         model: state.vs.schema,
         columns,
@@ -2475,12 +2478,12 @@ async fn insert_and_fetch_one(
         .insert_returning_pk(&query, pk_field)
         .await
         .map_err(|e| write_failure("viewset::create", &e))?;
-    fetch_by_pk(state, acq, pk_field, pk_val, fields)
+    fetch_by_pk_scoped(state, acq, pk_field, pk_val, fields, scope)
         .await
-        .ok_or_else(|| {
+        .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "created but could not retrieve".to_owned(),
+                crate::error::client_error_body("viewset::create::read_back", &e, false),
             )
         })
 }
@@ -2497,13 +2500,15 @@ fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, Strin
 }
 
 /// Single-row create — used by both the form-urlencoded codepath
-/// and the JSON-object body codepath. Returns 201 + the row JSON.
+/// and the JSON-object body codepath. Returns 201 + the row JSON, or
+/// 201 with no body when the new row is outside `scope`.
 async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     form: &HashMap<String, String>,
     json: Option<&Value>,
     pk_field: &'static crate::core::FieldSchema,
+    scope: &[WhereExpr],
 ) -> Response {
     // When a serializer is registered: run its input validation and
     // skip every model column it doesn't accept (read_only / computed).
@@ -2527,8 +2532,9 @@ async fn create_one(
     };
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
-    match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields).await {
-        Ok(obj) => json_created(obj),
+    match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields, scope).await {
+        Ok(Some(obj)) => json_created(obj),
+        Ok(None) => StatusCode::CREATED.into_response(),
         Err((code, msg)) => json_error(code, &msg),
     }
 }
@@ -2538,7 +2544,8 @@ async fn create_one(
 /// is rejected with the index + message (atomic-validate, not
 /// atomic-insert — partial-insert recovery is a separate concern).
 /// On success, inserts each row sequentially and returns 201 + the
-/// JSON array of created rows in submission order.
+/// JSON array of created rows in submission order; a row outside
+/// `scope` is `null`.
 ///
 /// Issue #435.
 async fn create_many(
@@ -2546,6 +2553,7 @@ async fn create_many(
     acq: &mut AcquiredConn,
     rows: &[(HashMap<String, String>, Option<Value>)],
     pk_field: &'static crate::core::FieldSchema,
+    scope: &[WhereExpr],
 ) -> Response {
     if rows.is_empty() {
         return json_created(Value::Array(Vec::new()));
@@ -2651,15 +2659,10 @@ async fn create_many(
     // atomicity is a property of the writes, which is the part that was
     // missing.
     let mut created: Vec<Value> = Vec::with_capacity(pks.len());
-    for (i, pk_val) in pks.into_iter().enumerate() {
-        match fetch_by_pk(state, acq, pk_field, pk_val, &fields).await {
-            Some(obj) => created.push(obj),
-            None => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("bulk entry {i}: created but could not retrieve"),
-                );
-            }
+    for pk_val in pks {
+        match fetch_by_pk_scoped(state, acq, pk_field, pk_val, &fields, scope).await {
+            Ok(obj) => created.push(obj.unwrap_or(Value::Null)),
+            Err(e) => return json_server_error("viewset::bulk_create::read_back", &e),
         }
     }
 
@@ -2776,10 +2779,12 @@ async fn update_inner(
         }
     }
 
+    // The UPDATE committed; a row it moved out of scope answers 204.
     let fields = state.effective_fields();
-    match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, scope).await {
-        Some(obj) => json_response(obj),
-        None => json_error(StatusCode::NOT_FOUND, "not found after update"),
+    match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, &scope).await {
+        Ok(Some(obj)) => json_response(obj),
+        Ok(None) => no_content(),
+        Err(e) => json_server_error("viewset::update::read_back", &e),
     }
 }
 
@@ -2825,37 +2830,19 @@ async fn handle_destroy(
 
 // ------------------------------------------------------------------ helpers
 
-/// [`fetch_by_pk`] narrowed by the filter backends — the read-back after an
-/// update, which must not return a row the principal is scoped out of.
+/// The read-back after a write, narrowed by `scope`: `None` when the
+/// written row is outside it, so a scoped-out row is never echoed.
 async fn fetch_by_pk_scoped(
     state: &ViewSetState,
     acq: &mut AcquiredConn,
     pk_field: &'static crate::core::FieldSchema,
     pk_val: SqlValue,
     fields: &[&'static crate::core::FieldSchema],
-    scope: Vec<WhereExpr>,
-) -> Option<Value> {
+    scope: &[WhereExpr],
+) -> Result<Option<Value>, crate::sql::ExecError> {
     let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
-    select_q.where_clause = narrow(select_q.where_clause, scope);
-    render_single(state, acq, &select_q, fields)
-        .await
-        .ok()
-        .flatten()
-}
-
-async fn fetch_by_pk(
-    state: &ViewSetState,
-    acq: &mut AcquiredConn,
-    pk_field: &'static crate::core::FieldSchema,
-    pk_val: SqlValue,
-    fields: &[&'static crate::core::FieldSchema],
-) -> Option<Value> {
-    // #562 — SelectQuery::by_pk replaces the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
-    render_single(state, acq, &select_q, fields)
-        .await
-        .ok()
-        .flatten()
+    select_q.where_clause = narrow(select_q.where_clause, scope.to_vec());
+    render_single(state, acq, &select_q, fields).await
 }
 
 /// Render the rows matching `select_q` for a list response: through

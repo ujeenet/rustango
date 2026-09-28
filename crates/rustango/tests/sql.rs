@@ -655,11 +655,28 @@ fn search_combined_with_filter_uses_and() {
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
-        r#"SELECT "id", "name", "is_active" FROM "user" WHERE "is_active" = $1 AND ("name" ILIKE $2 ESCAPE '!')"#,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("is_active" = $1) AND ("name" ILIKE $2 ESCAPE '!')"#,
     );
     assert_eq!(
         stmt.params,
         vec![SqlValue::Bool(true), SqlValue::String("%ali%".into())],
+    );
+}
+
+#[test]
+fn search_after_a_top_level_or_keeps_it_parenthesized() {
+    let mut q = empty_select().where_clause(WhereExpr::Or(vec![
+        WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(true))),
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+    ]));
+    q.search = Some(SearchClause {
+        columns: vec!["name"],
+        query: "ali".into(),
+    });
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("is_active" = $1 OR "id" = $2) AND ("name" ILIKE $3 ESCAPE '!')"#,
     );
 }
 
