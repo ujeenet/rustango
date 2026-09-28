@@ -862,12 +862,32 @@ fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfi
     // to clone (just an Arc-of-router under the hood).
     let make = || {
         let svc = tenant_admin.clone();
-        // Forward the request whole: the extensions carry the client IP
-        // (`ConnectInfo`, `TrustedRealIp`) the login limits key on.
         move |req: axum::http::Request<axum::body::Body>| {
             let svc = svc.clone();
             async move {
-                svc.oneshot(req)
+                // A fresh request drops the outer router's path params,
+                // which the inner `Path` extractors would otherwise see.
+                let (parts, body) = req.into_parts();
+                let mut builder = axum::http::Request::builder()
+                    .method(&parts.method)
+                    .uri(&parts.uri);
+                for (k, v) in &parts.headers {
+                    builder = builder.header(k, v);
+                }
+                let mut fresh = builder.body(body).expect("valid request");
+                // Keep the client IP the login limits key on.
+                let ext = fresh.extensions_mut();
+                if let Some(ci) = parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                {
+                    ext.insert(*ci);
+                }
+                #[cfg(feature = "admin")]
+                if let Some(ip) = parts.extensions.get::<crate::real_ip::TrustedRealIp>() {
+                    ext.insert(*ip);
+                }
+                svc.oneshot(fresh)
                     .await
                     .unwrap_or_else(|_| unreachable!("Router is Infallible"))
             }
