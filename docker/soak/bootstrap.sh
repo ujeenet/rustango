@@ -156,14 +156,16 @@ app create-user t01 soakadmin --password "${SOAK_TENANT_ADMIN_PASSWORD:-soak-adm
 #   t03  SSO: a plain user, a staff user, a superuser, a spare
 #   t04  login lock and limits      t05  password change (#1338)
 #   t06  JWT                        t07  tenant admin CSRF (#1713)
-for pair in "t03 sso-user" "t03 sso-staff" "t03 sso-other" "t04 lockprobe" "t06 jwtuser"; do
-    slug=${pair%% *}; user=${pair#* }
-    app create-user "$slug" "$user" --password "soak-${user}-pw" 2>/dev/null \
-        || log "user $user on $slug already exists"
-done
+# Superusers first: a tenant's first user is promoted to superuser
+# whatever the flags say, and sso-user must stay a plain user.
 for pair in "t03 sso-super" "t05 pwchange" "t07 csrfadmin"; do
     slug=${pair%% *}; user=${pair#* }
     app create-user "$slug" "$user" --password "soak-${user}-pw" --superuser 2>/dev/null \
+        || log "user $user on $slug already exists"
+done
+for pair in "t03 sso-user" "t03 sso-staff" "t03 sso-other" "t04 lockprobe" "t06 jwtuser"; do
+    slug=${pair%% *}; user=${pair#* }
+    app create-user "$slug" "$user" --password "soak-${user}-pw" 2>/dev/null \
         || log "user $user on $slug already exists"
 done
 

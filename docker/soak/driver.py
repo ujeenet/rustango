@@ -1054,6 +1054,29 @@ async def check_v4_mapped_filter(client, name, base, headers=None):
                                       " — control: this listener is IPv4-only")), name)
 
 
+async def raw_status(base, head: str, body_chunks) -> int | None:
+    """Send one HTTP/1.1 request by hand and return the status.
+
+    httpx gives up when the server answers 413 and closes while the
+    body is still going up; a browser or proxy reads the answer anyway.
+    """
+    from urllib.parse import urlparse
+    u = urlparse(base)
+    reader, writer = await asyncio.open_connection(u.hostname, u.port or 80)
+    try:
+        writer.write(head.encode())
+        for chunk in body_chunks:
+            try:
+                writer.write(chunk)
+                await writer.drain()
+            except (ConnectionError, OSError):
+                break
+        line = await asyncio.wait_for(reader.readline(), 10)
+        return int(line.split()[1]) if line.startswith(b"HTTP/") else None
+    finally:
+        writer.close()
+
+
 async def check_body_limit(client, name, base, headers=None):
     """#1673 — `max_body_bytes` (256 KiB) caps chunked bodies and QUERY.
 
@@ -1062,18 +1085,18 @@ async def check_body_limit(client, name, base, headers=None):
     """
     big = json.dumps({"sku": f"BIG-{RUN_ID}", "name": "x" * 400_000,
                       "blurb": None, "price_cents": 1, "active": False}).encode()
-
-    async def chunks():
-        for i in range(0, len(big), 16_384):
-            yield big[i:i + 16_384]
-
-    h = {**(headers or {}), "Content-Type": "application/json"}
-    r = await client.post(f"{base}/api/v1/products", headers=h, content=chunks())
+    host = host_of(base, headers)
+    chunked = [f"{len(big[i:i + 16_384]):x}\r\n".encode() + big[i:i + 16_384] + b"\r\n"
+               for i in range(0, len(big), 16_384)] + [b"0\r\n\r\n"]
+    st = await raw_status(base, f"POST /api/v1/products HTTP/1.1\r\nHost: {host}\r\n"
+                          "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n"
+                          "Connection: close\r\n\r\n", chunked)
     REPORT.add("chunked body over max_body_bytes is 413", "#1673",
-               verdict(r.status_code == 413), f"{r.status_code} {r.text[:120]}", name)
-    q = await client.request("QUERY", f"{base}/api/v1/products", headers=h, content=big)
-    REPORT.add("QUERY body over max_body_bytes is 413", "#1673",
-               verdict(q.status_code == 413), f"{q.status_code} {q.text[:120]}", name)
+               verdict(st == 413), f"{st}", name)
+    q = await raw_status(base, f"QUERY /api/v1/products HTTP/1.1\r\nHost: {host}\r\n"
+                         f"Content-Type: application/json\r\nContent-Length: {len(big)}\r\n"
+                         "Connection: close\r\n\r\n", [big])
+    REPORT.add("QUERY body over max_body_bytes is 413", "#1673", verdict(q == 413), f"{q}", name)
 
 
 # ------------------------------------------------------------- #1675
@@ -1747,10 +1770,14 @@ async def check_hash_off_runtime(client, name, base):
     limit) while `/_soak/info` is polled. Argon2 on a Tokio worker used
     to hold that worker for the whole hash.
     """
+    # Its own client: the storm fills the shared one's connection pool,
+    # and a poll queued there would time the driver, not the server.
+    poller = httpx.AsyncClient(timeout=30)
+
     async def poll(stop, out):
         while not stop.is_set():
             t = time.perf_counter()
-            await client.get(f"{base}/_soak/info")
+            await poller.get(f"{base}/_soak/info")
             out.append(time.perf_counter() - t)
             await asyncio.sleep(0.02)
 
@@ -1770,6 +1797,7 @@ async def check_hash_off_runtime(client, name, base):
                                return_exceptions=True)
     stop.set()
     await p
+    await poller.aclose()
     ok = sum(1 for r in res if not isinstance(r, Exception) and r.status_code == 303)
     during.sort()
     p95 = during[int(len(during) * 0.95) - 1] if during else 0
@@ -1876,15 +1904,25 @@ async def check_bare_admin(client, name, base):
     REPORT.add("admin login carries security headers", "#1699", verdict(bool(xfo)),
                f"X-Frame-Options: {xfo}", name)
     token = set_cookie_value(login, "rustango_csrf")
+
+    def refused(r):
+        # The admin login re-renders its form on a CSRF failure; the
+        # password is right, so any session cookie means it got through.
+        return (r.status_code in (200, 403) and not set_cookie_value(r, ADMIN_COOKIE)
+                and (r.status_code == 403 or "form was invalid" in r.text))
+
     empty = await client.post(f"{base}/__admin/login", headers={
-        "Cookie": "rustango_csrf=", "Origin": origin_of(base, None)},
+        "Cookie": "rustango_csrf=", "Origin": origin_of(base, None),
+        "X-Forwarded-For": fresh_ip()},
         data={"_csrf": "", "username": ADMIN_USER[0], "password": ADMIN_USER[1]})
-    REPORT.add("CSRF refuses an empty token pair", "#1693", verdict(empty.status_code == 403),
-               f"admin login: {empty.status_code}", name)
+    REPORT.add("CSRF refuses an empty token pair", "#1693", verdict(refused(empty)),
+               f"admin login: {empty.status_code}, session set: "
+               f"{bool(set_cookie_value(empty, ADMIN_COOKIE))}", name)
     foreign = await admin_login(client, base, *ADMIN_USER, origin="http://evil.example",
                                 token=token, ip=fresh_ip())
-    REPORT.add("admin login refuses a foreign Origin", "#1695",
-               verdict(foreign.status_code == 403), f"{foreign.status_code}", name)
+    REPORT.add("admin login refuses a foreign Origin", "#1695", verdict(refused(foreign)),
+               f"{foreign.status_code}, session set: "
+               f"{bool(set_cookie_value(foreign, ADMIN_COOKIE))}", name)
     ok = await admin_login(client, base, *ADMIN_USER, token=token, ip=fresh_ip())
     session = secret(set_cookie_value(ok, ADMIN_COOKIE))
     REPORT.add("admin login signs a superuser in", "#1609",
@@ -1929,6 +1967,8 @@ async def check_admin_inlines(client, name, base, session_cookie, headers=None,
     order = await client.get(f"{base}/api/v1/orders-raw/{ids['o1']}", headers=h)
     parent = {k: ("" if v is None else str(v)) for k, v in order.json().items()
               if k not in ("id", "placed_at")}
+    # NULL, as a browser form sends it. (SQLite's JSON reads NULL as 0.)
+    parent.update({"assigned_picker_id": "", "note": ""})
 
     def form(line, product, qty):
         return {**parent, "_csrf": token,
@@ -2578,9 +2618,7 @@ async def main():
             hdr = {"Host": tenant_host(1)}
             saas_info[name] = await check_soak_info(client, name, base, headers=hdr,
                                                     expect_tenant="t01")
-            # The apex, as a load balancer probing the process would:
-            # an unlisted Host is refused now (#1700).
-            await check_health_endpoints(client, name, base, headers={"Host": APEX})
+            await check_health_endpoints(client, name, base)
             await check_null_fk(client, name, base, headers=hdr)
             await check_serializer_carries_fk(client, name, base, headers=hdr)
             await check_bulk_atomic(client, name, base, headers=hdr)

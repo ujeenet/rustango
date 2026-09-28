@@ -1,6 +1,6 @@
 {
   "name": "0003_create_rustango_shared_sso_providers",
-  "created_at": "2026-09-28T00:43:35.972938+00:00",
+  "created_at": "2026-09-28T01:42:25.999827+00:00",
   "prev": "0001_create_rustango_audit_log_and_rustango_content_types_and_rustango_operators_etc",
   "atomic": true,
   "scope": "registry",

@@ -1,6 +1,6 @@
 {
-  "name": "0002_auto",
-  "created_at": "2026-09-28T00:44:31.999730+00:00",
+  "name": "0002_create_commerce_gift_card_and_commerce_promotion",
+  "created_at": "2026-09-28T01:42:26.005051+00:00",
   "prev": "0001_create_commerce_customer_and_commerce_inventory_and_commerce_order_etc",
   "atomic": true,
   "snapshot": {
@@ -1073,6 +1073,14 @@
             "max_length": 300
           },
           {
+            "name": "key_sha256",
+            "column": "key_sha256",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 64
+          },
+          {
             "name": "provider_id",
             "column": "provider_id",
             "ty": "i64",
@@ -1094,14 +1102,6 @@
             "nullable": false,
             "primary_key": false,
             "max_length": 255
-          },
-          {
-            "name": "subject_sha256",
-            "column": "subject_sha256",
-            "ty": "string",
-            "nullable": false,
-            "primary_key": false,
-            "max_length": 64
           },
           {
             "name": "user_id",
@@ -1519,13 +1519,12 @@
         "method": "btree"
       },
       {
-        "name": "rustango_sso_links_provider_source_provider_id_issuer_subject_s",
+        "name": "rustango_sso_links_provider_source_provider_id_key_sha256_idx",
         "table": "rustango_sso_links",
         "columns": [
           "provider_source",
           "provider_id",
-          "issuer",
-          "subject_sha256"
+          "key_sha256"
         ],
         "unique": true,
         "method": "btree"

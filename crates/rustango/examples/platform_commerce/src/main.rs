@@ -108,9 +108,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // — which receive no pool of their own — can find it.
     commerce::jobs::register_pool(commerce::jobs::SINGLE, pool.clone());
 
-    // The admin login refuses every user while the TOTP table is
-    // missing, and nothing else creates it before a first login.
-    rustango::admin::totp_store::ensure_table(&pool).await?;
     DatabaseJobQueue::ensure_table_pool(&pool).await?;
     let queue = Arc::new(
         DatabaseJobQueue::with_workers_pool(pool.clone(), 4)
