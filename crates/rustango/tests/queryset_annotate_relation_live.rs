@@ -181,8 +181,9 @@ mod sqlite_live {
             })
             .collect();
         assert_eq!(by_name.get("One"), Some(&SqlValue::I64(100)));
-        assert_eq!(by_name.get("Three"), Some(&SqlValue::I64(60))); // 10 + 20 + 30
-                                                                    // SUM over no rows is NULL, as on PG and MySQL (#1766).
+        // 10 + 20 + 30
+        assert_eq!(by_name.get("Three"), Some(&SqlValue::I64(60)));
+        // SUM over no rows is NULL, as on PG and MySQL (#1766).
         assert_eq!(by_name.get("Zero"), Some(&SqlValue::Null));
     }
 
@@ -297,6 +298,15 @@ mod pg_live {
             .unwrap();
         assert_eq!(get_i64(&three[0], "books_sum_pages"), 60);
 
+        // SUM over no rows is NULL (#1766).
+        let zero = Author::objects()
+            .filter("name", "Zero")
+            .annotate_sum("books", "pages")
+            .fetch(&pool)
+            .await
+            .unwrap();
+        assert_eq!(zero[0].get("books_sum_pages"), Some(&SqlValue::Null));
+
         let exists: HashMap<String, i64> = Author::objects()
             .annotate_exists("books")
             .fetch(&pool)
@@ -356,6 +366,15 @@ mod my_live {
             .await
             .unwrap();
         assert_eq!(get_i64(&three[0], "books_sum_pages"), 60);
+
+        // SUM over no rows is NULL (#1766).
+        let zero = Author::objects()
+            .filter("name", "Zero")
+            .annotate_sum("books", "pages")
+            .fetch(&pool)
+            .await
+            .unwrap();
+        assert_eq!(zero[0].get("books_sum_pages"), Some(&SqlValue::Null));
 
         let exists: HashMap<String, i64> = Author::objects()
             .annotate_exists("books")

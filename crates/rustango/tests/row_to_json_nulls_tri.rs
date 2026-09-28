@@ -31,9 +31,18 @@ pub struct Order {
     pub rush: Option<bool>,
     #[rustango(max_length = 32)]
     pub note: Option<String>,
+    pub weight: Option<f64>,
+    pub due: Option<chrono::NaiveDate>,
 }
 
-const NULLABLE: [&str; 4] = ["assigned_picker_id", "quantity", "rush", "note"];
+const NULLABLE: [&str; 6] = [
+    "assigned_picker_id",
+    "quantity",
+    "rush",
+    "note",
+    "weight",
+    "due",
+];
 
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Order::SCHEMA.table).await;
@@ -56,6 +65,8 @@ async fn seed(pool: &Pool) {
         quantity: None,
         rush: None,
         note: None,
+        weight: None,
+        due: None,
     };
     empty.insert_pool(pool).await.expect("insert empty order");
     let mut full = Order {
@@ -64,6 +75,8 @@ async fn seed(pool: &Pool) {
         quantity: Some(7),
         rush: Some(true),
         note: Some("n".into()),
+        weight: Some(1.5),
+        due: chrono::NaiveDate::from_ymd_opt(2026, 9, 28),
     };
     full.insert_pool(pool).await.expect("insert full order");
 }
@@ -99,6 +112,8 @@ async fn set_cells_still_decode(pool: &Pool) {
     assert_eq!(rows[1]["quantity"], 7);
     assert_eq!(rows[1]["rush"], true);
     assert_eq!(rows[1]["note"], "n");
+    assert_eq!(rows[1]["weight"], 1.5);
+    assert_eq!(rows[1]["due"], "2026-09-28");
 }
 
 /// `values_dict` has its own SQLite cell decoder with the same trap.
