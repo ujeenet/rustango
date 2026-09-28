@@ -8,7 +8,7 @@
 #![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -473,6 +473,7 @@ async fn basic_without_a_tenant_is_refused() {
 
 /// With every hashing slot taken, each login answers 503 + Retry-After
 /// instead of queueing, and so do the password changes.
+#[cfg(feature = "testkit")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_full_hash_queue_answers_503_everywhere() {
     let _g = SUITE.lock().await;
@@ -515,20 +516,8 @@ async fn a_full_hash_queue_answers_503_everywhere() {
             .unwrap()
     };
 
-    let slots = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let run = Arc::new(AtomicBool::new(true));
-    // A queue many hashes deep, so no request reaches a slot in 50 ms.
-    let hogs: Vec<_> = (0..slots * 10)
-        .map(|_| {
-            let run = Arc::clone(&run);
-            tokio::spawn(async move {
-                while run.load(Ordering::Relaxed) {
-                    let _ = rustango::passwords::hash_async("hog").await;
-                }
-            })
-        })
-        .collect();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Every slot held, so no request gets one within the wait (#1786).
+    let held = rustango::passwords::hold_all_hash_slots().await;
 
     let change = "current_password=right-pass-123&new_password=another-pass-9&confirm_password=another-pass-9";
     let console_change = env
@@ -583,10 +572,7 @@ async fn a_full_hash_queue_answers_503_everywhere() {
     #[cfg(feature = "mcp")]
     let raw_auth =
         rustango::mcp::verify_raw_agent_credential(&env.tenant, &env.slug, &agent.token).await;
-    run.store(false, Ordering::Relaxed);
-    for h in hogs {
-        let _ = h.await;
-    }
+    drop(held);
     for (what, r) in answers {
         let status = r.status();
         let retry = r.headers().contains_key(header::RETRY_AFTER);
