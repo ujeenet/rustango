@@ -27,9 +27,8 @@ import os
 import subprocess
 import sys
 
-PROJECT = "rustango-soak"
+PROJECT = os.environ.get("SOAK_PROJECT", "rustango-soak")
 HERE = os.path.dirname(os.path.abspath(__file__))
-COMPOSE = ["docker", "compose", "-p", PROJECT, "-f", os.path.join(HERE, "docker-compose.yml")]
 
 # Every fix shipped in 0.58.0, by the issue tag its checks carry. A tag
 # with no check row at all is printed as MISSING: nothing may be absent.
@@ -89,17 +88,31 @@ def add(checks, name, issue, verdict, detail="", instance=""):
                    "detail": detail, "instance": instance, "source": "finalize"})
 
 
+def containers():
+    """[(service, container, state, status)] for the project, via labels,
+    so no compose file (or its required secrets) is needed."""
+    r = sh(["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={PROJECT}",
+            "--format", '{{.Label "com.docker.compose.service"}}\t{{.Names}}\t{{.State}}\t{{.Status}}'])
+    rows = [tuple(ln.split("\t")) for ln in r.stdout.splitlines() if ln.count("\t") == 3]
+    # Only this project's own containers; another stack may reuse the label.
+    return [row for row in rows if row[1].startswith(f"{PROJECT}-")]
+
+
 def service_logs():
     """{service: log text} for every container in the project."""
-    ps = sh(COMPOSE + ["ps", "-a", "--format", "{{.Service}}"])
     out = {}
-    for svc in sorted(set(ps.stdout.split())):
-        r = sh(COMPOSE + ["logs", "--no-color", "--no-log-prefix", svc])
-        out[svc] = r.stdout + r.stderr
+    for svc, name, _, _ in containers():
+        r = sh(["docker", "logs", name])
+        out[svc] = out.get(svc, "") + r.stdout + r.stderr
     return out
 
 
 def scan_logs(checks, logs, secrets, redaction):
+    if not any(logs.values()) or not secrets:
+        # A scan over nothing would pass; that is not a pass.
+        add(checks, "no credential, token or cookie in any container log", "#1610", "FAIL",
+            f"nothing to scan: {len(logs)} logs, {len(secrets)} secrets")
+        return
     hits = []
     for svc, text in logs.items():
         for s in secrets:
@@ -142,14 +155,12 @@ def scan_errors(checks, logs):
 
 
 def bootstrap_exits(checks):
-    ps = sh(COMPOSE + ["ps", "-a", "--format", "{{.Service}} {{.State}} {{.ExitCode}}"])
     bad, seen = [], 0
-    for ln in ps.stdout.splitlines():
-        parts = ln.split()
-        if parts and parts[0].startswith("bootstrap-"):
+    for svc, _, state, status in containers():
+        if svc.startswith("bootstrap-"):
             seen += 1
-            if parts[-1] != "0":
-                bad.append(ln)
+            if state != "exited" or not status.startswith("Exited (0)"):
+                bad.append(f"{svc}: {status}")
     add(checks, "every bootstrap migrate finished", "#1626",
         "FAIL" if bad or not seen else "PASS",
         f"{bad}" if bad else f"{seen} bootstrap containers exited 0 (context for #1626)")

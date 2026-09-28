@@ -1063,8 +1063,8 @@ async def check_v4_mapped_filter(client, name, base, headers=None):
                                       " — control: this listener is IPv4-only")), name)
 
 
-async def raw_status(base, head: str, body_chunks) -> int | None:
-    """Send one HTTP/1.1 request by hand and return the status.
+async def raw_status(base, head: str, body_chunks) -> tuple[int | None, str]:
+    """Send one HTTP/1.1 request by hand; return (status, body head).
 
     httpx gives up when the server answers 413 and closes while the
     body is still going up; a browser or proxy reads the answer anyway.
@@ -1072,16 +1072,26 @@ async def raw_status(base, head: str, body_chunks) -> int | None:
     from urllib.parse import urlparse
     u = urlparse(base)
     reader, writer = await asyncio.open_connection(u.hostname, u.port or 80)
+    # Read while sending: an early answer is followed by a close, and a
+    # reset can discard it if nobody was reading yet.
+    answer = asyncio.create_task(reader.read(4096))
     try:
-        writer.write(head.encode())
-        for chunk in body_chunks:
-            try:
+        try:
+            writer.write(head.encode())
+            await writer.drain()
+            for chunk in body_chunks:
+                if answer.done():
+                    break
                 writer.write(chunk)
                 await writer.drain()
-            except (ConnectionError, OSError):
-                break
-        line = await asyncio.wait_for(reader.readline(), 10)
-        return int(line.split()[1]) if line.startswith(b"HTTP/") else None
+        except (ConnectionError, OSError):
+            pass  # the server answered early and closed; read what it said
+        raw = await asyncio.wait_for(answer, 10)
+        line = raw.split(b"\r\n", 1)[0]
+        status = int(line.split()[1]) if line.startswith(b"HTTP/") else None
+        return status, raw.split(b"\r\n\r\n", 1)[-1][:160].decode(errors="replace")
+    except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+        return None, repr(e)
     finally:
         writer.close()
 
@@ -1089,23 +1099,31 @@ async def raw_status(base, head: str, body_chunks) -> int | None:
 async def check_body_limit(client, name, base, headers=None):
     """#1673 — `max_body_bytes` (256 KiB) caps chunked bodies and QUERY.
 
-    The chunked body is valid JSON, so without the cap the ViewSet reads
-    it and answers 400 on the long name, not 413.
+    The chunked bodies are valid JSON, so without the cap the handler
+    reads them whole: the ViewSet then answers 400 on the long name, the
+    payment 201.
     """
     big = json.dumps({"sku": f"BIG-{RUN_ID}", "name": "x" * 400_000,
                       "blurb": None, "price_cents": 1, "active": False}).encode()
     host = host_of(base, headers)
     chunked = [f"{len(big[i:i + 16_384]):x}\r\n".encode() + big[i:i + 16_384] + b"\r\n"
                for i in range(0, len(big), 16_384)] + [b"0\r\n\r\n"]
-    st = await raw_status(base, f"POST /api/v1/products HTTP/1.1\r\nHost: {host}\r\n"
-                          "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n"
-                          "Connection: close\r\n\r\n", chunked)
+
+    def post(path):
+        return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
+                "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+
+    st, body = await raw_status(base, post("/api/v1/payments"), chunked)
     REPORT.add("chunked body over max_body_bytes is 413", "#1673",
-               verdict(st == 413), f"{st}", name)
-    q = await raw_status(base, f"QUERY /api/v1/products HTTP/1.1\r\nHost: {host}\r\n"
-                         f"Content-Type: application/json\r\nContent-Length: {len(big)}\r\n"
-                         "Connection: close\r\n\r\n", [big])
-    REPORT.add("QUERY body over max_body_bytes is 413", "#1673", verdict(q == 413), f"{q}", name)
+               verdict(st == 413), f"payment (Json extractor): {st} {body[:80]}", name)
+    st, body = await raw_status(base, post("/api/v1/products"), chunked)
+    REPORT.add("chunked body over max_body_bytes is 413 on a ViewSet", "#1673",
+               verdict(st == 413), f"{st} {body[:100]}", name)
+    q, body = await raw_status(base, f"QUERY /api/v1/products HTTP/1.1\r\nHost: {host}\r\n"
+                               f"Content-Type: application/json\r\nContent-Length: {len(big)}\r\n"
+                               "Connection: close\r\n\r\n", [big])
+    REPORT.add("QUERY body over max_body_bytes is 413", "#1673", verdict(q == 413),
+               f"{q} {body[:80]}", name)
 
 
 # ------------------------------------------------------------- #1675
@@ -1700,7 +1718,8 @@ async def check_admin_global_limit(client):
         return
     k = await admin_login(client, base, *ADMIN_USER, ip=fresh_ip())
     REPORT.add("admin login: global limit", "#1609",
-               verdict(n <= 31 and is_refusal(k)),
+               # A token bucket refills a little while the burst runs.
+               verdict(n <= 36 and is_refusal(k)),
                f"refused at attempt {n}; a fresh IP with the right password got {k.status_code}",
                name)
 
@@ -1763,25 +1782,33 @@ async def check_lock_duration_setting(client):
 
 
 async def check_hash_queue_bounded(client):
-    """#1732 — a full hash queue answers 503, the same for any user."""
+    """#1732 — a full hash queue answers 503, the same for any user.
+
+    Spread over eight tenants: each tenant pool has 6 connections, so
+    one tenant alone cannot keep every hash slot (one per CPU) busy.
+    """
     name, base = EDGE_SAAS
-    host = tenant_host(6)
+    burst = httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=200))
 
-    async def one(user, password):
-        return await jwt_login(client, base, host, user, password, ip=fresh_ip(), extra=TLS)
+    async def one(host, user, password):
+        return await burst.post(f"{base}/api/auth/login", headers={
+            "Host": host, "X-Forwarded-For": fresh_ip(), **TLS},
+            json={"username": user, "password": secret(password)})
 
-    tasks = [one("jwtuser", pw("jwtuser")) for _ in range(30)]
-    tasks += [one(f"nobody-{RUN_ID}-{i}", "x") for i in range(30)]
+    tasks = [one(tenant_host(6), "jwtuser", pw("jwtuser")) for _ in range(40)]
+    tasks += [one(tenant_host(1 + i % 8), f"nobody-{RUN_ID}-{i}", "x") for i in range(120)]
     res = await asyncio.gather(*tasks, return_exceptions=True)
-    known = [r for r in res[:30] if not isinstance(r, Exception)]
-    unknown = [r for r in res[30:] if not isinstance(r, Exception)]
+    await burst.aclose()
+    known = [r for r in res[:40] if not isinstance(r, Exception)]
+    unknown = [r for r in res[40:] if not isinstance(r, Exception)]
     busy_k = [r for r in known if r.status_code == 503 and r.headers.get("retry-after")]
     busy_u = [r for r in unknown if r.status_code == 503 and r.headers.get("retry-after")]
-    other5 = [r.status_code for r in known + unknown if r.status_code >= 500 and r.status_code != 503]
+    other5 = sorted({r.status_code for r in known + unknown
+                     if r.status_code >= 500 and r.status_code != 503})
     REPORT.add("busy hash queue answers 503 + Retry-After", "#1732",
                verdict(bool(busy_k) and bool(busy_u) and not other5),
-               f"503s: known {len(busy_k)}/30, unknown {len(busy_u)}/30; other 5xx {other5}",
-               name)
+               f"503s: known {len(busy_k)}/40, unknown {len(busy_u)}/120; other 5xx {other5}; "
+               f"errors {sum(isinstance(r, Exception) for r in res)}", name)
     if busy_k and busy_u:
         REPORT.add("busy 503 is the same for known and unknown users", "#1732",
                    verdict(busy_k[0].text == busy_u[0].text), busy_k[0].text[:100], name)

@@ -453,6 +453,8 @@ services:
   web-saas-pg-edge:
     <<: *app-common
     image: rustango-soak/saas:postgres
+    # Two CPUs, so two hash slots: a login burst fills them (#1732).
+    cpus: "2"
     depends_on:
       bootstrap-saas-pg: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
