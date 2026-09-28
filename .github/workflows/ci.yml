@@ -1033,6 +1033,10 @@ jobs:
             --test orm_json_dates \
             --test orm_writes \
             --test orm_delta
+      - run: >-
+          cargo test -p rustango --no-default-features
+          --features sqlite,tenancy,admin-sso,testkit
+          --test sso_link_tenancy_sqlite_live --test sso_link_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
@@ -1218,6 +1222,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
