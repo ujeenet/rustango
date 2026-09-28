@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SQLite NULLs decode as `null`, not `0` (#1766)
+
+On SQLite a NULL cell came back as `0` / `false` / `""` in ViewSet JSON,
+the admin form and `values_dict`; it is `null` now, as on PG and MySQL.
+
 ### Fixed — admin create of users, secrets and timestamps (#1763, #1764)
 
 The admin can create and edit tenant and bare-admin users: `password_hash`
