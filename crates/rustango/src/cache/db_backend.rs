@@ -24,6 +24,10 @@
 //! - MySQL:    `cache_key VARCHAR(255) PRIMARY KEY, value LONGTEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
 //! - SQLite:   `cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL DEFAULT 0`
 //!
+//! A key longer than 255 bytes is stored as its first 190 bytes plus
+//! `#` and its SHA-256, so it fits MySQL's column and stays unique. A
+//! shorter key that already ends that way is hashed too.
+//!
 //! `expires` holds Unix **milliseconds**; `0` means the entry never
 //! expires. An entry is expired once now is *past* `expires`, not once
 //! it reaches it — the same rule as [`super::InMemoryCache`] and
@@ -45,6 +49,51 @@ use async_trait::async_trait;
 use super::{Cache, CacheError};
 use crate::core::SqlValue;
 use crate::sql::{raw_execute_pool, raw_query_pool, Pool};
+
+/// Longest key stored as-is: MySQL's `VARCHAR(255)` column.
+const MAX_RAW_KEY_BYTES: usize = 255;
+
+/// Bytes of a long key kept ahead of its hash, so prefix deletes still reach it.
+const HASHED_HEAD_BYTES: usize = MAX_RAW_KEY_BYTES - 1 - 64;
+
+/// The `cache_key` column value: the key itself, or `{head}#{sha256 hex}`
+/// when it is longer than [`MAX_RAW_KEY_BYTES`] or already ends like a hash,
+/// so a raw key never equals a hashed one.
+struct StoredKey(String);
+
+impl StoredKey {
+    fn new(key: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        if key.len() <= MAX_RAW_KEY_BYTES && !ends_like_hash(key) {
+            return Self(key.to_owned());
+        }
+        let digest = crate::hex::hex_encode(&Sha256::digest(key.as_bytes()));
+        Self(format!("{}#{digest}", head(key)))
+    }
+
+    fn into_value(self) -> SqlValue {
+        SqlValue::String(self.0)
+    }
+}
+
+/// Whether `key` ends in `#` plus 64 lowercase hex, the hashed form's tail.
+fn ends_like_hash(key: &str) -> bool {
+    let b = key.as_bytes();
+    b.len() >= 65
+        && b[b.len() - 65] == b'#'
+        && b[b.len() - 64..]
+            .iter()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+}
+
+/// `s` cut to at most [`HASHED_HEAD_BYTES`], on a char boundary.
+fn head(s: &str) -> &str {
+    let mut end = HASHED_HEAD_BYTES.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// Cache stored in a SQL table. Holds a [`Pool`] and a table name;
 /// every operation runs one statement written for that dialect.
@@ -174,7 +223,7 @@ impl Cache for DatabaseCache {
         let p1 = dialect.placeholder(1);
         let sql = format!("SELECT value, expires FROM {table} WHERE cache_key = {p1} LIMIT 1");
         let rows: Vec<(String, i64)> =
-            raw_query_pool(&sql, vec![SqlValue::String(key.to_owned())], &self.pool)
+            raw_query_pool(&sql, vec![StoredKey::new(key).into_value()], &self.pool)
                 .await
                 .map_err(|e| CacheError::Connection(format!("get: {e}")))?;
         let Some((value, expires)) = rows.into_iter().next() else {
@@ -214,7 +263,7 @@ impl Cache for DatabaseCache {
             &self.pool,
             &sql,
             vec![
-                SqlValue::String(key.to_owned()),
+                StoredKey::new(key).into_value(),
                 SqlValue::String(value.to_owned()),
                 SqlValue::I64(expires),
             ],
@@ -262,7 +311,7 @@ impl Cache for DatabaseCache {
                      VALUES ({p1}, {p2}, {p3})"
                 ),
                 vec![
-                    SqlValue::String(key.to_owned()),
+                    StoredKey::new(key).into_value(),
                     SqlValue::String(value.to_owned()),
                     SqlValue::I64(expires),
                 ],
@@ -281,7 +330,7 @@ impl Cache for DatabaseCache {
                 vec![
                     SqlValue::String(value.to_owned()),
                     SqlValue::I64(expires),
-                    SqlValue::String(key.to_owned()),
+                    StoredKey::new(key).into_value(),
                     SqlValue::I64(now),
                 ],
             )
@@ -305,7 +354,7 @@ impl Cache for DatabaseCache {
             ),
             // Textual placeholder order; see the note above.
             vec![
-                SqlValue::String(key.to_owned()),
+                StoredKey::new(key).into_value(),
                 SqlValue::String(value.to_owned()),
                 SqlValue::I64(expires),
                 SqlValue::I64(now),
@@ -321,7 +370,7 @@ impl Cache for DatabaseCache {
         let table = dialect.quote_ident(&self.table);
         let p1 = dialect.placeholder(1);
         let sql = format!("DELETE FROM {table} WHERE cache_key = {p1}");
-        raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(key.to_owned())])
+        raw_execute_pool(&self.pool, &sql, vec![StoredKey::new(key).into_value()])
             .await
             .map_err(|e| CacheError::Connection(format!("delete: {e}")))?;
         Ok(())
@@ -363,7 +412,9 @@ impl Cache for DatabaseCache {
         let p = dialect.placeholder(1);
         // Use the crate-wide escaper so the escape character cannot
         // drift between the cache and the ORM's LIKE lookups.
-        let pattern = format!("{}%", crate::core::escape_like(prefix));
+        // A hashed key keeps only its head, so a longer prefix matches on that
+        // head: this may drop extra entries, never fewer.
+        let pattern = format!("{}%", crate::core::escape_like(head(prefix)));
         let sql = format!(
             "DELETE FROM {table} WHERE cache_key LIKE {p}{}",
             crate::core::LIKE_ESCAPE_CLAUSE
@@ -383,6 +434,32 @@ mod tests {
     #[test]
     fn expires_for_zero_when_no_ttl() {
         assert_eq!(DatabaseCache::expires_for(None), 0);
+    }
+
+    #[test]
+    fn short_keys_are_stored_unchanged() {
+        let k = "x".repeat(MAX_RAW_KEY_BYTES);
+        assert_eq!(StoredKey::new(&k).0, k);
+    }
+
+    #[test]
+    fn long_keys_fit_the_column_and_stay_distinct() {
+        // Multi-byte chars around the cut must not split a char.
+        let base = "é".repeat(200);
+        let a = StoredKey::new(&format!("{base}a")).0;
+        let b = StoredKey::new(&format!("{base}b")).0;
+        assert!(a.len() <= MAX_RAW_KEY_BYTES, "{}", a.len());
+        assert_ne!(a, b);
+        assert!(a.starts_with(head(&base)));
+    }
+
+    #[test]
+    fn a_raw_key_never_equals_a_hashed_one() {
+        let long = "x".repeat(300);
+        let hashed = StoredKey::new(&long).0;
+        assert!(hashed.len() <= MAX_RAW_KEY_BYTES);
+        // Writing the hashed form as a raw key must not reach the long key's row.
+        assert_ne!(StoredKey::new(&hashed).0, hashed);
     }
 
     #[test]
