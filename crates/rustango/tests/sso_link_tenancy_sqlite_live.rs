@@ -89,6 +89,10 @@ struct Env {
 /// permission read fails).
 async fn boot_with(permissions: bool) -> Env {
     std::env::set_var("RUSTANGO_SECRET_KEY", "sso-link-test-key");
+    // Process-global resolver state from an earlier test in this binary.
+    rustango::testkit::reset_org_cache();
+    rustango::testkit::reset_host_generation();
+    rustango::testkit::reset_registry_breaker();
     let dir = tempfile::tempdir().unwrap();
     let reg_url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
     let pools = Arc::new(TenantPools::<sqlx::Sqlite>::new(

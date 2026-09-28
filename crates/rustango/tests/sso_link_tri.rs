@@ -50,20 +50,11 @@ async fn setup(pool: &Pool) {
     rustango::sso::link::ensure_table(pool)
         .await
         .expect("links table");
-    // Children first: the permission tables reference `rustango_users`.
-    for t in [
-        "rustango_user_permissions",
-        "rustango_user_roles",
-        "rustango_role_permissions",
-        "rustango_roles",
-        "rustango_permissions",
-    ] {
-        drop_table(pool, t).await;
-    }
-    rustango::testkit::matrix::fresh_table::<User>(pool).await;
-    rustango::tenancy::permissions::ensure_tables_pool(pool)
+    // `rustango_users` and the permission tables are shared with other
+    // suites (and FK targets): create what is missing, never drop them.
+    rustango::testkit::migrate_framework(pool)
         .await
-        .expect("permission tables");
+        .expect("framework tables");
 }
 
 fn profile(sub: &str, email: &str) -> NormalizedUser {
@@ -194,16 +185,21 @@ async fn subject_match_is_exact(pool: &Pool) {
 
 async fn email_match_is_exact(pool: &Pool) {
     let key = app_key();
-    let jose = user(pool, "jose", "Jose@Example.com").await;
+    // Unique per run: the shared user table keeps earlier runs' rows.
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let jose = user(pool, &format!("jose{n}"), &format!("Jose{n}@Example.com")).await;
     // ASCII case is ignored, whatever the stored case.
-    let p = profile("g-jose", "jose@example.com");
+    let p = profile("g-jose", &format!("jose{n}@example.com"));
     assert_eq!(
         find_or_provision_member(pool, &key, true, &p, false).await,
         Ok(MemberSignIn::Member(jose))
     );
     // An accent is not: never a link to `jose`, never a second account the
     // database would call the same.
-    let p = profile("g-accent", "josé@example.com");
+    let p = profile("g-accent", &format!("josé{n}@example.com"));
     let got = find_or_provision_member(pool, &key, true, &p, true).await;
     if pool.dialect().name() == "mysql" {
         assert_eq!(got, Ok(MemberSignIn::NotLinked), "ai_ci collides");
