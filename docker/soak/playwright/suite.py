@@ -907,7 +907,8 @@ def check_inline_parent(rec, browser, state, site, surface):
                 f.locator(f"input[name='{prefix}-id']").evaluate(f"e => e.value = '{lines[1]}'")
             f.locator(f"[name='{prefix}-quantity']").fill("77")
         resp = submit(page, form, button="button[name=_save]", fill=fill)
-        page.goto(site.url(f"{site.admin}/commerce_order_line/{lines[1]}"))
+        # Sabotage posts order a's own line, so the probe must see that change.
+        page.goto(site.url(f"{site.admin}/commerce_order_line/{lines[0 if SABOTAGE else 1]}"))
         body = page.content()
         moved_or_changed = "77" in re.sub(r"<[^>]+>", " ", body).split()
         rec.verdict(name, iss, not moved_or_changed,
@@ -1159,36 +1160,40 @@ def saas_suite(rec, browser):
 
     # Change password and logout, as a user of their own.
     fields = ("current_password", "new_password", "confirm_password")
-    cctx, _, cur = login_either(browser, tenant, csrf_user, [csrf_pw, csrf_pw + "-2"])
-    cst = state_of(cctx)
-    cctx.close()
-    new_pw = csrf_pw + "-2" if cur == csrf_pw else csrf_pw
 
-    def pw_landed(p, t):
-        # Probe with the old password: a miss with the new one would count
-        # toward the lock, and a success here clears the counter.
-        st, _, signed, _, c = attempt_login(browser, tenant, csrf_user, cur, xff(8))
-        c.close()
-        return not signed
-    csrf_matrix(rec, browser, cst, ta, "change password", "#1713", tenant.url("/__change-password"),
-                "form:has(input[name=new_password])",
-                fill=lambda f, t: (f.locator("[name=current_password]").fill(cur),
-                                   f.locator("[name=new_password]").fill(new_pw),
-                                   f.locator("[name=confirm_password]").fill(new_pw)),
-                effect=pw_landed, ok=lambda r, p: r.status < 400 and
-                attempt_login(browser, tenant, csrf_user, new_pw, xff(8))[2])
-    if new_pw != csrf_pw and not SABOTAGE:
-        c, p, _ = login(browser, tenant, csrf_user, new_pw)
-        change_password(p, tenant, "/__change-password", fields, new_pw, csrf_pw)
-        c.close()
-    cctx, _, _ = login_either(browser, tenant, csrf_user, [csrf_pw, csrf_pw + "-2"])
-    cst = state_of(cctx)
-    cctx.close()
-    csrf_matrix(rec, browser, cst, ta, "logout", "#1713", tenant.url("/__admin"),
-                "form[action$='/__logout']",
-                effect=lambda p, t: not signed_in_view(p.context.browser, state_of(p.context),
-                                                       tenant)[0],
-                ok=lambda r, p: r.status in (302, 303) and not has_session(p.context, tenant))
+    def own_user_writes():
+        cctx, _, cur = login_either(browser, tenant, csrf_user, [csrf_pw, csrf_pw + "-2"])
+        cst = state_of(cctx)
+        cctx.close()
+        new_pw = csrf_pw + "-2" if cur == csrf_pw else csrf_pw
+
+        def pw_landed(p, t):
+            # Probe with the old password: a miss with the new one would count
+            # toward the lock, and a success here clears the counter.
+            st, _, signed, _, c = attempt_login(browser, tenant, csrf_user, cur, xff(8))
+            c.close()
+            return not signed
+        csrf_matrix(rec, browser, cst, ta, "change password", "#1713", tenant.url("/__change-password"),
+                    "form:has(input[name=new_password])",
+                    fill=lambda f, t: (f.locator("[name=current_password]").fill(cur),
+                                       f.locator("[name=new_password]").fill(new_pw),
+                                       f.locator("[name=confirm_password]").fill(new_pw)),
+                    effect=pw_landed, ok=lambda r, p: r.status < 400 and
+                    attempt_login(browser, tenant, csrf_user, new_pw, xff(8))[2])
+        if new_pw != csrf_pw and not SABOTAGE:
+            c, p, _ = login(browser, tenant, csrf_user, new_pw)
+            change_password(p, tenant, "/__change-password", fields, new_pw, csrf_pw)
+            c.close()
+        cctx, _, _ = login_either(browser, tenant, csrf_user, [csrf_pw, csrf_pw + "-2"])
+        cst = state_of(cctx)
+        cctx.close()
+        csrf_matrix(rec, browser, cst, ta, "logout", "#1713", tenant.url("/__admin"),
+                    "form[action$='/__logout']",
+                    effect=lambda p, t: not signed_in_view(p.context.browser, state_of(p.context),
+                                                           tenant)[0],
+                    ok=lambda r, p: r.status in (302, 303) and not has_session(p.context, tenant))
+
+    section(rec, f"{ta} change password and logout", own_user_writes)
 
     ectx = new_ctx(browser, sup)
     epage = page_with_dialogs(ectx)
@@ -1408,7 +1413,13 @@ def console_sso(rec, browser, ops, console, tenant, oc):
                 f"form[action$='/sso-shared/{pid}/email-link']", effect=toggled_off,
                 ok=lambda r, p: r.status in (302, 303) and toggled_off(p, None))
     ctx = new_ctx(browser, ops)
-    page = ctx.new_page()
+    page = page_with_dialogs(ctx)
+    if SABOTAGE:
+        # An edit that recreates the row: a new id, and the old links orphaned.
+        page.goto(console.url("/sso-shared"))
+        submit(page, pin(page, f"form[action$='/sso-shared/{pid}/delete']"))
+        page.goto(console.url("/sso-shared"))
+        submit(page, pin(page, "form[action$='/sso-shared']"), fill=lambda f: fill(f, None))
     page.goto(console.url("/sso-shared"))
     still = page.locator(f"form[action$='/sso-shared/{pid}/email-link']").count() > 0
     rec.verdict(f"{oc} email-link toggle keeps the provider id", iss, still,
@@ -1423,6 +1434,16 @@ def console_sso(rec, browser, ops, console, tenant, oc):
     csrf_matrix(rec, browser, ops, oc, "delete shared SSO provider", iss, console.url("/sso-shared"),
                 f"form[action$='/sso-shared/{pid}/delete']",
                 effect=lambda p, t: not exists(p, None), ok=lambda r, p: not exists(p, None))
+    # Whatever this run left behind (tampered adds, a sabotage re-add).
+    ctx = new_ctx(browser, ops)
+    page = page_with_dialogs(ctx)
+    page.goto(console.url("/sso-shared"))
+    for a in page.locator("form[action*='/sso-shared/'][action$='/delete']").evaluate_all(
+            f"fs => fs.filter(f => f.closest('tr').innerText.includes('pw-shared-{RUN}'))"
+            ".map(f => f.getAttribute('action'))"):
+        page.goto(console.url("/sso-shared"))
+        submit(page, pin(page, f"form[action='{a}']"))
+    ctx.close()
 
 
 def single_suite(rec, browser):
@@ -1433,23 +1454,25 @@ def single_suite(rec, browser):
     page = ctx.new_page()
     r = page.goto(site.url("/__admin/login"))
     has_login = r.status == 200 and page.locator("input[name=password]").count() > 0
-    cookie_name = None
     ctx.close()
     if not has_login:
         rec.add("admin login page", "#1711", "NOT-COVERED",
                 f"/__admin/login -> {r.status}: the admin is mounted without session auth, so it "
                 "has no login, CSRF or limits")
         return
-    sctx, spage, _ = login_any(browser, site, "soakadmin", ADMIN_PW)
-    sup = state_of(sctx)
+    # `soakadmin` is the driver's too (its checks change passwords), so it
+    # only mints this run's users; everything else runs as our own.
+    sctx, spage, _ = login(browser, site, "soakadmin", ADMIN_PW)
     tag = RUN
-    totp_user, lock_user, chg_user, csrf_user = (f"pw-totp-{tag}", f"pw-lock-{tag}",
-                                                 f"pw-chg-{tag}", f"pw-csrf-{tag}")
-    for u in (totp_user, lock_user, chg_user, csrf_user):
+    sup_user, totp_user, lock_user, chg_user, csrf_user = (
+        f"pw-sup-{tag}", f"pw-totp-{tag}", f"pw-lock-{tag}", f"pw-chg-{tag}", f"pw-csrf-{tag}")
+    for u in (sup_user, totp_user, lock_user, chg_user, csrf_user):
         create_admin_user(spage, site, u, f"{u}-pw")
+    sctx.close()
+    sctx, spage, _ = login(browser, site, sup_user, f"{sup_user}-pw")
+    sup = state_of(sctx)
     admin_create(spage, site, "commerce_staff", {"name": PAYLOAD[:110]})
     sctx.close()
-    del cookie_name
 
     check_headers(rec, browser, None, ad, [("login page", site.url("/__admin/login"))])
     check_headers(rec, browser, sup, ad, [("index", site.url("/__admin")),
@@ -1503,11 +1526,7 @@ def single_suite(rec, browser):
             "the single-tenant app is built without admin-sso")
     budget_pause()
     check_login_limits(rec, browser, site, ad, lock_user, f"{lock_user}-pw",
-                       ("soakadmin", ADMIN_PW))
-
-
-def login_any(browser, site, user, pw):
-    return login(browser, site, user, pw)
+                       (sup_user, f"{sup_user}-pw"))
 
 
 def budget_pause():
