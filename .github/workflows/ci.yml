@@ -928,6 +928,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test m2m_through_model
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows --test password_reset_confirm
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,cache,config --test file_cache_backend
+      # No `tenancy`: the default page cache layer still caches (#1674).
+      - run: cargo test -p rustango --no-default-features --features sqlite,cache-page --test cache_page
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test factories
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,config,email --test file_email_backend
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,cache,sessions --test file_backed_sessions
@@ -1279,6 +1281,8 @@ jobs:
       # These read `MYSQL_TEST_URL` but no job set it for them, so their
       # MySQL arm never ran (#1678).
       - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_delete_prefix_live
+      # VARCHAR(255) truncated long keys only on MySQL (#1674).
+      - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_long_keys_tri
       - run: cargo test -p rustango --features mysql --test like_escape_live
       - run: cargo test -p rustango --features mysql --test migrate_progress_live
       - run: cargo test -p rustango --features mysql,tenancy --test preflight_live

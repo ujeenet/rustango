@@ -262,7 +262,7 @@ Dos cosas que conviene saber:
 | | |
 |---|---|
 | **Es un namespace, no una frontera** | Todo sigue viviendo en un solo backend, y el código que tenga la caché *sin acotar* puede leer cualquier clave. La idea es que el camino ergonómico sea el correcto. |
-| **`clear()` necesita enumerar claves** | Va por `Cache::delete_prefix`, y todos los backends integrados lo implementan: `InMemoryCache` filtra su mapa, `DatabaseCache` lanza `DELETE … LIKE 'prefix%'` con `%`, `_` y el carácter de escape escapados, `RedisCache` usa `SCAN`+`MATCH` con los metacaracteres de glob escapados, y `FileCache` recorre su directorio y compara la clave guardada en cada entrada. Un backend que no lo implemente ahora devuelve un **error** en lugar de recurrir a un fallback. |
+| **`clear()` necesita enumerar claves** | Va por `Cache::delete_prefix`, y todos los backends integrados lo implementan: `InMemoryCache` filtra su mapa, `DatabaseCache` lanza `DELETE … LIKE 'prefix%'` con `%`, `_` y el carácter de escape escapados, `RedisCache` usa `SCAN`+`MATCH` con los metacaracteres de glob escapados, y `FileCache` recorre su directorio y compara la clave guardada en cada entrada. Un backend que no lo implemente ahora devuelve un **error** en lugar de recurrir a un fallback. `DatabaseCache` guarda las claves de más de 255 bytes con hash y compara un prefijo de más de 190 bytes solo por sus primeros 190 bytes, así que puede borrar claves de más, nunca de menos. |
 
 El `Cache::clear()` sin acotar sigue siendo global al proceso, así que usa la
 vista acotada siempre que el cambio de un solo tenant sea lo que disparó la
