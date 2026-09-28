@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `DatabaseCache` keys compare exactly on MySQL: `user:1` no longer reads `User:1`, nor `café` `cafe`.
   Prefix deletes are exact-case on MySQL and SQLite too (#1757).
+- Admin TOTP re-enroll needs a current code from the confirmed device, so a stolen session cannot replace the factor; a failed start now shows an error (#1776).
 
 ### Added
 

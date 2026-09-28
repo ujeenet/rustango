@@ -156,6 +156,11 @@ untouched.
 `ensure_table` does not change an existing table; run once per cache table:
 `ALTER TABLE rustango_cache MODIFY cache_key VARBINARY(255) NOT NULL;`
 
+### TOTP re-enroll asks for a current code
+
+`POST /account/totp` with `reset=1` now needs `totp_code` from the current device (#1776).
+Custom `totp_enroll.html` overrides must add that field to the re-enroll form.
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token

@@ -546,8 +546,8 @@ fn render_change_password_form(
 struct TotpEnrollInput {
     #[serde(default)]
     totp_code: Option<String>,
-    /// Set to `reset=1` to re-enroll an already-enabled account: wipes
-    /// the current device and shows a fresh setup.
+    /// Set to `reset=1` to re-enroll an already-enabled account, with
+    /// `totp_code` from the current device (#1776).
     #[serde(default)]
     reset: Option<String>,
 }
@@ -636,10 +636,21 @@ async fn totp_enroll_submit(
     };
     let _ = super::totp_store::ensure_table(&state.pool).await;
 
-    // Re-enroll: wipe + regenerate, then show the fresh setup.
+    // Re-enroll: a current code first, then the fresh setup.
     if form.reset.is_some() {
         let s = crate::totp::TotpSecret::generate();
-        let _ = super::totp_store::start_enrollment(&state.pool, session.user_id, &s).await;
+        let code = form.totp_code.as_deref().unwrap_or("").trim();
+        let refused =
+            match super::totp_store::start_reenrollment(&state.pool, session.user_id, code, &s)
+                .await
+            {
+                Ok(true) => None,
+                Ok(false) => Some("Enter a current code from your authenticator to re-enroll."),
+                Err(_) => Some("Could not start re-enrollment — please try again."),
+            };
+        if let Some(msg) = refused {
+            return Html(render_totp_enroll(&state, true, "", "", Some(msg), None)).into_response();
+        }
         let otpauth = enroll_otpauth(&state, &session.username, &s);
         return Html(render_totp_enroll(
             &state,

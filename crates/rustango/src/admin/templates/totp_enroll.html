@@ -28,6 +28,11 @@
          this replaces your current device.</p>
       <form method="post" action="{{ action }}">
         {{ csrf_input | safe }}
+        <label>
+          Current code
+          <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
+                 pattern="[0-9]*" maxlength="8" placeholder="123456" required>
+        </label>
         <button type="submit" name="reset" value="1">Re-enroll</button>
       </form>
     {% else %}
