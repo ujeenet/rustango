@@ -167,7 +167,7 @@ mod sqlite_live {
     async fn annotate_sum_totals_child_column() {
         let pool = make_pool().await;
         seed(&pool).await;
-        let by_name: HashMap<String, i64> = Author::objects()
+        let by_name: HashMap<String, SqlValue> = Author::objects()
             .annotate_sum("books", "pages")
             .fetch(&pool)
             .await
@@ -176,12 +176,14 @@ mod sqlite_live {
             .map(|r| {
                 (
                     get_string(r, "name").to_owned(),
-                    get_i64(r, "books_sum_pages"),
+                    r.get("books_sum_pages").cloned().unwrap_or(SqlValue::Null),
                 )
             })
             .collect();
-        assert_eq!(by_name.get("One"), Some(&100));
-        assert_eq!(by_name.get("Three"), Some(&60)); // 10 + 20 + 30
+        assert_eq!(by_name.get("One"), Some(&SqlValue::I64(100)));
+        assert_eq!(by_name.get("Three"), Some(&SqlValue::I64(60))); // 10 + 20 + 30
+        // SUM over no rows is NULL, as on PG and MySQL (#1766).
+        assert_eq!(by_name.get("Zero"), Some(&SqlValue::Null));
     }
 
     #[tokio::test]
