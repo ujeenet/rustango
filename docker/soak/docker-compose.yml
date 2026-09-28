@@ -437,6 +437,22 @@ services:
       SOAK_APEX: soak.localhost
     volumes: [soak-results:/results]
 
+  # Browser checks for the admin, tenant admin and console fixes. Writes
+  # playwright.json (driver.py's check shape) and failure screenshots.
+  playwright:
+    profiles: [driver]
+    image: rustango-soak/playwright:latest
+    build:
+      context: ./playwright
+    depends_on:
+      web-single-pg: {condition: service_started}
+      web-saas-pg: {condition: service_started}
+    environment:
+      SOAK_APEX: soak.localhost
+      SOAK_IDP_PUBLIC: "localhost:${SOAK_IDP_PORT:-19000}"
+      PW_SABOTAGE: "${PW_SABOTAGE:-0}"
+    volumes: [soak-results:/results]
+
 volumes:
   pg-data:
   my-data:
