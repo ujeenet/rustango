@@ -66,6 +66,7 @@ struct Answer {
     status: StatusCode,
     retry_after: Option<String>,
     session: bool,
+    cookie: Option<String>,
     body: Vec<u8>,
 }
 
@@ -91,11 +92,14 @@ async fn login_code(app: &axum::Router, ip: &str, user: &str, pass: &str, code: 
         .headers()
         .get(header::RETRY_AFTER)
         .map(|v| v.to_str().unwrap().to_owned());
-    let session = resp
+    let cookie = resp
         .headers()
         .get_all(header::SET_COOKIE)
         .iter()
-        .any(|v| v.to_str().unwrap_or("").contains("rustango_admin_session="));
+        .filter_map(|v| v.to_str().ok())
+        .find(|s| s.starts_with("rustango_admin_session="))
+        .map(|s| s.split(';').next().unwrap_or("").to_owned());
+    let session = cookie.is_some();
     let body = to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap()
@@ -104,6 +108,7 @@ async fn login_code(app: &axum::Router, ip: &str, user: &str, pass: &str, code: 
         status,
         retry_after,
         session,
+        cookie,
         body,
     }
 }
@@ -293,5 +298,42 @@ async fn the_totp_prompt_spends_no_limit_tokens() {
         let a = login(&app, "10.69.0.1", "thr_gina", "right-pass").await;
         assert_eq!(a.status, StatusCode::OK, "prompt {n} must not be throttled");
         assert!(!a.session, "no session without the code");
+    }
+}
+
+/// #1776 — a re-enroll without a code is no guess, so it spends no
+/// per-IP tokens.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn a_codeless_reenroll_spends_no_limit_tokens() {
+    use rustango::admin::totp_store;
+    let _g = SUITE.lock().await;
+    let (app, pool) = app_with(&[]).await;
+    // Only a superuser reaches the account pages.
+    let mut u = AdminUser::new_with_password("thr_hank", "right-pass", true).unwrap();
+    u.insert_pool(&pool).await.unwrap();
+    let id = *u.id.get().unwrap();
+    let secret = rustango::totp::TotpSecret::generate();
+    totp_store::start_enrollment(&pool, id, &secret)
+        .await
+        .unwrap();
+    totp_store::confirm(&pool, id).await.unwrap();
+    let code = rustango::totp::generate(&secret, 30, 6);
+    let a = login_code(&app, "10.70.0.1", "thr_hank", "right-pass", &code).await;
+    let session = a.cookie.expect("session");
+
+    // Twice the per-IP limit of 3, all from one address.
+    for n in 0..6 {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/account/totp")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::COOKIE, format!("rustango_csrf={CSRF}; {session}"))
+            .body(Body::from(format!("_csrf={CSRF}&reset=1")))
+            .unwrap();
+        let addr: SocketAddr = "10.70.0.2:4000".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        let r = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "reset {n} was throttled");
     }
 }
