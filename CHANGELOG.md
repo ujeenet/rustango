@@ -15,6 +15,8 @@ code must be for a later one. New `totp::matched_step` /
 `admin::totp_store::redeem_code` / `confirm_with_code` accept a code
 once. Account lockout counts failures in a fixed window from the first
 failure; a failure no longer extends it.
+`migrate` now creates `rustango_admin_totp`, so a fresh install with
+`totp` no longer refuses every admin login before enrollment.
 
 ### Security — page cache keys on the resolved tenant; long DB cache keys hashed (#1674)
 
@@ -52,9 +54,9 @@ SSO logins (bare admin, tenant admin, member) now sign in the user linked
 to the IdP's `(provider, sub)` in the new `rustango_sso_links` table. A
 matching email links a first-time user only when the provider has the new
 `allow_email_link` (default off), and never a superuser or staff account.
-Links and emails match exactly on every collation. Only superusers add or
-change provider and link rows in the admin; the operator console toggles
-the shared flag in place. `sso::resolve_by_slug` returns
+Links and emails match exactly on every collation. Only superusers write
+provider and link rows in the admin; an editable operator console sets the
+shared flag in place. `sso::resolve_by_slug` returns
 `ResolvedProvider`; `member_auth::find_or_provision_member` takes a
 `ProviderKey` and returns `MemberSignIn`.
 

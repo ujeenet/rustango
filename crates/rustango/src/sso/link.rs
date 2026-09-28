@@ -84,16 +84,17 @@ impl ProviderKey {
 }
 
 /// One `(provider, subject) -> user` link, in the tenant's storage (or the
-/// bare admin's database). Adding or changing a row is superuser-only.
+/// bare admin's database). Adding, changing or deleting a row is
+/// superuser-only, and needs the admin's session auth.
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rustango_sso_links",
-    unique_together = "provider_source, provider_id, issuer, subject_sha256",
+    unique_together = "provider_source, provider_id, key_sha256",
     admin(
         list_display = "provider_source, provider_id, subject, user_id, created_at",
         search_fields = "subject",
         ordering = "user_id",
-        readonly_fields = "created_at",
+        readonly_fields = "key_sha256, created_at",
     )
 )]
 #[allow(dead_code)]
@@ -111,9 +112,10 @@ pub struct SsoLink {
     /// The IdP's stable subject (`sub`, or the provider's user id).
     #[rustango(max_length = 255)]
     pub subject: String,
-    /// Lowercase hex SHA-256 of `subject`: the exact, collation-proof key.
+    /// [`key_sha256`] of `issuer` and `subject`: the exact, collation-proof
+    /// key. Derived; sign-in fills or repairs it, so the admin leaves it empty.
     #[rustango(max_length = 64)]
-    pub subject_sha256: String,
+    pub key_sha256: Option<String>,
     /// Local user id, in the user table [`LinkSource`] names.
     pub user_id: i64,
     #[rustango(auto_now_add)]
@@ -130,17 +132,22 @@ fn superuser_only(_: &axum::http::request::Parts, _: Option<&serde_json::Value>)
 crate::register_admin_object_permission!("rustango_sso_links", "add", superuser_only);
 #[cfg(feature = "admin")]
 crate::register_admin_object_permission!("rustango_sso_links", "change", superuser_only);
+#[cfg(feature = "admin")]
+crate::register_admin_object_permission!("rustango_sso_links", "delete", superuser_only);
 // A provider row can turn on email linking or add a new IdP.
 #[cfg(feature = "admin")]
 crate::register_admin_object_permission!("rustango_sso_providers", "add", superuser_only);
 #[cfg(feature = "admin")]
 crate::register_admin_object_permission!("rustango_sso_providers", "change", superuser_only);
+#[cfg(feature = "admin")]
+crate::register_admin_object_permission!("rustango_sso_providers", "delete", superuser_only);
 
-/// Lowercase hex SHA-256 of `subject`, as stored in [`SsoLink::subject_sha256`].
+/// Lowercase hex SHA-256 of `issuer`, a newline and `subject`, as stored in
+/// [`SsoLink::key_sha256`].
 #[must_use]
-pub fn subject_sha256(subject: &str) -> String {
+pub fn key_sha256(issuer: &str, subject: &str) -> String {
     use sha2::{Digest as _, Sha256};
-    Sha256::digest(subject.as_bytes())
+    Sha256::digest(format!("{issuer}\n{subject}").as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
@@ -158,25 +165,46 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
 }
 
 /// The link for `(key, subject)`, if any. Issuer and subject are compared
-/// exactly here, whatever the column collation.
+/// exactly, whatever the column collation; a missing or stale `key_sha256`
+/// is repaired.
 ///
 /// # Errors
-/// Driver failures, including a missing table.
+/// Driver failures (including a missing table), or two rows for one identity.
 pub async fn linked_user(
     pool: &Pool,
     key: &ProviderKey,
     subject: &str,
-) -> Result<Option<SsoLink>, ExecError> {
-    use crate::sql::FetcherPool as _;
+) -> Result<Option<SsoLink>, String> {
+    use crate::sql::{FetcherPool as _, UpdaterPool as _};
     let rows: Vec<SsoLink> = SsoLink::objects()
         .filter("provider_source", key.source.as_str())
         .filter("provider_id", key.provider_id)
-        .filter("subject_sha256", subject_sha256(subject))
+        .filter("subject", subject.to_owned())
         .fetch(pool)
-        .await?;
-    Ok(rows
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut exact = rows
         .into_iter()
-        .find(|l| l.issuer == key.issuer && l.subject == subject))
+        .filter(|l| l.issuer == key.issuer && l.subject == subject);
+    let Some(mut link) = exact.next() else {
+        return Ok(None);
+    };
+    if exact.next().is_some() {
+        return Err(format!("two links for subject {subject:?}"));
+    }
+    let want = key_sha256(&key.issuer, subject);
+    if link.key_sha256.as_deref() != Some(want.as_str()) {
+        let id = link.id.get().copied().unwrap_or_default();
+        SsoLink::objects()
+            .filter("id", id)
+            .update()
+            .set("key_sha256", want.clone())
+            .execute_pool(pool)
+            .await
+            .map_err(|e| format!("repair key_sha256 of link {id}: {e}"))?;
+        link.key_sha256 = Some(want);
+    }
+    Ok(Some(link))
 }
 
 fn link_row(key: &ProviderKey, subject: &str, user_id: i64) -> SsoLink {
@@ -186,7 +214,7 @@ fn link_row(key: &ProviderKey, subject: &str, user_id: i64) -> SsoLink {
         provider_id: key.provider_id,
         issuer: key.issuer.clone(),
         subject: subject.to_owned(),
-        subject_sha256: subject_sha256(subject),
+        key_sha256: Some(key_sha256(&key.issuer, subject)),
         user_id,
         created_at: Auto::Unset,
     }
@@ -246,11 +274,42 @@ pub trait AccountLookup: Sync {
         &self,
         id: i64,
     ) -> impl std::future::Future<Output = Result<Option<Account>, String>> + Send;
-    /// The account whose email is exactly `email` (already lowercased).
+    /// The account for `email` (already lowercased), matched ASCII-case-insensitively.
     fn by_email(
         &self,
         email: &str,
-    ) -> impl std::future::Future<Output = Result<Option<Account>, String>> + Send;
+    ) -> impl std::future::Future<Output = Result<EmailLookup, String>> + Send;
+}
+
+/// What an email lookup found.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum EmailLookup {
+    Missing,
+    Found(Account),
+    /// The database matched rows (collation) that are not this email, or more
+    /// than one: never link by it, never provision a second account.
+    Collides,
+}
+
+impl EmailLookup {
+    /// Pick the one account whose `email` equals `wanted` ignoring ASCII case.
+    /// `rows` are the database's case-insensitive matches.
+    #[allow(clippy::result_unit_err)]
+    pub fn pick<'a, T>(
+        rows: &'a [T],
+        wanted: &str,
+        email: impl Fn(&T) -> Option<&str>,
+    ) -> Result<Option<&'a T>, ()> {
+        let mut exact = rows
+            .iter()
+            .filter(|r| email(r).is_some_and(|e| e.eq_ignore_ascii_case(wanted)));
+        match (exact.next(), exact.next()) {
+            (Some(one), None) => Ok(Some(one)),
+            (None, _) if rows.is_empty() => Ok(None),
+            _ => Err(()),
+        }
+    }
 }
 
 /// Why an SSO sign-in was refused.
@@ -267,6 +326,8 @@ pub enum LinkRefusal {
     EmailLinkDisabled,
     /// An account matched, but it is privileged.
     Privileged,
+    /// The email collides with another account on this database.
+    EmailCollides,
     /// The account is inactive.
     Inactive,
     /// A storage error.
@@ -285,6 +346,7 @@ impl std::fmt::Display for LinkRefusal {
             Self::Privileged => {
                 write!(f, "no link; email linking refused for a privileged account")
             }
+            Self::EmailCollides => write!(f, "no link; the email collides with another account"),
             Self::Inactive => write!(f, "the account is inactive"),
             Self::Storage(e) => write!(f, "storage: {e}"),
         }
@@ -311,7 +373,10 @@ pub async fn sign_in(
     if subject.is_empty() {
         return Err(LinkRefusal::NoSubject);
     }
-    if let Some(link) = linked_user(pool, key, subject).await.map_err(storage)? {
+    if let Some(link) = linked_user(pool, key, subject)
+        .await
+        .map_err(LinkRefusal::Storage)?
+    {
         match accounts
             .by_id(link.user_id)
             .await
@@ -319,7 +384,7 @@ pub async fn sign_in(
         {
             Some(a) if a.active => return Ok(a.user_id),
             Some(_) => return Err(LinkRefusal::Inactive),
-            // The user is gone: drop the stale link and carry on.
+            // The user is gone (a clean miss, not an error): drop the stale link.
             None => {
                 link.delete_pool(pool).await.map_err(storage)?;
             }
@@ -328,12 +393,14 @@ pub async fn sign_in(
     let email = super::verified_email(profile)
         .map_err(|_| LinkRefusal::Unverified)?
         .to_ascii_lowercase();
-    let Some(found) = accounts
+    let found = match accounts
         .by_email(&email)
         .await
         .map_err(LinkRefusal::Storage)?
-    else {
-        return Err(LinkRefusal::NoAccount(email));
+    {
+        EmailLookup::Found(a) => a,
+        EmailLookup::Missing => return Err(LinkRefusal::NoAccount(email)),
+        EmailLookup::Collides => return Err(LinkRefusal::EmailCollides),
     };
     if !allow_email_link {
         return Err(LinkRefusal::EmailLinkDisabled);
@@ -346,7 +413,10 @@ pub async fn sign_in(
     }
     if let Err(e) = create_link(pool, key, subject, found.user_id).await {
         // A concurrent first login may have linked it already.
-        return match linked_user(pool, key, subject).await.map_err(storage)? {
+        return match linked_user(pool, key, subject)
+            .await
+            .map_err(LinkRefusal::Storage)?
+        {
             Some(link) if link.user_id == found.user_id => Ok(found.user_id),
             _ => Err(storage(e)),
         };
@@ -382,8 +452,24 @@ mod tests {
     }
 
     #[test]
-    fn subject_hash_is_exact() {
-        assert_ne!(subject_sha256("Sub-A"), subject_sha256("sub-a"));
-        assert_eq!(subject_sha256("x").len(), 64);
+    fn key_hash_is_exact() {
+        assert_ne!(key_sha256("i", "Sub-A"), key_sha256("i", "sub-a"));
+        assert_ne!(key_sha256("I", "s"), key_sha256("i", "s"));
+        assert_eq!(key_sha256("i", "x").len(), 64);
+    }
+
+    #[test]
+    fn email_pick_is_ascii_case_insensitive_and_refuses_ambiguity() {
+        let pick = |rows: &[&str], wanted: &str| {
+            let rows: Vec<String> = rows.iter().map(|r| (*r).to_owned()).collect();
+            EmailLookup::pick(&rows, wanted, |r| Some(r.as_str())).map(|r| r.cloned())
+        };
+        assert_eq!(
+            pick(&["Ann@X.com"], "ann@x.com"),
+            Ok(Some("Ann@X.com".into()))
+        );
+        assert_eq!(pick(&["jose@x.com"], "josé@x.com"), Err(()));
+        assert_eq!(pick(&["a@x", "A@x"], "a@x"), Err(()));
+        assert_eq!(pick(&[], "a@x"), Ok(None));
     }
 }

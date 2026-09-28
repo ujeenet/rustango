@@ -79,7 +79,8 @@ feature emits an `AddColumn` / `DropColumn` migration for that column.
 
 The link table is a normal migrated model: in the tenant's storage for
 tenant logins, and in the admin database for the bare admin. A link is
-matched exactly (the subject by its SHA-256, the email compared in Rust),
+matched exactly (issuer and subject keyed by a SHA-256; the email ignores
+ASCII case only),
 whatever the database collation.
 
 The client **secret is encrypted at rest** — the `client_secret` column
@@ -104,8 +105,8 @@ admin model — add/edit/enable from the admin UI, no redeploy. Fields:
 | `scopes` | Optional space-separated scope override (default `openid email profile`). |
 | `allow_email_link` | Link a first-time user by verified email (default off). Never links a superuser or staff account; ignored by the bare admin. |
 
-Only a superuser can add or change `SsoProvider` and `SsoLink` rows in the
-admin; other staff can list and delete them with the usual permissions.
+Only a superuser can add, change or delete `SsoProvider` and `SsoLink`
+rows in the admin; other staff can list them with the usual permissions.
 
 To add a provider: enter the `client_id` + `client_secret`, pick a
 `kind` (or `oidc` + an `issuer_url`), and save. The endpoints are
@@ -135,9 +136,11 @@ IdP. A user is linked by opt-in email linking (non-privileged tenant
 users), or by a superuser adding an `SsoLink` row: `provider_source`
 (`tenant`, `shared` or `admin`), `provider_id` (the provider row id),
 `issuer` (`kind`, or `kind|issuer_url` without a trailing slash),
-`subject`, `subject_sha256` (lowercase hex SHA-256 of the subject) and
-`user_id`. The refusal log line (`sso refused`) carries `provider_id`,
-`issuer` and `subject`.
+`subject` and `user_id`. Leave `key_sha256` empty: the first sign-in
+fills it. The refusal log line (`sso refused`) carries `provider_id`,
+`issuer` and `subject`. Adding a row needs the admin's session auth
+(`Builder::with_session_auth`, or the tenant admin's `with_session`);
+without it nobody can add links.
 
 ## Member (end-user) SSO
 

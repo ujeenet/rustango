@@ -37,8 +37,10 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
       <td>{% if p.allow_email_link %}✓{% else %}—{% endif %}</td>
       <td>{{ p.sort_order }}</td>
       <td class="actions-col">
+        {% if edit_enabled %}
         <form method="post" action="/sso-shared/{{ p.id }}/email-link">
           {{ csrf_input | default(value='') | safe }}
+          <input type="hidden" name="allow_email_link" value="{% if p.allow_email_link %}off{% else %}on{% endif %}">
           <button type="submit" class="btn-row-action">{% if p.allow_email_link %}Stop email linking{% else %}Allow email linking{% endif %}</button>
         </form>
         <form method="post" action="/sso-shared/{{ p.id }}/delete"
@@ -46,6 +48,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
           {{ csrf_input | default(value='') | safe }}
           <button type="submit" class="btn-row-action">Delete</button>
         </form>
+        {% endif %}
       </td>
     </tr>
     {% endfor %}
@@ -53,6 +56,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
 </table>
 {% endif %}
 
+{% if edit_enabled %}
 <h2>Add a shared provider</h2>
 <form method="post" action="/sso-shared" class="op-form">
   {{ csrf_input | default(value='') | safe }}
@@ -77,4 +81,5 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
   <label class="inline"><input type="checkbox" name="allow_email_link"> Link first-time users by verified email, in every tenant (never superusers or staff)</label>
   <button type="submit">Add provider</button>
 </form>
+{% endif %}
 {% endblock %}

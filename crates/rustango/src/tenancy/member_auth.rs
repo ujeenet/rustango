@@ -62,7 +62,8 @@ use crate::extractors::{Tenant, TenantContext};
 use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::{Auto, Pool};
 use crate::sso::link::{
-    create_link_tx, sign_in, Account, AccountLookup, LinkRefusal, LinkSource, ProviderKey,
+    create_link_tx, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, LinkSource,
+    ProviderKey,
 };
 use crate::sso::provider::resolve_by_slug;
 use crate::sso::{build_provider, open_flow, seal_flow, NormalizedUser};
@@ -576,11 +577,26 @@ async fn sso_callback(
                 login_base,
             ));
         }
-        Ok(_) => {
+        Ok(MemberSignIn::NoAccount) => {
             return clear_flow(sso_error(
                 "There is no account for this sign-in. Please contact your administrator.",
                 login_base,
             ));
+        }
+        Ok(MemberSignIn::Inactive) => {
+            return clear_flow(sso_error(
+                "This account is disabled. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::Unverified) => {
+            return clear_flow(sso_error(
+                "Your identity provider did not return a verified email.",
+                login_base,
+            ));
+        }
+        Ok(_) => {
+            return clear_flow(sso_error("Sign-in failed. Please try again.", login_base));
         }
         Err(e) => {
             tracing::error!(error = %e, "find-or-provision member failed");
@@ -608,12 +624,16 @@ async fn sso_callback(
 pub enum MemberSignIn {
     /// Signed in (linked, email-linked, or newly provisioned) as this user id.
     Member(i64),
-    /// An account has this email but may not be linked by it: the provider
-    /// does not allow email linking, or the account is privileged.
+    /// An account has this email but may not be linked by it: email linking
+    /// is off, the account is privileged, or the email collides with another.
     NotLinked,
     /// No account has this email, and provisioning is off.
     NoAccount,
-    /// Refused for another reason: unverified email, no subject, inactive account.
+    /// The account is inactive.
+    Inactive,
+    /// The IdP sent no verified email (and there is no link).
+    Unverified,
+    /// Refused for another reason, e.g. no subject.
     Refused,
 }
 
@@ -651,8 +671,12 @@ pub async fn find_or_provision_member(
     };
     tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {refusal}");
     Ok(match refusal {
-        LinkRefusal::EmailLinkDisabled | LinkRefusal::Privileged => MemberSignIn::NotLinked,
+        LinkRefusal::EmailLinkDisabled | LinkRefusal::Privileged | LinkRefusal::EmailCollides => {
+            MemberSignIn::NotLinked
+        }
         LinkRefusal::NoAccount(_) => MemberSignIn::NoAccount,
+        LinkRefusal::Inactive => MemberSignIn::Inactive,
+        LinkRefusal::Unverified => MemberSignIn::Unverified,
         _ => MemberSignIn::Refused,
     })
 }
@@ -676,38 +700,51 @@ impl TenantAccounts<'_> {
 
 impl AccountLookup for TenantAccounts<'_> {
     async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
-        match tenant_user(self.0, id).await {
+        match find_tenant_user(self.0, id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
             Some(u) => self.account(&u).await,
             None => Ok(None),
         }
     }
 
-    async fn by_email(&self, email: &str) -> Result<Option<Account>, String> {
+    async fn by_email(&self, email: &str) -> Result<EmailLookup, String> {
         use crate::sql::FetcherPool as _;
         let rows = User::objects()
-            .filter("email", email.to_owned())
+            .filter("email__iexact", email.to_owned())
             .fetch(self.0)
             .await
             .map_err(|e| format!("lookup: {e}"))?;
-        // Exact match: a case- or accent-insensitive collation must not widen it.
-        match rows.iter().find(|u| u.email.as_deref() == Some(email)) {
-            Some(u) => self.account(u).await,
-            None => Ok(None),
+        match EmailLookup::pick(&rows, email, |u| u.email.as_deref()) {
+            Ok(Some(u)) => Ok(self
+                .account(u)
+                .await?
+                .map_or(EmailLookup::Missing, EmailLookup::Found)),
+            Ok(None) => Ok(EmailLookup::Missing),
+            Err(()) => Ok(EmailLookup::Collides),
         }
     }
 }
 
-/// The tenant user with this id, if any.
-pub(crate) async fn tenant_user(pool: &Pool, id: i64) -> Option<User> {
+/// The tenant user with this id; a driver error is an error, not "missing".
+pub(crate) async fn find_tenant_user(
+    pool: &Pool,
+    id: i64,
+) -> Result<Option<User>, crate::sql::ExecError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-    User::objects()
+    Ok(User::objects()
         .where_(User::id.eq(id))
         .fetch(pool)
-        .await
-        .ok()?
+        .await?
         .into_iter()
-        .next()
+        .next())
+}
+
+/// The tenant user with this id, if it can be read.
+pub(crate) async fn tenant_user(pool: &Pool, id: i64) -> Option<User> {
+    find_tenant_user(pool, id).await.ok().flatten()
 }
 
 /// Auto-create a tenant user from a verified IdP email. `password_hash`
