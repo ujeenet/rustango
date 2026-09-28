@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.58.0
+
 ### Bare admin logout needs a CSRF token
 
 A custom form posting to the bare admin `/logout` must send `_csrf`

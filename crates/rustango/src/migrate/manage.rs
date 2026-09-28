@@ -5775,7 +5775,7 @@ version = "0.1.0"
 
 [dependencies]
 name = "not-this-one"
-rustango = { version = "0.57", features = ["batteries"] }
+rustango = { version = "0.58", features = ["batteries"] }
 "#;
         assert_eq!(
             package_name_from_cargo_toml(manifest).as_deref(),

@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.58.0] — 2026-09-28
+
 ### Security — bare admin logout needs a CSRF token
 
 `POST /logout` on the bare admin now refuses a missing token or a
