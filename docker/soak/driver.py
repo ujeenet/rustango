@@ -1140,7 +1140,8 @@ async def check_model_shortcut_scopes(client, name, base, headers=None):
     problems = [f"{k}: shortcut {b[f'shortcut_{k}']} != queryset {b[f'scoped_{k}']}"
                 for k in ("sum", "min", "max", "avg")
                 if b[f"shortcut_{k}"] != b[f"scoped_{k}"]]
-    if b.get("shortcut_max") == 1_000_000_000 or b.get("shortcut_min") == 1:
+    # Only the max is a tell: visible probe rows elsewhere also cost 1.
+    if b.get("shortcut_max") == 1_000_000_000:
         problems.append("an aggregate reached a hidden row")
     if b.get("destroy_hidden") != 0 or b.get("delete_where_hidden") != 0 or b.get("hidden_left") != 2:
         problems.append(f"destroy/delete_where touched hidden rows: {b}")
@@ -1768,8 +1769,15 @@ async def check_lock_duration_setting(client):
     name, base = EDGE_SAAS
     host = tenant_host(4)
     user = ("lockprobe", pw("lockprobe"))
+    busy = 0
     for i in range(5):
-        await jwt_login(client, base, host, user[0], f"wrong-{i}", ip=fresh_ip(), extra=TLS)
+        r = await jwt_login(client, base, host, user[0], f"wrong-{i}", ip=fresh_ip(), extra=TLS)
+        busy += r.status_code == 503
+    if busy:
+        # A 503 is not a failure, so it never counts toward the lock.
+        REPORT.add("lockout_duration_secs sets the lock length", "#1609", "NOT-COVERED",
+                   f"{busy} of 5 failures met a busy hash queue (the #1732 burst)", name)
+        return
     locked = await jwt_login(client, base, host, *user, ip=fresh_ip(), extra=TLS)
     ra = locked.headers.get("retry-after")
     REPORT.add("lockout_duration_secs sets the lock length", "#1609",
