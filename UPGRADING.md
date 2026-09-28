@@ -165,6 +165,10 @@ without it you build `AuthRequestMeta` yourself.
 It is now `Result<Option<McpAgent>, AgentError>`: `Ok(None)` is a
 refused key, `Err(AgentError::Tenancy(TenancyError::Busy))` means 503.
 
+### SQLite NULLs are `null` in JSON and `values_dict`
+
+Code that read `0` / `false` / `""` for a NULL SQLite cell now gets `null` / `SqlValue::Null`.
+
 ### Admin password widget and derived-field hooks
 
 A `formfield_overrides = "col: password"` column is now never echoed: forms
