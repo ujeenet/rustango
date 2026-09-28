@@ -240,6 +240,9 @@ pub trait Cache: Send + Sync + 'static {
     /// 'prefix%'`, `RedisCache` runs `SCAN MATCH` then `DEL`, and
     /// [`FileCache`] scans its directory (the filename is a hash, so
     /// the key has to be read from inside each file).
+    ///
+    /// `DatabaseCache` matches a prefix over 190 bytes on its first 190
+    /// bytes, so it may delete extra keys, never fewer.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         Err(CacheError::Connection(format!(
             "this cache backend does not implement `delete_prefix`, so the prefix \

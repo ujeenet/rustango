@@ -162,6 +162,11 @@ noted. Bring the module's `…RouterExt` trait into scope to get the method.
 | Live reload | `LiveReloadLayer` | `.livereload(..)` |
 | Debug panel | `DebugPanelLayer` | `.debug_panel(..)` |
 
+Under `tenancy`, mount `CachePageLayer` inside the tenancy layer: on a router
+you pass to the server builder. It puts the resolved tenant in the key; outside
+the tenancy layer it cannot see the tenant and does not cache. A CDN in front
+must also vary on the tenant header (`X-Org`), or it will mix tenants itself.
+
 The next sections walk the ones the request asked for in detail.
 
 ---
