@@ -73,6 +73,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::api_errors::ApiError;
+use crate::body_limit::over_cap;
 use crate::cache::BoxedCache;
 
 const DEFAULT_HEADER: &str = "idempotency-key";
@@ -334,18 +335,6 @@ fn too_large() -> Response<Body> {
         "request body too large",
     )
     .into_response()
-}
-
-/// Whether a body read failed on the size cap, not on the stream.
-fn over_cap(e: &axum::Error) -> bool {
-    let mut err: Option<&(dyn std::error::Error + 'static)> = Some(e);
-    while let Some(e) = err {
-        if e.is::<http_body_util::LengthLimitError>() {
-            return true;
-        }
-        err = e.source();
-    }
-    false
 }
 
 /// Headers that carry a credential, hashed only when no identity is resolved.

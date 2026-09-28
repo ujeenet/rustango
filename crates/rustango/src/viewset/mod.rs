@@ -1504,21 +1504,6 @@ macro_rules! or_500 {
     };
 }
 
-/// Unwrap, or return a `400` JSON error. Sibling of [`or_500`].
-macro_rules! or_400 {
-    ($expr:expr) => {
-        match $expr {
-            ::core::result::Result::Ok(v) => v,
-            ::core::result::Result::Err(e) => {
-                return json_error(
-                    ::axum::http::StatusCode::BAD_REQUEST,
-                    &::std::string::ToString::to_string(&e),
-                );
-            }
-        }
-    };
-}
-
 /// The predicates every filter backend contributes for this request,
 /// to be ANDed into whatever query the action runs.
 fn scope_filters(
@@ -2440,7 +2425,10 @@ async fn handle_create(
     };
 
     // A JSON array body means a bulk create.
-    let create_body = or_400!(extract_create_body(parts, body).await);
+    let create_body = match extract_create_body(parts, body).await {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
@@ -2716,7 +2704,10 @@ async fn update_inner(
         Err(resp) => return resp,
     };
 
-    let (form, json) = or_400!(extract_form_body(parts, body).await);
+    let (form, json) = match extract_form_body(parts, body).await {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
 
     // Serializer (when set): validate the body + the set of model
     // columns it doesn't accept (read_only / computed), which we skip.
@@ -2898,12 +2889,39 @@ async fn render_single(
     }
 }
 
+/// Why a write body was refused: over a size cap (413) or unreadable (400).
+pub(crate) enum BodyError {
+    TooLarge,
+    Bad(String),
+}
+
+impl From<String> for BodyError {
+    fn from(msg: String) -> Self {
+        Self::Bad(msg)
+    }
+}
+
+impl From<&str> for BodyError {
+    fn from(msg: &str) -> Self {
+        Self::Bad(msg.to_owned())
+    }
+}
+
+impl BodyError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::TooLarge => json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
+            Self::Bad(msg) => json_error(StatusCode::BAD_REQUEST, &msg),
+        }
+    }
+}
+
 /// Extract form data from both `application/x-www-form-urlencoded` and
 /// `application/json` request bodies.
 async fn extract_form_body(
     parts: axum::http::request::Parts,
     body: Body,
-) -> Result<(HashMap<String, String>, Option<Value>), String> {
+) -> Result<(HashMap<String, String>, Option<Value>), BodyError> {
     match extract_create_body(parts, body).await? {
         CreateBody::Single(form, json) => Ok((form, json)),
         CreateBody::Bulk(_) => Err("expected a JSON object; got an array".into()),
@@ -2928,7 +2946,7 @@ pub(crate) enum CreateBody {
 pub(crate) async fn extract_create_body(
     parts: axum::http::request::Parts,
     body: Body,
-) -> Result<CreateBody, String> {
+) -> Result<CreateBody, BodyError> {
     use axum::body::to_bytes;
 
     let content_type = parts
@@ -2937,9 +2955,14 @@ pub(crate) async fn extract_create_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let bytes = to_bytes(body, 4 * 1024 * 1024)
-        .await
-        .map_err(|e| e.to_string())?;
+    let bytes = to_bytes(body, 4 * 1024 * 1024).await.map_err(|e| {
+        // Our own cap or an outer `BodyLimitLayer` stream cap (#1673).
+        #[cfg(feature = "admin")]
+        if crate::body_limit::over_cap(&e) {
+            return BodyError::TooLarge;
+        }
+        BodyError::Bad(e.to_string())
+    })?;
 
     if content_type.contains("application/json") {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -3035,6 +3058,38 @@ mod envelope_tests {
             (v["error"].as_str(), v["details"]["retry_after"].as_u64()),
             (Some("rate_limited"), Some(5))
         );
+    }
+}
+
+#[cfg(all(test, feature = "admin"))]
+mod body_tests {
+    use super::{extract_create_body, Body, BodyError, StatusCode};
+
+    fn json_parts() -> axum::http::request::Parts {
+        let req = axum::http::Request::builder()
+            .header("content-type", "application/json")
+            .body(())
+            .unwrap();
+        req.into_parts().0
+    }
+
+    /// A streamed body over an outer cap is a 413, not a 400 (#1673).
+    #[tokio::test]
+    async fn an_over_cap_body_is_413() {
+        let body = Body::new(http_body_util::Limited::new(Body::from("[1,2,3,4]"), 4));
+        let Err(err) = extract_create_body(json_parts(), body).await else {
+            panic!("an over-cap body was accepted");
+        };
+        assert!(matches!(err, BodyError::TooLarge));
+        assert_eq!(err.into_response().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_body_is_still_400() {
+        let Err(err) = extract_create_body(json_parts(), Body::from("{not json")).await else {
+            panic!("malformed JSON was accepted");
+        };
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
     }
 }
 

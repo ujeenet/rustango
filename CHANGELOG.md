@@ -75,7 +75,8 @@ reads only `X-Forwarded-For`. `ip_filter` and `trust_proxies` match
 IPv4-mapped IPv6 peers against IPv4 rules, so a v4 blocklist no longer
 fails open on a dual-stack listener. `BodyLimitLayer` caps chunked and
 HTTP/2 bodies as they stream (413) and checks `QUERY` by default. An
-all-trusted chain resolves to the rightmost hop.
+all-trusted chain resolves to the rightmost hop. A ViewSet create or
+update over the cap answers 413 too, not 400.
 
 ### Security — Model shortcuts honour global scopes; Pool writes are audited (#1675)
 
