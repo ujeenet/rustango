@@ -406,9 +406,9 @@ impl Drop for OpenSavepoint {
 ///
 /// **Failed statements differ by backend:** PG aborts the transaction,
 /// but MySQL and SQLite undo only the failed statement (duplicate key
-/// 1062, a lock-wait timeout with `innodb_rollback_on_timeout=OFF`,
-/// `SQLITE_BUSY`). If the closure ignores that error and returns `Ok`,
-/// the other writes commit.
+/// 1062, `SQLITE_BUSY`). If the closure ignores that error and returns
+/// `Ok`, the other writes commit. A MySQL lock-wait timeout (1205) always
+/// aborts the block.
 ///
 /// **Costs:** past 64 open savepoints in one transaction PostgreSQL
 /// spills its subtransaction cache, so avoid nesting in hot loops. On
