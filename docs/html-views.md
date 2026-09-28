@@ -96,8 +96,9 @@ the view handles paging, ordering, filtering and search from query params.
 ```rust
 use rustango::template_views::ListView;
 use std::sync::Arc;
-use tera::Tera;
 
+// Escapes every template, not only `.html` ones.
+let tera = rustango::template_extensions::html_tera_from_glob("templates/**/*")?;
 let app = ListView::for_model(Post::SCHEMA)
     .page_size(20)                       // rows per page (?page=N to navigate)
     .order_by("published_at", true)      // default sort, true = DESC
@@ -208,7 +209,7 @@ string**, not a list — `join` on it is an error. And there is no top-level
 `errors` variable; iterating one is a Tera render failure, so the page returns
 500 rather than showing the message.
 
-`{{ csrf_input | safe }}` needs the filter: Tera autoescapes `.html`, so without
+`{{ csrf_input | safe }}` needs the filter: `html_tera` autoescapes every template, so without
 it the token renders as text and every POST is rejected.
 
 **Validation.** Schema rules (type, `max_length`, NOT NULL…) are enforced

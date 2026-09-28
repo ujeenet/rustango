@@ -253,7 +253,7 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` builds the layer with `secure: true`, so the cookie is rejected over plain HTTP — on `http://localhost` use `CsrfConfig::allow_insecure_for_dev()` or the layer appears to do nothing. `csrf::with_config(CsrfConfig)` overrides the cookie/header names and the `Secure` flag, and `trusted_origins` — extra origins allowed beside the request's own Host. The Origin check runs even when it is empty: a foreign `Origin` gets `403`, and over TLS so does a POST with no `Origin`. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` a ready-made hidden `<input>` — write it as `{{ csrf_input | safe }}`, because Tera autoescapes `.html` templates and without the filter the page renders a visible literal `<input …>` and the form carries no `_csrf` field, so every POST 403s. Both variables are only in context for the `template_views` CBVs or after you call `forms::csrf::stamp_into_context` yourself — a hand-rolled handler has neither. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
+`csrf::layer()` builds the layer with `secure: true`, so the cookie is rejected over plain HTTP — on `http://localhost` use `CsrfConfig::allow_insecure_for_dev()` or the layer appears to do nothing. `csrf::with_config(CsrfConfig)` overrides the cookie/header names and the `Secure` flag, and `trusted_origins` — extra origins allowed beside the request's own Host. The Origin check runs even when it is empty: a foreign `Origin` gets `403`, and over TLS so does a POST with no `Origin`. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` a ready-made hidden `<input>` — write it as `{{ csrf_input | safe }}`, because templates autoescape and without the filter the page renders a visible literal `<input …>` and the form carries no `_csrf` field, so every POST 403s. Both variables are only in context for the `template_views` CBVs or after you call `forms::csrf::stamp_into_context` yourself — a hand-rolled handler has neither. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
 
 **Exempting collector endpoints.** `CsrfConfig::exempt_prefix("/path")` (repeatable) skips CSRF enforcement for unsafe methods on requests whose path starts with the given prefix. This is for append-only, no-auth-state endpoints hit via `navigator.sendBeacon` — e.g. an analytics collector — which can't set an `X-CSRF-Token` header and, when the page is served from a CDN cache that strips `Set-Cookie`, may carry no CSRF cookie at all. Keep prefixes narrow and never exempt anything that reads or writes auth state.
 
@@ -269,7 +269,7 @@ Until [#1395](https://github.com/ujeenet/rustango/issues/1395) this paragraph cl
 
 XSS (cross-site scripting) happens when user input is rendered as HTML and runs as code in someone else's browser. The fix is to escape any user input before it reaches the page. **Rustango** handles this two ways:
 
-**1. Tera template auto-escape** — Tera is **Rustango**'s template engine (like Jinja or Blade). Every `{{ var }}` is HTML-escaped automatically — but only in templates Tera autoescapes, which is its default set of `.html`, `.htm` and `.xml`. Rustango sets no `autoescape_suffixes`, so a `.txt`, `.j2` or `.tera` template is **not** escaped. Use `{{ var | safe }}` to opt out — rare, and dangerous, so only do it for HTML you fully trust.
+**1. Tera template auto-escape** — Tera is **Rustango**'s template engine (like Jinja or Blade). Every `{{ var }}` is HTML-escaped automatically in every template the framework builds, whatever its suffix. Build your own engine with `template_extensions::html_tera()` / `html_tera_from_glob(glob)` to get the same; a bare `Tera::new` escapes only `.html`, `.htm` and `.xml`. Plain-text email parts (`EmailRenderer` subject and `.txt` body) are the one place rendered raw. Use `{{ var | safe }}` to opt out — rare, and dangerous, so only do it for HTML you fully trust.
 
 **2. Manual escape helper** — for when you build HTML in Rust code instead of a template:
 
@@ -591,6 +591,8 @@ async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> impl IntoResp
 | `Base64Sha256` | Stripe, AWS SNS |
 
 The signature comparison is constant-time, meaning it always takes the same amount of time whether the guess is right or wrong. That stops timing attacks, where an attacker measures tiny response-time differences to guess the secret one character at a time.
+
+Outbound calls to URLs that config can set (webhook delivery, Slack `webhook_callback`, OAuth2/OIDC discovery, token and userinfo) refuse loopback, private, link-local and metadata addresses and never follow redirects. Set `RUSTANGO_OUTBOUND_ALLOW_PRIVATE=1` to reach an IdP or hook on your own network.
 
 ---
 

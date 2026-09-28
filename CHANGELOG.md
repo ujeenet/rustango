@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — outbound clients check their target (#1716)
+
+Slack `webhook_callback` and OAuth2 discovery, token and userinfo calls
+refuse private and metadata addresses, never follow redirects, and keep
+at most 256 bytes of an error body. Same check as webhook delivery.
+
+### Security — every framework template autoescapes (#1721)
+
+New `template_extensions::html_tera()` / `html_tera_from_glob()` escape
+every template, not only `.html`. `EmailRenderer` escapes the HTML body
+and leaves the subject and text body raw.
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token

@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+### Outbound calls refuse private addresses
+
+Slack `webhook_callback` and OAuth2/OIDC calls now refuse loopback,
+private and metadata targets. For an IdP on your own network set
+`RUSTANGO_OUTBOUND_ALLOW_PRIVATE=1`. `OAuth2Provider::http` is removed.
+
+### Templates escape whatever their name
+
+Templates built with `html_tera*` and `EmailRenderer` HTML bodies now
+escape `.tera`, `.j2` and suffix-less templates too; output that relied on
+raw values needs `| safe`. `EmailRenderer::tera()`/`tera_mut()` became
+`configure(|tera| ...)`, which changes both engines.
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token

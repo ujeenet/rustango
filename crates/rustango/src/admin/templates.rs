@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 fn templates() -> &'static tera::Tera {
     static T: OnceLock<tera::Tera> = OnceLock::new();
     T.get_or_init(|| {
-        let mut tera = tera::Tera::default();
+        let mut tera = crate::template_extensions::html_tera();
         tera.add_raw_templates([
             (
                 "_theme_tokens.html",

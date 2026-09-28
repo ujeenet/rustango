@@ -52,7 +52,8 @@
 //! address must be public; loopback, private, link-local, CGNAT and
 //! multicast targets are dead-lettered, and the connection is pinned to
 //! the checked addresses. [`WebhookSubscription::allow_private_targets`]
-//! turns the address check off. Only the status code is kept on failure.
+//! turns the address check off, as does `RUSTANGO_OUTBOUND_ALLOW_PRIVATE=1`.
+//! Only the status code is kept on failure.
 //!
 //! [`SignatureFormat`]: crate::webhook::SignatureFormat
 //! [`WebhookSubscription::header`]: crate::webhook_delivery::WebhookSubscription::header
@@ -60,7 +61,6 @@
 //! [`WebhookSubscription::allow_private_targets`]: crate::webhook_delivery::WebhookSubscription::allow_private_targets
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,6 +69,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::jobs::{Job, JobError, JobQueue};
+use crate::outbound::{CheckedTarget, TargetError, TargetPolicy};
 use crate::webhook::{sign as sign_body, SignatureFormat};
 
 /// Per-delivery UUID. Receivers can use it to drop duplicates.
@@ -126,32 +127,26 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         &body,
     );
 
-    let url = reqwest::Url::parse(&event.target_url)
-        .map_err(|e| JobError::Fatal(format!("bad target url: {e}")))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(JobError::Fatal(format!(
-            "scheme not allowed: {}",
-            url.scheme()
-        )));
-    }
-    let mut builder = reqwest::Client::builder()
+    let policy = if event.allow_private_targets {
+        TargetPolicy::AllowPrivate
+    } else {
+        TargetPolicy::from_env()
+    };
+    let target = CheckedTarget::check(&event.target_url, policy)
+        .await
+        .map_err(|e| match e {
+            TargetError::Dns(_) => JobError::Retryable(e.to_string()),
+            _ => JobError::Fatal(e.to_string()),
+        })?;
+    let builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(event.timeout_secs.max(1)))
-        .user_agent(USER_AGENT)
-        .redirect(reqwest::redirect::Policy::none());
-    if !event.allow_private_targets {
-        let (host, addrs) = checked_target(&url).await?;
-        // Connect only to the checked addresses; a proxy would re-resolve the host.
-        builder = builder.no_proxy();
-        if let Some(host) = host {
-            builder = builder.resolve_to_addrs(&host, &addrs);
-        }
-    }
-    let client = builder
-        .build()
+        .user_agent(USER_AGENT);
+    let client = target
+        .client(builder)
         .map_err(|e| JobError::Queue(format!("build http client: {e}")))?;
 
     let mut req = client
-        .post(url)
+        .post(target.url().clone())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(HEADER_ID, &event.id)
         .header(HEADER_EVENT, &event.event)
@@ -183,88 +178,6 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
 
 fn is_default_retryable(status: u16) -> bool {
     status == 408 || status == 429 || (500..600).contains(&status)
-}
-
-/// Check every resolved address of `url`. Returns the host name (None
-/// for an IP literal) and the addresses to pin it to.
-async fn checked_target(url: &reqwest::Url) -> Result<(Option<String>, Vec<SocketAddr>), JobError> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| JobError::Fatal("target url has no host".into()))?;
-    let port = url.port_or_known_default().unwrap_or(80);
-    let literal = host.trim_start_matches('[').trim_end_matches(']');
-    // The error never names the address: it may be an internal one.
-    let blocked = || JobError::Fatal("target resolves to a blocked address".into());
-    if let Ok(ip) = literal.parse::<IpAddr>() {
-        if is_blocked_ip(ip) {
-            return Err(blocked());
-        }
-        return Ok((None, vec![SocketAddr::new(ip, port)]));
-    }
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| JobError::Retryable(format!("dns: {e}")))?
-        .collect();
-    if addrs.is_empty() {
-        return Err(JobError::Retryable(format!("dns: no addresses for {host}")));
-    }
-    if addrs.iter().any(|a| is_blocked_ip(a.ip())) {
-        return Err(blocked());
-    }
-    Ok((Some(host.to_owned()), addrs))
-}
-
-/// Loopback, private, link-local, CGNAT, multicast, unspecified and
-/// other non-public ranges. IPv4 embedded in IPv6 is checked as IPv4.
-fn is_blocked_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_blocked_v4(v4),
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_blocked_v4(v4);
-            }
-            let seg = v6.segments();
-            let v4 = |hi: u16, lo: u16| {
-                let [a, b] = hi.to_be_bytes();
-                let [c, d] = lo.to_be_bytes();
-                Ipv4Addr::new(a, b, c, d)
-            };
-            // NAT64 64:ff9b::/96 and IPv4-translated ::ffff:0:0:0/96.
-            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || seg[..6] == [0, 0, 0, 0, 0xffff, 0] {
-                return is_blocked_v4(v4(seg[6], seg[7]));
-            }
-            // 6to4 2002::/16 carries the IPv4 in bits 16..48.
-            if seg[0] == 0x2002 {
-                return is_blocked_v4(v4(seg[1], seg[2]));
-            }
-            // Teredo 2001::/32: server IPv4, then the client IPv4 XOR'd.
-            if seg[0] == 0x2001 && seg[1] == 0 {
-                return is_blocked_v4(v4(seg[2], seg[3])) || is_blocked_v4(v4(!seg[6], !seg[7]));
-            }
-            v6.is_loopback()
-                || seg[..3] == [0x64, 0xff9b, 1] // local-use NAT64 64:ff9b:1::/48
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (seg[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
-                || (seg[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-                || (seg[0] & 0xffc0) == 0xfec0 // site-local fec0::/10
-                || seg[..6] == [0, 0, 0, 0, 0, 0] // IPv4-compatible ::/96
-        }
-    }
-}
-
-fn is_blocked_v4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    a == 0 // this network 0.0.0.0/8
-        || ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_multicast()
-        || ip.is_broadcast()
-        || (a == 100 && (b & 0xc0) == 64) // CGNAT 100.64.0.0/10
-        || (a == 192 && b == 0 && c == 0) // 192.0.0.0/24
-        || (a == 198 && (b & 0xfe) == 18) // benchmarking 198.18.0.0/15
-        || a >= 240 // reserved 240.0.0.0/4
 }
 
 /// Config for one webhook subscriber, plus methods to register the
@@ -647,58 +560,6 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let h = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (base, h)
-    }
-
-    #[test]
-    fn blocked_ip_ranges() {
-        for ip in [
-            "127.0.0.1",
-            "0.0.0.0",
-            "10.1.2.3",
-            "172.16.0.1",
-            "192.168.1.1",
-            "169.254.169.254",
-            "100.64.0.1",
-            "224.0.0.1",
-            "255.255.255.255",
-            "::1",
-            "::",
-            "fe80::1",
-            "fc00::1",
-            "fd12::1",
-            "ff02::1",
-            "::ffff:127.0.0.1",
-            "::ffff:169.254.169.254",
-            "64:ff9b::a9fe:a9fe",
-            "::ffff:0:7f00:1",              // IPv4-translated 127.0.0.1
-            "64:ff9b:1::808:808",           // local-use NAT64
-            "2002:7f00:1::1",               // 6to4 of 127.0.0.1
-            "2002:a9fe:a9fe::1",            // 6to4 of 169.254.169.254
-            "2001:0:808:808:0:0:80ff:fffe", // Teredo, client 127.0.0.1
-            "2001:0:a00:1:0:0:f7f7:f7f7",   // Teredo, server 10.0.0.1
-            "fec0::1",
-            "::7f00:1",
-            "100.127.255.255",
-            "192.0.0.8",
-            "198.18.0.1",
-            "240.0.0.1",
-        ] {
-            assert!(is_blocked_ip(ip.parse().unwrap()), "{ip} should be blocked");
-        }
-        for ip in [
-            "93.184.216.34",
-            "8.8.8.8",
-            "2606:4700::1111",
-            "::ffff:8.8.8.8",
-            "::ffff:0:808:808",
-            "2002:808:808::1",
-            "2001:0:808:808:0:0:f7f7:f7f7", // Teredo, client 8.8.8.8
-        ] {
-            assert!(
-                !is_blocked_ip(ip.parse().unwrap()),
-                "{ip} should be allowed"
-            );
-        }
     }
 
     #[tokio::test]

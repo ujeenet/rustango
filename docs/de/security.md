@@ -259,7 +259,7 @@ Bis [#1395](https://github.com/ujeenet/rustango/issues/1395) behauptete dieser A
 
 XSS (Cross-Site Scripting) tritt auf, wenn Benutzereingaben als HTML gerendert werden und als Code im Browser einer anderen Person laufen. Die Lösung ist, jede Benutzereingabe zu escapen, bevor sie die Seite erreicht. **Rustango** löst das auf zwei Wegen:
 
-**1. Tera-Template-Auto-Escape** — Tera ist **Rustango**s Template-Engine. Jedes `{{ var }}` wird automatisch HTML-escapt — aber nur in Templates, die Tera autoescapt, also seinem Standard-Satz `.html`, `.htm` und `.xml`. Rustango setzt keine `autoescape_suffixes`, ein `.txt`-, `.j2`- oder `.tera`-Template wird also **nicht** escapt. Verwende `{{ var | safe }}`, um dich abzumelden — selten und gefährlich, also tue das nur für HTML, dem du vollständig vertraust.
+**1. Tera-Template-Auto-Escape** — Tera ist **Rustango**s Template-Engine. Jedes `{{ var }}` wird in jedem Template, das das Framework baut, automatisch HTML-escapt, egal welche Endung. Mit `template_extensions::html_tera()` / `html_tera_from_glob(glob)` bekommt deine eigene Engine dasselbe; ein nacktes `Tera::new` escapt nur `.html`, `.htm` und `.xml`. Nur die Klartext-Teile von E-Mails (`EmailRenderer`-Betreff und `.txt`-Body) werden roh gerendert. Verwende `{{ var | safe }}`, um dich abzumelden — selten und gefährlich, also tue das nur für HTML, dem du vollständig vertraust.
 
 **2. Manueller Escape-Helper** — für den Fall, dass du HTML in Rust-Code statt in einem Template baust:
 

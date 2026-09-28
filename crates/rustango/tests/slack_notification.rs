@@ -17,8 +17,14 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+/// The capture servers are on loopback, which the callback refuses by default.
+fn allow_private() {
+    std::env::set_var("RUSTANGO_OUTBOUND_ALLOW_PRIVATE", "1");
+}
+
 /// Bind to 127.0.0.1:0, return (base_url, captured-bodies handle).
 async fn spawn_capture_server() -> (String, Arc<Mutex<Vec<Value>>>) {
+    allow_private();
     let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let state = Arc::clone(&captured);
     let app = Router::new()
@@ -76,6 +82,7 @@ async fn webhook_callback_passes_through_block_payload() {
 
 #[tokio::test]
 async fn webhook_callback_surfaces_non_2xx_as_error() {
+    allow_private();
     // Spin up a server that always returns 500.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");

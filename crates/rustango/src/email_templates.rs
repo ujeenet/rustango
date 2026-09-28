@@ -64,10 +64,12 @@ impl From<tera::Error> for EmailRenderError {
     }
 }
 
-/// A Tera engine loaded with your email templates. Share it between
-/// handlers as `Arc<EmailRenderer>`.
+/// Your email templates, loaded into two Tera engines: HTML bodies
+/// render escaped, the subject and plain-text body render raw (#1721).
+/// Share it between handlers as `Arc<EmailRenderer>`.
 pub struct EmailRenderer {
-    tera: Tera,
+    html: Tera,
+    text: Tera,
 }
 
 impl EmailRenderer {
@@ -78,8 +80,9 @@ impl EmailRenderer {
     /// cannot be read.
     pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self, EmailRenderError> {
         let glob = format!("{}/**/*", dir.as_ref().display());
-        let tera = Tera::new(&glob)?;
-        Ok(Self { tera })
+        Ok(Self::from_html_tera(
+            crate::template_extensions::html_tera_from_glob(&glob)?,
+        ))
     }
 
     /// Build from `(name, source)` pairs held in memory. Good for
@@ -88,25 +91,21 @@ impl EmailRenderer {
     /// # Errors
     /// The Tera error when a template does not parse.
     pub fn from_pairs(pairs: Vec<(&str, &str)>) -> Result<Self, EmailRenderError> {
-        let mut tera = Tera::default();
-        // Autoescape is off: these templates are not all HTML. You must
-        // escape untrusted values in HTML bodies yourself.
-        tera.autoescape_on(Vec::new());
-        for (name, source) in pairs {
-            tera.add_raw_template(name, source)?;
-        }
-        Ok(Self { tera })
+        let mut tera = crate::template_extensions::html_tera();
+        tera.add_raw_templates(pairs)?;
+        Ok(Self::from_html_tera(tera))
     }
 
-    /// Borrow the inner Tera.
-    #[must_use]
-    pub fn tera(&self) -> &Tera {
-        &self.tera
+    fn from_html_tera(html: Tera) -> Self {
+        let mut text = html.clone();
+        text.autoescape_on(Vec::new());
+        Self { html, text }
     }
 
-    /// Borrow the inner Tera mutably, to register filters at startup.
-    pub fn tera_mut(&mut self) -> &mut Tera {
-        &mut self.tera
+    /// Change both engines, e.g. to register filters at startup.
+    pub fn configure(&mut self, f: impl Fn(&mut Tera)) {
+        f(&mut self.html);
+        f(&mut self.text);
     }
 
     /// Render `{name}.subject.txt`, `{name}.txt` and, if it exists,
@@ -122,7 +121,7 @@ impl EmailRenderer {
         let html_name = format!("{name}.html");
 
         let subject = self
-            .tera
+            .text
             .render(&subject_name, context)
             .map_err(|e| match underlying_kind(&e) {
                 TemplateMissing::Yes => EmailRenderError::Missing(subject_name.clone()),
@@ -132,7 +131,7 @@ impl EmailRenderer {
             .to_owned();
 
         let body =
-            self.tera
+            self.text
                 .render(&text_name, context)
                 .map_err(|e| match underlying_kind(&e) {
                     TemplateMissing::Yes => EmailRenderError::Missing(text_name.clone()),
@@ -142,8 +141,8 @@ impl EmailRenderer {
         let mut email = Email::new().subject(subject).body(body);
 
         // The HTML body is optional.
-        if self.tera.get_template_names().any(|t| t == html_name) {
-            let html = self.tera.render(&html_name, context)?;
+        if self.html.get_template_names().any(|t| t == html_name) {
+            let html = self.html.render(&html_name, context)?;
             email = email.html_body(html);
         }
         Ok(email)
@@ -254,13 +253,33 @@ mod tests {
     }
 
     #[test]
-    fn tera_mut_lets_caller_register_filters() {
-        let mut r =
-            EmailRenderer::from_pairs(vec![("hi.subject.txt", "x"), ("hi.txt", "x")]).unwrap();
-        r.tera_mut()
-            .register_filter("noop", |v: &tera::Value, _: &_| Ok(v.clone()));
-        // Rendering still works afterwards.
-        let _ = r.render("hi", &Context::new()).unwrap();
+    fn configure_registers_filters_on_both_engines() {
+        let mut r = EmailRenderer::from_pairs(vec![
+            ("hi.subject.txt", "{{ 1 | noop }}"),
+            ("hi.txt", "{{ 2 | noop }}"),
+            ("hi.html", "{{ 3 | noop }}"),
+        ])
+        .unwrap();
+        r.configure(|t| t.register_filter("noop", |v: &tera::Value, _: &_| Ok(v.clone())));
+        let e = r.render("hi", &Context::new()).unwrap();
+        assert_eq!((e.subject.as_str(), e.body.as_str()), ("1", "2"));
+        assert_eq!(e.html_body.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn html_body_escapes_and_text_body_does_not() {
+        let r = EmailRenderer::from_pairs(vec![
+            ("x.subject.txt", "Re: {{ v }}"),
+            ("x.txt", "{{ v }}"),
+            ("x.html", "<p>{{ v }}</p>"),
+        ])
+        .unwrap();
+        let mut c = Context::new();
+        c.insert("v", "<script>&");
+        let e = r.render("x", &c).unwrap();
+        assert_eq!(e.html_body.as_deref(), Some("<p>&lt;script&gt;&amp;</p>"));
+        assert_eq!(e.body, "<script>&");
+        assert_eq!(e.subject, "Re: <script>&");
     }
 
     #[test]

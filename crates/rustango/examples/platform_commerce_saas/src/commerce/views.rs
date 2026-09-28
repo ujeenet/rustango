@@ -63,7 +63,7 @@ pub(super) fn product_item(p: &Product) -> String {
 /// the pattern #1669 made safe on user input: `urlize` escapes the text
 /// and the link it builds.
 pub fn promotion_templates() -> std::sync::Arc<tera::Tera> {
-    let mut t = tera::Tera::default();
+    let mut t = rustango::template_extensions::html_tera();
     rustango::default_filters::register_filters(&mut t);
     t.add_raw_templates([
         (

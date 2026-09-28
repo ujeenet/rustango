@@ -32,6 +32,8 @@ struct Idp {
 
 impl Idp {
     async fn start() -> Self {
+        // The fake IdP is on loopback, which outbound calls refuse by default.
+        std::env::set_var("RUSTANGO_OUTBOUND_ALLOW_PRIVATE", "1");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let issuer = format!("http://{}", listener.local_addr().unwrap());
         let claims = Arc::new(Mutex::new(serde_json::json!({})));

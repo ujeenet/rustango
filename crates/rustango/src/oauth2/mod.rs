@@ -60,7 +60,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -68,6 +68,8 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+
+use crate::outbound::{bounded_text, CheckedTarget, TargetPolicy};
 
 pub mod providers;
 pub mod registry;
@@ -190,7 +192,6 @@ pub struct OAuth2Provider {
     /// Custom mapper. Defaults to [`default_user_mapper`] (works for OIDC
     /// providers where userinfo follows OIDC claims spec).
     pub user_mapper: UserMapper,
-    pub http: reqwest::Client,
 }
 
 impl std::fmt::Debug for OAuth2Provider {
@@ -233,7 +234,6 @@ impl OAuth2Provider {
             extra_auth_params: Vec::new(),
             use_pkce: true,
             user_mapper: Arc::new(default_user_mapper),
-            http: reqwest::Client::new(),
         }
     }
 
@@ -291,15 +291,15 @@ impl OAuth2Provider {
     ) -> Result<Self, OAuthError> {
         let issuer = issuer.as_ref().trim_end_matches('/');
         let url = format!("{issuer}/.well-known/openid-configuration");
-        let http = reqwest::Client::new();
+        let (http, target) = checked_client(&url).await?;
         let resp = http
-            .get(&url)
+            .get(target)
             .send()
             .await
             .map_err(|e| OAuthError::Discovery(format!("GET {url}: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = bounded_text(resp, ERROR_BODY_MAX).await;
             return Err(OAuthError::Discovery(format!(
                 "GET {url} -> {status}: {body}"
             )));
@@ -320,7 +320,6 @@ impl OAuth2Provider {
             extra_auth_params: Vec::new(),
             use_pkce: true,
             user_mapper: Arc::new(default_user_mapper),
-            http,
         })
     }
 
@@ -407,9 +406,9 @@ impl OAuth2Provider {
         if self.use_pkce {
             body.push(("code_verifier", &flow.pkce_verifier));
         }
-        let resp = self
-            .http
-            .post(&self.token_url)
+        let (http, target) = checked_client(&self.token_url).await?;
+        let resp = http
+            .post(target)
             .header("Accept", "application/json")
             .form(&body)
             .send()
@@ -421,9 +420,9 @@ impl OAuth2Provider {
             .as_deref()
             .ok_or(OAuthError::BadConfig("userinfo_url not set"))?;
 
-        let resp = self
-            .http
-            .get(userinfo_url)
+        let (http, target) = checked_client(userinfo_url).await?;
+        let resp = http
+            .get(target)
             .bearer_auth(&tokens.access_token)
             .header("Accept", "application/json")
             .send()
@@ -436,6 +435,19 @@ impl OAuth2Provider {
 }
 
 // --------------------------------------------------------------------- helpers
+
+/// Most bytes of a failed response body kept in an error.
+const ERROR_BODY_MAX: usize = 256;
+
+/// A no-redirect client pinned to `url`'s checked addresses: a tenant
+/// can set the issuer, so discovered endpoints may point anywhere (#1716).
+async fn checked_client(url: &str) -> Result<(reqwest::Client, reqwest::Url), OAuthError> {
+    let target = CheckedTarget::check(url, TargetPolicy::from_env())
+        .await
+        .map_err(|e| OAuthError::Http(e.to_string()))?;
+    let client = target.client(reqwest::Client::builder().timeout(Duration::from_secs(15)))?;
+    Ok((client, target.url().clone()))
+}
 
 #[derive(Deserialize)]
 struct DiscoveryDoc {
@@ -450,7 +462,7 @@ async fn decode_or_error<T: serde::de::DeserializeOwned>(
 ) -> Result<T, OAuthError> {
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = bounded_text(resp, ERROR_BODY_MAX).await;
         return Err(OAuthError::BadStatus {
             status: status.as_u16(),
             body,
@@ -671,6 +683,32 @@ mod tests {
         let (url, _flow) = p.begin();
         assert!(url.contains("prompt=consent"));
         assert!(url.contains("access_type=offline"));
+    }
+
+    #[tokio::test]
+    async fn discovery_refuses_a_private_issuer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, axum::Router::new()).await.unwrap() });
+        let err = OAuth2Provider::from_discovery("x", &issuer, "c", "s", "https://app/cb")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked address"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn complete_refuses_a_metadata_token_url() {
+        let p = OAuth2Provider::new(
+            "t",
+            "cid",
+            "csec",
+            "https://app.test/cb",
+            "https://idp.test/auth",
+            "http://169.254.169.254/token",
+        );
+        let (_, flow) = p.begin();
+        let err = p.complete(&flow, "code", &flow.state).await.unwrap_err();
+        assert!(err.to_string().contains("blocked address"), "{err}");
     }
 
     #[tokio::test]
