@@ -706,6 +706,12 @@ def check_login_limits(rec, browser, site, surface, known_user, known_pw, ip_use
     name = f"{surface} per-IP limit: right password refused after a burst (429 + Retry-After)"
     with guarded(rec, name, iss):
         ip = xff(111 + hash(surface) % 40)
+        # A locked account also answers 429; that must not pass for this.
+        st, _, ok_before, _, pc = attempt_login(browser, site, ip_user[0], ip_user[1], xff(7))
+        pc.close()
+        if not ok_before and not SABOTAGE:
+            rec.add(name, iss, "NOT-COVERED", f"{ip_user[0]} cannot sign in before the test ({st})")
+            raise Recorded
         # Own context, own connection pool: it keeps the bucket empty while
         # the real submit (second context, same client IP) lands.
         bctx = new_ctx(browser, None, ip)
@@ -741,7 +747,8 @@ def check_login_limits(rec, browser, site, surface, known_user, known_pw, ip_use
         if SABOTAGE and status == 429:
             status, ra = 303, None
         counts = {s: burst.count(s) for s in set(burst)}
-        rec.verdict(name, iss, status == 429 and ra is not None and not has_session(c, site),
+        in_window = ra is not None and ra.isdigit() and int(ra) <= 60
+        rec.verdict(name, iss, status == 429 and in_window and not has_session(c, site),
                     f"burst statuses {counts}; then {ip_user[0]} with the right password -> "
                     f"{status}, Retry-After={ra}", page)
         c.close()
@@ -902,7 +909,15 @@ def check_inline_parent(rec, browser, state, site, surface):
             return
         prefix = pk_input.get_attribute("name")[:-len("-id")]
 
+        worked_around = []
+
         def fill(f):
+            # SQLite renders the NULL picker FK as `0`, and saving that fails
+            # the FK before the inline rows are looked at.
+            picker = f.locator("input[name=assigned_picker_id]")
+            if picker.count() and picker.input_value() == "0":
+                picker.fill("")
+                worked_around.append("cleared assigned_picker_id=0")
             if not SABOTAGE:
                 f.locator(f"input[name='{prefix}-id']").evaluate(f"e => e.value = '{lines[1]}'")
             f.locator(f"[name='{prefix}-quantity']").fill("77")
@@ -911,8 +926,11 @@ def check_inline_parent(rec, browser, state, site, surface):
         page.goto(site.url(f"{site.admin}/commerce_order_line/{lines[0 if SABOTAGE else 1]}"))
         body = page.content()
         moved_or_changed = "77" in re.sub(r"<[^>]+>", " ", body).split()
-        rec.verdict(name, iss, not moved_or_changed,
-                    f"POST -> {resp.status}; order b's line quantity 77 = {moved_or_changed}", page)
+        # A refusal, not a save that failed for another reason.
+        refused = 400 <= resp.status < 500
+        rec.verdict(name, iss, refused and not moved_or_changed,
+                    f"POST -> {resp.status}; posted line now quantity 77 = {moved_or_changed}"
+                    + (f"; {worked_around[0]}" if worked_around else ""), page)
     ctx.close()
 
 
