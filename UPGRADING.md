@@ -150,6 +150,16 @@ untouched.
 
 ## Unreleased
 
+### Admin TOTP codes are single use
+
+`rustango_admin_totp` gains a nullable `last_used_step` column (#1672).
+`totp_store::ensure_table`, or the first code accepted after the upgrade,
+adds it to an existing table. `AdminTotp` literals need the new field. A
+code that already signed in is refused, so users wait for the next one.
+`Lockout::counter_ttl` is now a fixed window from the first failure. The
+lockout cache keys changed, so failure counts in progress at the
+upgrade start again from zero; active locks are kept.
+
 ### Page cache keys include the tenant
 
 Page cache keys now include the tenant (#1674), so cached pages miss

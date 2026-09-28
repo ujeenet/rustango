@@ -4,6 +4,21 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — single-use refresh rotation, TOTP replay guard, fixed lockout window (#1672)
+
+`JwtLifecycle::refresh` and `refresh_with` redeem the old refresh token
+through one `JtiStore::mark_used` call, so two concurrent refreshes of
+one token no longer both succeed. An admin TOTP code is accepted once:
+the device stores the last accepted time step (`last_used_step`) and a
+code must be for a later one. New `totp::matched_step` /
+`matched_step_at` return the step a code matched, and
+`admin::totp_store::redeem_code` / `confirm_with_code` accept a code
+once. Account lockout counts failures in a fixed window from the first
+failure; a failure no longer extends it.
+
+`migrate` now creates `rustango_admin_totp`, so a fresh install with
+`totp` no longer refuses every admin login before enrollment.
+
 ### Security — page cache keys on the resolved tenant; long DB cache keys hashed (#1674)
 
 `CachePageLayer` resolves the request's tenant and puts its slug in the
