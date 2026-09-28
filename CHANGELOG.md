@@ -16,6 +16,11 @@ untouched datetime is no longer truncated to seconds. New forms pre-check
 flows, so the admin no longer offers an Add form for them. The audit log
 records a secret change as `[changed]` and never stores the value.
 
+### Fixed
+
+- `DatabaseCache` keys compare exactly on MySQL: `user:1` no longer reads `User:1`, nor `café` `cafe`.
+  Prefix deletes are exact-case on MySQL and SQLite too (#1757).
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token

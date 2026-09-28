@@ -162,6 +162,11 @@ return `Box::pin(async move { …; Ok(()) })`; an `Err` is shown on the form.
 Before this release the admin stored an SSO provider's `client_secret` in
 plaintext, which no longer decrypts. Re-save each admin-created provider's
 secret after upgrading.
+### MySQL cache keys compare exactly
+
+`DatabaseCache` now creates `cache_key` as `VARBINARY(255)` on MySQL (#1757).
+`ensure_table` does not change an existing table; run once per cache table:
+`ALTER TABLE rustango_cache MODIFY cache_key VARBINARY(255) NOT NULL;`
 
 ## 0.58.0
 
