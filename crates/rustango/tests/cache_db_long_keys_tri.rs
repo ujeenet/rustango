@@ -1,5 +1,5 @@
 //! `DatabaseCache` keys longer than MySQL's `VARCHAR(255)` round-trip
-//! and stay distinct, on every dialect (#1674).
+//! and stay distinct, on every dialect (#1674), and compare exactly (#1757).
 
 #![cfg(all(
     feature = "cache",
@@ -88,7 +88,40 @@ async fn prefix_delete_reaches_long_keys(pool: &Pool) {
     let _ = cache.drop_table().await;
 }
 
+/// Keys compare byte for byte: case and accents are not folded, and a
+/// prefix delete stays inside its exact namespace (#1757).
+async fn keys_compare_exactly(pool: &Pool) {
+    let cache = fresh(pool).await;
+    cache.set("User:1", "upper", None).await.unwrap();
+    assert_eq!(cache.get("user:1").await.unwrap(), None, "case folded");
+    cache.set("user:1", "lower", None).await.unwrap();
+    assert_eq!(cache.get("User:1").await.unwrap().as_deref(), Some("upper"));
+    assert_eq!(cache.get("user:1").await.unwrap().as_deref(), Some("lower"));
+
+    cache.set("cafe", "plain", None).await.unwrap();
+    assert_eq!(cache.get("café").await.unwrap(), None, "accent folded");
+    assert!(cache.add("café", "accent", None).await.unwrap(), "add café");
+    assert_eq!(cache.get("cafe").await.unwrap().as_deref(), Some("plain"));
+
+    cache.set("tenant:acme:x", "a", None).await.unwrap();
+    cache.set("tenant:ACME:x", "b", None).await.unwrap();
+    cache.set("tenant:acmé:x", "c", None).await.unwrap();
+    cache.delete_prefix("tenant:acme:").await.unwrap();
+    assert_eq!(cache.get("tenant:acme:x").await.unwrap(), None);
+    assert_eq!(
+        cache.get("tenant:ACME:x").await.unwrap().as_deref(),
+        Some("b"),
+        "prefix delete folded case"
+    );
+    assert_eq!(
+        cache.get("tenant:acmé:x").await.unwrap().as_deref(),
+        Some("c"),
+        "prefix delete folded accents"
+    );
+    let _ = cache.drop_table().await;
+}
+
 tri_dialect_test! {
     setup: noop,
-    scenarios: [long_keys_round_trip, prefix_delete_reaches_long_keys],
+    scenarios: [long_keys_round_trip, prefix_delete_reaches_long_keys, keys_compare_exactly],
 }
