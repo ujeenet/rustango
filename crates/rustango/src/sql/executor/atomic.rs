@@ -5,7 +5,6 @@
 //! pool runs in a savepoint on it (#1666). Each block's future carries its
 //! own context in a task-local, so `join!`ed blocks cannot see each other's.
 
-use std::any::Any;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -18,28 +17,26 @@ use crate::sql::Pool;
 
 type Callback = Box<dyn FnOnce() + Send>;
 
-/// Identity of a pool: the options `Arc` its clones share. Held, so the
-/// address cannot be reused while a block is open.
+/// Identity of a pool: the address of the pool state its clones share.
+/// The clone held here keeps that address from being reused, and unlike
+/// `connect_options()` it survives `set_connect_options`.
 #[derive(Clone)]
-struct PoolId(Arc<dyn Any + Send + Sync>);
+struct PoolId(Pool);
 
 impl PoolId {
-    fn of(pool: &Pool) -> Self {
-        match pool {
+    fn key(&self) -> *const () {
+        match &self.0 {
             #[cfg(feature = "postgres")]
-            Pool::Postgres(p) => Self(p.connect_options()),
+            Pool::Postgres(p) => std::ptr::from_ref(p.options()).cast(),
             #[cfg(feature = "mysql")]
-            Pool::Mysql(p) => Self(p.connect_options()),
+            Pool::Mysql(p) => std::ptr::from_ref(p.options()).cast(),
             #[cfg(feature = "sqlite")]
-            Pool::Sqlite(p) => Self(p.connect_options()),
+            Pool::Sqlite(p) => std::ptr::from_ref(p.options()).cast(),
         }
     }
 
     fn same(&self, other: &Self) -> bool {
-        std::ptr::eq(
-            Arc::as_ptr(&self.0).cast::<()>(),
-            Arc::as_ptr(&other.0).cast::<()>(),
-        )
+        self.key() == other.key()
     }
 }
 
@@ -58,6 +55,8 @@ struct TxState {
     depth: usize,
     /// A savepoint statement failed; the transaction can only roll back.
     poisoned: bool,
+    /// A guard was handed out since the last liveness probe.
+    dirty: bool,
 }
 
 impl TxState {
@@ -80,6 +79,27 @@ impl TxState {
         self.savepoint("RELEASE SAVEPOINT", depth).await?;
         self.depth = depth - 1;
         Ok(())
+    }
+
+    /// Poison the transaction if the server already ended it.
+    async fn check_open(&mut self) -> Result<(), ExecError> {
+        self.dirty = false;
+        if self.tx().still_open().await {
+            Ok(())
+        } else {
+            self.poisoned = true;
+            Err(ExecError::AtomicAborted)
+        }
+    }
+
+    /// MySQL ends the transaction on a deadlock and then autocommits,
+    /// so a statement there must not run before this probe.
+    fn needs_probe(&self) -> bool {
+        #[cfg(feature = "mysql")]
+        if self.dirty && matches!(self.tx, Some(PoolTx::Mysql(_))) {
+            return true;
+        }
+        false
     }
 
     /// Refuse a poisoned transaction; roll back a cancelled block first.
@@ -114,13 +134,17 @@ async fn acquire(slot: &Arc<Slot>) -> Result<OwnedMutexGuard<TxState>, ExecError
         Err(_) if slot.guards.load(Ordering::SeqCst) > 0 => return Err(ExecError::NestedAtomic),
         Err(_) => Arc::clone(&slot.state).lock_owned().await,
     };
-    if !guard.poisoned && slot.cancelled.load(Ordering::SeqCst) == 0 {
+    if !guard.poisoned && slot.cancelled.load(Ordering::SeqCst) == 0 && !guard.needs_probe() {
         return Ok(guard);
     }
     let slot = Arc::clone(slot);
     in_background(async move {
         let mut g = guard;
-        g.settle(&slot).await.map(|()| g)
+        g.settle(&slot).await?;
+        if g.needs_probe() {
+            g.check_open().await?;
+        }
+        Ok(g)
     })
     .await
 }
@@ -169,10 +193,11 @@ impl AtomicTx {
     /// is open; [`ExecError::AtomicAborted`] after a failed savepoint.
     pub async fn lock(&self) -> Result<TxGuard<'_>, ExecError> {
         let slot = &self.block.slot;
-        let guard = acquire(slot).await?;
+        let mut guard = acquire(slot).await?;
         if guard.depth != self.block.depth {
             return Err(ExecError::NestedAtomic);
         }
+        guard.dirty = true;
         slot.guards.fetch_add(1, Ordering::SeqCst);
         Ok(TxGuard {
             guard,
@@ -208,26 +233,38 @@ impl std::ops::DerefMut for TxGuard<'_> {
     }
 }
 
+/// Hand-off between a nested block and its background SAVEPOINT task, so
+/// a block dropped while its savepoint opens is still rolled back.
+#[derive(Default)]
+struct Opening {
+    opened: AtomicBool,
+    abandoned: AtomicBool,
+}
+
 /// An open savepoint. Dropped before its end starts, it is rolled back on next use.
 struct OpenSavepoint {
     slot: Arc<Slot>,
     depth: usize,
+    opening: Arc<Opening>,
     ending: bool,
+}
+
+fn mark_cancelled(slot: &Slot, depth: usize) {
+    let _ = slot
+        .cancelled
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
+            Some(if c == 0 { depth } else { c.min(depth) })
+        });
 }
 
 impl Drop for OpenSavepoint {
     fn drop(&mut self) {
         if !self.ending {
-            let _ = self
-                .slot
-                .cancelled
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
-                    Some(if c == 0 {
-                        self.depth
-                    } else {
-                        c.min(self.depth)
-                    })
-                });
+            // Either side that sees both flags marks it; a refused open never does.
+            self.opening.abandoned.store(true, Ordering::SeqCst);
+            if self.opening.opened.load(Ordering::SeqCst) {
+                mark_cancelled(&self.slot, self.depth);
+            }
         }
     }
 }
@@ -282,6 +319,13 @@ impl Drop for OpenSavepoint {
 /// whole transaction rolls back and [`ExecError::AtomicAborted`] is
 /// returned.
 ///
+/// **Server-ended transactions:** before the outermost COMMIT the block
+/// checks the transaction is still open, so a statement error the closure
+/// ignored on PostgreSQL returns [`ExecError::AtomicAborted`] instead of a
+/// silent rollback. On MySQL, where a deadlock ends the transaction and
+/// later statements autocommit, each [`AtomicTx::lock`] after the first
+/// runs the same check (one extra savepoint round trip).
+///
 /// **Costs:** past 64 open savepoints in one transaction PostgreSQL
 /// spills its subtransaction cache, so avoid nesting in hot loops. On
 /// MySQL a deadlock inside a nested block rolls back the whole outer
@@ -305,7 +349,7 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    let id = PoolId::of(pool);
+    let id = PoolId(pool.clone());
     let current = BLOCK.try_with(Arc::clone).ok();
     let same_pool =
         std::iter::successors(current.clone(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id));
@@ -333,6 +377,7 @@ where
             tx: Some(transaction_pool(pool).await?),
             depth: 0,
             poisoned: false,
+            dirty: false,
         })),
         cancelled: AtomicUsize::new(0),
         guards: AtomicUsize::new(0),
@@ -348,12 +393,16 @@ where
     let handle = AtomicTx {
         block: Arc::clone(&block),
     };
-    let res = BLOCK.scope(Arc::clone(&block), f(&handle)).await;
+    let res = BLOCK
+        .scope(Arc::clone(&block), async { f(&handle).await })
+        .await;
     // Waits for any background savepoint work, then rolls back a
     // cancelled nested block before deciding.
     let mut st = slot.state.lock().await;
     let settled = match st.settle(&slot).await {
         Ok(()) if st.depth != 0 => Err(ExecError::AtomicAborted),
+        // PG turns a COMMIT after a failed statement into a silent ROLLBACK.
+        Ok(()) if res.is_ok() => st.check_open().await,
         other => other,
     };
     let tx = st.tx.take().expect("atomic transaction is open");
@@ -393,22 +442,35 @@ where
     let slot = Arc::clone(&parent.slot);
     let guard = acquire(&slot).await?;
     let parent_depth = parent.depth;
-    let depth = in_background(async move {
+    let depth = parent_depth + 1;
+    let opening = Arc::new(Opening::default());
+    // Armed before the SAVEPOINT is sent: a drop from here on is a cancel.
+    let mut open = OpenSavepoint {
+        slot: Arc::clone(&slot),
+        depth,
+        opening: Arc::clone(&opening),
+        ending: false,
+    };
+    let (task_slot, task_opening) = (Arc::clone(&slot), Arc::clone(&opening));
+    let opened = in_background(async move {
         let mut g = guard;
         // Only the innermost open block may open a child.
         if g.depth != parent_depth {
             return Err(ExecError::NestedAtomic);
         }
-        g.savepoint("SAVEPOINT", parent_depth + 1).await?;
-        g.depth = parent_depth + 1;
-        Ok(g.depth)
+        g.savepoint("SAVEPOINT", depth).await?;
+        g.depth = depth;
+        task_opening.opened.store(true, Ordering::SeqCst);
+        if task_opening.abandoned.load(Ordering::SeqCst) {
+            mark_cancelled(&task_slot, depth);
+        }
+        Ok(())
     })
-    .await?;
-    let mut open = OpenSavepoint {
-        slot: Arc::clone(&slot),
-        depth,
-        ending: false,
-    };
+    .await;
+    if let Err(e) = opened {
+        open.ending = true;
+        return Err(e);
+    }
     let block = Arc::new(Block {
         pool: parent.pool.clone(),
         slot: Arc::clone(&slot),
@@ -420,13 +482,16 @@ where
     let handle = AtomicTx {
         block: Arc::clone(&block),
     };
-    let res = BLOCK.scope(Arc::clone(&block), f(&handle)).await;
+    let res = BLOCK
+        .scope(Arc::clone(&block), async { f(&handle).await })
+        .await;
     let guard = match acquire(&slot).await {
         Ok(g) => g,
         // `open` is still armed: the next use rolls this savepoint back.
         Err(e) => return Err(res.err().unwrap_or(e)),
     };
-    // From here the background task finishes the savepoint either way.
+    // From here the background task finishes the savepoint, callbacks
+    // included, even if this future is dropped.
     open.ending = true;
     let release = res.is_ok();
     let ended = in_background(async move {
@@ -438,6 +503,12 @@ where
         if release {
             g.savepoint("RELEASE SAVEPOINT", depth).await?;
             g.depth = depth - 1;
+            let callbacks = block.take_callbacks();
+            parent
+                .callbacks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(callbacks);
             Ok(())
         } else {
             g.rollback_to(depth).await
@@ -447,12 +518,6 @@ where
     // A block's own error wins over a failure to end its savepoint.
     let v = res?;
     ended?;
-    let callbacks = block.take_callbacks();
-    parent
-        .callbacks
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .extend(callbacks);
     Ok(v)
 }
 

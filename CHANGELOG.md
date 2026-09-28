@@ -36,7 +36,9 @@ on the same pool opened a second transaction that survived the outer
 rollback and deadlocked a one-connection pool; it now runs in a
 savepoint on the outer connection. `on_commit` callbacks fire only at
 the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
-emits invalid SQL.
+emits invalid SQL. A transaction the server already ended (a PG
+statement error the closure ignored, a MySQL deadlock) makes `atomic`
+return `ExecError::AtomicAborted` instead of `Ok`.
 
 **Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
 statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
