@@ -18,6 +18,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
       <th>Kind</th>
       <th>Issuer / client</th>
       <th>Enabled</th>
+      <th>Email linking</th>
       <th>Order</th>
       <th class="actions-col">Actions</th>
     </tr>
@@ -33,8 +34,13 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
         <code>{{ p.client_id }}</code>
       </td>
       <td>{% if p.enabled %}✓{% else %}—{% endif %}</td>
+      <td>{% if p.allow_email_link %}✓{% else %}—{% endif %}</td>
       <td>{{ p.sort_order }}</td>
       <td class="actions-col">
+        <form method="post" action="/sso-shared/{{ p.id }}/email-link">
+          {{ csrf_input | default(value='') | safe }}
+          <button type="submit" class="btn-row-action">{% if p.allow_email_link %}Stop email linking{% else %}Allow email linking{% endif %}</button>
+        </form>
         <form method="post" action="/sso-shared/{{ p.id }}/delete"
               onsubmit="return confirm('Delete shared provider {{ p.slug }}?');">
           {{ csrf_input | default(value='') | safe }}
@@ -68,7 +74,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
   <label>Scopes (optional, space-separated) <input name="scopes" placeholder="openid email profile groups"></label>
   <label>Sort order <input name="sort_order" type="number" value="0"></label>
   <label class="inline"><input type="checkbox" name="enabled" checked> Enabled</label>
-  <label class="inline"><input type="checkbox" name="allow_email_link"> Link first-time users by verified email (never superusers or staff)</label>
+  <label class="inline"><input type="checkbox" name="allow_email_link"> Link first-time users by verified email, in every tenant (never superusers or staff)</label>
   <button type="submit">Add provider</button>
 </form>
 {% endblock %}
