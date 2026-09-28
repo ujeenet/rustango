@@ -359,6 +359,88 @@ async fn reenroll_needs_a_current_code() {
     assert!(html.contains("Setup key"), "a fresh code must start it");
 }
 
+/// #1776 — wrong step-up codes lock the account like wrong login codes.
+#[tokio::test]
+async fn wrong_reenroll_codes_lock_the_account() {
+    let (pool, _alice) = seed().await;
+    // Own user: the lock is process-global.
+    AdminUser::new_with_password("dave1776", "correct horse", true)
+        .unwrap()
+        .insert_pool(&pool)
+        .await
+        .unwrap();
+    let dave_id = *AdminUser::objects()
+        .filter("username", "dave1776")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0)
+        .id
+        .get()
+        .unwrap();
+    let secret = TotpSecret::generate();
+    totp_store::start_enrollment(&pool, dave_id, &secret)
+        .await
+        .unwrap();
+    totp_store::confirm(&pool, dave_id).await.unwrap();
+
+    let app = router(pool);
+    let csrf = fetch_csrf(&app).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let code = rustango::totp::generate_at(&secret, now, 30, 6);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/login"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={csrf}"))
+                .body(Body::from(format!(
+                    "_csrf={csrf}&username=dave1776&password=correct%20horse&totp_code={code}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .find_map(|v| {
+            let s = v.to_str().ok()?;
+            s.starts_with("rustango_admin_session=")
+                .then(|| s.split(';').next().unwrap_or("").to_owned())
+        })
+        .expect("session cookie");
+    let reenroll = |code: String| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/account/totp"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={csrf}; {session}"))
+                .body(Body::from(format!("_csrf={csrf}&reset=1&totp_code={code}")))
+                .unwrap(),
+        )
+    };
+    let next = rustango::totp::generate_at(&secret, now + 30, 30, 6);
+    let wrong = if next == "000000" { "111111" } else { "000000" };
+    for n in 0..5 {
+        let r = reenroll(wrong.to_owned()).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "attempt {n}");
+    }
+    let r = reenroll(next).await.unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a locked account must refuse even the right code"
+    );
+}
+
 #[tokio::test]
 async fn non_enrolled_user_logs_in_without_a_code() {
     let (pool, _secret) = seed().await;

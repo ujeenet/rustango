@@ -629,6 +629,7 @@ async fn totp_enroll_form(State(state): State<AppState>) -> Response {
 #[cfg(feature = "totp")]
 async fn totp_enroll_submit(
     State(state): State<AppState>,
+    ip: crate::login_throttle::ClientIp,
     Form(form): Form<TotpEnrollInput>,
 ) -> Response {
     let Some(session) = super::session::current() else {
@@ -636,18 +637,34 @@ async fn totp_enroll_submit(
     };
     let _ = super::totp_store::ensure_table(&state.pool).await;
 
-    // Re-enroll: a current code first, then the fresh setup.
+    // Re-enroll: a current code first, then the fresh setup. The code
+    // goes through the login gate, so it cannot be brute-forced.
     if form.reset.is_some() {
+        let attempt = match crate::login_throttle::shared()
+            .begin(
+                &crate::login_throttle::LoginScope::Admin,
+                &ip,
+                &session.username,
+            )
+            .await
+        {
+            Ok(a) => a,
+            Err(refused) => return refused.into_response(),
+        };
         let s = crate::totp::TotpSecret::generate();
         let code = form.totp_code.as_deref().unwrap_or("").trim();
-        let refused =
-            match super::totp_store::start_reenrollment(&state.pool, session.user_id, code, &s)
-                .await
-            {
-                Ok(true) => None,
-                Ok(false) => Some("Enter a current code from your authenticator to re-enroll."),
-                Err(_) => Some("Could not start re-enrollment — please try again."),
-            };
+        let started =
+            super::totp_store::start_reenrollment(&state.pool, session.user_id, code, &s).await;
+        match (&started, code.is_empty()) {
+            (Ok(true), false) => attempt.succeeded().await,
+            (Ok(false), false) => attempt.failed().await,
+            _ => {}
+        }
+        let refused = match started {
+            Ok(true) => None,
+            Ok(false) => Some("Enter a current code from your authenticator to re-enroll."),
+            Err(_) => Some("Could not start re-enrollment — please try again."),
+        };
         if let Some(msg) = refused {
             return Html(render_totp_enroll(&state, true, "", "", Some(msg), None)).into_response();
         }
