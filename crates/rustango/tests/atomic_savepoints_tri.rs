@@ -424,12 +424,12 @@ async fn sabotage(sp: &AtomicTx) -> Result<(), ExecError> {
     let sql = sqlx::raw_sql("RELEASE SAVEPOINT rustango_sp_1");
     match &mut *sp.lock().await? {
         #[cfg(feature = "postgres")]
-        PoolTx::Postgres(t) => (&mut **t).execute(sql).await?,
+        PoolTx::Postgres(t) => (&mut **t).execute(sql).await.map(|_| ())?,
         #[cfg(feature = "mysql")]
-        PoolTx::Mysql(t) => (&mut **t).execute(sql).await.map(|_| Default::default())?,
+        PoolTx::Mysql(t) => (&mut **t).execute(sql).await.map(|_| ())?,
         #[cfg(feature = "sqlite")]
-        PoolTx::Sqlite(t) => (&mut **t).execute(sql).await.map(|_| Default::default())?,
-    };
+        PoolTx::Sqlite(t) => (&mut **t).execute(sql).await.map(|_| ())?,
+    }
     Ok(())
 }
 
@@ -654,12 +654,14 @@ async fn sqlite_rollback_refuses_later_statements(pool: &Pool) {
     if dialect(pool) != "sqlite" {
         return; // The hook is SQLite's; PG and MySQL have their own checks.
     }
-    use rustango::sql::{sqlx, sqlx::Executor as _, PoolTx};
     let p = one_conn(pool).await;
     let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
         put(tx, 1).await?;
         let mut guard = tx.lock().await?;
-        if let PoolTx::Sqlite(t) = &mut *guard {
+        #[cfg(feature = "sqlite")]
+        #[allow(irrefutable_let_patterns)]
+        if let rustango::sql::PoolTx::Sqlite(t) = &mut *guard {
+            use rustango::sql::{sqlx, sqlx::Executor as _};
             // Stands in for SQLite rolling back on its own (SQLITE_FULL, IOERR).
             (&mut **t).execute(sqlx::raw_sql("ROLLBACK")).await?;
         }
