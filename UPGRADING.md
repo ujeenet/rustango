@@ -150,6 +150,30 @@ untouched.
 
 ## Unreleased
 
+### SSO signs in by link, not by email
+
+Existing SSO users are refused until they are linked. Run
+`makemigrations` + `migrate`: it adds `allow_email_link` to
+`rustango_sso_providers` / `rustango_shared_sso_providers` and creates
+`rustango_sso_links` (until then email linking reads as off and SSO is
+refused). Then either turn on `allow_email_link` (a normal user is linked
+on the next login; for a shared provider it applies to every tenant), or
+have a superuser add an `SsoLink` row. Superusers, staff and every
+bare-admin account need the row: `provider_source` `tenant`/`shared`/
+`admin`, `provider_id` the provider row id, `issuer` `kind` or
+`kind|issuer_url` without a trailing slash, `subject`, `user_id`; the
+admin computes `key_sha256`. The `sso refused` log
+line carries `provider_id`, `issuer` and `subject`. Only superusers can
+now add, change or delete `SsoProvider` and `SsoLink` rows in the admin.
+A read-only operator console can no longer change shared providers.
+(Pre-release soak databases built from an earlier 0.58.0 draft have a
+`subject_sha256` column instead of `key_sha256`: drop and re-migrate
+`rustango_sso_links`. Released versions never had it.)
+`find_or_provision_member(pool, email, profile, auto)` is now
+`(pool, &ProviderKey, allow_email_link, profile, auto)` and returns
+`MemberSignIn`: map `NotLinked` (an existing account, not linkable by
+email) apart from `NoAccount`, or every existing member looks "closed".
+
 ### Bounded update/delete; `atomic()` hands out a lockable `AtomicTx`
 
 `update()` / `delete()` now honour `limit`, `offset` and `order_by`

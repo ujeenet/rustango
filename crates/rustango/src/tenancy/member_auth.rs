@@ -8,11 +8,9 @@
 //! [`SsoProvider`] rows that already live in each tenant's storage — the
 //! difference is the *session it mints*. Because the core lives in the
 //! `sso` feature (not `admin-sso`), member SSO builds with just
-//! `tenancy + sso` — no auto-admin required. Where the admin flow is
-//! **link-to-existing** (an unknown email is refused), the member flow
-//! can **auto-provision** a new tenant user from a verified IdP email so
-//! a gym member / SaaS end-user can sign in the first time without an
-//! operator creating the row by hand.
+//! `tenancy + sso` — no auto-admin required. Like the admin flows it signs
+//! in by `(provider, sub)` link; unlike them it can **auto-provision** (and
+//! link) a new tenant user when no account has the verified IdP email.
 //!
 //! [`SsoProvider`]: crate::sso::SsoProvider
 //!
@@ -63,8 +61,12 @@ use subtle::ConstantTimeEq;
 use crate::extractors::{Tenant, TenantContext};
 use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::{Auto, Pool};
+use crate::sso::link::{
+    create_link_tx, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, LinkSource,
+    ProviderKey,
+};
 use crate::sso::provider::resolve_by_slug;
-use crate::sso::{build_provider, open_flow, seal_flow, verified_email, NormalizedUser};
+use crate::sso::{build_provider, open_flow, seal_flow, NormalizedUser};
 use crate::tenancy::User;
 
 // ===================================================================
@@ -341,8 +343,8 @@ pub struct MemberAuthConfig {
     /// Default `"/"`.
     pub landing_url: String,
     /// Auto-create a tenant user from a verified IdP email the first
-    /// time it's seen. When `false`, an unknown email is refused (like
-    /// the admin link-to-existing flow). Default `true`.
+    /// time it's seen. When `false`, an unknown email is refused.
+    /// Default `true`.
     pub auto_provision: bool,
     /// Member session lifetime in seconds. Default `604800` (7 days).
     pub session_ttl: i64,
@@ -469,7 +471,7 @@ async fn sso_begin(
         }
     };
 
-    let provider = match build_provider(&resolved).await {
+    let provider = match build_provider(&resolved.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, slug, "build_provider failed");
@@ -542,7 +544,7 @@ async fn sso_callback(
             ))
         }
     };
-    let provider = match build_provider(&resolved).await {
+    let provider = match build_provider(&resolved.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "build_provider failed on callback");
@@ -558,48 +560,53 @@ async fn sso_callback(
         }
     };
 
-    let email = match verified_email(&normalized) {
-        Ok(e) => e.to_ascii_lowercase(),
-        Err(e) => {
-            tracing::warn!(error = %e, "unverified / missing email from IdP");
+    let key = resolved.key(LinkSource::Tenant);
+    let member_id = match find_or_provision_member(
+        &pool,
+        &key,
+        resolved.allow_email_link,
+        &normalized,
+        config.auto_provision,
+    )
+    .await
+    {
+        Ok(MemberSignIn::Member(id)) => id,
+        Ok(MemberSignIn::NotLinked) => {
+            return clear_flow(sso_error(
+                "This sign-in is not linked to your account. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::NoAccount) => {
+            return clear_flow(sso_error(
+                "There is no account for this sign-in. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::Inactive) => {
+            return clear_flow(sso_error(
+                "This account is disabled. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::Unverified) => {
             return clear_flow(sso_error(
                 "Your identity provider did not return a verified email.",
                 login_base,
             ));
         }
+        Ok(_) => {
+            return clear_flow(sso_error("Sign-in failed. Please try again.", login_base));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "find-or-provision member failed");
+            return clear_flow(sso_error("Could not complete sign-in.", login_base));
+        }
     };
 
-    let member_id =
-        match find_or_provision_member(&pool, &email, &normalized, config.auto_provision).await {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                tracing::warn!(email, "no member account and auto-provision disabled");
-                return clear_flow(sso_error(
-                    "There is no account for that email. Please contact your administrator.",
-                    login_base,
-                ));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "find-or-provision member failed");
-                return clear_flow(sso_error("Could not complete sign-in.", login_base));
-            }
-        };
-
-    let member = {
-        use crate::core::Column as _;
-        use crate::sql::FetcherPool as _;
-        match User::objects()
-            .where_(User::id.eq(member_id))
-            .fetch(&pool)
-            .await
-            .map(|rows| rows.into_iter().next())
-        {
-            Ok(Some(u)) => u,
-            Ok(None) | Err(_) => {
-                tracing::error!(member_id, "member row missing after find-or-provision");
-                return clear_flow(sso_error("Could not complete sign-in.", login_base));
-            }
-        }
+    let Some(member) = tenant_user(&pool, member_id).await.filter(|u| u.active) else {
+        tracing::warn!(member_id, "member missing or inactive after sign-in");
+        return clear_flow(sso_error("Could not complete sign-in.", login_base));
     };
     let cookie = mint_cookie(
         &ctx.session_secret,
@@ -611,44 +618,133 @@ async fn sso_callback(
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
 
-/// Match the IdP email to an existing member, else auto-provision one
-/// (when `auto_provision`). Returns `Ok(Some(id))` on match/create,
-/// `Ok(None)` when unknown and auto-provision is off (caller refuses).
+/// What [`find_or_provision_member`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberSignIn {
+    /// Signed in (linked, email-linked, or newly provisioned) as this user id.
+    Member(i64),
+    /// An account has this email but may not be linked by it: email linking
+    /// is off, the account is privileged, or the email collides with another.
+    NotLinked,
+    /// No account has this email, and provisioning is off.
+    NoAccount,
+    /// The account is inactive.
+    Inactive,
+    /// The IdP sent no verified email (and there is no link).
+    Unverified,
+    /// Refused for another reason, e.g. no subject.
+    Refused,
+}
+
+/// The member linked to `(provider, profile.provider_user_id)`; else see
+/// [`crate::sso::link::sign_in`]; else, with `auto_provision`, a new linked member.
 ///
-/// Public because the browser SSO flow is not the only caller any more: a
-/// native mobile sign-in verifies an ID token itself and then needs exactly
-/// this rule. Keeping it private forced the one downstream app that does so to
-/// reimplement it, and two copies of "which existing member is this, and may
-/// we create one" drift apart silently — both keep working, differently.
+/// Public so a native sign-in that verified its own ID token uses the same rule.
+///
+/// # Errors
+/// Storage failures.
 pub async fn find_or_provision_member(
     pool: &Pool,
-    email: &str,
+    provider: &ProviderKey,
+    allow_email_link: bool,
     profile: &NormalizedUser,
     auto_provision: bool,
-) -> Result<Option<i64>, String> {
+) -> Result<MemberSignIn, String> {
+    let refusal = match sign_in(
+        pool,
+        provider,
+        allow_email_link,
+        profile,
+        &TenantAccounts(pool),
+    )
+    .await
+    {
+        Ok(id) => return Ok(MemberSignIn::Member(id)),
+        Err(LinkRefusal::NoAccount(email)) if auto_provision => {
+            return provision_member(pool, provider, &email, profile)
+                .await
+                .map(MemberSignIn::Member);
+        }
+        Err(LinkRefusal::Storage(e)) => return Err(e),
+        Err(e) => e,
+    };
+    tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {refusal}");
+    Ok(match refusal {
+        LinkRefusal::EmailLinkDisabled | LinkRefusal::Privileged | LinkRefusal::EmailCollides => {
+            MemberSignIn::NotLinked
+        }
+        LinkRefusal::NoAccount(_) => MemberSignIn::NoAccount,
+        LinkRefusal::Inactive => MemberSignIn::Inactive,
+        LinkRefusal::Unverified => MemberSignIn::Unverified,
+        _ => MemberSignIn::Refused,
+    })
+}
+
+/// A tenant's users. Privileged = superuser, or holds any admin permission;
+/// a permission read error counts as privileged.
+pub(crate) struct TenantAccounts<'a>(pub &'a Pool);
+
+impl TenantAccounts<'_> {
+    async fn account(&self, user: &User) -> Result<Option<Account>, String> {
+        let Some(user_id) = user.id.get().copied() else {
+            return Ok(None);
+        };
+        let privileged = user.is_superuser
+            || crate::tenancy::permissions::user_permissions_pool(user_id, self.0)
+                .await
+                .map_or(true, |perms| !perms.is_empty());
+        Ok(Some(Account::new(user_id, privileged, user.active)))
+    }
+}
+
+impl AccountLookup for TenantAccounts<'_> {
+    async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
+        match find_tenant_user(self.0, id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Some(u) => self.account(&u).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn by_email(&self, email: &str) -> Result<EmailLookup, String> {
+        use crate::sql::FetcherPool as _;
+        let rows = User::objects()
+            .filter("email__iexact", email.to_owned())
+            .fetch(self.0)
+            .await
+            .map_err(|e| format!("lookup: {e}"))?;
+        match EmailLookup::pick(&rows, email, |u| u.email.as_deref()) {
+            Ok(Some(u)) => Ok(self
+                .account(u)
+                .await?
+                .map_or(EmailLookup::Missing, EmailLookup::Found)),
+            Ok(None) => Ok(EmailLookup::Missing),
+            Err(()) => Ok(EmailLookup::Collides),
+        }
+    }
+}
+
+/// The tenant user with this id; a driver error is an error, not "missing".
+pub(crate) async fn find_tenant_user(
+    pool: &Pool,
+    id: i64,
+) -> Result<Option<User>, crate::sql::ExecError> {
+    use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-
-    // Idempotent — find by (lowercased) email first.
-    let existing = User::objects()
-        .filter("email", email.to_owned())
+    Ok(User::objects()
+        .where_(User::id.eq(id))
         .fetch(pool)
-        .await
-        .map_err(|e| format!("lookup: {e}"))?
+        .await?
         .into_iter()
-        .next();
-    if let Some(u) = existing {
-        return Ok(Some(
-            u.id.get()
-                .copied()
-                .ok_or_else(|| "existing user missing id".to_owned())?,
-        ));
-    }
+        .next())
+}
 
-    if !auto_provision {
-        return Ok(None);
-    }
-
-    provision_member(pool, email, profile).await.map(Some)
+/// The tenant user with this id, if it can be read.
+pub(crate) async fn tenant_user(pool: &Pool, id: i64) -> Option<User> {
+    find_tenant_user(pool, id).await.ok().flatten()
 }
 
 /// Auto-create a tenant user from a verified IdP email. `password_hash`
@@ -657,6 +753,7 @@ pub async fn find_or_provision_member(
 /// The username is the email local-part, deduped on unique clash.
 async fn provision_member(
     pool: &Pool,
+    provider: &ProviderKey,
     email: &str,
     profile: &NormalizedUser,
 ) -> Result<i64, String> {
@@ -696,13 +793,22 @@ async fn provision_member(
             password_changed_at: None,
         };
 
-        match user.insert_pool(pool).await {
+        // The user and its link commit together, or neither does.
+        let mut tx = crate::sql::transaction_pool(pool)
+            .await
+            .map_err(|e| format!("begin: {e}"))?;
+        match user.insert_tx(&mut tx).await {
             Ok(()) => {
-                return user
+                let id = user
                     .id
                     .get()
                     .copied()
-                    .ok_or_else(|| "insert returned no id".to_owned());
+                    .ok_or_else(|| "insert returned no id".to_owned())?;
+                create_link_tx(&mut tx, provider, &profile.provider_user_id, id)
+                    .await
+                    .map_err(|e| format!("link: {e}"))?;
+                tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+                return Ok(id);
             }
             Err(e) if attempt == 0 => {
                 // Likely a username/email unique clash — retry once with

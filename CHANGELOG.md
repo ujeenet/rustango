@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — SSO links accounts by provider subject, email linking opt-in
+
+SSO logins (bare admin, tenant admin, member) now sign in the user linked
+to the IdP's `(provider, sub)` in the new `rustango_sso_links` table. A
+matching email links a first-time user only when the provider has the new
+`allow_email_link` (default off), and never a superuser or staff account.
+Links and emails match exactly on every collation. Only superusers write
+provider and link rows in the admin; an editable operator console sets the
+shared flag in place. `sso::resolve_by_slug` returns
+`ResolvedProvider`; `member_auth::find_or_provision_member` takes a
+`ProviderKey` and returns `MemberSignIn`.
+
 ### Security — bounded update/delete; nested `atomic()` uses savepoints (#1666)
 
 `QuerySet::update()` and `delete()` dropped `limit`, `offset` and

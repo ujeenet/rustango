@@ -87,6 +87,12 @@ pub struct SsoProvider {
     #[rustango(max_length = 255)]
     pub scopes: Option<String>,
 
+    /// Link a first-time SSO user to the account with the same verified
+    /// email. Never links a superuser or staff account; the bare admin ignores it.
+    /// Only a superuser can add or change provider rows in the admin.
+    #[rustango(default = "false")]
+    pub allow_email_link: bool,
+
     /// Set on INSERT via `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
@@ -96,16 +102,146 @@ pub struct SsoProvider {
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
+use super::link::{LinkSource, ProviderKey};
 use super::{parse_scopes, ProviderButton, ResolvedSso, SsoError};
-use crate::sql::Pool;
+use crate::core::{Model, SqlValue};
+use crate::query::QuerySet;
+use crate::sql::{ExecError, Pool};
+
+/// Columns provider reads leave out. `allow_email_link` is read on its own,
+/// so a table not yet migrated still serves logins.
+const DEFERRED: &[&str] = &["allow_email_link", "created_at", "updated_at"];
+
+/// A provider row, shared by [`SsoProvider`] and `SharedSsoProvider`.
+/// `client_secret` is still encrypted.
+pub(crate) struct ProviderRow {
+    pub id: i64,
+    pub slug: String,
+    pub label: String,
+    pub kind: String,
+    pub issuer_url: Option<String>,
+    pub client_id: String,
+    client_secret: String,
+    pub enabled: bool,
+    pub sort_order: i32,
+    pub scopes: Option<String>,
+}
+
+fn text(v: Option<&SqlValue>) -> Option<String> {
+    match v {
+        Some(SqlValue::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn int(v: Option<&SqlValue>) -> i64 {
+    match v {
+        Some(SqlValue::I64(n)) => *n,
+        Some(SqlValue::I32(n)) => i64::from(*n),
+        Some(SqlValue::I16(n)) => i64::from(*n),
+        Some(SqlValue::Bool(b)) => i64::from(*b),
+        _ => 0,
+    }
+}
+
+/// Provider rows matching `qs`, without the [`DEFERRED`] columns.
+pub(crate) async fn load_rows<T: Model>(
+    qs: QuerySet<T>,
+    pool: &Pool,
+) -> Result<Vec<ProviderRow>, ExecError> {
+    let rows = qs.defer(DEFERRED).fetch(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|r| ProviderRow {
+            id: int(r.get("id")),
+            slug: text(r.get("slug")).unwrap_or_default(),
+            label: text(r.get("label")).unwrap_or_default(),
+            kind: text(r.get("kind")).unwrap_or_default(),
+            issuer_url: text(r.get("issuer_url")),
+            client_id: text(r.get("client_id")).unwrap_or_default(),
+            client_secret: text(r.get("client_secret")).unwrap_or_default(),
+            enabled: int(r.get("enabled")) != 0,
+            sort_order: i32::try_from(int(r.get("sort_order"))).unwrap_or(0),
+            scopes: text(r.get("scopes")),
+        })
+        .collect())
+}
+
+/// A resolved provider plus what the link step needs.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ResolvedProvider {
+    pub sso: ResolvedSso,
+    /// Provider row id.
+    pub id: i64,
+    /// The row's `allow_email_link`; `false` when it can't be read.
+    pub allow_email_link: bool,
+}
+
+impl ResolvedProvider {
+    /// Link key for this provider as seen from `source`.
+    #[must_use]
+    pub fn key(&self, source: LinkSource) -> ProviderKey {
+        ProviderKey::for_row(
+            source,
+            self.id,
+            &self.sso.provider,
+            self.sso.issuer_url.as_deref(),
+        )
+    }
+}
+
+/// Resolve the enabled `T` row with this `slug`. `Ok(None)` when none matches.
+pub(crate) async fn resolve_row<T: Model>(
+    pool: &Pool,
+    slug: &str,
+    redirect_uri: String,
+) -> Result<Option<ResolvedProvider>, SsoError> {
+    use crate::casts::CastValue as _;
+    let row = load_rows(QuerySet::<T>::new().filter("slug", slug.to_owned()), pool)
+        .await
+        .map_err(|e| SsoError::Config(format!("db: {e}")))?
+        .into_iter()
+        .find(|r| r.enabled);
+    let Some(r) = row else {
+        return Ok(None);
+    };
+    let client_secret =
+        EncryptedString::from_db(&r.client_secret).map_err(|e| SsoError::Secret(e.to_string()))?;
+    let allow_email_link = match QuerySet::<T>::new()
+        .filter("id", r.id)
+        .values_list_flat("allow_email_link")
+        .fetch::<bool>(pool)
+        .await
+    {
+        Ok(v) => v.first().copied().unwrap_or(false),
+        Err(e) => {
+            tracing::warn!(target: "rustango::sso", "allow_email_link unreadable, treated as off: {e}");
+            false
+        }
+    };
+    Ok(Some(ResolvedProvider {
+        sso: ResolvedSso {
+            provider: r.kind,
+            issuer_url: r.issuer_url,
+            client_id: r.client_id,
+            client_secret,
+            redirect_uri,
+            scopes: parse_scopes(r.scopes.as_deref()),
+        },
+        id: r.id,
+        allow_email_link,
+    }))
+}
 
 /// Enabled providers for the bare admin login page, sorted by `sort_order`.
 /// `login_base` is the login path (e.g. `/admin/login`); each button links
 /// to `{login_base}/sso/{slug}`. A DB error yields an empty list (the login
 /// page still renders the password form).
 pub async fn list_enabled(pool: &Pool, login_base: &str) -> Vec<ProviderButton> {
-    use crate::sql::FetcherPool as _;
-    let mut rows: Vec<SsoProvider> = SsoProvider::objects().fetch(pool).await.unwrap_or_default();
+    let mut rows = load_rows(QuerySet::<SsoProvider>::new(), pool)
+        .await
+        .unwrap_or_default();
     rows.retain(|r| r.enabled);
     rows.sort_by_key(|r| r.sort_order);
     rows.into_iter()
@@ -117,36 +253,16 @@ pub async fn list_enabled(pool: &Pool, login_base: &str) -> Vec<ProviderButton> 
         .collect()
 }
 
-/// Resolve one enabled provider by `slug` into a ready-to-build
-/// [`ResolvedSso`] (secret dereferenced via `env://`/literal). `Ok(None)`
-/// when no enabled row matches.
+/// Resolve one enabled [`SsoProvider`] by `slug`. `Ok(None)` when no enabled
+/// row matches.
 ///
 /// # Errors
 /// [`SsoError::Config`] on a DB error, [`SsoError::Secret`] when the
-/// `secret_ref` can't be resolved.
+/// stored secret can't be decrypted.
 pub async fn resolve_by_slug(
     pool: &Pool,
     slug: &str,
     redirect_uri: String,
-) -> Result<Option<ResolvedSso>, SsoError> {
-    use crate::sql::FetcherPool as _;
-    let row = SsoProvider::objects()
-        .filter("slug", slug.to_owned())
-        .fetch(pool)
-        .await
-        .map_err(|e| SsoError::Config(format!("db: {e}")))?
-        .into_iter()
-        .find(|r| r.enabled);
-    let Some(r) = row else {
-        return Ok(None);
-    };
-    let client_secret = r.client_secret.clone().into_inner();
-    Ok(Some(ResolvedSso {
-        provider: r.kind,
-        issuer_url: r.issuer_url,
-        client_id: r.client_id,
-        client_secret,
-        redirect_uri,
-        scopes: parse_scopes(r.scopes.as_deref()),
-    }))
+) -> Result<Option<ResolvedProvider>, SsoError> {
+    resolve_row::<SsoProvider>(pool, slug, redirect_uri).await
 }

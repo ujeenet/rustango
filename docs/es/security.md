@@ -313,8 +313,9 @@ La autenticación es cómo confirmas quién está haciendo una petición. **Rust
 > consulta la [guía de SSO](sso.md). Los proveedores se **gestionan desde la UI
 > del admin como filas** (varios por superficie; por inquilino, o un conjunto
 > compartido entre inquilinos), con el secreto de cliente **cifrado en reposo**.
-> Es enlace-a-existente (el email verificado del IdP debe coincidir con un usuario
-> del admin; sin auto-aprovisionamiento) y reutiliza la sesión existente.
+> Inicia sesión con la cuenta enlazada al subject del IdP (el enlace por email es
+> opcional por proveedor y nunca se aplica a superusuarios ni staff; sin
+> auto-aprovisionamiento) y reutiliza la sesión existente.
 
 ### Tres backends listos para usar
 
