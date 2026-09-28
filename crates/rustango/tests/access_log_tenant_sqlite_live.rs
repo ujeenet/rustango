@@ -282,3 +282,60 @@ async fn tenant_field_off_never_labels() {
         "`Off` must not label even a resolved tenant, got:\n{out}"
     );
 }
+
+/// #1745 — behind `Builder::real_ip` the access log names the client
+/// the trusted proxy forwarded, not the proxy. The builder mounts the
+/// log on the outermost router, so a `RealIpLayer` on the api router
+/// would run too late. Tenant host: the console logs on its own too.
+#[cfg(feature = "admin")]
+#[tokio::test]
+async fn the_builder_access_log_names_the_client_behind_a_trusted_proxy() {
+    use rustango::real_ip::RealIpLayer;
+    use rustango::sql::sqlx;
+    let _g = lock().lock().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
+    let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+    let api = Router::new().route("/app", get(|| async { "ok" }));
+    let app = rustango::server::Builder::<sqlx::Sqlite>::from_pool(pool, url, "localhost")
+        .api(api)
+        .observability(Some(AccessLogLayer::default().trust_proxy_headers(true)))
+        .real_ip(
+            RealIpLayer::default()
+                .trust_proxies(["10.0.0.1"])
+                .expect("cidr"),
+        )
+        .into_router()
+        .await
+        .expect("assemble");
+
+    let buf = CaptureWriter::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mut req = Request::builder()
+        .uri("/app")
+        .header("host", "acme.localhost")
+        .header("x-forwarded-for", "203.0.113.7")
+        .body(Body::empty())
+        .expect("request");
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "10.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    app.oneshot(req).await.expect("response");
+
+    let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap_or_default();
+    let line = out
+        .lines()
+        .find(|l| l.contains("rustango::access_log"))
+        .unwrap_or_else(|| panic!("no access-log line:\n{out}"));
+    assert!(
+        line.contains("client.address=203.0.113.7"),
+        "expected the forwarded client, got:\n{line}"
+    );
+}

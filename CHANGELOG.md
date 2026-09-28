@@ -4,6 +4,34 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — every IP reader uses the trusted client IP (#1745)
+
+The ViewSet throttle, the auth signals' `ip_address` and the access log
+no longer read the leftmost `X-Forwarded-For` / `X-Real-IP`; they use
+`TrustedRealIp`, else the socket, like the rate limiters.
+
+**Breaking:** `signals::auth::meta_from_headers` is replaced by
+`meta_from_parts` (needs `admin`). Behind a proxy without
+`RealIpLayer::trust_proxies`, every client now shares one ViewSet bucket
+and logs the proxy IP. See UPGRADING.
+
+New `server::Builder::real_ip` mounts `RealIpLayer` outside the access log
+and the tenant admin, so their IPs are the trusted client.
+
+### Security — login-limit leftovers (#1748)
+
+`RateLimitLayer::per_ip` groups IPv6 by /64. A raw MCP key on a busy
+hash queue answers 503, not 401. The admin 2FA prompt no longer spends
+login limit tokens.
+
+**Breaking:** `verify_raw_agent_credential` returns
+`Result<Option<McpAgent>, AgentError>`, not `Option<McpAgent>`.
+
+### Fixed — SQLite NULLs decode as `null`, not `0` (#1766)
+
+On SQLite a NULL cell came back as `0` / `false` / `""` in ViewSet JSON,
+the admin form and `values_dict`; it is `null` now, as on PG and MySQL.
+
 ### Fixed — admin create of users, secrets and timestamps (#1763, #1764)
 
 The admin can create and edit tenant and bare-admin users: `password_hash`
@@ -19,6 +47,10 @@ records a secret change as `[changed]` and never stores the value.
 ### Fixed — `bin/bump-version.sh` covers `docs/index.toml` and install pins (#1750)
 
 - A series bump now rewrites `docs/index.toml`, `orm = { package = "rustango", version = … }` and `<crate> = "X.Y"` pins, and leaves example comments alone; the verify step checks what `docs_versions` checks.
+
+### Fixed — CI pulls service images from a GHCR mirror (#1688)
+
+- `mirror-images.yml` copies each CI image to `ghcr.io/ujeenet/ci-*` weekly, so jobs stop failing on `toomanyrequests`.
 
 ### Fixed
 
