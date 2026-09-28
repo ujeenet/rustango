@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Bare admin logout needs a CSRF token
+
+A custom form posting to the bare admin `/logout` must send `_csrf`
+(or `X-CSRF-Token`); without it the POST gets 403.
+
 ### Bounded update/delete; `atomic()` hands out a lockable `AtomicTx`
 
 `update()` / `delete()` now honour `limit`, `offset` and `order_by`
