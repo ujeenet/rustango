@@ -46,8 +46,10 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::extractors::Tenant;
+use crate::sql::sqlx::Database;
 use crate::sql::FetcherPool as _;
 use crate::tenancy::jwt_lifecycle::JwtLifecycle;
+use crate::tenancy::{DefaultTenantDb, Org};
 
 // ---------------------------------------------------------------- Config
 
@@ -253,12 +255,23 @@ impl JwtAuth {
     /// They are tenant-aware via the [`Tenant`] extractor.
     #[must_use]
     pub fn router(&self) -> Router<()> {
+        self.router_for::<DefaultTenantDb>()
+    }
+
+    /// [`Self::router`] for a `Tenant<DB>` other than the default, e.g.
+    /// SQLite in a build that also enables `postgres` (#1778).
+    #[must_use]
+    pub fn router_for<DB>(&self) -> Router<()>
+    where
+        DB: Database,
+        Tenant<DB>: FromRequestParts<JwtAuth> + Send,
+    {
         let p = &self.0.prefix;
         Router::new()
-            .route(&format!("{p}/login"), post(login))
-            .route(&format!("{p}/refresh"), post(refresh))
-            .route(&format!("{p}/logout"), post(logout))
-            .route(&format!("{p}/me"), get(me))
+            .route(&format!("{p}/login"), post(login::<DB>))
+            .route(&format!("{p}/refresh"), post(refresh::<DB>))
+            .route(&format!("{p}/logout"), post(logout::<DB>))
+            .route(&format!("{p}/me"), get(me::<DB>))
             .with_state(self.clone())
     }
 
@@ -317,6 +330,24 @@ fn login_claims(
 
 // ---------------------------------------------------------------- Handlers
 
+/// A `Tenant<DB>` with the backend erased, so the handler bodies are not
+/// generic and their futures stay provably `Send`.
+struct Scope {
+    org: Org,
+    pool: crate::sql::Pool,
+}
+
+impl Scope {
+    fn of<DB: Database>(t: Tenant<DB>) -> Self {
+        let pool = t.pool().clone();
+        Self { org: t.org, pool }
+    }
+
+    fn pool(&self) -> &crate::sql::Pool {
+        &self.pool
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LoginInput {
     pub username: String,
@@ -337,13 +368,24 @@ pub struct LoginOutput {
     pub user: UserBrief,
 }
 
-async fn login(
+fn login<DB: Database>(
     State(auth): State<JwtAuth>,
-    t: Tenant,
+    t: Tenant<DB>,
     ip: crate::login_throttle::ClientIp,
     extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginInput>,
+) -> impl std::future::Future<Output = Result<Json<LoginOutput>, Response>> + Send {
+    login_in(auth, Scope::of(t), ip, extensions, headers, body)
+}
+
+async fn login_in(
+    auth: JwtAuth,
+    t: Scope,
+    ip: crate::login_throttle::ClientIp,
+    extensions: axum::http::Extensions,
+    headers: axum::http::HeaderMap,
+    body: LoginInput,
 ) -> Result<Json<LoginOutput>, Response> {
     use crate::core::Column as _;
     use crate::login_throttle::LoginRefused;
@@ -483,10 +525,18 @@ pub struct RefreshOutput {
 /// stolen refresh token is single-use — the legitimate user's next
 /// refresh succeeds and invalidates whatever the attacker also tried
 /// to use.
-async fn refresh(
+fn refresh<DB: Database>(
     State(auth): State<JwtAuth>,
-    t: Tenant,
+    t: Tenant<DB>,
     Json(body): Json<RefreshInput>,
+) -> impl std::future::Future<Output = Result<Json<RefreshOutput>, Response>> + Send {
+    refresh_in(auth, Scope::of(t), body)
+}
+
+async fn refresh_in(
+    auth: JwtAuth,
+    t: Scope,
+    body: RefreshInput,
 ) -> Result<Json<RefreshOutput>, Response> {
     let jwt = auth.lifecycle();
     // Audit N3 — bind refresh to the resolved tenant. Without this, a
@@ -560,9 +610,20 @@ pub struct LogoutInput {
     pub refresh: Option<String>,
 }
 
-async fn logout(
+fn logout<DB: Database>(
     State(auth): State<JwtAuth>,
-    t: Tenant,
+    t: Tenant<DB>,
+    extensions: axum::http::Extensions,
+    headers: axum::http::HeaderMap,
+    bearer: Bearer,
+    body: Option<Json<LogoutInput>>,
+) -> impl std::future::Future<Output = Result<StatusCode, Response>> + Send {
+    logout_in(auth, Scope::of(t), extensions, headers, bearer, body)
+}
+
+async fn logout_in(
+    auth: JwtAuth,
+    t: Scope,
     extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     bearer: Bearer,
@@ -634,11 +695,15 @@ async fn logout(
 /// Validates the token's `tenant` claim against the resolved
 /// request tenant via [`JwtAuth::verify_for_tenant`] so a JWT minted on
 /// one subdomain can't be replayed against another.
-async fn me(
+fn me<DB: Database>(
     State(auth): State<JwtAuth>,
-    t: Tenant,
+    t: Tenant<DB>,
     bearer: Bearer,
-) -> Result<Json<UserBrief>, Response> {
+) -> impl std::future::Future<Output = Result<Json<UserBrief>, Response>> + Send {
+    me_in(auth, Scope::of(t), bearer)
+}
+
+async fn me_in(auth: JwtAuth, t: Scope, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
     use crate::tenancy::auth::User;
@@ -708,9 +773,28 @@ async fn me(
 /// [`AuthenticatedUser`]: crate::tenancy::AuthenticatedUser
 /// [`Principal`]: crate::tenancy::Principal
 /// [`OwnedBy`]: crate::viewset::OwnedBy
-pub async fn require_bearer(
-    State(auth): State<JwtAuth>,
+pub fn require_bearer(
+    auth: State<JwtAuth>,
     t: Tenant,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> impl std::future::Future<Output = Response> + Send {
+    require_bearer_for::<DefaultTenantDb>(auth, t, req, next)
+}
+
+/// [`require_bearer`] for a `Tenant<DB>` other than the default (#1778).
+pub fn require_bearer_for<DB: Database>(
+    State(auth): State<JwtAuth>,
+    t: Tenant<DB>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> impl std::future::Future<Output = Response> + Send {
+    bearer_in(auth, Scope::of(t), req, next)
+}
+
+async fn bearer_in(
+    auth: JwtAuth,
+    t: Scope,
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### TOTP re-enroll asks for a current code
+
+`POST /account/totp` with `reset=1` now needs `totp_code` from the current device (#1776).
+Custom `totp_enroll.html` overrides must add that field to the re-enroll form.
+
 ### An admin TOTP re-enroll keeps the old device until confirmed
 
 `rustango_admin_totp` gains a nullable `pending_secret_base32` column

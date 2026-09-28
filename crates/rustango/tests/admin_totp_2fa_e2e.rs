@@ -271,38 +271,25 @@ async fn the_enrollment_code_cannot_sign_in() {
     assert!(!sess, "the enrollment code signed in a second time");
 }
 
-/// #1756 — an unfinished re-enroll keeps the old factor in force.
-#[tokio::test]
-async fn an_unfinished_reenroll_keeps_the_old_code() {
-    let (pool, secret) = seed().await;
-    let app = router(pool);
-    let csrf = fetch_csrf(&app).await;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let code = rustango::totp::generate_at(&secret, now, 30, 6);
-    let session = session_cookie(&app, &csrf, "alice", &code).await;
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("{PREFIX}/account/totp"))
-                .header("content-type", "application/x-www-form-urlencoded")
-                .header(header::COOKIE, format!("rustango_csrf={csrf}; {session}"))
-                .body(Body::from(format!("_csrf={csrf}&reset=1")))
-                .unwrap(),
-        )
+/// A superuser with a confirmed device. Own user per test: the login
+/// lock is process-global.
+async fn enrolled_user(pool: &Pool, name: &str) -> (i64, TotpSecret) {
+    let mut u = AdminUser::new_with_password(name, "correct horse", true).unwrap();
+    u.insert_pool(pool).await.unwrap();
+    let id = *u.id.get().unwrap();
+    let secret = TotpSecret::generate();
+    totp_store::start_enrollment(pool, id, &secret)
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    totp_store::confirm(pool, id).await.unwrap();
+    (id, secret)
+}
 
-    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", "").await;
-    assert!(!sess, "a pending re-enroll let the password alone sign in");
-    let next = rustango::totp::generate_at(&secret, now + 30, 30, 6);
-    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", &next).await;
-    assert!(sess, "the old factor must still sign in");
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 /// GET (no body) or POST `form` to the enroll page; returns the HTML.
@@ -325,40 +312,142 @@ async fn totp_page(app: &axum::Router, cookies: &str, form: Option<String>) -> S
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-async fn alice_id(pool: &Pool) -> i64 {
-    let u = AdminUser::objects()
-        .filter("username", "alice")
-        .fetch(pool)
-        .await
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    *u.id.get().unwrap()
+/// #1776 — a session alone cannot start a re-enroll; a fresh code can.
+#[tokio::test]
+async fn reenroll_needs_a_current_code() {
+    let (pool, _alice) = seed().await;
+    let (id, secret) = enrolled_user(&pool, "erin1776").await;
+    let app = router(pool.clone());
+    let csrf = fetch_csrf(&app).await;
+    let now = unix_now();
+    let code = rustango::totp::generate_at(&secret, now, 30, 6);
+    let session = session_cookie(&app, &csrf, "erin1776", &code).await;
+    let cookies = format!("rustango_csrf={csrf}; {session}");
+
+    for body in [
+        format!("_csrf={csrf}&reset=1"),
+        format!("_csrf={csrf}&reset=1&totp_code=000000"),
+        // Already spent on the login above.
+        format!("_csrf={csrf}&reset=1&totp_code={code}"),
+    ] {
+        let html = totp_page(&app, &cookies, Some(body.clone())).await;
+        let device = totp_store::device(&pool, id).await.expect("device");
+        assert!(
+            device.pending_secret_base32.is_none(),
+            "{body} staged a secret"
+        );
+        assert!(
+            html.contains("enabled</strong>"),
+            "not the 2FA page: {html}"
+        );
+        assert!(!html.contains("Setup key"), "re-enroll started by {body}");
+    }
+
+    let next = rustango::totp::generate_at(&secret, now + 30, 30, 6);
+    let html = totp_page(
+        &app,
+        &cookies,
+        Some(format!("_csrf={csrf}&reset=1&totp_code={next}")),
+    )
+    .await;
+    assert!(html.contains("Setup key"), "a fresh code must start it");
+}
+
+/// #1776 — wrong step-up codes lock the account like wrong login codes.
+#[tokio::test]
+async fn wrong_reenroll_codes_lock_the_account() {
+    let (pool, _alice) = seed().await;
+    let (_id, secret) = enrolled_user(&pool, "dave1776").await;
+    let app = router(pool);
+    let csrf = fetch_csrf(&app).await;
+    let now = unix_now();
+    let code = rustango::totp::generate_at(&secret, now, 30, 6);
+    let session = session_cookie(&app, &csrf, "dave1776", &code).await;
+    let reenroll = |code: String| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/account/totp"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={csrf}; {session}"))
+                .body(Body::from(format!("_csrf={csrf}&reset=1&totp_code={code}")))
+                .unwrap(),
+        )
+    };
+    let next = rustango::totp::generate_at(&secret, now + 30, 30, 6);
+    let wrong = if next == "000000" { "111111" } else { "000000" };
+    for n in 0..5 {
+        let r = reenroll(wrong.to_owned()).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "attempt {n}");
+    }
+    let r = reenroll(next).await.unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a locked account must refuse even the right code"
+    );
+}
+
+/// #1756 — an unfinished re-enroll keeps the old factor in force.
+#[tokio::test]
+async fn an_unfinished_reenroll_keeps_the_old_code() {
+    let (pool, _alice) = seed().await;
+    let (id, secret) = enrolled_user(&pool, "fay1756").await;
+    let app = router(pool.clone());
+    let csrf = fetch_csrf(&app).await;
+    let now = unix_now();
+    let code = rustango::totp::generate_at(&secret, now, 30, 6);
+    let session = session_cookie(&app, &csrf, "fay1756", &code).await;
+    let cookies = format!("rustango_csrf={csrf}; {session}");
+    let next = rustango::totp::generate_at(&secret, now + 30, 30, 6);
+    let html = totp_page(
+        &app,
+        &cookies,
+        Some(format!("_csrf={csrf}&reset=1&totp_code={next}")),
+    )
+    .await;
+    assert!(html.contains("Setup key"), "the re-enroll did not start");
+
+    // Both codes in the window are spent, so check the store, not a login.
+    let device = totp_store::device(&pool, id).await.expect("device");
+    assert!(device.pending_secret_base32.is_some(), "nothing staged");
+    assert_eq!(
+        totp_store::confirmed_secret(&pool, id)
+            .await
+            .map(|s| s.to_base32()),
+        Some(secret.to_base32()),
+        "the unfinished re-enroll replaced the factor"
+    );
+    let (_s, sess) = login(&app, &csrf, "fay1756", "correct horse", "").await;
+    assert!(!sess, "a pending re-enroll let the password alone sign in");
 }
 
 /// #1756 — only the reset response shows a re-enroll's key; a code for
 /// it then swaps the factor.
 #[tokio::test]
 async fn a_pending_reenroll_key_is_shown_once_and_promotes() {
-    let (pool, old) = seed().await;
+    let (pool, _alice) = seed().await;
+    let (id, old) = enrolled_user(&pool, "gus1756").await;
     let app = router(pool.clone());
     let csrf = fetch_csrf(&app).await;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = unix_now();
     let session = session_cookie(
         &app,
         &csrf,
-        "alice",
+        "gus1756",
         &rustango::totp::generate_at(&old, now, 30, 6),
     )
     .await;
     let cookies = format!("rustango_csrf={csrf}; {session}");
 
-    let reset = totp_page(&app, &cookies, Some(format!("_csrf={csrf}&reset=1"))).await;
-    let pending = totp_store::device(&pool, alice_id(&pool).await)
+    let current = rustango::totp::generate_at(&old, now + 30, 30, 6);
+    let reset = totp_page(
+        &app,
+        &cookies,
+        Some(format!("_csrf={csrf}&reset=1&totp_code={current}")),
+    )
+    .await;
+    let pending = totp_store::device(&pool, id)
         .await
         .unwrap()
         .pending_secret_base32
@@ -388,11 +477,16 @@ async fn a_pending_reenroll_key_is_shown_once_and_promotes() {
     .await;
     assert!(done.contains("now enabled"), "promote failed: {done}");
 
-    let old_next = rustango::totp::generate_at(&old, now + 30, 30, 6);
-    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", &old_next).await;
-    assert!(!sess, "the old factor still signs in after the re-enroll");
+    // The old codes in the window are spent, so check the store.
+    assert_eq!(
+        totp_store::confirmed_secret(&pool, id)
+            .await
+            .map(|s| s.to_base32()),
+        Some(pending.clone()),
+        "the old factor is still the confirmed one"
+    );
     let new_next = rustango::totp::generate_at(&fresh, now + 30, 30, 6);
-    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", &new_next).await;
+    let (_s, sess) = login(&app, &csrf, "gus1756", "correct horse", &new_next).await;
     assert!(sess, "the new factor must sign in");
 }
 

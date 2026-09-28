@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- Admin TOTP re-enroll needs a current code from the confirmed device, so a stolen session cannot replace the factor; a failed start now shows an error (#1776).
+
+### Added
+
+- `JwtAuth::router_for::<DB>()` and `require_bearer_for::<DB>` serve a non-default `Tenant<DB>`, e.g. SQLite in a build with `postgres` on (#1778).
+
 ### Security — a TOTP re-enroll keeps the confirmed factor until the new one is confirmed (#1756)
 
 Starting a re-enroll no longer replaces the confirmed device: the new
