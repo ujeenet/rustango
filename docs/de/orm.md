@@ -1482,7 +1482,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Verwirf die `tx`, ohne `commit()` aufzurufen (z. B. bei einem frühen `?`-Return), und die Transaktion rollt zurück. Für einen Nach-Commit-Hook ist der Scope `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, der bei `Ok` automatisch committet und bei `Err` zurückrollt — der Hook selbst ist `rustango::sql::on_commit(|| { … })` und wird **innerhalb** dieser Closure aufgerufen. `atomic` leert die Queue, nachdem der Commit durch ist; ein `on_commit` außerhalb eines `atomic`-Scopes paniert, statt den Callback zu verwerfen.
+Verwirf die `tx`, ohne `commit()` aufzurufen (z. B. bei einem frühen `?`-Return), und die Transaktion rollt zurück. Für einen Nach-Commit-Hook ist der Scope `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, der bei `Ok` automatisch committet und bei `Err` zurückrollt — der Hook selbst ist `rustango::sql::on_commit(|| { … })` und wird **innerhalb** dieser Closure aufgerufen. `atomic` leert die Queue, nachdem der Commit durch ist; ein `on_commit` außerhalb eines `atomic`-Scopes paniert, statt den Callback zu verwerfen. In der Closure ist `tx` ein `AtomicTx`: sperre ihn pro Statement, `insert_tx(&mut *tx.lock().await?, &q)`. Ein verschachteltes `atomic(&pool, …)` auf demselben Pool läuft als Savepoint auf derselben Verbindung, und seine Hooks warten auf den äußersten Commit. Verschachtelung gilt pro Pool-Objekt: reiche den Pool des Requests weiter. Zwei verschachtelte Blöcke gleichzeitig (`join!`) oder ein über den Aufruf gehaltener `TxGuard` liefern `ExecError::NestedAtomic`; ein fehlgeschlagener Savepoint rollt alles mit `ExecError::AtomicAborted` zurück. Ein mit `tokio::spawn` gestarteter Task erbt den Block nicht.
 
 ---
 

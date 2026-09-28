@@ -9,12 +9,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 `QuerySet::update()` and `delete()` dropped `limit`, `offset` and
 `order_by`, so `.limit(1).delete()` deleted every matching row. They
 now bound the statement by primary key on every backend, and refuse
-(`QueryError::BoundedDmlUnsupported`) when they cannot. A nested
-`atomic()` on the same pool opened a second transaction that survived
-the outer rollback and deadlocked a one-connection pool; it now runs in
-a savepoint on the outer connection. `on_commit` callbacks fire only at
-the outermost commit. SQLite
-`.offset(n)` without `.limit()` no longer emits invalid SQL.
+(`QueryError::BoundedDmlUnsupported`, reason `BoundedDmlReason`) when
+they cannot, including a negative limit or offset. A nested `atomic()`
+on the same pool opened a second transaction that survived the outer
+rollback and deadlocked a one-connection pool; it now runs in a
+savepoint on the outer connection. `on_commit` callbacks fire only at
+the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
+emits invalid SQL.
+
+**Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
+statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
+`ExecError::NestedAtomic`, `ExecError::AtomicAborted`,
+`QueryError::BoundedDmlUnsupported`, `BoundedDmlReason`.
 
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 

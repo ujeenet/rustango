@@ -161,6 +161,13 @@ A nested `atomic(&pool, …)` on the same pool is now a savepoint on the
 outer transaction, and its `on_commit` callbacks wait for the outermost
 commit. Drop the `TxGuard` before nesting, or get `ExecError::NestedAtomic`.
 
+Nested writes that used to survive an outer rollback (an audit row, say)
+are now rolled back with it, silently. For an independent commit, use a
+different pool or `tokio::spawn`. Nesting is per pool object: pass the
+request's pool down instead of looking it up again. On MySQL before
+8.0.21 and MariaDB before 11.1 a bounded update/delete may scan the whole
+table.
+
 ### The trusted client IP is the rightmost untrusted hop
 
 Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the
