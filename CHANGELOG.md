@@ -16,6 +16,10 @@ untouched datetime is no longer truncated to seconds. New forms pre-check
 flows, so the admin no longer offers an Add form for them. The audit log
 records a secret change as `[changed]` and never stores the value.
 
+### Fixed — `bin/bump-version.sh` covers `docs/index.toml` and install pins (#1750)
+
+- A series bump now rewrites `docs/index.toml`, `orm = { package = "rustango", version = … }` and `<crate> = "X.Y"` pins, and leaves example comments alone; the verify step checks what `docs_versions` checks.
+
 ### Fixed
 
 - `DatabaseCache` keys compare exactly on MySQL: `user:1` no longer reads `User:1`, nor `café` `cafe`.
