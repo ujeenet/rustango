@@ -67,7 +67,8 @@ pub fn promotion_templates() -> std::sync::Arc<tera::Tera> {
         ),
         (
             "commerce_promotion_detail.html",
-            "<h1>{{ object.code }}</h1>\n<p class=\"label\">{{ object.label | urlize | safe }}</p>",
+            "<h1>{{ object.code }}</h1>\n<p class=\"label\">{{ object.label | urlize | safe }}</p>\n\
+             <p class=\"short\">{{ object.label | urlizetrunc(arg=12) | safe }}</p>",
         ),
         (
             "commerce_promotion_form.html",

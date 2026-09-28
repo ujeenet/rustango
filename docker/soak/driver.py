@@ -72,6 +72,15 @@ SAAS = {
     "saas-my": "http://web-saas-my:8080",
     "saas-sq": "http://web-saas-sq:8080",
 }
+# Run against a subset, e.g. `SOAK_INSTANCES=single-sq,saas-sq,saas-pg-edge`.
+ONLY = {n for n in os.environ.get("SOAK_INSTANCES", "").split(",") if n}
+if ONLY:
+    SINGLE = {n: b for n, b in SINGLE.items() if n in ONLY}
+    SAAS = {n: b for n, b in SAAS.items() if n in ONLY}
+
+
+def wanted(name: str) -> bool:
+    return not ONLY or name in ONLY
 
 
 # ----------------------------------------------------------------- report
@@ -1240,6 +1249,21 @@ async def check_urlize_and_cbv_csrf(client, name, base, headers=None):
                    verdict(page.status_code == 200 and not raw and "&lt;script&gt;" in body),
                    f"{page.status_code}; raw script {'present' if raw else 'absent'}: "
                    f"{body[body.find('class=') : body.find('class=') + 200]!r}", name)
+
+    # `urlizetrunc` cut non-ASCII text on a byte, not a char (#1669).
+    wide = f"ÑAN-{RUN_ID}-{time.time_ns() % 10**9}"
+    r = await client.post(f"{base}/api/v1/promotions", headers=headers, json={
+        "code": wide, "label": "ñandú https://ñandú.example/ábcdéfghíjk fin",
+        "amount_cents": 1, "visible": True, "deleted_at": None})
+    if r.status_code in (200, 201):
+        page = await client.get(f"{base}/promos/{r.json().get('id')}", headers=headers)
+        short = page.text.split('class="short">', 1)[-1][:160]
+        REPORT.add("urlizetrunc keeps non-ASCII text whole", "#1669",
+                   verdict(page.status_code == 200 and "ñandú" in short and "\ufffd" not in short),
+                   f"{page.status_code} {short!r}", name)
+    else:
+        REPORT.add("urlizetrunc keeps non-ASCII text whole", "#1669", "FAIL",
+                   f"could not create a promotion: {r.status_code}", name)
 
     token = await pages_csrf(client, base, headers)
     host = origin_of(base, headers)
@@ -2420,6 +2444,11 @@ def report_uncoverable_058():
         REPORT.add(label, "#1661", "NOT-COVERED", why)
     REPORT.add("intcomma(i64::MIN) does not panic", "#1663", "NOT-COVERED",
                "in-process text helper; no page renders it")
+    REPORT.add("the console provisioning and admin table-missing pages escape `'`", "#1663",
+               "NOT-COVERED", "provisioning is not mounted, and the table-missing page only "
+               "ever shows a model's table name, which has no quote")
+    REPORT.add("distributed locks keep their own cache namespace", "#1674", "NOT-COVERED",
+               "neither app takes a distributed lock")
     REPORT.add("new tenant project template loads its settings", "#1702", "NOT-COVERED",
                "scaffolder output; the soak app was not regenerated. The tier files "
                "reaching the tenancy server is checked as #1702 above")
@@ -2642,16 +2671,20 @@ async def main():
 
         print("\n== assertions: edge instances ==")
         # Started now, awaited before the load: it sleeps 22 s.
-        lock_timer = asyncio.create_task(
-            guarded(check_lock_duration_setting, client, name=EDGE_SAAS[0]))
-        await guarded(check_tls_redirect, client, name=EDGE_SAAS[0])
-        await guarded(check_hash_queue_bounded, client, name=EDGE_SAAS[0])
-        await guarded(emit_redaction_probe, client, name=EDGE_SAAS[0])
-        await guarded(check_admin_global_limit, client, name=EDGE_SINGLE[0])
+        lock_timer = None
+        if wanted(EDGE_SAAS[0]):
+            lock_timer = asyncio.create_task(
+                guarded(check_lock_duration_setting, client, name=EDGE_SAAS[0]))
+            await guarded(check_tls_redirect, client, name=EDGE_SAAS[0])
+            await guarded(check_hash_queue_bounded, client, name=EDGE_SAAS[0])
+            await guarded(emit_redaction_probe, client, name=EDGE_SAAS[0])
+        if wanted(EDGE_SINGLE[0]):
+            await guarded(check_admin_global_limit, client, name=EDGE_SINGLE[0])
         if "single-my" in live_single:
             await guarded(check_hash_off_runtime, client, "single-my", live_single["single-my"],
                           name="single-my")
-        check_tenant_fk_schemas()
+        if "saas-pg" in live_saas:
+            check_tenant_fk_schemas()
         report_uncoverable_058()
 
         # Last, because they spend the driver's per-IP login budget on
@@ -2661,7 +2694,8 @@ async def main():
             await guarded(check_admin_login_limits, client, name, base, name=name)
         for name, base in live_saas.items():
             await guarded(check_tenancy_login_limits, client, name, base, name=name)
-        await lock_timer
+        if lock_timer is not None:
+            await lock_timer
 
         targets = [(n, b, None) for n, b in live_single.items()]
         targets += [(n, b, {"Host": tenant_host(rng.randint(1, TENANTS))})
