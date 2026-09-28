@@ -181,7 +181,7 @@ async fn boot() -> Env {
     let api = Router::new()
         .route("/whoami", get(whoami))
         .require_auth(backends)
-        .merge(jwt.router())
+        .merge(jwt.router_for::<sqlx::Sqlite>())
         .layer(axum::middleware::from_fn(
             move |mut req: Request<Body>, next: axum::middleware::Next| {
                 let ctx = ctx.clone();
@@ -260,7 +260,6 @@ impl Env {
             .unwrap()
     }
 
-    #[cfg_attr(feature = "postgres", allow(dead_code))]
     async fn jwt_login(&self, ip: &str, user: &str, pass: &str) -> axum::response::Response {
         let req = Request::builder()
             .method("POST")
@@ -379,7 +378,6 @@ async fn served_tenant_admin_limits_per_ip() {
     assert!(is_429(&r), "got {}", r.status());
 }
 
-#[cfg(not(feature = "postgres"))]
 #[tokio::test]
 async fn jwt_login_locks_with_429() {
     let _g = SUITE.lock().await;
@@ -574,7 +572,6 @@ async fn a_full_hash_queue_answers_503_everywhere() {
         ("basic", env.basic(&next_ip(), &name, PASS).await),
         ("operator change-password", console_change),
         ("tenant change-password", admin_change),
-        #[cfg(not(feature = "postgres"))]
         ("jwt login", env.jwt_login(&next_ip(), &name, PASS).await),
     ];
     #[cfg(feature = "mcp")]
