@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### Admin password widget and derived-field hooks
+
+A `formfield_overrides = "col: password"` column is now never echoed: forms
+render it empty, list and detail show only "set", and an empty edit keeps the
+stored value. `admin::derived_fields::DeriveFn` is now async and fallible:
+return `Box::pin(async move { …; Ok(()) })`; an `Err` is shown on the form.
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token

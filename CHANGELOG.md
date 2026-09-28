@@ -4,6 +4,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin create of users, secrets and timestamps (#1763, #1764)
+
+The admin can create and edit tenant and bare-admin users: `password_hash`
+is a password input, hashed off the runtime, and an empty edit keeps it.
+SSO provider `client_secret`s are encrypted on admin writes and never shown.
+Read-only fields render locked and not `required`; read-only NOT NULL
+timestamps are filled on create, `auto_now` is restamped on update, and an
+untouched datetime is no longer truncated to seconds. New forms pre-check
+`default = "true"` checkboxes. API keys and agents are minted by their own
+flows, so the admin no longer offers an Add form for them.
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token

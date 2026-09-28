@@ -144,10 +144,10 @@ crate::register_admin_object_permission!("rustango_sso_providers", "delete", sup
 
 // The admin writes `key_sha256` from the submitted issuer and subject.
 #[cfg(feature = "admin")]
-fn derive_key(
-    values: &mut Vec<(&'static str, crate::core::SqlValue)>,
-    before: Option<&serde_json::Value>,
-) {
+fn derive_key<'a>(
+    values: &'a mut Vec<(&'static str, crate::core::SqlValue)>,
+    before: Option<&'a serde_json::Value>,
+) -> crate::admin::derived_fields::DeriveFuture<'a> {
     use crate::admin::derived_fields::text;
     let issuer = text(values, before, "issuer").unwrap_or_default();
     let subject = text(values, before, "subject").unwrap_or_default();
@@ -156,6 +156,7 @@ fn derive_key(
         "key_sha256",
         crate::core::SqlValue::String(key_sha256(&issuer, &subject)),
     ));
+    Box::pin(async { Ok::<(), String>(()) })
 }
 
 #[cfg(feature = "admin")]

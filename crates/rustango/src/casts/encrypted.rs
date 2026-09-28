@@ -56,7 +56,7 @@ fn cipher() -> Result<XChaCha20Poly1305, CastError> {
     Ok(XChaCha20Poly1305::new(Key::from_slice(&key)))
 }
 
-fn encrypt(plaintext: &[u8]) -> Result<String, CastError> {
+pub(crate) fn encrypt(plaintext: &[u8]) -> Result<String, CastError> {
     let cipher = cipher()?;
     let mut nonce = [0u8; NONCE_LEN];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
