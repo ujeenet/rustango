@@ -243,10 +243,14 @@ pub enum ExecError {
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
     EmptyReturning,
 
-    /// A nested `atomic()` started while a `TxGuard` of the outer block
-    /// was still held. Drop the guard first.
-    #[error("nested `atomic()` while the outer transaction is locked; drop the `TxGuard` first")]
+    /// A nested `atomic()` or `lock()` found the transaction in use: a
+    /// `TxGuard` still held, or two nested blocks at once (`join!`).
+    #[error("atomic transaction in use: drop the `TxGuard` and run nested blocks one at a time")]
     NestedAtomic,
+
+    /// A savepoint statement failed, so the `atomic` transaction can only roll back.
+    #[error("a savepoint failed; the atomic transaction was rolled back")]
+    AtomicAborted,
 
     /// `ForeignKey::get` resolved a PK that didn't match any row in
     /// the target table. Means the parent was deleted under a

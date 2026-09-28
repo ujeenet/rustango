@@ -127,10 +127,10 @@ pub enum QueryError {
 
     /// `limit()`/`offset()` on `update()`/`delete()` could not be bounded
     /// by primary key, so the statement is refused rather than run unbounded.
-    #[error("`{model}`: limit/offset on update()/delete() is not supported with {reason}")]
+    #[error("`{model}`: limit/offset on update()/delete() refused: {reason}")]
     BoundedDmlUnsupported {
         model: &'static str,
-        reason: &'static str,
+        reason: BoundedDmlReason,
     },
 
     /// The value does not fit the lookup: `__in` without a list,
@@ -185,4 +185,18 @@ pub enum QueryError {
         distinct_on: Vec<String>,
         order_by: Vec<String>,
     },
+}
+
+/// Why a bounded `update()`/`delete()` was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum BoundedDmlReason {
+    #[error("the model has no single-column primary key")]
+    NoSinglePrimaryKey,
+    #[error("order_by spans a relation")]
+    RelationOrderBy,
+    #[error("the queryset has a set operation")]
+    SetOperation,
+    #[error("limit or offset is negative")]
+    Negative,
 }
