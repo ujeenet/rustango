@@ -17,9 +17,8 @@
 //! ```ignore
 //! use rustango::template_views::ListView;
 //! use std::sync::Arc;
-//! use tera::Tera;
 //!
-//! let mut tera = Tera::default();
+//! let mut tera = rustango::template_extensions::html_tera();
 //! tera.add_raw_template("post_list.html", r#"
 //!     {% for post in object_list %}
 //!         <h2>{{ post.title }}</h2>

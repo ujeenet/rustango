@@ -10,11 +10,19 @@ Slack `webhook_callback` and OAuth2 discovery, token and userinfo calls
 refuse private and metadata addresses, never follow redirects, and keep
 at most 256 bytes of an error body. Same check as webhook delivery.
 
+**Breaking:** an IdP or Slack hook on a private address is refused until
+listed in the new `RUSTANGO_OUTBOUND_ALLOW` (hosts and CIDRs); webhook
+delivery ignores that list. `OAuth2Provider::http` is removed; use the new
+`with_client_config` / `from_discovery_with` for a custom CA or mTLS.
+
 ### Security — every framework template autoescapes (#1721)
 
 New `template_extensions::html_tera()` / `html_tera_from_glob()` escape
 every template, not only `.html`. `EmailRenderer` escapes the HTML body
 and leaves the subject and text body raw.
+
+**Breaking:** `EmailRenderer::tera_mut()` is replaced by `configure()`;
+`tera()` now returns the HTML engine.
 
 ## [0.58.1] — 2026-09-28
 

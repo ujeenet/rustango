@@ -102,6 +102,12 @@ impl EmailRenderer {
         Self { html, text }
     }
 
+    /// The HTML (escaping) engine. The text engine has the same templates.
+    #[must_use]
+    pub fn tera(&self) -> &Tera {
+        &self.html
+    }
+
     /// Change both engines, e.g. to register filters at startup.
     pub fn configure(&mut self, f: impl Fn(&mut Tera)) {
         f(&mut self.html);
