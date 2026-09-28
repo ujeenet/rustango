@@ -335,6 +335,9 @@ AccessLogLayer::default()
     .trust_proxy_headers(true)   // TrustedRealIp de RealIpLayer, nunca cabeceras crudas
 ```
 
+`RealIpLayer` debe ejecutarse antes del access log. Con `server::Builder`,
+páselo a `.real_ip(layer)`; una capa en el router de la API llega tarde.
+
 Los parámetros de consulta que llevan credenciales se enmascaran con
 `[redacted]` antes de escribir la línea — `password`, `passwd`, `token`,
 `secret`, `api_key`, `apikey`, `access_token`, `refresh_token`, `signature`,

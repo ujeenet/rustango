@@ -339,6 +339,9 @@ AccessLogLayer::default()
     .trust_proxy_headers(true)   // TrustedRealIp de RealIpLayer, jamais les en-têtes bruts
 ```
 
+`RealIpLayer` doit s'exécuter avant le journal d'accès. Avec `server::Builder`,
+passez-le à `.real_ip(layer)` ; une couche sur le routeur de l'API arrive trop tard.
+
 Les paramètres de requête porteurs d'identifiants sont masqués par `[redacted]`
 avant l'écriture de la ligne — `password`, `passwd`, `token`, `secret`,
 `api_key`, `apikey`, `access_token`, `refresh_token`, `signature`, `auth`.

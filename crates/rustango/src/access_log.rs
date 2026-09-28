@@ -118,6 +118,7 @@ impl AccessLogLayer {
 
     /// Log the `TrustedRealIp` from `RealIpLayer` instead of the TCP
     /// peer. Off by default. Raw forwarding headers are never read.
+    /// `RealIpLayer` must wrap this layer; see `server::Builder::real_ip`.
     #[must_use]
     pub fn trust_proxy_headers(mut self, on: bool) -> Self {
         self.trust_proxy_headers = on;

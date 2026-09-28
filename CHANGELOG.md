@@ -10,6 +10,8 @@ The ViewSet throttle, the auth signals' `ip_address` and the access log
 no longer read the leftmost `X-Forwarded-For` / `X-Real-IP`; they use
 `TrustedRealIp`, else the socket, like the rate limiters.
 `signals::auth::meta_from_headers` is replaced by `meta_from_parts`.
+New `server::Builder::real_ip` mounts `RealIpLayer` outside the access log
+and the tenant admin, so their IPs are the trusted client.
 
 ### Security — login-limit leftovers (#1748)
 
