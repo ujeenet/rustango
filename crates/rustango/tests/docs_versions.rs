@@ -126,7 +126,7 @@ fn is_rustango_dependency(line: &str) -> bool {
 /// which is labelled `MySQL` and is none of this test's business.
 ///
 /// Two components are accepted only when labelled `rustango`, so a dependency
-/// caret (`axum = "0.8"`) is ignored while `rustango = "0.57"` is checked. The
+/// caret (`axum = "0.8"`) is ignored while `rustango = "0.58"` is checked. The
 /// neighbour checks drop anything inside a longer dotted run, which is
 /// how `0.0.0.0:8080` — the README's bind address — stays out.
 fn versions_in(line: &str) -> Vec<String> {
@@ -424,7 +424,7 @@ fn install_pins(text: &str) -> Vec<(usize, String)> {
         if !line.contains("rustango") {
             continue;
         }
-        // `rustango = "0.57"` and `rustango = { version = "0.57", … }`,
+        // `rustango = "0.58"` and `rustango = { version = "0.58", … }`,
         // including the renamed form `orm = { package = "rustango", … }`.
         //
         // The bare form is matched for every crate this workspace

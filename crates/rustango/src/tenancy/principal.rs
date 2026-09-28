@@ -21,7 +21,6 @@
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use super::middleware::AuthenticatedUser;
@@ -148,7 +147,7 @@ pub struct Unauthenticated;
 
 impl IntoResponse for Unauthenticated {
     fn into_response(self) -> Response {
-        (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+        crate::api_errors::ApiError::unauthorized("authentication required").into_response()
     }
 }
 
@@ -188,6 +187,15 @@ mod tests {
     #[test]
     fn unauthenticated_requests_have_no_principal() {
         assert!(Principal::from_parts(&parts()).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_rejection_is_an_api_error() {
+        let r = Unauthenticated.into_response();
+        assert_eq!(r.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["error"], "unauthorized");
     }
 
     #[test]

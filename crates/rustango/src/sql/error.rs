@@ -4,6 +4,7 @@ use crate::core::QueryError;
 
 /// Raised while lowering a `SelectQuery` to a parameterized statement.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SqlError {
     /// `Op::In` was used with something other than `SqlValue::List`.
     #[error("`Op::In` requires `SqlValue::List`")]
@@ -226,6 +227,7 @@ pub enum SqlError {
 
 /// Raised while compiling, writing, or executing a query end-to-end.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExecError {
     #[error(transparent)]
     Query(#[from] QueryError),
@@ -240,6 +242,22 @@ pub enum ExecError {
     /// `RETURNING` columns. Use `insert` for those.
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
     EmptyReturning,
+
+    /// A nested `atomic()` or `lock()` found the transaction in use: a
+    /// `TxGuard` still held, or two nested blocks at once (`join!`).
+    #[error("atomic transaction in use: drop the `TxGuard` and run nested blocks one at a time")]
+    NestedAtomic,
+
+    /// The `atomic` transaction was rolled back: a savepoint failed, or a
+    /// statement error ended it (PG error, MySQL deadlock). Nothing committed.
+    #[error("the atomic transaction was rolled back after a failed statement")]
+    AtomicAborted,
+
+    /// The server ended the `atomic` transaction without a failed statement,
+    /// e.g. a MySQL DDL / TRUNCATE / LOCK TABLES implicit commit. Writes before
+    /// and after it may already be committed, so do not blindly retry.
+    #[error("the server ended the atomic transaction early; some writes may be committed")]
+    AtomicEndedEarly,
 
     /// `ForeignKey::get` resolved a PK that didn't match any row in
     /// the target table. Means the parent was deleted under a

@@ -1588,6 +1588,7 @@ dependencies = [
  "rustango",
  "serde",
  "serde_json",
+ "tera",
  "tokio",
  "tower",
  "tracing",
@@ -1993,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.57.12"
+version = "0.58.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -2037,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.57.12"
+version = "0.58.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

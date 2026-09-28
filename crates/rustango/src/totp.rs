@@ -98,10 +98,42 @@ pub fn verify_at(
     digits: u32,
     window: i64,
 ) -> bool {
+    matched_step_at(secret, code, unix_secs, step_secs, digits, window).is_some()
+}
+
+/// [`verify`], returning the time step the code matched. A caller that
+/// stores it can refuse the same code twice.
+#[must_use]
+pub fn matched_step(
+    secret: &TotpSecret,
+    code: &str,
+    step_secs: u64,
+    digits: u32,
+    window: i64,
+) -> Option<u64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    matched_step_at(secret, code, now, step_secs, digits, window)
+}
+
+/// [`matched_step`] at a specific unix timestamp. The latest matching
+/// step wins.
+#[must_use]
+pub fn matched_step_at(
+    secret: &TotpSecret,
+    code: &str,
+    unix_secs: u64,
+    step_secs: u64,
+    digits: u32,
+    window: i64,
+) -> Option<u64> {
     let step = step_secs.max(1) as i64;
     let center = (unix_secs as i64) / step;
+    let mut matched = None;
+    // Every step is checked, so timing does not reveal which one matched.
     for offset in -window..=window {
-        let counter = match (center + offset).try_into() {
+        let counter: u64 = match (center + offset).try_into() {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -109,10 +141,10 @@ pub fn verify_at(
             hotp(&secret.0, counter, digits).as_bytes(),
             code.as_bytes(),
         ) {
-            return true;
+            matched = Some(counter);
         }
     }
-    false
+    matched
 }
 
 /// Build the `otpauth://` URI for a secret. Show it as a QR code so
@@ -218,6 +250,18 @@ mod tests {
         let secret = TotpSecret(b"12345678901234567890".to_vec());
         let code = generate_at(&secret, 1_111_111_109, 30, 8);
         assert_eq!(code, "07081804");
+    }
+
+    #[test]
+    fn matched_step_names_the_step_the_code_belongs_to() {
+        let s = TotpSecret::generate();
+        let t = 1_700_000_000;
+        let prev = generate_at(&s, t - 30, 30, 6);
+        assert_eq!(matched_step_at(&s, &prev, t, 30, 6, 1), Some(t / 30 - 1));
+        let now = generate_at(&s, t, 30, 6);
+        assert_eq!(matched_step_at(&s, &now, t, 30, 6, 1), Some(t / 30));
+        let far = generate_at(&s, t + 90, 30, 6);
+        assert_eq!(matched_step_at(&s, &far, t, 30, 6, 1), None);
     }
 
     #[test]

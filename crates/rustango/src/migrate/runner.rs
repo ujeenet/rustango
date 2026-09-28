@@ -757,6 +757,15 @@ async fn invoke_migration_callback(
     (cb.forward)(pool).await
 }
 
+/// The atomic runners' callback arm. `file::parse` already refuses this
+/// shape; running it would hang on the tx's own locks (#1626).
+fn callback_in_atomic(mig: &str, op: &crate::migrate::file::CallbackOp) -> MigrateError {
+    MigrateError::Validation(format!(
+        "{mig}: callback `{}` needs `\"atomic\": false` (#1626)",
+        op.name,
+    ))
+}
+
 /// Build a [`MigrationPreview`] for a single migration. Pure —
 /// no DB access. Same render path as `apply_atomic` / `apply_loose`
 /// but the statements stream into a `Vec<String>` instead of a tx.
@@ -822,15 +831,7 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(&mut *tx).await?;
             }
-            Operation::Callback(c) => {
-                // #347 — RunPython runs OUTSIDE the migration's tx
-                // because our callback signature takes an owned `Pool`
-                // (drives its own connections). Document the limitation
-                // — operators who want atomicity should set
-                // `atomic: false` on the migration and manage their
-                // own transactions.
-                invoke_migration_callback(c, pool.clone().into()).await?;
-            }
+            Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
         }
     }
     for stmt in deferred_fks {
@@ -1289,11 +1290,7 @@ async fn unapply_atomic(
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(&mut *tx).await?;
             }
-            Operation::Callback(c) => {
-                // #347 — callback runs OUTSIDE the surrounding tx; see
-                // `invoke_migration_callback` doc.
-                invoke_migration_callback(c, pool.clone().into()).await?;
-            }
+            Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
         }
     }
     for stmt in deferred_fks {
@@ -2163,10 +2160,7 @@ async fn apply_atomic_pool(
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
                     }
-                    Operation::Callback(c) => {
-                        // #347 — see `invoke_migration_callback` doc.
-                        invoke_migration_callback(c, pool.clone().into()).await?;
-                    }
+                    Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
                 }
             }
             for stmt in deferred_fks {
@@ -2272,10 +2266,7 @@ async fn apply_atomic_pool(
                             .await
                             .map_err(|e| stuck!(e))?;
                     }
-                    Operation::Callback(c) => {
-                        // #347 — see `invoke_migration_callback` doc.
-                        invoke_migration_callback(c, pool.clone().into()).await?;
-                    }
+                    Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
                 }
                 applied += 1;
             }
@@ -2316,10 +2307,7 @@ async fn apply_atomic_pool(
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
                     }
-                    Operation::Callback(c) => {
-                        // #347 — see `invoke_migration_callback` doc.
-                        invoke_migration_callback(c, pool.clone().into()).await?;
-                    }
+                    Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
                 }
             }
             for stmt in deferred_fks {
@@ -2780,10 +2768,7 @@ async fn unapply_atomic_pool(
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
                     }
-                    Operation::Callback(c) => {
-                        // #347 — see `invoke_migration_callback` doc.
-                        invoke_migration_callback(c, pool.clone().into()).await?;
-                    }
+                    Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
                 }
             }
             for stmt in deferred_fks {
@@ -2826,10 +2811,7 @@ async fn unapply_atomic_pool(
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
                     }
-                    Operation::Callback(c) => {
-                        // #347 — see `invoke_migration_callback` doc.
-                        invoke_migration_callback(c, pool.clone().into()).await?;
-                    }
+                    Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
                 }
             }
             for stmt in deferred_fks {
@@ -2862,10 +2844,7 @@ async fn unapply_atomic_pool(
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
                     }
-                    Operation::Callback(c) => {
-                        // #347 — see `invoke_migration_callback` doc.
-                        invoke_migration_callback(c, pool.clone().into()).await?;
-                    }
+                    Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
                 }
             }
             for stmt in deferred_fks {

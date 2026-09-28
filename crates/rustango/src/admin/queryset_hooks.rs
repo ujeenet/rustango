@@ -16,11 +16,7 @@
 //! use rustango::core::{Filter, Op, SqlValue};
 //!
 //! fn only_published(_parts: &Parts) -> Vec<Filter> {
-//!     vec![Filter {
-//!         column: "is_published",
-//!         op: Op::Eq,
-//!         value: SqlValue::Bool(true),
-//!     }]
+//!     vec![Filter::new("is_published", Op::Eq, SqlValue::Bool(true))]
 //! }
 //!
 //! rustango::register_admin_queryset!("blog_post", only_published);
@@ -84,11 +80,11 @@ pub fn for_table(table: &str) -> Vec<&'static AdminQuerySetHook> {
 /// ```ignore
 /// fn only_owned(parts: &axum::http::request::Parts) -> Vec<rustango::core::Filter> {
 ///     let user_id = parts.extensions.get::<UserId>().copied().unwrap_or(0);
-///     vec![rustango::core::Filter {
-///         column: "owner_id",
-///         op: rustango::core::Op::Eq,
-///         value: rustango::core::SqlValue::I64(user_id),
-///     }]
+///     vec![rustango::core::Filter::new(
+///         "owner_id",
+///         rustango::core::Op::Eq,
+///         rustango::core::SqlValue::I64(user_id),
+///     )]
 /// }
 /// rustango::register_admin_queryset!("blog_post", only_owned);
 /// ```

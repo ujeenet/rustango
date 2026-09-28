@@ -62,8 +62,11 @@ use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
-use axum::http::{header, HeaderValue, Request, Response, StatusCode};
+use axum::http::{Request, Response, StatusCode};
+use axum::response::IntoResponse as _;
 use base64::Engine;
+
+use crate::api_errors::ApiError;
 use subtle::ConstantTimeEq;
 use tower::Service;
 
@@ -257,24 +260,11 @@ async fn verify_request(
 }
 
 fn deny(msg: &str) -> Response<Body> {
-    let body = format!(r#"{{"error":"unauthorized","reason":"{msg}"}}"#);
-    let mut resp = Response::new(Body::from(body));
-    *resp.status_mut() = StatusCode::UNAUTHORIZED;
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
+    ApiError::unauthorized(msg).into_response()
 }
 
 fn too_large() -> Response<Body> {
-    let mut resp = Response::new(Body::from(r#"{"error":"payload too large"}"#));
-    *resp.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
+    ApiError::from_status(StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response()
 }
 
 // =====================================================================
@@ -459,6 +449,9 @@ mod tests {
             .unwrap();
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 401);
+        let b = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["error"], "unauthorized", "the ApiError envelope (#1193)");
     }
 
     #[tokio::test]

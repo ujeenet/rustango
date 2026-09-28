@@ -33,7 +33,18 @@ x-app-env: &app-env
   # be a Trivy HIGH, and the `trivy` CI job blocks on those.
   #   openssl rand -base64 32
   RUSTANGO_SESSION_SECRET: "${RUSTANGO_SESSION_SECRET:?generate one with openssl rand -base64 32}"
+  # Encrypts SSO client secrets at rest (`EncryptedString`).
+  RUSTANGO_SECRET_KEY: "${RUSTANGO_SECRET_KEY:?generate one with openssl rand -base64 32}"
+  # The service-token key `/_soak/service-token` verifies with (#1538).
+  SOAK_SERVICE_TOKEN_SECRET: "${SOAK_SERVICE_TOKEN_SECRET:?generate one with openssl rand -base64 32}"
   RUSTANGO_BIND: 0.0.0.0:8080
+  # The driver and the browser reach the apps across Docker's bridge, so
+  # it is the "proxy": its `X-Forwarded-For` is believed, and the driver
+  # uses that to give each login-limit test its own client IP (#1673).
+  TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+  # Unlocks the `/_soak/*` probes that write rows or dial out.
+  SOAK_PROBES: "1"
+  SOAK_IDP_ISSUER: http://idp:9000
   RUSTANGO_ENV: prod
   # A soak legitimately saturates pools; 5s turns that into spurious
   # failures that look like bugs.
@@ -55,13 +66,13 @@ x-app-env: &app-env
   # half. This is the half that was impossible until 0.57.5 added
   # `Cli::with_tenant_pools`: 6 connections per tenant pool, which is
   # enough for the `Tenant` extractor's pinned connection plus handler
-  # work, and 20 x 6 x 2 = 240.
+  # work. With the cap below, a web process holds at most 8 x 6 = 48.
   TENANT_POOL_MAX_CONNECTIONS: "6"
   TENANT_POOL_MIN_CONNECTIONS: "1"
-  # 20 tenants at boot plus headroom for ones provisioned mid-soak. The
-  # cache has no eviction and errors hard when full, so this is a
-  # ceiling to set deliberately rather than discover.
-  TENANT_POOL_CACHE_MAX: "48"
+  # Below the 20 tenants on purpose: load across all of them forces LRU
+  # eviction, which used to fail every tenant past the cap (#1527, #1528).
+  TENANT_POOL_CACHE_MAX: "8"
+  TENANT_POOL_SCOPED_CACHE_MAX: "8"
   # Unlocks `POST /_soak/tenants/{slug}/active`, which is the only way
   # to make a tenant *stop* being active — and therefore the only way to
   # observe the supervisor retiring its queue. Off by default in the
@@ -116,7 +127,7 @@ services:
       - shared_buffers=512MB
       - -c
       - work_mem=8MB
-    ports: ["5433:5432"]
+    ports: ["${SOAK_PG_PORT:-5433}:5432"]
     volumes:
       - pg-data:/var/lib/postgresql/data
       # Runs once, when the volume is first initialised. Creates the
@@ -138,7 +149,7 @@ services:
       MYSQL_USER: rustango
       MYSQL_PASSWORD: rustango
     command: ["--max-connections=1200", "--innodb-buffer-pool-size=768M"]
-    ports: ["3406:3306"]
+    ports: ["${SOAK_MY_PORT:-3406}:3306"]
     volumes:
       - my-data:/var/lib/mysql
       # Every MySQL tenant is database-mode (schema mode is
@@ -153,7 +164,7 @@ services:
 
   redis:
     image: public.ecr.aws/docker/library/redis:7
-    ports: ["6479:6379"]
+    ports: ["${SOAK_REDIS_PORT:-6479}:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -169,7 +180,7 @@ services:
     environment:
       MINIO_ROOT_USER: rustango
       MINIO_ROOT_PASSWORD: rustango123
-    ports: ["9100:9000", "9101:9001"]
+    ports: ["${SOAK_MINIO_PORT:-9100}:9000", "${SOAK_MINIO_CONSOLE_PORT:-9101}:9001"]
     volumes: [minio-data:/data]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
@@ -178,7 +189,8 @@ services:
       retries: 20
 
   minio-init:
-    image: quay.io/minio/mc:latest
+    # The server image ships `mc`; quay.io/minio/mc now needs a login.
+    image: quay.io/minio/minio:latest
     restart: "no"
     depends_on:
       minio: {condition: service_healthy}
@@ -309,7 +321,7 @@ services:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: single-pg
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
-    ports: ["18081:8080"]
+    ports: ["${SOAK_SINGLE_PG_PORT:-18081}:8080"]
 
   web-single-my:
     <<: *app-common
@@ -321,7 +333,7 @@ services:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: single-my
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce
-    ports: ["18082:8080"]
+    ports: ["${SOAK_SINGLE_MY_PORT:-18082}:8080"]
 
   web-single-sq:
     <<: *app-common
@@ -332,6 +344,9 @@ services:
     environment:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: single-sq
+      # Dual-stack, so IPv4 clients arrive as `::ffff:a.b.c.d` and the
+      # v4 ip_filter rule must still match them (#1673).
+      RUSTANGO_BIND: "[::]:8080"
       DATABASE_URL: sqlite:///data/single.db?mode=rwc
       # SQLite runs its workers in-process. Two containers on one SQLite
       # file would need POSIX advisory locks plus WAL shared memory
@@ -339,7 +354,7 @@ services:
       # process is what you would actually deploy.
       SOAK_INLINE_WORKERS: "1"
     volumes: [sq-single:/data]
-    ports: ["18083:8080"]
+    ports: ["${SOAK_SINGLE_SQ_PORT:-18083}:8080"]
 
   web-saas-pg:
     <<: *app-common
@@ -350,9 +365,12 @@ services:
     environment:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: saas-pg
+      # #1700: the tenancy server refuses any other Host with a 400. The
+      # service name stays listed for probes from inside the network.
+      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test", "shared.example.test", "web-saas-pg"]'
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
       RUSTANGO_APEX_DOMAIN: soak.localhost
-    ports: ["18084:8080"]
+    ports: ["${SOAK_SAAS_PG_PORT:-18084}:8080"]
 
   web-saas-my:
     <<: *app-common
@@ -363,9 +381,12 @@ services:
     environment:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: saas-my
+      # #1700: the tenancy server refuses any other Host with a 400. The
+      # service name stays listed for probes from inside the network.
+      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test", "shared.example.test", "web-saas-my"]'
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce_saas_my
       RUSTANGO_APEX_DOMAIN: soak.localhost
-    ports: ["18085:8080"]
+    ports: ["${SOAK_SAAS_MY_PORT:-18085}:8080"]
 
   web-saas-sq:
     <<: *app-common
@@ -376,10 +397,13 @@ services:
     environment:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: saas-sq
+      # #1700: the tenancy server refuses any other Host with a 400. The
+      # service name stays listed for probes from inside the network.
+      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test", "shared.example.test", "web-saas-sq"]'
       DATABASE_URL: sqlite:///data/registry.db?mode=rwc
       RUSTANGO_APEX_DOMAIN: soak.localhost
     volumes: [sq-saas:/data]
-    ports: ["18086:8080"]
+    ports: ["${SOAK_SAAS_SQ_PORT:-18086}:8080"]
 
   # --------------------------------------------------------------- worker
   #
@@ -418,23 +442,111 @@ services:
       <<: *app-env
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce
 
-  # -------------------------------------------------------------- driver
+  # ---------------------------------------------------------------- edge
+  #
+  # Second processes on the Postgres databases, carrying the settings a
+  # shared instance cannot: an HTTPS redirect, no access log, a 1 ms
+  # hash wait and a low admin login ceiling. Keeping them here leaves
+  # the six main instances as a browser sees a normal deployment. No
+  # host ports: only the driver talks to them.
 
-  driver:
-    profiles: [driver]
+  web-saas-pg-edge:
+    <<: *app-common
+    image: rustango-soak/saas:postgres
+    # Two CPUs, so two hash slots: a login burst fills them (#1732).
+    cpus: "2"
+    depends_on:
+      bootstrap-saas-pg: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    environment:
+      <<: *app-env
+      RUSTANGO_CACHE_NAMESPACE: saas-pg-edge
+      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test", "shared.example.test", "web-saas-pg-edge"]'
+      # #1700: plain HTTP to the login, admin and console is redirected;
+      # the driver marks its "TLS" requests the way a proxy would.
+      RUSTANGO__SECURITY__SECURE_SSL_REDIRECT: "true"
+      RUSTANGO__SECURITY__SECURE_PROXY_SSL_HEADER: '["x-forwarded-proto", "https"]'
+      # #1610: with the access log off, the request span must still
+      # redact `[audit] redact_query_params`.
+      RUSTANGO__LOGGING__ACCESS_LOG: "false"
+      # #1732: a busy hash queue answers 503 at once.
+      RUSTANGO__AUTH__HASH_WAIT_MS: "1"
+      # #1672: a 20 s lock, short enough to watch it end on time.
+      RUSTANGO__AUTH__LOCKOUT_DURATION_SECS: "20"
+      DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
+      RUSTANGO_APEX_DOMAIN: soak.localhost
+
+  web-single-pg-edge:
+    <<: *app-common
+    image: rustango-soak/commerce:all
+    depends_on:
+      bootstrap-single-pg: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    environment:
+      <<: *app-env
+      RUSTANGO_CACHE_NAMESPACE: single-pg-edge
+      # #1609: the admin login's global ceiling, low enough to reach.
+      RUSTANGO__AUTH__LOGIN_GLOBAL_LIMIT: "30"
+      DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
+
+  # ----------------------------------------------------------------- idp
+  #
+  # A fake OpenID Connect provider (and webhook sink) for the SSO and
+  # webhook checks. Browsers reach `/authorize` on the published port.
+
+  idp:
     image: rustango-soak/driver:latest
     build:
       context: .
       dockerfile: Dockerfile.driver
+    entrypoint: ["python", "-u", "/driver/idp.py"]
+    environment:
+      SOAK_IDP_ISSUER: http://idp:9000
+      SOAK_IDP_PUBLIC_URL: "http://localhost:${SOAK_IDP_PORT:-19000}"
+      SOAK_IDP_DOWNGRADE_REDIRECT: "1"
+    ports: ["${SOAK_IDP_PORT:-19000}:9000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # -------------------------------------------------------------- driver
+
+  driver:
+    profiles: [driver]
+    # Built by `idp`, which shares the image.
+    image: rustango-soak/driver:latest
     depends_on:
       web-single-pg: {condition: service_started}
       web-saas-pg: {condition: service_started}
+      idp: {condition: service_healthy}
     environment:
       SOAK_DURATION_SECS: "${SOAK_DURATION_SECS:-1800}"
       SOAK_CONCURRENCY: "${SOAK_CONCURRENCY:-24}"
       SOAK_TENANTS: "${SOAK_TENANTS:-20}"
       SOAK_FAIL_RATIO_PCT: "${SOAK_FAIL_RATIO_PCT:-10}"
       SOAK_APEX: soak.localhost
+      # To forge service tokens with and without `exp` (#1538).
+      SOAK_SERVICE_TOKEN_SECRET: "${SOAK_SERVICE_TOKEN_SECRET:?generate one with openssl rand -base64 32}"
+      # Read-only catalog probe for #1645 (FK targets per schema).
+      SOAK_PG_URL: postgresql://rustango:rustango@pg:5432/commerce_saas_pg
+    volumes: [soak-results:/results]
+
+  # Browser checks for the admin, tenant admin and console fixes. Writes
+  # playwright.json (driver.py's check shape) and failure screenshots.
+  playwright:
+    profiles: [driver]
+    image: rustango-soak/playwright:latest
+    build:
+      context: ./playwright
+    depends_on:
+      web-single-pg: {condition: service_started}
+      web-saas-pg: {condition: service_started}
+    environment:
+      SOAK_APEX: soak.localhost
+      SOAK_IDP_PUBLIC: "localhost:${SOAK_IDP_PORT:-19000}"
+      PW_SABOTAGE: "${PW_SABOTAGE:-0}"
     volumes: [soak-results:/results]
 
 volumes:

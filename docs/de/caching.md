@@ -265,7 +265,7 @@ Zwei Dinge, die man wissen sollte:
 | | |
 |---|---|
 | **Ein Namespace, keine Sicherheitsgrenze** | Alles liegt weiter in einem Backend, und Code mit dem *ungescopeten* Cache kann jeden Key lesen. Der Punkt ist, dass der ergonomische Pfad der korrekte ist. |
-| **`clear()` braucht Key-Enumeration** | Es läuft über `Cache::delete_prefix`, und jedes eingebaute Backend implementiert das: `InMemoryCache` filtert seine Map, `DatabaseCache` schickt ein `DELETE … LIKE 'prefix%'` mit escaptem `%`, `_` und Escape-Zeichen, `RedisCache` nutzt `SCAN`+`MATCH` mit escapten Glob-Metazeichen, und `FileCache` scannt sein Verzeichnis und vergleicht den in jedem Eintrag gespeicherten Key. Ein Backend, das es nicht implementiert, liefert jetzt einen **Fehler** statt eines Fallbacks. |
+| **`clear()` braucht Key-Enumeration** | Es läuft über `Cache::delete_prefix`, und jedes eingebaute Backend implementiert das: `InMemoryCache` filtert seine Map, `DatabaseCache` schickt ein `DELETE … LIKE 'prefix%'` mit escaptem `%`, `_` und Escape-Zeichen, `RedisCache` nutzt `SCAN`+`MATCH` mit escapten Glob-Metazeichen, und `FileCache` scannt sein Verzeichnis und vergleicht den in jedem Eintrag gespeicherten Key. Ein Backend, das es nicht implementiert, liefert jetzt einen **Fehler** statt eines Fallbacks. `DatabaseCache` speichert Keys über 255 Bytes gehasht und vergleicht ein Präfix über 190 Bytes nur auf seinen ersten 190 Bytes; es löscht also eventuell mehr Keys, nie weniger. |
 
 Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
 gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die

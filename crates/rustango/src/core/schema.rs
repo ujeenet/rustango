@@ -1,5 +1,9 @@
 //! Schema types: what every model in the registry looks like at runtime.
 
+// A new public struct here must be `#[non_exhaustive]` with a `const fn`
+// constructor, so it can grow without a breaking release (#1661).
+#![deny(clippy::exhaustive_structs)]
+
 use super::FieldType;
 
 /// Static description of a single column on a model.
@@ -17,6 +21,7 @@ use super::FieldType;
 /// `#[rustango(default = "…")]`. The string goes in as written, so
 /// you must make it valid SQL and quote any string literal yourself.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct FieldSchema {
     pub name: &'static str,
     pub column: &'static str,
@@ -124,6 +129,46 @@ pub struct FieldSchema {
 }
 
 impl FieldSchema {
+    /// A plain `NOT NULL` column; every other field is off or empty,
+    /// except `editable`. Set the rest by assigning fields:
+    ///
+    /// ```
+    /// use rustango::core::{FieldSchema, FieldType};
+    ///
+    /// const ID: FieldSchema = {
+    ///     let mut f = FieldSchema::new("id", "id", FieldType::I64);
+    ///     f.primary_key = true;
+    ///     f
+    /// };
+    /// ```
+    #[must_use]
+    pub const fn new(name: &'static str, column: &'static str, ty: FieldType) -> Self {
+        Self {
+            name,
+            column,
+            ty,
+            nullable: false,
+            primary_key: false,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto: false,
+            unique: false,
+            generated_as: None,
+            help_text: None,
+            choices: None,
+            db_comment: None,
+            verbose_name: None,
+            editable: true,
+            blank: false,
+            case_insensitive: false,
+            fk_on_delete: None,
+            validators: &[],
+        }
+    }
+
     /// Readable label for this field: `verbose_name` if set, else the
     /// Rust field name. Renderers should call this instead of
     /// repeating the fallback.
@@ -157,11 +202,33 @@ impl FieldSchema {
 
 /// Static description of a relation to another model.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum Relation {
     /// Foreign key. The local column references `to.<on>`.
+    #[non_exhaustive]
     Fk { to: &'static str, on: &'static str },
     /// One-to-one. Same shape as FK, separate variant for callers that care.
+    #[non_exhaustive]
     O2O { to: &'static str, on: &'static str },
+}
+
+impl Relation {
+    /// A foreign key to `to.<on>`. The variant cannot be built by hand
+    /// outside the crate:
+    ///
+    /// ```compile_fail
+    /// let _ = rustango::core::Relation::Fk { to: "user", on: "id" };
+    /// ```
+    #[must_use]
+    pub const fn fk(to: &'static str, on: &'static str) -> Self {
+        Self::Fk { to, on }
+    }
+
+    /// A one-to-one link to `to.<on>`.
+    #[must_use]
+    pub const fn o2o(to: &'static str, on: &'static str) -> Self {
+        Self::O2O { to, on }
+    }
 }
 
 /// The `ON DELETE` clause
@@ -173,6 +240,7 @@ pub enum Relation {
 /// Set it with `#[rustango(on_delete = "cascade" | "restrict" |
 /// "set_null" | "set_default" | "no_action")]`, case-insensitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OnDeleteAction {
     /// `ON DELETE CASCADE` — delete this row when the referenced row goes.
     Cascade,
@@ -231,6 +299,7 @@ impl OnDeleteAction {
 /// pk_column = "object_pk"))]`. The admin renders such columns as
 /// links to the target.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct GenericRelation {
     /// Name for the relation, used in admin labels and error
     /// messages.
@@ -240,6 +309,18 @@ pub struct GenericRelation {
     pub ct_column: &'static str,
     /// Column on this table holding the target row's primary key.
     pub pk_column: &'static str,
+}
+
+impl GenericRelation {
+    /// A generic FK: the content-type column, then the object-PK column.
+    #[must_use]
+    pub const fn new(name: &'static str, ct_column: &'static str, pk_column: &'static str) -> Self {
+        Self {
+            name,
+            ct_column,
+            pk_column,
+        }
+    }
 }
 
 /// Reverse-FK existence metadata from
@@ -252,6 +333,7 @@ pub struct GenericRelation {
 /// `QuerySet::where_has(name)` and `where_doesnt_have(name)` must
 /// resolve a relation by name with no `self` value at hand.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ReverseRelation {
     /// Relation name as declared in `reverse_has(name = "books")`.
     /// Queryset shortcuts look it up by this.
@@ -270,6 +352,24 @@ pub struct ReverseRelation {
     pub self_pk_column: &'static str,
 }
 
+impl ReverseRelation {
+    /// A reverse FK: the child model, its FK column, then this model's PK column.
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        child_schema: &'static ModelSchema,
+        child_fk_column: &'static str,
+        self_pk_column: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            child_schema,
+            child_fk_column,
+            self_pk_column,
+        }
+    }
+}
+
 /// Metadata for a **reverse generic-FK** relation, from
 /// `#[rustango(generic_has(name, child, ct_column, pk_column))]`. It
 /// lets a queryset answer "do polymorphic children point at me?" by
@@ -284,6 +384,7 @@ pub struct ReverseRelation {
 /// match. The parent table name is a compile-time constant, so no
 /// async content-type lookup is needed.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct GenericReverseRelation {
     /// Relation name as declared in `generic_has(name = "tags")`.
     pub name: &'static str,
@@ -302,6 +403,27 @@ pub struct GenericReverseRelation {
     pub self_pk_column: &'static str,
 }
 
+impl GenericReverseRelation {
+    /// A reverse generic FK: the child, its content-type and object-PK
+    /// columns, then this model's PK column.
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        child_schema: &'static ModelSchema,
+        ct_column: &'static str,
+        pk_column: &'static str,
+        self_pk_column: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            child_schema,
+            ct_column,
+            pk_column,
+            self_pk_column,
+        }
+    }
+}
+
 /// A multi-column ("composite") foreign key, declared at the model
 /// level. Single-column FKs stay in [`FieldSchema::relation`];
 /// composite ones live here so each column keeps its plain Rust type.
@@ -311,6 +433,7 @@ pub struct GenericReverseRelation {
 /// on = ("entity_table", "entity_pk"), from = ("table_name", "row_pk")))]`.
 /// `from` and `on` must be the same length, or the macro errors.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct CompositeFkRelation {
     /// Name for the relation, used in admin labels, error messages
     /// and as the prefix for generated reverse accessors.
@@ -325,6 +448,19 @@ pub struct CompositeFkRelation {
     pub on: &'static [&'static str],
 }
 
+impl CompositeFkRelation {
+    /// A composite FK from the local `from` columns to `to.on`, matched by position.
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        to: &'static str,
+        from: &'static [&'static str],
+        on: &'static [&'static str],
+    ) -> Self {
+        Self { name, to, from, on }
+    }
+}
+
 /// One many-to-many relation, from
 /// `#[rustango(m2m(name = "tags", to = "app_tags", through = "post_tags",
 ///                 src = "post_id", dst = "tag_id"))]`.
@@ -333,6 +469,7 @@ pub struct CompositeFkRelation {
 /// source table. The migration writer reads it to emit `CREATE TABLE`
 /// for the junction table.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct M2MRelation {
     /// Rust accessor name used to generate the `<name>_m2m()` method.
     pub name: &'static str,
@@ -354,6 +491,28 @@ pub struct M2MRelation {
     pub auto_create: bool,
 }
 
+impl M2MRelation {
+    /// A relation whose junction table the migration writer creates
+    /// (`auto_create = true`).
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        to: &'static str,
+        through: &'static str,
+        src_col: &'static str,
+        dst_col: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            to,
+            through,
+            src_col,
+            dst_col,
+            auto_create: true,
+        }
+    }
+}
+
 /// Static description of a model.
 ///
 /// `display` names the field to show when this model is the *target*
@@ -361,6 +520,7 @@ pub struct M2MRelation {
 /// raw PK. Set it with `#[rustango(display = "field")]`. When `None`,
 /// callers fall back to the primary key.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ModelSchema {
     pub name: &'static str,
     pub table: &'static str,
@@ -582,6 +742,10 @@ pub struct ModelSchema {
     /// `#[rustango(global_scope(name = "...", apply = fn_path))]`,
     /// where `fn_path` names a `fn() -> WhereExpr` in scope. Use them
     /// for soft-delete hiding and tenant isolation.
+    ///
+    /// `ViewSet` and the template views apply them too. The admin does
+    /// not, so staff can reach every row; narrow it with
+    /// `register_admin_queryset!`.
     pub global_scopes: &'static [GlobalScope],
 }
 
@@ -594,6 +758,7 @@ pub struct ModelSchema {
 /// such as `chrono::Utc::now()` for a "published before now" scope.
 /// Keep it cheap: it runs once per `compile()`.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct GlobalScope {
     /// Name that
     /// [`crate::query::QuerySet::without_global_scope`] uses to opt
@@ -607,7 +772,96 @@ pub struct GlobalScope {
     pub apply: fn() -> crate::core::WhereExpr,
 }
 
+impl GlobalScope {
+    /// A scope named `name` whose filter `apply` builds.
+    #[must_use]
+    pub const fn new(name: &'static str, apply: fn() -> crate::core::WhereExpr) -> Self {
+        Self { name, apply }
+    }
+}
+
 impl ModelSchema {
+    /// Every global scope's filter, minus the scopes named in `skip`.
+    pub(crate) fn global_scope_exprs(&self, skip: &[&str]) -> Vec<crate::core::WhereExpr> {
+        self.global_scopes
+            .iter()
+            .filter(|s| !skip.contains(&s.name))
+            .map(|s| (s.apply)())
+            .collect()
+    }
+
+    /// `where_clause` ANDed with every global scope. For queries built
+    /// straight from the schema rather than through a `QuerySet`.
+    #[must_use]
+    pub fn with_global_scopes(
+        &self,
+        where_clause: crate::core::WhereExpr,
+    ) -> crate::core::WhereExpr {
+        let mut all = self.global_scope_exprs(&[]);
+        if all.is_empty() {
+            return where_clause;
+        }
+        if !matches!(&where_clause, crate::core::WhereExpr::And(v) if v.is_empty()) {
+            all.push(where_clause);
+        }
+        crate::core::WhereExpr::And(all)
+    }
+}
+
+impl ModelSchema {
+    /// A table-backed, tenant-scoped, `managed` model with no fields
+    /// and every option off or empty. Set the rest by assigning
+    /// fields; nested slices go in their own `const`, because a
+    /// borrow inside a statement is not extended to `'static`:
+    ///
+    /// ```
+    /// use rustango::core::{FieldSchema, FieldType, ModelSchema};
+    ///
+    /// const POST: &ModelSchema = &{
+    ///     const FIELDS: &[FieldSchema] = &[FieldSchema::new("id", "id", FieldType::I64)];
+    ///     let mut s = ModelSchema::new("Post", "post");
+    ///     s.fields = FIELDS;
+    ///     s
+    /// };
+    /// ```
+    #[must_use]
+    pub const fn new(name: &'static str, table: &'static str) -> Self {
+        Self {
+            name,
+            table,
+            fields: &[],
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            permissions: false,
+            audit_track: None,
+            m2m: &[],
+            indexes: &[],
+            check_constraints: &[],
+            exclusion_constraints: &[],
+            default_permissions: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: ModelScope::Tenant,
+            default_order: &[],
+            is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
+            managed: true,
+            db_table_comment: None,
+            default_related_name: None,
+            base_manager_name: None,
+            required_db_vendor: None,
+            required_db_features: &[],
+            order_with_respect_to: None,
+            proxy: false,
+            get_latest_by: None,
+            extra_permissions: &[],
+            global_scopes: &[],
+        }
+    }
+
     /// Readable singular label: `verbose_name` if set, else the Rust
     /// struct name. Renderers should call this instead of repeating
     /// the fallback.
@@ -634,6 +888,7 @@ impl ModelSchema {
 /// migration generator can route each change to the right scoped
 /// file without touching runtime schema discovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum ModelScope {
     /// Lives in the registry database, shared across tenants, with
     /// one row per tenant or per operator. `Org` and `Operator` are
@@ -680,11 +935,20 @@ impl ModelScope {
 /// expression goes into the DDL as written, so quote literals and
 /// name columns yourself.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct CheckConstraint {
     /// Constraint name used in `ALTER TABLE … ADD CONSTRAINT "name"`.
     pub name: &'static str,
     /// Raw SQL boolean expression placed inside `CHECK ( … )`.
     pub expr: &'static str,
+}
+
+impl CheckConstraint {
+    /// A `CHECK (expr)` constraint named `name`.
+    #[must_use]
+    pub const fn new(name: &'static str, expr: &'static str) -> Self {
+        Self { name, expr }
+    }
 }
 
 /// One Postgres `EXCLUDE` constraint.
@@ -707,6 +971,7 @@ pub struct CheckConstraint {
 /// which renders as `ALTER TABLE … ADD CONSTRAINT "no_overlap" EXCLUDE
 /// USING gist ("room_id" WITH =, "during" WITH &&)`.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ExclusionConstraint {
     /// Constraint name used in `ALTER TABLE … ADD CONSTRAINT "name"`.
     pub name: &'static str,
@@ -723,6 +988,23 @@ pub struct ExclusionConstraint {
     pub where_clause: Option<&'static str>,
 }
 
+impl ExclusionConstraint {
+    /// A constraint over every row (`where_clause: None`).
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        using: &'static str,
+        elements: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        Self {
+            name,
+            using,
+            elements,
+            where_clause: None,
+        }
+    }
+}
+
 /// One `CREATE INDEX` for the migration writer.
 ///
 /// Declare it with:
@@ -732,6 +1014,7 @@ pub struct ExclusionConstraint {
 ///
 /// Both forms take `unique` and `name` sub-attributes.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct IndexSchema {
     /// Index name used in `CREATE INDEX "name"` and `DROP INDEX "name"`.
     /// Auto-generated as `{table}_{col}_idx` when not supplied.
@@ -762,6 +1045,21 @@ pub struct IndexSchema {
     pub include: &'static [&'static str],
 }
 
+impl IndexSchema {
+    /// A plain, non-unique B-tree index over `columns`.
+    #[must_use]
+    pub const fn new(name: &'static str, columns: &'static [&'static str]) -> Self {
+        Self {
+            name,
+            columns,
+            unique: false,
+            method: IndexMethod::BTree,
+            where_clause: None,
+            include: &[],
+        }
+    }
+}
+
 /// Index access method, the `USING <method>` in `CREATE INDEX`.
 /// Covers the Postgres index types plus the default B-tree.
 ///
@@ -774,6 +1072,7 @@ pub struct IndexSchema {
 /// - **SQLite**: btree only; it has no `USING` clause, so other
 ///   methods are dropped at emit time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum IndexMethod {
     /// Default B-tree. Every backend supports it.
     #[default]
@@ -847,6 +1146,7 @@ impl IndexMethod {
 /// Every field's default — an empty slice or zero — means "use the
 /// framework default", so you only set what you care about.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct AdminConfig {
     /// Columns on the list view, in order. An empty slice shows every
     /// scalar field in declaration order. An FK column renders the
@@ -945,6 +1245,7 @@ pub struct AdminConfig {
 
 /// The auto-JOIN policy for FK columns on the admin list view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ListSelectRelated {
     /// The default: join every visible FK, so list cells show the
     /// target's display value in one round trip.
@@ -961,6 +1262,7 @@ pub enum ListSelectRelated {
 /// rewrites the target from a slugified join of their values — for
 /// example `slug` filled in from `title` as you type.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct PrepopulatedField {
     /// Field to fill in, such as `"slug"`.
     pub target: &'static str,
@@ -969,11 +1271,20 @@ pub struct PrepopulatedField {
     pub sources: &'static [&'static str],
 }
 
+impl PrepopulatedField {
+    /// Fills `target` from the slugified `sources`.
+    #[must_use]
+    pub const fn new(target: &'static str, sources: &'static [&'static str]) -> Self {
+        Self { target, sources }
+    }
+}
+
 /// One group of fields on a create or edit form.
 ///
 /// An empty `title` renders no `<legend>`, which gives a single-group
 /// form with no section header.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Fieldset {
     /// Section title shown as `<legend>`. Empty string suppresses it.
     pub title: &'static str,
@@ -982,9 +1293,18 @@ pub struct Fieldset {
     pub fields: &'static [&'static str],
 }
 
+impl Fieldset {
+    /// A fieldset titled `title`; an empty title renders no legend.
+    #[must_use]
+    pub const fn new(title: &'static str, fields: &'static [&'static str]) -> Self {
+        Self { title, fields }
+    }
+}
+
 impl AdminConfig {
     /// Config for a model with no `#[rustango(admin(...))]`: every
-    /// setting takes the framework default.
+    /// setting takes the framework default. Start a custom config from
+    /// a copy of it and assign the fields you need.
     pub const DEFAULT: AdminConfig = AdminConfig {
         list_display: &[],
         search_fields: &[],
@@ -1094,6 +1414,7 @@ pub trait Model: Sized + Send + Sync + 'static {
 ///
 /// Internal API: end users should not construct these directly.
 #[doc(hidden)]
+#[non_exhaustive]
 pub struct ModelEntry {
     pub schema: &'static ModelSchema,
     /// `module_path!()` at the registration site, such as
@@ -1103,6 +1424,15 @@ pub struct ModelEntry {
 }
 
 impl ModelEntry {
+    /// Registry entry; `module_path` is `module_path!()` at the model.
+    #[must_use]
+    pub const fn new(schema: &'static ModelSchema, module_path: &'static str) -> Self {
+        Self {
+            schema,
+            module_path,
+        }
+    }
+
     /// App label for this model: the `#[rustango(app = "...")]`
     /// override if set, else the first module segment after the crate
     /// root. For crate `my_app`:

@@ -525,7 +525,10 @@ fn router_inner(
     // reachable from un-authenticated tenant pages.
     let public = Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", post(logout))
+        .route("/logout", post(logout));
+    // Cacheable GET-only assets stay outside the CSRF layers, so no
+    // shared cache stores a `Set-Cookie` with them.
+    let assets = Router::new()
         .route("/__static__/rustango.png", get(static_rustango_png))
         .route("/__brand__/{slug}/{filename}", get(serve_brand_asset));
 
@@ -543,14 +546,20 @@ fn router_inner(
             "/change-password",
             get(change_password_form).post(change_password_submit),
         );
-    // Registry-wide shared SSO providers (admin-sso) — always available to
-    // authenticated operators; writes go to the registry pool the console
-    // already holds.
+    // Registry-wide shared SSO providers (admin-sso): every operator sees
+    // the list; changing it needs an editable console.
     #[cfg(feature = "admin-sso")]
     {
-        private = private
-            .route("/sso-shared", get(sso_shared_list).post(sso_shared_create))
-            .route("/sso-shared/{id}/delete", post(sso_shared_delete));
+        private = private.route("/sso-shared", get(sso_shared_list));
+        if edit_enabled {
+            private = private
+                .route("/sso-shared", post(sso_shared_create))
+                .route("/sso-shared/{id}/delete", post(sso_shared_delete))
+                .route(
+                    "/sso-shared/{id}/email-link",
+                    post(sso_shared_set_email_link),
+                );
+        }
     }
     if edit_enabled {
         private = private
@@ -671,11 +680,26 @@ fn router_inner(
     // the login bounce carries the whole attempted URL, and `token`
     // because the impersonation handoff puts one in the query string.
     use crate::access_log::AccessLogRouterExt as _;
-    public.merge(private).with_state(state).access_log(
-        crate::access_log::AccessLogLayer::new()
-            .redact_additional("next")
-            .redact_additional("token"),
-    )
+    // CSRF on every console POST, login included (#1710): a tenant
+    // subdomain is same-site with the apex, so `SameSite=Lax` does not
+    // stop it. The layer checks token and Origin first; inside it,
+    // `csrf_context` mints the token `render` puts in each form and sets
+    // its cookie, so the layer sees it set and adds no second one.
+    // Origin is the check that stops a tenant host: it can plant the
+    // cookie, and so knows the token.
+    public
+        .merge(private)
+        .route_layer(middleware::from_fn(
+            crate::admin::csrf_context::csrf_context,
+        ))
+        .route_layer(crate::forms::csrf::layer())
+        .merge(assets)
+        .with_state(state)
+        .access_log(
+            crate::access_log::AccessLogLayer::new()
+                .redact_additional("next")
+                .redact_additional("token"),
+        )
 }
 
 /// Rows per page, for every list the console renders. One number for
@@ -816,7 +840,15 @@ pub(super) struct ListQuery {
 /// Prefer this to `.unwrap_or_default()`, which turns a template error
 /// into a blank `200` with no clue what went wrong.
 fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body> {
-    match state.tera.render(template, ctx) {
+    // Every console form posts this back; `csrf::layer()` checks it (#1710).
+    let mut ctx = ctx.clone();
+    // `csrf_token` is for scripts that send `X-CSRF-Token` (fetch, and
+    // the multipart branding form, whose body the layer cannot read).
+    if let Some(token) = crate::admin::session::current_csrf_token() {
+        ctx.insert("csrf_input", &crate::forms::csrf::csrf_input_html(&token));
+        ctx.insert("csrf_token", &token);
+    }
+    match state.tera.render(template, &ctx) {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             let mut detail = e.to_string();
@@ -866,9 +898,7 @@ async fn require_session(
     mut req: axum::http::Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    let cookie_value = read_cookie(&headers, COOKIE_NAME);
-    let payload = cookie_value
-        .as_deref()
+    let payload = crate::cookies::cookie_from_headers(&headers, COOKIE_NAME)
         .and_then(|v| session::decode(&state.session_secret, v).ok());
     // A 303 back from login turns the original POST into a GET, which
     // then 405s on POST-only routes. Trim `next` down to the parent GET
@@ -890,12 +920,14 @@ async fn require_session(
                 return redirect_to_login(&safe_next).into_response();
             };
             // Drop sessions issued before the last password change.
-            // NULL means the password was never changed, so the
-            // session stays valid.
-            if let Some(ts) = op.password_changed_at {
-                if payload.iat < ts.timestamp() {
-                    return redirect_to_login(&safe_next).into_response();
-                }
+            if !session::survives_password_change(
+                &state.session_secret,
+                &payload.pwf,
+                payload.iat,
+                &op.password_hash,
+                op.password_changed_at,
+            ) {
+                return redirect_to_login(&safe_next).into_response();
             }
             // Chrome for `op_layout.html`, so a generic view mounted
             // here renders with the console layout. Gated because
@@ -1047,12 +1079,12 @@ struct LoginQuery {
 async fn login_form(
     State(state): State<ConsoleState>,
     Query(q): Query<LoginQuery>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("next", &q.next.unwrap_or_else(|| "/".into()));
     ctx.insert("error", &q.error);
-    Html(state.tera.render("op_login.html", &ctx).unwrap_or_default())
+    render(&state, "op_login.html", &ctx)
 }
 
 #[derive(Deserialize)]
@@ -1065,9 +1097,11 @@ struct LoginSubmit {
 
 async fn login_submit(
     State(state): State<ConsoleState>,
+    ip: crate::login_throttle::ClientIp,
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginSubmit>,
 ) -> Response<Body> {
+    use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -1075,83 +1109,57 @@ async fn login_submit(
     let meta = meta_from_headers(&headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
 
-    // Audit M1 (console) — per-account brute-force lockout, on by
-    // default. Resolve the operator id up front so the lockout is keyed
-    // by id (`op:<id>`), not the raw username: only an *existing* account
-    // accrues failures, so an attacker can't lock arbitrary names. A
-    // locked account is rejected before `authenticate` runs the verify.
-    #[cfg(feature = "cache")]
-    let pre_id: Option<i64> = {
-        use crate::core::Column as _;
-        use crate::sql::FetcherPool as _;
-        auth::Operator::objects()
-            .where_(auth::Operator::username.eq(form.username.clone()))
-            .fetch(&state.registry)
-            .await
-            .ok()
-            .and_then(|rows: Vec<auth::Operator>| rows.into_iter().next())
-            .and_then(|op| op.id.get().copied())
+    // Rate limits and the account lock, before the lookup (#1609).
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(&LoginScope::Operator, &ip, &form.username)
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
     };
-    #[cfg(feature = "cache")]
-    if let Some(id) = pre_id {
-        if crate::account_lockout::shared()
-            .is_locked(&format!("op:{id}"))
-            .await
-        {
+    let found = match auth::find_operator(&state.registry, &form.username).await {
+        Ok(op) => op,
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
+    };
+    if let Some(op) = &found {
+        if let Err(refused) = attempt.resolve(&op.username).await {
+            return refused.into_response();
+        }
+    }
+
+    let principal = match auth::check_operator_password(found, &form.password).await {
+        Ok(Some(op)) => op,
+        Ok(None) => {
+            attempt.failed().await;
             send_user_login_failed(UserLoginFailedContext {
                 source: "operator",
                 attempted_username: Some(form.username.clone()),
                 reason: AuthFailureReason::InvalidCredentials,
-                request: meta.clone(),
+                request: meta,
             })
             .await;
             return Redirect::to(&format!(
-                "/login?error=Too+many+failed+attempts.+Try+again+later.&next={}",
+                "/login?error=Invalid+credentials&next={}",
                 urlencoding_lite(&next)
             ))
             .into_response();
         }
-    }
-
-    let principal =
-        match auth::authenticate_operator_pool(&state.registry, &form.username, &form.password)
-            .await
-        {
-            Ok(Some(op)) => op,
-            Ok(None) => {
-                // Audit M1 — count the failure against the resolved id
-                // (existing accounts only, so no arbitrary-name DoS).
-                #[cfg(feature = "cache")]
-                if let Some(id) = pre_id {
-                    let _ = crate::account_lockout::shared()
-                        .record_failure(&format!("op:{id}"))
-                        .await;
-                }
-                send_user_login_failed(UserLoginFailedContext {
-                    source: "operator",
-                    attempted_username: Some(form.username.clone()),
-                    reason: AuthFailureReason::InvalidCredentials,
-                    request: meta,
-                })
-                .await;
-                return Redirect::to(&format!(
-                    "/login?error=Invalid+credentials&next={}",
-                    urlencoding_lite(&next)
-                ))
-                .into_response();
-            }
-            Err(e) => {
-                tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
-            }
-        };
+        Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
+    };
     let oid = principal.id.get().copied().unwrap_or_default();
-    // Audit M1 — successful login clears the failure counter + any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared()
-        .clear(&format!("op:{oid}"))
-        .await;
-    let payload = SessionPayload::new(oid, SESSION_TTL_SECS);
+    attempt.succeeded().await;
+    let payload = SessionPayload::new(
+        oid,
+        SESSION_TTL_SECS,
+        session::PasswordFingerprint::of(&state.session_secret, &principal.password_hash),
+    );
     let cookie_value = session::encode(&state.session_secret, &payload);
     let cookie = Cookie::build((COOKIE_NAME, cookie_value))
         .path("/")
@@ -1217,15 +1225,8 @@ async fn logout(
 /// Best-effort: decode the operator session cookie to recover the
 /// operator id for audit signals. `None` on any error.
 fn decode_operator_session(headers: &axum::http::HeaderMap, secret: &SessionSecret) -> Option<i64> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';').map(str::trim) {
-        if let Some(val) = part.strip_prefix(&format!("{COOKIE_NAME}=")) {
-            if let Ok(p) = session::decode(secret, val) {
-                return Some(p.oid);
-            }
-        }
-    }
-    None
+    let val = crate::cookies::cookie_from_headers(headers, COOKIE_NAME)?;
+    session::decode(secret, val).ok().map(|p| p.oid)
 }
 
 // ----------------------------- views
@@ -1237,22 +1238,14 @@ async fn change_password_form(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "change_password");
     ctx.insert("operator_username", &op.username);
     ctx.insert("error", &params.get("error"));
     ctx.insert("success", &params.get("ok"));
-    Html(
-        state
-            .tera
-            .render("op_change_password.html", &ctx)
-            .unwrap_or_else(|e| {
-                tracing::error!(target: "rustango::tenancy::operator_console", error = %e, "op_change_password.html render");
-                "<!doctype html><h1>Change-password page unavailable</h1>".to_owned()
-            }),
-    )
+    render(&state, "op_change_password.html", &ctx)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1266,7 +1259,7 @@ struct OpChangePasswordForm {
 /// `POST /change-password`: check the current password, hash the new
 /// one, save it and bump `password_changed_at`.
 ///
-/// `require_session` rejects cookies older than `password_changed_at`,
+/// `require_session` rejects cookies minted under the old password,
 /// so this request is the last one the current cookie can serve; the
 /// next click goes to login.
 async fn change_password_submit(
@@ -1317,12 +1310,21 @@ async fn change_password_submit(
         }
     };
     let ok =
-        super::password::verify(&form.current_password, &op_row.password_hash).unwrap_or(false);
+        match super::password::verify_async(&form.current_password, &op_row.password_hash).await {
+            Ok(ok) => ok,
+            Err(super::TenancyError::Busy) => {
+                return crate::login_throttle::LoginRefused::Busy.into_response()
+            }
+            Err(_) => false,
+        };
     if !ok {
         return redir_err("Current password did not match.");
     }
-    let new_hash = match super::password::hash(&form.new_password) {
+    let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(e) => return redir_err(&format!("hash failed: {e}")),
     };
     op_row.password_hash = new_hash;
@@ -1337,17 +1339,12 @@ async fn change_password_submit(
 async fn welcome(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "home");
     ctx.insert("operator_username", &op.username);
-    Html(
-        state
-            .tera
-            .render("op_welcome.html", &ctx)
-            .unwrap_or_default(),
-    )
+    render(&state, "op_welcome.html", &ctx)
 }
 
 async fn orgs_list(
@@ -1419,6 +1416,7 @@ struct SharedSsoForm {
     scopes: Option<String>,
     sort_order: Option<i32>,
     enabled: Option<String>,
+    allow_email_link: Option<String>,
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1446,6 +1444,7 @@ async fn sso_shared_list(
                 "issuer_url": p.issuer_url,
                 "client_id": p.client_id,
                 "enabled": p.enabled,
+                "allow_email_link": p.allow_email_link,
                 "sort_order": p.sort_order,
             })
         })
@@ -1455,13 +1454,8 @@ async fn sso_shared_list(
     ctx.insert("section", "sso");
     ctx.insert("operator_username", &op.username);
     ctx.insert("providers", &view);
-    Html(
-        state
-            .tera
-            .render("op_sso_shared.html", &ctx)
-            .unwrap_or_default(),
-    )
-    .into_response()
+    ctx.insert("edit_enabled", &state.pools.is_some());
+    render(&state, "op_sso_shared.html", &ctx)
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1481,6 +1475,7 @@ async fn sso_shared_create(
         enabled: form.enabled.as_deref() == Some("on"),
         sort_order: form.sort_order.unwrap_or(0),
         scopes: form.scopes.filter(|s| !s.trim().is_empty()),
+        allow_email_link: form.allow_email_link.as_deref() == Some("on"),
         created_at: crate::sql::Auto::Unset,
         updated_at: crate::sql::Auto::Unset,
     };
@@ -1492,6 +1487,50 @@ async fn sso_shared_create(
             .into_response();
     }
     Redirect::to("/sso-shared").into_response()
+}
+
+/// The wanted `allow_email_link` value, `on` or `off`.
+#[cfg(feature = "admin-sso")]
+#[derive(serde::Deserialize)]
+struct EmailLinkForm {
+    allow_email_link: String,
+}
+
+/// Set `allow_email_link` in place (only that column), so the id and its links survive.
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_set_email_link(
+    State(state): State<ConsoleState>,
+    Extension(_op): Extension<auth::Operator>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Form(form): Form<EmailLinkForm>,
+) -> Response<Body> {
+    use crate::sql::UpdaterPool as _;
+    let allow = match form.allow_email_link.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "allow_email_link must be on or off",
+            )
+                .into_response()
+        }
+    };
+    match super::sso::SharedSsoProvider::objects()
+        .filter("id", id)
+        .update()
+        .set("allow_email_link", allow)
+        .execute_pool(&state.registry)
+        .await
+    {
+        Ok(1) => Redirect::to("/sso-shared").into_response(),
+        Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("update failed: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1649,13 +1688,7 @@ async fn org_edit_form(
         "impersonate_enabled",
         &state.tenant_session_secret.is_some(),
     );
-    Html(
-        state
-            .tera
-            .render("op_orgs_edit.html", &ctx)
-            .unwrap_or_default(),
-    )
-    .into_response()
+    render(&state, "op_orgs_edit.html", &ctx)
 }
 
 /// `POST /orgs/{slug}/edit`: parse the form with
@@ -2058,32 +2091,8 @@ async fn static_rustango_png() -> Response<Body> {
 
 // ----------------------------- helpers
 
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for piece in raw.split(';') {
-        let piece = piece.trim();
-        if let Some(value) = piece.strip_prefix(&format!("{name}=")) {
-            return Some(value.to_owned());
-        }
-    }
-    None
-}
-
-/// Minimal URL-encoder for the small set of characters we need to
-/// quote in a `next=` query param. Avoids pulling in `urlencoding`
-/// as a dep for ~6 lines of work.
-fn urlencoding_lite(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
+// The crate's one query-value encoder (#1663); it also escapes `/`.
+use crate::url_codec::url_encode as urlencoding_lite;
 
 /// Check a caller-supplied `?next=` before it reaches `Location`.
 ///
@@ -2143,8 +2152,12 @@ async fn org_impersonate(
     // Mint the short-lived URL handoff token. Includes a random
     // single-use `jti` and the slug, both checked at redemption.
     use super::impersonation_handoff as handoff;
-    let payload =
-        handoff::HandoffPayload::new(operator_id, slug.clone(), handoff::HANDOFF_TTL_SECS);
+    let payload = handoff::HandoffPayload::new(
+        operator_id,
+        slug.clone(),
+        handoff::HANDOFF_TTL_SECS,
+        handoff::PasswordFingerprint::of(&tenant_secret, &op.password_hash),
+    );
     let token = handoff::mint(&tenant_secret, &payload);
 
     // Audit row on the operator side. The tenant admin writes its own
@@ -2261,6 +2274,26 @@ mod sanitize_next_tests {
         for ok in ["/orgs", "/orgs/acme/edit", "/orgs?page=2&q=a"] {
             assert_eq!(sanitize_next(Some(ok)), ok, "{ok} should survive");
         }
+    }
+}
+
+#[cfg(test)]
+mod redirect_to_login_tests {
+    use super::redirect_to_login;
+
+    /// `next` is fully encoded and decodes back to the path it came from.
+    #[test]
+    fn next_round_trips_through_the_location() {
+        let resp = redirect_to_login("/orgs/acme edit?tab=1&x=2");
+        let loc = resp.headers()[axum::http::header::LOCATION]
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/login?next=%2Forgs%2Facme%20edit%3Ftab%3D1%26x%3D2");
+        let next = loc.strip_prefix("/login?next=").unwrap();
+        assert_eq!(
+            crate::url_codec::url_decode(next),
+            "/orgs/acme edit?tab=1&x=2"
+        );
     }
 }
 

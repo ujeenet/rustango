@@ -216,17 +216,8 @@ fn compute_signature(canonical: &str, secret: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn encode_component(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
+// Same output as the copy it replaced, so issued signatures stay valid.
+use crate::url_codec::url_encode as encode_component;
 
 // Percent-decoding lives in `crate::url_codec::url_decode`.
 use crate::url_codec::url_decode as decode_component;

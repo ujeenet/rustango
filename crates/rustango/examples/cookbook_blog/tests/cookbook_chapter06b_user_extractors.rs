@@ -228,10 +228,34 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
     assert_eq!(resp.status().as_u16(), 401, "anonymous /whoami should be 401");
 
     // Step 2 — log in via the tenant `/login` cookie route.
+    //
+    // GET the form first, as a browser does: it seeds the CSRF cookie
+    // and carries the matching token in a hidden field (#1607). The
+    // cookie jar holds the cookie; the form has to echo the token.
+    let csrf = {
+        let html = client
+            .get(format!("http://{BIND}/login"))
+            .header("Host", &host)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        html.split(r#"name="_csrf" value=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_default()
+            .to_owned()
+    };
     let resp = client
         .post(format!("http://{BIND}/login"))
         .header("Host", &host)
-        .form(&[("username", USERNAME), ("password", PASSWORD)])
+        .form(&[
+            ("username", USERNAME),
+            ("password", PASSWORD),
+            ("_csrf", csrf.as_str()),
+        ])
         .send()
         .await
         .unwrap();

@@ -734,7 +734,27 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect)
+    render_changes_split_inner(changes, current, dialect, None)
+}
+
+/// As [`render_changes_split_with_dialect`], but every FK target is
+/// qualified with `schema`, so it cannot resolve through `search_path`
+/// to a same-named table elsewhere (#1645).
+pub(crate) fn render_changes_split_in_schema(
+    changes: &[SchemaChange],
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<RenderedBatch, String> {
+    render_changes_split_inner(changes, current, dialect, schema)
+}
+
+/// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
+fn fk_target(dialect: &dyn crate::sql::Dialect, schema: Option<&str>, table: &str) -> String {
+    match schema {
+        Some(s) => format!("{}.{}", dialect.quote_ident(s), dialect.quote_ident(table)),
+        None => dialect.quote_ident(table),
+    }
 }
 
 /// Reject `AlterColumn*` operations on dialects whose DDL we
@@ -780,6 +800,7 @@ fn render_changes_split_inner(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     for change in changes {
@@ -792,7 +813,7 @@ fn render_changes_split_inner(
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
-                        .extend(constraints_sql_from_snapshot(table, dialect));
+                        .extend(constraints_sql_from_snapshot(table, dialect, schema));
                 }
             }
             SchemaChange::DropColumn { table, column } => {
@@ -1171,8 +1192,8 @@ fn render_changes_split_inner(
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);
-                let q_src_table = dialect.quote_ident(src_table);
-                let q_dst_table = dialect.quote_ident(dst_table);
+                let q_src_table = fk_target(dialect, schema, src_table);
+                let q_dst_table = fk_target(dialect, schema, dst_table);
                 let q_id = dialect.quote_ident("id");
                 let q_src_fk = dialect.quote_ident(&format!("{through}_{src_col}_fkey"));
                 let q_dst_fk = dialect.quote_ident(&format!("{through}_{dst_col}_fkey"));
@@ -1245,7 +1266,7 @@ fn render_changes_split_inner(
                     "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({from_cols}) REFERENCES {} ({on_cols})",
                     dialect.quote_ident(table),
                     dialect.quote_ident(name),
-                    dialect.quote_ident(to),
+                    fk_target(dialect, schema, to),
                 ));
             }
             SchemaChange::DropCompositeFk { table, name } => {
@@ -1427,6 +1448,7 @@ fn create_table_sql_from_snapshot_with_dialect(
 fn constraints_sql_from_snapshot(
     t: &TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
 ) -> Vec<String> {
     let table_q = dialect.quote_ident(&t.name);
     let mut out: Vec<String> = t
@@ -1439,7 +1461,7 @@ fn constraints_sql_from_snapshot(
                     "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
                     dialect.quote_ident(&constraint),
                     dialect.quote_ident(&f.column),
-                    dialect.quote_ident(&rel.to),
+                    fk_target(dialect, schema, &rel.to),
                     dialect.quote_ident(&rel.on),
                 );
                 // #1549 — this is the path system migrations take, and
@@ -1458,7 +1480,7 @@ fn constraints_sql_from_snapshot(
             "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
             dialect.quote_ident(&cf.name),
             from_cols.join(", "),
-            dialect.quote_ident(&cf.to),
+            fk_target(dialect, schema, &cf.to),
             on_cols.join(", "),
         ));
     }
@@ -2112,6 +2134,44 @@ mod sql_type_tests {
         assert!(stmt.contains(r#"ADD CONSTRAINT "fk_child_parent_composite""#));
         assert!(stmt.contains(r#"FOREIGN KEY ("pa_id", "pb_id")"#));
         assert!(stmt.contains(r#"REFERENCES "parent" ("a_id", "b_id")"#));
+    }
+
+    /// #1645 — the m2m and composite arms qualify their targets too.
+    #[test]
+    fn in_schema_render_qualifies_every_fk_target() {
+        let snap = empty_snap();
+        let mut changes = make_create_m2m();
+        changes.extend(make_add_composite_fk());
+        let out =
+            render_changes_split_in_schema(&changes, &snap, &crate::sql::Postgres, Some("t1"))
+                .unwrap();
+        assert!(out.deferred_fks[0].contains(r#"REFERENCES "t1"."posts" ("id")"#));
+        assert!(out.deferred_fks[1].contains(r#"REFERENCES "t1"."tags" ("id")"#));
+        assert!(out.deferred_fks[2].contains(r#"REFERENCES "t1"."parent" ("a_id", "b_id")"#));
+    }
+
+    /// #1645 — the plain per-field FK arm qualifies its target.
+    #[test]
+    fn in_schema_render_qualifies_a_field_fk() {
+        let table: TableSnapshot = serde_json::from_value(serde_json::json!({
+            "name": "child", "model": "Child", "fields": [{
+                "name": "user_id", "column": "user_id", "ty": "i64",
+                "nullable": false, "primary_key": false,
+                "fk": { "kind": "fk", "to": "rustango_users", "on": "id" },
+            }],
+        }))
+        .unwrap();
+        let pg = &crate::sql::Postgres;
+        let fk = constraints_sql_from_snapshot(&table, pg, Some("t1"));
+        assert!(
+            fk[0].contains(r#"REFERENCES "t1"."rustango_users" ("id")"#),
+            "{fk:?}"
+        );
+        let fk = constraints_sql_from_snapshot(&table, pg, None);
+        assert!(
+            fk[0].contains(r#"REFERENCES "rustango_users" ("id")"#),
+            "{fk:?}"
+        );
     }
 
     #[cfg(feature = "mysql")]

@@ -201,11 +201,13 @@ impl PasswordHasherChain {
 // ------------------------------------------------------------------ Argon2idHasher
 
 /// Argon2id hasher over [`crate::passwords::hash`] /
-/// [`crate::passwords::verify`]. Put it first in the chain.
+/// [`crate::passwords::verify`]. Put it first in the chain. The chain
+/// is sync: from async code, run it under `spawn_blocking`.
 #[cfg(feature = "passwords")]
 pub struct Argon2idHasher;
 
 #[cfg(feature = "passwords")]
+#[allow(clippy::disallowed_methods)] // a sync trait
 impl PasswordHasher for Argon2idHasher {
     fn algorithm(&self) -> &'static str {
         "argon2id"

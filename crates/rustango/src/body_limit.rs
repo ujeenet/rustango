@@ -2,9 +2,10 @@
 //!
 //! An unbounded request body is a denial-of-service: one client can
 //! make the server buffer gigabytes. axum's `DefaultBodyLimit` caps
-//! 2 MiB per extractor; this layer adds a router-wide cap that checks
-//! `Content-Length` before the body is read into memory and answers
-//! with a JSON `413 Payload Too Large`.
+//! 2 MiB per extractor; this layer adds a router-wide cap. A declared
+//! `Content-Length` over it gets a JSON `413 Payload Too Large` upfront.
+//! Any other body is capped as it streams, and a body extractor that
+//! reads past the cap answers `413`.
 //!
 //! ## Quick start
 //!
@@ -23,18 +24,18 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use axum::Router;
 
 #[derive(Clone, Debug)]
 pub struct BodyLimitLayer {
-    /// Maximum body size in bytes. Requests with a `Content-Length`
-    /// above this get a `413 Payload Too Large` upfront.
+    /// Maximum body size in bytes, declared or streamed.
     pub max_bytes: usize,
-    /// Methods whose bodies are checked. Default: POST, PUT, PATCH.
-    /// GET, DELETE and HEAD usually have no body, so they are skipped.
+    /// Methods whose bodies are checked. Default: POST, PUT, PATCH and
+    /// QUERY. GET, DELETE and HEAD usually have no body, so they are
+    /// skipped.
     pub methods: Vec<axum::http::Method>,
 }
 
@@ -50,7 +51,12 @@ impl BodyLimitLayer {
         use axum::http::Method;
         Self {
             max_bytes,
-            methods: vec![Method::POST, Method::PUT, Method::PATCH],
+            methods: vec![
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                crate::http_query::QUERY.clone(),
+            ],
         }
     }
 
@@ -64,7 +70,7 @@ impl BodyLimitLayer {
 
     /// Build the layer from [`crate::config::ServerSettings`]. Returns
     /// `None` when `max_body_bytes` is unset, so the layer is opt-in.
-    /// Methods stay at the default POST/PUT/PATCH.
+    /// Methods stay at the default.
     ///
     /// ```ignore
     /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -114,20 +120,28 @@ async fn handle(cfg: Arc<BodyLimitLayer>, req: Request<Body>, next: Next) -> Res
             return too_large(cfg.max_bytes);
         }
     }
-    next.run(req).await
+    // Chunked and HTTP/2 bodies carry no Content-Length: cap the stream.
+    let (parts, body) = req.into_parts();
+    let body = Body::new(http_body_util::Limited::new(body, cfg.max_bytes));
+    next.run(Request::from_parts(parts, body)).await
+}
+
+/// Whether a body read failed on a size cap, not on the stream.
+pub(crate) fn over_cap(e: &axum::Error) -> bool {
+    let mut err: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(e) = err {
+        if e.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        err = e.source();
+    }
+    false
 }
 
 fn too_large(limit: usize) -> Response {
-    let body = format!(r#"{{"error":"payload too large","limit_bytes":{limit}}}"#);
-    let mut resp = Response::builder()
-        .status(StatusCode::PAYLOAD_TOO_LARGE)
-        .body(Body::from(body))
-        .unwrap_or_else(|_| Response::new(Body::empty()));
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
+    crate::api_errors::ApiError::from_status(StatusCode::PAYLOAD_TOO_LARGE, "payload too large")
+        .with_details(serde_json::json!({ "limit_bytes": limit }))
+        .into_response()
 }
 
 #[cfg(test)]
@@ -202,8 +216,9 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["error"], "payload too large");
-        assert_eq!(v["limit_bytes"], 10);
+        assert_eq!(v["error"], "payload_too_large");
+        assert_eq!(v["message"], "payload too large");
+        assert_eq!(v["details"]["limit_bytes"], 10);
     }
 
     #[tokio::test]
@@ -223,21 +238,46 @@ mod tests {
         assert_eq!(resp.status(), 200);
     }
 
+    /// A body with no `Content-Length`, as chunked or HTTP/2 sends it.
+    fn streamed(method: Method, n: usize) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri("/")
+            .body(Body::from("0".repeat(n)))
+            .unwrap()
+    }
+
+    fn reading_app(limit: usize) -> Router {
+        Router::new()
+            .route("/", post(|b: String| async move { b.len().to_string() }))
+            .route("/q", crate::http_query::query(|b: String| async move { b }))
+            .body_limit(BodyLimitLayer::new(limit))
+    }
+
     #[tokio::test]
-    async fn missing_content_length_lets_request_through() {
-        // No Content-Length: nothing to check here, so axum's
-        // per-extractor limit takes over.
-        let resp = app(10)
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/")
-                    .body(Body::from("0".repeat(100)))
-                    .unwrap(),
-            )
+    async fn streamed_body_over_limit_gets_413() {
+        let resp = reading_app(1024)
+            .oneshot(streamed(Method::POST, 1025))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn streamed_body_under_limit_passes() {
+        let resp = reading_app(1024)
+            .oneshot(streamed(Method::POST, 1024))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn query_body_is_limited_by_default() {
+        let mut req = streamed(crate::http_query::QUERY.clone(), 200 * 1024);
+        *req.uri_mut() = "/q".parse().unwrap();
+        let resp = reading_app(1024).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -266,12 +306,13 @@ mod tests {
     }
 
     #[test]
-    fn default_methods_are_post_put_patch() {
+    fn default_methods_are_post_put_patch_query() {
         let l = BodyLimitLayer::default();
-        assert_eq!(l.methods.len(), 3);
+        assert_eq!(l.methods.len(), 4);
         assert!(l.methods.contains(&Method::POST));
         assert!(l.methods.contains(&Method::PUT));
         assert!(l.methods.contains(&Method::PATCH));
+        assert!(l.methods.contains(&crate::http_query::QUERY));
     }
 
     /// Unset → None, so the caller skips mounting (opt-in).
@@ -291,6 +332,6 @@ mod tests {
         let layer = BodyLimitLayer::from_settings(&s).expect("Some");
         assert_eq!(layer.max_bytes, 10_000_000);
         // Methods preserved at default.
-        assert_eq!(layer.methods.len(), 3);
+        assert_eq!(layer.methods, BodyLimitLayer::default().methods);
     }
 }

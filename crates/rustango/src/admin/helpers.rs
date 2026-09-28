@@ -65,6 +65,21 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
     chrome_context_with_session(state, active_table, session.as_ref())
 }
 
+/// The hidden CSRF field for this request's token; empty outside a request.
+pub(crate) fn csrf_input_for(csrf_token: &str) -> String {
+    if csrf_token.is_empty() {
+        String::new()
+    } else {
+        crate::forms::csrf::csrf_input_html(csrf_token)
+    }
+}
+
+/// The hidden CSRF field for the current request.
+#[cfg(feature = "totp")]
+pub(crate) fn current_csrf_input() -> String {
+    csrf_input_for(&super::session::current_csrf_token().unwrap_or_default())
+}
+
 /// As [`chrome_context`] but takes an explicit `Option<&AdminSession>`.
 /// Used by tests and any path that has the session in hand directly
 /// (without going through the task-local). #253 slice B.
@@ -89,11 +104,7 @@ pub(crate) fn chrome_context_with_session(
     // depends on the template, because `CsrfLayer` rejects an unsafe
     // request whatever was rendered.
     let csrf_token = super::session::current_csrf_token().unwrap_or_default();
-    let csrf_input = if csrf_token.is_empty() {
-        String::new()
-    } else {
-        crate::forms::csrf::csrf_input_html(&csrf_token)
-    };
+    let csrf_input = csrf_input_for(&csrf_token);
 
     serde_json::json!({
         "csrf_token": csrf_token,

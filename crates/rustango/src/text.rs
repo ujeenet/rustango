@@ -151,6 +151,21 @@ pub fn html_escape(s: &str) -> String {
     out
 }
 
+/// Append `s` to `out` with the five XML characters escaped (`&apos;`
+/// for `'`), for feeds and sitemaps.
+pub(crate) fn xml_escape_into(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+}
+
 /// Inverse of [`html_escape`] — decode HTML entities back to their
 /// characters.
 ///
@@ -2320,9 +2335,8 @@ pub fn format_html_join(sep: &str, format_string: &str, args: &[Vec<&str>]) -> S
 /// the anchor.
 ///
 /// `nofollow = true` adds `rel="nofollow"` to anchors, which
-/// defends against link-farming on user-submitted text. Body text
-/// outside detected URLs passes through verbatim, so escape the
-/// input with [`html_escape`] first when the source is untrusted.
+/// defends against link-farming on user-submitted text. The whole
+/// output is HTML-escaped, so pass raw (unescaped) text.
 ///
 /// ```ignore
 /// use rustango::text::urlize;
@@ -2342,6 +2356,12 @@ pub fn format_html_join(sep: &str, format_string: &str, args: &[Vec<&str>]) -> S
 /// ```
 #[must_use]
 pub fn urlize(text: &str, nofollow: bool) -> String {
+    urlize_trunc(text, nofollow, usize::MAX)
+}
+
+/// [`urlize`] with each link's visible text cut to `limit` chars
+/// (`...` appended); the `href` is kept whole.
+pub(crate) fn urlize_trunc(text: &str, nofollow: bool, limit: usize) -> String {
     let mut out = String::with_capacity(text.len() + 32);
     let rel_attr = if nofollow { r#" rel="nofollow""# } else { "" };
     for token in text.split_inclusive(char::is_whitespace) {
@@ -2350,12 +2370,12 @@ pub fn urlize(text: &str, nofollow: bool) -> String {
         let (trail_punct_start, trail_punct) = split_off_trailing_punct(body);
         let core = &body[..trail_punct_start];
 
-        if let Some(rendered) = render_match(core, rel_attr) {
+        if let Some(rendered) = render_match(core, rel_attr, limit) {
             out.push_str(&rendered);
-            out.push_str(trail_punct);
+            out.push_str(&html_escape(trail_punct));
             out.push_str(trailing_ws);
         } else {
-            out.push_str(token);
+            out.push_str(&html_escape(token));
         }
     }
     out
@@ -2393,25 +2413,31 @@ fn split_off_trailing_punct(s: &str) -> (usize, &str) {
 /// Detect the three supported URL shapes inside `core` and
 /// return the rendered HTML anchor. Returns `None` for non-matches
 /// so the caller can emit the literal token instead.
-fn render_match(core: &str, rel_attr: &str) -> Option<String> {
-    if core.starts_with("http://") || core.starts_with("https://") {
-        return Some(format!(r#"<a href="{core}"{rel_attr}>{core}</a>"#));
-    }
-    if core.starts_with("www.") && core.contains('.') {
-        return Some(format!(r#"<a href="http://{core}"{rel_attr}>{core}</a>"#));
-    }
-    // Email: at-sign present, surrounded by something on both sides,
-    // domain contains a `.`.
-    if let Some(at) = core.find('@') {
-        if at > 0 && at < core.len() - 1 {
-            let (local, _) = core.split_at(at);
-            let domain = &core[at + 1..];
-            if !local.is_empty() && domain.contains('.') {
-                return Some(format!(r#"<a href="mailto:{core}"{rel_attr}>{core}</a>"#));
-            }
+fn render_match(core: &str, rel_attr: &str, limit: usize) -> Option<String> {
+    let href = if core.starts_with("http://") || core.starts_with("https://") {
+        core.to_owned()
+    } else if core.starts_with("www.") {
+        format!("http://{core}")
+    } else {
+        // Email: text on both sides of the `@`, and a `.` in the domain.
+        let at = core.find('@')?;
+        let domain = &core[at + 1..];
+        if at == 0 || !domain.contains('.') {
+            return None;
         }
-    }
-    None
+        format!("mailto:{core}")
+    };
+    let text = if core.chars().count() > limit {
+        let cut: String = core.chars().take(limit.saturating_sub(3)).collect();
+        format!("{cut}...")
+    } else {
+        core.to_owned()
+    };
+    Some(format!(
+        r#"<a href="{}"{rel_attr}>{}</a>"#,
+        html_escape(&href),
+        html_escape(&text)
+    ))
 }
 
 /// Remove HTML / XML tag markup from `s` and return the bare text
@@ -2552,6 +2578,14 @@ mod tests {
     #[test]
     fn html_escape_passes_safe_chars() {
         assert_eq!(html_escape("hello world 123"), "hello world 123");
+    }
+
+    /// Atom writes this into a double-quoted `href`, so every arm matters.
+    #[test]
+    fn xml_escape_into_covers_all_five() {
+        let mut out = String::new();
+        xml_escape_into(&mut out, r#"a&b<c>"d'e"#);
+        assert_eq!(out, "a&amp;b&lt;c&gt;&quot;d&apos;e");
     }
 
     #[test]
@@ -3019,6 +3053,39 @@ mod tests {
         // no `.` → not anchored. Original token preserved.
         let out = urlize("ping not@a@valid for input", false);
         assert!(!out.contains("<a"));
+    }
+
+    #[test]
+    fn urlize_escapes_quotes_in_href_and_text() {
+        assert_eq!(
+            urlize(r#"https://x.com/"a='b'"#, false),
+            r#"<a href="https://x.com/&quot;a=&#x27;b">https://x.com/&quot;a=&#x27;b</a>&#x27;"#
+        );
+    }
+
+    #[test]
+    fn urlize_escapes_angle_brackets_everywhere() {
+        let out = urlize("<b>hi</b> https://x.com/<i> a<b>@x.com", false);
+        assert_eq!(
+            out,
+            "&lt;b&gt;hi&lt;/b&gt; \
+             <a href=\"https://x.com/&lt;i&gt;\">https://x.com/&lt;i&gt;</a> \
+             <a href=\"mailto:a&lt;b&gt;@x.com\">a&lt;b&gt;@x.com</a>"
+        );
+    }
+
+    #[test]
+    fn urlize_never_links_javascript_scheme() {
+        let out = urlize("javascript:alert(1) JAVASCRIPT://x.com/%0aalert(1)", false);
+        assert!(!out.contains("<a"), "got: {out}");
+    }
+
+    #[test]
+    fn urlize_trunc_cuts_raw_text_before_escaping() {
+        assert_eq!(
+            urlize_trunc("https://x.com/&&&&", false, 17),
+            r#"<a href="https://x.com/&amp;&amp;&amp;&amp;">https://x.com/...</a>"#
+        );
     }
 
     #[test]

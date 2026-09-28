@@ -181,14 +181,14 @@ async fn callback_handler(
     let Some(provider) = state.registry.get(&tenant, &provider_name) else {
         return (StatusCode::NOT_FOUND, "unknown provider").into_response();
     };
-    let Some(sealed) = read_cookie(&headers, FLOW_COOKIE) else {
+    let Some(sealed) = crate::cookies::cookie_from_headers(&headers, FLOW_COOKIE) else {
         return (
             StatusCode::BAD_REQUEST,
             "missing flow cookie — start at /login",
         )
             .into_response();
     };
-    let flow = match open_flow(&sealed, &state.flow_secret) {
+    let flow = match open_flow(sealed, &state.flow_secret) {
         Ok(f) => f,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, format!("invalid flow cookie: {e}")).into_response()
@@ -231,17 +231,6 @@ async fn callback_handler(
         }
         Err(AuthError(msg)) => (StatusCode::BAD_GATEWAY, msg).into_response(),
     }
-}
-
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-    for kv in cookie_header.split(';') {
-        let kv = kv.trim();
-        if let Some(rest) = kv.strip_prefix(&format!("{name}=")) {
-            return Some(rest.to_owned());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -380,18 +369,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn read_cookie_extracts_named_value() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            "session=abc; rustango_oauth_flow=xyz; theme=dark"
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(read_cookie(&headers, FLOW_COOKIE).as_deref(), Some("xyz"));
-        assert!(read_cookie(&headers, "missing").is_none());
     }
 }

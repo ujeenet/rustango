@@ -66,7 +66,7 @@ let app = router.security_headers(SecurityHeadersLayer::strict());
 
 | Preset | Quand l'utiliser |
 |---|---|
-| `strict()` | Production : HSTS preload + XFO=DENY + nosniff + Referrer-Policy=no-referrer + COOP=same-origin + Permissions-Policy verrouillée |
+| `strict()` | Production : HSTS preload + XFO=DENY + nosniff + Referrer-Policy=same-origin + COOP=same-origin + Permissions-Policy verrouillée |
 | `relaxed()` | Intégrable dans des iframes : SAMEORIGIN + HSTS 1 an |
 | `dev()` | Local : nosniff uniquement (pas de HSTS pour éviter de verrouiller localhost en HTTPS pour toujours) |
 | `empty()` | Construire à partir de zéro |
@@ -243,7 +243,7 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` construit la couche avec `secure: true`, donc le cookie est rejeté en HTTP simple — sur `http://localhost`, utilisez `CsrfConfig::allow_insecure_for_dev()` sans quoi la couche semble ne rien faire. `csrf::with_config(CsrfConfig)` remplace les noms de cookie/en-tête et le flag `Secure`, ainsi que `trusted_origins` — vide par défaut, donc la vérification de l'en-tête Origin est **désactivée** tant que vous n'en ajoutez pas. Dans les templates, `{{ csrf_token }}` vous donne le jeton brut et `{{ csrf_input }}` un `<input>` caché prêt à l'emploi — écrivez-le `{{ csrf_input | safe }}`, car Tera échappe automatiquement les templates `.html` : sans le filtre, la page affiche un `<input …>` littéral visible, le formulaire ne porte aucun champ `_csrf` et chaque POST renvoie 403. Les deux variables ne sont dans le contexte que pour les CBV `template_views`, ou après avoir appelé vous-même `forms::csrf::stamp_into_context` — un handler écrit à la main n'a ni l'une ni l'autre. Il utilise le motif du cookie à double soumission : sur les méthodes non sûres (POST, PUT, PATCH, DELETE), la couche vérifie l'en-tête `X-CSRF-Token` (ou le champ de formulaire `_csrf`) par rapport au cookie `rustango_csrf` ; une discordance renvoie `403 Forbidden`.
+`csrf::layer()` construit la couche avec `secure: true`, donc le cookie est rejeté en HTTP simple — sur `http://localhost`, utilisez `CsrfConfig::allow_insecure_for_dev()` sans quoi la couche semble ne rien faire. `csrf::with_config(CsrfConfig)` remplace les noms de cookie/en-tête et le flag `Secure`, ainsi que `trusted_origins` — des origines supplémentaires admises en plus du Host de la requête. La vérification d'Origin s'exécute même si la liste est vide : un `Origin` étranger reçoit `403`, et en TLS un POST sans `Origin` aussi. Dans les templates, `{{ csrf_token }}` vous donne le jeton brut et `{{ csrf_input }}` un `<input>` caché prêt à l'emploi — écrivez-le `{{ csrf_input | safe }}`, car Tera échappe automatiquement les templates `.html` : sans le filtre, la page affiche un `<input …>` littéral visible, le formulaire ne porte aucun champ `_csrf` et chaque POST renvoie 403. Les deux variables ne sont dans le contexte que pour les CBV `template_views`, ou après avoir appelé vous-même `forms::csrf::stamp_into_context` — un handler écrit à la main n'a ni l'une ni l'autre. Il utilise le motif du cookie à double soumission : sur les méthodes non sûres (POST, PUT, PATCH, DELETE), la couche vérifie l'en-tête `X-CSRF-Token` (ou le champ de formulaire `_csrf`) par rapport au cookie `rustango_csrf` ; une discordance renvoie `403 Forbidden`.
 
 **Exempter les endpoints collecteurs.** `CsrfConfig::exempt_prefix("/path")` (répétable) ignore l'application du CSRF pour les méthodes non sûres sur les requêtes dont le chemin commence par le préfixe donné. Ceci concerne les endpoints append-only, sans état d'authentification, atteints via `navigator.sendBeacon` — par exemple un collecteur d'analytics — qui ne peuvent pas définir un en-tête `X-CSRF-Token` et, lorsque la page est servie depuis un cache CDN qui supprime `Set-Cookie`, peuvent ne porter aucun cookie CSRF du tout. Gardez les préfixes étroits et n'exemptez jamais quoi que ce soit qui lit ou écrit un état d'authentification.
 
@@ -313,7 +313,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 L'authentification est la manière dont vous confirmez qui effectue une requête. **Rustango** fournit trois backends prêts à l'emploi (Basic auth, clés d'API et JWT) et vous laisse écrire les vôtres en implémentant un seul trait. Vous les attachez aux routes, et les requêtes sans identifiant reconnu reçoivent un `401`.
 
-> **SSO admin.** Pour permettre aux opérateurs de se connecter à l'admin avec un IdP externe (Google, Microsoft/Azure AD, GitHub, ou tout fournisseur OpenID Connect) au lieu d'un mot de passe, activez la feature `admin-sso` — voir le [guide SSO](sso.md). Les fournisseurs sont **gérés depuis l'interface admin sous forme de lignes** (plusieurs par surface ; par tenant, ou un ensemble partagé entre tenants), avec le secret client **chiffré au repos**. C'est un rattachement à l'existant (l'email vérifié de l'IdP doit correspondre à un utilisateur admin ; pas d'auto-provisionnement) et cela réutilise la session existante.
+> **SSO admin.** Pour permettre aux opérateurs de se connecter à l'admin avec un IdP externe (Google, Microsoft/Azure AD, GitHub, ou tout fournisseur OpenID Connect) au lieu d'un mot de passe, activez la feature `admin-sso` — voir le [guide SSO](sso.md). Les fournisseurs sont **gérés depuis l'interface admin sous forme de lignes** (plusieurs par surface ; par tenant, ou un ensemble partagé entre tenants), avec le secret client **chiffré au repos**. Il connecte le compte lié au subject de l'IdP (la liaison par email est optionnelle par fournisseur et ne s'applique jamais aux superusers ni au staff ; pas d'auto-provisionnement) et réutilise la session existante.
 
 ### Trois backends prêts à l'emploi
 
@@ -506,6 +506,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 ```
 
 Fonctionne avec Google Authenticator, Authy, 1Password, Bitwarden et d'autres applications d'authentification standard.
+
+`verify` accepte le même code à nouveau jusqu'à son expiration. Pour des codes à usage unique, appelez plutôt `matched_step`, stockez le pas qu'il renvoie et n'acceptez un code que si son pas est postérieur au pas stocké. La connexion admin intégrée fait ainsi.
 
 **Codes de récupération** (codes de secours à usage unique pour quand un utilisateur perd son téléphone) pas encore fournis. Le motif courant est de stocker 8 à 10 codes hachés par utilisateur et d'en brûler un à chaque utilisation.
 

@@ -108,6 +108,7 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
+use axum::response::IntoResponse as _;
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
@@ -382,11 +383,11 @@ where
 ///             return Vec::new();
 ///         }
 ///         schema.field("status").map_or_else(Vec::new, |f| {
-///             vec![WhereExpr::Predicate(Filter {
-///                 column: f.column,
-///                 op: Op::Eq,
-///                 value: SqlValue::from("published"),
-///             })]
+///             vec![WhereExpr::Predicate(Filter::new(
+///                 f.column,
+///                 Op::Eq,
+///                 SqlValue::from("published"),
+///             ))]
 ///         })
 ///     })
 ///     .router_pool("/posts", pool);
@@ -1147,21 +1148,34 @@ impl AcquiredConn {
         crate::sql::select_rows_pool_with_related::<T>(&self.pool, q).await
     }
 
-    /// Insert a row and return its primary key. PG and SQLite use
-    /// RETURNING; MySQL uses `LAST_INSERT_ID()`.
+    /// Insert a row and return its primary key (see [`created_pk`]).
     async fn insert_returning_pk(
         &mut self,
         q: &InsertQuery,
         pk_field: &crate::core::FieldSchema,
     ) -> Result<SqlValue, crate::sql::ExecError> {
         let returning = crate::sql::insert_returning_pool(&self.pool, q).await?;
-        Ok(pk_from_returning(returning, pk_field))
+        Ok(created_pk(q, returning, pk_field))
     }
 }
 
-/// Read the primary key out of an INSERT's RETURNING, or MySQL's
-/// `LAST_INSERT_ID()`. Shared by the single-row and bulk paths.
-fn pk_from_returning(
+/// The PK of the row `q` just inserted: the submitted value when the PK
+/// column is in the INSERT, else the database-generated one.
+/// Shared by the single-row and bulk paths.
+fn created_pk(
+    q: &InsertQuery,
+    returning: crate::sql::InsertReturningPool,
+    pk_field: &crate::core::FieldSchema,
+) -> SqlValue {
+    match q.columns.iter().position(|c| *c == pk_field.column) {
+        Some(i) => q.values[i].clone(),
+        None => generated_pk(returning, pk_field),
+    }
+}
+
+/// Read a generated PK out of an INSERT's RETURNING, or MySQL's
+/// `LAST_INSERT_ID()`.
+fn generated_pk(
     returning: crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
 ) -> SqlValue {
@@ -1342,12 +1356,20 @@ fn json_response(body: Value) -> Response {
     json_with_status(StatusCode::OK, body)
 }
 
+/// An [`ApiError`](crate::api_errors::ApiError) body; a 5xx message is
+/// logged rather than sent.
 fn json_error(status: StatusCode, msg: &str) -> Response {
-    json_with_status(status, json!({ "error": msg }))
+    crate::api_errors::ApiError::logged(status, "viewset", msg).into_response()
 }
 
-/// A `400` from serializer validation, shaped as
-/// `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
+/// A 500 whose cause is logged under `context`, not sent.
+fn json_server_error(context: &str, e: &dyn std::fmt::Display) -> Response {
+    crate::api_errors::ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, context, e)
+        .into_response()
+}
+
+/// A `422` from serializer validation, as every `validation_failed` is.
+/// `details` is `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
 fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     let mut map = serde_json::Map::new();
     for (field, msgs) in errs.fields() {
@@ -1356,7 +1378,9 @@ fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     if !errs.non_field().is_empty() {
         map.insert("non_field_errors".to_owned(), json!(errs.non_field()));
     }
-    json_with_status(StatusCode::BAD_REQUEST, Value::Object(map))
+    crate::api_errors::ApiError::validation("invalid input")
+        .with_details(Value::Object(map))
+        .into_response()
 }
 
 /// Rename inbound form keys from serializer field names to model
@@ -1480,34 +1504,22 @@ macro_rules! or_500 {
     };
 }
 
-/// Unwrap, or return a `400` JSON error. Sibling of [`or_500`].
-macro_rules! or_400 {
-    ($expr:expr) => {
-        match $expr {
-            ::core::result::Result::Ok(v) => v,
-            ::core::result::Result::Err(e) => {
-                return json_error(
-                    ::axum::http::StatusCode::BAD_REQUEST,
-                    &::std::string::ToString::to_string(&e),
-                );
-            }
-        }
-    };
-}
-
-/// The predicates every filter backend contributes for this request,
-/// to be ANDed into whatever query the action runs.
+/// The model's global scopes plus every filter backend's predicates for
+/// this request, to be ANDed into whatever query the action runs.
 fn scope_filters(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
-    state
-        .vs
-        .filter_backends
-        .iter()
-        .flat_map(|b| b.filter_with(parts, params, state.vs.schema))
-        .collect()
+    let mut all = state.vs.schema.global_scope_exprs(&[]);
+    all.extend(
+        state
+            .vs
+            .filter_backends
+            .iter()
+            .flat_map(|b| b.filter_with(parts, params, state.vs.schema)),
+    );
+    all
 }
 
 /// `expr` narrowed by `extra`. An empty `extra` returns `expr`
@@ -1639,14 +1651,7 @@ fn client_key(parts: &axum::http::request::Parts) -> String {
 
 /// A `429 Too Many Requests` with a `Retry-After` header.
 fn throttled_response(retry_after_secs: u64) -> Response {
-    Response::builder()
-        .status(StatusCode::TOO_MANY_REQUESTS)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::RETRY_AFTER, retry_after_secs.to_string())
-        .body(Body::from(
-            json!({ "error": "request throttled" }).to_string(),
-        ))
-        .unwrap()
+    crate::api_errors::ApiError::rate_limited_response("request throttled", retry_after_secs)
 }
 
 /// Parse a path capture into the primary key's type, or a `400`.
@@ -2409,10 +2414,7 @@ async fn handle_retrieve(
     match render_single(&state, &mut acq, &select_q, &fields).await {
         Ok(Some(row)) => json_response(row),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not found"),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &crate::error::server_error_body("viewset::retrieve", &e),
-        ),
+        Err(e) => json_server_error("viewset::retrieve", &e),
     }
 }
 
@@ -2425,16 +2427,13 @@ async fn handle_create(
         Err(resp) => return resp,
     };
 
+    // The read-back is scoped: a row created outside it is not echoed.
+    let scope = scope_filters(&state, &parts, &HashMap::new());
     // A JSON array body means a bulk create.
-    let create_body = or_400!(extract_create_body(parts, body).await);
-
-    let skip: Vec<&str> = state
-        .vs
-        .schema
-        .scalar_fields()
-        .filter(|f| f.primary_key || f.auto)
-        .map(|f| f.name)
-        .collect();
+    let create_body = match extract_create_body(parts, body).await {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
@@ -2443,22 +2442,19 @@ async fn handle_create(
 
     match create_body {
         CreateBody::Single(form, json) => {
-            create_one(&state, &mut acq, &form, json.as_ref(), &skip, pk_field).await
+            create_one(&state, &mut acq, &form, json.as_ref(), pk_field, &scope).await
         }
-        CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, &skip, pk_field).await,
+        CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, pk_field, &scope).await,
     }
 }
 
 /// Run `INSERT … RETURNING <pk>`, then re-fetch the row by its PK as
-/// JSON. The insert-then-fetch tail shared by `create_one` and
-/// `create_many`.
+/// JSON, narrowed by `scope`; `None` when the new row is outside it.
 ///
-/// Returns `(StatusCode, message)` so both callers emit the right
-/// code:
+/// Returns `(StatusCode, message)` so the caller emits the right code:
 /// * `BAD_REQUEST` when the INSERT fails — a constraint violation or
 ///   a bad value, so probably the client's fault.
-/// * `INTERNAL_SERVER_ERROR` when the INSERT works but the re-fetch
-///   misses, which should not happen.
+/// * `INTERNAL_SERVER_ERROR` when the re-fetch errors.
 ///
 /// `columns` and `values` come from an earlier `collect_values`, so
 /// the inbound shape is already validated.
@@ -2469,7 +2465,8 @@ async fn insert_and_fetch_one(
     values: Vec<SqlValue>,
     pk_field: &'static crate::core::FieldSchema,
     fields: &[&'static crate::core::FieldSchema],
-) -> Result<Value, (StatusCode, String)> {
+    scope: &[WhereExpr],
+) -> Result<Option<Value>, (StatusCode, String)> {
     let query = InsertQuery {
         model: state.vs.schema,
         columns,
@@ -2480,40 +2477,51 @@ async fn insert_and_fetch_one(
     let pk_val = acq
         .insert_returning_pk(&query, pk_field)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    fetch_by_pk(state, acq, pk_field, pk_val, fields)
+        .map_err(|e| write_failure("viewset::create", &e))?;
+    fetch_by_pk_scoped(state, acq, pk_field, pk_val, fields, scope)
         .await
-        .ok_or_else(|| {
+        .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "created but could not retrieve".to_owned(),
+                crate::error::client_error_body("viewset::create::read_back", &e, false),
             )
         })
 }
 
+/// A failed INSERT/UPDATE: a database rejection is the client's `400`,
+/// with the driver text withheld; anything else is a `500`.
+fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
+    if matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_))) {
+        let body = crate::error::client_error_body(context, e, true);
+        (StatusCode::BAD_REQUEST, body)
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
+}
+
 /// Single-row create — used by both the form-urlencoded codepath
-/// and the JSON-object body codepath. Returns 201 + the row JSON.
+/// and the JSON-object body codepath. Returns 201 + the row JSON, or
+/// 201 with no body when the new row is outside `scope`.
 async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     form: &HashMap<String, String>,
     json: Option<&Value>,
-    skip: &[&str],
     pk_field: &'static crate::core::FieldSchema,
+    scope: &[WhereExpr],
 ) -> Response {
     // When a serializer is registered: run its input validation and
     // skip every model column it doesn't accept (read_only / computed).
-    let extra_skip = match serializer_write_prep(state, json) {
+    // `Auto` columns are skipped by `collect_values`; a natural PK is written.
+    let skip = match serializer_write_prep(state, json) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
-    let mut all_skip: Vec<&str> = skip.to_vec();
-    all_skip.extend(extra_skip);
     // Translate `source`-renamed writable keys (serializer field name →
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
-    let collected = match collect_insert_values(state.vs.schema, form, &all_skip) {
+    let collected = match collect_insert_values(state.vs.schema, form, &skip) {
         Ok(v) => v,
         Err(e) => {
             return json_error(
@@ -2524,8 +2532,9 @@ async fn create_one(
     };
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
-    match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields).await {
-        Ok(obj) => json_created(obj),
+    match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields, scope).await {
+        Ok(Some(obj)) => json_created(obj),
+        Ok(None) => StatusCode::CREATED.into_response(),
         Err((code, msg)) => json_error(code, &msg),
     }
 }
@@ -2535,15 +2544,16 @@ async fn create_one(
 /// is rejected with the index + message (atomic-validate, not
 /// atomic-insert — partial-insert recovery is a separate concern).
 /// On success, inserts each row sequentially and returns 201 + the
-/// JSON array of created rows in submission order.
+/// JSON array of created rows in submission order; a row outside
+/// `scope` is `null`.
 ///
 /// Issue #435.
 async fn create_many(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     rows: &[(HashMap<String, String>, Option<Value>)],
-    skip: &[&str],
     pk_field: &'static crate::core::FieldSchema,
+    scope: &[WhereExpr],
 ) -> Response {
     if rows.is_empty() {
         return json_created(Value::Array(Vec::new()));
@@ -2555,15 +2565,13 @@ async fn create_many(
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
         // Serializer validation + non-writable skip, per entry.
-        let extra_skip = match serializer_write_prep(state, json.as_ref()) {
+        let skip = match serializer_write_prep(state, json.as_ref()) {
             Ok(s) => s,
             Err(resp) => return resp,
         };
-        let mut all_skip: Vec<&str> = skip.to_vec();
-        all_skip.extend(extra_skip);
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
-        let collected = match collect_insert_values(state.vs.schema, row, &all_skip) {
+        let collected = match collect_insert_values(state.vs.schema, row, &skip) {
             Ok(v) => v,
             Err(e) => {
                 let e = public_form_error(state, e);
@@ -2599,10 +2607,7 @@ async fn create_many(
     let mut tx = match crate::sql::transaction_pool(&acq.pool).await {
         Ok(tx) => tx,
         Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &crate::error::server_error_body("viewset::bulk_create::begin", &e),
-            );
+            return json_server_error("viewset::bulk_create::begin", &e);
         }
     };
 
@@ -2616,7 +2621,7 @@ async fn create_many(
             on_conflict: None,
         };
         match crate::sql::insert_returning_tx(&mut tx, &query).await {
-            Ok(returning) => pks.push(pk_from_returning(returning, pk_field)),
+            Ok(returning) => pks.push(created_pk(&query, returning, pk_field)),
             Err(e) => {
                 // Drop every row this request wrote, including the ones
                 // that succeeded before entry `i`.
@@ -2646,10 +2651,7 @@ async fn create_many(
         }
     }
     if let Err(e) = tx.commit().await {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &crate::error::server_error_body("viewset::bulk_create::commit", &e),
-        );
+        return json_server_error("viewset::bulk_create::commit", &e);
     }
 
     // Read the rows back after the commit. They have to be committed to
@@ -2657,15 +2659,10 @@ async fn create_many(
     // atomicity is a property of the writes, which is the part that was
     // missing.
     let mut created: Vec<Value> = Vec::with_capacity(pks.len());
-    for (i, pk_val) in pks.into_iter().enumerate() {
-        match fetch_by_pk(state, acq, pk_field, pk_val, &fields).await {
-            Some(obj) => created.push(obj),
-            None => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("bulk entry {i}: created but could not retrieve"),
-                );
-            }
+    for pk_val in pks {
+        match fetch_by_pk_scoped(state, acq, pk_field, pk_val, &fields, scope).await {
+            Ok(obj) => created.push(obj.unwrap_or(Value::Null)),
+            Err(e) => return json_server_error("viewset::bulk_create::read_back", &e),
         }
     }
 
@@ -2710,7 +2707,10 @@ async fn update_inner(
         Err(resp) => return resp,
     };
 
-    let (form, json) = or_400!(extract_form_body(parts, body).await);
+    let (form, json) = match extract_form_body(parts, body).await {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
 
     // Serializer (when set): validate the body + the set of model
     // columns it doesn't accept (read_only / computed), which we skip.
@@ -2773,13 +2773,18 @@ async fn update_inner(
         // scoped out of. Both are a 404 — see `handle_retrieve`.
         Ok(0) => return json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => {}
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => {
+            let (status, msg) = write_failure("viewset::update", &e);
+            return json_error(status, &msg);
+        }
     }
 
+    // The UPDATE committed; a row it moved out of scope answers 204.
     let fields = state.effective_fields();
-    match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, scope).await {
-        Some(obj) => json_response(obj),
-        None => json_error(StatusCode::NOT_FOUND, "not found after update"),
+    match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, &scope).await {
+        Ok(Some(obj)) => json_response(obj),
+        Ok(None) => no_content(),
+        Err(e) => json_server_error("viewset::update::read_back", &e),
     }
 }
 
@@ -2819,46 +2824,25 @@ async fn handle_destroy(
     match acq.delete(&query).await {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => no_content(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &crate::error::server_error_body("viewset::destroy", &e),
-        ),
+        Err(e) => json_server_error("viewset::destroy", &e),
     }
 }
 
 // ------------------------------------------------------------------ helpers
 
-/// [`fetch_by_pk`] narrowed by the filter backends — the read-back after an
-/// update, which must not return a row the principal is scoped out of.
+/// The read-back after a write, narrowed by `scope`: `None` when the
+/// written row is outside it, so a scoped-out row is never echoed.
 async fn fetch_by_pk_scoped(
     state: &ViewSetState,
     acq: &mut AcquiredConn,
     pk_field: &'static crate::core::FieldSchema,
     pk_val: SqlValue,
     fields: &[&'static crate::core::FieldSchema],
-    scope: Vec<WhereExpr>,
-) -> Option<Value> {
+    scope: &[WhereExpr],
+) -> Result<Option<Value>, crate::sql::ExecError> {
     let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
-    select_q.where_clause = narrow(select_q.where_clause, scope);
-    render_single(state, acq, &select_q, fields)
-        .await
-        .ok()
-        .flatten()
-}
-
-async fn fetch_by_pk(
-    state: &ViewSetState,
-    acq: &mut AcquiredConn,
-    pk_field: &'static crate::core::FieldSchema,
-    pk_val: SqlValue,
-    fields: &[&'static crate::core::FieldSchema],
-) -> Option<Value> {
-    // #562 — SelectQuery::by_pk replaces the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
-    render_single(state, acq, &select_q, fields)
-        .await
-        .ok()
-        .flatten()
+    select_q.where_clause = narrow(select_q.where_clause, scope.to_vec());
+    render_single(state, acq, &select_q, fields).await
 }
 
 /// Render the rows matching `select_q` for a list response: through
@@ -2892,12 +2876,39 @@ async fn render_single(
     }
 }
 
+/// Why a write body was refused: over a size cap (413) or unreadable (400).
+pub(crate) enum BodyError {
+    TooLarge,
+    Bad(String),
+}
+
+impl From<String> for BodyError {
+    fn from(msg: String) -> Self {
+        Self::Bad(msg)
+    }
+}
+
+impl From<&str> for BodyError {
+    fn from(msg: &str) -> Self {
+        Self::Bad(msg.to_owned())
+    }
+}
+
+impl BodyError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::TooLarge => json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
+            Self::Bad(msg) => json_error(StatusCode::BAD_REQUEST, &msg),
+        }
+    }
+}
+
 /// Extract form data from both `application/x-www-form-urlencoded` and
 /// `application/json` request bodies.
 async fn extract_form_body(
     parts: axum::http::request::Parts,
     body: Body,
-) -> Result<(HashMap<String, String>, Option<Value>), String> {
+) -> Result<(HashMap<String, String>, Option<Value>), BodyError> {
     match extract_create_body(parts, body).await? {
         CreateBody::Single(form, json) => Ok((form, json)),
         CreateBody::Bulk(_) => Err("expected a JSON object; got an array".into()),
@@ -2922,7 +2933,7 @@ pub(crate) enum CreateBody {
 pub(crate) async fn extract_create_body(
     parts: axum::http::request::Parts,
     body: Body,
-) -> Result<CreateBody, String> {
+) -> Result<CreateBody, BodyError> {
     use axum::body::to_bytes;
 
     let content_type = parts
@@ -2931,9 +2942,14 @@ pub(crate) async fn extract_create_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let bytes = to_bytes(body, 4 * 1024 * 1024)
-        .await
-        .map_err(|e| e.to_string())?;
+    let bytes = to_bytes(body, 4 * 1024 * 1024).await.map_err(|e| {
+        // Our own cap or an outer `BodyLimitLayer` stream cap (#1673).
+        #[cfg(feature = "admin")]
+        if crate::body_limit::over_cap(&e) {
+            return BodyError::TooLarge;
+        }
+        BodyError::Bad(e.to_string())
+    })?;
 
     if content_type.contains("application/json") {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -2982,6 +2998,86 @@ fn json_object_to_form(obj: &serde_json::Map<String, Value>) -> HashMap<String, 
         form.insert(k.clone(), s);
     }
     form
+}
+
+/// Every ViewSet error is an `ApiError`, and a 5xx withholds its cause (#1193).
+#[cfg(test)]
+mod envelope_tests {
+    use super::{json_error, json_server_error, throttled_response, StatusCode};
+
+    async fn body(r: axum::response::Response) -> serde_json::Value {
+        let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        serde_json::from_slice(&b).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_404_is_the_envelope() {
+        let v = body(json_error(StatusCode::NOT_FOUND, "not found")).await;
+        assert_eq!(
+            (v["error"].as_str(), v["message"].as_str()),
+            (Some("not_found"), Some("not found"))
+        );
+        assert_eq!(v["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn a_500_withholds_the_driver_text() {
+        let _env = crate::error::test_env::lock();
+        let (a, b) = (
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "relation \"users\" missing",
+            ),
+            json_server_error("t", &"relation \"users\" missing"),
+        );
+        for v in [body(a).await, body(b).await] {
+            assert_eq!(v["error"], "internal_error");
+            assert!(!v.to_string().contains("users"), "{v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_throttle_carries_retry_after() {
+        let r = throttled_response(5);
+        assert_eq!(r.headers()[axum::http::header::RETRY_AFTER], "5");
+        let v = body(r).await;
+        assert_eq!(
+            (v["error"].as_str(), v["details"]["retry_after"].as_u64()),
+            (Some("rate_limited"), Some(5))
+        );
+    }
+}
+
+#[cfg(all(test, feature = "admin"))]
+mod body_tests {
+    use super::{extract_create_body, Body, BodyError, StatusCode};
+
+    fn json_parts() -> axum::http::request::Parts {
+        let req = axum::http::Request::builder()
+            .header("content-type", "application/json")
+            .body(())
+            .unwrap();
+        req.into_parts().0
+    }
+
+    /// A streamed body over an outer cap is a 413, not a 400 (#1673).
+    #[tokio::test]
+    async fn an_over_cap_body_is_413() {
+        let body = Body::new(http_body_util::Limited::new(Body::from("[1,2,3,4]"), 4));
+        let Err(err) = extract_create_body(json_parts(), body).await else {
+            panic!("an over-cap body was accepted");
+        };
+        assert!(matches!(err, BodyError::TooLarge));
+        assert_eq!(err.into_response().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_body_is_still_400() {
+        let Err(err) = extract_create_body(json_parts(), Body::from("{not json")).await else {
+            panic!("malformed JSON was accepted");
+        };
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 #[cfg(test)]
@@ -3180,6 +3276,34 @@ mod tenant_router_tests {
         let vs = static_state.read_only();
         let _r = vs.clone().tenant_router("/api/users");
         // If this compiles, the variant + builder are wired.
+    }
+}
+
+/// A submitted PK wins over MySQL's `LAST_INSERT_ID()`, which is 0 for a
+/// non-auto PK and would read back `WHERE pk = 0` (#1671).
+#[cfg(all(test, feature = "mysql", feature = "tenancy"))]
+mod created_pk_tests {
+    use super::*;
+    use crate::core::Model as _;
+
+    #[test]
+    fn a_submitted_string_pk_is_not_replaced_by_last_insert_id() {
+        let schema = crate::tenancy::auth::User::SCHEMA;
+        let pk = schema
+            .fields
+            .iter()
+            .find(|f| f.ty == FieldType::String)
+            .expect("a String field");
+        let q = InsertQuery::new(
+            schema,
+            vec![pk.column],
+            vec![SqlValue::String("rust".into())],
+        );
+        let got = created_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk);
+        assert!(
+            matches!(got, SqlValue::String(ref s) if s == "rust"),
+            "{got:?}"
+        );
     }
 }
 

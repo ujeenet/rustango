@@ -242,9 +242,11 @@ pub fn row_to_json_sqlite(
                         .map(|s| json!(s))
                         .unwrap_or(Value::Null)
                 }),
+            // sqlx binds a Uuid as a 16-byte BLOB; older rows may be TEXT.
             FieldType::Uuid => row
-                .try_get::<String, _>(field.column)
-                .map(|u| json!(u))
+                .try_get::<uuid::Uuid, _>(field.column)
+                .map(|u| json!(u.to_string()))
+                .or_else(|_| row.try_get::<String, _>(field.column).map(|u| json!(u)))
                 .unwrap_or(Value::Null),
             FieldType::Json => {
                 // SQLite stores JSON as TEXT; try parsing back to

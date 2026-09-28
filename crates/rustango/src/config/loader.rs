@@ -443,18 +443,21 @@ retention_days = 90
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `Settings::detected_features` reports the compiled-in
-    /// features. The lib-test build turns on every default feature,
-    /// so the list is not empty and includes postgres.
+    /// `Settings::detected_features` reports exactly the compiled-in
+    /// backends, whatever feature set the test build uses.
     #[test]
     fn detected_features_lists_compiled_in_features() {
         use crate::config::Settings;
         let feats = Settings::detected_features();
         assert!(!feats.is_empty(), "expected at least one feature");
-        assert!(
-            feats.contains(&"postgres"),
-            "postgres feature is in the default set; got {feats:?}"
-        );
+        let compiled = [
+            ("postgres", cfg!(feature = "postgres")),
+            ("mysql", cfg!(feature = "mysql")),
+            ("sqlite", cfg!(feature = "sqlite")),
+        ];
+        for (backend, on) in compiled {
+            assert_eq!(feats.contains(&backend), on, "{backend}: {feats:?}");
+        }
     }
 
     #[test]

@@ -408,7 +408,7 @@ let cfg = rustango::config::Settings::load_from_env()?;
 // auth_routes — access_ttl_secs / refresh_ttl_secs
 let auth = rustango::tenancy::auth_routes::Config::default()
     .with_jwt_settings(&cfg.auth.jwt);
-api.merge(rustango::tenancy::auth_routes::jwt_router(auth));
+api.merge(rustango::tenancy::auth_routes::JwtAuth::new(auth).router());
 
 // security_headers — preset + csp + hsts override
 let sec = rustango::security_headers::SecurityHeadersLayer::from_settings(&cfg.security);
@@ -900,11 +900,7 @@ Scopes fold in at **every compile entry** — SELECT (`fetch_pool` / `Model::all
 use rustango::core::{Filter, Op, SqlValue, WhereExpr};
 
 fn active_only() -> WhereExpr {
-    WhereExpr::Predicate(Filter {
-        column: "is_active",
-        op: Op::Eq,
-        value: SqlValue::Bool(true),
-    })
+    WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(true)))
 }
 
 #[derive(Model)]
@@ -2285,13 +2281,8 @@ the `rustango_csrf` cookie when missing, so templates can render:
 </form>
 ```
 
-POST validation is a separate layer. The recommended
-shortcut is `Cli::with_csrf()` — see
-[Auto-mounting CSRF](#auto-mounting-csrf--for-form-driven-cbvs).
-For projects not using `Cli`, mount `forms::csrf::layer()` directly
-on the router to enforce that the `_csrf` form field matches the
-cookie value. Without it the `csrf_token` context var still
-populates, but POSTs aren't validated.
+Every view router with a POST route checks the token itself: a POST
+whose `_csrf` field does not match the cookie gets `403`.
 
 ### Bulk actions on `ListView`
 Row checkboxes + an action `<select>` that applies the same
@@ -2619,9 +2610,9 @@ For finer control (immutable hash-named bundles, `.well-known`
 whitelisting), keep mounting `static_router` directly on your own
 router and skip the shortcut.
 
-### Auto-mounting CSRF — for form-driven CBVs
-`template_views` `CreateView` / `UpdateView` / `DeleteView` need the
-`_csrf` cookie + form field cycle wired. Same shape:
+### Auto-mounting CSRF — for hand-written form handlers
+The `template_views` routers check the token themselves. Your own
+form-posting handlers need the layer on the API router:
 
 ```rust,ignore
 rustango::manage::Cli::new()
@@ -2956,9 +2947,9 @@ combine with the existing dialect features:
 
 ```toml
 [dependencies]
-rustango = { version = "0.57", features = ["sqlite"] }
+rustango = { version = "0.58", features = ["sqlite"] }
 # or both at once:
-rustango = { version = "0.57", features = ["postgres", "sqlite"] }
+rustango = { version = "0.58", features = ["postgres", "sqlite"] }
 ```
 
 The macro emits per-backend trait impls only when the feature is
@@ -3424,7 +3415,7 @@ UPDATE`, `INSERT … RETURNING`) translated to portable equivalents.
 
 ```toml
 # Tri-dialect media
-rustango = { version = "0.57", default-features = false, features = ["sqlite", "media", "storage"] }
+rustango = { version = "0.58", default-features = false, features = ["sqlite", "media", "storage"] }
 ```
 
 ```rust,ignore
@@ -3486,7 +3477,7 @@ your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.57", features = ["mcp"] }
+rustango = { version = "0.58", features = ["mcp"] }
 # mcp pulls tenancy + sse + serializer + openapi automatically.
 ```
 

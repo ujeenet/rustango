@@ -412,8 +412,8 @@ impl ListView {
     /// Form shape the POST handler expects:
     /// - `action`: the name of one registered action
     /// - `_selected_action`: one or more values, each a row's PK
-    /// - `_csrf`: the CSRF token (when [`crate::manage::Cli::with_csrf`]
-    ///   is on, which is the recommended setup for form-driven CBVs)
+    /// - `_csrf`: the CSRF token (`{{ csrf_input | safe }}`); the
+    ///   router rejects a POST without it
     ///
     /// Successful action runs return `303 See Other` to the same
     /// prefix so a refresh after the redirect doesn't replay the
@@ -440,16 +440,19 @@ impl ListView {
     /// = delete_selected` POST arrives without a `confirmed = true`
     /// flag. v0.31 candidate.
     ///
+    /// A custom action gets only the selected PKs the model's global
+    /// scopes let through.
+    ///
     /// ```rust,ignore
     /// ListView::for_model(Post::SCHEMA)
     ///     .bulk_actions(true)               // enables built-in delete_selected
     ///     .action("publish_selected", "Publish selected", Arc::new(|pool, pks| {
     ///         Box::pin(async move {
-    ///             let pks: Vec<i64> = pks.iter().filter_map(|v| match v {
-    ///                 SqlValue::I64(n) => Some(*n), _ => None,
-    ///             }).collect();
-    ///             sqlx::query("UPDATE posts SET status = 'published' WHERE id = ANY($1)")
-    ///                 .bind(&pks).execute(pool).await
+    ///             Post::objects()
+    ///                 .filter("id__in", SqlValue::List(pks.to_vec()))
+    ///                 .update()
+    ///                 .set("status", "published")
+    ///                 .execute_pool(pool).await
     ///                 .map(|_| ()).map_err(|e| e.to_string())
     ///         })
     ///     }))
@@ -615,7 +618,7 @@ impl ListView {
         } else {
             get(handle_list)
         };
-        Router::new().route(prefix, route).with_state(state)
+        csrf_protected(Router::new().route(prefix, route).with_state(state))
     }
 
     /// Tenant-aware variant — each request resolves its own
@@ -634,7 +637,7 @@ impl ListView {
         } else {
             get(handle_list_tenant)
         };
-        Router::new().route(prefix, route).with_state(state)
+        csrf_protected(Router::new().route(prefix, route).with_state(state))
     }
 }
 
@@ -749,15 +752,10 @@ async fn handle_list(
         limit: Some(page_size),
         offset: Some(offset),
         ..SelectQuery::new(state.vs.schema)
-    };
-    let count_q = crate::core::CountQuery {
-        model: state.vs.schema,
-        where_clause,
-        // template_views folds the search-fields ILIKE predicates
-        // into where_clause via build_list_where, so the dedicated
-        // SearchClause is unused here.
-        search: None,
-    };
+    }
+    .with_global_scopes();
+    // Search predicates are folded into where_clause by build_list_where.
+    let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let (rows_result, count_result) = tokio::join!(
@@ -805,7 +803,7 @@ async fn handle_list(
 
     // v0.30.17 — stamp the CSRF token into the context AND set the
     // cookie on the response. ListView's bulk-action POST is gated
-    // by the project's CSRF middleware (when on); without this the
+    // by the router's CSRF layer; without this the
     // form-rendered token is empty and every legitimate POST 403s.
     let set_cookie = stamp_csrf(&headers, &mut ctx);
     let mut resp = render(&state.tera, &state.vs.template, &ctx);
@@ -872,6 +870,10 @@ async fn handle_list_action(
         .iter()
         .find(|a| same_action_name(&a.name, &action))
     {
+        let pks = match visible_pks_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
+            Ok(v) => v,
+            Err(e) => return template_error(&format!("scope selected rows: {e}")),
+        };
         match &custom.handler {
             BulkActionHandler::Pool(f) => f(&state.pool, &pks).await,
             #[cfg(all(feature = "tenancy", feature = "postgres"))]
@@ -1030,7 +1032,8 @@ async fn handle_detail(
     };
     // #562 — use the `SelectQuery::by_pk` constructor instead of
     // spelling out the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk));
+    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk))
+        .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1084,9 +1087,8 @@ fn resolve_lookup_field(
 /// page, `POST <prefix>/{pk}/delete` executes the delete and 303s to
 /// `success_url`.
 ///
-/// CSRF protection is the project's responsibility — mount this view
-/// under a CSRF-protected scope (`rustango::forms::csrf`) when the
-/// POST is reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 #[derive(Clone)]
 pub struct DeleteView {
     schema: &'static ModelSchema,
@@ -1120,12 +1122,14 @@ impl DeleteView {
             pool,
         });
         let path = mount_path(prefix, "/{pk}/delete");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1134,12 +1138,15 @@ impl DeleteView {
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let state = Arc::new(TenantDeleteViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}/delete");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_delete_confirm_tenant).post(handle_delete_submit_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_delete_confirm_tenant)
+                        .post(handle_delete_submit_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -1162,7 +1169,8 @@ async fn handle_delete_confirm(
         ));
     };
     // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk));
+    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+        .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1187,14 +1195,9 @@ async fn handle_delete_submit(
             state.vs.schema.table
         ));
     };
-    let delete_q = crate::core::DeleteQuery {
-        model: state.vs.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
-        }),
-    };
+    let delete_q =
+        crate::core::DeleteQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+            .with_global_scopes();
     match crate::sql::delete_pool(&state.pool, &delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
@@ -1228,8 +1231,8 @@ async fn handle_delete_submit(
 /// DEFAULT fires). Validation errors render the form back with
 /// `errors: { field_name: "message" }` in the context.
 ///
-/// CSRF protection is the project's responsibility — mount under
-/// a CSRF-protected scope when the POST is reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 #[derive(Clone)]
 pub struct CreateView {
     schema: &'static ModelSchema,
@@ -1338,12 +1341,14 @@ impl CreateView {
             validator: self.validator.clone(),
         });
         let path = mount_path(prefix, "/new");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_create_get).post(handle_create_post),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_create_get).post(handle_create_post),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1359,12 +1364,14 @@ impl CreateView {
             validator: self.validator,
         });
         let path = mount_path(prefix, "/new");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_create_get_tenant).post(handle_create_post_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_create_get_tenant).post(handle_create_post_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -1434,12 +1441,14 @@ impl UpdateView {
             validator: self.validator.clone(),
         });
         let path = mount_path(prefix, "/{pk}/edit");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_update_get).post(handle_update_post),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_update_get).post(handle_update_post),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1455,12 +1464,14 @@ impl UpdateView {
             validator: self.validator,
         });
         let path = mount_path(prefix, "/{pk}/edit");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_update_get_tenant).post(handle_update_post_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_update_get_tenant).post(handle_update_post_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -1964,7 +1975,8 @@ async fn handle_update_get(
     };
     // #562 — `SelectQuery::by_pk` replaces the 11-field struct
     // literal.
-    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk));
+    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk))
+        .with_global_scopes();
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
@@ -2024,15 +2036,13 @@ async fn handle_update_post(
             value: value.into(),
         })
         .collect();
-    let update_q = crate::core::UpdateQuery {
-        model: state.schema,
-        set: assignments,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
-        }),
-    };
+    let pk_match = WhereExpr::Predicate(Filter {
+        column: pk_field.column,
+        op: Op::Eq,
+        value: coerce_pk(pk_field, &pk),
+    });
+    let update_q =
+        crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
     match crate::sql::update_pool(&state.pool, &update_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
@@ -2397,25 +2407,15 @@ fn build_list_where(
     }
 }
 
-fn stamp_csrf(_headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
-    #[cfg(feature = "csrf")]
-    {
-        // Delegate to the public helper so the CBV-side context shape
-        // matches what hand-rolled handlers get from
-        // `forms::csrf::stamp_into_context` (issue #15). Stamps both
-        // `csrf_token` (raw) and `csrf_input` (HTML).
-        crate::forms::csrf::stamp_into_context(_headers, ctx)
-    }
-    #[cfg(not(feature = "csrf"))]
-    {
-        // CSRF feature off — render with empty token so templates that
-        // reference `{{ csrf_token }}` don't error. Validation isn't
-        // enforced in this configuration; the empty hidden input is
-        // harmless.
-        ctx.insert("csrf_token", "");
-        ctx.insert("csrf_input", "");
-        None
-    }
+/// Stamp `csrf_token` and `csrf_input` into the context (issue #15).
+fn stamp_csrf(headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
+    crate::forms::csrf::stamp_into_context(headers, ctx)
+}
+
+/// Every CBV router with a POST route goes through here, so each
+/// write must carry the token [`stamp_csrf`] rendered (#1669).
+fn csrf_protected(router: Router<()>) -> Router<()> {
+    router.route_layer(crate::forms::csrf::layer())
 }
 
 /// Append a `Set-Cookie` header to a ready response when
@@ -2788,7 +2788,8 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
     // SQL writer project against the IN clause.
     let target = lookup_target_schema(fk.target_table)
         .expect("target table existed when collecting lookups");
-    // #810 — IN-list lookup via the `by_pk_in` constructor.
+    // #810 — IN-list lookup via the `by_pk_in` constructor; a target
+    // row its own global scopes hide gets no `_display`.
     SelectQuery::by_pk_in(
         target,
         fk.target_pk_column,
@@ -2797,6 +2798,7 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
             .map(json_value_to_sql_for_fk_pk)
             .collect(),
     )
+    .with_global_scopes()
 }
 
 /// Convert a JSON-shaped value (read out of an object_list row)
@@ -2948,12 +2950,42 @@ async fn fetch_pks_as_objects_pool(
     pks: &[SqlValue],
 ) -> Result<Vec<Value>, String> {
     // #810 — IN-list lookup via the `by_pk_in` constructor.
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
     let rows = select_rows_as_json(pool, &q, &fields)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/// `pks` narrowed to the rows the model's global scopes let through,
+/// in submitted order — what a custom bulk action receives.
+async fn visible_pks_pool(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pool: &Pool,
+    pks: &[SqlValue],
+) -> Result<Vec<SqlValue>, String> {
+    if pks.is_empty() || schema.global_scopes.is_empty() {
+        return Ok(pks.to_vec());
+    }
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
+    let rows = select_rows_as_json(pool, &q, &[pk_field])
+        .await
+        .map_err(|e| e.to_string())?;
+    let visible: Vec<SqlValue> = rows
+        .iter()
+        .filter_map(|r| r.get(pk_field.name))
+        .filter_map(|v| {
+            let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+            coerce_pk_typed(pk_field, &raw).ok()
+        })
+        .collect();
+    Ok(pks
+        .iter()
+        .filter(|p| visible.contains(p))
+        .cloned()
+        .collect())
 }
 
 /// Run the built-in `delete_selected` action: `DELETE FROM <table>
@@ -2967,7 +2999,8 @@ async fn run_delete_selected_pool(
     pks: &[SqlValue],
 ) -> Result<(), String> {
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
-    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec())
+        .with_global_scopes();
     crate::sql::delete_pool(pool, &q)
         .await
         .map(|_| ())
@@ -3235,8 +3268,8 @@ async fn handle_redirect_view(State(state): State<Arc<RedirectView>>) -> Respons
 /// - `values: HashMap<String, String>` — empty on GET, raw POST values
 ///   on validation failure so the form can repopulate.
 ///
-/// CSRF protection is the project's responsibility — mount under a
-/// CSRF-protected scope when reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 pub struct FormView<F>
 where
     F: crate::forms::Form,
@@ -3293,12 +3326,14 @@ where
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let state = Arc::new(StandaloneFormViewState { vs: self, tera });
-        Router::new()
-            .route(
-                prefix,
-                get(handle_form_view_get::<F>).post(handle_form_view_post::<F>),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    prefix,
+                    get(handle_form_view_get::<F>).post(handle_form_view_post::<F>),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -3424,12 +3459,10 @@ mod tenant {
             limit: Some(page_size),
             offset: Some(offset),
             ..SelectQuery::new(state.vs.schema)
-        };
-        let count_q = crate::core::CountQuery {
-            model: state.vs.schema,
-            where_clause,
-            search: None,
-        };
+        }
+        .with_global_scopes();
+        let count_q =
+            crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
 
         // v0.38 — use the tenant's tri-dialect Pool enum; runs the
         // same code on PG / MySQL / SQLite. Routes through
@@ -3544,6 +3577,10 @@ mod tenant {
             .iter()
             .find(|a| super::same_action_name(&a.name, &action))
         {
+            let pks = match super::visible_pks_pool(state.vs.schema, pk_field, &pool, &pks).await {
+                Ok(v) => v,
+                Err(e) => return template_error(&format!("scope selected rows: {e}")),
+            };
             match &custom.handler {
                 #[cfg(feature = "postgres")]
                 super::BulkActionHandler::Tenant(f) => {
@@ -3609,7 +3646,8 @@ mod tenant {
                 Err(e) => return template_error(&e),
             };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk));
+        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk))
+            .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3647,7 +3685,8 @@ mod tenant {
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
         let select_q =
-            SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk));
+            SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+                .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3673,14 +3712,12 @@ mod tenant {
                 state.vs.schema.table
             ));
         };
-        let delete_q = crate::core::DeleteQuery {
-            model: state.vs.schema,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
-            }),
-        };
+        let delete_q = crate::core::DeleteQuery::by_pk(
+            state.vs.schema,
+            pk_field.column,
+            coerce_pk(pk_field, &pk),
+        )
+        .with_global_scopes();
         match crate::sql::delete_pool(t.pool(), &delete_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
@@ -3784,7 +3821,8 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk));
+        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk))
+            .with_global_scopes();
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
         let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await
@@ -3848,15 +3886,13 @@ mod tenant {
                 value: value.into(),
             })
             .collect();
-        let update_q = crate::core::UpdateQuery {
-            model: state.schema,
-            set: assignments,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
-            }),
-        };
+        let pk_match = WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::Eq,
+            value: coerce_pk(pk_field, &pk),
+        });
+        let update_q =
+            crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
         match crate::sql::update_pool(t.pool(), &update_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
@@ -4346,13 +4382,14 @@ mod tests {
     /// rendered hidden input matches what the browser will send
     /// back on POST). Returns `None` for the Set-Cookie since the
     /// cookie was already there.
-    #[cfg(feature = "csrf")]
     #[test]
     fn stamp_csrf_reuses_existing_cookie() {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_static("session=abc; rustango_csrf=existing-token"),
+            axum::http::HeaderValue::from_static(
+                "session=abc; rustango_csrf=existing-token-existing-token-existing-toke",
+            ),
         );
         let mut ctx = Context::new();
         let set_cookie = stamp_csrf(&headers, &mut ctx);
@@ -4363,12 +4400,11 @@ mod tests {
         let mut tera = Tera::default();
         tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
         let rendered = tera.render("t", &ctx).unwrap();
-        assert_eq!(rendered, "existing-token");
+        assert_eq!(rendered, "existing-token-existing-token-existing-toke");
     }
 
     /// `stamp_csrf` mints a fresh token when the cookie is absent
     /// and returns the Set-Cookie header for the caller to attach.
-    #[cfg(feature = "csrf")]
     #[test]
     fn stamp_csrf_mints_fresh_when_absent() {
         let headers = axum::http::HeaderMap::new();
@@ -4387,21 +4423,6 @@ mod tests {
         assert_eq!(rendered, token_in_cookie);
         // Token shape: 32 random bytes → base64url no-pad → 43 chars.
         assert_eq!(rendered.len(), 43);
-    }
-
-    /// Without the `csrf` feature, `stamp_csrf` is a no-op that
-    /// stamps an empty `csrf_token`. The hidden input renders as
-    /// `<input value="">` — harmless when CSRF isn't enforced.
-    #[cfg(not(feature = "csrf"))]
-    #[test]
-    fn stamp_csrf_noop_when_feature_off() {
-        let headers = axum::http::HeaderMap::new();
-        let mut ctx = Context::new();
-        let set_cookie = stamp_csrf(&headers, &mut ctx);
-        assert!(set_cookie.is_none());
-        let mut tera = Tera::default();
-        tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
-        assert_eq!(tera.render("t", &ctx).unwrap(), "");
     }
 
     /// `apply_csrf_cookie` appends a Set-Cookie header when given
@@ -4587,7 +4608,10 @@ mod tests {
         // where a backticked mention is followed by the field list.
         let start = text
             .match_indices("`form.fields`")
-            .find(|(i, _)| text[*i..text.len().min(i + 200)].contains("`max_length`"))
+            .find(|(i, _)| {
+                let window: String = text[*i..].chars().take(200).collect();
+                window.contains("`max_length`")
+            })
             .map(|(i, _)| i)
             .expect("no `form.fields` field-list sentence on this page");
         // The list ends at the full stop directly after a closing backtick.
@@ -5819,20 +5843,141 @@ mod tests {
             .template("f.html")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("name="))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "name=")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "name:1");
+    }
+
+    const TEST_CSRF: &str = "existing-token-existing-token-existing-toke";
+
+    /// A form POST carrying a matching CSRF cookie and `_csrf` field.
+    fn csrf_form_post(uri: &str, body: &str) -> Request<Body> {
+        let body = if body.is_empty() {
+            format!("_csrf={TEST_CSRF}")
+        } else {
+            format!("_csrf={TEST_CSRF}&{body}")
+        };
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("rustango_csrf={TEST_CSRF}"))
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    /// Every CBV router with a POST route rejects a write without the token (#1669).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cbv_post_without_csrf_token_is_forbidden() {
+        use crate::forms::{Form, FormErrors};
+
+        struct OkForm;
+        impl Form for OkForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                Ok(OkForm)
+            }
+        }
+
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+        let schema = schema_two_fields();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let tera = Arc::new(tera);
+        let routers: Vec<(&str, Router<()>)> = vec![
+            (
+                "/form",
+                FormView::<OkForm>::for_form(|_| async { Ok(()) })
+                    .template("f.html")
+                    .router("/form", tera.clone()),
+            ),
+            (
+                "/c/new",
+                CreateView::for_model(schema).router("/c", tera.clone(), pool.clone()),
+            ),
+            (
+                "/u/1/edit",
+                UpdateView::for_model(schema).router("/u", tera.clone(), pool.clone()),
+            ),
+            (
+                "/d/1/delete",
+                DeleteView::for_model(schema).router("/d", tera.clone(), pool.clone()),
+            ),
+            (
+                "/l",
+                ListView::for_model(schema).bulk_actions(true).router(
+                    "/l",
+                    tera.clone(),
+                    pool.clone(),
+                ),
+            ),
+        ];
+        for (uri, app) in routers {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from("action=delete_selected&_selected_action=1"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
+    /// Every `tenant_router` with a POST route rejects a write without the
+    /// token, before tenant resolution (#1669).
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn cbv_tenant_post_without_csrf_token_is_forbidden() {
+        let schema = schema_two_fields();
+        let tera = Arc::new(Tera::default());
+        let routers = || -> Vec<(&str, Router<()>)> {
+            vec![
+                (
+                    "/c/new",
+                    CreateView::for_model(schema).tenant_router("/c", tera.clone()),
+                ),
+                (
+                    "/u/1/edit",
+                    UpdateView::for_model(schema).tenant_router("/u", tera.clone()),
+                ),
+                (
+                    "/d/1/delete",
+                    DeleteView::for_model(schema).tenant_router("/d", tera.clone()),
+                ),
+                (
+                    "/l",
+                    ListView::for_model(schema)
+                        .bulk_actions(true)
+                        .tenant_router("/l", tera.clone()),
+                ),
+            ]
+        };
+        let body = "action=delete_selected&_selected_action=1";
+        for (uri, app) in routers() {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+        // With the token the request gets past CSRF (and fails on the missing tenant).
+        for (uri, app) in routers() {
+            let res = app.oneshot(csrf_form_post(uri, body)).await.unwrap();
+            assert_ne!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
     }
 
     #[tokio::test]
@@ -5854,17 +5999,7 @@ mod tests {
             .success_url("/thanks")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(""))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "")).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             res.headers()
@@ -5896,17 +6031,7 @@ mod tests {
             .success_url("/thanks\r\nSet-Cookie: pwned=1")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(""))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "")).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert!(
             res.headers().get(axum::http::header::LOCATION).is_none(),

@@ -29,9 +29,13 @@ use crate::core::{Filter, Model, Op, SelectQuery, SqlValue, WhereExpr};
 /// admin router before the auth middleware, so the login form itself
 /// stays reachable.
 pub(crate) fn public_router(state: AppState) -> Router {
+    // Logout needs no session, but a forged one must still be refused.
+    let logout = Router::new()
+        .route("/logout", post(logout_submit))
+        .route_layer(crate::forms::csrf::layer());
     Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", post(logout_submit))
+        .merge(logout)
         .with_state(state)
 }
 
@@ -138,9 +142,11 @@ struct LoginInput {
 
 async fn login_submit(
     State(state): State<AppState>,
+    ip: crate::login_throttle::ClientIp,
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginInput>,
 ) -> Response {
+    use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -167,6 +173,16 @@ async fn login_submit(
         .await;
     }
 
+    // Rate limits and the account lock, before the lookup, so the
+    // answer is the same whether or not the username exists.
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(&LoginScope::Admin, &ip, &form.username)
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
+
     // Schema-driven lookup: the bare admin compiles without `tenancy`,
     // so it cannot use tenancy's typed query helpers.
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
@@ -183,7 +199,13 @@ async fn login_submit(
     let Some(row) = row else {
         // Spend a verify's worth of work on the unknown-user path, so
         // timing does not reveal whether the username exists.
-        crate::passwords::verify_dummy(&form.password);
+        if crate::passwords::verify_dummy_async(&form.password)
+            .await
+            .is_err()
+        {
+            return LoginRefused::Busy.into_response();
+        }
+        attempt.failed().await;
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -193,6 +215,13 @@ async fn login_submit(
         .await;
         return login_response(&state, &headers, Some("Invalid credentials.")).await;
     };
+    let stored_name = row
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or(form.username.as_str());
+    if let Err(refused) = attempt.resolve(stored_name).await {
+        return refused.into_response();
+    }
     let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or_default();
     let stored_hash = row
         .get("password_hash")
@@ -204,36 +233,16 @@ async fn login_submit(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Per-account brute-force lockout, on by default. The key is scoped
-    // (`admin:<id>`) so it cannot collide with operator or tenant ids,
-    // and it uses the resolved id, not the raw username, so an attacker
-    // cannot lock accounts at will. A locked account stops here, before
-    // the password verify.
-    #[cfg(feature = "cache")]
-    if crate::account_lockout::shared()
-        .is_locked(&format!("admin:{id}"))
-        .await
-    {
-        send_user_login_failed(UserLoginFailedContext {
-            source: "admin",
-            attempted_username: Some(form.username.clone()),
-            reason: AuthFailureReason::InvalidCredentials,
-            request: meta.clone(),
-        })
-        .await;
-        return login_response(
-            &state,
-            &headers,
-            Some("Too many failed attempts. Please try again later."),
-        )
-        .await;
-    }
-
     // Verify before the active check, so active and inactive accounts
     // take the same time.
-    let password_ok = crate::passwords::verify(&form.password, stored_hash).unwrap_or(false);
+    let password_ok = match crate::passwords::verify_async(&form.password, stored_hash).await {
+        Ok(ok) => ok,
+        Err(crate::passwords::PasswordError::Busy) => return LoginRefused::Busy.into_response(),
+        Err(_) => false,
+    };
 
     if !is_active {
+        attempt.failed().await;
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -248,13 +257,7 @@ async fn login_submit(
         return login_response(&state, &headers, Some("Invalid credentials.")).await;
     }
     if !password_ok {
-        // Count this failure toward the per-account lockout.
-        #[cfg(feature = "cache")]
-        {
-            let _ = crate::account_lockout::shared()
-                .record_failure(&format!("admin:{id}"))
-                .await;
-        }
+        attempt.failed().await;
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -296,9 +299,17 @@ async fn login_submit(
         };
         if let Some(totp_secret) = enrolled {
             let code = form.totp_code.as_deref().unwrap_or("").trim();
-            // 30s step, 6 digits, ±1 window: the authenticator-app
-            // defaults, which allow one step of clock skew.
-            if code.is_empty() || !crate::totp::verify(&totp_secret, code, 30, 6, 1) {
+            // Single use: a replayed code fails like a wrong one. A
+            // store error fails closed.
+            let accepted = !code.is_empty()
+                && super::totp_store::redeem_code(&state.pool, id, &totp_secret, code)
+                    .await
+                    .unwrap_or(false);
+            if !accepted {
+                // A wrong code counts; a missing one is just the prompt.
+                if !code.is_empty() {
+                    attempt.failed().await;
+                }
                 send_user_login_failed(UserLoginFailedContext {
                     source: "admin",
                     attempted_username: Some(form.username.clone()),
@@ -317,14 +328,11 @@ async fn login_submit(
     }
 
     // A successful login clears the failure counter and any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared()
-        .clear(&format!("admin:{id}"))
-        .await;
+    attempt.succeeded().await;
 
     // Bind the cookie to a fingerprint of the current password hash, so
     // a password change or reset invalidates it.
-    let auth_hash = session::password_fingerprint(&secret, stored_hash);
+    let auth_hash = crate::session::PasswordFingerprint::of(&secret, stored_hash);
     let cookie_value = session::encode(
         &secret,
         AdminSession {
@@ -419,7 +427,14 @@ async fn change_password_submit(
         .get("password_hash")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if !crate::passwords::verify(&form.current_password, stored_hash).unwrap_or(false) {
+    let ok = match crate::passwords::verify_async(&form.current_password, stored_hash).await {
+        Ok(ok) => ok,
+        Err(crate::passwords::PasswordError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
+        Err(_) => false,
+    };
+    if !ok {
         return Html(render_change_password_form(
             &state,
             None,
@@ -428,8 +443,11 @@ async fn change_password_submit(
         .into_response();
     }
 
-    let new_hash = match crate::passwords::hash(&form.new_password) {
+    let new_hash = match crate::passwords::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(crate::passwords::PasswordError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(_) => {
             return Html(render_change_password_form(
                 &state,
@@ -475,7 +493,7 @@ async fn change_password_submit(
     ))
     .into_response();
     if let Some(secret) = state.config.session_secret.as_ref() {
-        let auth_hash = session::password_fingerprint(secret, &new_hash);
+        let auth_hash = crate::session::PasswordFingerprint::of(secret, &new_hash);
         let cookie_value = session::encode(
             secret,
             AdminSession {
@@ -555,6 +573,7 @@ fn render_totp_enroll(
         "otpauth_url": otpauth_url,
         "error": error,
         "success": success,
+        "csrf_input": super::helpers::current_csrf_input(),
     });
     render_template("totp_enroll.html", &ctx)
 }
@@ -657,7 +676,14 @@ async fn totp_enroll_submit(
         .into_response();
     };
     let code = form.totp_code.as_deref().unwrap_or("").trim();
-    if code.is_empty() || !crate::totp::verify(&secret, code, 30, 6, 1) {
+    // Confirms and redeems in one write, so the confirming code cannot
+    // sign in again and a failed write does not burn it.
+    let confirmed = if code.is_empty() {
+        Ok(false)
+    } else {
+        super::totp_store::confirm_with_code(&state.pool, session.user_id, &secret, code).await
+    };
+    if matches!(confirmed, Ok(false)) {
         let otpauth = enroll_otpauth(&state, &session.username, &secret);
         return Html(render_totp_enroll(
             &state,
@@ -669,10 +695,7 @@ async fn totp_enroll_submit(
         ))
         .into_response();
     }
-    if super::totp_store::confirm(&state.pool, session.user_id)
-        .await
-        .is_err()
-    {
+    if confirmed.is_err() {
         return Html(render_totp_enroll(
             &state,
             false,
@@ -707,15 +730,9 @@ async fn logout_submit(State(state): State<AppState>, headers: axum::http::Heade
         .session_secret
         .as_ref()
         .and_then(|secret| {
-            let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-            for part in raw.split(';').map(str::trim) {
-                if let Some(val) = part.strip_prefix(&format!("{SESSION_COOKIE}=")) {
-                    if let Some(sess) = session::decode(secret, val) {
-                        return Some((Some(sess.user_id), Some(sess.username)));
-                    }
-                }
-            }
-            None
+            let val = crate::cookies::cookie_from_headers(&headers, SESSION_COOKIE)?;
+            let sess = session::decode(secret, val)?;
+            Some((Some(sess.user_id), Some(sess.username)))
         })
         .unwrap_or((None, None));
 
@@ -814,20 +831,7 @@ pub(crate) async fn require_session(
 /// chrome: rendering the chrome needs this same gate to have passed.
 /// The body offers a sign-out button.
 fn forbidden_page(session: &AdminSession) -> Response {
-    // Inline escape. The gate runs before `next.run`, so the chrome's
-    // `render::escape` helper is not reachable here without rebuilding
-    // state, and the username must still be escaped.
-    let mut username = String::with_capacity(session.username.len());
-    for ch in session.username.chars() {
-        match ch {
-            '&' => username.push_str("&amp;"),
-            '<' => username.push_str("&lt;"),
-            '>' => username.push_str("&gt;"),
-            '"' => username.push_str("&quot;"),
-            '\'' => username.push_str("&#39;"),
-            other => username.push(other),
-        }
-    }
+    let username = crate::text::html_escape(&session.username);
     let body = format!(
         "<!doctype html>\
          <html><head><title>Forbidden</title>\
@@ -854,14 +858,9 @@ fn forbidden_page(session: &AdminSession) -> Response {
 fn read_session_cookie(
     req: &Request<Body>,
     secret: &AdminSessionSecret,
-) -> Option<(AdminSession, String)> {
-    let raw = req.headers().get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';').map(str::trim) {
-        if let Some(val) = part.strip_prefix(&format!("{SESSION_COOKIE}=")) {
-            return session::decode_full(secret, val);
-        }
-    }
-    None
+) -> Option<(AdminSession, crate::session::PasswordFingerprint)> {
+    let val = crate::cookies::cookie_from_headers(req.headers(), SESSION_COOKIE)?;
+    session::decode_full(secret, val)
 }
 
 /// Outcome of the gate's per-request liveness lookup.
@@ -880,7 +879,11 @@ enum GateCheck {
 /// Re-read the user's live state in one lookup: the password
 /// fingerprint, which rejects cookies minted before a password change,
 /// plus live `active` and `is_superuser`.
-async fn gate_live_check(gate: &SessionGate, user_id: i64, cookie_auth_hash: &str) -> GateCheck {
+async fn gate_live_check(
+    gate: &SessionGate,
+    user_id: i64,
+    cookie_auth_hash: &crate::session::PasswordFingerprint,
+) -> GateCheck {
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let select = SelectQuery::by_pk(AdminUser::SCHEMA, "id", SqlValue::I64(user_id));
     match crate::sql::select_one_row_as_json(&gate.pool, &select, &fields).await {
@@ -889,7 +892,7 @@ async fn gate_live_check(gate: &SessionGate, user_id: i64, cookie_auth_hash: &st
                 .get("password_hash")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            if session::password_fingerprint(&gate.secret, current) != cookie_auth_hash {
+            if !cookie_auth_hash.matches(&gate.secret, current) {
                 return GateCheck::Reject; // password changed since login
             }
             // `active` defaults to true, as in the login check, so a

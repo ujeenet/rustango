@@ -71,6 +71,9 @@ async fn seeded_pool() -> Pool {
     pool
 }
 
+/// The CSRF token a form POST echoes in its cookie and `_csrf` field.
+const CSRF: &str = "html-contrast-csrf-token-html-contrast-csrf";
+
 /// Templates a browser-facing app needs. The `posts_*` names are the framework
 /// defaults for table `posts`.
 fn tera() -> Arc<Tera> {
@@ -193,9 +196,10 @@ async fn html_create_view_renders_form_then_redirects_on_post() {
                 .method("POST")
                 .uri("/posts/new")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "title=Posted+from+a+form&body=hi&status=published&author_id=1",
-                ))
+                .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+                .body(Body::from(format!(
+                    "_csrf={CSRF}&title=Posted+from+a+form&body=hi&status=published&author_id=1"
+                )))
                 .unwrap(),
         )
         .await

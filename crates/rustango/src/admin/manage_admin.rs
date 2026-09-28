@@ -3,7 +3,7 @@
 //!
 //! It takes a plain `&Pool`, with no tenancy resolver, writes to
 //! `rustango_admin_users` (creating the table if needed), and hashes
-//! the password with `crate::passwords::hash`.
+//! the password with `crate::passwords::hash_async`.
 //!
 //! Usage:
 //!
@@ -137,7 +137,8 @@ pub async fn create_admin_cmd<W: Write + Send>(
     }
 
     // ---- hash + insert -------------------------------------------
-    let hash = crate::passwords::hash(&plain)
+    let hash = crate::passwords::hash_async(&plain)
+        .await
         .map_err(|e| MigrateError::Validation(format!("password hash failed: {e}")))?;
     let mut user = AdminUser {
         id: Auto::Unset,

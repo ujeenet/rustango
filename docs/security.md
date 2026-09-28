@@ -66,7 +66,7 @@ let app = router.security_headers(SecurityHeadersLayer::strict());
 
 | Preset | When to use |
 |---|---|
-| `strict()` | Production: HSTS preload + XFO=DENY + nosniff + Referrer-Policy=no-referrer + COOP=same-origin + Permissions-Policy locked down |
+| `strict()` | Production: HSTS preload + XFO=DENY + nosniff + Referrer-Policy=same-origin + COOP=same-origin + Permissions-Policy locked down |
 | `relaxed()` | Embeddable in iframes: SAMEORIGIN + 1y HSTS |
 | `dev()` | Local: nosniff only (no HSTS to avoid locking localhost into HTTPS forever) |
 | `empty()` | Build up from scratch |
@@ -169,6 +169,16 @@ When exhausted: `429 Too Many Requests` with `Retry-After` header. Every success
 >
 > Name the addresses your ingress actually connects from. Trusting a range wider than that hands the bypass to anyone inside it.
 
+### Built-in login limits
+
+Every built-in password login (admin, operator console, tenant admin, JWT `/auth/login`) goes through `rustango::login_throttle` before the user lookup. It checks, in order, a per-username lock (5 failures, 15 min) that counts unknown usernames the same as real ones, a per-IP limit (20 failed logins/min; IPv6 counts per /64) and a global limit per login (600 failed logins/min each for the admin, the operator console and every tenant). A successful login does not count against the limits. Once the user row is found, the lock also follows the stored username, so spellings the database treats as equal (MySQL matches `alicé` to `alice`) share one lock. HTTP Basic and API keys have their own scope and only count failures. A refused login gets `429` with `Retry-After`, and the same answer whether or not the account exists.
+
+Behind a reverse proxy, mount `RealIpLayer` with your proxies as shown above. Without it every client has the proxy's address and shares one per-IP bucket; a warning is logged once when forwarding headers arrive.
+
+Password hashing runs at most one job per CPU, shared by every login; HTTP Basic, API keys and agent secrets may use at most half the slots. A login that waits longer than `hash_wait_ms` (5 s) for a slot gets `503` with `Retry-After`, for known and unknown users alike.
+
+Tune them under `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. A value set in code (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) wins over these keys. The per-IP and global buckets are per process; the username lock uses `account_lockout::shared()`, which you can back with a shared cache via `account_lockout::configure_shared`. Failures count in a fixed window (1 hour by default) that starts at the first failure, so an attacker gets `lockout_threshold - 1` guesses per window without a lock; the per-IP and global limits bound the rest.
+
 `RateLimitLayer` is **process-local** — it counts requests only within one running instance, which is fine if you run a single instance. If you run several instances (replicas) behind a load balancer, each would keep its own count, so the real limit multiplies. To share one count across all replicas, use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
 
 ```rust
@@ -243,7 +253,7 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` builds the layer with `secure: true`, so the cookie is rejected over plain HTTP — on `http://localhost` use `CsrfConfig::allow_insecure_for_dev()` or the layer appears to do nothing. `csrf::with_config(CsrfConfig)` overrides the cookie/header names and the `Secure` flag, and `trusted_origins` — empty by default, so the Origin-header check is **off** until you add one. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` a ready-made hidden `<input>` — write it as `{{ csrf_input | safe }}`, because Tera autoescapes `.html` templates and without the filter the page renders a visible literal `<input …>` and the form carries no `_csrf` field, so every POST 403s. Both variables are only in context for the `template_views` CBVs or after you call `forms::csrf::stamp_into_context` yourself — a hand-rolled handler has neither. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
+`csrf::layer()` builds the layer with `secure: true`, so the cookie is rejected over plain HTTP — on `http://localhost` use `CsrfConfig::allow_insecure_for_dev()` or the layer appears to do nothing. `csrf::with_config(CsrfConfig)` overrides the cookie/header names and the `Secure` flag, and `trusted_origins` — extra origins allowed beside the request's own Host. The Origin check runs even when it is empty: a foreign `Origin` gets `403`, and over TLS so does a POST with no `Origin`. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` a ready-made hidden `<input>` — write it as `{{ csrf_input | safe }}`, because Tera autoescapes `.html` templates and without the filter the page renders a visible literal `<input …>` and the form carries no `_csrf` field, so every POST 403s. Both variables are only in context for the `template_views` CBVs or after you call `forms::csrf::stamp_into_context` yourself — a hand-rolled handler has neither. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
 
 **Exempting collector endpoints.** `CsrfConfig::exempt_prefix("/path")` (repeatable) skips CSRF enforcement for unsafe methods on requests whose path starts with the given prefix. This is for append-only, no-auth-state endpoints hit via `navigator.sendBeacon` — e.g. an analytics collector — which can't set an `X-CSRF-Token` header and, when the page is served from a CDN cache that strips `Set-Cookie`, may carry no CSRF cookie at all. Keep prefixes narrow and never exempt anything that reads or writes auth state.
 
@@ -313,7 +323,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 Authentication is how you confirm who is making a request. **Rustango** ships three ready-made backends (Basic auth, API keys, and JWTs) and lets you write your own. You attach them to routes, and requests without a recognized credential get a `401`.
 
-> **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). Providers are **managed from the admin UI as rows** (multiple per surface; per-tenant, or a shared set across tenants), with the client secret **encrypted at rest**. It's link-to-existing (the verified IdP email must match an admin user; no auto-provisioning) and reuses the existing session.
+> **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). Providers are **managed from the admin UI as rows** (multiple per surface; per-tenant, or a shared set across tenants), with the client secret **encrypted at rest**. It signs in the account linked to the IdP subject (email linking is opt-in per provider and never applies to superusers or staff; no auto-provisioning) and reuses the existing session.
 
 ### Three ready-made backends
 
@@ -509,6 +519,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 ```
 
 Works with Google Authenticator, Authy, 1Password, Bitwarden, and other standard authenticator apps.
+
+`verify` accepts the same code again until it expires. To make codes single use, call `matched_step` instead, store the step it returns, and accept a code only when its step is later than the stored one. The built-in admin login does this.
 
 **Recovery codes** (one-time backup codes for when a user loses their phone) aren't shipped yet. The common pattern is to store 8–10 hashed codes per user and burn one each time it's used.
 

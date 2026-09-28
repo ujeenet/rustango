@@ -196,6 +196,155 @@ async fn login_form_renders_for_anon() {
     rmig::drop_all(&pool).await.unwrap();
 }
 
+/// GET the login form and take both halves of the double-submit CSRF
+/// pair off the response: the `rustango_csrf` cookie and the token to
+/// post back in `_csrf`. They are the same value (#1607).
+///
+/// Returns `None` when the build has no `csrf` feature, in which case
+/// there is no cookie to read and nothing to verify against.
+async fn login_csrf(app: &axum::Router, slug: &str) -> Option<String> {
+    let req = Request::builder()
+        .method("GET")
+        .uri("/__login")
+        .header("x-org", slug)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let tokens: Vec<String> = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| {
+            v.strip_prefix("rustango_csrf=")
+                .and_then(|rest| rest.split(';').next())
+                .map(str::to_owned)
+        })
+        .collect();
+    // One cookie, not two different ones (#1711).
+    assert!(tokens.len() <= 1, "two CSRF cookies: {tokens:?}");
+    tokens.into_iter().next()
+}
+
+/// A login POST with no CSRF token is refused, and refused *before*
+/// the credentials are looked at — so a third-party page cannot sign
+/// the victim's browser into an attacker-controlled account (#1607).
+///
+/// `SameSite=Lax` does not cover this: login CSRF mints a **new**
+/// session rather than replaying an existing one.
+#[cfg(feature = "csrf")]
+#[tokio::test]
+async fn login_without_a_csrf_token_is_refused() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+
+    let slug = unique("logincsrf");
+    seed_db_mode_tenant(&pool, &slug, &url).await;
+    reset_users_table(&pool).await;
+    insert_user(&pool, "alice", "hunter2", true).await;
+
+    let pools = Arc::new(TenantPools::new(pool.clone()));
+    let app = build_app(pools, url);
+
+    // Correct credentials, no token. Must be 403 — not a 303 into a
+    // session, and not the invalid-credentials redirect either.
+    let body =
+        serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")]).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/__login")
+        .header("x-org", &slug)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a login POST with no CSRF token must be refused"
+    );
+    assert!(
+        !resp
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|v| v.starts_with("rustango_tenant_session=")),
+        "a refused login must not mint a session"
+    );
+
+    // A cookie without a matching form field is still refused — the
+    // token has to be posted back, not merely held.
+    let token = login_csrf(&app, &slug).await.expect("csrf cookie seeded");
+    let body =
+        serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")]).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/__login")
+        .header("x-org", &slug)
+        .header("cookie", format!("rustango_csrf={token}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::FORBIDDEN,
+        "cookie alone is not enough; the form must echo the token"
+    );
+
+    // A full pair from a foreign Origin is refused (#1695): tenants
+    // share an apex, so another tenant's page can plant the cookie.
+    let body = serde_urlencoded::to_string([
+        ("username", "alice"),
+        ("password", "hunter2"),
+        ("_csrf", token.as_str()),
+    ])
+    .unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/__login")
+        .header("x-org", &slug)
+        .header("host", "t01.example.com")
+        .header("origin", "http://t02.example.com")
+        .header("cookie", format!("rustango_csrf={token}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::FORBIDDEN,
+        "a matching pair from a foreign Origin must be refused"
+    );
+
+    // And the real flow still works.
+    let body = serde_urlencoded::to_string([
+        ("username", "alice"),
+        ("password", "hunter2"),
+        ("_csrf", token.as_str()),
+    ])
+    .unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/__login")
+        .header("x-org", &slug)
+        .header("cookie", format!("rustango_csrf={token}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(
+        app.oneshot(req).await.unwrap().status(),
+        StatusCode::SEE_OTHER,
+        "a legitimate login with a matching token must still succeed"
+    );
+
+    rmig::drop_all(&pool).await.unwrap();
+}
+
 /// Wrong credentials → 303 back to `/__login?error=...`.
 #[tokio::test]
 async fn login_with_wrong_credentials_redirects_to_error() {
@@ -215,11 +364,20 @@ async fn login_with_wrong_credentials_redirects_to_error() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
 
-    let body = serde_urlencoded::to_string([("username", "alice"), ("password", "WRONG")]).unwrap();
+    // Carry a real CSRF token so this test still exercises the
+    // credential path rather than stopping at the 403 (#1607).
+    let token = login_csrf(&app, &slug).await.unwrap_or_default();
+    let body = serde_urlencoded::to_string([
+        ("username", "alice"),
+        ("password", "WRONG"),
+        ("_csrf", token.as_str()),
+    ])
+    .unwrap();
     let req = Request::builder()
         .method("POST")
         .uri("/__login")
         .header("x-org", &slug)
+        .header("cookie", format!("rustango_csrf={token}"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(body))
         .unwrap();
@@ -276,13 +434,19 @@ async fn superuser_login_grants_read_write_admin() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
 
-    // Login.
-    let form =
-        serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")]).unwrap();
+    // Login — with the CSRF pair, as a browser would (#1607).
+    let token = login_csrf(&app, &slug).await.unwrap_or_default();
+    let form = serde_urlencoded::to_string([
+        ("username", "alice"),
+        ("password", "hunter2"),
+        ("_csrf", token.as_str()),
+    ])
+    .unwrap();
     let login_req = Request::builder()
         .method("POST")
         .uri("/__login")
         .header("x-org", &slug)
+        .header("cookie", format!("rustango_csrf={token}"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(form))
         .unwrap();
@@ -410,12 +574,18 @@ async fn cookie_from_one_tenant_is_rejected_at_another() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
 
-    let form =
-        serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")]).unwrap();
+    let token = login_csrf(&app, &slug_a).await.unwrap_or_default();
+    let form = serde_urlencoded::to_string([
+        ("username", "alice"),
+        ("password", "hunter2"),
+        ("_csrf", token.as_str()),
+    ])
+    .unwrap();
     let login_req = Request::builder()
         .method("POST")
         .uri("/__login")
         .header("x-org", &slug_a)
+        .header("cookie", format!("rustango_csrf={token}"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(form))
         .unwrap();
@@ -477,13 +647,19 @@ async fn admin_write_records_user_source_via_with_source_install() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
 
-    // Login.
-    let form =
-        serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")]).unwrap();
+    // Login — with the CSRF pair, as a browser would (#1607).
+    let token = login_csrf(&app, &slug).await.unwrap_or_default();
+    let form = serde_urlencoded::to_string([
+        ("username", "alice"),
+        ("password", "hunter2"),
+        ("_csrf", token.as_str()),
+    ])
+    .unwrap();
     let login_req = Request::builder()
         .method("POST")
         .uri("/__login")
         .header("x-org", &slug)
+        .header("cookie", format!("rustango_csrf={token}"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(form))
         .unwrap();
@@ -496,11 +672,51 @@ async fn admin_write_records_user_source_via_with_source_install() {
         ("label", "after-edit"),
     ])
     .unwrap();
+
+    // #1713 — a forged update riding the session cookie is refused: no
+    // token, or the full pair planted from a sibling tenant's Origin.
+    for extra in [
+        vec![],
+        vec![
+            ("cookie", format!("rustango_csrf={token}")),
+            ("x-csrf-token", token.clone()),
+            ("host", "t01.example.com".to_owned()),
+            ("origin", "http://t02.example.com".to_owned()),
+        ],
+    ] {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(format!("/tenauth_widget/{widget_pk}"))
+            .header("x-org", &slug)
+            .header("cookie", &cookie)
+            .header("content-type", "application/x-www-form-urlencoded");
+        for (k, v) in &extra {
+            req = req.header(*k, v);
+        }
+        let forged = req.body(Body::from(update_form.clone())).unwrap();
+        let resp = app.clone().oneshot(forged).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{extra:?}");
+    }
+    let rows: Vec<Widget> = {
+        use rustango::sql::FetcherPool as _;
+        Widget::objects()
+            .fetch(&rustango::sql::Pool::from(pool.clone()))
+            .await
+            .unwrap()
+    };
+    assert!(
+        rows.iter().all(|w| w.label == "before-edit"),
+        "a refused write must change nothing"
+    );
+
     let update_req = Request::builder()
         .method("POST")
         .uri(format!("/tenauth_widget/{widget_pk}"))
         .header("x-org", &slug)
         .header("cookie", &cookie)
+        // Admin writes need the CSRF pair too (#1713).
+        .header("cookie", format!("rustango_csrf={token}"))
+        .header("x-csrf-token", &token)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(update_form))
         .unwrap();

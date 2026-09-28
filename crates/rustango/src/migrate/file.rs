@@ -154,7 +154,8 @@ fn default_reversible() -> bool {
 /// Returns [`MigrateError::Io`] if the file is unreadable, or
 /// [`MigrateError::Json`] if its contents don't deserialize. Also
 /// rejects an internally-inconsistent `Operation::Data` where
-/// `reversible == true` but `reverse_sql` is missing.
+/// `reversible == true` but `reverse_sql` is missing, and a callback in
+/// an atomic migration (#1626).
 pub fn load(path: &Path) -> Result<Migration, MigrateError> {
     let raw = std::fs::read_to_string(path)?;
     parse(&raw)
@@ -322,13 +323,25 @@ pub fn extract_index(name: &str) -> Option<u32> {
 
 fn validate(mig: &Migration) -> Result<(), MigrateError> {
     for (i, op) in mig.forward.iter().enumerate() {
-        if let Operation::Data(d) = op {
-            if d.reversible && d.reverse_sql.is_none() {
+        match op {
+            Operation::Data(d) => {
+                if d.reversible && d.reverse_sql.is_none() {
+                    return Err(MigrateError::Validation(format!(
+                        "{}: forward[{}]: reversible=true but reverse_sql is missing",
+                        mig.name, i,
+                    )));
+                }
+            }
+            // The callback runs on a second connection; inside the tx it
+            // waits on the tx's locks, forever on PostgreSQL (#1626).
+            Operation::Callback(c) if mig.atomic => {
                 return Err(MigrateError::Validation(format!(
-                    "{}: forward[{}]: reversible=true but reverse_sql is missing",
-                    mig.name, i,
+                    "{}: forward[{}]: callback `{}` needs `\"atomic\": false` \
+                     (#1626); safe to add to an already-applied file",
+                    mig.name, i, c.name,
                 )));
             }
+            _ => {}
         }
     }
     Ok(())

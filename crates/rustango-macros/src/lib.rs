@@ -984,14 +984,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #manager_trait
 
         #root::core::inventory::submit! {
-            #root::core::ModelEntry {
-                schema: <#struct_name as #root::core::Model>::SCHEMA,
-                // `module_path!()` evaluates at the registration site,
-                // so a Model declared in `crate::blog::models` records
-                // `"<crate>::blog::models"` and `resolved_app_label()`
-                // can infer "blog" without an explicit attribute.
-                module_path: ::core::module_path!(),
-            }
+            // `module_path!()` evaluates at the registration site,
+            // so a Model declared in `crate::blog::models` records
+            // `"<crate>::blog::models"` and `resolved_app_label()`
+            // can infer "blog" without an explicit attribute.
+            #root::core::ModelEntry::new(
+                <#struct_name as #root::core::Model>::SCHEMA,
+                ::core::module_path!(),
+            )
         }
     })
 }
@@ -1765,14 +1765,11 @@ fn reverse_has_accessor_tokens(
                 use #root::core::{Expr, Model as _, Op, SelectQuery, WhereExpr};
                 let child_schema =
                     <#child as #root::core::Model>::SCHEMA;
-                let inner = SelectQuery {
-                    where_clause: WhereExpr::ExprCompare {
-                        lhs: Expr::Column(#child_fk_column),
-                        op: Op::Eq,
-                        rhs: Expr::OuterRef(#self_pk_column),
-                    },
-                    ..SelectQuery::new(child_schema)
-                };
+                let inner = SelectQuery::new(child_schema).where_clause(WhereExpr::ExprCompare {
+                    lhs: Expr::Column(#child_fk_column),
+                    op: Op::Eq,
+                    rhs: Expr::OuterRef(#self_pk_column),
+                });
                 WhereExpr::Exists(::std::boxed::Box::new(inner))
             }
 
@@ -1781,14 +1778,11 @@ fn reverse_has_accessor_tokens(
                 use #root::core::{Expr, Model as _, Op, SelectQuery, WhereExpr};
                 let child_schema =
                     <#child as #root::core::Model>::SCHEMA;
-                let inner = SelectQuery {
-                    where_clause: WhereExpr::ExprCompare {
-                        lhs: Expr::Column(#child_fk_column),
-                        op: Op::Eq,
-                        rhs: Expr::OuterRef(#self_pk_column),
-                    },
-                    ..SelectQuery::new(child_schema)
-                };
+                let inner = SelectQuery::new(child_schema).where_clause(WhereExpr::ExprCompare {
+                    lhs: Expr::Column(#child_fk_column),
+                    op: Op::Eq,
+                    rhs: Expr::OuterRef(#self_pk_column),
+                });
                 WhereExpr::NotExists(::std::boxed::Box::new(inner))
             }
 
@@ -1882,17 +1876,13 @@ fn through_accessor_tokens(
                 use #root::core::{Filter, Model as _, Op, SelectQuery, WhereExpr};
                 let intermediate_schema =
                     <#intermediate as #root::core::Model>::SCHEMA;
-                let sub = SelectQuery {
-                    where_clause: WhereExpr::Predicate(Filter {
-                        column: #intermediate_fk_column,
-                        op: Op::Eq,
-                        value: self.__rustango_pk_value(),
-                    }),
-                    projection: ::core::option::Option::Some(
-                        ::std::vec![#intermediate_pk_column],
-                    ),
-                    ..SelectQuery::new(intermediate_schema)
-                };
+                let sub = SelectQuery::new(intermediate_schema)
+                    .where_clause(WhereExpr::Predicate(Filter::new(
+                        #intermediate_fk_column,
+                        Op::Eq,
+                        self.__rustango_pk_value(),
+                    )))
+                    .projection(::std::vec![#intermediate_pk_column]);
                 #root::query::QuerySet::<#far>::new().where_raw(
                     WhereExpr::InSubquery {
                         column: #far_fk_column,
@@ -2374,26 +2364,22 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // wall-clock at write time, regardless of what value the
             // user left in the struct field.
             out.update_assignments.push(quote! {
-                #root::core::Assignment {
-                    column: #column,
-                    value: ::core::convert::Into::<#root::core::Expr>::into(
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            #root::__chrono::Utc::now()
-                        )
+                #root::core::Assignment::new(
+                    #column,
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
+                        #root::__chrono::Utc::now()
                     ),
-                }
+                )
             });
             out.upsert_update_columns.push(quote!(#column));
         } else {
             out.update_assignments.push(quote! {
-                #root::core::Assignment {
-                    column: #column,
-                    value: ::core::convert::Into::<#root::core::Expr>::into(
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#ident)
-                        )
+                #root::core::Assignment::new(
+                    #column,
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&self.#ident)
                     ),
-                }
+                )
             });
             out.upsert_update_columns.push(quote!(#column));
         }
@@ -2532,26 +2518,19 @@ fn model_impl_tokens(
             None => quote!(::core::option::Option::None),
         };
         let include_lits: Vec<&str> = idx.include.iter().map(String::as_str).collect();
-        quote! {
-            #root::core::IndexSchema {
-                name: #name,
-                columns: &[ #(#cols),* ],
-                unique: #unique,
-                method: #method_variant,
-                where_clause: #where_clause,
-                include: &[ #(#include_lits),* ],
-            }
-        }
+        quote! {{
+            let mut i = #root::core::IndexSchema::new(#name, &[ #(#cols),* ]);
+            i.unique = #unique;
+            i.method = #method_variant;
+            i.where_clause = #where_clause;
+            i.include = &[ #(#include_lits),* ];
+            i
+        }}
     });
     let checks_tokens = checks.iter().map(|c| {
         let name = c.name.as_str();
         let expr = c.expr.as_str();
-        quote! {
-            #root::core::CheckConstraint {
-                name: #name,
-                expr: #expr,
-            }
-        }
+        quote!(#root::core::CheckConstraint::new(#name, #expr))
     });
     let excludes_tokens = excludes.iter().map(|e| {
         let name = e.name.as_str();
@@ -2565,14 +2544,15 @@ fn model_impl_tokens(
             Some(w) => quote!(::core::option::Option::Some(#w)),
             None => quote!(::core::option::Option::None),
         };
-        quote! {
-            #root::core::ExclusionConstraint {
-                name: #name,
-                using: #using,
-                elements: &[ #(#element_tokens),* ],
-                where_clause: #where_tokens,
-            }
-        }
+        quote! {{
+            let mut e = #root::core::ExclusionConstraint::new(
+                #name,
+                #using,
+                &[ #(#element_tokens),* ],
+            );
+            e.where_clause = #where_tokens;
+            e
+        }}
     });
     let composite_fk_tokens = composite_fks.iter().map(|rel| {
         let name = rel.name.as_str();
@@ -2580,25 +2560,19 @@ fn model_impl_tokens(
         let from_cols: Vec<&str> = rel.from.iter().map(String::as_str).collect();
         let on_cols: Vec<&str> = rel.on.iter().map(String::as_str).collect();
         quote! {
-            #root::core::CompositeFkRelation {
-                name: #name,
-                to: #to,
-                from: &[ #(#from_cols),* ],
-                on: &[ #(#on_cols),* ],
-            }
+            #root::core::CompositeFkRelation::new(
+                #name,
+                #to,
+                &[ #(#from_cols),* ],
+                &[ #(#on_cols),* ],
+            )
         }
     });
     let generic_fk_tokens = generic_fks.iter().map(|rel| {
         let name = rel.name.as_str();
         let ct_col = rel.ct_column.as_str();
         let pk_col = rel.pk_column.as_str();
-        quote! {
-            #root::core::GenericRelation {
-                name: #name,
-                ct_column: #ct_col,
-                pk_column: #pk_col,
-            }
-        }
+        quote!(#root::core::GenericRelation::new(#name, #ct_col, #pk_col))
     });
     // Issue #291 / T2.5 — `default_order` slice literal. Empty when
     // no `#[rustango(default_order = "...")]` attribute was supplied.
@@ -2613,13 +2587,14 @@ fn model_impl_tokens(
     // consumer's scope; the name is stored as a string literal.
     let global_scope_tokens = global_scopes.iter().map(|s| {
         let name = s.name.as_str();
-        let apply = &s.apply;
-        quote! {
-            #root::core::GlobalScope {
-                name: #name,
-                apply: #apply,
+        // The slice sits in a nested `const`, where `Self` does not resolve.
+        let mut apply = s.apply.clone();
+        if let Some(first) = apply.segments.first_mut() {
+            if first.ident == "Self" {
+                first.ident = struct_name.clone();
             }
         }
+        quote!(#root::core::GlobalScope::new(#name, #apply))
     });
 
     let m2m_tokens = m2m_relations.iter().map(|rel| {
@@ -2629,16 +2604,11 @@ fn model_impl_tokens(
         let src = rel.src.as_str();
         let dst = rel.dst.as_str();
         let auto_create = rel.auto_create;
-        quote! {
-            #root::core::M2MRelation {
-                name: #name,
-                to: #to,
-                through: #through,
-                src_col: #src,
-                dst_col: #dst,
-                auto_create: #auto_create,
-            }
-        }
+        quote! {{
+            let mut m = #root::core::M2MRelation::new(#name, #to, #through, #src, #dst);
+            m.auto_create = #auto_create;
+            m
+        }}
     });
     // Issue #830 sub-piece: emit `Model::reverse_relations()` override
     // when the model declares `#[rustango(reverse_has(...))]`. Each
@@ -2654,12 +2624,12 @@ fn model_impl_tokens(
             let child_fk_column = rel.child_fk_column.as_str();
             let self_pk_column = rel.self_pk_column.as_str();
             quote! {
-                #root::core::ReverseRelation {
-                    name: #name,
-                    child_schema: <#child as #root::core::Model>::SCHEMA,
-                    child_fk_column: #child_fk_column,
-                    self_pk_column: #self_pk_column,
-                }
+                #root::core::ReverseRelation::new(
+                    #name,
+                    <#child as #root::core::Model>::SCHEMA,
+                    #child_fk_column,
+                    #self_pk_column,
+                )
             }
         });
         quote! {
@@ -2681,13 +2651,13 @@ fn model_impl_tokens(
             let pk_column = rel.pk_column.as_str();
             let self_pk_column = rel.self_pk_column.as_str();
             quote! {
-                #root::core::GenericReverseRelation {
-                    name: #name,
-                    child_schema: <#child as #root::core::Model>::SCHEMA,
-                    ct_column: #ct_column,
-                    pk_column: #pk_column,
-                    self_pk_column: #self_pk_column,
-                }
+                #root::core::GenericReverseRelation::new(
+                    #name,
+                    <#child as #root::core::Model>::SCHEMA,
+                    #ct_column,
+                    #pk_column,
+                    #self_pk_column,
+                )
             }
         });
         quote! {
@@ -2697,41 +2667,55 @@ fn model_impl_tokens(
             }
         }
     };
+    let fields_slice = const_slice(
+        &quote!(#root::core::FieldSchema),
+        field_schemas.iter().cloned(),
+    );
+    let m2m_slice = const_slice(&quote!(#root::core::M2MRelation), m2m_tokens);
+    let indexes_slice = const_slice(&quote!(#root::core::IndexSchema), indexes_tokens);
+    let checks_slice = const_slice(&quote!(#root::core::CheckConstraint), checks_tokens);
+    let excludes_slice = const_slice(&quote!(#root::core::ExclusionConstraint), excludes_tokens);
+    let composite_fk_slice = const_slice(
+        &quote!(#root::core::CompositeFkRelation),
+        composite_fk_tokens,
+    );
+    let generic_fk_slice = const_slice(&quote!(#root::core::GenericRelation), generic_fk_tokens);
+    let global_scope_slice = const_slice(&quote!(#root::core::GlobalScope), global_scope_tokens);
     quote! {
         impl #root::core::Model for #struct_name {
-            const SCHEMA: &'static #root::core::ModelSchema = &#root::core::ModelSchema {
-                name: #model_name,
-                table: #table,
-                fields: &[ #(#field_schemas),* ],
-                display: #display_tokens,
-                app_label: #app_label_tokens,
-                admin: #admin_tokens,
-                soft_delete_column: #soft_delete_tokens,
-                permissions: #permissions,
-                audit_track: #audit_track_tokens,
-                m2m: &[ #(#m2m_tokens),* ],
-                indexes: &[ #(#indexes_tokens),* ],
-                check_constraints: &[ #(#checks_tokens),* ],
-                exclusion_constraints: &[ #(#excludes_tokens),* ],
-                composite_relations: &[ #(#composite_fk_tokens),* ],
-                generic_relations: &[ #(#generic_fk_tokens),* ],
-                scope: #scope_tokens,
-                default_order: &[ #(#default_order_tokens),* ],
-                is_view: #is_view,
-                verbose_name: #verbose_name_tokens,
-                verbose_name_plural: #verbose_name_plural_tokens,
-                managed: #managed,
-                base_manager_name: #base_manager_name_tokens,
-                order_with_respect_to: #order_with_respect_to_tokens,
-                proxy: #proxy,
-                required_db_features: &[ #(#required_db_features_lits),* ],
-                required_db_vendor: #required_db_vendor_tokens,
-                default_related_name: #default_related_name_tokens,
-                db_table_comment: #db_table_comment_tokens,
-                get_latest_by: #get_latest_by_tokens,
-                extra_permissions: &[ #(#extra_permission_tokens),* ],
-                default_permissions: &[ #(#default_permission_tokens),* ],
-                global_scopes: &[ #(#global_scope_tokens),* ],
+            const SCHEMA: &'static #root::core::ModelSchema = &{
+                let mut s = #root::core::ModelSchema::new(#model_name, #table);
+                s.fields = #fields_slice;
+                s.display = #display_tokens;
+                s.app_label = #app_label_tokens;
+                s.admin = #admin_tokens;
+                s.soft_delete_column = #soft_delete_tokens;
+                s.permissions = #permissions;
+                s.audit_track = #audit_track_tokens;
+                s.m2m = #m2m_slice;
+                s.indexes = #indexes_slice;
+                s.check_constraints = #checks_slice;
+                s.exclusion_constraints = #excludes_slice;
+                s.composite_relations = #composite_fk_slice;
+                s.generic_relations = #generic_fk_slice;
+                s.scope = #scope_tokens;
+                s.default_order = &[ #(#default_order_tokens),* ];
+                s.is_view = #is_view;
+                s.verbose_name = #verbose_name_tokens;
+                s.verbose_name_plural = #verbose_name_plural_tokens;
+                s.managed = #managed;
+                s.base_manager_name = #base_manager_name_tokens;
+                s.order_with_respect_to = #order_with_respect_to_tokens;
+                s.proxy = #proxy;
+                s.required_db_features = &[ #(#required_db_features_lits),* ];
+                s.required_db_vendor = #required_db_vendor_tokens;
+                s.default_related_name = #default_related_name_tokens;
+                s.db_table_comment = #db_table_comment_tokens;
+                s.get_latest_by = #get_latest_by_tokens;
+                s.extra_permissions = &[ #(#extra_permission_tokens),* ];
+                s.default_permissions = &[ #(#default_permission_tokens),* ];
+                s.global_scopes = #global_scope_slice;
+                s
             };
 
             #reverse_relations_override
@@ -2789,14 +2773,14 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .as_ref()
         .map(|(v, _)| v.as_slice())
         .unwrap_or(&[]);
-    let fieldset_tokens = fieldsets.iter().map(|(title, fields)| {
-        let title = title.as_str();
-        let field_lits = fields.iter().map(|s| s.as_str());
-        quote!(#root::core::Fieldset {
-            title: #title,
-            fields: &[ #( #field_lits ),* ],
-        })
-    });
+    let fieldset_tokens = const_slice(
+        &quote!(#root::core::Fieldset),
+        fieldsets.iter().map(|(title, fields)| {
+            let title = title.as_str();
+            let field_lits = fields.iter().map(String::as_str);
+            quote!(#root::core::Fieldset::new(#title, &[ #( #field_lits ),* ]))
+        }),
+    );
 
     let list_display_links = admin
         .list_display_links
@@ -2815,14 +2799,14 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .as_ref()
         .map(|(v, _)| v.as_slice())
         .unwrap_or(&[]);
-    let prepopulated_tokens = prepopulated.iter().map(|(target, sources)| {
-        let target = target.as_str();
-        let source_lits = sources.iter().map(|s| s.as_str());
-        quote!(#root::core::PrepopulatedField {
-            target: #target,
-            sources: &[ #( #source_lits ),* ],
-        })
-    });
+    let prepopulated_tokens = const_slice(
+        &quote!(#root::core::PrepopulatedField),
+        prepopulated.iter().map(|(target, sources)| {
+            let target = target.as_str();
+            let source_lits = sources.iter().map(String::as_str);
+            quote!(#root::core::PrepopulatedField::new(#target, &[ #( #source_lits ),* ]))
+        }),
+    );
 
     let raw_id_fields = admin
         .raw_id_fields
@@ -2879,25 +2863,30 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     });
 
     quote! {
-        ::core::option::Option::Some(&#root::core::AdminConfig {
-            list_display: &[ #( #list_display_lits ),* ],
-            search_fields: &[ #( #search_fields_lits ),* ],
-            list_per_page: #list_per_page,
-            ordering: &[ #( #ordering_tokens ),* ],
-            readonly_fields: &[ #( #readonly_fields_lits ),* ],
-            list_filter: &[ #( #list_filter_lits ),* ],
-            actions: &[ #( #actions_lits ),* ],
-            fieldsets: &[ #( #fieldset_tokens ),* ],
-            list_display_links: &[ #( #list_display_links_lits ),* ],
-            search_help_text: #search_help_text,
-            actions_on_top: #actions_on_top,
-            actions_on_bottom: #actions_on_bottom,
-            date_hierarchy: #date_hierarchy,
-            prepopulated_fields: &[ #( #prepopulated_tokens ),* ],
-            raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
-            autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
-            list_select_related: #list_select_related_tokens,
-            formfield_overrides: &[ #( #formfield_tokens ),* ],
+        ::core::option::Option::Some({
+            const ADMIN: &#root::core::AdminConfig = &{
+                let mut a = #root::core::AdminConfig::DEFAULT;
+                a.list_display = &[ #( #list_display_lits ),* ];
+                a.search_fields = &[ #( #search_fields_lits ),* ];
+                a.list_per_page = #list_per_page;
+                a.ordering = &[ #( #ordering_tokens ),* ];
+                a.readonly_fields = &[ #( #readonly_fields_lits ),* ];
+                a.list_filter = &[ #( #list_filter_lits ),* ];
+                a.actions = &[ #( #actions_lits ),* ];
+                a.fieldsets = #fieldset_tokens;
+                a.list_display_links = &[ #( #list_display_links_lits ),* ];
+                a.search_help_text = #search_help_text;
+                a.actions_on_top = #actions_on_top;
+                a.actions_on_bottom = #actions_on_bottom;
+                a.date_hierarchy = #date_hierarchy;
+                a.prepopulated_fields = #prepopulated_tokens;
+                a.raw_id_fields = &[ #( #raw_id_fields_lits ),* ];
+                a.autocomplete_fields = &[ #( #autocomplete_fields_lits ),* ];
+                a.list_select_related = #list_select_related_tokens;
+                a.formfield_overrides = &[ #( #formfield_tokens ),* ];
+                a
+            };
+            ADMIN
         })
     }
 }
@@ -3049,13 +3038,11 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec::Vec::new(),
-                        on_conflict: ::core::option::Option::None,
-                    };
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    );
                     #root::sql::insert_pool(pool, &_query).await
                 }
 
@@ -3075,15 +3062,12 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec::Vec::new(),
-                        on_conflict: ::core::option::Option::Some(
-                            #root::core::ConflictClause::DoNothing,
-                        ),
-                    };
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    )
+                    .on_conflict(#root::core::ConflictClause::DoNothing);
                     let dialect = pool.dialect();
                     let stmt = dialect.compile_insert(&_query)?;
                     let rows = #root::sql::raw_execute_pool(
@@ -3108,13 +3092,12 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec![ #( #returning_cols ),* ],
-                        on_conflict: ::core::option::Option::None,
-                    };
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    )
+                    .returning(::std::vec![ #( #returning_cols ),* ]);
                     let _result = #root::sql::insert_returning_pool(
                         pool, &_query,
                     ).await?;
@@ -3146,15 +3129,12 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec::Vec::new(),
-                        on_conflict: ::core::option::Option::Some(
-                            #root::core::ConflictClause::DoNothing,
-                        ),
-                    };
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    )
+                    .on_conflict(#root::core::ConflictClause::DoNothing);
                     let dialect = pool.dialect();
                     let stmt = dialect.compile_insert(&_query)?;
                     let rows = #root::sql::raw_execute_pool(
@@ -3178,13 +3158,11 @@ fn inherent_impl_tokens(
                 &self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #insert_columns ),* ],
-                    values: ::std::vec![ #( #insert_values ),* ],
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #insert_columns ),* ],
+                    ::std::vec![ #( #insert_values ),* ],
+                );
                 #root::sql::insert_pool(pool, &_query).await
             }
 
@@ -3211,15 +3189,12 @@ fn inherent_impl_tokens(
                 &self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<bool, #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #insert_columns ),* ],
-                    values: ::std::vec![ #( #insert_values ),* ],
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::Some(
-                        #root::core::ConflictClause::DoNothing,
-                    ),
-                };
+                let _query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #insert_columns ),* ],
+                    ::std::vec![ #( #insert_values ),* ],
+                )
+                .on_conflict(#root::core::ConflictClause::DoNothing);
                 let dialect = pool.dialect();
                 let stmt = dialect.compile_insert(&_query)?;
                 let rows = #root::sql::raw_execute_pool(pool, &stmt.sql, stmt.params).await?;
@@ -3267,30 +3242,92 @@ fn inherent_impl_tokens(
     } else {
         quote!(::std::string::String::new())
     };
-    let make_op_emit = |op_path: TokenStream2| -> TokenStream2 {
-        if audited_fields.is_some() {
-            let pairs = audit_pair_tokens.iter();
-            let pk_str = audit_pk_to_string.clone();
-            quote! {
-                let _audit_entry = #root::audit::PendingEntry {
+    // `__rustango_audit_entry`: the one place a snapshot `PendingEntry`
+    // is built, so every audited write path records the same shape.
+    let audit_entry_method = if audited_fields.is_some() {
+        let pairs = audit_pair_tokens.iter();
+        let pk_str = audit_pk_to_string.clone();
+        quote! {
+            /// Snapshot audit entry for `operation` on this row.
+            #[doc(hidden)]
+            pub fn __rustango_audit_entry(
+                &self,
+                operation: #root::audit::AuditOp,
+            ) -> #root::audit::PendingEntry {
+                #root::audit::PendingEntry {
                     entity_table: <Self as #root::core::Model>::SCHEMA.table,
                     entity_pk: #pk_str,
-                    operation: #op_path,
+                    operation,
                     source: #root::audit::current_source(),
                     changes: #root::audit::snapshot_changes(&[
                         #( #pairs ),*
                     ]),
-                };
-                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
+    // Builds `_audit_entry`; `written` is the soft-delete column's new
+    // value, recorded in place of the stale `self` field.
+    let make_entry = |op_path: TokenStream2, written: Option<TokenStream2>| -> TokenStream2 {
+        if let (Some(v), Some(col)) = (written, fields.soft_delete_column.as_deref()) {
+            quote! {
+                let mut _audit_entry = self.__rustango_audit_entry(#op_path);
+                _audit_entry.set_tracked(#col, #v);
             }
         } else {
-            quote!()
+            quote!(let _audit_entry = self.__rustango_audit_entry(#op_path);)
         }
     };
-    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create));
-    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete));
-    let audit_softdelete_emit = make_op_emit(quote!(#root::audit::AuditOp::SoftDelete));
-    let audit_restore_emit = make_op_emit(quote!(#root::audit::AuditOp::Restore));
+    let soft_deleted_json = quote!(#root::__serde_json::to_value(&_now)
+        .unwrap_or(#root::__serde_json::Value::Null));
+    let restored_json = quote!(#root::__serde_json::Value::Null);
+    // `_on` emit; `affected` paths skip the row when nothing changed.
+    let make_op_emit =
+        |op_path: TokenStream2, written: Option<TokenStream2>, affected: bool| -> TokenStream2 {
+            if audited_fields.is_none() {
+                return quote!();
+            }
+            let entry = make_entry(op_path, written);
+            let emit = quote! {
+                #entry
+                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+            };
+            if affected {
+                quote!(if _affected > 0 { #emit })
+            } else {
+                emit
+            }
+        };
+    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create), None, false);
+    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete), None, true);
+    let audit_softdelete_emit = make_op_emit(
+        quote!(#root::audit::AuditOp::SoftDelete),
+        Some(soft_deleted_json.clone()),
+        true,
+    );
+    let audit_restore_emit = make_op_emit(
+        quote!(#root::audit::AuditOp::Restore),
+        Some(restored_json.clone()),
+        true,
+    );
+    // `&Pool` update runner for soft_delete / restore: one tx with the
+    // audit row when audited, a plain UPDATE otherwise.
+    let make_pool_update = |op_path: TokenStream2, written: TokenStream2| -> TokenStream2 {
+        if audited_fields.is_some() {
+            let entry = make_entry(op_path, Some(written));
+            quote! {
+                #entry
+                #root::audit::save_one_with_audit(pool, &_query, &_audit_entry).await
+            }
+        } else {
+            quote!(#root::sql::update_pool(pool, &_query).await)
+        }
+    };
+    let pool_softdelete_run =
+        make_pool_update(quote!(#root::audit::AuditOp::SoftDelete), soft_deleted_json);
+    let pool_restore_run = make_pool_update(quote!(#root::audit::AuditOp::Restore), restored_json);
 
     // `save_pool(&Pool)` — emitted for every model with a PK.
     // Audited Auto-PK models are deferred (the Auto::Unset →
@@ -3339,19 +3376,17 @@ fn inherent_impl_tokens(
                         &mut self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::UpdateQuery {
-                            model: <Self as #root::core::Model>::SCHEMA,
-                            set: ::std::vec![ #( #assignments ),* ],
-                            where_clause: #root::core::WhereExpr::Predicate(
-                                #root::core::Filter {
-                                    column: #pk_column_lit,
-                                    op: #root::core::Op::Eq,
-                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::core::clone::Clone::clone(&self.#pk_ident)
-                                    ),
-                                }
-                            ),
-                        };
+                        let _query = #root::core::UpdateQuery::new(
+                            <Self as #root::core::Model>::SCHEMA,
+                            ::std::vec![ #( #assignments ),* ],
+                            #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                                #pk_column_lit,
+                                #root::core::Op::Eq,
+                                ::core::convert::Into::<#root::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            )),
+                        );
                         let _audit_entry = #root::audit::PendingEntry {
                             entity_table: <Self as #root::core::Model>::SCHEMA.table,
                             entity_pk: #pk_str,
@@ -3422,19 +3457,17 @@ fn inherent_impl_tokens(
                             );
                             return ::core::result::Result::Ok(0);
                         }
-                        let _query = #root::core::UpdateQuery {
-                            model: _schema,
-                            set: _filtered,
-                            where_clause: #root::core::WhereExpr::Predicate(
-                                #root::core::Filter {
-                                    column: #pk_column_lit,
-                                    op: #root::core::Op::Eq,
-                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::core::clone::Clone::clone(&self.#pk_ident)
-                                    ),
-                                }
-                            ),
-                        };
+                        let _query = #root::core::UpdateQuery::new(
+                            _schema,
+                            _filtered,
+                            #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                                #pk_column_lit,
+                                #root::core::Op::Eq,
+                                ::core::convert::Into::<#root::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            )),
+                        );
                         // Narrow the audit snapshot to the same column set.
                         let _all_pairs: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                             ::std::vec![ #( #pairs2 ),* ];
@@ -3510,19 +3543,17 @@ fn inherent_impl_tokens(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #dispatch_unset
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![ #( #assignments ),* ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![ #( #assignments ),* ],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
                     let _affected = #root::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(_affected)
                 }
@@ -3607,19 +3638,17 @@ fn inherent_impl_tokens(
                         );
                         return ::core::result::Result::Ok(0);
                     }
-                    let _query = #root::core::UpdateQuery {
-                        model: _schema,
-                        set: _filtered,
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
+                    let _query = #root::core::UpdateQuery::new(
+                        _schema,
+                        _filtered,
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
                     let _affected = #root::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(_affected)
                 }
@@ -3704,8 +3733,6 @@ fn inherent_impl_tokens(
                     })
                     .unwrap_or_default()
             };
-            let pairs = audit_pair_tokens.iter();
-            let pk_str = audit_pk_to_string.clone();
             quote! {
                 /// Insert this row against either backend with audit
                 /// emission inside the same transaction. Bi-dialect
@@ -3724,26 +3751,16 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec![ #( #returning_cols ),* ],
-                        on_conflict: ::core::option::Option::None,
-                    };
-                    let _audit_entry = #root::audit::PendingEntry {
-                        entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                        entity_pk: #pk_str,
-                        operation: #root::audit::AuditOp::Create,
-                        source: #root::audit::current_source(),
-                        changes: #root::audit::snapshot_changes(&[
-                            #( #pairs ),*
-                        ]),
-                    };
-                    let _result = #root::audit::insert_one_with_audit(
-                        pool, &_query, &_audit_entry,
-                    ).await?;
-                    #root::sql::apply_auto_pk(_result, self)
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    )
+                    .returning(::std::vec![ #( #returning_cols ),* ]);
+                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
+                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
+                    })
+                    .await
                 }
             }
         } else {
@@ -3864,19 +3881,17 @@ fn inherent_impl_tokens(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #unset_dispatch
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![ #( #assignments ),* ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![ #( #assignments ),* ],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
                     let _after_pairs: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                         ::std::vec![ #( #after_pairs_pg ),* ];
                     #root::audit::save_one_with_diff(
@@ -3916,8 +3931,6 @@ fn inherent_impl_tokens(
         let pk_ident_for_pool = primary_key.map(|(ident, _)| ident);
         if let Some(pk_ident) = pk_ident_for_pool {
             if audited_fields.is_some() {
-                let pairs = audit_pair_tokens.iter();
-                let pk_str = audit_pk_to_string.clone();
                 quote! {
                     /// Delete this row against either backend with audit
                     /// emission inside the same transaction. Bi-dialect
@@ -3929,27 +3942,15 @@ fn inherent_impl_tokens(
                         &self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::DeleteQuery {
-                            model: <Self as #root::core::Model>::SCHEMA,
-                            where_clause: #root::core::WhereExpr::Predicate(
-                                #root::core::Filter {
-                                    column: #pk_column_lit,
-                                    op: #root::core::Op::Eq,
-                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::core::clone::Clone::clone(&self.#pk_ident)
-                                    ),
-                                }
+                        let _query = #root::core::DeleteQuery::by_pk(
+                            <Self as #root::core::Model>::SCHEMA,
+                            #pk_column_lit,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
-                        };
-                        let _audit_entry = #root::audit::PendingEntry {
-                            entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                            entity_pk: #pk_str,
-                            operation: #root::audit::AuditOp::Delete,
-                            source: #root::audit::current_source(),
-                            changes: #root::audit::snapshot_changes(&[
-                                #( #pairs ),*
-                            ]),
-                        };
+                        );
+                        let _audit_entry =
+                            self.__rustango_audit_entry(#root::audit::AuditOp::Delete);
                         #root::audit::delete_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await
@@ -3967,18 +3968,13 @@ fn inherent_impl_tokens(
                         &self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::DeleteQuery {
-                            model: <Self as #root::core::Model>::SCHEMA,
-                            where_clause: #root::core::WhereExpr::Predicate(
-                                #root::core::Filter {
-                                    column: #pk_column_lit,
-                                    op: #root::core::Op::Eq,
-                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::core::clone::Clone::clone(&self.#pk_ident)
-                                    ),
-                                }
+                        let _query = #root::core::DeleteQuery::by_pk(
+                            <Self as #root::core::Model>::SCHEMA,
+                            #pk_column_lit,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
-                        };
+                        );
                         #root::sql::delete_pool(pool, &_query).await
                     }
                 }
@@ -4146,12 +4142,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Sum(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .sum::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4177,12 +4170,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Avg(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .avg::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4208,12 +4198,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Min(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .min::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4239,12 +4226,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Max(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .max::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4846,23 +4830,18 @@ fn inherent_impl_tokens(
                 if _values.is_empty() {
                     return ::core::result::Result::Ok(0);
                 }
-                let _query = #root::core::DeleteQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: <Self as #root::core::Model>::SCHEMA
-                                .primary_key()
-                                .ok_or_else(|| {
-                                    #root::sql::ExecError::Sql(
-                                        #root::sql::SqlError::MissingPrimaryKey,
-                                    )
-                                })?
-                                .column,
-                            op: #root::core::Op::In,
-                            value: #root::core::SqlValue::List(_values),
-                        },
-                    ),
-                };
+                let _pk = <Self as #root::core::Model>::SCHEMA
+                    .primary_key()
+                    .ok_or_else(|| {
+                        #root::sql::ExecError::Sql(#root::sql::SqlError::MissingPrimaryKey)
+                    })?;
+                let _query = #root::query::QuerySet::<Self>::default()
+                    .filter_op(
+                        _pk.name,
+                        #root::core::Op::In,
+                        #root::core::SqlValue::List(_values),
+                    )
+                    .compile_delete()?;
                 #root::sql::delete_pool(pool, &_query).await
             }
 
@@ -5657,9 +5636,6 @@ fn inherent_impl_tokens(
             /// Eloquent
             /// `Model::where($where_col, $where_val)->delete()` parity.
             ///
-            /// For more complex filters drop into the queryset
-            /// builder + `Self::query().filter(...).delete().execute_pool(&pool)`.
-            ///
             /// # Errors
             /// As [`#root::sql::delete_pool`].
             pub async fn delete_where(
@@ -5667,26 +5643,9 @@ fn inherent_impl_tokens(
                 where_val: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                let _query = #root::core::DeleteQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: <Self as #root::core::Model>::SCHEMA
-                                .field(where_col)
-                                .ok_or_else(|| {
-                                    #root::sql::ExecError::Query(
-                                        #root::core::QueryError::UnknownField {
-                                            model: <Self as #root::core::Model>::SCHEMA.name,
-                                            field: ::std::string::ToString::to_string(where_col),
-                                        },
-                                    )
-                                })?
-                                .column,
-                            op: #root::core::Op::Eq,
-                            value: ::core::convert::Into::into(where_val),
-                        },
-                    ),
-                };
+                let _query = #root::query::QuerySet::<Self>::default()
+                    .filter_op(where_col, #root::core::Op::Eq, where_val)
+                    .compile_delete()?;
                 #root::sql::delete_pool(pool, &_query).await
             }
 
@@ -5979,29 +5938,6 @@ fn inherent_impl_tokens(
             #avg_method
             #min_method
             #max_method
-
-            /// Internal: forward to
-            /// [`#root::sql::model_shortcuts::aggregate_one_pool`].
-            /// Backs `sum` / `avg` / `min` / `max`.
-            #[doc(hidden)]
-            pub async fn __aggregate_one_pool<U>(
-                col: &str,
-                build: fn(&'static str) -> #root::core::AggregateExpr,
-                pool: &#root::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                #root::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): #root::sql::MaybePgFromRow
-                    + #root::sql::MaybeMyFromRow
-                    + #root::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                #root::sql::model_shortcuts::aggregate_one_pool::<Self, U>(col, build, pool)
-                    .await
-            }
 
             /// Fetch every row of this model from `pool`. Eloquent
             /// `Model::all()` parity — a thin wrapper over
@@ -6368,13 +6304,12 @@ fn inherent_impl_tokens(
                 let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #pushes )*
-                let _query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: _columns,
-                    values: _values,
-                    returning: ::std::vec![ #( #returning_cols ),* ],
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _values,
+                )
+                .returning(::std::vec![ #( #returning_cols ),* ]);
                 let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
                 #root::sql::apply_auto_pk(_result, self)
             }
@@ -6391,13 +6326,11 @@ fn inherent_impl_tokens(
                 &self,
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #insert_columns ),* ],
-                    values: ::std::vec![ #( #insert_values ),* ],
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #insert_columns ),* ],
+                    ::std::vec![ #( #insert_values ),* ],
+                );
                 #root::sql::insert_tx(tx, &_query).await
             }
         }
@@ -6427,19 +6360,17 @@ fn inherent_impl_tokens(
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 #dispatch_unset
-                let _query = #root::core::UpdateQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    set: ::std::vec![ #( #assignments ),* ],
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: #pk_column_lit,
-                            op: #root::core::Op::Eq,
-                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        }
-                    ),
-                };
+                let _query = #root::core::UpdateQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #assignments ),* ],
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
                 let _affected = #root::sql::update_tx(tx, &_query).await?;
                 ::core::result::Result::Ok(_affected)
             }
@@ -6463,18 +6394,13 @@ fn inherent_impl_tokens(
                     &self,
                     tx: &mut #root::sql::PoolTx<'_>,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _query = #root::core::DeleteQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
+                    let _query = #root::core::DeleteQuery::by_pk(
+                        <Self as #root::core::Model>::SCHEMA,
+                        #pk_column_lit,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                    };
+                    );
                     #root::sql::delete_tx(tx, &_query).await
                 }
             }
@@ -6727,19 +6653,17 @@ fn inherent_impl_tokens(
                     return self.insert_on(#executor_passes_to_data_write).await.map(|()| 1u64);
                 }
                 #audit_update_pre
-                let _query = #root::core::UpdateQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    set: ::std::vec![ #( #assignments ),* ],
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: #pk_column_lit,
-                            op: #root::core::Op::Eq,
-                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        }
-                    ),
-                };
+                let _query = #root::core::UpdateQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #assignments ),* ],
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
                 let _affected = #root::sql::__macro_internals::update_on(
                     #executor_passes_to_data_write,
                     &_query,
@@ -6803,13 +6727,13 @@ fn inherent_impl_tokens(
                 let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #upsert_pushes )*
-                let query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: _columns,
-                    values: _values,
-                    returning: ::std::vec![ #( #upsert_returning ),* ],
-                    on_conflict: ::core::option::Option::Some(#conflict_clause),
-                };
+                let query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _values,
+                )
+                .returning(::std::vec![ #( #upsert_returning ),* ])
+                .on_conflict(#conflict_clause);
                 let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
@@ -6853,28 +6777,21 @@ fn inherent_impl_tokens(
                 ) -> ::core::result::Result<u64, #root::sql::ExecError>
                 #executor_where
                 {
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![
-                            #root::core::Assignment {
-                                column: #col_lit,
-                                value: ::core::convert::Into::<#root::core::Expr>::into(
-                                    ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        #root::__chrono::Utc::now()
-                                    )
-                                ),
-                            },
-                        ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
+                    let _now = #root::__chrono::Utc::now();
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![#root::core::Assignment::new(
+                            #col_lit,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(_now),
+                        )],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
                     let _affected = #root::sql::__macro_internals::update_on(
                         #executor_passes_to_data_write,
                         &_query,
@@ -6896,26 +6813,20 @@ fn inherent_impl_tokens(
                 ) -> ::core::result::Result<u64, #root::sql::ExecError>
                 #executor_where
                 {
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![
-                            #root::core::Assignment {
-                                column: #col_lit,
-                                value: ::core::convert::Into::<#root::core::Expr>::into(
-                                    #root::core::SqlValue::Null
-                                ),
-                            },
-                        ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![#root::core::Assignment::new(
+                            #col_lit,
+                            #root::core::SqlValue::Null,
+                        )],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
                     let _affected = #root::sql::__macro_internals::update_on(
                         #executor_passes_to_data_write,
                         &_query,
@@ -6942,29 +6853,22 @@ fn inherent_impl_tokens(
                     &self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![
-                            #root::core::Assignment {
-                                column: #col_lit,
-                                value: ::core::convert::Into::<#root::core::Expr>::into(
-                                    ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        #root::__chrono::Utc::now()
-                                    )
-                                ),
-                            },
-                        ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
-                    #root::sql::update_pool(pool, &_query).await
+                    let _now = #root::__chrono::Utc::now();
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![#root::core::Assignment::new(
+                            #col_lit,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(_now),
+                        )],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
+                    #pool_softdelete_run
                 }
 
                 /// Tri-dialect counterpart of [`Self::restore_on`].
@@ -6978,27 +6882,21 @@ fn inherent_impl_tokens(
                     &self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![
-                            #root::core::Assignment {
-                                column: #col_lit,
-                                value: ::core::convert::Into::<#root::core::Expr>::into(
-                                    #root::core::SqlValue::Null
-                                ),
-                            },
-                        ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
-                    #root::sql::update_pool(pool, &_query).await
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![#root::core::Assignment::new(
+                            #col_lit,
+                            #root::core::SqlValue::Null,
+                        )],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
+                    #pool_restore_run
                 }
 
                 /// Hard-delete this row, ignoring the soft-delete
@@ -7149,18 +7047,13 @@ fn inherent_impl_tokens(
             ) -> ::core::result::Result<u64, #root::sql::ExecError>
             #executor_where
             {
-                let query = #root::core::DeleteQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: #pk_column_lit,
-                            op: #root::core::Op::Eq,
-                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        }
+                let query = #root::core::DeleteQuery::by_pk(
+                    <Self as #root::core::Model>::SCHEMA,
+                    #pk_column_lit,
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&self.#pk_ident)
                     ),
-                };
+                );
                 let _affected = #root::sql::__macro_internals::delete_on(
                     #executor_passes_to_data_write,
                     &query,
@@ -7186,6 +7079,7 @@ fn inherent_impl_tokens(
             }
             #pool_delete_method
             #pool_insert_method
+            #audit_entry_method
             #pool_save_method
             #refresh_replicate_methods
             #tx_delete_method
@@ -7270,13 +7164,12 @@ fn inherent_impl_tokens(
                 let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #pushes )*
-                let query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: _columns,
-                    values: _values,
-                    returning: ::std::vec![ #( #returning_cols ),* ],
-                    on_conflict: ::core::option::Option::None,
-                };
+                let query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _values,
+                )
+                .returning(::std::vec![ #( #returning_cols ),* ]);
                 let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
@@ -7333,13 +7226,11 @@ fn inherent_impl_tokens(
             where
                 _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
             {
-                let query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #insert_columns ),* ],
-                    values: ::std::vec![ #( #insert_values ),* ],
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::None,
-                };
+                let query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #insert_columns ),* ],
+                    ::std::vec![ #( #insert_values ),* ],
+                );
                 #root::sql::__macro_internals::insert_on(_executor, &query).await
             }
         }
@@ -7421,13 +7312,12 @@ fn inherent_impl_tokens(
                     ::std::vec![ #( #cols_all ),* ]
                 };
 
-                let _query = #root::core::BulkInsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: _columns,
-                    rows: _all_rows,
-                    returning: ::std::vec![ #( #returning_cols ),* ],
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _all_rows,
+                )
+                .returning(::std::vec![ #( #returning_cols ),* ]);
                 let _returned = #root::sql::__macro_internals::bulk_insert_on(
                     #executor_passes_to_data_write,
                     &_query,
@@ -7495,13 +7385,11 @@ fn inherent_impl_tokens(
                     #( #pushes_all )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = #root::core::BulkInsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #cols_all ),* ],
-                    rows: _all_rows,
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #cols_all ),* ],
+                    _all_rows,
+                );
                 let _ = #root::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
                 ::core::result::Result::Ok(())
             }
@@ -7573,18 +7461,12 @@ fn inherent_impl_tokens(
                     #( #upsert_pushes )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = #root::core::BulkInsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #upsert_cols ),* ],
-                    rows: _all_rows,
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::Some(
-                        #root::core::ConflictClause::DoUpdate {
-                            target: target.to_vec(),
-                            update_columns: update_cols.to_vec(),
-                        }
-                    ),
-                };
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #upsert_cols ),* ],
+                    _all_rows,
+                )
+                .on_conflict_do_update(target, update_cols);
                 #root::sql::bulk_insert_pool(pool, &_query).await
             }
 
@@ -7613,15 +7495,12 @@ fn inherent_impl_tokens(
                     #( #upsert_pushes )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = #root::core::BulkInsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #upsert_cols ),* ],
-                    rows: _all_rows,
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::Some(
-                        #root::core::ConflictClause::DoNothing
-                    ),
-                };
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #upsert_cols ),* ],
+                    _all_rows,
+                )
+                .on_conflict_do_nothing();
                 #root::sql::bulk_insert_pool(pool, &_query).await
             }
         }
@@ -7751,11 +7630,11 @@ fn inherent_impl_tokens(
                         }
                         _rows.push(_row_vals);
                     }
-                    let _query = #root::core::BulkUpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        update_columns: _update_columns,
-                        rows: _rows,
-                    };
+                    let _query = #root::core::BulkUpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _update_columns,
+                        _rows,
+                    );
                     #root::sql::bulk_update_pool(pool, &_query).await
                 }
             }
@@ -11334,32 +11213,29 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             ))
         }
     };
-    let schema = quote! {
-        #root::core::FieldSchema {
-            name: #name,
-            column: #column_lit,
-            ty: #field_type_tokens,
-            nullable: #nullable,
-            primary_key: #primary_key,
-            relation: #relation,
-            max_length: #max_length,
-            min: #min,
-            max: #max,
-            default: #default,
-            auto: #auto,
-            unique: #unique,
-            generated_as: #generated_as,
-            help_text: #help_text,
-            choices: #choices,
-            db_comment: #db_comment,
-            verbose_name: #verbose_name,
-            editable: #editable,
-            blank: #blank,
-            case_insensitive: #case_insensitive,
-            fk_on_delete: #fk_on_delete,
-            validators: &[ #(#validators_lits),* ],
-        }
-    };
+    let schema = quote! {{
+        let mut f = #root::core::FieldSchema::new(#name, #column_lit, #field_type_tokens);
+        f.nullable = #nullable;
+        f.primary_key = #primary_key;
+        f.relation = #relation;
+        f.max_length = #max_length;
+        f.min = #min;
+        f.max = #max;
+        f.default = #default;
+        f.auto = #auto;
+        f.unique = #unique;
+        f.generated_as = #generated_as;
+        f.help_text = #help_text;
+        f.choices = #choices;
+        f.db_comment = #db_comment;
+        f.verbose_name = #verbose_name;
+        f.editable = #editable;
+        f.blank = #blank;
+        f.case_insensitive = #case_insensitive;
+        f.fk_on_delete = #fk_on_delete;
+        f.validators = &[ #(#validators_lits),* ];
+        f
+    }};
 
     let from_row_init = quote! {
         #ident: #root::sql::sqlx::Row::try_get(row, #column_lit)?
@@ -11429,6 +11305,15 @@ fn check_bound_compatibility(
     Ok(())
 }
 
+/// A `&'static [ty]` of `const fn` results. The slice needs its own
+/// `const`: a `&[..]` assigned in a statement is not extended to `'static`.
+fn const_slice(ty: &TokenStream2, items: impl Iterator<Item = TokenStream2>) -> TokenStream2 {
+    quote!({
+        const ITEMS: &[#ty] = &[ #(#items),* ];
+        ITEMS
+    })
+}
+
 fn optional_u32(value: Option<u32>) -> TokenStream2 {
     if let Some(v) = value {
         quote!(::core::option::Option::Some(#v))
@@ -11478,10 +11363,10 @@ fn relation_tokens(
         }
         let on = attrs.on.as_deref().unwrap_or("id");
         return Ok(quote! {
-            ::core::option::Option::Some(#root::core::Relation::Fk {
-                to: <#inner as #root::core::Model>::SCHEMA.table,
-                on: #on,
-            })
+            ::core::option::Option::Some(#root::core::Relation::fk(
+                <#inner as #root::core::Model>::SCHEMA.table,
+                #on,
+            ))
         });
     }
     match (&attrs.fk, &attrs.o2o) {
@@ -11498,14 +11383,14 @@ fn relation_tokens(
             // inside Self::SCHEMA's own initializer.
             let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(#root::core::Relation::Fk { to: #resolved, on: #on })
+                ::core::option::Option::Some(#root::core::Relation::fk(#resolved, #on))
             })
         }
         (None, Some(to)) => {
             let on = attrs.on.as_deref().unwrap_or("id");
             let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(#root::core::Relation::O2O { to: #resolved, on: #on })
+                ::core::option::Option::Some(#root::core::Relation::o2o(#resolved, #on))
             })
         }
         (None, None) => {

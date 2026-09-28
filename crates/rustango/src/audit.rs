@@ -106,6 +106,15 @@ pub struct PendingEntry {
     pub changes: Value,
 }
 
+impl PendingEntry {
+    /// Replace `column`'s recorded value, only if the column is tracked.
+    pub fn set_tracked(&mut self, column: &str, value: Value) {
+        if let Some(slot) = self.changes.get_mut(column) {
+            *slot = value;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditOp {
     Create,
@@ -576,12 +585,7 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
     // system migrations.
     use crate::core::Model as _;
     let snapshot = crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA]);
-    let changes =
-        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
-    let batch =
-        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
-            .map_err(sqlx::Error::Protocol)?;
-    crate::migrate::apply_idempotent(pool, &batch).await?;
+    crate::migrate::apply_idempotent(pool, &snapshot).await?;
     Ok(())
 }
 
@@ -1008,8 +1012,8 @@ pub async fn cleanup_keep_last_n_pool(
 }
 
 /// Run a `DeleteQuery` and emit its audit entry in one transaction, so
-/// the row and its audit record commit together. Used by the generated
-/// `Model::delete_pool` for audited models.
+/// the row and its audit record commit together. No row is written when
+/// nothing was deleted. Used by the generated `Model::delete_pool`.
 ///
 /// # Errors
 /// Any [`crate::sql::ExecError`] from compile, bind or execute, plus
@@ -1022,7 +1026,9 @@ pub async fn delete_one_with_audit(
     let stmt = pool.dialect().compile_delete(query)?;
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
-    emit_one_tx(&mut tx, entry).await?;
+    if affected > 0 {
+        emit_one_tx(&mut tx, entry).await?;
+    }
     tx.commit().await?;
     Ok(affected)
 }
@@ -1043,8 +1049,8 @@ async fn emit_one_tx(
     }
 }
 
-/// Run an `UpdateQuery` and emit its audit entry in one transaction.
-/// Used by the generated `Model::save_pool` for audited models.
+/// Run an `UpdateQuery` and emit its audit entry in one transaction,
+/// unless nothing was updated. Used by the generated `Model::save_pool`.
 ///
 /// The entry is a **snapshot**: `changes` holds the values after the
 /// write, with no `before` side. For a field-level diff, use
@@ -1061,36 +1067,40 @@ pub async fn save_one_with_audit(
     let stmt = pool.dialect().compile_update(query)?;
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
-    emit_one_tx(&mut tx, entry).await?;
+    if affected > 0 {
+        emit_one_tx(&mut tx, entry).await?;
+    }
     tx.commit().await?;
     Ok(affected)
 }
 
-/// Run an `InsertQuery`, capture the auto-assigned PK, and emit the audit
-/// entry in one transaction. Used by the generated `Model::insert_pool`
-/// for audited models.
+/// Run an `InsertQuery`, write the assigned PK back into `model`, then
+/// emit `entry(model)` in the same transaction, so the audit row carries
+/// the real PK. Used by the generated `Model::insert_pool` for audited
+/// models.
 ///
-/// Returns the same [`crate::sql::InsertReturningPool`] as the
-/// non-audited [`crate::sql::insert_returning_pool`].
-///
-/// MySQL fills in only one `Auto<T>` PK, because a connection has a
-/// single `LAST_INSERT_ID()`. A model with more than one returns
-/// `SqlError::OperatorNotSupportedInDialect`, as on the non-audited path.
+/// MySQL fills in only the first `Auto<T>` field (one `LAST_INSERT_ID()`),
+/// so other tracked `Auto` and generated fields audit as `null` there.
 ///
 /// # Errors
-/// Any [`crate::sql::ExecError`] from compile, bind or execute, plus
-/// `sqlx::Error` from the audit emit.
-pub async fn insert_one_with_audit(
+/// Any [`crate::sql::ExecError`] from compile, bind, execute or PK
+/// decode, plus `sqlx::Error` from the audit emit.
+pub async fn insert_one_with_audit<M>(
     pool: &crate::sql::Pool,
     query: &crate::core::InsertQuery,
-    entry: &PendingEntry,
-) -> Result<crate::sql::InsertReturningPool, crate::sql::ExecError> {
+    model: &mut M,
+    entry: impl FnOnce(&M) -> PendingEntry,
+) -> Result<(), crate::sql::ExecError>
+where
+    M: crate::sql::AssignAutoPkPool,
+{
     // `insert_returning_tx` already handles each backend's return shape.
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
-    emit_one_tx(&mut tx, entry).await?;
+    crate::sql::apply_auto_pk(returning, model)?;
+    emit_one_tx(&mut tx, &entry(model)).await?;
     tx.commit().await?;
-    Ok(returning)
+    Ok(())
 }
 
 /// Postgres bind helper, exposed so generated bodies on the audited

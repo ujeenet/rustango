@@ -203,7 +203,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 
 `ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement sa forme JSON : `{"error": <code machine>, "message": …, "status": …, "details": …}`.
 
-**Ce n'est pas la seule forme d'erreur que le framework émet.** Un ViewSet répond `{"error": "<message lisible>"}` pour ses propres échecs, et une map indexée par nom de champ pour la validation d'un serializer — trois enveloppes au total, et `error` porte un code machine dans l'une et une phrase dans l'autre. [ViewSets — formes de réponse en erreur](viewsets.md#formes-de-réponse-en-erreur) indique quel chemin émet laquelle.
+Les erreurs JSON du framework lui-même utilisent la même forme : ViewSets, rejets de tenant et de `Principal`, media, endpoints JSON de l'admin, limites de corps, limites de débit et mode maintenance. Un `5xx` journalise sa cause et envoie un `message` générique. Voir [ViewSets — formes de réponse en erreur](viewsets.md#formes-de-réponse-en-erreur).
 
 ---
 
@@ -286,7 +286,7 @@ default = [
 Pour réduire un binaire qui n'a pas besoin de tout, désactivez les valeurs par défaut et ne listez que ce que vous utilisez :
 
 ```toml
-rustango = { version = "0.57", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.58", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

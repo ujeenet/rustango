@@ -53,7 +53,7 @@ pub enum ConnectFault {
     /// Reached the server; it refused the credentials.
     AuthFailed,
     /// Reached the server and authenticated; the named database is not
-    /// there.
+    /// there, or (MySQL 1044) this user may not see it.
     NoSuchDatabase,
     /// Connected fine, but this role may not do what a tenant needs —
     /// create tables, most importantly. The failure a naive `SELECT 1`
@@ -89,8 +89,8 @@ impl ConnectFault {
                 "the server refused these credentials — check the username and password"
             }
             Self::NoSuchDatabase => {
-                "the server is reachable but has no such database — create it, or fix the \
-                 name in the URL"
+                "the server is reachable but this user sees no such database — create it, \
+                 grant this user access to it, or fix the name in the URL"
             }
             Self::PermissionDenied => {
                 "connected, but this role cannot create tables — grant it schema-level CREATE, \
@@ -184,10 +184,12 @@ fn classify_db(db: &dyn sqlx::error::DatabaseError) -> ConnectFault {
         return match my.number() {
             // 1045 access denied for user
             1045 => ConnectFault::AuthFailed,
-            // 1049 unknown database
-            1049 => ConnectFault::NoSuchDatabase,
-            // 1044 access denied to database, 1142 table command denied
-            1044 | 1142 => ConnectFault::PermissionDenied,
+            // 1049 unknown database. 1044 "access denied to database" too:
+            // MySQL sends it for a missing database the user has no global
+            // rights to see, so the two cannot be told apart (#1678).
+            1049 | 1044 => ConnectFault::NoSuchDatabase,
+            // 1142 table command denied
+            1142 => ConnectFault::PermissionDenied,
             _ => ConnectFault::Other,
         };
     }

@@ -1,36 +1,9 @@
-//! A password reset stamps `password_changed_at`, so sessions issued
-//! before it stop validating (#1449).
+//! A password reset writes a new hash and stamps `password_changed_at`
+//! in one UPDATE (#1449).
 //!
-//! The reset helpers rotated the hash and nothing else. `password_changed_at`
-//! — the column the session middleware compares `iat` against — was never
-//! written, and `NULL` is specifically the value that middleware reads as
-//! "never rotated, do not enforce". So the check was not merely stale, it
-//! was disabled.
-//!
-//! Password reset is what someone does when they believe their account is
-//! compromised. It is the one flow where "sign me out everywhere" is the
-//! whole point, and it was the flow that did not do it: the attacker's
-//! session survived the victim's reset.
-//!
-//! The admin change-password path stamped it all along
-//! (`tenancy/admin.rs`), so the same account reached two documented ways
-//! got two different security outcomes — and the weaker one was the path
-//! `docs/auth-flows.md` walks you through.
-//!
-//! ## What this file proves, and what it leans on
-//!
-//! Two links in one chain:
-//!
-//! 1. **reset -> column stamped** — here.
-//! 2. **column stamped -> session rejected** — already pinned end-to-end by
-//!    `admin_change_password_ui_live::session_minted_before_password_rotation_is_rejected`,
-//!    which builds a real cookie with a past `iat`, stamps the column, and
-//!    asserts the next request bounces to login.
-//!
-//! Asserting (1) here rather than rebuilding (2)'s Postgres router harness
-//! keeps this test runnable on in-memory SQLite with no service. The column
-//! is not a proxy for the behaviour — it is the input the middleware reads,
-//! and the test above is what establishes that.
+//! Sessions carry a fingerprint of the hash, so the new hash is what ends
+//! them (#1338); the session tests in `session_user_sqlite_live.rs` and
+//! `tenant_admin_session_sqlite_live.rs` pin that. This file pins the write.
 
 #![cfg(all(
     feature = "sqlite",
@@ -92,15 +65,11 @@ fn link() -> String {
     )
 }
 
-/// The fix. A reset through the framework's own table ends the session.
+/// A reset through the framework's own table stamps the column.
 #[tokio::test]
 async fn a_reset_stamps_password_changed_at() {
     let pool = pool().await;
-    assert_eq!(
-        password_changed_at(&pool).await,
-        None,
-        "precondition: NULL means the middleware does not enforce"
-    );
+    assert_eq!(password_changed_at(&pool).await, None, "precondition");
 
     confirm_password_reset_pool(&pool, &link(), STRONG, SECRET)
         .await
@@ -108,9 +77,7 @@ async fn a_reset_stamps_password_changed_at() {
 
     assert!(
         password_changed_at(&pool).await.is_some(),
-        "a reset must stamp password_changed_at — otherwise every session \
-         issued before it stays valid, including an attacker's, which is \
-         the exact thing the user reset their password to stop"
+        "a reset must stamp password_changed_at"
     );
 }
 

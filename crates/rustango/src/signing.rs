@@ -337,6 +337,20 @@ mod tests {
 
     // -------- Signer --------
 
+    /// The default salts are wire format: changing one breaks every
+    /// signature already issued.
+    #[test]
+    fn default_salts_are_pinned() {
+        assert_eq!(
+            Signer::new(b"secret").sign("hello"),
+            "hello:pvfaQG3UfSAMBnRP48NaU9ix3p9cCq-teryvz-33PC4"
+        );
+        assert_eq!(
+            TimestampSigner::new(b"secret").sign_at("hello", 0),
+            "hello:0:j_jgni92IcNlhM4M0hXBKrWBNxCq41Lshy6LvyHUE8s"
+        );
+    }
+
     #[test]
     fn signer_round_trips_simple_value() {
         let s = Signer::new(b"secret");

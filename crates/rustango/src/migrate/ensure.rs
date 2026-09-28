@@ -21,14 +21,23 @@ use crate::sql::Pool;
 #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
 const MYSQL_DUPLICATES: &[u16] = &[1050, 1061, 1826];
 
-/// `true` when `number` is MySQL's way of saying the object is there.
+/// MySQL `ER_DUP_FIELDNAME`: "already exists" only for an `ADD COLUMN`.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+const MYSQL_DUP_FIELDNAME: u16 = 1060;
+
+/// `true` when `number` is MySQL's way of saying the object `stmt`
+/// creates is there.
 ///
 /// Split out so a test can pin the trap without a driver error: these
 /// are error numbers, and comparing one against `DatabaseError::code()`
 /// — which is the `SQLSTATE` — silently never matches.
 #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
-fn is_mysql_duplicate(number: u16) -> bool {
-    MYSQL_DUPLICATES.contains(&number)
+fn is_mysql_duplicate(number: u16, stmt: &str) -> bool {
+    MYSQL_DUPLICATES.contains(&number) || (number == MYSQL_DUP_FIELDNAME && is_add_column(stmt))
+}
+
+fn is_add_column(stmt: &str) -> bool {
+    stmt.starts_with("ALTER TABLE ") && stmt.contains(" ADD COLUMN ")
 }
 
 /// `true` when the error says the object is already there.
@@ -46,7 +55,8 @@ fn is_mysql_duplicate(number: u16) -> bool {
 ///   matches that catch-all.
 /// * **SQLite** reports nothing usable either way, so it keeps the text
 ///   match. Its messages are not localised.
-fn is_already_exists(e: &crate::sql::ExecError, dialect: &str) -> bool {
+#[cfg_attr(not(feature = "mysql"), allow(unused_variables))]
+fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: &str) -> bool {
     let crate::sql::ExecError::Driver(err) = e else {
         return false;
     };
@@ -56,7 +66,7 @@ fn is_already_exists(e: &crate::sql::ExecError, dialect: &str) -> bool {
         "mysql" => err
             .as_database_error()
             .and_then(|db| db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
-            .is_some_and(|my| is_mysql_duplicate(my.number())),
+            .is_some_and(|my| is_mysql_duplicate(my.number(), stmt)),
         _ => {
             let msg = format!("{e}").to_lowercase();
             msg.contains("already exists") || msg.contains("duplicate")
@@ -71,35 +81,103 @@ fn is_already_exists(e: &crate::sql::ExecError, dialect: &str) -> bool {
 /// error into a successful statement that gets binlogged and fsynced,
 /// 165 -> 568 us, to silence a log line MySQL never wrote.
 ///
+/// `ALTER TABLE … ADD COLUMN` gets `IF NOT EXISTS` the same way.
 /// `ADD CONSTRAINT` is left alone everywhere: no backend has
 /// `IF NOT EXISTS` for it, so those still rely on [`is_already_exists`].
 fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     if dialect != "postgres" {
         return std::borrow::Cow::Borrowed(stmt);
     }
-    match stmt.strip_prefix("CREATE TABLE ") {
-        Some(rest) if !rest.starts_with("IF NOT EXISTS") => {
-            std::borrow::Cow::Owned(format!("CREATE TABLE IF NOT EXISTS {rest}"))
+    if let Some(rest) = stmt.strip_prefix("CREATE TABLE ") {
+        if !rest.starts_with("IF NOT EXISTS") {
+            return std::borrow::Cow::Owned(format!("CREATE TABLE IF NOT EXISTS {rest}"));
         }
-        _ => std::borrow::Cow::Borrowed(stmt),
     }
+    if is_add_column(stmt) && !stmt.contains(" ADD COLUMN IF NOT EXISTS ") {
+        if let Some((head, tail)) = stmt.split_once(" ADD COLUMN ") {
+            return std::borrow::Cow::Owned(format!("{head} ADD COLUMN IF NOT EXISTS {tail}"));
+        }
+    }
+    std::borrow::Cow::Borrowed(stmt)
 }
 
-/// Run every statement in `batch`, tolerating objects that already
+/// Create every table in `snapshot`, tolerating objects that already
 /// exist. The one entry point the `ensure_*` helpers share, so the
 /// policy cannot drift between them.
+///
+/// FK targets are pinned to the schema the tables are created in, so a
+/// missing target fails instead of binding to another schema (#1645).
 ///
 /// # Errors
 /// Any driver failure that is not "already exists".
 pub(crate) async fn apply_idempotent(
     pool: &Pool,
-    batch: &super::RenderedBatch,
+    snapshot: &super::SchemaSnapshot,
 ) -> Result<(), sqlx::Error> {
+    let schema = creation_schema(pool).await?;
+    let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
+    let batch = super::diff::render_changes_split_in_schema(
+        &changes,
+        snapshot,
+        pool.dialect(),
+        schema.as_deref(),
+    )
+    .map_err(sqlx::Error::Protocol)?;
+    apply_batch(pool, &batch).await
+}
+
+/// Add each `(table, column)` of `snapshot` that a table created by an
+/// older release lacks. Never creates the table.
+///
+/// # Errors
+/// Any driver failure that is not "already exists", including a
+/// missing table.
+#[cfg(all(feature = "admin", feature = "totp"))]
+pub(crate) async fn add_columns_idempotent(
+    pool: &Pool,
+    snapshot: &super::SchemaSnapshot,
+    columns: &[(&str, &str)],
+) -> Result<(), sqlx::Error> {
+    let changes: Vec<_> = columns
+        .iter()
+        .map(|(table, column)| super::SchemaChange::AddColumn {
+            table: (*table).to_owned(),
+            column: (*column).to_owned(),
+        })
+        .collect();
+    let schema = creation_schema(pool).await?;
+    let batch = super::diff::render_changes_split_in_schema(
+        &changes,
+        snapshot,
+        pool.dialect(),
+        schema.as_deref(),
+    )
+    .map_err(sqlx::Error::Protocol)?;
+    apply_batch(pool, &batch).await
+}
+
+/// Where Postgres creates unqualified tables; `None` on backends
+/// without schemas.
+async fn creation_schema(pool: &Pool) -> Result<Option<String>, sqlx::Error> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => sqlx::query_scalar::<_, Option<String>>("SELECT current_schema()")
+            .fetch_one(pg)
+            .await?
+            .map(Some)
+            .ok_or_else(|| sqlx::Error::Protocol("search_path names no existing schema".into())),
+        #[allow(unreachable_patterns)]
+        _ => Ok(None),
+    }
+}
+
+/// Run every statement in `batch`, tolerating objects that already exist.
+async fn apply_batch(pool: &Pool, batch: &super::RenderedBatch) -> Result<(), sqlx::Error> {
     let dialect = pool.dialect().name();
     for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
         let stmt = idempotent(stmt, dialect);
         if let Err(e) = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await {
-            if is_already_exists(&e, dialect) {
+            if is_already_exists(&e, dialect, &stmt) {
                 continue;
             }
             return Err(match e {
@@ -150,6 +228,15 @@ mod tests {
         assert_eq!(idempotent(idx, "postgres"), idx);
     }
 
+    #[test]
+    fn add_column_gains_if_not_exists_on_postgres_only() {
+        let s = r#"ALTER TABLE "t" ADD COLUMN "c" BIGINT"#;
+        let guarded = r#"ALTER TABLE "t" ADD COLUMN IF NOT EXISTS "c" BIGINT"#;
+        assert_eq!(idempotent(s, "postgres"), guarded);
+        assert_eq!(idempotent(guarded, "postgres"), guarded);
+        assert_eq!(idempotent(s, "mysql"), s);
+    }
+
     /// The tests above feed in hand-written SQL, so they would pass even
     /// if the renderer stopped emitting the shape `idempotent` looks
     /// for. This one runs a real batch through the real renderer, which
@@ -188,7 +275,7 @@ mod tests {
         }
     }
 
-    /// `apply_idempotent` itself, against a real SQLite database.
+    /// `apply_batch` itself, against a real SQLite database.
     ///
     /// Written because the review found three reverts of it that every
     /// other test survived: dropping the `idempotent` rewrite, dropping
@@ -208,7 +295,7 @@ mod tests {
             deferred_fks: vec!["CREATE TABLE b (id INTEGER PRIMARY KEY)".to_owned()],
             ..Default::default()
         };
-        super::apply_idempotent(&pool, &batch)
+        super::apply_batch(&pool, &batch)
             .await
             .expect("first run creates both");
         for t in ["a", "b"] {
@@ -218,7 +305,7 @@ mod tests {
         }
 
         // Second run is a no-op, not an error.
-        super::apply_idempotent(&pool, &batch)
+        super::apply_batch(&pool, &batch)
             .await
             .expect("re-running an ensure must be idempotent");
 
@@ -228,7 +315,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            super::apply_idempotent(&pool, &bad).await.is_err(),
+            super::apply_batch(&pool, &bad).await.is_err(),
             "a syntax error must propagate; swallowing everything would \
              make every ensure silently succeed"
         );
@@ -239,13 +326,37 @@ mod tests {
     /// `SQLSTATE`, so it could never match — and a text fallback hid it.
     #[test]
     fn mysql_duplicates_are_numbers() {
-        assert!(is_mysql_duplicate(1050), "ER_TABLE_EXISTS_ERROR");
-        assert!(is_mysql_duplicate(1061), "ER_DUP_KEYNAME");
-        assert!(is_mysql_duplicate(1826), "ER_FK_DUP_NAME");
+        let create = "CREATE TABLE t (id INT)";
+        assert!(is_mysql_duplicate(1050, create), "ER_TABLE_EXISTS_ERROR");
+        assert!(is_mysql_duplicate(1061, create), "ER_DUP_KEYNAME");
+        assert!(is_mysql_duplicate(1826, create), "ER_FK_DUP_NAME");
         // ER_DUP_ENTRY: a unique index that genuinely could not be
         // built. It must propagate, not read as "already exists".
-        assert!(!is_mysql_duplicate(1062), "ER_DUP_ENTRY must not swallow");
-        assert!(!is_mysql_duplicate(1064), "syntax error must not swallow");
-        assert!(!is_mysql_duplicate(1170), "TEXT-in-index must not swallow");
+        assert!(
+            !is_mysql_duplicate(1062, create),
+            "ER_DUP_ENTRY must not swallow"
+        );
+        assert!(
+            !is_mysql_duplicate(1064, create),
+            "syntax error must not swallow"
+        );
+        assert!(
+            !is_mysql_duplicate(1170, create),
+            "TEXT-in-index must not swallow"
+        );
+    }
+
+    /// `ER_DUP_FIELDNAME` means "already there" only for `ADD COLUMN`; a
+    /// CREATE TABLE that names a column twice is a real error.
+    #[test]
+    fn mysql_dup_fieldname_only_for_add_column() {
+        assert!(is_mysql_duplicate(
+            1060,
+            "ALTER TABLE `t` ADD COLUMN `c` BIGINT"
+        ));
+        assert!(!is_mysql_duplicate(
+            1060,
+            "CREATE TABLE `t` (`c` INT, `c` INT)"
+        ));
     }
 }

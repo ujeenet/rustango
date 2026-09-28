@@ -122,3 +122,23 @@ fn a_deactivated_tenant_is_retired() {
         "all queues retire when no tenant is active"
     );
 }
+
+/// The storefront escapes product text fields (#1636).
+#[test]
+fn the_storefront_escapes_product_text() {
+    let p = super::models::Product {
+        id: rustango::sql::Auto::Unset,
+        sku: "<b>sku</b>".into(),
+        name: "<script>alert(1)</script>".into(),
+        description: None,
+        price_cents: 1999,
+        active: true,
+        created_at: rustango::sql::Auto::Unset,
+    };
+    let li = super::views::product_item(&p);
+    assert!(!li.contains("<script>") && !li.contains("<b>"), "got: {li}");
+    assert!(
+        li.contains(&rustango::text::html_escape("<script>alert(1)</script>")),
+        "got: {li}"
+    );
+}

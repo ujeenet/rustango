@@ -23,6 +23,12 @@
 //!     return Err("bad credentials");
 //! }
 //! ```
+//!
+//! From async code call [`hash_async`] / [`verify_async`] /
+//! [`verify_dummy_async`]; the sync calls block a runtime worker.
+
+// This module owns the sync calls the lint bans elsewhere.
+#![allow(clippy::disallowed_methods)]
 
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordError {
@@ -30,6 +36,10 @@ pub enum PasswordError {
     Hash(String),
     #[error("verification error: {0}")]
     Verify(String),
+    /// No hashing slot freed up in time. Answer 503; the same for a
+    /// known and an unknown user.
+    #[error("password hashing is busy")]
+    Busy,
 }
 
 /// Hash a password with argon2id. Returns a standard PHC string.
@@ -91,6 +101,157 @@ fn dummy_hash() -> &'static str {
 /// attacker which accounts exist.
 pub fn verify_dummy(password: &str) {
     let _ = verify(password, dummy_hash());
+}
+
+// ------------------------------------------------------------------ Async variants
+
+/// [`hash`] on the blocking pool. Use this from async code: an inline
+/// argon2 call parks a runtime worker for the whole hash.
+///
+/// # Errors
+/// As [`hash`], or [`PasswordError::Busy`] when no slot frees up in time.
+pub async fn hash_async(password: &str) -> Result<String, PasswordError> {
+    let password = password.to_owned();
+    off_runtime(move || hash(&password)).await?
+}
+
+/// [`verify`] on the blocking pool.
+///
+/// # Errors
+/// As [`verify`], or [`PasswordError::Busy`].
+pub async fn verify_async(password: &str, stored_hash: &str) -> Result<bool, PasswordError> {
+    let (password, stored_hash) = (password.to_owned(), stored_hash.to_owned());
+    off_runtime(move || verify(&password, &stored_hash)).await?
+}
+
+/// [`verify_dummy`] on the blocking pool. It waits for a slot like a
+/// real verify, so an unknown user is busy exactly when a known one is.
+///
+/// # Errors
+/// [`PasswordError::Busy`] when no slot frees up in time.
+pub async fn verify_dummy_async(password: &str) -> Result<(), PasswordError> {
+    let password = password.to_owned();
+    off_runtime(move || verify_dummy(&password)).await
+}
+
+/// Default for how long a hash job waits for a free slot.
+pub const DEFAULT_HASH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+static HASH_WAIT: crate::boot_slot::BootSlot<std::time::Duration> =
+    crate::boot_slot::BootSlot::new();
+
+/// Set how long a hash job waits for a slot before [`PasswordError::Busy`].
+/// Call at boot. It replaces the `[auth] hash_wait_ms` value; `false`
+/// if an earlier call won.
+pub fn configure_hash_wait(wait: std::time::Duration) -> bool {
+    HASH_WAIT.set_explicit(wait)
+}
+
+/// The `[auth] hash_wait_ms` value; `false` if app code already set one.
+#[cfg(feature = "config")]
+pub(crate) fn configure_hash_wait_from_settings(wait: std::time::Duration) -> bool {
+    HASH_WAIT.set_from_settings(wait)
+}
+
+/// How long a hash job currently waits for a slot.
+#[must_use]
+pub fn hash_wait() -> std::time::Duration {
+    *HASH_WAIT.get(|| DEFAULT_HASH_WAIT)
+}
+
+/// Which share of the [`HashQueue`] a job may use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HashLane {
+    /// Login forms, JWT login, password changes: every slot.
+    Login,
+    /// Credentials sent per request (HTTP Basic, API keys, agent
+    /// secrets): at most half the slots, so a flood of them cannot
+    /// starve the login forms.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    Credential,
+}
+
+/// At most `slots` argon2 jobs at once, [`HashLane::Credential`] jobs
+/// at most half of them; a job that cannot get a slot in time gives up
+/// with [`PasswordError::Busy`].
+pub(crate) struct HashQueue {
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+    credential: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl HashQueue {
+    pub(crate) fn new(slots: usize) -> Self {
+        let slots = slots.max(1);
+        Self {
+            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(slots)),
+            credential: std::sync::Arc::new(tokio::sync::Semaphore::new((slots / 2).max(1))),
+        }
+    }
+
+    /// Run `f` on the blocking pool once a slot is free, waiting at most
+    /// `wait` in all. A panic in `f` resumes in the caller, as inline.
+    pub(crate) async fn run<T, F>(
+        &self,
+        lane: HashLane,
+        wait: std::time::Duration,
+        f: F,
+    ) -> Result<T, PasswordError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let deadline = tokio::time::Instant::now() + wait;
+        let acquire = |s: &std::sync::Arc<tokio::sync::Semaphore>| {
+            tokio::time::timeout_at(deadline, std::sync::Arc::clone(s).acquire_owned())
+        };
+        let lane_permit = match lane {
+            HashLane::Login => None,
+            HashLane::Credential => Some(
+                acquire(&self.credential)
+                    .await
+                    .map_err(|_| PasswordError::Busy)?
+                    .expect("password semaphore is never closed"),
+            ),
+        };
+        let permit = acquire(&self.slots)
+            .await
+            .map_err(|_| PasswordError::Busy)?
+            .expect("password semaphore is never closed");
+        // The permits move into the job, so a dropped caller still holds
+        // its slot until the hash finishes.
+        Ok(tokio::task::spawn_blocking(move || {
+            let _permits = (permit, lane_permit);
+            f()
+        })
+        .await
+        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic())))
+    }
+}
+
+/// Run argon2 work on the process-wide [`HashQueue`], one slot per CPU.
+pub(crate) async fn off_runtime<T, F>(f: F) -> Result<T, PasswordError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    off_runtime_in(HashLane::Login, f).await
+}
+
+/// [`off_runtime`] in `lane`.
+pub(crate) async fn off_runtime_in<T, F>(lane: HashLane, f: F) -> Result<T, PasswordError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    static QUEUE: std::sync::OnceLock<HashQueue> = std::sync::OnceLock::new();
+    QUEUE
+        .get_or_init(|| {
+            HashQueue::new(
+                std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get),
+            )
+        })
+        .run(lane, hash_wait(), f)
+        .await
 }
 
 // ------------------------------------------------------------------ Strength check
@@ -169,6 +330,28 @@ const KNOWN_WEAK: &[&str] = &[
     "passw0rd",
 ];
 
+/// Awaits `fut` next to a 1 ms ticker and returns its output with the
+/// ticks seen meanwhile. On a current-thread runtime inline argon2 sees 0.
+#[cfg(test)]
+pub(crate) async fn ticks_while<F: std::future::Future>(fut: F) -> (F::Output, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let t = Arc::clone(&ticks);
+    let ticker = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            t.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    tokio::task::yield_now().await;
+    let before = ticks.load(Ordering::Relaxed);
+    let out = fut.await;
+    let n = ticks.load(Ordering::Relaxed) - before;
+    ticker.abort();
+    (out, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +382,95 @@ mod tests {
         assert!(!verify("whatever-an-attacker-types", dummy_hash()).unwrap());
         // The public entry point never panics.
         verify_dummy("whatever-an-attacker-types");
+    }
+
+    /// On a current-thread runtime an inline hash freezes every other
+    /// task; off the runtime a 1 ms ticker keeps running (#1709).
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_variants_do_not_block_the_runtime() {
+        let (h, n) = ticks_while(hash_async("correct horse battery staple")).await;
+        assert!(n >= 2, "hash_async stalled the runtime ({n} ticks)");
+        let h = h.unwrap();
+        let (ok, n) = ticks_while(verify_async("correct horse battery staple", &h)).await;
+        assert!(ok.unwrap());
+        assert!(n >= 2, "verify_async stalled the runtime ({n} ticks)");
+        let (r, n) = ticks_while(verify_dummy_async("nobody")).await;
+        assert!(r.is_ok());
+        assert!(n >= 2, "verify_dummy_async stalled the runtime ({n} ticks)");
+    }
+
+    #[tokio::test]
+    async fn off_runtime_resumes_the_original_panic() {
+        struct Marker;
+        let err = tokio::spawn(off_runtime(|| std::panic::panic_any(Marker)))
+            .await
+            .unwrap_err();
+        assert!(err.into_panic().downcast::<Marker>().is_ok());
+    }
+
+    /// A full queue answers `Busy` after the wait instead of queueing
+    /// forever, and a freed slot is usable again (#1732).
+    #[tokio::test]
+    async fn a_full_queue_times_out_then_recovers() {
+        let wait = std::time::Duration::from_millis(20);
+        let q = HashQueue::new(1);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let hold = tokio::spawn({
+            let slots = std::sync::Arc::clone(&q.slots);
+            async move {
+                let _p = slots.acquire_owned().await.unwrap();
+                tokio::task::spawn_blocking(move || rx.recv())
+                    .await
+                    .unwrap()
+            }
+        });
+        while q.slots.available_permits() > 0 {
+            tokio::task::yield_now().await;
+        }
+        let started = std::time::Instant::now();
+        let r = q.run(HashLane::Login, wait, || ()).await;
+        assert!(matches!(r, Err(PasswordError::Busy)));
+        assert!(started.elapsed() >= wait);
+        tx.send(()).unwrap();
+        hold.await.unwrap().unwrap();
+        assert!(q.run(HashLane::Login, wait, || 7).await.is_ok());
+    }
+
+    /// Credential jobs holding their whole share leave the rest of the
+    /// slots to logins.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn credential_jobs_cannot_take_every_slot() {
+        let wait = std::time::Duration::from_millis(50);
+        let q = std::sync::Arc::new(HashQueue::new(4));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let hogs: Vec<_> = (0..6)
+            .map(|_| {
+                let (q, rx) = (std::sync::Arc::clone(&q), std::sync::Arc::clone(&rx));
+                tokio::spawn(async move {
+                    q.run(
+                        HashLane::Credential,
+                        std::time::Duration::from_secs(5),
+                        move || {
+                            let _ = rx.lock().unwrap().recv();
+                        },
+                    )
+                    .await
+                })
+            })
+            .collect();
+        while q.credential.available_permits() > 0 {
+            tokio::task::yield_now().await;
+        }
+        let r = q.run(HashLane::Credential, wait, || ()).await;
+        assert!(matches!(r, Err(PasswordError::Busy)), "share is capped");
+        assert!(q.run(HashLane::Login, wait, || 1).await.is_ok());
+        for _ in 0..6 {
+            tx.send(()).unwrap();
+        }
+        for h in hogs {
+            assert!(h.await.unwrap().is_ok());
+        }
     }
 
     #[test]

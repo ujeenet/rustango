@@ -107,7 +107,7 @@ where
     let mut op = crate::tenancy::Operator {
         id: Auto::default(),
         username: username.clone(),
-        password_hash: crate::tenancy::password::hash(&plain)?,
+        password_hash: crate::tenancy::password::hash_async(&plain).await?,
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
@@ -214,7 +214,7 @@ where
         TenancyError::Validation(format!("create-user: no tenant with slug `{slug}`"))
     })?;
 
-    let hash = crate::tenancy::password::hash(&plain)?;
+    let hash = crate::tenancy::password::hash_async(&plain).await?;
 
     // v0.38 — open a tenant-scoped Pool enum (handles schema-mode on
     // PG, database-mode on any backend). Then drive the read/write
@@ -443,7 +443,7 @@ where
         };
         (p, false)
     };
-    let hash = crate::tenancy::password::hash(&plain)?;
+    let hash = crate::tenancy::password::hash_async(&plain).await?;
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
     // v0.38 — tri-dialect UPDATE. Bind chrono::Utc::now() instead of
     // SQL `NOW()` so the same code works on PG/MySQL (NOW()) and
@@ -547,7 +547,7 @@ where
         };
         (p, false)
     };
-    let hash = crate::tenancy::password::hash(&plain)?;
+    let hash = crate::tenancy::password::hash_async(&plain).await?;
     // Route the operator-password rotate through the ORM so the SQL
     // gets per-dialect placeholders + identifier quoting + `NOW()` is
     // a value we set on the Rust side (chrono::Utc::now()) instead of
@@ -664,12 +664,12 @@ where
             "change-password: no user `{username}` in tenant `{slug}`"
         )));
     };
-    if !crate::tenancy::password::verify(&cur_plain, &user.password_hash)? {
+    if !crate::tenancy::password::verify_async(&cur_plain, &user.password_hash).await? {
         return Err(TenancyError::Validation(
             "change-password: current password did not match".into(),
         ));
     }
-    user.password_hash = crate::tenancy::password::hash(&new_plain)?;
+    user.password_hash = crate::tenancy::password::hash_async(&new_plain).await?;
     user.password_changed_at = Some(chrono::Utc::now());
     user.save_pool(&pool).await?;
     writeln!(
@@ -767,12 +767,12 @@ where
             "change-operator-password: no operator named `{username}`"
         ))
     })?;
-    if !crate::tenancy::password::verify(&cur_plain, &op.password_hash)? {
+    if !crate::tenancy::password::verify_async(&cur_plain, &op.password_hash).await? {
         return Err(TenancyError::Validation(
             "change-operator-password: current password did not match".into(),
         ));
     }
-    op.password_hash = crate::tenancy::password::hash(&new_plain)?;
+    op.password_hash = crate::tenancy::password::hash_async(&new_plain).await?;
     op.password_changed_at = Some(chrono::Utc::now());
     op.save_pool(&registry).await?;
     writeln!(w, "password changed for operator `{username}`")?;

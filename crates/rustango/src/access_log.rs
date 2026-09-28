@@ -221,16 +221,19 @@ impl AccessLogLayer {
 /// a build failure.
 #[cfg(any(feature = "manage", feature = "tenancy"))]
 #[must_use]
-pub(crate) fn mount_observability(router: Router, access_log: Option<AccessLogLayer>) -> Router {
+pub(crate) fn mount_observability(
+    router: Router,
+    access_log: Option<AccessLogLayer>,
+    redact: Vec<String>,
+) -> Router {
     #[cfg(feature = "admin")]
     {
         use crate::request_id::RequestIdRouterExt as _;
-        let span = match access_log.as_ref() {
-            Some(l) => {
-                crate::tracing_layer::TracingLayer::new().redact(l.redact_query_params.clone())
-            }
-            None => crate::tracing_layer::TracingLayer::new(),
-        };
+        // One arm, not two. The span used to fall back to the default
+        // list whenever the access log was off, so `[logging]
+        // access_log = false` silently narrowed an `[audit]` setting
+        // and a configured param was logged in clear text (#1610).
+        let span = crate::tracing_layer::TracingLayer::new().redact(redact);
         let router = router.request_id(crate::request_id::RequestIdLayer::default());
         let router = match access_log {
             Some(l) => router.access_log(l),
@@ -705,6 +708,27 @@ mod observability_mount_tests {
     /// a handler's own `tracing::info!` rendered.
     #[cfg(feature = "admin")]
     async fn captured_handler_line(access_log: Option<AccessLogLayer>) -> (StatusCode, String) {
+        captured_handler_line_redacting(access_log, default_redact_params()).await
+    }
+
+    /// As above, with an explicit span redact list — the thing that
+    /// used to be unreachable when the access log was off (#1610).
+    #[cfg(feature = "admin")]
+    async fn captured_handler_line_redacting(
+        access_log: Option<AccessLogLayer>,
+        redact: Vec<String>,
+    ) -> (StatusCode, String) {
+        captured_handler_line_for("/", access_log, redact).await
+    }
+
+    /// As above for a specific URI, so a test can put a secret in the
+    /// query string and assert it does not reach the span.
+    #[cfg(feature = "admin")]
+    async fn captured_handler_line_for(
+        uri: &str,
+        access_log: Option<AccessLogLayer>,
+        redact: Vec<String>,
+    ) -> (StatusCode, String) {
         let buf = Buf::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(buf.clone())
@@ -721,14 +745,53 @@ mod observability_mount_tests {
                 }),
             ),
             access_log,
+            redact,
         );
         let resp = app
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .expect("router answers");
         let status = resp.status();
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         (status, out)
+    }
+
+    /// Turning the access log off must not narrow the span's redact
+    /// list to the defaults (#1610).
+    ///
+    /// The two settings live in different config sections, so
+    /// `[logging] access_log = false` silently disarmed an `[audit]
+    /// redact_query_params` entry — a control that reads as on in the
+    /// configuration and is off in the process.
+    ///
+    /// Asserts on the rendered span, not on the list: the list being
+    /// right and the span not using it is the failure this exists for.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn the_span_honours_configured_redaction_with_the_log_off() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (status, out) = captured_handler_line_for(
+            "/?invite_token=s3cr3t-invite",
+            // access log OFF — the path that used to fall back.
+            None,
+            vec!["invite_token".to_owned()],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            out.contains("in handler"),
+            "the handler's own event never rendered, so this proves nothing:\n{out}"
+        );
+        assert!(
+            out.contains("invite_token"),
+            "the span did not record the query at all, so the redaction \
+             assertion below would pass for the wrong reason:\n{out}"
+        );
+        assert!(
+            !out.contains("s3cr3t-invite"),
+            "a configured redact param leaked in clear text on the span:\n{out}"
+        );
     }
 
     /// `[logging] access_log = false` must not take the **span** with

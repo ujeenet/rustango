@@ -379,6 +379,9 @@ COPY config /app/config
 RUN useradd --uid 10001 --create-home app && chown -R 10001 /app
 USER 10001
 WORKDIR /app
+# A release image runs the prod tier. Unset, the dev tier would load and
+# bind 127.0.0.1, which the port mapping cannot reach.
+ENV RUSTANGO_ENV=prod
 EXPOSE 8080
 # `.with_health()` mounts /health; drop this line if you removed it.
 HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=12 \
@@ -672,6 +675,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready hit the registry pool
+        // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
+        // then RUSTANGO__* env overrides. Without it the files the
+        // scaffolder writes are inert, and the login, admin and operator
+        // console send no security headers.
+        .with_settings_from_env()
         .run()
         .await
 }
@@ -890,6 +898,11 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # argon2_iterations  = 2
 # lockout_threshold  = 5
 # lockout_duration_secs = 900
+# login_ip_limit     = 20       # failed logins per IP per window
+# login_ip_window_secs = 60
+# login_global_limit = 600      # failed logins across all clients, per login, per window
+# login_global_window_secs = 60
+# hash_wait_ms       = 5000     # wait for a hashing slot before 503
 
 # [auth.jwt]
 # access_ttl_secs   = 900       # 15 min
@@ -959,6 +972,8 @@ bind = "127.0.0.1:8080"
 # browser into HSTS.
 headers_preset    = "dev"
 hsts_max_age_secs = 0
+# Plain-HTTP dev server: a `Secure` login cookie would be dropped.
+secure_cookies    = false
 
 [brand]
 # Make the dev tier visually distinguishable from prod.

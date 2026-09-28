@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.57"                                        # Postgres (the default backend)
+//! rustango = "0.58"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.57", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.57", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.58", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.58", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -152,6 +152,9 @@
 //! feature matrix and guides.
 //! [`examples/cookbook_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/cookbook_blog)
 //! is a runnable multi-tenant blog with one chapter per feature.
+
+// Sync argon2 calls in `clippy.toml` must go through the `*_async` variants (#1709).
+#![deny(clippy::disallowed_methods)]
 
 // Lets `::rustango::...` paths emitted by the proc-macro resolve to
 // ourselves inside this crate.
@@ -500,14 +503,12 @@ pub mod mailable;
 /// [`jsonapi::to_resource`] + [`jsonapi::to_collection`].
 pub mod jsonapi;
 
-/// Shared HMAC-SHA256 / SHA-256 / hex primitives, plus `constant_time_eq`.
+/// Shared HMAC-SHA256 / SHA-256 / hex primitives, plus `constant_time_compare`.
 /// Internal: for raw HMAC, depend on `hmac` + `sha2` directly. The cfg list
 /// covers every feature that needs one of these primitives.
 #[cfg(any(
-    feature = "hmac-auth",
+    feature = "_signing",
     feature = "storage-s3",
-    feature = "signed_url",
-    feature = "jwt",
     feature = "csrf",
     feature = "totp",
 ))]
@@ -796,7 +797,8 @@ pub mod webhook;
 pub mod webhook_delivery;
 
 /// Standardized API error responses. See [`api_errors::ApiError`].
-#[cfg(feature = "admin")]
+/// Needs only axum, so every HTTP surface can answer in this shape.
+#[cfg(feature = "_axum")]
 pub mod api_errors;
 
 /// Generic API key generation + verification (argon2id-hashed).
@@ -860,6 +862,14 @@ pub mod logging;
 /// Cache-backed counter + lock flag. See [`account_lockout::Lockout`].
 #[cfg(feature = "cache")]
 pub mod account_lockout;
+
+#[cfg(any(feature = "cache", feature = "passwords"))]
+pub(crate) mod boot_slot;
+
+/// Per-IP, per-account and global limits in front of every built-in
+/// password login. See [`login_throttle::LoginThrottle`].
+#[cfg(feature = "admin")]
+pub mod login_throttle;
 
 /// Broadcast event bus — fan-out for SSE / WebSocket / signal-driven push.
 /// See [`sse::EventBus`].
@@ -1063,12 +1073,7 @@ pub mod dates;
 /// Value signer — `signing::Signer::sign(value)` and
 /// `signing::TimestampSigner` with a TTL. Use it for signed payloads such
 /// as password reset tokens, magic links and signed cookies.
-#[cfg(any(
-    feature = "hmac-auth",
-    feature = "storage-s3",
-    feature = "signed_url",
-    feature = "jwt",
-))]
+#[cfg(feature = "_signing")]
 pub mod signing;
 
 /// `Set-Cookie` builder — `Cookie::new(name, value)
@@ -1115,7 +1120,8 @@ pub mod password_hashers;
 /// Signed-cookie session primitives — an HMAC-SHA256 key wrapper and a
 /// `sign(secret, msg)` helper, shared by every layer that sets a signed
 /// cookie so the crypto lives in one place. See [`session::SessionSecret`].
-#[cfg(any(feature = "admin", feature = "tenancy"))]
+/// `csrf` too: its cookie reads `session::secure_cookies` (#1608).
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
 pub mod session;
 
 /// Graceful-shutdown signal handling — SIGINT **and** SIGTERM in one place,

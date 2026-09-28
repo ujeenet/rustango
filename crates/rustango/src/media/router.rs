@@ -109,6 +109,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+
+use crate::api_errors::ApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -849,13 +851,10 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                                 "refused: upload request body could not be read within \
                                  the gate's limit"
                             );
-                            return (
-                                StatusCode::FORBIDDEN,
-                                Json(serde_json::json!({
-                                    "error": "upload request body too large to authorize"
-                                })),
+                            return ApiError::forbidden(
+                                "upload request body too large to authorize",
                             )
-                                .into_response();
+                            .into_response();
                         };
                         // A body that does not parse is still an upload
                         // request. It reaches the policy with empty
@@ -879,12 +878,7 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                             path = %parts.uri.path(),
                             "refused: no route in the media table matches"
                         );
-                        return (
-                            StatusCode::FORBIDDEN,
-                            Json(
-                                serde_json::json!({ "error": "not a recognised media operation" }),
-                            ),
-                        )
+                        return ApiError::forbidden("not a recognised media operation")
                             .into_response();
                     };
                     let decision = auth.authorize(&parts, action.clone()).await;
@@ -902,17 +896,13 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                         // 401 means "authenticate", 403 means "you may
                         // not". A token client treats 401 as its cue to
                         // refresh.
-                        let (status, message) = match decision {
+                        return match decision {
                             MediaDecision::Unauthenticated => {
-                                (StatusCode::UNAUTHORIZED, "authentication required")
+                                ApiError::unauthorized("authentication required")
                             }
-                            _ => (
-                                StatusCode::FORBIDDEN,
-                                "not authorized for this media operation",
-                            ),
-                        };
-                        return (status, Json(serde_json::json!({ "error": message })))
-                            .into_response();
+                            _ => ApiError::forbidden("not authorized for this media operation"),
+                        }
+                        .into_response();
                     }
                     next.run(axum::extract::Request::from_parts(parts, body))
                         .await
@@ -1234,17 +1224,14 @@ struct ContentsQuery {
 
 impl IntoResponse for MediaError {
     fn into_response(self) -> Response {
-        let (status, msg) = match &self {
-            MediaError::UnknownDisk(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            MediaError::Storage(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            MediaError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            MediaError::Other(m) if m.contains("not found") => {
-                (StatusCode::NOT_FOUND, self.to_string())
-            }
-            MediaError::Other(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+        let status = match &self {
+            MediaError::UnknownDisk(_) => StatusCode::BAD_REQUEST,
+            MediaError::Storage(_) => StatusCode::BAD_GATEWAY,
+            MediaError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MediaError::Other(m) if m.contains("not found") => StatusCode::NOT_FOUND,
+            MediaError::Other(_) => StatusCode::BAD_REQUEST,
         };
-        let body = serde_json::json!({"error": msg});
-        (status, Json(body)).into_response()
+        ApiError::logged(status, "media", &self).into_response()
     }
 }
 

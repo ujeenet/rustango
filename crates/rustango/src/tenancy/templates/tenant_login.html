@@ -139,6 +139,9 @@
     <label for="password">Password</label>
     <input type="password" id="password" name="password" autocomplete="current-password" required>
     <input type="hidden" name="next" value="{{ next }}">
+    {# Login CSRF: without this an attacker can sign the victim's
+       browser into an attacker-controlled account (#1607). #}
+    {% if csrf_token %}<input type="hidden" name="_csrf" value="{{ csrf_token }}">{% endif %}
     <button type="submit">Sign in</button>
     {% if sso_enabled %}
     <div class="sso-divider"><span>or</span></div>

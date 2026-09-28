@@ -879,6 +879,10 @@ async fn migrate<W: Write>(
     // migrations are applied — the user never hand-creates it. Cheap and
     // safe to re-run on every `migrate`.
     crate::audit::ensure_table_pool(pool).await?;
+    // The admin login fails closed on a missing TOTP table (#1644), so a
+    // fresh install needs it before the first login, not at enrollment.
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    crate::admin::totp_store::ensure_table(pool).await?;
 
     // #1464 — rows written by the pre-fix SQLite default are stored as
     // `YYYY-MM-DD HH:MM:SS` and do not compare or sort against a
@@ -1463,11 +1467,14 @@ pub fn append_data_op(
     reverse_sql: Option<&str>,
 ) -> Result<(), MigrateError> {
     let path = file_path(dir, migration_name);
-    let mut mig = file::load(&path).map_err(|_| {
-        MigrateError::Validation(format!(
-            "migration `{migration_name}` not found at {}",
-            path.display()
-        ))
+    let mut mig = file::load(&path).map_err(|e| match e {
+        MigrateError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            MigrateError::Validation(format!(
+                "migration `{migration_name}` not found at {}",
+                path.display()
+            ))
+        }
+        other => other,
     })?;
     mig.forward.push(Operation::Data(DataOp {
         sql: sql.to_owned(),
@@ -4506,7 +4513,7 @@ pub struct DeployAuditFindings {
 /// var (`SECRET_KEY` — never read by the framework). The
 /// framework reads `RUSTANGO_SESSION_SECRET` for HMAC-signing
 /// the operator-console + tenant-admin cookies AND the JWT
-/// payloads issued by `auth_routes::jwt_router` (#81). Same key
+/// payloads issued by `auth_routes::JwtAuth` (#81). Same key
 /// covers both surfaces.
 pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindings) {
     // RUSTANGO_ENV — production should be explicitly tagged.
@@ -5768,7 +5775,7 @@ version = "0.1.0"
 
 [dependencies]
 name = "not-this-one"
-rustango = { version = "0.57", features = ["batteries"] }
+rustango = { version = "0.58", features = ["batteries"] }
 "#;
         assert_eq!(
             package_name_from_cargo_toml(manifest).as_deref(),

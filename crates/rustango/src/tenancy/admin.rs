@@ -279,7 +279,12 @@ where
             .unwrap_or_else(branding::default_brand_storage);
         let routes = self.routes;
 
-        Router::new().fallback(move |req: Request<Body>| {
+        // CSRF on every tenant admin write (#1713): tenant hosts are
+        // same-site, so `SameSite=Lax` lets `t02` post to `t01`. Same
+        // pair as the console: the layer checks token and Origin, and
+        // inside it `csrf_context` sets the token every form renders.
+        // `layer`, not `route_layer`: everything here is the fallback.
+        let router = Router::new().fallback(move |req: Request<Body>| {
             let pools = pools.clone();
             let registry_url = registry_url.clone();
             let resolver = resolver.clone();
@@ -308,7 +313,12 @@ where
                 )
                 .await
             }
-        })
+        });
+        router
+            .layer(axum::middleware::from_fn(
+                crate::admin::csrf_context::csrf_context,
+            ))
+            .layer(crate::forms::csrf::layer())
     }
 }
 
@@ -351,8 +361,9 @@ where
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
         Err(e) => {
-            warn!(target: "rustango::tenancy::admin", error = %e, "resolver error");
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            // Logged, not sent: the resolver error can name the registry host.
+            let body = crate::error::server_error_body("tenancy::admin::resolve", &e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
         }
     };
 
@@ -362,13 +373,9 @@ where
     let pool = match pools.scoped_pool_dyn(&org).await {
         Ok(p) => p,
         Err(e) => {
-            warn!(
-                target: "rustango::tenancy::admin",
-                slug = %org.slug,
-                error = %e,
-                "tenant pool build failed",
-            );
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            // Before the session check, and the text can name the tenant DB host.
+            let body = crate::error::server_error_body("tenancy::admin::pool", &e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
         }
     };
 
@@ -455,6 +462,7 @@ where
                             brand_storage,
                             routes,
                             parts.uri.query(),
+                            &parts.headers,
                             &pool,
                             &registry_pool,
                         )
@@ -462,13 +470,24 @@ where
                         .into_response()
                     };
                     #[cfg(not(feature = "admin-sso"))]
-                    let resp = login_form(&org, cfg, brand_storage, routes, parts.uri.query())
-                        .await
-                        .into_response();
+                    let resp = login_form(
+                        &org,
+                        cfg,
+                        brand_storage,
+                        routes,
+                        parts.uri.query(),
+                        &parts.headers,
+                    )
+                    .await
+                    .into_response();
                     resp
                 }
                 axum::http::Method::POST => {
-                    login_submit(&org, cfg, &pool, routes, parts.headers, body).await
+                    let ip = crate::login_throttle::ClientIp::from_parts(
+                        &parts.extensions,
+                        &parts.headers,
+                    );
+                    login_submit(&org, cfg, &pool, routes, ip, parts.headers, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -714,9 +733,8 @@ async fn validate_session(
         Err(_) => return SessionCheck::Anonymous,
     };
     // An impersonation cookie from the operator console grants tenant
-    // superuser. Re-check the operator still exists and is active on
-    // every request: otherwise a deactivated operator keeps full admin
-    // for the rest of the cookie's lifetime.
+    // superuser. Re-check on every request that the operator still
+    // exists, is active and has the same password.
     if let Some(operator_id) = payload.imp {
         let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
             .where_(super::auth::Operator::id.eq(operator_id))
@@ -735,13 +753,24 @@ async fn validate_session(
             }
         };
         return match ops.into_iter().next() {
-            Some(op) if op.active => SessionCheck::Authenticated {
-                is_superuser: true,
-                user_id: 0,
-                username: String::new(),
-                impersonated_by: Some(operator_id),
-            },
-            // Operator gone or deactivated → drop the impersonation.
+            Some(op)
+                if op.active
+                    && super::session::survives_password_change(
+                        &cfg.secret,
+                        &payload.pwf,
+                        payload.iat,
+                        &op.password_hash,
+                        op.password_changed_at,
+                    ) =>
+            {
+                SessionCheck::Authenticated {
+                    is_superuser: true,
+                    user_id: 0,
+                    username: String::new(),
+                    impersonated_by: Some(operator_id),
+                }
+            }
+            // Operator gone, deactivated or password changed → drop it.
             _ => SessionCheck::Anonymous,
         };
     }
@@ -770,13 +799,15 @@ async fn validate_session(
     if !user.active {
         return SessionCheck::Anonymous;
     }
-    // v0.28.4 — invalidate sessions issued before the latest password
-    // rotation. `password_changed_at IS NULL` means the account
-    // predates v0.28.4 and never rotated; we don't enforce.
-    if let Some(ts) = user.password_changed_at {
-        if payload.iat < ts.timestamp() {
-            return SessionCheck::Anonymous;
-        }
+    // Invalidate sessions minted before the latest password change.
+    if !super::session::survives_password_change(
+        &cfg.secret,
+        &payload.pwf,
+        payload.iat,
+        &user.password_hash,
+        user.password_changed_at,
+    ) {
+        return SessionCheck::Anonymous;
     }
     SessionCheck::Authenticated {
         is_superuser: user.is_superuser,
@@ -803,9 +834,10 @@ async fn login_form(
     brand_storage: &BoxedStorage,
     routes: &super::routes::RouteConfig,
     query: Option<&str>,
+    headers: &HeaderMap,
     #[cfg(feature = "admin-sso")] tenant_pool: &crate::sql::Pool,
     #[cfg(feature = "admin-sso")] registry_pool: &crate::sql::Pool,
-) -> axum::response::Html<String> {
+) -> Response {
     let mut next: Option<String> = None;
     let mut error: Option<String> = None;
     if let Some(q) = query {
@@ -861,10 +893,29 @@ async fn login_form(
         ctx.insert("sso_enabled", &!providers.is_empty());
         ctx.insert("sso_providers", &providers);
     }
+    // Seed the double-submit CSRF token so the first GET already
+    // carries one; without it the first POST would always fail
+    // (#1607). The cookie rides on this response.
+    // Under `build()` the request's token (and its cookie) comes from
+    // `csrf_context`; minting a second one here would not match (#1713).
+    #[cfg(feature = "csrf")]
+    let set_cookie = match crate::admin::session::current_csrf_token() {
+        Some(token) => {
+            ctx.insert("csrf_token", &token);
+            None
+        }
+        None => {
+            let (token, cookie) =
+                crate::forms::csrf::ensure_token(headers, crate::forms::csrf::CSRF_COOKIE);
+            ctx.insert("csrf_token", &token);
+            cookie
+        }
+    };
+
     // v0.27.5 — log render errors instead of silently rendering an
     // empty body. The previous `unwrap_or_default()` hid a real
     // template-include resolution bug from the operator.
-    axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
+    let html = axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
         Ok(html) => html,
         Err(e) => {
             tracing::error!(
@@ -878,7 +929,16 @@ async fn login_form(
              server logs for the underlying Tera error.</p></body></html>"
                 .to_owned()
         }
-    })
+    });
+
+    let mut resp = html.into_response();
+    #[cfg(feature = "csrf")]
+    if let Some(cookie) = set_cookie {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+            resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    resp
 }
 
 #[derive(serde::Deserialize)]
@@ -887,6 +947,8 @@ struct LoginSubmitForm {
     password: String,
     #[serde(default)]
     next: Option<String>,
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 async fn login_submit(
@@ -894,10 +956,12 @@ async fn login_submit(
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
+    ip: crate::login_throttle::ClientIp,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     use crate::core::Column as _;
+    use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
         meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
@@ -915,6 +979,29 @@ async fn login_submit(
         Err(_) => return (StatusCode::BAD_REQUEST, "malformed login form").into_response(),
     };
     let next = sanitize_next(form.next.as_deref());
+
+    // Login CSRF (#1607): reject before the user lookup, so a forged
+    // POST costs nothing and cannot probe usernames by timing.
+    // `SameSite=Lax` does not cover this — login CSRF sets a *new*
+    // session rather than replaying an existing one, which is what
+    // makes "the victim is now inside the attacker's account" possible.
+    #[cfg(feature = "csrf")]
+    if !crate::forms::csrf::verify_form_token(&headers, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF token missing or mismatched").into_response();
+    }
+
+    // Rate limits and the account lock, before the lookup (#1609).
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &ip,
+            &form.username,
+        )
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
 
     // v0.38 — auth check via the tri-dialect ORM. The query targets
     // the tenant's `rustango_users` table on the user-supplied pool;
@@ -953,40 +1040,31 @@ async fn login_submit(
         // wasn't covered by the authenticate_*_pool timing fix); spend a
         // verify's worth of work on the unknown-user path so timing
         // doesn't reveal whether the username exists.
-        super::password::verify_dummy(&form.password);
+        if super::password::verify_dummy_async(&form.password)
+            .await
+            .is_err()
+        {
+            return LoginRefused::Busy.into_response();
+        }
+        attempt.failed().await;
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
-    let uid: i64 = user.id.get().copied().unwrap_or(0);
-
-    // Audit M1 (console) — per-account brute-force lockout, on by
-    // default, keyed by tenant slug + resolved user id (no
-    // arbitrary-name DoS, no cross-tenant id collision). A locked
-    // account is rejected before the password verify.
-    #[cfg(feature = "cache")]
-    let lock_key = format!("tenant:{}:{}", org.slug, uid);
-    #[cfg(feature = "cache")]
-    if uid != 0 && crate::account_lockout::shared().is_locked(&lock_key).await {
-        fire_failed(AuthFailureReason::InvalidCredentials).await;
-        return bad_creds();
+    if let Err(refused) = attempt.resolve(&user.username).await {
+        return refused.into_response();
     }
+    let uid: i64 = user.id.get().copied().unwrap_or(0);
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
-    let ok = matches!(
-        super::password::verify(&form.password, &user.password_hash),
-        Ok(true)
-    );
+    let ok = match super::password::verify_async(&form.password, &user.password_hash).await {
+        Ok(ok) => ok,
+        Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
+        Err(_) => false,
+    };
 
     if !user.active || !ok || uid == 0 {
-        // Audit M1 — count the failure against the resolved id (existing
-        // accounts only).
-        #[cfg(feature = "cache")]
-        if uid != 0 {
-            let _ = crate::account_lockout::shared()
-                .record_failure(&lock_key)
-                .await;
-        }
+        attempt.failed().await;
         let reason = if !user.active {
             AuthFailureReason::Inactive
         } else {
@@ -996,12 +1074,15 @@ async fn login_submit(
         return bad_creds();
     }
 
-    // Audit M1 — successful login clears the failure counter + any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared().clear(&lock_key).await;
+    attempt.succeeded().await;
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
-    let payload = TenantSessionPayload::new(uid, &org.slug, ttl_secs);
+    let payload = TenantSessionPayload::new(
+        uid,
+        &org.slug,
+        ttl_secs,
+        super::session::PasswordFingerprint::of(&cfg.secret, &user.password_hash),
+    );
     let cookie_value = tenant_console::encode(&cfg.secret, &payload);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")
@@ -1093,7 +1174,7 @@ async fn redeem_impersonation_handoff(
     // so browsers accept it on localhost too.
     let ttl_secs = i64::try_from(routes.impersonation_ttl.as_secs())
         .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
-    let session = TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs);
+    let session = TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs, payload.pwf);
     let cookie_value = tenant_console::encode(&cfg.secret, &session);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")
@@ -1236,6 +1317,9 @@ fn change_password_form(
     ctx.insert("admin_url", &routes.admin_url);
     ctx.insert("logout_url", &routes.logout_url);
     ctx.insert("static_url", &routes.static_url);
+    if let Some(token) = crate::admin::session::current_csrf_token() {
+        ctx.insert("csrf_token", &token);
+    }
     axum::response::Html(match cfg.tera.render("tenant_change_password.html", &ctx) {
         Ok(html) => html,
         Err(e) => {
@@ -1311,12 +1395,22 @@ async fn change_password_submit(
     let Some(mut user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
-    let ok = super::password::verify(&form.current_password, &user.password_hash).unwrap_or(false);
+    let ok = match super::password::verify_async(&form.current_password, &user.password_hash).await
+    {
+        Ok(ok) => ok,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
+        Err(_) => false,
+    };
     if !ok {
         return redir_err("Current password did not match.");
     }
-    let new_hash = match super::password::hash(&form.new_password) {
+    let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(e) => {
             return redir_err(&format!("hash failed: {e}"));
         }
@@ -1357,28 +1451,11 @@ fn rustango_icon_png_response() -> Response {
 }
 
 fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for piece in raw.split(';') {
-        let piece = piece.trim();
-        if let Some(value) = piece.strip_prefix(&format!("{name}=")) {
-            return Some(value.to_owned());
-        }
-    }
-    None
+    crate::cookies::cookie_from_headers(headers, name).map(str::to_owned)
 }
 
-fn urlencoding_lite(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
+// The crate's one query-value encoder (#1663); it also escapes `/`.
+use crate::url_codec::url_encode as urlencoding_lite;
 
 // Percent-decoder consolidated into [`crate::url_codec`] — same
 // behavior the local `url_decode_lite` had (lossy UTF-8 conversion).
@@ -1520,10 +1597,12 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
             | branding::BrandError::InvalidSlug
             | branding::BrandError::InvalidFilename,
         ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => {
-            warn!(target: "rustango::tenancy::admin", error = %e, "brand asset");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        // Unauthenticated route; a storage error can name the bucket or path.
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::error::server_error_body("tenancy::admin::brand_asset", &e),
+        )
+            .into_response(),
     }
 }
 
@@ -1532,6 +1611,58 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
 /// `Location` — rather than `urls::url_has_allowed_host_and_scheme`,
 /// which nothing in this codebase calls and which is where the
 /// original fix landed.
+/// A resolver failure is a 500 whose body withholds the driver text (#1684).
+#[cfg(all(test, feature = "sqlite"))]
+mod resolver_error_tests {
+    use super::*;
+    use crate::tenancy::TenancyError;
+
+    struct Failing;
+
+    #[async_trait::async_trait]
+    impl OrgResolver for Failing {
+        async fn resolve(
+            &self,
+            _parts: &axum::http::request::Parts,
+            _registry: &crate::sql::Pool,
+        ) -> Result<Option<Org>, TenancyError> {
+            Err(TenancyError::Resolution(
+                "could not reach registry-db:5432".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_500_withholds_the_resolver_text() {
+        let _env = crate::error::test_env::lock();
+        let registry = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pools = TenantPools::<sqlx::Sqlite>::new(registry);
+        let storage: BoxedStorage = Arc::new(crate::storage::InMemoryStorage::new());
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let resp = handle_request(
+            req,
+            &pools,
+            "",
+            &Failing,
+            &None,
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &storage,
+            &super::super::routes::RouteConfig::default(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("registry-db"), "{text}");
+    }
+}
+
 #[cfg(test)]
 mod sanitize_next_tests {
     use super::sanitize_next_with_routes;

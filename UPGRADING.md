@@ -150,6 +150,339 @@ untouched.
 
 ## Unreleased
 
+## 0.58.0
+
+### Bare admin logout needs a CSRF token
+
+A custom form posting to the bare admin `/logout` must send `_csrf`
+(or `X-CSRF-Token`); without it the POST gets 403.
+
+### ViewSet and template views hide scoped-out rows
+
+A model with a `global_scope` served through `ViewSet` or the template
+views now hides the scoped-out rows there too, and a PK request for one
+is a 404 (#1746). An endpoint that must reach them should use
+`Model::objects().without_global_scopes()` in its own handler. A
+ViewSet PUT/PATCH that moves its row out of a scope or filter backend
+answers `204 No Content`; a create whose row lands outside answers
+`201` with no body (`null` at that index in a bulk create).
+
+### SSO signs in by link, not by email
+
+Existing SSO users are refused until they are linked. Run
+`makemigrations` + `migrate`: it adds `allow_email_link` to
+`rustango_sso_providers` / `rustango_shared_sso_providers` and creates
+`rustango_sso_links` (until then email linking reads as off and SSO is
+refused). Then either turn on `allow_email_link` (a normal user is linked
+on the next login; for a shared provider it applies to every tenant), or
+have a superuser add an `SsoLink` row. Superusers, staff and every
+bare-admin account need the row: `provider_source` `tenant`/`shared`/
+`admin`, `provider_id` the provider row id, `issuer` `kind` or
+`kind|issuer_url` without a trailing slash, `subject`, `user_id`; the
+admin computes `key_sha256`. The `sso refused` log
+line carries `provider_id`, `issuer` and `subject`. Only superusers can
+now add, change or delete `SsoProvider` and `SsoLink` rows in the admin.
+A read-only operator console can no longer change shared providers.
+(Pre-release soak databases built from an earlier 0.58.0 draft have a
+`subject_sha256` column instead of `key_sha256`: drop and re-migrate
+`rustango_sso_links`. Released versions never had it.)
+`find_or_provision_member(pool, email, profile, auto)` is now
+`(pool, &ProviderKey, allow_email_link, profile, auto)` and returns
+`MemberSignIn`: map `NotLinked` (an existing account, not linkable by
+email) apart from `NoAccount`, or every existing member looks "closed".
+
+### Bounded update/delete; `atomic()` hands out a lockable `AtomicTx`
+
+`update()` / `delete()` now honour `limit`, `offset` and `order_by`
+(#1666); a queryset that relied on them being ignored now touches fewer
+rows. With a composite or missing PK, or after `union()`, a bounded one
+returns `QueryError::BoundedDmlUnsupported`. The `atomic` closure now
+gets `&AtomicTx`, not `&mut PoolTx`: write `insert_tx(&mut *tx.lock().await?, &q)`.
+A nested `atomic(&pool, …)` on the same pool is now a savepoint on the
+outer transaction, and its `on_commit` callbacks wait for the outermost
+commit. Drop the `TxGuard` before nesting, or get `ExecError::NestedAtomic`.
+
+Nested writes that used to survive an outer rollback (an audit row, say)
+are now rolled back with it, silently. For an independent commit, use a
+different pool or `tokio::spawn`. Nesting is per pool object: pass the
+request's pool down instead of looking it up again. On MySQL before
+8.0.21 and MariaDB before 11.1 a bounded update/delete may scan the whole
+table. On MySQL, DDL / `TRUNCATE` / `LOCK TABLES` inside `atomic` commit
+implicitly: `atomic` returns `ExecError::AtomicEndedEarly` with writes
+already committed, so a retry can write twice. On MySQL and SQLite a
+failed statement undoes only itself; if the closure ignores it, the rest
+commits (PG aborts the whole transaction).
+
+### Admin TOTP codes are single use
+
+`rustango_admin_totp` gains a nullable `last_used_step` column (#1672).
+`totp_store::ensure_table`, or the first code accepted after the upgrade,
+adds it to an existing table. `AdminTotp` literals need the new field. A
+code that already signed in is refused, so users wait for the next one.
+`Lockout::counter_ttl` is now a fixed window from the first failure. The
+lockout cache keys changed, so failure counts in progress at the
+upgrade start again from zero; active locks are kept.
+
+### Page cache keys include the tenant
+
+Page cache keys now include the tenant (#1674), so cached pages miss
+once after upgrade.
+
+### The page cache stops caching outside the tenancy layer
+
+Under `tenancy`, a `CachePageLayer` that cannot see the tenant context
+no longer caches. Mount it on a router passed to the server builder,
+or add `.tenant_agnostic(true)` for routes that are the same for every
+tenant. A CDN in front must vary on the tenant header itself.
+
+### Long database cache keys change stored form
+
+`DatabaseCache` keys over 255 bytes, or ending in `#` plus 64 hex, are
+now stored hashed, so those entries miss once. Run `cache.clear()`
+after upgrading to drop the old rows.
+
+### The trusted client IP is the rightmost untrusted hop
+
+Behind `trust_proxies`, `TrustedRealIp` and `RealIp` are now the
+rightmost hop that is not a trusted proxy (#1673). List every proxy hop
+(CDN egress, load balancer, nginx) in `trust_proxies`, or the client IP
+will be one of your proxies. If your proxy sets `X-Real-IP`,
+`CF-Connecting-IP` or `Forwarded` instead of appending to XFF, name
+that strategy; `Auto` behind a trusted proxy reads only XFF.
+`BodyLimitLayer` now also limits bodies without `Content-Length`; over
+the limit a body extractor answers axum's plain 413.
+
+### Model shortcuts respect global scopes
+
+`Model::sum/avg/min/max/destroy/delete_where` now apply global scopes
+(#1675); to act on every row use `Model::objects().without_global_scopes()`.
+`delete_where` type-checks its value like `update_where`
+(`QueryError::TypeMismatch`). `audit::insert_one_with_audit` takes
+`(pool, &query, &mut model, |m| entry)` and sets the PK on `model`. The
+hidden `Model::__aggregate_one_pool` and
+`sql::model_shortcuts::aggregate_one_pool` are removed.
+
+### Logins are rate limited; lockout keys on the username
+
+A locked or throttled login answers `429` with `Retry-After` (#1609);
+it used to re-render the form. Lockout counts the submitted username,
+not the user id. Behind a reverse proxy set `RealIpLayer::trust_proxies`,
+or every client shares one per-IP bucket (20 a minute). The `admin`
+feature now enables `cache`. `passwords::verify_dummy_async` and
+`tenancy::password::verify_dummy_async` return `Result`; handle `Busy`
+as on the known-user path. New variants: `PasswordError::Busy`,
+`TenancyError::Busy`, `tenancy::auth_backends::AuthError::Refused`.
+`LoginThrottle::begin` takes a `&LoginScope`; `LoginThrottle::account`
+is gone (use `LoginScope::TenantBasic`); call
+`LoginAttempt::resolve(stored_username)` after the user lookup.
+`login_throttle::configure_shared`, `account_lockout::configure_shared`
+and `passwords::configure_hash_wait` now win over `[auth]` values in
+either order. `login_ip_limit` and `login_global_limit` count failed
+logins only; the global limit applies per scope. `ModelBackend` and
+`ApiKeyBackend` refuse without a `TenantSlug`.
+
+### Sessions carry a password fingerprint
+
+Bare-admin, tenant, member and operator sessions sign out once after
+the upgrade (#1338). `TenantSessionPayload::new`,
+`tenancy::session::SessionPayload::new` and `MemberSessionPayload::new`
+take a `PasswordFingerprint`
+(`PasswordFingerprint::of(&secret, &user.password_hash)`);
+`HandoffPayload::new` and `TenantSessionPayload::impersonation` take the
+operator's. `member_auth::mint_cookie` takes `&User` instead of `uid`
+and `password_hash`. `TestClient::force_login_tenant_user` and
+`force_login_operator` take `&User` / `&Operator`. `SessionPayload` is
+no longer `Copy`.
+
+### Idempotency keys stored before the upgrade are not replayed
+
+The key format changed (#1668). Add your auth layer after
+`.idempotency(..)` so the caller is resolved first. A keyed request
+with a body over `body_cap` (4 MiB by default) now gets `413`, with or
+without `Content-Length`; raise `body_cap` for large uploads.
+
+### `template_views` POSTs need the CSRF token; `urlize` escapes
+
+`template_views` POST routes return 403 without a token (#1669): put
+`{{ csrf_input | safe }}` in every form. The feature now enables `csrf`.
+`urlize` escapes its input, so stop passing it pre-escaped text or `&`
+shows as `&amp;amp;`.
+
+### Webhooks to private addresses are dead-lettered
+
+Receivers on localhost, private or link-local addresses (tests,
+intranet) now fail unless the subscription calls
+`.allow_private_targets(true)` (#1670). Delivery ignores
+`HTTP(S)_PROXY`. `WebhookEvent` gained a public field,
+`allow_private_targets`; a hand-built `WebhookEvent { .. }` must set it.
+
+### Admin inline helpers are removed
+
+`admin::inlines::apply_post` and `apply_post_generic` wrote child rows
+with no permission check (#1667). The admin's parent update applies
+inlines itself; there is no public replacement.
+
+### Check schema-mode tenants for FKs into `public`
+
+Tenants created before #1645 may have a framework FK into `public`. This
+lists them (your own cross-schema FKs are left out):
+
+```sql
+SELECT n.nspname, s.relname, c.conname
+FROM pg_constraint c
+JOIN pg_class s ON s.oid = c.conrelid
+JOIN pg_namespace n ON n.oid = s.relnamespace
+JOIN pg_class t ON t.oid = c.confrelid
+JOIN pg_namespace tn ON tn.oid = t.relnamespace
+WHERE c.contype = 'f' AND n.nspname <> 'public' AND tn.nspname = 'public'
+  AND s.relname IN ('rustango_api_keys', 'rustango_role_permissions',
+                    'rustango_user_roles', 'rustango_user_permissions');
+```
+
+Drop each one (`ALTER TABLE "<schema>"."<table>" DROP CONSTRAINT "<name>"`).
+For the three permission tables, `manage seed-permissions --slug <slug>`
+then re-creates them inside the tenant. For `rustango_api_keys`, re-add it
+by hand:
+
+```sql
+ALTER TABLE "<schema>"."rustango_api_keys"
+  ADD CONSTRAINT "rustango_api_keys_user_id_fkey" FOREIGN KEY ("user_id")
+  REFERENCES "<schema>"."rustango_users" ("id") ON DELETE CASCADE;
+```
+
+### Tenant admin and operator console POSTs need the CSRF token
+
+Every POST to the tenant admin (#1713) and the operator console (#1710)
+now needs the `rustango_csrf` cookie echoed as `_csrf` (form) or
+`X-CSRF-Token` (header), and a same-host `Origin`. Browsers get this
+from the rendered forms. A script or test that posts directly gets
+`403`: GET a page first to receive the cookie, then send it back.
+
+### Tenancy: `allowed_hosts` and the HTTPS redirect now cover `/health`
+
+Under `Cli::tenancy()` they now wrap every route (#1700). A load
+balancer that probes `/health` by IP needs that host in
+`allowed_hosts`, and `/health` in `secure_redirect_exempt` if it
+probes over plain HTTP. The single-tenant server already worked so.
+
+### Login returns 403 behind a proxy that rewrites Host
+
+The admin and tenant logins now require `Origin` to match `Host`
+(#1695); `csrf_trusted_origins` does not apply. Forward the original
+`Host` from the proxy. A custom handler calling `verify_form_token`
+gets the same check.
+
+### `strict` headers preset: `Referrer-Policy: same-origin`
+
+Was `no-referrer`, which makes browsers send `Origin: null` on every
+POST, so forms were refused (#1695). If you need `no-referrer`, set it
+per response on pages without forms.
+
+### `shortcuts::redirect_to_login` is removed
+
+Its arguments ran the other way round from the one that stays (#1663):
+
+```rust
+// before: shortcuts::redirect_to_login(next, "/login")
+rustango::auth_decorators::redirect_to_login("/login", "next", next)
+```
+
+### Query IR structs are `#[non_exhaustive]`
+
+`Filter`, `Assignment`, `SelectQuery`, `InsertQuery`, `BulkInsertQuery`,
+`UpdateQuery`, `BulkUpdateQuery`, `DeleteQuery`, `CountQuery` and
+`AggregateQuery` (#1661). A struct literal outside the crate, including
+`..SelectQuery::new(m)`, now fails with `E0639`; use `X::new(..)`:
+
+```rust
+let f = Filter::new("status", Op::Eq, "draft");
+let q = InsertQuery::new(Post::SCHEMA, cols, vals).returning(vec!["id"]);
+let mut s = SelectQuery::new(Post::SCHEMA).where_clause(f.into());
+s.limit = Some(10);
+```
+
+A destructuring pattern needs `..` (`let Filter { column, .. } = f`), or
+it fails with `E0638`. Reading and assigning fields still works. Code
+that only uses the `QuerySet` API or `#[derive(Model)]` is unaffected.
+`OrderClause`, `Join` and the other clause structs are not changed yet.
+
+### Schema structs are `#[non_exhaustive]`
+
+`FieldSchema`, `ModelSchema`, `AdminConfig`, `IndexSchema`,
+`GlobalScope`, `Fieldset`, `PrepopulatedField`, the relation and
+constraint structs, and `Relation::Fk` / `Relation::O2O` (#1661). A hand-built schema now fails with `E0639`. Start from `new`
+(or `AdminConfig::DEFAULT`) and assign fields:
+
+```rust
+const ID: FieldSchema = {
+    let mut f = FieldSchema::new("id", "id", FieldType::I64);
+    f.primary_key = true;
+    f
+};
+let rel = Relation::fk("user", "id");
+```
+
+A pattern on a variant needs `..` (`Relation::Fk { to, on, .. }`), or
+it fails with `E0638`.
+`SqlError` and `ExecError` are also `#[non_exhaustive]`; add a `_ =>`
+arm. `#[derive(Model)]` users are unaffected.
+
+### `migrate` refuses a callback migration without `"atomic": false`
+
+Any migration file with a `{"callback": …}` op now needs
+`"atomic": false`, including files already applied (#1626). Add it;
+the ledger stores only names, so editing an applied file is safe.
+Embedded migrations need a rebuild.
+
+`atomic: false` means a failed callback does not roll back the schema
+op before it. To keep that, split the file: the schema op in one
+migration, the callback alone in the next.
+
+### `rustango::core` enums are `#[non_exhaustive]`
+
+`SqlValue`, `FieldType`, `Op`, `WhereExpr`, `Expr`, `Relation`,
+`OnDeleteAction`, `QueryError` and the other enums in `rustango::core`
+(#1661). A match without a `_ =>` arm now fails with
+`error[E0004]: non-exhaustive patterns`; add the arm. `Weight` and
+`NullsOrder` stay exhaustive.
+### Every framework JSON error is now an `ApiError` body
+
+Only affects clients that parse error bodies (#1193). The shape is
+
+```json
+{"error": "not_found", "message": "not found", "status": 404}
+```
+
+`details` appears only when there is something in it.
+
+| Was | Now |
+|---|---|
+| ViewSet `{"error": "<sentence>"}` | sentence in `message`; `error` is a code |
+| Serializer `400` `{"title": [...]}` | **`422`**, `details.title`, `error: "validation_failed"` |
+| Admin `{"error": "form", "detail": …}` | `400` `bad_request`, reason in `message` |
+| Tenant / `Principal` rejections, plain text | JSON, same shape |
+| `auth_routes` / `require_bearer` handler errors, plain text | JSON, same shape (#1684); axum's own body-parse rejections are unchanged |
+| `limit_bytes`, `retry_after`, admin `table` / `pk` | under `details` |
+| 5xx carrying the driver message | generic `message` unless `RUSTANGO_DISCLOSE_ERRORS`; cause logged at `rustango::error` |
+| ViewSet create/update constraint `400` with driver text | `400`, generic `message` |
+
+A `MaintenanceLayer` with a custom `.body(…)` is unchanged.
+
+### `jwt_router` is gone: build one `JwtAuth`
+
+The JWT config no longer lives in a process global (#1190).
+`jwt_router(cfg)` becomes `JwtAuth::new(cfg).router()`:
+
+```rust
+let auth = JwtAuth::new(Config::default());
+api.layer(middleware::from_fn_with_state(auth.clone(), require_bearer))
+    .merge(auth.router())
+```
+
+`auth_routes::verify_for_tenant(token, slug)` is now
+`auth.verify_for_tenant(token, slug)`. Use the **same** `JwtAuth` for the
+router and the middleware, or a logout will not revoke for the middleware.
+
 ### `MigrateError` is now `#[non_exhaustive]`
 
 Only affects code that **matches exhaustively** on it. Add a `_ =>` arm:

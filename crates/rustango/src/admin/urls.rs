@@ -672,18 +672,17 @@ impl Builder {
                 //
                 // **Order matters, and it runs in reverse of how it
                 // reads.** `route_layer` applies outermost last, so
-                // `csrf_context` runs first and mints the token that
-                // `chrome_context` reads, then `CsrfLayer`
-                // validates, then `require_session` authenticates.
-                // The token must exist before any template renders,
-                // and validation must happen whether or not the
-                // session is valid.
+                // `CsrfLayer` validates first, then `csrf_context`
+                // mints the token that `chrome_context` reads, then
+                // `require_session` authenticates. The layer sits
+                // outside so it sees `csrf_context`'s cookie and adds
+                // no second one (#1711).
                 .route_layer(axum::middleware::from_fn_with_state(
                     gate,
                     super::login_view::require_session,
                 ))
-                .route_layer(crate::forms::csrf::layer())
-                .route_layer(axum::middleware::from_fn(super::csrf_context::csrf_context));
+                .route_layer(axum::middleware::from_fn(super::csrf_context::csrf_context))
+                .route_layer(crate::forms::csrf::layer());
             // Public login and logout routes, plus the per-provider
             // SSO routes. Providers live in the DB (`SsoProvider`),
             // and the routes mount whenever session auth is on,

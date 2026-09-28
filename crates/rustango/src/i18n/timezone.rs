@@ -175,16 +175,7 @@ pub fn parse_offset(s: &str) -> Option<FixedOffset> {
 /// parsing, activation and the task-local stay available everywhere.
 #[cfg(feature = "_axum")]
 pub fn from_cookie(headers: &axum::http::HeaderMap, cookie_name: &str) -> Option<FixedOffset> {
-    let raw = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|h| h.to_str().ok())?;
-    for pair in raw.split(';') {
-        let pair = pair.trim();
-        if let Some(value) = pair.strip_prefix(&format!("{cookie_name}=")) {
-            return parse_offset(value);
-        }
-    }
-    None
+    parse_offset(crate::cookies::cookie_from_headers(headers, cookie_name)?)
 }
 
 /// Extract a `FixedOffset` from request headers — checks the

@@ -160,6 +160,117 @@ async fn enrolled_user_is_gated_by_the_totp_code() {
     assert_eq!(status, StatusCode::SEE_OTHER, "success redirects");
 }
 
+/// #1672 — a code that signed in once cannot sign in again.
+#[tokio::test]
+async fn a_used_code_cannot_sign_in_again() {
+    let (pool, secret) = seed().await;
+    let app = router(pool);
+    let csrf = fetch_csrf(&app).await;
+    let code = rustango::totp::generate(&secret, 30, 6);
+    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", &code).await;
+    assert!(sess, "first use signs in");
+    let (_s, sess) = login(&app, &csrf, "alice", "correct horse", &code).await;
+    assert!(!sess, "a replayed TOTP code granted a second session");
+}
+
+/// The session cookie (`name=value`) a successful password login sets.
+async fn session_cookie(app: &axum::Router, csrf: &str, username: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/login"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={csrf}"))
+                .body(Body::from(format!(
+                    "_csrf={csrf}&username={username}&password=correct%20horse&totp_code="
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .find_map(|v| {
+            let s = v.to_str().ok()?;
+            s.starts_with("rustango_admin_session=")
+                .then(|| s.split(';').next().unwrap_or("").to_owned())
+        })
+        .expect("session cookie")
+}
+
+/// #1672 — the code that confirms enrollment cannot then sign in.
+#[tokio::test]
+async fn the_enrollment_code_cannot_sign_in() {
+    let (pool, _secret) = seed().await;
+    // A superuser without 2FA: only superusers reach the admin.
+    AdminUser::new_with_password("carol", "correct horse", true)
+        .unwrap()
+        .insert_pool(&pool)
+        .await
+        .unwrap();
+    let app = router(pool.clone());
+    let csrf = fetch_csrf(&app).await;
+    let session = session_cookie(&app, &csrf, "carol").await;
+    let cookies = format!("rustango_csrf={csrf}; {session}");
+
+    // GET starts enrollment and stores a pending secret.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{PREFIX}/account/totp"))
+                .header(header::COOKIE, &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let carol_id = *AdminUser::objects()
+        .filter("username", "carol")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id
+        .get()
+        .unwrap();
+    let device = totp_store::device(&pool, carol_id)
+        .await
+        .expect("pending device");
+    let secret = TotpSecret::from_base32(&device.secret_base32).unwrap();
+    let code = rustango::totp::generate(&secret, 30, 6);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/account/totp"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookies)
+                .body(Body::from(format!("_csrf={csrf}&totp_code={code}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        totp_store::confirmed_secret(&pool, carol_id)
+            .await
+            .is_some(),
+        "enrollment confirmed"
+    );
+
+    let (_s, sess) = login(&app, &csrf, "carol", "correct horse", &code).await;
+    assert!(!sess, "the enrollment code signed in a second time");
+}
+
 #[tokio::test]
 async fn non_enrolled_user_logs_in_without_a_code() {
     let (pool, _secret) = seed().await;
@@ -175,6 +286,41 @@ async fn non_enrolled_user_logs_in_without_a_code() {
     assert_eq!(status, StatusCode::SEE_OTHER);
 }
 
+/// #1695 — a valid pair and valid credentials from a foreign Origin
+/// get no session.
+#[tokio::test]
+async fn login_from_a_foreign_origin_is_refused() {
+    let (pool, _secret) = seed().await;
+    let app = router(pool);
+    let csrf = fetch_csrf(&app).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{PREFIX}/login"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(header::HOST, "admin.example.com")
+                .header(header::ORIGIN, "http://evil.example")
+                .header(header::COOKIE, format!("rustango_csrf={csrf}"))
+                .body(Body::from(format!(
+                    "_csrf={csrf}&username=bob&password=correct%20horse&totp_code="
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let sess = resp.headers().get_all(header::SET_COOKIE).iter().any(|v| {
+        v.to_str()
+            .is_ok_and(|s| s.contains("rustango_admin_session="))
+    });
+    assert!(
+        !sess,
+        "foreign Origin must not get a session ({})",
+        resp.status()
+    );
+}
+
 #[tokio::test]
 async fn wrong_password_never_reaches_the_totp_step() {
     let (pool, secret) = seed().await;
@@ -185,4 +331,39 @@ async fn wrong_password_never_reaches_the_totp_step() {
     let code = rustango::totp::generate(&secret, 30, 6);
     let (_s, sess) = login(&app, &csrf, "alice", "wrong", &code).await;
     assert!(!sess, "wrong password is rejected regardless of the code");
+}
+
+/// Fresh install: `migrate` creates the TOTP table, so a password login
+/// works before anyone has opened the enroll page.
+#[tokio::test]
+async fn fresh_install_login_works_without_the_enroll_page() {
+    let p = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite");
+    let pool: Pool = p.into();
+    let dir = tempfile::tempdir().unwrap();
+    rustango::migrate::manage::run_with_writer(
+        &pool,
+        dir.path(),
+        ["migrate".to_owned()],
+        &mut Vec::new(),
+    )
+    .await
+    .expect("migrate");
+    let mut u = AdminUser::new_with_password("dora", "correct horse", true).unwrap();
+    u.insert_pool(&pool).await.unwrap();
+    let id = *u.id.get().unwrap();
+
+    let app = router(pool.clone());
+    let csrf = fetch_csrf(&app).await;
+    let (status, sess) = login(&app, &csrf, "dora", "correct horse", "").await;
+    assert!(
+        sess,
+        "fresh install refused a valid login (status {status})"
+    );
+    assert!(totp_store::confirmed_secret_checked(&pool, id)
+        .await
+        .is_ok());
 }

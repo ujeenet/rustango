@@ -29,18 +29,11 @@ pub struct Place {
 // Park the spatial expr in a SET clause — we only inspect the emitted
 // SQL / params, never execute, so type-compatibility is irrelevant.
 fn update_set(value: Expr) -> UpdateQuery {
-    UpdateQuery {
-        model: Place::SCHEMA,
-        set: vec![Assignment {
-            column: "rank",
-            value,
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
-    }
+    UpdateQuery::new(
+        Place::SCHEMA,
+        vec![Assignment::new("rank", value)],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+    )
 }
 
 // ---------- PG: native ST_* emission ----------

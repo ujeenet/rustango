@@ -88,12 +88,9 @@ async fn post_json(pool: &Pool, body: &str) -> StatusCode {
 }
 
 async fn row_count(pool: &Pool) -> i64 {
-    let q = rustango::core::CountQuery {
-        model: Widget::SCHEMA,
-        // Empty `And` is vacuously true — no WHERE emitted.
-        where_clause: rustango::core::WhereExpr::And(Vec::new()),
-        search: None,
-    };
+    // Empty `And` is vacuously true — no WHERE emitted.
+    let q =
+        rustango::core::CountQuery::new(Widget::SCHEMA, rustango::core::WhereExpr::And(Vec::new()));
     rustango::sql::count_rows_pool(pool, &q)
         .await
         .expect("count")

@@ -82,6 +82,32 @@ fn decode_escapes(s: &str, plus_is_space: bool) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// [`url_decode`], but `None` on a malformed `%xx` or invalid UTF-8
+/// instead of passing it through, for security checks such as CSRF.
+#[allow(dead_code)] // the caller is feature-gated
+pub(crate) fn url_decode_strict(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                out.push(hex_pair_at(bytes, i)?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// Decode one path segment: `%XX` only, `+` stays literal.
 ///
 /// [`url_decode`] turns `+` into a space, which is right for forms and
@@ -416,6 +442,14 @@ pub fn urlsafe_base64_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_decode_strict_refuses_what_url_decode_passes_through() {
+        for bad in ["%2", "%ZZ", "%+5", "%FF"] {
+            assert_eq!(url_decode_strict(bad), None, "{bad}");
+        }
+        assert_eq!(url_decode_strict("a%20b+c").as_deref(), Some("a b c"));
+    }
 
     #[test]
     fn plain_text_passes_through() {

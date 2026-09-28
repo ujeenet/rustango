@@ -66,7 +66,7 @@ let app = router.security_headers(SecurityHeadersLayer::strict());
 
 | Preajuste | Cuándo usarlo |
 |---|---|
-| `strict()` | Producción: HSTS preload + XFO=DENY + nosniff + Referrer-Policy=no-referrer + COOP=same-origin + Permissions-Policy restringida |
+| `strict()` | Producción: HSTS preload + XFO=DENY + nosniff + Referrer-Policy=same-origin + COOP=same-origin + Permissions-Policy restringida |
 | `relaxed()` | Incrustable en iframes: SAMEORIGIN + HSTS de 1 año |
 | `dev()` | Local: solo nosniff (sin HSTS para evitar bloquear localhost en HTTPS para siempre) |
 | `empty()` | Construir desde cero |
@@ -243,7 +243,7 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` construye la capa con `secure: true`, así que la cookie se rechaza sobre HTTP plano — en `http://localhost` usa `CsrfConfig::allow_insecure_for_dev()` o la capa parecerá no hacer nada. `csrf::with_config(CsrfConfig)` sobrescribe los nombres de cookie/cabecera y el flag `Secure`, además de `trusted_origins` — vacío por defecto, así que la comprobación de la cabecera Origin está **desactivada** hasta que añadas alguno. En las plantillas, `{{ csrf_token }}` te da el token en bruto y `{{ csrf_input }}` un `<input>` oculto listo para usar — escríbelo como `{{ csrf_input | safe }}`, porque Tera autoescapa las plantillas `.html`: sin el filtro la página renderiza un `<input …>` literal visible, el formulario no lleva campo `_csrf` y cada POST devuelve 403. Ambas variables solo están en el contexto para las CBV de `template_views` o después de llamar tú mismo a `forms::csrf::stamp_into_context` — un handler escrito a mano no tiene ninguna. Usa el patrón de cookie de doble envío: en los métodos inseguros (POST, PUT, PATCH, DELETE) la capa comprueba la cabecera `X-CSRF-Token` (o el campo de formulario `_csrf`) contra la cookie `rustango_csrf`; una discrepancia devuelve `403 Forbidden`.
+`csrf::layer()` construye la capa con `secure: true`, así que la cookie se rechaza sobre HTTP plano — en `http://localhost` usa `CsrfConfig::allow_insecure_for_dev()` o la capa parecerá no hacer nada. `csrf::with_config(CsrfConfig)` sobrescribe los nombres de cookie/cabecera y el flag `Secure`, además de `trusted_origins` — orígenes extra permitidos junto al propio Host de la petición. La comprobación de Origin se ejecuta aunque esté vacío: un `Origin` ajeno recibe `403`, y sobre TLS también un POST sin `Origin`. En las plantillas, `{{ csrf_token }}` te da el token en bruto y `{{ csrf_input }}` un `<input>` oculto listo para usar — escríbelo como `{{ csrf_input | safe }}`, porque Tera autoescapa las plantillas `.html`: sin el filtro la página renderiza un `<input …>` literal visible, el formulario no lleva campo `_csrf` y cada POST devuelve 403. Ambas variables solo están en el contexto para las CBV de `template_views` o después de llamar tú mismo a `forms::csrf::stamp_into_context` — un handler escrito a mano no tiene ninguna. Usa el patrón de cookie de doble envío: en los métodos inseguros (POST, PUT, PATCH, DELETE) la capa comprueba la cabecera `X-CSRF-Token` (o el campo de formulario `_csrf`) contra la cookie `rustango_csrf`; una discrepancia devuelve `403 Forbidden`.
 
 **Eximir endpoints recolectores.** `CsrfConfig::exempt_prefix("/path")` (repetible) omite la aplicación de CSRF para los métodos inseguros en peticiones cuya ruta comienza con el prefijo dado. Esto es para endpoints de solo anexado, sin estado de autenticación, alcanzados vía `navigator.sendBeacon` — por ejemplo, un recolector de analíticas — que no pueden establecer una cabecera `X-CSRF-Token` y, cuando la página se sirve desde una caché de CDN que elimina `Set-Cookie`, puede que no lleven ninguna cookie CSRF en absoluto. Mantén los prefijos estrechos y nunca eximas nada que lea o escriba estado de autenticación.
 
@@ -313,8 +313,9 @@ La autenticación es cómo confirmas quién está haciendo una petición. **Rust
 > consulta la [guía de SSO](sso.md). Los proveedores se **gestionan desde la UI
 > del admin como filas** (varios por superficie; por inquilino, o un conjunto
 > compartido entre inquilinos), con el secreto de cliente **cifrado en reposo**.
-> Es enlace-a-existente (el email verificado del IdP debe coincidir con un usuario
-> del admin; sin auto-aprovisionamiento) y reutiliza la sesión existente.
+> Inicia sesión con la cuenta enlazada al subject del IdP (el enlace por email es
+> opcional por proveedor y nunca se aplica a superusuarios ni staff; sin
+> auto-aprovisionamiento) y reutiliza la sesión existente.
 
 ### Tres backends listos para usar
 
@@ -507,6 +508,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 ```
 
 Funciona con Google Authenticator, Authy, 1Password, Bitwarden y otras aplicaciones autenticadoras estándar.
+
+`verify` acepta el mismo código otra vez hasta que caduca. Para códigos de un solo uso, llame a `matched_step`, guarde el paso que devuelve y acepte un código solo si su paso es posterior al guardado. El inicio de sesión integrado del admin lo hace así.
 
 **Códigos de recuperación** (códigos de respaldo de un solo uso para cuando un usuario pierde su teléfono) todavía no se incluyen. El patrón común es almacenar de 8 a 10 códigos hasheados por usuario y consumir uno cada vez que se usa.
 

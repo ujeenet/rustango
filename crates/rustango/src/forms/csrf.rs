@@ -109,16 +109,15 @@ pub struct CsrfConfig {
     /// `"https://app.example.com"` or
     /// `"https://*.example.com"` for a wildcard subdomain.
     ///
-    /// Default `[]` (empty) — disables the Origin-header check
-    /// entirely so existing deployments don't break. To enable
-    /// defense-in-depth Origin-based CSRF protection, populate this
-    /// list with at least the application's own canonical origin.
+    /// Default `[]` (empty). The Origin check still runs: the
+    /// request's own `Host` is the implicit trusted origin, so a
+    /// same-origin deployment needs no configuration. Add entries only
+    /// for origins *other* than the app's own.
     ///
-    /// When non-empty, the layer ALSO accepts the request's own
-    /// Host header as an implicit trusted origin (same-origin
-    /// requests always pass). Defense-in-depth: even if an XSS
-    /// attacker steals the cookie token, they can't submit from a
-    /// different origin.
+    /// It used to be that an empty list skipped the check entirely,
+    /// which left the default deployment on bare unsigned
+    /// double-submit — forgeable by anyone able to write a cookie on
+    /// the parent domain (#1529).
     pub trusted_origins: Vec<String>,
     /// URL path prefixes exempt from CSRF enforcement on unsafe
     /// methods. Default `[]`. Intended for `navigator.sendBeacon`
@@ -222,9 +221,10 @@ impl CsrfConfig {
 ///   `*.subdomain.example.com` wildcard) → allow.
 /// * Anything else → reject.
 ///
-/// When `trusted_origins` is empty, the layer skips the check
-/// entirely (back-compat default) — the Origin header alone is
-/// not consulted.
+/// An empty `trusted_origins` no longer skips the check: the
+/// request's own `Host` is the implicit trusted origin, so
+/// same-origin traffic passes with no configuration and a foreign
+/// Origin is rejected by default (#1529).
 /// Split an `Origin` header into `(scheme, host[:port])`.
 ///
 /// `None` when it is not `scheme://host` — an empty header, the
@@ -243,11 +243,10 @@ fn split_origin(origin: &str) -> Option<(&str, &str)> {
 /// *reject* a plain-http Origin, so a proxy that forwards neither
 /// header leaves behaviour exactly as it was rather than locking
 /// anyone out.
-fn request_is_https(req: &Request<Body>) -> bool {
-    if req.uri().scheme_str() == Some("https") {
+fn request_is_https(h: &axum::http::HeaderMap, uri_is_https: bool) -> bool {
+    if uri_is_https {
         return true;
     }
-    let h = req.headers();
     if h.get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| {
@@ -272,23 +271,38 @@ fn request_is_https(req: &Request<Body>) -> bool {
 }
 
 fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
-    if trusted.is_empty() {
-        return true;
-    }
-    let Some(origin) = req
-        .headers()
+    origin_allowed_in(
+        req.headers(),
+        req.uri().scheme_str() == Some("https"),
+        trusted,
+    )
+}
+
+fn origin_allowed_in(
+    headers: &axum::http::HeaderMap,
+    uri_is_https: bool,
+    trusted: &[String],
+) -> bool {
+    let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|h| h.to_str().ok())
     else {
-        // No Origin header — fall back to legacy behavior. Browsers
-        // always send Origin on cross-origin POST, so the missing
-        // case is curl / server-to-server which already gets
-        // protected by the double-submit token check.
-        return true;
+        // No Origin header. Over TLS this is refused: unsigned
+        // double-submit alone is forgeable by anyone who can write a
+        // cookie on the parent domain — XSS on a sibling subdomain, a
+        // dangling-CNAME takeover, or a network attacker on any
+        // plaintext `http://*.example.com` (`Secure` stops the cookie
+        // being *sent* over HTTP, not *written*). Origin is what
+        // catches that, so it must not be skippable by omitting it
+        // (#1529).
+        //
+        // Plain HTTP keeps the old behaviour, so server-to-server and
+        // curl callers on internal networks are not locked out by an
+        // upgrade; they are still covered by the token check.
+        return !request_is_https(headers, uri_is_https);
     };
     // Same-origin: Origin's scheme AND host must match the request.
-    if let Some(host) = req
-        .headers()
+    if let Some(host) = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
     {
@@ -302,7 +316,7 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
             // `http://` Origin is a different origin, not this one.
             // Accepting it let a network attacker who can serve the
             // http site forge a same-origin POST at the https one.
-            let scheme_ok = !(scheme == "http" && request_is_https(req));
+            let scheme_ok = !(scheme == "http" && request_is_https(headers, uri_is_https));
             if host_matches && scheme_ok {
                 return true;
             }
@@ -314,33 +328,39 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
         if entry == origin {
             return true;
         }
-        if let Some(wild) = entry.strip_prefix("https://*.") {
-            // Match `https://anything.<wild>` exactly.
-            if let Some(prefix) = origin.strip_prefix("https://") {
-                if prefix == wild {
-                    return true;
-                }
-                if let Some(rest) = prefix.strip_suffix(wild) {
-                    if rest.ends_with('.') {
-                        return true;
-                    }
-                }
-            }
-        }
-        if let Some(wild) = entry.strip_prefix("http://*.") {
-            if let Some(prefix) = origin.strip_prefix("http://") {
-                if prefix == wild {
-                    return true;
-                }
-                if let Some(rest) = prefix.strip_suffix(wild) {
-                    if rest.ends_with('.') {
-                        return true;
-                    }
-                }
+        for scheme in ["https://", "http://"] {
+            let Some(wild) = entry
+                .strip_prefix(scheme)
+                .and_then(|e| e.strip_prefix("*."))
+            else {
+                continue;
+            };
+            let Some(authority) = origin.strip_prefix(scheme) else {
+                continue;
+            };
+            if wildcard_matches(authority, wild) {
+                return true;
             }
         }
     }
     false
+}
+
+/// `true` when `authority` (`host` or `host:port`) is covered by a
+/// `*.<wild>` entry — either `wild` itself or any subdomain of it.
+///
+/// The port is stripped first. Matching the raw authority meant
+/// `https://sub.example.com:8443` missed a `https://*.example.com`
+/// entry the operator believed covered it, and the symptom was a 403
+/// that reads as flaky rather than as a config problem (#1529).
+fn wildcard_matches(authority: &str, wild: &str) -> bool {
+    let host = authority.split(':').next().unwrap_or(authority);
+    let wild_host = wild.split(':').next().unwrap_or(wild);
+    if host == wild_host {
+        return true;
+    }
+    host.strip_suffix(wild_host)
+        .is_some_and(|rest| rest.ends_with('.'))
 }
 
 /// The [`tower::Layer`] implementation. Wraps inner services with
@@ -402,8 +422,8 @@ where
             let req = if !method_is_csrf_exempt(req.method(), &cfg)
                 && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
             {
-                // Origin-header defense-in-depth. Skipped when
-                // `trusted_origins` is empty (back-compat default).
+                // Origin-header defense-in-depth. Always runs; an empty
+                // `trusted_origins` means same-host only (#1529).
                 if !origin_allowed(&req, &cfg.trusted_origins) {
                     return Ok(forbid_response(
                         "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS \
@@ -417,11 +437,7 @@ where
                     .map(str::to_owned);
                 if let Some(h) = header_value {
                     // Header path — short-circuit, no body buffering.
-                    let token_match = match &cookie_value {
-                        Some(c) => crate::crypto::constant_time_compare(c.as_bytes(), h.as_bytes()),
-                        None => false,
-                    };
-                    if !token_match {
+                    if !tokens_match(cookie_value.as_deref(), Some(&h)) {
                         return Ok(forbid_response("CSRF token missing or mismatched"));
                     }
                     req
@@ -438,13 +454,7 @@ where
                         }
                     };
                     let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
-                    let token_match = match (&cookie_value, &form_token) {
-                        (Some(c), Some(f)) => {
-                            crate::crypto::constant_time_compare(c.as_bytes(), f.as_bytes())
-                        }
-                        _ => false,
-                    };
-                    if !token_match {
+                    if !tokens_match(cookie_value.as_deref(), form_token.as_deref()) {
                         return Ok(forbid_response("CSRF token missing or mismatched"));
                     }
                     Request::from_parts(parts, Body::from(bytes))
@@ -471,7 +481,10 @@ where
             // and the stored cookie disagreed, and their first submit was
             // a 403. Reloading masked it, which is why it survived: only
             // brand-new visitors ever saw it.
-            if cookie_value.is_none() && !sets_cookie(&response, &cfg.cookie_name) {
+            if cookie_value.is_none()
+                && !sets_cookie(&response, &cfg.cookie_name)
+                && !is_publicly_cacheable(response.headers())
+            {
                 let token = mint_token();
                 let cookie_str = format!(
                     "{}={token}; Path=/; SameSite=Lax{}",
@@ -489,13 +502,11 @@ where
     }
 }
 
-/// Cap the form-body buffer the CSRF middleware will consume
-/// while extracting the `_csrf` field. 64 KiB is generous for any
-/// realistic HTML form (typical forms are < 4 KiB; file uploads
-/// don't use form-encoded bodies). Bodies larger than this 403
-/// — the middleware can't safely buffer megabyte-scale form
-/// payloads in memory just to verify a token.
-const BODY_BUFFER_LIMIT: usize = 64 * 1024;
+/// Cap the form-body buffer the CSRF middleware will consume while
+/// extracting the `_csrf` field. axum's default request body limit
+/// (2 MB), which the handler buffers up to anyway: a lower cap here
+/// turned a large admin edit (a long text field) into a 403 (#1714).
+const BODY_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 
 /// `true` when `path` starts with any configured exempt prefix. Used to
 /// skip CSRF enforcement for beacon/collector endpoints.
@@ -523,6 +534,17 @@ fn method_is_csrf_exempt(m: &Method, cfg: &CsrfConfig) -> bool {
 ///
 /// Checked before the layer seeds its own, so a handler that stamped a
 /// token into its template keeps the value it rendered.
+/// `true` when a shared cache may store the response (`Cache-Control:
+/// public`). A `Set-Cookie` on it would hand one token to every visitor.
+pub(crate) fn is_publicly_cacheable(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get_all(axum::http::header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|d| d.trim().eq_ignore_ascii_case("public"))
+}
+
 fn sets_cookie<B>(response: &Response<B>, name: &str) -> bool {
     response
         .headers()
@@ -542,16 +564,7 @@ fn read_csrf_cookie(req: &Request<Body>, name: &str) -> Option<String> {
 }
 
 fn read_csrf_cookie_from_headers(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';') {
-        let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k == name {
-                return Some(v.to_owned());
-            }
-        }
-    }
-    None
+    crate::cookies::cookie_from_headers(headers, name).map(str::to_owned)
 }
 
 /// `true` when the request body is `application/x-www-form-urlencoded`
@@ -587,52 +600,29 @@ fn read_form_field(body: &[u8], name: &str) -> Option<String> {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
         };
-        let key = percent_decode(k.replace('+', " ").as_bytes())?;
+        // Strict: a malformed field is refused, not truncated.
+        let key = url_decode_strict(k)?;
         if key == name {
-            return percent_decode(v.replace('+', " ").as_bytes());
+            return url_decode_strict(v);
         }
     }
     None
 }
 
-/// Minimal RFC 3986 percent-decoder used by the form-field parser.
-/// Returns `None` on malformed `%xx` sequences (rejects rather
-/// than truncating).
-fn percent_decode(bytes: &[u8]) -> Option<String> {
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'%' {
-            if i + 2 >= bytes.len() {
-                return None;
-            }
-            let hi = hex_digit(bytes[i + 1])?;
-            let lo = hex_digit(bytes[i + 2])?;
-            out.push(hi * 16 + lo);
-            i += 3;
-        } else {
-            out.push(b);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
+use crate::url_codec::url_decode_strict;
 
 /// Generate a fresh 32-byte token, base64url-encoded (no padding).
 fn mint_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// `true` for the shape [`mint_token`] produces: 43 base64url chars.
+fn is_minted_token(t: &str) -> bool {
+    t.len() == 43
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Read the existing CSRF cookie from request headers, or mint a
@@ -670,8 +660,13 @@ pub fn ensure_token(
     headers: &axum::http::HeaderMap,
     cookie_name: &str,
 ) -> (String, Option<String>) {
+    // Reuse only a token this module could have minted. A sibling
+    // subdomain can plant any cookie value, and the token is rendered
+    // into pages (#1712 review).
     if let Some(existing) = read_csrf_cookie_from_headers(headers, cookie_name) {
-        return (existing, None);
+        if is_minted_token(&existing) {
+            return (existing, None);
+        }
     }
     let token = mint_token();
     // `Secure` from the same policy the session cookies use: the boot
@@ -687,9 +682,9 @@ pub fn ensure_token(
     (token, Some(cookie))
 }
 
-/// Validate a server-rendered form POST against the double-submit CSRF
-/// cookie. Returns `true` iff [`CSRF_COOKIE`] is present in `headers`
-/// and matches `submitted` (the `_csrf` form field) in constant time.
+/// Validate a server-rendered form POST. Returns `true` iff the Origin
+/// is the request's own Host (no trusted list; #1695) and
+/// [`CSRF_COOKIE`] matches `submitted` (the `_csrf` field) in constant time.
 ///
 /// For handlers that render their own form and seed the token via
 /// [`ensure_token`] + [`csrf_input_html`] (so the GET response sets the
@@ -698,12 +693,21 @@ pub fn ensure_token(
 /// token in the handler would set two conflicting cookies.
 #[must_use]
 pub fn verify_form_token(headers: &axum::http::HeaderMap, submitted: Option<&str>) -> bool {
-    match (
-        read_csrf_cookie_from_headers(headers, CSRF_COOKIE),
+    if !origin_allowed_in(headers, false, &[]) {
+        return false;
+    }
+    tokens_match(
+        read_csrf_cookie_from_headers(headers, CSRF_COOKIE).as_deref(),
         submitted,
-    ) {
-        (Some(cookie), Some(form)) => {
-            crate::crypto::constant_time_compare(cookie.as_bytes(), form.as_bytes())
+    )
+}
+
+/// The one double-submit check: both tokens present, non-empty and
+/// equal in constant time (#1693).
+fn tokens_match(cookie: Option<&str>, submitted: Option<&str>) -> bool {
+    match (cookie, submitted) {
+        (Some(c), Some(s)) if !c.is_empty() => {
+            crate::crypto::constant_time_compare(c.as_bytes(), s.as_bytes())
         }
         _ => false,
     }
@@ -735,24 +739,7 @@ pub fn csrf_input_html(token: &str) -> String {
     format!(r#"<input type="hidden" name="{CSRF_FORM_FIELD}" value="{escaped}">"#)
 }
 
-/// Tiny HTML-attribute escaper — sufficient for the token alphabet
-/// (`A-Z`, `a-z`, `0-9`, `-`, `_` from base64url) but defensive in
-/// case a caller passes a token from an unusual source. Avoids
-/// pulling a full HTML-escape crate for the one-string case.
-fn html_escape_attr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+use crate::text::html_escape as html_escape_attr;
 
 /// Read or mint a CSRF token and stamp it into the Tera context with
 /// two keys callers can pick from: `csrf_token` (raw string, for SPA
@@ -839,6 +826,92 @@ fn csrf_input_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a POST with the given Origin/Host, optionally over TLS.
+    fn post(origin: Option<&str>, host: &str, https: bool) -> Request<Body> {
+        let mut b = Request::builder().method(Method::POST).uri("/forms/submit");
+        if let Some(o) = origin {
+            b = b.header(axum::http::header::ORIGIN, o);
+        }
+        if https {
+            b = b.header("x-forwarded-proto", "https");
+        }
+        b.header(axum::http::header::HOST, host)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// The default config must reject a cross-origin POST (#1529).
+    ///
+    /// This is the whole point of the issue: an attacker who can write
+    /// a cookie on the parent domain — XSS on a sibling subdomain, a
+    /// dangling-CNAME takeover, a network attacker on any plaintext
+    /// `http://*.example.com` — forges a matching double-submit pair.
+    /// Origin is what catches that, and it used to be off unless the
+    /// integrator populated a list.
+    #[test]
+    fn a_foreign_origin_is_rejected_with_the_default_config() {
+        let cfg = CsrfConfig::default();
+        assert!(cfg.trusted_origins.is_empty(), "the default is still []");
+
+        assert!(
+            !origin_allowed(
+                &post(Some("https://evil.example"), "app.example.com", true),
+                &cfg.trusted_origins
+            ),
+            "a foreign Origin must be refused out of the box"
+        );
+        // Same-origin still passes with no configuration at all.
+        assert!(origin_allowed(
+            &post(Some("https://app.example.com"), "app.example.com", true),
+            &cfg.trusted_origins
+        ));
+    }
+
+    /// A missing Origin must not be a way around the check on HTTPS —
+    /// otherwise anything able to omit the header skips it (#1529).
+    #[test]
+    fn a_missing_origin_is_refused_over_tls_only() {
+        let empty: Vec<String> = Vec::new();
+        assert!(
+            !origin_allowed(&post(None, "app.example.com", true), &empty),
+            "no Origin over TLS must be refused"
+        );
+        // Plain HTTP keeps the old behaviour so server-to-server and
+        // curl callers are not locked out by an upgrade.
+        assert!(
+            origin_allowed(&post(None, "app.example.com", false), &empty),
+            "no Origin over plain http stays allowed"
+        );
+    }
+
+    /// A wildcard entry covers a non-default port. Matching the raw
+    /// authority made this a silent false negative that reads as a
+    /// flaky 403 (#1529).
+    #[test]
+    fn a_wildcard_entry_matches_a_non_default_port() {
+        let trusted = vec!["https://*.example.com".to_owned()];
+        for origin in [
+            "https://sub.example.com:8443",
+            "https://sub.example.com",
+            "https://deep.sub.example.com:443",
+        ] {
+            assert!(
+                origin_allowed(&post(Some(origin), "app.other", true), &trusted),
+                "`{origin}` should match the wildcard"
+            );
+        }
+        // Still not a free pass for a lookalike domain.
+        for origin in [
+            "https://sub.example.com.evil.test",
+            "https://notexample.com:8443",
+        ] {
+            assert!(
+                !origin_allowed(&post(Some(origin), "app.other", true), &trusted),
+                "`{origin}` must not match the wildcard"
+            );
+        }
+    }
 
     #[test]
     fn safe_method_predicate() {
@@ -952,6 +1025,30 @@ mod tests {
         );
     }
 
+    /// A planted cookie that is not a minted token is replaced, not
+    /// reused — it is rendered into pages, `<script>` included.
+    #[test]
+    fn ensure_token_replaces_a_planted_cookie() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "rustango_csrf=</script><svg/onload=alert(1)>"
+                .parse()
+                .unwrap(),
+        );
+        let (token, set_cookie) = ensure_token(&headers, CSRF_COOKIE);
+        assert!(is_minted_token(&token), "{token}");
+        assert!(set_cookie.is_some(), "the planted cookie is overwritten");
+
+        let good = mint_token();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("rustango_csrf={good}").parse().unwrap(),
+        );
+        assert_eq!(ensure_token(&headers, CSRF_COOKIE), (good, None));
+    }
+
     /// `is_form_encoded` recognizes the canonical content type +
     /// the `; charset=utf-8` variant browsers sometimes append.
     /// Other types (multipart, JSON) return false.
@@ -1006,6 +1103,14 @@ mod tests {
         assert_eq!(read_form_field(body, "_csrf").as_deref(), Some("abc/xyz"));
     }
 
+    /// The field parser refuses a malformed token rather than passing
+    /// through a lenient decode of it.
+    #[test]
+    fn read_form_field_refuses_a_malformed_token() {
+        assert_eq!(read_form_field(b"_csrf=ab%ZZ", "_csrf"), None);
+        assert_eq!(read_form_field(b"_csrf=ab%2", "_csrf"), None);
+    }
+
     #[test]
     fn read_form_field_treats_plus_as_space() {
         let body = b"q=hello+world";
@@ -1022,10 +1127,12 @@ mod tests {
 
     #[test]
     fn percent_decode_rejects_malformed() {
-        assert!(percent_decode(b"%2").is_none()); // truncated
-        assert!(percent_decode(b"%ZZ").is_none()); // non-hex
-        assert_eq!(percent_decode(b"plain").as_deref(), Some("plain"));
-        assert_eq!(percent_decode(b"a%20b").as_deref(), Some("a b"));
+        assert!(url_decode_strict("%2").is_none()); // truncated
+        assert!(url_decode_strict("%ZZ").is_none()); // non-hex
+        assert!(url_decode_strict("%+5").is_none()); // sign is not hex
+        assert!(url_decode_strict("%FF").is_none()); // not UTF-8
+        assert_eq!(url_decode_strict("plain").as_deref(), Some("plain"));
+        assert_eq!(url_decode_strict("a%20b+c").as_deref(), Some("a b c"));
     }
 
     // ---- template helpers (issue #15) ----
@@ -1058,6 +1165,68 @@ mod tests {
         assert!(!verify_form_token(&empty, Some("tok-abc123")));
     }
 
+    /// #1693 — an empty cookie with an empty token is refused on
+    /// every entry point: the form helper, the header and the form body.
+    #[tokio::test]
+    async fn an_empty_cookie_and_empty_token_are_refused() {
+        use tower::ServiceExt as _;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{CSRF_COOKIE}=").parse().unwrap(),
+        );
+        let mut passed = Vec::new();
+        if verify_form_token(&headers, Some("")) {
+            passed.push("verify_form_token");
+        }
+
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(|| async { "saved" }))
+            .layer(layer());
+        let send = |req: Request<Body>| app.clone().oneshot(req);
+        let base = || {
+            Request::builder()
+                .method("POST")
+                .uri("/save")
+                .header("cookie", "rustango_csrf=")
+        };
+        let by_header = base().header("x-csrf-token", "").body(Body::empty());
+        let by_form = base()
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("_csrf="));
+        for (name, req) in [("header", by_header.unwrap()), ("form", by_form.unwrap())] {
+            if send(req).await.unwrap().status() != StatusCode::FORBIDDEN {
+                passed.push(name);
+            }
+        }
+        assert!(passed.is_empty(), "empty tokens passed via {passed:?}");
+    }
+
+    /// #1695 — a matching pair from a foreign Origin is refused.
+    #[test]
+    fn verify_form_token_checks_origin() {
+        let with = |origin: Option<&str>, proto: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(
+                axum::http::header::COOKIE,
+                format!("{CSRF_COOKIE}=tok").parse().unwrap(),
+            );
+            h.insert(axum::http::header::HOST, "t01.example.com".parse().unwrap());
+            if let Some(o) = origin {
+                h.insert(axum::http::header::ORIGIN, o.parse().unwrap());
+            }
+            if let Some(p) = proto {
+                h.insert("x-forwarded-proto", p.parse().unwrap());
+            }
+            verify_form_token(&h, Some("tok"))
+        };
+        assert!(!with(Some("http://t02.example.com"), None));
+        assert!(!with(Some("null"), None));
+        assert!(with(Some("http://t01.example.com"), None));
+        assert!(with(None, None), "plain http without Origin keeps working");
+        assert!(!with(None, Some("https")), "over TLS, Origin is required");
+    }
+
     #[test]
     fn csrf_input_html_escapes_attribute_specials() {
         // Defensive escape — base64url tokens never contain these,
@@ -1071,7 +1240,7 @@ mod tests {
         assert!(html.contains("&lt;"), "{html}");
         assert!(html.contains("&amp;"), "{html}");
         assert!(html.contains("&gt;"), "{html}");
-        assert!(html.contains("&#39;"), "{html}");
+        assert!(html.contains("&#x27;"), "{html}");
     }
 
     #[cfg(feature = "template_views")]
@@ -1104,7 +1273,9 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_static("rustango_csrf=fixed_value"),
+            axum::http::HeaderValue::from_static(
+                "rustango_csrf=fixed_value-fixed_value-fixed_value-fixed_v",
+            ),
         );
         let mut ctx = tera::Context::new();
         let set_cookie = stamp_into_context(&headers, &mut ctx);
@@ -1113,7 +1284,7 @@ mod tests {
         let json = ctx.into_json();
         assert_eq!(
             json.get("csrf_token").and_then(|v| v.as_str()),
-            Some("fixed_value")
+            Some("fixed_value-fixed_value-fixed_value-fixed_v")
         );
     }
 
@@ -1151,6 +1322,59 @@ mod tests {
             .unwrap();
         assert!(sets_cookie(&resp, "rustango_csrf"));
         assert!(!sets_cookie(&resp, "other_cookie"));
+    }
+
+    /// #1714 — no CSRF cookie rides on a publicly cacheable response.
+    #[tokio::test]
+    async fn no_cookie_is_seeded_on_a_public_cacheable_response() {
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route(
+                "/asset",
+                axum::routing::get(|| async { ([("cache-control", "public, max-age=300")], "x") }),
+            )
+            .route("/page", axum::routing::get(|| async { "x" }))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()));
+        let get = |uri: &'static str| {
+            app.clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        };
+        assert!(get("/asset")
+            .await
+            .unwrap()
+            .headers()
+            .get("set-cookie")
+            .is_none());
+        assert!(get("/page")
+            .await
+            .unwrap()
+            .headers()
+            .get("set-cookie")
+            .is_some());
+    }
+
+    /// #1714 — a large form (a long text field) is not refused for its
+    /// size when it carries a valid token.
+    #[tokio::test]
+    async fn a_large_form_with_a_valid_token_passes() {
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(|| async { "saved" }))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()));
+        let body = format!("_csrf=tok&text={}", "a".repeat(200 * 1024));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/save")
+                    .header("cookie", "rustango_csrf=tok")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[test]

@@ -24,16 +24,16 @@ One `#[derive(Model)]` is the whole contract — from it Rustango emits typed qu
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.57"
+rustango = "0.58"
 
 # SQLite — file-backed or in-memory
-rustango = { version = "0.57", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.58", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.57", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.58", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 ```
 
-Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.57" }` needs no extra wiring.
+Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.58" }` needs no extra wiring.
 
 **Moving between versions?** Rustango is `0.x`, so a minor bump is allowed to break things and several have. [UPGRADING.md](UPGRADING.md) has the per-version notes and a checklist — including the two that bite regardless of version: a session secret that can stop a booting app, and a generated system migration that has to reach production.
 
@@ -242,7 +242,7 @@ let app = Router::new().merge(PostViewSet::router("/api/posts", pool.clone()));
 
 ## HTML views & forms
 
-Class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. CSRF auto-mounts for form-driven views.
+Class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. Every view router with a POST route checks the CSRF token.
 
 📖 [HTML views](docs/html-views.md)
 

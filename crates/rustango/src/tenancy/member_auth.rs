@@ -8,11 +8,9 @@
 //! [`SsoProvider`] rows that already live in each tenant's storage — the
 //! difference is the *session it mints*. Because the core lives in the
 //! `sso` feature (not `admin-sso`), member SSO builds with just
-//! `tenancy + sso` — no auto-admin required. Where the admin flow is
-//! **link-to-existing** (an unknown email is refused), the member flow
-//! can **auto-provision** a new tenant user from a verified IdP email so
-//! a gym member / SaaS end-user can sign in the first time without an
-//! operator creating the row by hand.
+//! `tenancy + sso` — no auto-admin required. Like the admin flows it signs
+//! in by `(provider, sub)` link; unlike them it can **auto-provision** (and
+//! link) a new tenant user when no account has the verified IdP email.
 //!
 //! [`SsoProvider`]: crate::sso::SsoProvider
 //!
@@ -61,11 +59,15 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::extractors::{Tenant, TenantContext};
-use crate::session::{secure_cookies, sign, SessionSecret};
+use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::{Auto, Pool};
+use crate::sso::link::{
+    create_link_tx, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, LinkSource,
+    ProviderKey,
+};
 use crate::sso::provider::resolve_by_slug;
-use crate::sso::{build_provider, open_flow, seal_flow, verified_email, NormalizedUser};
-use crate::tenancy::{OrgResolver as _, User};
+use crate::sso::{build_provider, open_flow, seal_flow, NormalizedUser};
+use crate::tenancy::User;
 
 // ===================================================================
 // A. Member session codec — SECURITY-CRITICAL, domain-separated.
@@ -105,19 +107,23 @@ pub struct MemberSessionPayload {
     pub slug: String,
     /// Expiry as Unix seconds.
     pub exp: i64,
-    /// Issued-at as Unix seconds. Compared against
-    /// `rustango_users.password_changed_at` so a password rotation
-    /// invalidates live member sessions (parity with `SessionUser`).
+    /// Issued-at as Unix seconds. A session issued before
+    /// `rustango_users.password_changed_at` is rejected.
     pub iat: i64,
     /// Audience tag — always `"member"` for this codec.
     pub aud: String,
+    /// Fingerprint of the user's `password_hash` at login. Any password
+    /// change makes it stop matching (#1338).
+    #[serde(default)]
+    pub pwf: PasswordFingerprint,
 }
 
 impl MemberSessionPayload {
     /// Mint a fresh member payload. `aud` is fixed to `"member"`; `iat`
-    /// is now and `exp` is `iat + ttl_secs`.
+    /// is now and `exp` is `iat + ttl_secs`. `pwf` is the
+    /// [`PasswordFingerprint`] of the user's current hash.
     #[must_use]
-    pub fn new(uid: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
+    pub fn new(uid: i64, slug: impl Into<String>, ttl_secs: i64, pwf: PasswordFingerprint) -> Self {
         let iat = chrono::Utc::now().timestamp();
         Self {
             uid,
@@ -125,6 +131,7 @@ impl MemberSessionPayload {
             exp: iat + ttl_secs,
             iat,
             aud: "member".to_owned(),
+            pwf,
         }
     }
 
@@ -220,12 +227,22 @@ fn secure_suffix() -> &'static str {
     }
 }
 
-/// Build a `Set-Cookie` value minting a fresh member session for `uid`
+/// Build a `Set-Cookie` value minting a fresh member session for `user`
 /// on `slug`, valid for `ttl` seconds. `HttpOnly; SameSite=Lax; Path=/`
-/// with `; Secure` added on the prod tier.
+/// with `; Secure` added on the prod tier. Changing the user's password
+/// ends the session.
+///
+/// # Panics
+/// If `user` has no id (was never saved).
 #[must_use]
-pub fn mint_cookie(secret: &SessionSecret, uid: i64, slug: &str, ttl: i64) -> String {
-    let value = encode(secret, &MemberSessionPayload::new(uid, slug, ttl));
+pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) -> String {
+    let uid = user
+        .id
+        .get()
+        .copied()
+        .expect("mint_cookie needs a saved user row");
+    let pwf = PasswordFingerprint::of(secret, &user.password_hash);
+    let value = encode(secret, &MemberSessionPayload::new(uid, slug, ttl, pwf));
     format!(
         "{MEMBER_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={ttl}{s}",
         s = secure_suffix(),
@@ -257,16 +274,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
+        use crate::tenancy::middleware::{request_org, request_pool, session_keys};
+
+        let Some(keys) = session_keys(&parts.extensions) else {
             return Ok(CurrentMember(None));
         };
 
-        let org = match ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-        {
-            Ok(Some(o)) => o,
+        let org = match request_org(parts, &parts.extensions).await {
+            Some(Ok(Some(o))) => o,
             _ => return Ok(CurrentMember(None)),
         };
 
@@ -275,14 +290,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
             None => return Ok(CurrentMember(None)),
         };
 
-        let payload = match decode(&ctx.session_secret, &org.slug, &cookie_value) {
+        let payload = match decode(keys.session, &org.slug, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(CurrentMember(None)),
         };
 
-        let pool = match ctx.pools.scoped_pool_dyn(&org).await {
-            Ok(p) => p,
-            Err(_) => return Ok(CurrentMember(None)),
+        let pool = match request_pool(&parts.extensions, &org).await {
+            Some(Ok(p)) => p,
+            _ => return Ok(CurrentMember(None)),
         };
 
         use crate::core::Column as _;
@@ -295,11 +310,15 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
 
         let user = users.into_iter().next().filter(|u| u.active);
         // Reject a session minted before the user's last password
-        // change (parity with `SessionUser`). `password_changed_at IS
-        // NULL` (never rotated) stays valid.
-        let user = user.filter(|u| match u.password_changed_at {
-            Some(changed) => payload.iat >= changed.timestamp(),
-            None => true,
+        // change (parity with `SessionUser`).
+        let user = user.filter(|u| {
+            crate::tenancy::session::survives_password_change(
+                keys.session,
+                &payload.pwf,
+                payload.iat,
+                &u.password_hash,
+                u.password_changed_at,
+            )
         });
         Ok(CurrentMember(user))
     }
@@ -307,16 +326,7 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
 
 /// Pull one cookie value out of the `Cookie` request header by name.
 fn extract_cookie(parts: &Parts, name: &str) -> Option<String> {
-    let header = parts.headers.get(header::COOKIE)?.to_str().ok()?;
-    for pair in header.split(';') {
-        let pair = pair.trim();
-        if let Some(val) = pair.strip_prefix(name) {
-            if let Some(v) = val.strip_prefix('=') {
-                return Some(v.to_owned());
-            }
-        }
-    }
-    None
+    crate::cookies::cookie_from_headers(&parts.headers, name).map(str::to_owned)
 }
 
 // ===================================================================
@@ -333,8 +343,8 @@ pub struct MemberAuthConfig {
     /// Default `"/"`.
     pub landing_url: String,
     /// Auto-create a tenant user from a verified IdP email the first
-    /// time it's seen. When `false`, an unknown email is refused (like
-    /// the admin link-to-existing flow). Default `true`.
+    /// time it's seen. When `false`, an unknown email is refused.
+    /// Default `true`.
     pub auto_provision: bool,
     /// Member session lifetime in seconds. Default `604800` (7 days).
     pub session_ttl: i64,
@@ -461,7 +471,7 @@ async fn sso_begin(
         }
     };
 
-    let provider = match build_provider(&resolved).await {
+    let provider = match build_provider(&resolved.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, slug, "build_provider failed");
@@ -534,7 +544,7 @@ async fn sso_callback(
             ))
         }
     };
-    let provider = match build_provider(&resolved).await {
+    let provider = match build_provider(&resolved.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "build_provider failed on callback");
@@ -550,36 +560,57 @@ async fn sso_callback(
         }
     };
 
-    let email = match verified_email(&normalized) {
-        Ok(e) => e.to_ascii_lowercase(),
-        Err(e) => {
-            tracing::warn!(error = %e, "unverified / missing email from IdP");
+    let key = resolved.key(LinkSource::Tenant);
+    let member_id = match find_or_provision_member(
+        &pool,
+        &key,
+        resolved.allow_email_link,
+        &normalized,
+        config.auto_provision,
+    )
+    .await
+    {
+        Ok(MemberSignIn::Member(id)) => id,
+        Ok(MemberSignIn::NotLinked) => {
+            return clear_flow(sso_error(
+                "This sign-in is not linked to your account. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::NoAccount) => {
+            return clear_flow(sso_error(
+                "There is no account for this sign-in. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::Inactive) => {
+            return clear_flow(sso_error(
+                "This account is disabled. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::Unverified) => {
             return clear_flow(sso_error(
                 "Your identity provider did not return a verified email.",
                 login_base,
             ));
         }
+        Ok(_) => {
+            return clear_flow(sso_error("Sign-in failed. Please try again.", login_base));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "find-or-provision member failed");
+            return clear_flow(sso_error("Could not complete sign-in.", login_base));
+        }
     };
 
-    let member_id =
-        match find_or_provision_member(&pool, &email, &normalized, config.auto_provision).await {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                tracing::warn!(email, "no member account and auto-provision disabled");
-                return clear_flow(sso_error(
-                    "There is no account for that email. Please contact your administrator.",
-                    login_base,
-                ));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "find-or-provision member failed");
-                return clear_flow(sso_error("Could not complete sign-in.", login_base));
-            }
-        };
-
+    let Some(member) = tenant_user(&pool, member_id).await.filter(|u| u.active) else {
+        tracing::warn!(member_id, "member missing or inactive after sign-in");
+        return clear_flow(sso_error("Could not complete sign-in.", login_base));
+    };
     let cookie = mint_cookie(
         &ctx.session_secret,
-        member_id,
+        &member,
         &t.org.slug,
         config.session_ttl,
     );
@@ -587,44 +618,133 @@ async fn sso_callback(
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
 
-/// Match the IdP email to an existing member, else auto-provision one
-/// (when `auto_provision`). Returns `Ok(Some(id))` on match/create,
-/// `Ok(None)` when unknown and auto-provision is off (caller refuses).
+/// What [`find_or_provision_member`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberSignIn {
+    /// Signed in (linked, email-linked, or newly provisioned) as this user id.
+    Member(i64),
+    /// An account has this email but may not be linked by it: email linking
+    /// is off, the account is privileged, or the email collides with another.
+    NotLinked,
+    /// No account has this email, and provisioning is off.
+    NoAccount,
+    /// The account is inactive.
+    Inactive,
+    /// The IdP sent no verified email (and there is no link).
+    Unverified,
+    /// Refused for another reason, e.g. no subject.
+    Refused,
+}
+
+/// The member linked to `(provider, profile.provider_user_id)`; else see
+/// [`crate::sso::link::sign_in`]; else, with `auto_provision`, a new linked member.
 ///
-/// Public because the browser SSO flow is not the only caller any more: a
-/// native mobile sign-in verifies an ID token itself and then needs exactly
-/// this rule. Keeping it private forced the one downstream app that does so to
-/// reimplement it, and two copies of "which existing member is this, and may
-/// we create one" drift apart silently — both keep working, differently.
+/// Public so a native sign-in that verified its own ID token uses the same rule.
+///
+/// # Errors
+/// Storage failures.
 pub async fn find_or_provision_member(
     pool: &Pool,
-    email: &str,
+    provider: &ProviderKey,
+    allow_email_link: bool,
     profile: &NormalizedUser,
     auto_provision: bool,
-) -> Result<Option<i64>, String> {
+) -> Result<MemberSignIn, String> {
+    let refusal = match sign_in(
+        pool,
+        provider,
+        allow_email_link,
+        profile,
+        &TenantAccounts(pool),
+    )
+    .await
+    {
+        Ok(id) => return Ok(MemberSignIn::Member(id)),
+        Err(LinkRefusal::NoAccount(email)) if auto_provision => {
+            return provision_member(pool, provider, &email, profile)
+                .await
+                .map(MemberSignIn::Member);
+        }
+        Err(LinkRefusal::Storage(e)) => return Err(e),
+        Err(e) => e,
+    };
+    tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {refusal}");
+    Ok(match refusal {
+        LinkRefusal::EmailLinkDisabled | LinkRefusal::Privileged | LinkRefusal::EmailCollides => {
+            MemberSignIn::NotLinked
+        }
+        LinkRefusal::NoAccount(_) => MemberSignIn::NoAccount,
+        LinkRefusal::Inactive => MemberSignIn::Inactive,
+        LinkRefusal::Unverified => MemberSignIn::Unverified,
+        _ => MemberSignIn::Refused,
+    })
+}
+
+/// A tenant's users. Privileged = superuser, or holds any admin permission;
+/// a permission read error counts as privileged.
+pub(crate) struct TenantAccounts<'a>(pub &'a Pool);
+
+impl TenantAccounts<'_> {
+    async fn account(&self, user: &User) -> Result<Option<Account>, String> {
+        let Some(user_id) = user.id.get().copied() else {
+            return Ok(None);
+        };
+        let privileged = user.is_superuser
+            || crate::tenancy::permissions::user_permissions_pool(user_id, self.0)
+                .await
+                .map_or(true, |perms| !perms.is_empty());
+        Ok(Some(Account::new(user_id, privileged, user.active)))
+    }
+}
+
+impl AccountLookup for TenantAccounts<'_> {
+    async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
+        match find_tenant_user(self.0, id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Some(u) => self.account(&u).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn by_email(&self, email: &str) -> Result<EmailLookup, String> {
+        use crate::sql::FetcherPool as _;
+        let rows = User::objects()
+            .filter("email__iexact", email.to_owned())
+            .fetch(self.0)
+            .await
+            .map_err(|e| format!("lookup: {e}"))?;
+        match EmailLookup::pick(&rows, email, |u| u.email.as_deref()) {
+            Ok(Some(u)) => Ok(self
+                .account(u)
+                .await?
+                .map_or(EmailLookup::Missing, EmailLookup::Found)),
+            Ok(None) => Ok(EmailLookup::Missing),
+            Err(()) => Ok(EmailLookup::Collides),
+        }
+    }
+}
+
+/// The tenant user with this id; a driver error is an error, not "missing".
+pub(crate) async fn find_tenant_user(
+    pool: &Pool,
+    id: i64,
+) -> Result<Option<User>, crate::sql::ExecError> {
+    use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-
-    // Idempotent — find by (lowercased) email first.
-    let existing = User::objects()
-        .filter("email", email.to_owned())
+    Ok(User::objects()
+        .where_(User::id.eq(id))
         .fetch(pool)
-        .await
-        .map_err(|e| format!("lookup: {e}"))?
+        .await?
         .into_iter()
-        .next();
-    if let Some(u) = existing {
-        return Ok(Some(
-            u.id.get()
-                .copied()
-                .ok_or_else(|| "existing user missing id".to_owned())?,
-        ));
-    }
+        .next())
+}
 
-    if !auto_provision {
-        return Ok(None);
-    }
-
-    provision_member(pool, email, profile).await.map(Some)
+/// The tenant user with this id, if it can be read.
+pub(crate) async fn tenant_user(pool: &Pool, id: i64) -> Option<User> {
+    find_tenant_user(pool, id).await.ok().flatten()
 }
 
 /// Auto-create a tenant user from a verified IdP email. `password_hash`
@@ -633,6 +753,7 @@ pub async fn find_or_provision_member(
 /// The username is the email local-part, deduped on unique clash.
 async fn provision_member(
     pool: &Pool,
+    provider: &ProviderKey,
     email: &str,
     profile: &NormalizedUser,
 ) -> Result<i64, String> {
@@ -661,7 +782,8 @@ async fn provision_member(
         let mut user = User {
             id: Auto::Unset,
             username,
-            password_hash: crate::tenancy::password::hash(&random_unusable_secret())
+            password_hash: crate::tenancy::password::hash_async(&random_unusable_secret())
+                .await
                 .map_err(|e| format!("hash: {e}"))?,
             email: Some(email.to_owned()),
             is_superuser: false,
@@ -671,13 +793,22 @@ async fn provision_member(
             password_changed_at: None,
         };
 
-        match user.insert_pool(pool).await {
+        // The user and its link commit together, or neither does.
+        let mut tx = crate::sql::transaction_pool(pool)
+            .await
+            .map_err(|e| format!("begin: {e}"))?;
+        match user.insert_tx(&mut tx).await {
             Ok(()) => {
-                return user
+                let id = user
                     .id
                     .get()
                     .copied()
-                    .ok_or_else(|| "insert returned no id".to_owned());
+                    .ok_or_else(|| "insert returned no id".to_owned())?;
+                create_link_tx(&mut tx, provider, &profile.provider_user_id, id)
+                    .await
+                    .map_err(|e| format!("link: {e}"))?;
+                tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+                return Ok(id);
             }
             Err(e) if attempt == 0 => {
                 // Likely a username/email unique clash — retry once with
@@ -784,12 +915,16 @@ mod tests {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())
     }
 
+    fn fp() -> PasswordFingerprint {
+        PasswordFingerprint::of(&secret(), "$argon2id$test")
+    }
+
     // ---- A. domain separation (security-critical) -------------------
 
     #[test]
     fn member_cookie_round_trips() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let back = decode(&s, "acme", &value).expect("round-trips");
         assert_eq!(back.uid, 7);
         assert_eq!(back.slug, "acme");
@@ -802,7 +937,7 @@ mod tests {
         // the domain tag makes the signed message disjoint, so the HMAC
         // never matches.
         let s = secret();
-        let member_value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let member_value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let err = tenant_console::decode(&s, "acme", &member_value).unwrap_err();
         assert!(
             matches!(err, SessionError::BadSignature),
@@ -815,7 +950,7 @@ mod tests {
         let s = secret();
         let tenant_value = tenant_console::encode(
             &s,
-            &tenant_console::TenantSessionPayload::new(7, "acme", 3600),
+            &tenant_console::TenantSessionPayload::new(7, "acme", 3600, fp()),
         );
         let err = decode(&s, "acme", &tenant_value).unwrap_err();
         assert!(
@@ -827,7 +962,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_wrong_slug() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         assert_eq!(
             decode(&s, "globex", &value).unwrap_err(),
             MemberSessionError::WrongTenant
@@ -837,7 +972,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_expired() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", -10));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", -10, fp()));
         assert_eq!(
             decode(&s, "acme", &value).unwrap_err(),
             MemberSessionError::Expired
@@ -847,7 +982,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_tampered_signature() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let (_, sig) = value.split_once('.').unwrap();
         let evil = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(br#"{"uid":999,"slug":"acme","exp":9999999999,"iat":0,"aud":"member"}"#);
@@ -869,6 +1004,7 @@ mod tests {
             exp: chrono::Utc::now().timestamp() + 3600,
             iat: chrono::Utc::now().timestamp(),
             aud: "admin".to_owned(),
+            pwf: fp(),
         };
         let value = encode(&s, &payload);
         assert_eq!(

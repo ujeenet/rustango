@@ -122,6 +122,8 @@ async fn boot() -> Booted {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -178,6 +180,8 @@ impl Booted {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .uri(uri)
                     .header("cookie", &self.cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -524,6 +528,9 @@ async fn the_routes_require_a_session() {
                 Request::builder()
                     .method(method)
                     .uri(&uri)
+                    // A valid CSRF pair, so the session gate is what refuses.
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from("hostname=evil.example.com"))
                     .unwrap(),

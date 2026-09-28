@@ -4,6 +4,517 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.58.0] — 2026-09-28
+
+### Security — bare admin logout needs a CSRF token
+
+`POST /logout` on the bare admin now refuses a missing token or a
+foreign Origin, like the tenant admin and console.
+
+### Security — ViewSet and template views apply global scopes (#1746)
+
+`ViewSet` and `ListView` / `DetailView` / `UpdateView` / `DeleteView`
+now apply the model's `global_scope(...)` filters, like a `QuerySet`:
+lists, counts, filters, search, pagination and the built-in
+`delete_selected` skip scoped-out rows, and a PK read, update or delete
+of one is a 404. Custom bulk actions get only the selected PKs the
+scopes let through, and FK `_display` lookups apply the target's scopes.
+A write that leaves its row outside the scope is not echoed: an update
+answers `204`, a create `201` with no body (`null` in a bulk array).
+`?search=` is now ANDed with the whole filter, also when it is an `OR`.
+The admin still sees every row; narrow it with
+`register_admin_queryset!`. New `ModelSchema::with_global_scopes` and
+`.with_global_scopes()` on `SelectQuery`, `CountQuery`, `UpdateQuery`
+and `DeleteQuery` for queries built from a schema.
+
+### Security — SSO links accounts by provider subject, email linking opt-in
+
+SSO logins (bare admin, tenant admin, member) now sign in the user linked
+to the IdP's `(provider, sub)` in the new `rustango_sso_links` table. A
+matching email links a first-time user only when the provider has the new
+`allow_email_link` (default off), and never a superuser or staff account.
+Links and emails match exactly on every collation. Only superusers write
+provider and link rows in the admin; an editable operator console sets the
+shared flag in place. `sso::resolve_by_slug` returns
+`ResolvedProvider`; `member_auth::find_or_provision_member` takes a
+`ProviderKey` and returns `MemberSignIn`.
+
+### Security — bounded update/delete; nested `atomic()` uses savepoints (#1666)
+
+`QuerySet::update()` and `delete()` dropped `limit`, `offset` and
+`order_by`, so `.limit(1).delete()` deleted every matching row. They
+now bound the statement by primary key on every backend, and refuse
+(`QueryError::BoundedDmlUnsupported`, reason `BoundedDmlReason`) when
+they cannot, including a negative limit or offset. A nested `atomic()`
+on the same pool opened a second transaction that survived the outer
+rollback and deadlocked a one-connection pool; it now runs in a
+savepoint on the outer connection. `on_commit` callbacks fire only at
+the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
+emits invalid SQL. A transaction the server already ended (a PG
+statement error the closure ignored, a MySQL deadlock) makes `atomic`
+return `ExecError::AtomicAborted` instead of `Ok`; a MySQL DDL implicit
+commit returns `ExecError::AtomicEndedEarly`.
+
+**Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
+statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
+`ExecError::NestedAtomic`, `ExecError::AtomicAborted`, `ExecError::AtomicEndedEarly`,
+`QueryError::BoundedDmlUnsupported`, `BoundedDmlReason`.
+
+### Security — single-use refresh rotation, TOTP replay guard, fixed lockout window (#1672)
+
+`JwtLifecycle::refresh` and `refresh_with` redeem the old refresh token
+through one `JtiStore::mark_used` call, so two concurrent refreshes of
+one token no longer both succeed. An admin TOTP code is accepted once:
+the device stores the last accepted time step (`last_used_step`) and a
+code must be for a later one. New `totp::matched_step` /
+`matched_step_at` return the step a code matched, and
+`admin::totp_store::redeem_code` / `confirm_with_code` accept a code
+once. Account lockout counts failures in a fixed window from the first
+failure; a failure no longer extends it.
+
+`migrate` now creates `rustango_admin_totp`, so a fresh install with
+`totp` no longer refuses every admin login before enrollment.
+
+### Security — page cache keys on the resolved tenant; long DB cache keys hashed (#1674)
+
+`CachePageLayer` resolves the request's tenant and puts its slug in the
+key, so tenants picked by `X-Org` on one Host no longer share a page.
+With `tenancy` on and no tenant context it does not cache; opt out per
+route with `tenant_agnostic(true)`. `DatabaseCache` stores keys over
+255 bytes as a 190-byte head plus SHA-256, so they round-trip on MySQL
+instead of truncating and colliding.
+
+### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
+
+`RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`
+/ `Forwarded` hop that is not a trusted proxy; it took the leftmost,
+which the client writes. Behind a trusted proxy `HeaderStrategy::Auto`
+reads only `X-Forwarded-For`. `ip_filter` and `trust_proxies` match
+IPv4-mapped IPv6 peers against IPv4 rules, so a v4 blocklist no longer
+fails open on a dual-stack listener. `BodyLimitLayer` caps chunked and
+HTTP/2 bodies as they stream (413) and checks `QUERY` by default. An
+all-trusted chain resolves to the rightmost hop. A ViewSet create or
+update over the cap answers 413 too, not 400.
+
+### Security — Model shortcuts honour global scopes; Pool writes are audited (#1675)
+
+`Model::sum`, `avg`, `min`, `max`, `destroy` and `delete_where` now
+apply the model's global scopes, like their `QuerySet` versions. On
+audited models `soft_delete(&Pool)` and `restore(&Pool)` write their
+audit row in the same transaction as the UPDATE, and `insert_pool`
+records the assigned PK instead of an empty `entity_pk`. On MySQL only
+the first `Auto` field is read back after an insert, so other tracked
+`Auto` fields (such as `auto_now_add`) and generated columns are
+recorded as `null` in the create row there. Audited writes that change no row write no audit row, and soft-delete
+and restore rows record the value written.
+
+### Security — login rate limits and a bounded hashing queue (#1609, #1732)
+
+Every built-in password login (admin, operator console, tenant admin,
+JWT, HTTP Basic) passes one gate before the user lookup: a global
+ceiling, a per-IP limit, and a per-username lock that counts unknown
+usernames like real ones. A refused login gets `429` with
+`Retry-After`, the same whether or not the account exists; a locked
+account no longer answers differently from an unknown one. Hashing
+waits at most `[auth] hash_wait_ms` (default 5 s) for a slot, then
+answers `503`, the same for known and unknown users. New `[auth]`
+keys: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`,
+`login_global_window_secs`, `hash_wait_ms`; `lockout_threshold` and
+`lockout_duration_secs` now take effect.
+
+The gate checks the account lock, then the per-IP limit, then a
+global limit per login scope (admin, operator console, each tenant); a
+refused request spends nothing from later limits, and successful logins
+are free. IPv6 clients are limited per /64. Once the row is found the
+lock also follows the stored username, so spellings MySQL treats as
+equal share one lock. HTTP Basic and API keys have their own scopes,
+count only failures per IP, and use at most half the hashing slots. A
+failure while locked no longer extends the lock. A busy hash queue
+answers 503 on the password-change pages and agent `/token`.
+The tenant admin behind `server::Builder` now gets the client IP, so
+its per-IP login limit applies (the route wrapper dropped it).
+
+### Fixed — session extractors on SQLite and MySQL
+
+`SessionUser`, `SessionOperator` and `CurrentMember` looked only for
+the Postgres `TenantContext`, so with the `postgres` feature on (the
+default) a stack that mounts `TenantContext<Sqlite>`,
+`TenantContext<MySql>` or `DatabaseTenantContext` saw every request as
+anonymous. They now find the tenant context of any backend.
+
+### Security — a password change ends sessions from the same second (#1338)
+
+Tenant admin, member, `SessionUser` and operator-console sessions now
+carry a fingerprint of the password hash, so any change or reset ends
+every older session, even one issued in the same second.
+`SessionOperator` now checks this too; it used to ignore password
+changes. An open impersonation in the tenant admin ends when that
+operator's password changes (#1735). The fingerprint is domain-tagged,
+so it never matches another MAC made with the session secret. See
+UPGRADING.
+
+### Security — password hashing no longer blocks the async runtime (#1709)
+
+Login, change-password, API-key and agent checks ran argon2 inline on
+Tokio workers, so a few parallel logins could stall every request. New
+`passwords::{hash_async, verify_async, verify_dummy_async}` and
+`tenancy::password::*_async` run it on the blocking pool, at most one
+per CPU at a time, and every framework call site uses them. Call the
+async ones from handlers; clippy now refuses the sync ones inside the
+crate.
+
+### Security — examples escape product text in the storefronts (#1636)
+
+`platform_commerce` and `platform_commerce_saas` HTML-escape product
+`sku` and `name`.
+
+### Security — idempotency replays are scoped to the caller and route (#1668)
+
+`IdempotencyLayer` now keys a stored response on host, the request's
+tenant, the resolved caller, method, path and query, then the client's
+key. With no resolved caller it hashes `Authorization`, `Cookie` and
+`X-Api-Key` instead, so a token refresh between retries still replays
+when auth runs first. A response that sets a cookie is not stored. A
+reused key with a different body gets `422`; a body over `body_cap`
+gets `413`, other body errors `400`. `require_auth` now records the
+tenant slug.
+
+### Security — ViewSet create keeps a client-supplied primary key (#1671)
+
+ViewSet create and bulk create now write the PK a client sends for a
+model whose PK is not `Auto<T>` (a `String` slug, say). Before, it was
+dropped: the create failed, and on SQLite with a nullable PK column it
+committed an unreachable NULL-key row. A create with no PK is now a 400
+on every backend. Update still ignores a PK in the body. The created
+row is read back by that PK, so MySQL returns the right row and a Uuid
+PK no longer 500s. On SQLite, Uuid columns in ViewSet JSON now show
+their value instead of `null`.
+
+### Security — CSRF refuses an empty token (#1693)
+
+An empty `rustango_csrf` cookie with an empty `_csrf` field or
+`X-CSRF-Token` header passed the double-submit check. The CSRF layer
+and `verify_form_token` now share one check that refuses it.
+
+### Fixed — the admin sets one CSRF cookie on a first visit (#1711)
+
+A first visit to a protected admin page set two different
+`rustango_csrf` cookies; it worked only because browsers keep the last.
+
+### Security — `urlize` escapes its output; built-in HTML views check CSRF (#1669)
+
+`urlize` and `urlizetrunc` now HTML-escape the href, the link text and
+the text around links, so `{{ x | urlize | safe }}` is safe on user
+input. Every `template_views` router with a POST route now refuses a
+POST without a matching CSRF token; before, the token was rendered but
+nothing checked it unless `Cli::with_csrf()` was on. `urlizetrunc` no
+longer breaks non-ASCII text.
+
+### Security — tenant FKs from ensure helpers stay in the tenant schema (#1645)
+
+On PostgreSQL, the tables that permissions, API keys, audit, TOTP and
+passkeys create for themselves now schema-qualify every FK target. A
+schema-mode tenant without `rustango_users` could get an FK bound to
+`public.rustango_users`, so a delete in `public` cascaded into the
+tenant. It now gets a "relation does not exist" error. MySQL and SQLite
+are unchanged.
+
+### Security — admin inline formsets stay under their parent (#1667)
+
+Inline updates and deletes are keyed on the parent (the FK, or content
+type and object pk), and inserts always set the parent, ignoring a
+submitted FK. Each inline row passes the child table's own admin gates
+first. A child PK from another parent returns 404; a refused gate
+returns 403 and the parent is not saved. Inline and child
+`readonly_fields` are no longer written. Rows you did not edit skip
+the change check, so one locked child row no longer blocks the save. A
+child deleted by someone else since the page loaded counts as deleted;
+editing it re-renders the form with a message.
+
+### Security — webhook delivery checks its target (#1670)
+
+Delivery sends only to http/https, does not follow redirects, and
+refuses loopback, private, link-local, CGNAT, multicast and unspecified
+addresses, including IPv4 inside 6to4, Teredo and NAT64, checked after
+DNS and pinned for the connection. The refusal does not name the
+resolved address. A failed
+delivery stores the status code, not the response body. Use
+`WebhookSubscription::allow_private_targets(true)` for intranet or test
+receivers.
+
+### Changed — schema structs are `#[non_exhaustive]`, with `const fn` constructors (#1661)
+
+**Breaking** for hand-built schemas; see UPGRADING. `FieldSchema`,
+`ModelSchema` and the other structs in `core::schema`, the
+`Relation` variants, `SqlError` and `ExecError` can now grow without a
+breaking release. `clippy::exhaustive_structs` is denied in
+`core::schema`, so a new struct there cannot slip in exhaustive.
+
+### Security — tenant admin writes are CSRF-protected (#1713)
+
+The tenant admin's create, update, delete, bulk actions, change-password
+and logout checked no CSRF token. Tenant hosts are same-site, so a page
+on one tenant could edit another tenant's data through its admin's
+browser. `TenantAdminBuilder::build()` now wraps every route in the
+token and `Origin` check, and every tenant admin form carries the token.
+
+### Security — the operator console is CSRF-protected (#1710)
+
+None of its POSTs checked a token or `Origin`, and a tenant subdomain
+is same-site with the apex, so `SameSite=Lax` did not help: a page on
+any tenant host could act as a signed-in operator — purge tenants, or
+add a shared SSO provider and sign in as any tenant user. Every console
+POST now needs the CSRF token and a same-host `Origin`; every console
+form carries the token, and the branding upload sends it as a header.
+Scripts that POST to the console must send `X-CSRF-Token`.
+
+`csrf::ensure_token` now reuses a `rustango_csrf` cookie only if it has
+the shape of a minted token, and mints a fresh one otherwise. A sibling
+subdomain can plant any cookie value, and the token is rendered into
+pages.
+
+### Fixed — a new tenant project loads its settings (#1702)
+
+`cargo rustango new --template tenant` wrote `config/*.toml` but its
+`main.rs` never called `.with_settings_from_env()`, so the tier files
+did nothing and the login, admin and console sent no security headers.
+Existing projects: add that call to the `Cli` chain in `main.rs`.
+
+With settings loaded, two template defaults mattered. The dev tier now
+sets `secure_cookies = false`, so login works over plain HTTP. The
+release `Dockerfile` sets `RUSTANGO_ENV=prod`; unset, the image loaded
+the dev tier and bound 127.0.0.1 (the fullstack image already did).
+
+### Security — `allowed_hosts` and the HTTPS redirect cover the whole tenancy server (#1700)
+
+Under `Cli::tenancy()`, `[security] allowed_hosts` and
+`secure_ssl_redirect` reached only the api router, so the tenant login
+and admin took any `Host` and answered plain HTTP. Both now go on the
+server's outermost router, as the headers do since #1699
+(`server::Builder::allowed_hosts`, `::ssl_redirect`). On every server a
+bad `Host` is now refused (400) before the redirect; it used to get a
+301 to `https://<that host>`.
+
+### Security — tenant login, admin and console get the security headers (#1699)
+
+Under `Cli::tenancy()` the `[security]` headers reached only the api
+router, so the tenant login and admin could be framed. They now go on
+the server's outermost router (`server::Builder::security_headers`).
+A header a handler sets itself is kept rather than overwritten.
+A `[security] csp` now reaches these pages too; they use inline script,
+so a CSP without `'unsafe-inline'` breaks them (#1703).
+
+### Security — login forms check Origin (#1695)
+
+`verify_form_token`, used by the tenant and admin logins, now requires
+the Origin to match the request's Host (`csrf_trusted_origins` does not
+apply). A foreign Origin with a valid cookie pair was signing users in;
+tenants share an apex, so one tenant's page could plant the cookie for
+another. Over TLS a POST without Origin is refused, as `CsrfLayer` does.
+
+The `strict` headers preset now sends `Referrer-Policy: same-origin`,
+not `no-referrer`. Under `no-referrer` browsers send `Origin: null`, so
+every login and every `CsrfLayer` form was refused. See UPGRADING.
+
+### Changed — one cookie reader (#1663)
+
+New `cookies::cookie_value(header, name)` and `cookies::cookie_from_headers`
+replace fourteen private `Cookie:` readers. A repeated cookie name now
+resolves to the first one everywhere (RFC 6265 §5.4), and values are
+trimmed and unquoted the same way `parse_cookie_header` does.
+
+### Changed — one set of percent codecs (#1663)
+
+Five private copies now use `url_codec`: `method_override` decoded bytes
+as Latin-1, the CSRF form parser had its own strict decoder (now
+`url_codec::url_decode_strict`), and the tenant admin, operator
+console, test client and signed URLs had their own encoders.
+`?next=` values in their login redirects now escape `/` as `%2F`.
+
+### Fixed — `intcomma(i64::MIN)` panicked; one `redirect_to_login` (#1663)
+
+`humanize::intcomma` overflowed on `i64::MIN` and now shares
+`numberformat`'s digit grouper. **Breaking:**
+`shortcuts::redirect_to_login(next, login_url)` is removed; it took its
+arguments in the opposite order to
+`auth_decorators::redirect_to_login(login_url, "next", next)`, which
+stays.
+
+### Changed — the ten query IR structs are `#[non_exhaustive]`, with constructors (#1661)
+
+**Breaking:** `Filter`, `Assignment`, `SelectQuery`, `InsertQuery`,
+`BulkInsertQuery`, `UpdateQuery`, `BulkUpdateQuery`, `DeleteQuery`,
+`CountQuery` and `AggregateQuery` can no longer be built with a struct
+literal outside the crate. Use `X::new(..)` and the builders
+(`InsertQuery::returning`, `.on_conflict`, `SelectQuery::where_clause`,
+`.projection`). Fields stay `pub`, so a new field is no longer a break.
+`Filter::new` takes `impl Into<SqlValue>`. A `compile_fail` doctest per
+struct fails if the marker is dropped. See UPGRADING.
+### Fixed — two HTML escapers skipped `'` (#1663)
+
+The operator console's provisioning page and the admin's error page
+escaped `& < > "` but not `'`. Twelve private escapers (and the
+cookbook example's) now import `text::html_escape` or the shared XML
+one, so `'` is `&#x27;` everywhere, `csrf_input_html` included (was
+`&#39;`). The `one_html_escaper` guard fails on a new copy.
+### Changed — `rustango::core` enums are `#[non_exhaustive]` (#1661)
+
+**Breaking** only for exhaustive matches; see UPGRADING. 29 enums can
+now gain a variant without a breaking release, and
+`clippy::exhaustive_enums` is denied in `core` so a new one cannot
+slip in exhaustive.
+### Changed — one error envelope across the framework (#1193)
+
+**Breaking** for clients parsing error bodies. See UPGRADING.
+
+ViewSets, tenant and `Principal` rejections, media, the admin's JSON
+errors, body and rate limits, HMAC auth and maintenance mode now all
+answer with `ApiError`. A client no longer needs a layer to normalise
+four shapes, and a 5xx no longer sends the driver's message, which
+could name tables and columns.
+
+Serializer validation is now `422`, like every other
+`validation_failed`. `ApiError` is available with `_axum` (was `admin`)
+and gains `from_status`, `logged` and `rate_limited_response`.
+
+### Changed — JWT auth is a value, not a process global (#1190)
+
+**Breaking:** `jwt_router(cfg)` is now `JwtAuth::new(cfg).router()`,
+`require_bearer` needs `from_fn_with_state(auth, …)`, and
+`verify_for_tenant` is a `JwtAuth` method. See UPGRADING.
+
+`jwt_router` was removed rather than kept: it hid its `JwtAuth`, so the
+easy upgrade built a second one and lost logout revocation.
+
+The first `jwt_router` call used to win for the whole process, so a
+second config was silently ignored and tests had to set
+`RUSTANGO_SESSION_SECRET` before anything touched it.
+
+### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
+
+**Breaking:** the loader now refuses a callback in an atomic migration,
+and `atomic` defaults to true. See UPGRADING.
+
+The callback runs on a second connection and waited on the migration
+transaction's own locks: forever on PostgreSQL, until `busy_timeout` on
+SQLite, and on MySQL after a data op (50s error, or a metadata-lock
+hang). The `callbacks::` example also put the callback before the
+schema op it backfills; corrected.
+
+### Fixed — turning off the access log silently narrowed span redaction (#1610)
+
+The request span is mounted whether or not `[logging] access_log` is
+on, but it could only take the configured `redact_query_params` list
+*from* the access-log layer. With the log off it fell back to the
+defaults, so a project that set
+
+```toml
+[audit]
+redact_query_params = ["invite_token"]
+```
+
+got `invite_token` redacted in the access-log event and written in
+**clear text on the span** when there was no event.
+
+The two settings live in different config sections, and nothing in
+either said one disarmed the other — a control that reads as on in the
+configuration and is off in the process.
+
+`mount_observability` now takes the redact list directly, so there is
+one arm instead of two and no path that can fall back. `Cli` derives
+it from the same `AccessLogLayer` it would have mounted, rather than
+recomputing the composition, since building it a second way is how
+these drifted apart.
+
+`server::Builder` gains `span_redact` for the hand-built case, as an
+**override**: leave it unset and the span follows the access log's
+list, exactly as it did before. Defaulting it to the plain defaults
+instead would have re-created this bug with the log *on* — a
+hand-built server would have logged a configured param as
+`[redacted]` in the event and in clear text on the span, for the same
+request. Found by review before release.
+
+### Fixed — tenant login was the one POST with no CSRF protection (#1607)
+
+`POST /login` accepted a request with no token, a wrong token or no
+cookie — all three behaved identically — while every other
+server-rendered POST returned 403. That is login CSRF: a third-party
+page can auto-submit the attacker's own credentials and silently sign
+the victim's browser into an **attacker-controlled** account, after
+which the victim works inside the attacker's session.
+
+`SameSite=Lax` does not cover it. Login CSRF mints a *new* session
+cookie rather than replaying an existing one.
+
+`login_form` now seeds the double-submit token and `login_submit`
+verifies it before the user lookup, so a forged POST costs nothing and
+cannot probe usernames by timing. No new mechanism — the same
+`ensure_token` / `verify_form_token` pair the content POSTs already
+use.
+
+### Fixed — the CSRF Origin check was off by default (#1529)
+
+An empty `trusted_origins` skipped the Origin check entirely, so the
+default deployment ran on bare **unsigned** double-submit: a random
+cookie compared against a header. Cookies are scoped by registrable
+domain, not by origin, so anyone able to write one on the parent
+domain forges a valid pair — XSS on a sibling subdomain, a
+dangling-CNAME takeover, or a network attacker on any plaintext
+`http://*.example.com` (`Secure` stops the cookie being *sent* over
+HTTP, not *written*). Origin is what catches that.
+
+The check now runs with an empty list, using the request's own `Host`
+as the implicit trusted origin — so a same-origin deployment needs no
+configuration, and a foreign Origin is refused out of the box. Add
+entries only for origins other than the app's own.
+
+Two related holes closed with it:
+
+- **A missing Origin no longer passes over TLS.** Anything able to
+  omit the header skipped the check. Plain HTTP keeps the old
+  behaviour, so server-to-server callers are not locked out.
+- **Wildcard entries now match a non-default port.** `https://*.example.com`
+  did not cover `https://sub.example.com:8443`, a silent false
+  negative that reads as a flaky 403.
+
+Signing the token against the session — the remaining item on #1529 —
+is not in this release.
+
+### Fixed — a JWT with no `exp` never expired, and `decode` accepted it (#1538)
+
+`decode` skipped the expiry check when the claim was absent, so a
+token minted without `.ttl()` or `.expires_at()` was a permanent
+credential. `Claims::new(sub)` sets only `sub` and `iat`, so
+forgetting the TTL produced one silently.
+
+`exp` is required now, and its absence is `JwtError::MissingExp`
+rather than a pass. Non-expiring service tokens are a real case, so
+they get the explicit branch: `decode_allowing_no_exp` (and
+`decode_at_allowing_no_exp`), which still checks the signature and
+`nbf`.
+
+`JwtLifecycle` is unaffected — its `JwtClaims` has always had a
+required `exp` and always sets a TTL.
+
+**Breaking:** `JwtError` gains a variant, and a token your own code
+mints without an expiry now fails to decode. That is the bug.
+
+### Added — `jwt_router` takes a revocation store and a claims hook (#1190)
+
+`Config` gains `jti_store` and `extra_claims`, so an app no longer has
+to abandon the router to add its own claims or to share revocation
+state between replicas. The default `InMemoryJtiStore` is
+single-process and forgets every revocation on restart, which made
+`/logout` best-effort on more than one replica.
+
+The hook runs before the router's own `tenant` claim, so it cannot
+overwrite the binding that stops a token signed on one subdomain being
+replayed on another.
+
+The `OnceLock` the issue also names is unchanged: `verify_for_tenant`
+is public and reads it, so removing it is a breaking change. #1190
+stays open for that part.
+
 ## [0.57.12] — 2026-09-24
 
 A security release. An admin could log in on the password alone when

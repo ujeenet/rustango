@@ -3,6 +3,10 @@
 //! Light on purpose: no async, no database drivers, no proc-macros.
 //! Anything the macro output and the runtime both name lives here.
 
+// A new public enum here must be `#[non_exhaustive]`, so it can grow
+// without a breaking release (#1661).
+#![deny(clippy::exhaustive_enums)]
+
 pub mod aggregates;
 pub mod case;
 mod column;
@@ -21,7 +25,7 @@ pub mod window;
 
 pub use case::{case, value, CaseBuilder};
 pub use column::{Column, TypedAssignment, TypedExpr, TypedFieldList, TypedFilter};
-pub use error::QueryError;
+pub use error::{BoundedDmlReason, QueryError};
 pub use expr::{BinOp, CaseBranch, Expr, JsonPathStep, ScalarFn, VectorMetric, F};
 pub use field_type::{ArrayElem, FieldType, RangeElem};
 pub use query::{

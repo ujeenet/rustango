@@ -244,11 +244,16 @@ pub trait Dialect: Send + Sync {
     /// The `LIMIT` clause to add when a query has an `OFFSET` but no
     /// `LIMIT`. The writer puts it before the `OFFSET`.
     ///
-    /// MySQL's grammar demands a `LIMIT` alongside any `OFFSET`, and
-    /// pairs it with the largest `u64`. PG and SQLite accept a bare
-    /// `OFFSET`, so they return `None`.
+    /// MySQL and SQLite demand a `LIMIT` alongside any `OFFSET`; PG
+    /// accepts a bare `OFFSET` and returns `None`.
     fn offset_without_limit_clause(&self) -> Option<&'static str> {
         None
+    }
+
+    /// `true` if `IN (<subquery>)` rejects a `LIMIT`/`OFFSET` inside
+    /// (MySQL 1235), so the writer wraps it in a derived table.
+    fn in_subquery_limit_needs_derived_table(&self) -> bool {
+        false
     }
 
     /// Cast a SUM back to BIGINT. PG returns NUMERIC and MySQL

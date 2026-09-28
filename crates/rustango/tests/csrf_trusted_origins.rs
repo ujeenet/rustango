@@ -3,10 +3,8 @@
 //! double-submit-cookie token check.
 //!
 //! Behavior:
-//! * Default `trusted_origins: []` → Origin-header check disabled
-//!   (back-compat). Only the token check runs.
-//! * Non-empty list → on unsafe methods, request's Origin must be
-//!   either same-host or match one of the trusted entries.
+//! * On unsafe methods the Origin must be same-host or match a
+//!   trusted entry. An empty list means same-host only (#1529).
 //! * `https://*.example.com` wildcard matches any subdomain.
 
 #![cfg(feature = "csrf")]
@@ -58,14 +56,26 @@ async fn post_with_headers(app: Router, host: &str, origin: Option<&str>) -> Sta
     app.oneshot(req).await.unwrap().status()
 }
 
+/// An empty `trusted_origins` checks the Origin against the request's
+/// own Host instead of skipping the check (#1529).
+///
+/// This test used to assert the opposite — that a cross-origin POST
+/// with a matching token pair returned 200 — which is the attack
+/// itself: the pair is forgeable by anyone who can write a cookie on
+/// the parent domain, and Origin is what catches it.
 #[tokio::test]
-async fn empty_trusted_origins_disables_origin_check() {
+async fn empty_trusted_origins_still_checks_against_host() {
     let app = app(CsrfConfig::default().allow_insecure_for_dev());
-    // Cross-origin POST passes when trusted_origins is empty
-    // (back-compat with pre-v0.43 token-only checking).
     assert_eq!(
-        post_with_headers(app, "example.com", Some("https://attacker.com")).await,
-        StatusCode::OK
+        post_with_headers(app.clone(), "example.com", Some("https://attacker.com")).await,
+        StatusCode::FORBIDDEN,
+        "a foreign Origin must be refused with the default config"
+    );
+    // Same-origin still works with no configuration.
+    assert_eq!(
+        post_with_headers(app, "example.com", Some("http://example.com")).await,
+        StatusCode::OK,
+        "same-origin traffic must need no trusted_origins entry"
     );
 }
 

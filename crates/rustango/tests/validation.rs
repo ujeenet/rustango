@@ -165,10 +165,10 @@ fn validate_value_no_bounds_passes_everything() {
 
 #[test]
 fn insert_validate_accepts_in_bounds_values() {
-    let q = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["id", "name", "email", "age", "balance", "is_active"],
-        values: vec![
+    let q = InsertQuery::new(
+        User::SCHEMA,
+        vec!["id", "name", "email", "age", "balance", "is_active"],
+        vec![
             SqlValue::I64(1),
             SqlValue::String("alice".into()),
             SqlValue::Null,
@@ -176,47 +176,31 @@ fn insert_validate_accepts_in_bounds_values() {
             SqlValue::I64(0),
             SqlValue::Bool(true),
         ],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    );
     assert!(q.validate().is_ok());
 }
 
 #[test]
 fn insert_validate_rejects_too_long_string() {
-    let q = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["name"],
-        values: vec![SqlValue::String("a".repeat(50))],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    let q = InsertQuery::new(
+        User::SCHEMA,
+        vec!["name"],
+        vec![SqlValue::String("a".repeat(50))],
+    );
     let err = q.validate().unwrap_err();
     assert!(matches!(err, QueryError::MaxLengthExceeded { max: 8, .. }));
 }
 
 #[test]
 fn insert_validate_rejects_out_of_range_int() {
-    let q = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["age"],
-        values: vec![SqlValue::I32(200)],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    let q = InsertQuery::new(User::SCHEMA, vec!["age"], vec![SqlValue::I32(200)]);
     let err = q.validate().unwrap_err();
     assert!(matches!(err, QueryError::OutOfRange { value: 200, .. }));
 }
 
 #[test]
 fn insert_validate_reports_unknown_column() {
-    let q = InsertQuery {
-        model: User::SCHEMA,
-        columns: vec!["nope"],
-        values: vec![SqlValue::I32(1)],
-        returning: Vec::new(),
-        on_conflict: None,
-    };
+    let q = InsertQuery::new(User::SCHEMA, vec!["nope"], vec![SqlValue::I32(1)]);
     let err = q.validate().unwrap_err();
     assert_eq!(
         err,
@@ -233,51 +217,40 @@ fn insert_validate_reports_unknown_column() {
 fn update_validate_checks_set_values_only() {
     // Filters intentionally don't validate — they compare against existing
     // rows. A long filter value is allowed; a long SET value is not.
-    let q = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![Assignment {
-            column: "name",
-            value: SqlValue::String("a".repeat(20)).into(),
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "name",
-            op: Op::Eq,
-            value: SqlValue::String("a".repeat(50)), // not validated
-        }),
-    };
+    let q = UpdateQuery::new(
+        User::SCHEMA,
+        vec![Assignment::new("name", SqlValue::String("a".repeat(20)))],
+        // The filter value is not validated.
+        WhereExpr::Predicate(Filter::new(
+            "name",
+            Op::Eq,
+            SqlValue::String("a".repeat(50)),
+        )),
+    );
     let err = q.validate().unwrap_err();
     assert!(matches!(err, QueryError::MaxLengthExceeded { .. }));
 }
 
 #[test]
 fn update_validate_allows_in_bounds_set() {
-    let q = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![
-            Assignment {
-                column: "name",
-                value: SqlValue::String("ok".into()).into(),
-            },
-            Assignment {
-                column: "age",
-                value: SqlValue::I32(25).into(),
-            },
+    let q = UpdateQuery::new(
+        User::SCHEMA,
+        vec![
+            Assignment::new("name", SqlValue::String("ok".into())),
+            Assignment::new("age", SqlValue::I32(25)),
         ],
-        where_clause: WhereExpr::And(vec![]),
-    };
+        WhereExpr::And(vec![]),
+    );
     assert!(q.validate().is_ok());
 }
 
 #[test]
 fn update_validate_rejects_out_of_range_set() {
-    let q = UpdateQuery {
-        model: User::SCHEMA,
-        set: vec![Assignment {
-            column: "age",
-            value: SqlValue::I32(-5).into(),
-        }],
-        where_clause: WhereExpr::And(vec![]),
-    };
+    let q = UpdateQuery::new(
+        User::SCHEMA,
+        vec![Assignment::new("age", SqlValue::I32(-5))],
+        WhereExpr::And(vec![]),
+    );
     let err = q.validate().unwrap_err();
     assert!(matches!(err, QueryError::OutOfRange { value: -5, .. }));
 }

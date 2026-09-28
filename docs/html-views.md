@@ -286,8 +286,8 @@ add a friendlier alias alongside `object_list` / `object`.
 
 Each entry in `form.fields` carries `name`, `column`, `ty`, `required`,
 `max_length` and `value`. `form.errors` is keyed by field name and holds one
-message per field, not a list. With the `csrf` feature on, every view also
-stamps `csrf_token` and `csrf_input`.
+message per field, not a list. Every view also stamps `csrf_token` and
+`csrf_input`, and every view router rejects a POST without a matching token.
 
 `CreateView` stamps no `object`, so `{{ object.title }}` on a create form is
 undefined rather than empty — use `{{ field.value }}` from `form.fields`, which

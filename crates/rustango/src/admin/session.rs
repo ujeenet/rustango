@@ -12,8 +12,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use crate::session::sign;
 pub use crate::session::SessionSecret as AdminSessionSecret;
+use crate::session::{sign, PasswordFingerprint};
 
 tokio::task_local! {
     /// Per-request session, set by the `require_session` middleware, so
@@ -90,7 +90,7 @@ struct CookiePayload {
     /// it. `#[serde(default)]` lets older cookies decode: they carry
     /// `""`, which never matches, so they need one fresh login.
     #[serde(default)]
-    auth_hash: String,
+    auth_hash: PasswordFingerprint,
 }
 
 impl CookiePayload {
@@ -99,30 +99,21 @@ impl CookiePayload {
     }
 }
 
-/// Fingerprint of a user's `password_hash`, bound to the signing
-/// secret. Stored in the cookie at login and recomputed each request.
-/// It changes with the password, so old sessions stop validating. It
-/// cannot be reversed back to the hash.
-#[must_use]
-pub(crate) fn password_fingerprint(secret: &AdminSessionSecret, password_hash: &str) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sign(secret, password_hash.as_bytes()))
-}
-
 /// Sign a fresh session and return the cookie value to set. Lasts 8
-/// hours. `auth_hash` is the [`password_fingerprint`] of the user's
-/// current `password_hash`.
+/// hours. `auth_hash` is the fingerprint of the user's current
+/// `password_hash`.
 #[must_use]
 pub(crate) fn encode(
     secret: &AdminSessionSecret,
     session: AdminSession,
-    auth_hash: &str,
+    auth_hash: &PasswordFingerprint,
 ) -> String {
     let payload = CookiePayload {
         user_id: session.user_id,
         username: session.username,
         is_superuser: session.is_superuser,
         exp: chrono::Utc::now().timestamp() + DEFAULT_TTL_SECS,
-        auth_hash: auth_hash.to_owned(),
+        auth_hash: auth_hash.clone(),
     };
     let json = serde_json::to_vec(&payload).expect("payload serializes");
     let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json);
@@ -147,7 +138,7 @@ pub(crate) fn decode(secret: &AdminSessionSecret, value: &str) -> Option<AdminSe
 pub(crate) fn decode_full(
     secret: &AdminSessionSecret,
     value: &str,
-) -> Option<(AdminSession, String)> {
+) -> Option<(AdminSession, PasswordFingerprint)> {
     let (body, sig_b64) = value.split_once('.')?;
     let expected = sign(secret, body.as_bytes());
     let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -190,7 +181,7 @@ mod tests {
     #[test]
     fn round_trip_recovers_session_fields_and_auth_hash() {
         let secret = AdminSessionSecret::from_bytes(vec![42u8; 32]);
-        let fp = password_fingerprint(&secret, "$argon2id$fake-hash");
+        let fp = PasswordFingerprint::of(&secret, "$argon2id$fake-hash");
         let cookie = encode(&secret, session(7, "alice", true), &fp);
         let (s, auth_hash) = decode_full(&secret, &cookie).expect("valid cookie verifies");
         assert_eq!(s.user_id, 7);
@@ -203,15 +194,19 @@ mod tests {
         // The fingerprint changes with the password hash, so the
         // gate's compare invalidates old cookies.
         let secret = AdminSessionSecret::from_bytes(vec![9u8; 32]);
-        let before = password_fingerprint(&secret, "$argon2id$old");
-        let after = password_fingerprint(&secret, "$argon2id$new");
+        let before = PasswordFingerprint::of(&secret, "$argon2id$old");
+        let after = PasswordFingerprint::of(&secret, "$argon2id$new");
         assert_ne!(before, after);
     }
 
     #[test]
     fn tampered_signature_rejected() {
         let secret = AdminSessionSecret::from_bytes(vec![1u8; 32]);
-        let cookie = encode(&secret, session(1, "bob", false), "fp");
+        let cookie = encode(
+            &secret,
+            session(1, "bob", false),
+            &PasswordFingerprint::default(),
+        );
         let (body, _sig) = cookie.split_once('.').unwrap();
         let bad = format!("{body}.AAAA");
         assert!(decode(&secret, &bad).is_none());
@@ -221,7 +216,11 @@ mod tests {
     fn wrong_secret_rejected() {
         let secret_a = AdminSessionSecret::from_bytes(vec![1u8; 32]);
         let secret_b = AdminSessionSecret::from_bytes(vec![2u8; 32]);
-        let cookie = encode(&secret_a, session(1, "bob", false), "fp");
+        let cookie = encode(
+            &secret_a,
+            session(1, "bob", false),
+            &PasswordFingerprint::default(),
+        );
         assert!(decode(&secret_b, &cookie).is_none());
     }
 }

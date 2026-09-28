@@ -52,6 +52,11 @@ pub enum JwtError {
     BadSignature,
     #[error("token expired (exp={0})")]
     Expired(u64),
+    /// No `exp` claim. A token without one never expires, so `decode`
+    /// refuses it; mint with `.ttl()` or decode with
+    /// [`decode_allowing_no_exp`].
+    #[error("token has no exp claim and would never expire")]
+    MissingExp,
     #[error("token not yet valid (nbf={0})")]
     NotYetValid(u64),
     #[error("decode error: {0}")]
@@ -187,6 +192,10 @@ pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
 
 /// Decode + verify an HS256 JWT. Checks signature, `exp`, and `nbf`.
 ///
+/// `exp` is **required**: a token without one never expires, and
+/// forgetting `.ttl()` is indistinguishable from meaning to omit it.
+/// Use [`decode_allowing_no_exp`] for a deliberate service token.
+///
 /// It does **not** check `iss` or `aud`. If you set them when
 /// issuing, you must check them yourself on the returned claims. A
 /// valid signature alone does not prove the token was made for your
@@ -208,6 +217,39 @@ pub fn decode(token: &str, secret: &[u8]) -> Result<Claims, JwtError> {
 /// # Errors
 /// See [`JwtError`].
 pub fn decode_at(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtError> {
+    decode_inner(token, secret, now, true)
+}
+
+/// [`decode`] for a token that deliberately has no `exp` — a
+/// non-expiring service token. Every other check still runs.
+///
+/// This is the explicit branch: `decode` refuses such a token, because
+/// forgetting `.ttl()` and meaning to omit it look identical once the
+/// token is signed (#1538).
+///
+/// # Errors
+/// See [`JwtError`].
+pub fn decode_allowing_no_exp(token: &str, secret: &[u8]) -> Result<Claims, JwtError> {
+    decode_inner(token, secret, now_secs(), false)
+}
+
+/// [`decode_allowing_no_exp`] with an explicit "current" time.
+///
+/// # Errors
+/// See [`JwtError`].
+pub fn decode_at_allowing_no_exp(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtError> {
+    decode_inner(token, secret, now, false)
+}
+
+/// The one decode path. `require_exp` is the only difference between
+/// the public wrappers, so the signature and `nbf` checks cannot drift
+/// apart between them.
+fn decode_inner(
+    token: &str,
+    secret: &[u8],
+    now: u64,
+    require_exp: bool,
+) -> Result<Claims, JwtError> {
     let mut it = token.split('.');
     let header_b = it.next().ok_or(JwtError::Malformed)?;
     let payload_b = it.next().ok_or(JwtError::Malformed)?;
@@ -247,6 +289,10 @@ pub fn decode_at(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtErro
         if now > exp {
             return Err(JwtError::Expired(exp));
         }
+    } else if require_exp {
+        // Absent `exp` used to skip the check entirely, so a token
+        // minted without `.ttl()` was valid forever (#1538).
+        return Err(JwtError::MissingExp);
     }
     if let Some(nbf) = claims.get::<u64>("nbf") {
         if now < nbf {
@@ -294,7 +340,7 @@ mod tests {
 
     #[test]
     fn round_trip_encode_decode() {
-        let mut c = Claims::new("user-42");
+        let mut c = Claims::new("user-42").ttl(Duration::from_secs(3600));
         c.set("role", "admin");
         c.set("count", 7_i64);
         let token = encode(&c, SECRET).unwrap();
@@ -372,6 +418,49 @@ mod tests {
         assert!(matches!(err, JwtError::Expired(_)));
     }
 
+    /// A token minted without `.ttl()` carries no `exp`, and the old
+    /// `if let Some(exp)` skipped the check entirely — so it was valid
+    /// forever (#1538). `decode` now refuses it.
+    #[test]
+    fn a_token_with_no_exp_is_refused() {
+        let t = encode(&Claims::new("forever"), SECRET).unwrap();
+        assert!(
+            matches!(decode(&t, SECRET), Err(JwtError::MissingExp)),
+            "a token with no exp never expires and must not decode"
+        );
+        // Far-future `now`: still refused, because the problem is the
+        // absent claim, not the clock.
+        assert!(matches!(
+            decode_at(&t, SECRET, u64::MAX),
+            Err(JwtError::MissingExp)
+        ));
+    }
+
+    /// The deliberate non-expiring service token stays reachable, but
+    /// only by asking for it.
+    #[test]
+    fn the_no_exp_opt_out_still_decodes_and_still_checks_everything_else() {
+        let t = encode(&Claims::new("service"), SECRET).unwrap();
+        let v = decode_allowing_no_exp(&t, SECRET).expect("opt-out decodes");
+        assert_eq!(v.subject(), Some("service"));
+
+        // Opting out of `exp` does not opt out of the signature.
+        assert!(matches!(
+            decode_allowing_no_exp(&t, b"wrong-secret-bytes"),
+            Err(JwtError::BadSignature)
+        ));
+        // …nor of `nbf`.
+        let future = encode(
+            &Claims::new("service").not_before(now_secs() + 3600),
+            SECRET,
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_allowing_no_exp(&future, SECRET),
+            Err(JwtError::NotYetValid(_))
+        ));
+    }
+
     #[test]
     fn ttl_helper_sets_iat_and_exp() {
         let c = Claims::new("x").ttl(Duration::from_secs(3600));
@@ -382,7 +471,11 @@ mod tests {
 
     #[test]
     fn not_before_rejected_when_future() {
-        let c = Claims::new("x").not_before(now_secs() + 3600);
+        // Carries an `exp` so the rejection is `nbf`, not the missing
+        // expiry — otherwise this passes without exercising `nbf`.
+        let c = Claims::new("x")
+            .ttl(Duration::from_secs(7200))
+            .not_before(now_secs() + 3600);
         let t = encode(&c, SECRET).unwrap();
         assert!(matches!(decode(&t, SECRET), Err(JwtError::NotYetValid(_))));
     }
@@ -418,6 +511,7 @@ mod tests {
     #[test]
     fn issuer_audience_jti_round_trip() {
         let c = Claims::new("x")
+            .ttl(Duration::from_secs(3600))
             .issuer("api.example.com")
             .audience("client.example.com")
             .jti("token-1");
@@ -443,7 +537,9 @@ mod tests {
 
     #[test]
     fn empty_claims_round_trip_when_no_sub() {
-        let c = Claims::empty();
+        // `Claims::empty()` sets nothing at all, so it needs an
+        // explicit expiry to reach `decode` now.
+        let c = Claims::empty().ttl(Duration::from_secs(3600));
         let t = encode(&c, SECRET).unwrap();
         let v = decode(&t, SECRET).unwrap();
         assert_eq!(v.subject(), None);

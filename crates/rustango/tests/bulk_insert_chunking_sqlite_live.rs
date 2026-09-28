@@ -62,13 +62,7 @@ async fn pool_with_table() -> Pool {
 }
 
 fn query(rows: Vec<Vec<SqlValue>>) -> BulkInsertQuery {
-    BulkInsertQuery {
-        model: Chunked::SCHEMA,
-        columns: vec!["a", "b", "c", "d"],
-        rows,
-        returning: Vec::new(),
-        on_conflict: None,
-    }
+    BulkInsertQuery::new(Chunked::SCHEMA, vec!["a", "b", "c", "d"], rows)
 }
 
 #[tokio::test]

@@ -44,6 +44,7 @@ use super::value::SqlValue;
 /// So do the bitwise ops, except `BitXor`: SQLite has no XOR operator,
 /// so the writer returns `SqlError::OpNotSupportedInDialect` there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BinOp {
     /// `+` — addition (numeric / date-interval, dialect-dependent).
     Add,
@@ -81,6 +82,7 @@ pub enum BinOp {
 /// a pgvector operator such as [`BinOp::L2Distance`]. Ascending order
 /// always ranks the most similar row first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum VectorMetric {
     /// L2 / Euclidean distance — pgvector `<->`.
     L2,
@@ -110,6 +112,7 @@ impl VectorMetric {
 /// clause. The variants are recursive, so arithmetic and calls nest
 /// as deep as you need.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Expr {
     /// Bound value. Emitter pushes a parameter.
     Literal(SqlValue),
@@ -238,6 +241,7 @@ pub enum Expr {
 /// MySQL's path grammar has no negative form, so the writer rejects
 /// one there with a clear error.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JsonPathStep {
     /// Object key lookup. Emitted as a quoted SQL literal on PG
     /// (`-> 'name'`) and inside the path string on MySQL / SQLite
@@ -265,6 +269,7 @@ pub struct CaseBranch {
 /// The writer handles the per-dialect differences. Each variant below
 /// notes the ones a caller has to know about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScalarFn {
     // --- Text ---
     /// `LOWER(s)` — lowercase a string.

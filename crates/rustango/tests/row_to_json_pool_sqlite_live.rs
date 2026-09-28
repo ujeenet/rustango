@@ -4,7 +4,7 @@
 
 #![cfg(feature = "sqlite")]
 
-use rustango::core::{Filter, Model as _, Op, SelectQuery, SqlValue, WhereExpr};
+use rustango::core::{Model as _, SelectQuery, SqlValue};
 use rustango::sql::{select_one_row_as_json, select_rows_as_json, sqlx, Auto, Pool};
 use rustango::Model;
 
@@ -69,29 +69,11 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
     b.insert_pool(&pool).await.expect("insert beta");
 
     let fields = fields();
-    let rows = select_rows_as_json(
-        &pool,
-        &SelectQuery {
-            model: Widget::SCHEMA,
-            where_clause: WhereExpr::And(Vec::new()),
-            search: None,
-            joins: Vec::new(),
-            subquery_joins: Vec::new(),
-            order_by: vec![rustango::core::OrderItem::column("id", false)],
-            limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
-            compound_order_by: vec![],
-            compound_limit: None,
-            compound_offset: None,
-        },
-        &fields,
-    )
-    .await
-    .expect("select_rows_as_json");
+    let mut q = SelectQuery::new(Widget::SCHEMA);
+    q.order_by = vec![rustango::core::OrderItem::column("id", false)];
+    let rows = select_rows_as_json(&pool, &q, &fields)
+        .await
+        .expect("select_rows_as_json");
 
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["name"], "alpha");
@@ -110,27 +92,7 @@ async fn select_one_row_as_json_pool_returns_none_for_miss() {
     let fields = fields();
     let got = select_one_row_as_json(
         &pool,
-        &SelectQuery {
-            model: Widget::SCHEMA,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: "id",
-                op: Op::Eq,
-                value: SqlValue::I64(9999),
-            }),
-            search: None,
-            joins: Vec::new(),
-            subquery_joins: Vec::new(),
-            order_by: Vec::new(),
-            limit: Some(1),
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
-            compound_order_by: vec![],
-            compound_limit: None,
-            compound_offset: None,
-        },
+        &SelectQuery::by_pk(Widget::SCHEMA, "id", SqlValue::I64(9999)),
         &fields,
     )
     .await
@@ -155,27 +117,7 @@ async fn select_one_row_as_json_pool_returns_decoded_row_for_hit() {
     let fields = fields();
     let got = select_one_row_as_json(
         &pool,
-        &SelectQuery {
-            model: Widget::SCHEMA,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: "id",
-                op: Op::Eq,
-                value: SqlValue::I64(pk),
-            }),
-            search: None,
-            joins: Vec::new(),
-            subquery_joins: Vec::new(),
-            order_by: Vec::new(),
-            limit: Some(1),
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
-            compound_order_by: vec![],
-            compound_limit: None,
-            compound_offset: None,
-        },
+        &SelectQuery::by_pk(Widget::SCHEMA, "id", SqlValue::I64(pk)),
         &fields,
     )
     .await

@@ -220,3 +220,63 @@ pub struct ShipmentEvent {
     #[rustango(auto_now_add)]
     pub at: Auto<DateTime<Utc>>,
 }
+
+/// Only `visible` promotions exist for the API, the template views and
+/// the `Model::*` shortcuts (#1675, #1746). Hidden rows are the scope's
+/// proof: the soak seeds them and checks nothing reaches them.
+fn visible_only() -> rustango::core::WhereExpr {
+    rustango::core::WhereExpr::Predicate(rustango::core::Filter::new(
+        "visible",
+        rustango::core::Op::Eq,
+        true,
+    ))
+}
+
+/// Discount codes: scoped, soft-deleted and audited, so one model
+/// carries every write path #1675 fixed.
+#[allow(dead_code)]
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "commerce_promotion",
+    display = "code",
+    global_scope(name = "visible", apply = visible_only),
+    audit(track = "code, amount_cents, visible, deleted_at"),
+    admin(list_display = "id, code, amount_cents, visible", search_fields = "code")
+)]
+pub struct Promotion {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64, unique)]
+    pub code: String,
+    /// Free text a merchant types; the template view renders it through
+    /// `urlize` (#1669).
+    #[rustango(max_length = 500)]
+    pub label: String,
+    pub amount_cents: i64,
+    #[rustango(default = "true")]
+    pub visible: bool,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// A natural primary key: the code printed on the card is the key.
+/// ViewSet create must keep it (#1671).
+#[allow(dead_code)]
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "commerce_gift_card", display = "code")]
+pub struct GiftCard {
+    #[rustango(primary_key, max_length = 40)]
+    pub code: String,
+    pub balance_cents: i64,
+}
+
+// Order lines edit inline under their order in the admin; a line posted
+// under another order must not move or change (#1667).
+rustango::register_admin_inline!(
+    parent = "commerce_order",
+    child = "commerce_order_line",
+    fk = "order_id",
+    kind = rustango::admin::inlines::InlineKind::Tabular,
+    fields = &["product_id", "quantity", "unit_price_cents"],
+    extra = 0,
+);

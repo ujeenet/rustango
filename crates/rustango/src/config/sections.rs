@@ -510,7 +510,7 @@ pub struct ServerSettings {
 pub struct AuthSettings {
     /// JWT lifetimes. The field names match
     /// `rustango::tenancy::auth_routes::Config`, so this section can
-    /// go straight to `auth_routes::jwt_router(...)`.
+    /// go straight to `auth_routes::JwtAuth::new(...)`.
     pub jwt: JwtSettings,
     /// Argon2id memory cost in KiB. Default `19456`, about 19 MiB,
     /// which is the OWASP floor. Less memory means faster logins and
@@ -523,10 +523,24 @@ pub struct AuthSettings {
     /// fastest overall, since extra lanes only move work between
     /// cores.
     pub argon2_parallelism: Option<u32>,
-    /// Failed-login attempts before lockout. Default `5`.
+    /// Failed logins for one username, known or not, before it locks.
+    /// Default `5`.
     pub lockout_threshold: Option<u32>,
     /// Lockout duration in seconds. Default `900` (15 min).
     pub lockout_duration_secs: Option<u64>,
+    /// Failed logins one client IP (IPv6: one /64) may make per window.
+    /// Default `20`.
+    pub login_ip_limit: Option<u32>,
+    /// Per-IP window in seconds. Default `60`.
+    pub login_ip_window_secs: Option<u64>,
+    /// Failed logins all clients together may make per window, for each
+    /// login (admin, operator console, each tenant). Default `600`.
+    pub login_global_limit: Option<u32>,
+    /// Global window in seconds. Default `60`.
+    pub login_global_window_secs: Option<u64>,
+    /// How long a login waits for a password-hashing slot before it
+    /// answers 503, in milliseconds. Default `5000`.
+    pub hash_wait_ms: Option<u64>,
 }
 
 /// JWT lifetimes. The defaults match
@@ -596,8 +610,8 @@ pub struct SecuritySettings {
     /// Extra origins that pass the CSRF Origin check, on top of
     /// same-host requests. Each
     /// entry is scheme plus host, such as `"https://app.example.com"`
-    /// or `"https://*.example.com"`. Empty skips the Origin check.
-    /// Used by
+    /// or `"https://*.example.com"`. Empty still checks Origin, against
+    /// the request's own Host only. Used by
     /// [`crate::forms::csrf::CsrfConfig::with_trusted_origins`].
     pub csrf_trusted_origins: Vec<String>,
     /// `true` mounts [`crate::ssl_redirect::SslRedirectLayer`], which

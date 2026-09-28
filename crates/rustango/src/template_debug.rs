@@ -158,22 +158,8 @@ plain-text 500 response.</p>
     buf
 }
 
-/// Small HTML escape, enough to print raw error text safely without
-/// going back through Tera, which is what just failed.
-fn escape_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
+// Escapes raw error text without going back through Tera, which just failed.
+use crate::text::html_escape as escape_html;
 
 #[cfg(test)]
 mod tests {
@@ -285,7 +271,7 @@ mod tests {
         assert_eq!(escape_html("<"), "&lt;");
         assert_eq!(escape_html(">"), "&gt;");
         assert_eq!(escape_html("\""), "&quot;");
-        assert_eq!(escape_html("'"), "&#39;");
+        assert_eq!(escape_html("'"), "&#x27;");
         assert_eq!(escape_html("abc"), "abc");
     }
 }

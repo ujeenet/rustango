@@ -98,13 +98,17 @@ pub struct MaintenanceLayer {
 
 impl MaintenanceLayer {
     /// Layer driven by `flag`. `Retry-After` defaults to 60 s and the
-    /// body to `{"error":"under maintenance"}`.
+    /// body to a `503` [`ApiError`](crate::api_errors::ApiError).
     #[must_use]
     pub fn new(flag: MaintenanceFlag) -> Self {
         Self {
             flag,
             retry_after: Duration::from_secs(60),
-            body: Arc::new(r#"{"error":"under maintenance"}"#.to_owned()),
+            body: Arc::new(
+                crate::api_errors::ApiError::service_unavailable("under maintenance")
+                    .to_json()
+                    .to_string(),
+            ),
             allow_paths: Arc::new(HashSet::new()),
         }
     }
@@ -241,7 +245,8 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["error"], "under maintenance");
+        assert_eq!(v["error"], "service_unavailable");
+        assert_eq!(v["message"], "under maintenance");
     }
 
     #[tokio::test]

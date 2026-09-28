@@ -13,6 +13,7 @@
 //! creation layer — the tables exist because migrations ran, exactly like
 //! the rest of the framework's own tables.
 
+use super::password::HashLane;
 use crate::sql::{Auto, ExecError, Pool};
 
 /// A tenant-scoped MCP agent. Authenticates with a `prefix.secret`
@@ -95,9 +96,9 @@ pub enum AgentError {
 /// `(full_token, prefix, secret_hash)`. Mirrors
 /// `tenancy::auth_backends::create_api_key`'s OS-CSPRNG + argon2id path —
 /// 4-byte hex prefix (lookup half) + 16-byte hex secret (bearer half),
-/// hashed with [`crate::tenancy::password::hash`]. No `api_keys` feature
+/// hashed with [`crate::tenancy::password::hash_async`]. No `api_keys` feature
 /// needed (the framework's own argon2id is always on with `tenancy`).
-fn generate_credential() -> Result<(String, String, String), AgentError> {
+async fn generate_credential() -> Result<(String, String, String), AgentError> {
     use rand::rngs::OsRng;
     use rand::RngCore;
 
@@ -107,7 +108,9 @@ fn generate_credential() -> Result<(String, String, String), AgentError> {
     let mut secret_bytes = [0u8; 16];
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
-    let hash = super::password::hash(&secret).map_err(|e| AgentError::Secret(e.to_string()))?;
+    let hash = super::password::hash_async(&secret)
+        .await
+        .map_err(|e| AgentError::Secret(e.to_string()))?;
     Ok((format!("{prefix}.{secret}"), prefix, hash))
 }
 
@@ -134,7 +137,7 @@ pub async fn create_agent_pool(pool: &Pool, name: &str) -> Result<AgentSecret, A
         return Err(AgentError::Duplicate(name.to_owned()));
     }
 
-    let (token, prefix, hash) = generate_credential()?;
+    let (token, prefix, hash) = generate_credential().await?;
 
     let mut agent = Agent {
         id: Auto::default(),
@@ -169,7 +172,7 @@ pub async fn rotate_agent_secret_pool(pool: &Pool, name: &str) -> Result<AgentSe
         .next()
         .ok_or_else(|| AgentError::NotFound(name.to_owned()))?;
 
-    let (token, prefix, hash) = generate_credential()?;
+    let (token, prefix, hash) = generate_credential().await?;
     agent.secret_prefix = prefix;
     agent.secret_hash = hash;
     agent.secret_rotated_at = Some(chrono::Utc::now());
@@ -196,8 +199,8 @@ pub async fn list_agents_pool(pool: &Pool) -> Result<Vec<Agent>, AgentError> {
 /// mismatch (unknown name, inactive, or bad secret) — fail-closed.
 ///
 /// # Errors
-/// Propagates DB errors only; an unverifiable secret is `Ok(None)`, not an
-/// error, so callers can return a uniform `401`.
+/// DB errors, and [`super::TenancyError::Busy`] when no hashing slot frees
+/// up; an unverifiable secret is `Ok(None)`, so callers can return a uniform `401`.
 pub async fn authenticate_agent_pool(
     pool: &Pool,
     name: &str,
@@ -222,12 +225,17 @@ pub async fn authenticate_agent_pool(
         // Unknown / inactive agent: still spend an argon2 verification against a
         // fixed dummy hash so the response time doesn't reveal whether the agent
         // name exists (timing oracle → agent enumeration). #1099.
-        super::password::verify_dummy(secret_half);
+        super::password::verify_dummy_async_in(HashLane::Credential, secret_half).await?;
         return Ok(None);
     };
+    check_agent_secret(agent, secret_half).await
+}
 
-    match super::password::verify(secret_half, &agent.secret_hash) {
+/// `Some(agent)` when `secret` matches; hashing busy is an error.
+async fn check_agent_secret(agent: Agent, secret: &str) -> Result<Option<Agent>, AgentError> {
+    match super::password::verify_async_in(HashLane::Credential, secret, &agent.secret_hash).await {
         Ok(true) => Ok(Some(agent)),
+        Err(super::TenancyError::Busy) => Err(super::TenancyError::Busy.into()),
         _ => Ok(None),
     }
 }
@@ -239,7 +247,7 @@ pub async fn authenticate_agent_pool(
 /// contract as [`authenticate_agent_pool`].
 ///
 /// # Errors
-/// Propagates DB errors only; an unverifiable secret is `Ok(None)`.
+/// As [`authenticate_agent_pool`].
 pub async fn authenticate_agent_by_prefix_pool(
     pool: &Pool,
     prefix: &str,
@@ -258,14 +266,10 @@ pub async fn authenticate_agent_by_prefix_pool(
         .filter(|a| a.active)
     else {
         // Timing-neutral for unknown prefixes (#1099).
-        super::password::verify_dummy(secret);
+        super::password::verify_dummy_async_in(HashLane::Credential, secret).await?;
         return Ok(None);
     };
-
-    match super::password::verify(secret, &agent.secret_hash) {
-        Ok(true) => Ok(Some(agent)),
-        _ => Ok(None),
-    }
+    check_agent_secret(agent, secret).await
 }
 
 // ============================================================= skills (Slice 4)
@@ -872,7 +876,7 @@ pub async fn create_user_key_pool(
     }
 
     let name = unique_key_name(pool, user_id).await?;
-    let (token, prefix, hash) = generate_credential()?;
+    let (token, prefix, hash) = generate_credential().await?;
     let mut agent = Agent {
         id: Auto::default(),
         name,

@@ -113,7 +113,10 @@ fn the_comment_stripper_respects_string_literals() {
 /// here, or hand it to the builder, which layers it outermost.
 const DIRECT_MOUNT: &str = "mount_observability(api)";
 const BUILDER_HANDOFF: &str = "server::Builder::";
-const HANDS_TO_BUILDER: &str = ".observability(";
+/// The one helper both tenancy paths hand their builder to (#1700); it
+/// sets observability and the `[security]` outer layers together.
+const HANDS_TO_BUILDER: &str = ".tenancy_builder(";
+const HELPER_SETS_IT: &str = ".observability(";
 
 #[test]
 fn every_router_assembly_is_followed_by_the_observability_mount() {
@@ -203,10 +206,21 @@ fn every_builder_handoff_passes_the_layer() {
 
     assert!(
         bare.is_empty(),
-        "these paths construct a `server::Builder` and never call \
-         `.observability(...)` on it, so the tenant admin and the operator console \
-         serve with no access log and no request span:\n\n  {}",
+        "these paths construct a `server::Builder` and never hand it to \
+         `tenancy_builder(...)`, so the tenant admin and the operator console \
+         serve with no access log, no request span and no [security] outer \
+         layers:\n\n  {}",
         bare.join("\n  ")
+    );
+
+    // And the helper itself sets observability.
+    let helper = src
+        .find("fn tenancy_builder")
+        .expect("no `fn tenancy_builder` in manage.rs — the handoff has moved");
+    let body = &src[helper..(helper + 800).min(src.len())];
+    assert!(
+        body.contains(HELPER_SETS_IT),
+        "`tenancy_builder` no longer calls `.observability(...)`"
     );
 }
 

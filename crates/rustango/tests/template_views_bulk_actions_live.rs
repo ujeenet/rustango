@@ -142,12 +142,16 @@ fn build_app(pool: sqlx::PgPool) -> axum::Router {
     lv.router("/widgets", tera(), rustango::sql::Pool::Postgres(pool))
 }
 
+const CSRF: &str = "bulk-actions-csrf-token-bulk-actions-csrf-t";
+
+/// A form POST with a matching CSRF cookie and `_csrf` field.
 fn post_form(uri: &str, body: &str) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(Body::from(body.to_owned()))
+        .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+        .body(Body::from(format!("_csrf={CSRF}&{body}")))
         .unwrap()
 }
 
