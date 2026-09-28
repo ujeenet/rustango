@@ -12,6 +12,8 @@ together, under load, against real infrastructure.
 
 ```bash
 export RUSTANGO_SESSION_SECRET="$(openssl rand -base64 32)"
+export RUSTANGO_SECRET_KEY="$(openssl rand -base64 32)"        # SSO secrets at rest
+export SOAK_SERVICE_TOKEN_SECRET="$(openssl rand -base64 32)"  # #1538 probe
 
 # ~25 min of image builds the first time; the BuildKit cache is shared
 # across all four, so later builds are minutes.
@@ -19,13 +21,26 @@ docker compose -f docker/soak/docker-compose.yml build
 
 docker compose -f docker/soak/docker-compose.yml up -d
 docker compose -f docker/soak/docker-compose.yml --profile driver up driver
+
+# Log scan (#1610), ERROR lines, bootstrap exits, Playwright merge:
+python3 docker/soak/finalize.py --out /tmp/soak-report
 ```
+
+`finalize.py` merges `playwright.json` from the browser agent if it finds
+one (`--playwright PATH`, `docker/soak/soak-results/`, or the
+`soak-results` volume), and prints one table: every 0.58.0 fix, its
+checks, and the verdict per instance. A fix with no check row prints as
+`MISSING` and fails the run.
 
 `up -d` gives you a running fleet to poke at. The driver sits behind a
 profile so bringing the stack up does not start a 30-minute run.
 
 Knobs: `SOAK_DURATION_SECS` (1800), `SOAK_CONCURRENCY` (24),
-`SOAK_TENANTS` (20), `SOAK_FAIL_RATIO_PCT` (2).
+`SOAK_TENANTS` (20), `SOAK_FAIL_RATIO_PCT` (2). Every published port
+takes an override (`SOAK_PG_PORT`, `SOAK_MY_PORT`, `SOAK_REDIS_PORT`,
+`SOAK_MINIO_PORT`, `SOAK_MINIO_CONSOLE_PORT`, `SOAK_IDP_PORT`,
+`SOAK_SINGLE_{PG,MY,SQ}_PORT`, `SOAK_SAAS_{PG,MY,SQ}_PORT`), e.g.
+`SOAK_MY_PORT=3506` when the root compose holds 3406.
 
 ## Reading the log
 
@@ -140,6 +155,18 @@ Shifted, because this stack is meant to run *alongside* the repo-root
 | minio | 9100 / 9101 | 9000 / 9001 |
 | web-single-{pg,my,sq} | 18081–18083 | 8080 |
 | web-saas-{pg,my,sq} | 18084–18086 | 8080 |
+| idp (fake OIDC + webhook sink) | 19000 | 9000 |
+
+`web-saas-pg-edge` and `web-single-pg-edge` publish nothing: they are
+second processes on the Postgres databases with the settings a shared
+instance cannot carry (HTTPS redirect, access log off, 1 ms hash wait,
+20 s lock, admin global login limit 30). Only the driver talks to them.
+
+Browser logins through SSO: `/authorize` is served on
+`http://localhost:19000`, shows a form for the identity to assert, and
+sends the browser back over `http` (the apps build an `https` callback
+from `Host`). Tenant `t03` has the providers `idp-strict` and `idp-link`
+after the driver's first run (`POST /_soak/sso/seed`).
 
 MySQL publishes 3406 to match the root compose, which picked it to dodge
 a local MySQL. CI and the scaffolder use 3306 because they run in
@@ -169,6 +196,31 @@ the exact failure this release was about.
 - **Browser `Origin`**: the driver sets `Origin` itself, so it checks the
   preset's `Referrer-Policy` on an app route instead (`no-referrer` makes browsers
   send `Origin: null`).
+- **#1661** (`#[non_exhaustive]` structs and enums) is compile-time only;
+  its `compile_fail` doctests and clippy lints are the check.
+- **#1663** `intcomma(i64::MIN)` is an in-process helper no page renders.
+- **#1702** is scaffolder output. The soak checks the settings tier
+  reaches the tenancy server (HSTS, `allowed_hosts`), not the template.
+- **#1626** is a loader-time refusal and the soak's migrations carry no
+  callbacks; `finalize.py` only checks every bootstrap `migrate` exited 0.
+- **#1672 fixed lockout window**: the failure-counter window is 1 h and
+  not settable from `[auth]`. TOTP single use is a browser flow, left to
+  the Playwright agent.
+- **Session extractors on SQLite/MySQL**: the bug needs a hand-built
+  `server::Builder<Sqlite|MySql>` with the `postgres` feature on. Every
+  soak image goes through `Cli`, so the `-my`/`-sq` `SessionUser` checks
+  are controls.
+- **#1645** needs a schema-mode tenant *without* `rustango_users`; every
+  soak tenant has one, so the catalog check (no FK leaves its schema) is
+  a control.
+- **#1673 `ip_filter` on a dual-stack listener** only bites on
+  `web-single-sq`, which binds `[::]:8080`; the other instances are
+  IPv4-only controls.
+- **Tenancy login forms share one IP bucket.** The tenancy server has no
+  `RealIpLayer` hook, so the tenant and console login forms key every
+  driver request on the driver's own address. The login-limit checks run
+  last and the load phase outlasts the 60 s window; JWT and HTTP Basic
+  sit behind the API router's `RealIpLayer` and get one address each.
 
 ## Known gaps
 

@@ -76,9 +76,16 @@ pub async fn scopes_seed(pool: &Pool) -> ProbeResult {
         visible.push(promotion(pool, format!("VIS-{tag}-{i}"), 100, true).await?);
         hidden.push(promotion(pool, format!("HID-{tag}-{i}"), 100, false).await?);
     }
-    Ok(Json(
-        json!({ "tag": tag, "visible": visible, "hidden": hidden }),
-    ))
+    let scoped = Promotion::objects().count(pool).await.map_err(internal)?;
+    let all = Promotion::objects()
+        .without_global_scopes()
+        .count(pool)
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({
+        "tag": tag, "visible": visible, "hidden": hidden,
+        "scoped_total": scoped, "all_total": all,
+    })))
 }
 
 /// A promotion read past the scope, so the driver can see a hidden row

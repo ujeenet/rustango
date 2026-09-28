@@ -366,7 +366,7 @@ services:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: saas-pg
       # #1700: the tenancy server refuses any other Host with a 400.
-      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test"]'
+      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test", "shared.example.test"]'
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
       RUSTANGO_APEX_DOMAIN: soak.localhost
     ports: ["${SOAK_SAAS_PG_PORT:-18084}:8080"]
@@ -381,7 +381,7 @@ services:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: saas-my
       # #1700: the tenancy server refuses any other Host with a 400.
-      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test"]'
+      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test", "shared.example.test"]'
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce_saas_my
       RUSTANGO_APEX_DOMAIN: soak.localhost
     ports: ["${SOAK_SAAS_MY_PORT:-18085}:8080"]
@@ -396,7 +396,7 @@ services:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: saas-sq
       # #1700: the tenancy server refuses any other Host with a 400.
-      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test"]'
+      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test", "shared.example.test"]'
       DATABASE_URL: sqlite:///data/registry.db?mode=rwc
       RUSTANGO_APEX_DOMAIN: soak.localhost
     volumes: [sq-saas:/data]
@@ -456,7 +456,7 @@ services:
     environment:
       <<: *app-env
       RUSTANGO_CACHE_NAMESPACE: saas-pg-edge
-      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test"]'
+      RUSTANGO__SECURITY__ALLOWED_HOSTS: '[".soak.localhost", "shop-t19.example.test", "storefront-t20.example.test", "shared.example.test"]'
       # #1700: plain HTTP to the login, admin and console is redirected.
       RUSTANGO__SECURITY__SECURE_SSL_REDIRECT: "true"
       # #1610: with the access log off, the request span must still
@@ -464,6 +464,8 @@ services:
       RUSTANGO__LOGGING__ACCESS_LOG: "false"
       # #1732: a busy hash queue answers 503 at once.
       RUSTANGO__AUTH__HASH_WAIT_MS: "1"
+      # #1672: a 20 s lock, short enough to watch it end on time.
+      RUSTANGO__AUTH__LOCKOUT_DURATION_SECS: "20"
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
       RUSTANGO_APEX_DOMAIN: soak.localhost
 

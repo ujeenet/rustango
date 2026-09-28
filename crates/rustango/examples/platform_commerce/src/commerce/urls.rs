@@ -105,7 +105,11 @@ fn promotion_pages(pool: &Pool) -> Router<AppState> {
     let tera = views::promotion_templates();
     let s = Promotion::SCHEMA;
     Router::new()
-        .merge(ListView::for_model(s).router("/promos", tera.clone(), pool.clone()))
+        .merge(ListView::for_model(s).order_by("id", true).router(
+            "/promos",
+            tera.clone(),
+            pool.clone(),
+        ))
         .merge(CreateView::for_model(s).success_url("/promos").router(
             "/promos",
             tera.clone(),

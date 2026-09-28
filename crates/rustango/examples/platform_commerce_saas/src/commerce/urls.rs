@@ -90,6 +90,7 @@ pub fn api(
         .merge(promotion_pages())
         .route("/api/v1/orders/{id}/confirm", post(confirm_order))
         .merge(payments(cache.clone()))
+        .merge(account())
         .merge(storefront(cache))
         .route("/_soak/info", get(soak_info))
         .route("/_soak/jobs", get(soak_jobs))
@@ -131,7 +132,11 @@ fn promotion_pages() -> Router<AppState> {
     let tera = views::promotion_templates();
     let s = Promotion::SCHEMA;
     Router::new()
-        .merge(ListView::for_model(s).tenant_router("/promos", tera.clone()))
+        .merge(
+            ListView::for_model(s)
+                .order_by("id", true)
+                .tenant_router("/promos", tera.clone()),
+        )
         .merge(
             CreateView::for_model(s)
                 .success_url("/promos")
@@ -149,6 +154,22 @@ fn promotion_pages() -> Router<AppState> {
                 .tenant_router("/promos", tera),
         )
         .with_state(())
+}
+
+/// `GET /api/v1/account` for scripts, over HTTP Basic against the
+/// tenant's users; the login rate limits apply to it too (#1609).
+fn account() -> Router<AppState> {
+    use rustango::tenancy::auth_backends::{BoxedBackend, ModelBackend};
+    use rustango::tenancy::middleware::{CurrentUser, RouterAuthExt as _};
+    let backends: Vec<BoxedBackend> = vec![Arc::new(ModelBackend)];
+    Router::new()
+        .route(
+            "/api/v1/account",
+            get(|CurrentUser(u): CurrentUser| async move {
+                Json(serde_json::json!({ "user": u.map(|u| u.username) }))
+            }),
+        )
+        .require_auth(backends)
 }
 
 /// A retried payment POST must not charge twice, and must not replay
