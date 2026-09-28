@@ -27,7 +27,7 @@ use axum::{
 use super::session::{self, AdminSession, SESSION_COOKIE};
 use super::urls::AppState;
 use super::user::AdminUser;
-use crate::sso::link::{Account, AccountLookup};
+use crate::sso::link::{Account, AccountLookup, EmailLookup};
 
 /// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize)]
@@ -197,7 +197,7 @@ async fn sso_callback(
                 return login_error(&state, "nouser");
             }
         };
-    let Some(user) = accounts.user(uid).await else {
+    let Ok(Some(user)) = accounts.user(uid).await else {
         return login_error(&state, "nouser");
     };
     if !user.active {
@@ -241,15 +241,16 @@ async fn sso_callback(
 struct AdminAccounts<'a>(&'a crate::sql::Pool);
 
 impl AdminAccounts<'_> {
-    async fn user(&self, id: i64) -> Option<AdminUser> {
+    /// The admin user with this id; a driver error is an error, not "missing".
+    async fn user(&self, id: i64) -> Result<Option<AdminUser>, String> {
         use crate::sql::FetcherPool as _;
-        AdminUser::objects()
+        Ok(AdminUser::objects()
             .filter("id", id)
             .fetch(self.0)
             .await
-            .ok()?
+            .map_err(|e| e.to_string())?
             .into_iter()
-            .next()
+            .next())
     }
 }
 
@@ -259,19 +260,22 @@ fn admin_account(u: &AdminUser) -> Option<Account> {
 
 impl AccountLookup for AdminAccounts<'_> {
     async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
-        Ok(self.user(id).await.as_ref().and_then(admin_account))
+        Ok(self.user(id).await?.as_ref().and_then(admin_account))
     }
 
-    async fn by_email(&self, email: &str) -> Result<Option<Account>, String> {
+    async fn by_email(&self, email: &str) -> Result<EmailLookup, String> {
         use crate::sql::FetcherPool as _;
         let rows = AdminUser::objects()
-            .filter("email", email.to_owned())
+            .filter("email__iexact", email.to_owned())
             .fetch(self.0)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(rows
-            .iter()
-            .find(|u| u.email.as_deref() == Some(email))
-            .and_then(admin_account))
+        Ok(
+            match EmailLookup::pick(&rows, email, |u| u.email.as_deref()) {
+                Ok(Some(u)) => admin_account(u).map_or(EmailLookup::Missing, EmailLookup::Found),
+                Ok(None) => EmailLookup::Missing,
+                Err(()) => EmailLookup::Collides,
+            },
+        )
     }
 }

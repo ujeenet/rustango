@@ -10,9 +10,9 @@ SSO logins (bare admin, tenant admin, member) now sign in the user linked
 to the IdP's `(provider, sub)` in the new `rustango_sso_links` table. A
 matching email links a first-time user only when the provider has the new
 `allow_email_link` (default off), and never a superuser or staff account.
-Links and emails match exactly on every collation. Only superusers add or
-change provider and link rows in the admin; the operator console toggles
-the shared flag in place. `sso::resolve_by_slug` returns
+Links and emails match exactly on every collation. Only superusers write
+provider and link rows in the admin; an editable operator console sets the
+shared flag in place. `sso::resolve_by_slug` returns
 `ResolvedProvider`; `member_auth::find_or_provision_member` takes a
 `ProviderKey` and returns `MemberSignIn`.
 

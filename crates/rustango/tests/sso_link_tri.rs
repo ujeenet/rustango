@@ -5,7 +5,9 @@
 use rustango::casts::{Cast, EncryptedString};
 use rustango::oauth2::NormalizedUser;
 use rustango::sql::{Auto, Pool};
-use rustango::sso::link::{create_link, linked_user, sign_in, Account, AccountLookup, LinkRefusal};
+use rustango::sso::link::{
+    create_link, linked_user, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, SsoLink,
+};
 use rustango::sso::{list_enabled, resolve_by_slug, LinkSource, ProviderKey, SsoProvider};
 use rustango::tenancy::member_auth::{find_or_provision_member, MemberSignIn};
 use rustango::tenancy::User;
@@ -87,8 +89,39 @@ impl AccountLookup for One {
     async fn by_id(&self, _id: i64) -> Result<Option<Account>, String> {
         Ok(self.0)
     }
-    async fn by_email(&self, _email: &str) -> Result<Option<Account>, String> {
-        Ok(self.0)
+    async fn by_email(&self, _email: &str) -> Result<EmailLookup, String> {
+        Ok(self.0.map_or(EmailLookup::Missing, EmailLookup::Found))
+    }
+}
+
+/// `by_id` always fails, like a pool timeout.
+struct Broken;
+
+impl AccountLookup for Broken {
+    async fn by_id(&self, _id: i64) -> Result<Option<Account>, String> {
+        Err("pool timed out".into())
+    }
+    async fn by_email(&self, _email: &str) -> Result<EmailLookup, String> {
+        Err("pool timed out".into())
+    }
+}
+
+/// A concurrent first login: links the identity while this one looks up the email.
+struct Racing<'a> {
+    pool: &'a Pool,
+    key: ProviderKey,
+    subject: &'static str,
+}
+
+impl AccountLookup for Racing<'_> {
+    async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
+        Ok(Some(Account::new(id, false, true)))
+    }
+    async fn by_email(&self, _email: &str) -> Result<EmailLookup, String> {
+        create_link(self.pool, &self.key, self.subject, 7)
+            .await
+            .unwrap();
+        Ok(EmailLookup::Found(Account::new(7, false, true)))
     }
 }
 
@@ -161,19 +194,93 @@ async fn subject_match_is_exact(pool: &Pool) {
 
 async fn email_match_is_exact(pool: &Pool) {
     let key = app_key();
-    let jose = user(pool, "jose", "jose@example.com").await;
-    let p = profile("g-accent", "josé@example.com");
-    assert_eq!(
-        find_or_provision_member(pool, &key, true, &p, false).await,
-        Ok(MemberSignIn::NoAccount),
-        "an accent-insensitive collation must not match another account"
-    );
-    // The IdP's email is lowercased before the exact match.
-    let p = profile("g-jose", "Jose@Example.com");
+    let jose = user(pool, "jose", "Jose@Example.com").await;
+    // ASCII case is ignored, whatever the stored case.
+    let p = profile("g-jose", "jose@example.com");
     assert_eq!(
         find_or_provision_member(pool, &key, true, &p, false).await,
         Ok(MemberSignIn::Member(jose))
     );
+    // An accent is not: never a link to `jose`, never a second account the
+    // database would call the same.
+    let p = profile("g-accent", "josé@example.com");
+    let got = find_or_provision_member(pool, &key, true, &p, true).await;
+    if pool.dialect().name() == "mysql" {
+        assert_eq!(got, Ok(MemberSignIn::NotLinked), "ai_ci collides");
+    } else {
+        assert!(
+            matches!(got, Ok(MemberSignIn::Member(id)) if id != jose),
+            "a distinct email here: {got:?}"
+        );
+    }
+}
+
+async fn a_failing_user_lookup_keeps_the_link(pool: &Pool) {
+    let key = app_key();
+    create_link(pool, &key, "sub-keep", 3).await.unwrap();
+    assert!(matches!(
+        sign_in(
+            pool,
+            &key,
+            false,
+            &profile("sub-keep", "k@example.com"),
+            &Broken
+        )
+        .await,
+        Err(LinkRefusal::Storage(_))
+    ));
+    assert!(linked_user(pool, &key, "sub-keep").await.unwrap().is_some());
+}
+
+async fn issuer_case_is_part_of_the_key(pool: &Pool) {
+    let upper = ProviderKey::app("https://IDP.example").unwrap();
+    let lower = ProviderKey::app("https://idp.example").unwrap();
+    create_link(pool, &upper, "sub", 1).await.unwrap();
+    create_link(pool, &lower, "sub", 2).await.unwrap();
+    for (k, id) in [(&upper, 1), (&lower, 2)] {
+        assert_eq!(
+            linked_user(pool, k, "sub")
+                .await
+                .unwrap()
+                .map(|l| l.user_id),
+            Some(id)
+        );
+    }
+}
+
+async fn a_hand_made_link_gets_its_key(pool: &Pool) {
+    use rustango::sql::FetcherPool as _;
+    let key = app_key();
+    let mut row = SsoLink {
+        id: Auto::default(),
+        provider_source: "app".into(),
+        provider_id: 0,
+        issuer: key.issuer().to_owned(),
+        subject: "sub-hand".into(),
+        key_sha256: None,
+        user_id: 8,
+        created_at: Auto::default(),
+    };
+    row.insert_pool(pool).await.unwrap();
+    let ok = One(Some(Account::new(8, false, true)));
+    let p = profile("sub-hand", "h@example.com");
+    assert_eq!(sign_in(pool, &key, false, &p, &ok).await.unwrap(), 8);
+    let stored = SsoLink::objects().fetch(pool).await.unwrap();
+    assert_eq!(
+        stored[0].key_sha256.as_deref(),
+        Some(rustango::sso::link::key_sha256(key.issuer(), "sub-hand").as_str())
+    );
+}
+
+async fn a_concurrent_first_login_reuses_the_link(pool: &Pool) {
+    let key = app_key();
+    let racing = Racing {
+        pool,
+        key: key.clone(),
+        subject: "sub-race",
+    };
+    let p = profile("sub-race", "race@example.com");
+    assert_eq!(sign_in(pool, &key, true, &p, &racing).await.unwrap(), 7);
 }
 
 async fn sign_in_rules(pool: &Pool) {
@@ -338,6 +445,10 @@ tri_dialect_test!(
         key_matches_every_part,
         subject_match_is_exact,
         email_match_is_exact,
+        a_failing_user_lookup_keeps_the_link,
+        issuer_case_is_part_of_the_key,
+        a_hand_made_link_gets_its_key,
+        a_concurrent_first_login_reuses_the_link,
         sign_in_rules,
         a_link_to_a_deleted_user_is_dropped,
         provider_changes_drop_links,

@@ -79,8 +79,9 @@ diese Spalte aus.
 
 Die Link-Tabelle ist ein normales migriertes Modell: im Speicher des Tenants für
 Tenant-Anmeldungen und in der Admin-Datenbank für den Bare-Admin. Eine
-Verknüpfung wird exakt abgeglichen (das Subject über seinen SHA-256, die E-Mail
-in Rust verglichen), unabhängig von der Kollation der Datenbank.
+Verknüpfung wird exakt abgeglichen (Issuer und Subject über einen SHA-256
+verschlüsselt; bei der E-Mail wird nur die ASCII-Groß-/Kleinschreibung
+ignoriert), unabhängig von der Kollation der Datenbank.
 
 Das Client-**Secret ist im Ruhezustand verschlüsselt** — die `client_secret`-Spalte
 ist ein [`EncryptedString`](#secret-speicherung)-Cast, erst zur Anmeldezeit im Speicher
@@ -105,9 +106,8 @@ Felder:
 | `scopes` | Optionale, durch Leerzeichen getrennte Scope-Überschreibung (Standard `openid email profile`). |
 | `allow_email_link` | Einen Erstbenutzer über seine verifizierte E-Mail verknüpfen (Standard: aus). Verknüpft nie ein Superuser- oder Staff-Konto; vom Bare-Admin ignoriert. |
 
-Nur ein Superuser kann `SsoProvider`- und `SsoLink`-Zeilen im Admin anlegen
-oder ändern; anderes Staff kann sie mit den üblichen Berechtigungen auflisten
-und löschen.
+Nur ein Superuser kann `SsoProvider`- und `SsoLink`-Zeilen im Admin anlegen,
+ändern oder löschen; anderes Staff kann sie nur auflisten.
 
 Um einen Anbieter hinzuzufügen: geben Sie `client_id` + `client_secret` ein, wählen
 Sie ein `kind` (oder `oidc` + eine `issuer_url`) und speichern Sie. Die Endpunkte
@@ -138,9 +138,12 @@ IdP. Ein Benutzer wird verknüpft durch das optionale Verknüpfen per E-Mail
 (nicht privilegierte Tenant-Benutzer) oder dadurch, dass ein Superuser eine
 `SsoLink`-Zeile anlegt: `provider_source` (`tenant`, `shared` oder `admin`),
 `provider_id` (die ID der Anbieter-Zeile), `issuer` (`kind` oder
-`kind|issuer_url` ohne abschließenden Schrägstrich), `subject`, `subject_sha256`
-(SHA-256 des Subjects in Hex, Kleinbuchstaben) und `user_id`. Die Log-Zeile der
-Abweisung (`sso refused`) enthält `provider_id`, `issuer` und `subject`.
+`kind|issuer_url` ohne abschließenden Schrägstrich), `subject` und `user_id`.
+Lassen Sie `key_sha256` leer: die erste Anmeldung füllt es. Die Log-Zeile der
+Abweisung (`sso refused`) enthält `provider_id`, `issuer` und `subject`. Eine
+Zeile anzulegen erfordert die Session-Authentifizierung des Admins
+(`Builder::with_session_auth` oder `with_session` des Tenant-Admins); ohne sie
+kann niemand Verknüpfungen anlegen.
 
 ## Member (Endbenutzer) SSO
 

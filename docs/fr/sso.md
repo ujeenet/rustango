@@ -88,8 +88,8 @@ nu reste derrière `admin-sso`. Activer ou désactiver la fonctionnalité
 
 La table de liens est un modèle migré normal : dans le stockage du tenant
 pour les connexions tenant, et dans la base de l'admin pour le bare admin.
-Un lien est comparé exactement (le subject par son SHA-256, l'email
-comparé en Rust), quelle que soit la collation de la base.
+Un lien est comparé exactement (issuer et subject clés par un SHA-256 ;
+l'email n'ignore que la casse ASCII), quelle que soit la collation de la base.
 
 Le secret client est **chiffré au repos** — la colonne `client_secret`
 est un cast [`EncryptedString`](#stockage-des-secrets), déchiffré en
@@ -114,9 +114,9 @@ d'admin, sans redéploiement. Champs :
 | `scopes` | Substitution optionnelle des scopes, séparés par des espaces (par défaut `openid email profile`). |
 | `allow_email_link` | Lier un utilisateur qui se connecte pour la première fois par son email vérifié (désactivé par défaut). Ne lie jamais un compte superutilisateur ou staff ; ignoré par le bare admin. |
 
-Seul un superutilisateur peut ajouter ou modifier des lignes `SsoProvider`
-et `SsoLink` dans l'admin ; le reste du staff peut les lister et les
-supprimer avec les permissions habituelles.
+Seul un superutilisateur peut ajouter, modifier ou supprimer des lignes
+`SsoProvider` et `SsoLink` dans l'admin ; le reste du staff peut seulement
+les lister.
 
 Pour ajouter un provider : saisissez le `client_id` + `client_secret`,
 choisissez un `kind` (ou `oidc` + une `issuer_url`), et enregistrez. Les
@@ -151,9 +151,12 @@ optionnelle par email (utilisateurs tenant non privilégiés), ou par un
 superutilisateur qui ajoute une ligne `SsoLink` : `provider_source`
 (`tenant`, `shared` ou `admin`), `provider_id` (l'id de la ligne du
 provider), `issuer` (`kind`, ou `kind|issuer_url` sans barre oblique
-finale), `subject`, `subject_sha256` (SHA-256 du subject en hexadécimal
-minuscule) et `user_id`. La ligne de journal du refus (`sso refused`)
-porte `provider_id`, `issuer` et `subject`.
+finale), `subject` et `user_id`. Laissez `key_sha256` vide : la première
+connexion le remplit. La ligne de journal du refus (`sso refused`) porte
+`provider_id`, `issuer` et `subject`. Ajouter une ligne exige
+l'authentification par session de l'admin (`Builder::with_session_auth`,
+ou `with_session` de l'admin tenant) ; sans elle, personne ne peut ajouter
+de liens.
 
 ## SSO membre (utilisateur final)
 

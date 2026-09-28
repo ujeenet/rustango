@@ -546,18 +546,20 @@ fn router_inner(
             "/change-password",
             get(change_password_form).post(change_password_submit),
         );
-    // Registry-wide shared SSO providers (admin-sso) — always available to
-    // authenticated operators; writes go to the registry pool the console
-    // already holds.
+    // Registry-wide shared SSO providers (admin-sso): every operator sees
+    // the list; changing it needs an editable console.
     #[cfg(feature = "admin-sso")]
     {
-        private = private
-            .route("/sso-shared", get(sso_shared_list).post(sso_shared_create))
-            .route("/sso-shared/{id}/delete", post(sso_shared_delete))
-            .route(
-                "/sso-shared/{id}/email-link",
-                post(sso_shared_toggle_email_link),
-            );
+        private = private.route("/sso-shared", get(sso_shared_list));
+        if edit_enabled {
+            private = private
+                .route("/sso-shared", post(sso_shared_create))
+                .route("/sso-shared/{id}/delete", post(sso_shared_delete))
+                .route(
+                    "/sso-shared/{id}/email-link",
+                    post(sso_shared_set_email_link),
+                );
+        }
     }
     if edit_enabled {
         private = private
@@ -1452,6 +1454,7 @@ async fn sso_shared_list(
     ctx.insert("section", "sso");
     ctx.insert("operator_username", &op.username);
     ctx.insert("providers", &view);
+    ctx.insert("edit_enabled", &state.pools.is_some());
     render(&state, "op_sso_shared.html", &ctx)
 }
 
@@ -1486,30 +1489,48 @@ async fn sso_shared_create(
     Redirect::to("/sso-shared").into_response()
 }
 
-/// Flip `allow_email_link` in place, so the id and its links survive.
+/// The wanted `allow_email_link` value, `on` or `off`.
 #[cfg(feature = "admin-sso")]
-async fn sso_shared_toggle_email_link(
+#[derive(serde::Deserialize)]
+struct EmailLinkForm {
+    allow_email_link: String,
+}
+
+/// Set `allow_email_link` in place (only that column), so the id and its links survive.
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_set_email_link(
     State(state): State<ConsoleState>,
     Extension(_op): Extension<auth::Operator>,
     axum::extract::Path(id): axum::extract::Path<i64>,
+    Form(form): Form<EmailLinkForm>,
 ) -> Response<Body> {
-    let row = super::sso::SharedSsoProvider::objects()
-        .filter("id", id)
-        .fetch(&state.registry)
-        .await
-        .ok()
-        .and_then(|v| v.into_iter().next());
-    if let Some(mut r) = row {
-        r.allow_email_link = !r.allow_email_link;
-        if let Err(e) = r.save_pool(&state.registry).await {
+    use crate::sql::UpdaterPool as _;
+    let allow = match form.allow_email_link.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("update failed: {e}"),
+                StatusCode::BAD_REQUEST,
+                "allow_email_link must be on or off",
             )
-                .into_response();
+                .into_response()
         }
+    };
+    match super::sso::SharedSsoProvider::objects()
+        .filter("id", id)
+        .update()
+        .set("allow_email_link", allow)
+        .execute_pool(&state.registry)
+        .await
+    {
+        Ok(1) => Redirect::to("/sso-shared").into_response(),
+        Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("update failed: {e}"),
+        )
+            .into_response(),
     }
-    Redirect::to("/sso-shared").into_response()
 }
 
 #[cfg(feature = "admin-sso")]
