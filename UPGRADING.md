@@ -150,6 +150,28 @@ untouched.
 
 ## Unreleased
 
+### Bounded update/delete; `atomic()` hands out a lockable `AtomicTx`
+
+`update()` / `delete()` now honour `limit`, `offset` and `order_by`
+(#1666); a queryset that relied on them being ignored now touches fewer
+rows. With a composite or missing PK, or after `union()`, a bounded one
+returns `QueryError::BoundedDmlUnsupported`. The `atomic` closure now
+gets `&AtomicTx`, not `&mut PoolTx`: write `insert_tx(&mut *tx.lock().await?, &q)`.
+A nested `atomic(&pool, …)` on the same pool is now a savepoint on the
+outer transaction, and its `on_commit` callbacks wait for the outermost
+commit. Drop the `TxGuard` before nesting, or get `ExecError::NestedAtomic`.
+
+Nested writes that used to survive an outer rollback (an audit row, say)
+are now rolled back with it, silently. For an independent commit, use a
+different pool or `tokio::spawn`. Nesting is per pool object: pass the
+request's pool down instead of looking it up again. On MySQL before
+8.0.21 and MariaDB before 11.1 a bounded update/delete may scan the whole
+table. On MySQL, DDL / `TRUNCATE` / `LOCK TABLES` inside `atomic` commit
+implicitly: `atomic` returns `ExecError::AtomicEndedEarly` with writes
+already committed, so a retry can write twice. On MySQL and SQLite a
+failed statement undoes only itself; if the closure ignores it, the rest
+commits (PG aborts the whole transaction).
+
 ### Admin TOTP codes are single use
 
 `rustango_admin_totp` gains a nullable `last_used_step` column (#1672).

@@ -285,7 +285,7 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 | MySQL 8.0.1+ | Supports everything except `NO KEY` — that flag falls back to plain `FOR UPDATE` (the stricter lock). |
 | SQLite | No row-level lock syntax. The writer emits no clause at all; transactions hold an implicit write lock for the whole database. Use a different strategy for SQLite (typically a busy-wait loop on the transaction itself). |
 
-**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::atomic(&pool, …)` or `transaction_pool(&pool)`, which hand you a `PoolTx` to `match` on.
+**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::atomic(&pool, …)` or `transaction_pool(&pool)`, which hand you a `PoolTx` to `match` on (`atomic` through `tx.lock().await?`).
 
 ### Combining queries (union, intersection, difference)
 
@@ -1447,7 +1447,7 @@ Post::bulk_upsert_pool(
 > `#[cfg(feature = "postgres")]`.
 >
 > The multi-backend entry points are `rustango::sql::transaction_pool(&pool)`
-> and `rustango::sql::atomic(&pool, …)`. Both hand you a `PoolTx` — an enum you
+> and `rustango::sql::atomic(&pool, …)` (via `tx.lock().await?`). Both hand you a `PoolTx` — an enum you
 > `match` on per backend — rather than a driver transaction, so a tri-dialect
 > transaction is written per-arm, not by swapping the pool type.
 
@@ -1480,7 +1480,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For a hook that runs only after the commit lands, the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback.
+Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For a hook that runs only after the commit lands, the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback. Inside the closure `tx` is an `AtomicTx`: lock it per statement, `insert_tx(&mut *tx.lock().await?, &q)`. A nested `atomic(&pool, …)` on the same pool runs in a savepoint on the same connection, and its hooks wait for the outermost commit; holding a `TxGuard` across it returns `ExecError::NestedAtomic`. Nesting is per pool object, so pass the request's pool down rather than looking it up again. Two nested blocks at once (`join!`) return `ExecError::NestedAtomic`; a failed savepoint rolls the whole transaction back with `ExecError::AtomicAborted`. A `tokio::spawn`ed task does not inherit the block, so an `atomic` there commits on its own. PostgreSQL slows down past 64 savepoints in one transaction, so avoid nesting in hot loops; on MySQL a deadlock inside a nested block rolls back the whole transaction, and later ORM statements return `ExecError::AtomicAborted`. On MySQL, DDL / `TRUNCATE` / `LOCK TABLES` commit implicitly and `atomic` returns `ExecError::AtomicEndedEarly` with writes already committed. MySQL and SQLite undo only a failed statement (duplicate key, `SQLITE_BUSY`), so a closure that ignores the error and returns `Ok` commits the rest; PG aborts the whole transaction.
 
 ---
 

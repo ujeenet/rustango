@@ -99,6 +99,11 @@ impl Dialect for Sqlite {
         "sqlite"
     }
 
+    /// SQLite's grammar has no bare `OFFSET`; `LIMIT -1` means no limit.
+    fn offset_without_limit_clause(&self) -> Option<&'static str> {
+        Some(" LIMIT -1")
+    }
+
     // SQLite uses the trait defaults for quoting and placeholders.
 
     fn serial_type(&self, field_type: FieldType) -> &'static str {

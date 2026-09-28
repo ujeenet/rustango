@@ -243,6 +243,22 @@ pub enum ExecError {
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
     EmptyReturning,
 
+    /// A nested `atomic()` or `lock()` found the transaction in use: a
+    /// `TxGuard` still held, or two nested blocks at once (`join!`).
+    #[error("atomic transaction in use: drop the `TxGuard` and run nested blocks one at a time")]
+    NestedAtomic,
+
+    /// The `atomic` transaction was rolled back: a savepoint failed, or a
+    /// statement error ended it (PG error, MySQL deadlock). Nothing committed.
+    #[error("the atomic transaction was rolled back after a failed statement")]
+    AtomicAborted,
+
+    /// The server ended the `atomic` transaction without a failed statement,
+    /// e.g. a MySQL DDL / TRUNCATE / LOCK TABLES implicit commit. Writes before
+    /// and after it may already be committed, so do not blindly retry.
+    #[error("the server ended the atomic transaction early; some writes may be committed")]
+    AtomicEndedEarly,
+
     /// `ForeignKey::get` resolved a PK that didn't match any row in
     /// the target table. Means the parent was deleted under a
     /// non-CASCADE constraint, or the FK was constructed by hand with

@@ -4,6 +4,27 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — bounded update/delete; nested `atomic()` uses savepoints (#1666)
+
+`QuerySet::update()` and `delete()` dropped `limit`, `offset` and
+`order_by`, so `.limit(1).delete()` deleted every matching row. They
+now bound the statement by primary key on every backend, and refuse
+(`QueryError::BoundedDmlUnsupported`, reason `BoundedDmlReason`) when
+they cannot, including a negative limit or offset. A nested `atomic()`
+on the same pool opened a second transaction that survived the outer
+rollback and deadlocked a one-connection pool; it now runs in a
+savepoint on the outer connection. `on_commit` callbacks fire only at
+the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
+emits invalid SQL. A transaction the server already ended (a PG
+statement error the closure ignored, a MySQL deadlock) makes `atomic`
+return `ExecError::AtomicAborted` instead of `Ok`; a MySQL DDL implicit
+commit returns `ExecError::AtomicEndedEarly`.
+
+**Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
+statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
+`ExecError::NestedAtomic`, `ExecError::AtomicAborted`, `ExecError::AtomicEndedEarly`,
+`QueryError::BoundedDmlUnsupported`, `BoundedDmlReason`.
+
 ### Security — single-use refresh rotation, TOTP replay guard, fixed lockout window (#1672)
 
 `JwtLifecycle::refresh` and `refresh_with` redeem the old refresh token
