@@ -20,6 +20,15 @@ The admin still sees every row; narrow it with
 `.with_global_scopes()` on `SelectQuery`, `CountQuery`, `UpdateQuery`
 and `DeleteQuery` for queries built from a schema.
 
+### Security — page cache keys on the resolved tenant; long DB cache keys hashed (#1674)
+
+`CachePageLayer` resolves the request's tenant and puts its slug in the
+key, so tenants picked by `X-Org` on one Host no longer share a page.
+With `tenancy` on and no tenant context it does not cache; opt out per
+route with `tenant_agnostic(true)`. `DatabaseCache` stores keys over
+255 bytes as a 190-byte head plus SHA-256, so they round-trip on MySQL
+instead of truncating and colliding.
+
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 
 `RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`

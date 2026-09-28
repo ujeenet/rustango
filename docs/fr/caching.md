@@ -266,7 +266,7 @@ Deux choses à savoir :
 | | |
 |---|---|
 | **C'est un espace de noms, pas une frontière** | Tout vit encore dans un seul backend, et du code détenant le cache *non cadré* peut lire n'importe quelle clé. L'idée est que le chemin ergonomique soit le chemin correct. |
-| **`clear()` a besoin d'énumérer les clés** | Il passe par `Cache::delete_prefix`, et tous les backends intégrés l'implémentent : `InMemoryCache` filtre sa map, `DatabaseCache` émet `DELETE … LIKE 'prefix%'` avec `%`, `_` et le caractère d'échappement eux-mêmes échappés, `RedisCache` utilise `SCAN`+`MATCH` avec les métacaractères glob échappés, et `FileCache` parcourt son répertoire et compare la clé stockée dans chaque entrée. Un backend qui ne l'implémente pas renvoie désormais une **erreur** plutôt qu'un repli. |
+| **`clear()` a besoin d'énumérer les clés** | Il passe par `Cache::delete_prefix`, et tous les backends intégrés l'implémentent : `InMemoryCache` filtre sa map, `DatabaseCache` émet `DELETE … LIKE 'prefix%'` avec `%`, `_` et le caractère d'échappement eux-mêmes échappés, `RedisCache` utilise `SCAN`+`MATCH` avec les métacaractères glob échappés, et `FileCache` parcourt son répertoire et compare la clé stockée dans chaque entrée. Un backend qui ne l'implémente pas renvoie désormais une **erreur** plutôt qu'un repli. `DatabaseCache` stocke les clés de plus de 255 octets hachées et compare un préfixe de plus de 190 octets sur ses 190 premiers octets seulement : il peut supprimer des clés en trop, jamais en moins. |
 
 Le `Cache::clear()` non cadré reste global au processus : utilisez la vue cadrée
 dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.

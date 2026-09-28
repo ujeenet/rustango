@@ -4,6 +4,9 @@
 
 #![cfg(feature = "cache-page")]
 
+// Layers here are `tenant_agnostic`: under `tenancy` there is no tenant
+// context. Tenant keying is covered in `cache_page_tenant.rs`.
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +39,7 @@ async fn second_get_returns_cached_response() {
                 format!("body-{n}")
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     // First request — handler runs.
     let r1 = app
@@ -86,7 +89,7 @@ async fn post_requests_bypass_the_cache() {
                 "posted"
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     // Two POST requests — both should reach the handler.
     for _ in 0..2 {
@@ -122,7 +125,7 @@ async fn non_200_responses_are_not_cached() {
                 (StatusCode::INTERNAL_SERVER_ERROR, "boom")
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     // Two 500s — both must run the handler (no caching of errors).
     for _ in 0..2 {
@@ -154,7 +157,7 @@ async fn no_store_in_response_disables_caching() {
                 ([(header::CACHE_CONTROL, "no-store")], "fresh")
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     for _ in 0..2 {
         let _ = app
@@ -193,7 +196,11 @@ async fn vary_on_partitions_cache_per_header_value() {
                 format!("v={n}-lang={lang}")
             }),
         )
-        .layer(CachePageLayer::new(cache).vary_on(["accept-language"]));
+        .layer(
+            CachePageLayer::new(cache)
+                .tenant_agnostic(true)
+                .vary_on(["accept-language"]),
+        );
 
     // Two requests with different Accept-Language → both run.
     let r_en = app
@@ -254,7 +261,11 @@ async fn cache_expires_after_timeout() {
                 format!("v={n}")
             }),
         )
-        .layer(CachePageLayer::new(cache).timeout(Duration::from_millis(50)));
+        .layer(
+            CachePageLayer::new(cache)
+                .tenant_agnostic(true)
+                .timeout(Duration::from_millis(50)),
+        );
 
     let r1 = app
         .clone()
@@ -340,7 +351,7 @@ async fn multi_value_headers_survive_round_trip() {
                 }
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     // Warm the cache.
     let _ = app
@@ -381,7 +392,7 @@ async fn content_type_round_trips_through_cache() {
             "/api/data",
             get(|| async { ([(CONTENT_TYPE, "application/json")], r#"{"ok":true}"#) }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     let _miss = app
         .clone()
@@ -432,7 +443,7 @@ async fn oversize_body_bypasses_cache_not_500() {
                 ([(header::CONTENT_TYPE, "text/plain")], big)
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     let resp = app
         .clone()
@@ -459,9 +470,11 @@ async fn oversize_body_bypasses_cache_not_500() {
 #[tokio::test]
 async fn vary_response_header_is_set_for_partitioned_responses() {
     let cache = Arc::new(InMemoryCache::new());
-    let app: Router = Router::new()
-        .route("/p", get(|| async { "ok" }))
-        .layer(CachePageLayer::new(cache).vary_on(["accept-language"]));
+    let app: Router = Router::new().route("/p", get(|| async { "ok" })).layer(
+        CachePageLayer::new(cache)
+            .tenant_agnostic(true)
+            .vary_on(["accept-language"]),
+    );
 
     // Warm + hit.
     let _miss = app
@@ -512,7 +525,7 @@ async fn host_header_partitions_cache_by_default() {
                 format!("n={n}-host={host}")
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     let r_a = app
         .clone()
@@ -587,7 +600,11 @@ fn query_app(counter: &'static AtomicU32, cache: Arc<InMemoryCache>, cache_query
                 format!("q{n}:{body}")
             }),
         )
-        .layer(CachePageLayer::new(cache).cache_query(cache_query))
+        .layer(
+            CachePageLayer::new(cache)
+                .tenant_agnostic(true)
+                .cache_query(cache_query),
+        )
 }
 
 #[tokio::test]
@@ -672,7 +689,11 @@ async fn query_response_forced_private() {
                 ([(header::CACHE_CONTROL, "public, max-age=60")], "results")
             }),
         )
-        .layer(CachePageLayer::new(cache).cache_query(true));
+        .layer(
+            CachePageLayer::new(cache)
+                .tenant_agnostic(true)
+                .cache_query(true),
+        );
 
     let resp = app.clone().oneshot(query_req("q=x")).await.unwrap();
     let cc = resp
@@ -758,7 +779,7 @@ async fn response_setting_a_cookie_is_never_cached() {
                     .unwrap()
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     let r1 = app
         .clone()
@@ -804,7 +825,7 @@ async fn private_response_is_not_cached() {
                     .unwrap()
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     for _ in 0..2 {
         app.clone()
@@ -832,7 +853,7 @@ async fn request_with_cookie_bypasses_shared_cache_by_default() {
                 format!("body-{n}")
             }),
         )
-        .layer(CachePageLayer::new(cache));
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
 
     // Prime the cache with an anonymous request.
     app.clone()
@@ -881,7 +902,11 @@ async fn cache_authenticated_opt_in_allows_cookie_requests() {
                 format!("body-{n}")
             }),
         )
-        .layer(CachePageLayer::new(cache).cache_authenticated(true));
+        .layer(
+            CachePageLayer::new(cache)
+                .tenant_agnostic(true)
+                .cache_authenticated(true),
+        );
 
     for _ in 0..2 {
         app.clone()
@@ -897,4 +922,29 @@ async fn cache_authenticated_opt_in_allows_cookie_requests() {
     }
     // Second served from cache → handler ran once.
     assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
+}
+
+/// Without `tenancy` the default layer caches; there is no tenant to resolve.
+#[cfg(not(feature = "tenancy"))]
+#[tokio::test]
+async fn default_layer_caches_without_tenancy() {
+    let hits = Arc::new(AtomicU32::new(0));
+    let h = hits.clone();
+    let app: Router = Router::new()
+        .route(
+            "/page",
+            get(move || {
+                let h = h.clone();
+                async move { h.fetch_add(1, Ordering::SeqCst).to_string() }
+            }),
+        )
+        .layer(CachePageLayer::new(Arc::new(InMemoryCache::new())));
+    for _ in 0..2 {
+        let req = Request::builder().uri("/page").body(Body::empty()).unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
