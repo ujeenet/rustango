@@ -5,6 +5,7 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::audit::{self, AuditLog};
+use rustango::core::{BulkInsertQuery, SqlValue};
 use rustango::sql::{Auto, CounterPool as _, ExecError, FetcherPool as _, Pool, UpdaterPool as _};
 use rustango::{tri_dialect_test, Model};
 
@@ -259,6 +260,107 @@ async fn bulk_insert_and_upsert_audit_on_postgres(pool: &Pool) {
     }
 }
 
+/// Past every backend's bind cap as one 6-column audit INSERT.
+const OVER_BIND_CAP: usize = 11_000;
+
+/// `n` unaudited items named `b`, scores `0..n`, PKs in score order.
+async fn seed_many(pool: &Pool, n: i64) {
+    let rows = (0..n)
+        .map(|i| vec![SqlValue::from("b"), SqlValue::from(i)])
+        .collect();
+    let query = BulkInsertQuery::new(
+        <Item as rustango::core::Model>::SCHEMA,
+        vec!["name", "score"],
+        rows,
+    );
+    rustango::sql::bulk_insert_pool(pool, &query)
+        .await
+        .expect("seed");
+}
+
+/// An audit batch past the bind cap is split, not rejected.
+async fn large_audit_batch_is_chunked(pool: &Pool) {
+    let entries: Vec<_> = (0..OVER_BIND_CAP)
+        .map(|i| audit::PendingEntry {
+            entity_table: ITEM,
+            entity_pk: i.to_string(),
+            operation: audit::AuditOp::Create,
+            source: audit::AuditSource::System,
+            changes: serde_json::json!({}),
+        })
+        .collect();
+    audit::emit_many_pool(pool, &entries).await.expect("emit");
+    assert_eq!(ops(pool, ITEM, "create").await, OVER_BIND_CAP as i64);
+}
+
+/// More rows than one page: every page is written and audited.
+async fn bulk_writes_page_past_one_chunk(pool: &Pool) {
+    seed_many(pool, 1_200).await;
+    let n = Item::update_where("name", "b", "score", -1_i64, pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1_200);
+    assert_eq!(ops(pool, ITEM, "update").await, 1_200);
+    assert_eq!(Item::delete_where("name", "b", pool).await.unwrap(), 1_200);
+    assert_eq!(ops(pool, ITEM, "delete").await, 1_200);
+}
+
+/// A `limit()` bound is read once: updating the first page must not let
+/// the next page pick up rows past the limit.
+async fn bounded_update_writes_only_its_rows(pool: &Pool) {
+    seed_many(pool, 1_200).await;
+    let n = Item::objects()
+        .filter("name", "b")
+        .order_by(&[("score", false)])
+        .limit(700)
+        .update()
+        .set("score", 100_000_i64)
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 700);
+    assert_eq!(ops(pool, ITEM, "update").await, 700);
+    let moved = Item::objects()
+        .filter("score", 100_000_i64)
+        .count(pool)
+        .await
+        .unwrap();
+    assert_eq!(moved, 700);
+}
+
+/// A failed audit insert rolls the data write back. SQLite only:
+/// dropping the shared audit table would break other live suites.
+async fn failed_audit_insert_rolls_back_the_write(pool: &Pool) {
+    if pool.dialect().name() != "sqlite" {
+        return;
+    }
+    seed_many(pool, 3).await;
+    rustango::testkit::matrix::drop_table(pool, "rustango_audit_log").await;
+    let err = Item::update_where("name", "b", "score", 9_i64, pool)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ExecError::Driver(_)), "{err}");
+    let written = Item::objects().filter("score", 9_i64).count(pool).await;
+    assert_eq!(written.unwrap(), 0);
+}
+
+/// `bulk_insert` past the audit bind cap still audits every row.
+async fn large_bulk_insert_audits_on_postgres(pool: &Pool) {
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    #[allow(irrefutable_let_patterns)]
+    if let Pool::Postgres(pg) = pool {
+        let tags: Vec<Tag> = (0..OVER_BIND_CAP)
+            .map(|i| Tag {
+                slug: format!("s{i}"),
+                label: format!("l{i}"),
+            })
+            .collect();
+        Tag::bulk_insert(&tags, pg).await.expect("bulk insert");
+        assert_eq!(ops(pool, TAG, "create").await, OVER_BIND_CAP as i64);
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -273,5 +375,10 @@ tri_dialect_test! {
         queryset_update_audits_each_row,
         unauditable_bulk_writes_are_refused,
         bulk_insert_and_upsert_audit_on_postgres,
+        large_audit_batch_is_chunked,
+        bulk_writes_page_past_one_chunk,
+        bounded_update_writes_only_its_rows,
+        failed_audit_insert_rolls_back_the_write,
+        large_bulk_insert_audits_on_postgres,
     ],
 }

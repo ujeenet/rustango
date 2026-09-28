@@ -153,7 +153,9 @@ untouched.
 ### Bulk writes on audited models write audit rows
 
 On audited models the bulk shortcuts now lock and read the affected rows
-first and write one audit row each (#1747); expect one extra SELECT.
+first and write one audit row each (#1747); expect one extra SELECT per
+500 rows. `audit::emit_many` now takes an `Acquire` (`&PgPool`,
+`&mut PgConnection`) instead of any `Executor`, so it can split large batches.
 Audited non-`Auto` `bulk_insert_on` now takes `&mut PgConnection`, like
 the other audited `_on` methods. On audited models these now return
 `ExecError::AuditUnsupported`: `bulk_upsert_pool`,
