@@ -728,7 +728,7 @@ ViewSet::for_model(Post::SCHEMA)
 ```
 
 Au-dessus de la limite → `429 Too Many Requests` + `Retry-After`. Les compteurs sont par processus ;
-la clé du client est l'IP de connexion (ou `X-Forwarded-For` / `X-Real-IP`).
+la clé du client est l'IP client de confiance (`TrustedRealIp`, sinon le socket ; voir [security.md](security.md)).
 
 ---
 

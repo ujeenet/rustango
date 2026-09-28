@@ -86,6 +86,7 @@ async fn raw_credential_resolves_live_rbac_scope() {
     // The raw show-once token authenticates directly.
     let agent = verify_raw_agent_credential(&pool, "acme", &issued.token)
         .await
+        .expect("check runs")
         .expect("raw credential verifies");
     assert_eq!(agent.user_id, Some(uid));
     assert_eq!(agent.tenant, "acme");
@@ -100,6 +101,7 @@ async fn raw_credential_resolves_live_rbac_scope() {
         .expect("deny perm");
     let narrowed = verify_raw_agent_credential(&pool, "acme", &issued.token)
         .await
+        .expect("check runs")
         .expect("still authenticates");
     assert!(narrowed.skills.is_empty(), "denied perm drops the skill");
     assert!(narrowed.tools.is_empty());
@@ -121,6 +123,7 @@ async fn revoked_key_is_refused_immediately() {
     // Warm the verification cache with a successful call…
     assert!(verify_raw_agent_credential(&pool, "acme", &issued.token)
         .await
+        .expect("check runs")
         .is_some());
     // …then revoke: the liveness check runs per request, so even a cached
     // verification is refused straight away.
@@ -130,6 +133,7 @@ async fn revoked_key_is_refused_immediately() {
     assert!(
         verify_raw_agent_credential(&pool, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
         "revoked key must be refused despite the warm cache"
     );
@@ -162,6 +166,7 @@ async fn a_rotated_secret_stops_working_even_with_a_warm_cache() {
     assert!(
         verify_raw_agent_credential(&pool, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_some(),
         "precondition: the freshly issued token authenticates",
     );
@@ -173,6 +178,7 @@ async fn a_rotated_secret_stops_working_even_with_a_warm_cache() {
     assert!(
         verify_raw_agent_credential(&pool, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
         "the OLD secret must stop working the moment the row records a \
          rotation — the first attempt at this cleared a process-local \
@@ -182,6 +188,7 @@ async fn a_rotated_secret_stops_working_even_with_a_warm_cache() {
     assert!(
         verify_raw_agent_credential(&pool, "acme", &rotated.token)
             .await
+            .expect("check runs")
             .is_some(),
         "control: the NEW secret must authenticate, or the assertion \
          above would pass on a rotation that simply broke the key",
@@ -197,6 +204,7 @@ async fn deactivated_owner_is_refused() {
         .expect("key");
     assert!(verify_raw_agent_credential(&pool, "acme", &issued.token)
         .await
+        .expect("check runs")
         .is_some());
 
     let Pool::Sqlite(sq) = &pool else {
@@ -210,6 +218,7 @@ async fn deactivated_owner_is_refused() {
     assert!(
         verify_raw_agent_credential(&pool, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
         "a deactivated owner's keys must be refused"
     );
@@ -226,21 +235,25 @@ async fn garbage_and_wrong_secrets_are_refused() {
     // No dot → shape gate refuses without touching the DB.
     assert!(verify_raw_agent_credential(&pool, "acme", "not-a-key")
         .await
+        .expect("check runs")
         .is_none());
     // Empty halves.
     assert!(verify_raw_agent_credential(&pool, "acme", ".")
         .await
+        .expect("check runs")
         .is_none());
     // Right prefix, wrong secret.
     let prefix = issued.token.split('.').next().unwrap();
     let forged = format!("{prefix}.deadbeefdeadbeefdeadbeefdeadbeef");
     assert!(verify_raw_agent_credential(&pool, "acme", &forged)
         .await
+        .expect("check runs")
         .is_none());
     // A JWT-shaped bearer (three dot-separated base64 parts) must not
     // authenticate as a raw credential either.
     assert!(verify_raw_agent_credential(&pool, "acme", "eyJx.eyJy.sig")
         .await
+        .expect("check runs")
         .is_none());
 }
 
@@ -272,6 +285,7 @@ async fn credential_does_not_cross_tenants() {
     assert!(
         verify_raw_agent_credential(&acme, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_some(),
         "owning tenant must authenticate"
     );
@@ -281,6 +295,7 @@ async fn credential_does_not_cross_tenants() {
     assert!(
         verify_raw_agent_credential(&globex, "globex", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
         "credential must not authenticate against another tenant"
     );
@@ -309,6 +324,7 @@ async fn credential_does_not_cross_tenants() {
     assert!(
         verify_raw_agent_credential(&globex, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
         "a warm entry must not be redeemable against another tenant's \
          storage: the cached id resolves to a different agent there, \
@@ -320,6 +336,7 @@ async fn credential_does_not_cross_tenants() {
     assert!(
         verify_raw_agent_credential(&acme, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_some(),
         "owning tenant still authenticates after cross-tenant attempts"
     );

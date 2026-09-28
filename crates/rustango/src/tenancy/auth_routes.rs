@@ -341,19 +341,20 @@ async fn login(
     State(auth): State<JwtAuth>,
     t: Tenant,
     ip: crate::login_throttle::ClientIp,
+    extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginInput>,
 ) -> Result<Json<LoginOutput>, Response> {
     use crate::core::Column as _;
     use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
-        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
     };
     use crate::sql::FetcherPool as _;
     use crate::tenancy::auth::User;
 
-    let meta = meta_from_headers(&headers, Some("/auth/login"));
+    let meta = meta_from_parts(&extensions, &headers, Some("/auth/login"));
     let fire_failed = |reason: AuthFailureReason| -> UserLoginFailedContext {
         UserLoginFailedContext {
             source: "jwt",
@@ -562,12 +563,13 @@ pub struct LogoutInput {
 async fn logout(
     State(auth): State<JwtAuth>,
     t: Tenant,
+    extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     bearer: Bearer,
     body: Option<Json<LogoutInput>>,
 ) -> Result<StatusCode, Response> {
     let jwt = auth.lifecycle();
-    use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
+    use crate::signals::auth::{meta_from_parts, send_user_logged_out, UserLoggedOutContext};
     // Best-effort: decode the bearer to recover the user id for the
     // signal. We don't reject on verify-failure here — the revoke
     // call below still runs, and a stale/expired token logout is a
@@ -585,7 +587,7 @@ async fn logout(
         }
     }
     let user_id = claims.map(|c| c.sub);
-    let meta = meta_from_headers(&headers, Some("/auth/logout"));
+    let meta = meta_from_parts(&extensions, &headers, Some("/auth/logout"));
 
     jwt.revoke(&bearer.0).await;
 
