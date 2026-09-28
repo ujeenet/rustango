@@ -50,3 +50,36 @@ pub(super) fn product_item(p: &Product) -> String {
         p.price_cents % 100
     )
 }
+
+/// Templates for the promotion pages (`template_views`).
+///
+/// The detail page renders the merchant's label through `urlize | safe`,
+/// the pattern #1669 made safe on user input: `urlize` escapes the text
+/// and the link it builds.
+pub fn promotion_templates() -> std::sync::Arc<tera::Tera> {
+    let mut t = tera::Tera::default();
+    rustango::default_filters::register_filters(&mut t);
+    t.add_raw_templates([
+        (
+            "commerce_promotion_list.html",
+            "<ul>{% for p in object_list %}<li>{{ p.code }} {{ p.amount_cents }}</li>{% endfor %}</ul>\n\
+             <p>total={{ total }}</p>",
+        ),
+        (
+            "commerce_promotion_detail.html",
+            "<h1>{{ object.code }}</h1>\n<p class=\"label\">{{ object.label | urlize | safe }}</p>\n\
+             <p class=\"short\">{{ object.label | urlizetrunc(arg=12) | safe }}</p>",
+        ),
+        (
+            "commerce_promotion_form.html",
+            "<form method=\"post\">{{ csrf_input | safe }}\
+             <input name=\"code\"><input name=\"label\"><input name=\"amount_cents\"></form>",
+        ),
+        (
+            "commerce_promotion_confirm_delete.html",
+            "<form method=\"post\">{{ csrf_input | safe }}<button>Delete</button></form>",
+        ),
+    ])
+    .expect("promotion templates parse");
+    std::sync::Arc::new(t)
+}

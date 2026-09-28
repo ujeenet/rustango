@@ -1610,6 +1610,7 @@ dependencies = [
  "rustango",
  "serde",
  "serde_json",
+ "tera",
  "tokio",
  "tower",
  "tracing",

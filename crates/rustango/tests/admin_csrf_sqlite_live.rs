@@ -197,6 +197,38 @@ async fn a_get_seeds_the_csrf_cookie() {
     );
 }
 
+async fn logout(cookie: &str, body: &str, origin: Option<&str>) -> StatusCode {
+    let app = app_with_session_auth(pool().await);
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("/logout")
+        .header(header::HOST, "admin.test")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    if !cookie.is_empty() {
+        req = req.header(header::COOKIE, cookie);
+    }
+    if let Some(o) = origin {
+        req = req.header(header::ORIGIN, o);
+    }
+    let req = req.body(Body::from(body.to_owned())).unwrap();
+    app.oneshot(req).await.unwrap().status()
+}
+
+/// A forged logout is refused like the tenant admin and console ones.
+#[tokio::test]
+async fn logout_needs_a_csrf_token() {
+    let t = "dddddddddddddddddddddddddddddddd";
+    let pair = format!("rustango_csrf={t}");
+    let body = format!("_csrf={t}");
+    assert_eq!(logout("", "", None).await, StatusCode::FORBIDDEN);
+    assert_eq!(logout(&pair, "_csrf=", None).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        logout(&pair, &body, Some("https://evil.example")).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(logout(&pair, &body, None).await, StatusCode::SEE_OTHER);
+}
+
 /// The `rustango_csrf` values a response sets.
 fn csrf_cookies(resp: &axum::response::Response) -> Vec<String> {
     resp.headers()

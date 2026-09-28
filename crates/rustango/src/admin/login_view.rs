@@ -29,9 +29,13 @@ use crate::core::{Filter, Model, Op, SelectQuery, SqlValue, WhereExpr};
 /// admin router before the auth middleware, so the login form itself
 /// stays reachable.
 pub(crate) fn public_router(state: AppState) -> Router {
+    // Logout needs no session, but a forged one must still be refused.
+    let logout = Router::new()
+        .route("/logout", post(logout_submit))
+        .route_layer(crate::forms::csrf::layer());
     Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", post(logout_submit))
+        .merge(logout)
         .with_state(state)
 }
 
