@@ -65,6 +65,7 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
         "rustango_sso_links",
         "rustango_shared_sso_providers",
         "rustango_operators",
+        "rustango_org_hosts",
         "rustango_orgs",
         "__rustango_migrations__",
         "__rustango_system_migrations__",

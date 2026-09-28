@@ -79,8 +79,9 @@ para esa columna.
 
 La tabla de enlaces es un modelo migrado normal: en el almacenamiento del tenant
 para los inicios de sesión de tenant, y en la base de datos del admin para el
-bare-admin. Un enlace se compara de forma exacta (el subject por su SHA-256, el
-correo comparado en Rust), sea cual sea la collation de la base de datos.
+bare-admin. Un enlace se compara de forma exacta (issuer y subject con clave
+SHA-256; el correo solo ignora mayúsculas ASCII), sea cual sea la collation de
+la base de datos.
 
 El **secreto** del cliente está **cifrado en reposo** — la columna `client_secret`
 es un cast [`EncryptedString`](#almacenamiento-de-secretos), descifrado en memoria solo en el
@@ -105,8 +106,8 @@ redespliegue. Campos:
 | `scopes` | Anulación opcional de scopes separados por espacios (por defecto `openid email profile`). |
 | `allow_email_link` | Enlazar a un usuario que entra por primera vez por su correo verificado (desactivado por defecto). Nunca enlaza una cuenta de superusuario o staff; el bare-admin lo ignora. |
 
-Solo un superusuario puede añadir o cambiar filas `SsoProvider` y `SsoLink` en el
-admin; el resto del staff puede listarlas y borrarlas con los permisos habituales.
+Solo un superusuario puede añadir, cambiar o borrar filas `SsoProvider` y
+`SsoLink` en el admin; el resto del staff solo puede listarlas.
 
 Para añadir un proveedor: introduce el `client_id` + `client_secret`, elige un
 `kind` (o `oidc` + un `issuer_url`) y guarda. Los endpoints se descubren al iniciar
@@ -136,9 +137,12 @@ La URL de callback se deriva por petición a partir del host + slug
 IdP. Un usuario se enlaza mediante el enlace opcional por correo (usuarios de
 tenant no privilegiados), o cuando un superusuario añade una fila `SsoLink`:
 `provider_source` (`tenant`, `shared` o `admin`), `provider_id` (el id de la fila
-del proveedor), `issuer` (`kind`, o `kind|issuer_url` sin barra final), `subject`,
-`subject_sha256` (SHA-256 del subject en hexadecimal minúscula) y `user_id`. La
+del proveedor), `issuer` (`kind`, o `kind|issuer_url` sin barra final), `subject`
+y `user_id`. Deja `key_sha256` vacío: el primer inicio de sesión lo rellena. La
 línea de log del rechazo (`sso refused`) lleva `provider_id`, `issuer` y `subject`.
+Añadir una fila requiere la autenticación por sesión del admin
+(`Builder::with_session_auth`, o `with_session` del admin de tenant); sin ella,
+nadie puede añadir enlaces.
 
 ## SSO de miembro (usuario final)
 

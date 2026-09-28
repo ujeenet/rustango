@@ -200,10 +200,14 @@ on the next login; for a shared provider it applies to every tenant), or
 have a superuser add an `SsoLink` row. Superusers, staff and every
 bare-admin account need the row: `provider_source` `tenant`/`shared`/
 `admin`, `provider_id` the provider row id, `issuer` `kind` or
-`kind|issuer_url` without a trailing slash, `subject`, `subject_sha256`
-(lowercase hex SHA-256 of the subject), `user_id`. The `sso refused` log
+`kind|issuer_url` without a trailing slash, `subject`, `user_id`; leave
+`key_sha256` empty, the first sign-in fills it. The `sso refused` log
 line carries `provider_id`, `issuer` and `subject`. Only superusers can
-now add or change `SsoProvider` and `SsoLink` rows in the admin.
+now add, change or delete `SsoProvider` and `SsoLink` rows in the admin.
+A read-only operator console can no longer change shared providers.
+(Pre-release soak databases built from an earlier 0.58.0 draft have a
+`subject_sha256` column instead of `key_sha256`: drop and re-migrate
+`rustango_sso_links`. Released versions never had it.)
 `find_or_provision_member(pool, email, profile, auto)` is now
 `(pool, &ProviderKey, allow_email_link, profile, auto)` and returns
 `MemberSignIn`: map `NotLinked` (an existing account, not linkable by
