@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- `DatabaseCache` keys compare exactly on MySQL: `user:1` no longer reads `User:1`, nor `café` `cafe`.
+  Prefix deletes are exact-case on MySQL and SQLite too (#1757).
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token

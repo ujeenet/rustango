@@ -21,8 +21,11 @@
 //! PRIMARY KEY survives across dialects:
 //!
 //! - Postgres: `cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
-//! - MySQL:    `cache_key VARCHAR(255) PRIMARY KEY, value LONGTEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
+//! - MySQL:    `cache_key VARBINARY(255) PRIMARY KEY, value LONGTEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
 //! - SQLite:   `cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL DEFAULT 0`
+//!
+//! `VARBINARY` makes MySQL compare keys byte for byte, as PG and SQLite do;
+//! a default `VARCHAR` collation matched `user:1` to `User:1` (#1757).
 //!
 //! A key longer than 255 bytes is stored as its first 190 bytes plus
 //! `#` and its SHA-256, so it fits MySQL's column and stays unique. A
@@ -50,7 +53,7 @@ use super::{Cache, CacheError};
 use crate::core::SqlValue;
 use crate::sql::{raw_execute_pool, raw_query_pool, Pool};
 
-/// Longest key stored as-is: MySQL's `VARCHAR(255)` column.
+/// Longest key stored as-is: MySQL's `VARBINARY(255)` column.
 const MAX_RAW_KEY_BYTES: usize = 255;
 
 /// Bytes of a long key kept ahead of its hash, so prefix deletes still reach it.
@@ -139,7 +142,7 @@ impl DatabaseCache {
             ),
             "mysql" => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
-                 cache_key VARCHAR(255) PRIMARY KEY, \
+                 cache_key VARBINARY(255) PRIMARY KEY, \
                  value LONGTEXT NOT NULL, \
                  expires BIGINT NOT NULL DEFAULT 0\
                  )"
@@ -401,11 +404,8 @@ impl Cache for DatabaseCache {
     /// Postgres. `!` needs no escaping on any of the three, so one
     /// statement works everywhere.
     ///
-    /// One thing to watch: `LIKE` uses the column's collation, which
-    /// ignores ASCII case on SQLite and, by default, on MySQL, while
-    /// `get` and `delete` compare with `=`. Two namespaces that differ
-    /// only in case collide on a prefix delete but not on a read. Keep
-    /// namespaces lower-case, as tenant slugs already are.
+    /// SQLite's `LIKE` ignores ASCII case, so it matches with
+    /// `instr(..) = 1` instead; the prefix stays exact on every backend.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
@@ -414,12 +414,21 @@ impl Cache for DatabaseCache {
         // drift between the cache and the ORM's LIKE lookups.
         // A hashed key keeps only its head, so a longer prefix matches on that
         // head: this may drop extra entries, never fewer.
-        let pattern = format!("{}%", crate::core::escape_like(head(prefix)));
-        let sql = format!(
-            "DELETE FROM {table} WHERE cache_key LIKE {p}{}",
-            crate::core::LIKE_ESCAPE_CLAUSE
-        );
-        raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(pattern)])
+        let (sql, arg) = if dialect.name() == "sqlite" {
+            (
+                format!("DELETE FROM {table} WHERE instr(cache_key, {p}) = 1"),
+                head(prefix).to_owned(),
+            )
+        } else {
+            (
+                format!(
+                    "DELETE FROM {table} WHERE cache_key LIKE {p}{}",
+                    crate::core::LIKE_ESCAPE_CLAUSE
+                ),
+                format!("{}%", crate::core::escape_like(head(prefix))),
+            )
+        };
+        raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(arg)])
             .await
             .map_err(|e| CacheError::Connection(format!("delete_prefix: {e}")))?;
         Ok(())
