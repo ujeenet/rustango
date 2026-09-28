@@ -898,7 +898,8 @@ mod tests {
     /// The password widget never echoes the stored value.
     #[test]
     fn password_widget_never_echoes_the_value() {
-        let f = field("password_hash", "password_hash", FieldType::String);
+        let mut f = field("password_hash", "password_hash", FieldType::String);
+        f.nullable = false;
         let html = render_input_with_widget(&f, "$argon2id$stored", false, Some("password"));
         assert!(!html.contains("argon2"), "{html}");
         assert!(html.contains(" required"), "{html}");
