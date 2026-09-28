@@ -239,6 +239,20 @@ pub(crate) enum BearerRejection {
     Busy,
 }
 
+/// A raw-key check that failed: busy is 503, anything else 500.
+impl From<crate::tenancy::AgentError> for BearerRejection {
+    fn from(e: crate::tenancy::AgentError) -> Self {
+        if matches!(
+            e,
+            crate::tenancy::AgentError::Tenancy(crate::tenancy::TenancyError::Busy)
+        ) {
+            return Self::Busy;
+        }
+        tracing::warn!(error = %e, "mcp raw-key check failed");
+        Self::CheckFailed
+    }
+}
+
 impl BearerRejection {
     pub(crate) fn into_response(self, headers: &HeaderMap, uri: &axum::http::Uri) -> Response {
         match self {
@@ -295,13 +309,7 @@ pub(crate) async fn authenticate_bearer(
         None => match verify_raw_agent_credential(pool, slug, token).await {
             Ok(Some(agent)) => Ok(agent),
             Ok(None) => Err(BearerRejection::Unauthorized),
-            Err(crate::tenancy::AgentError::Tenancy(crate::tenancy::TenancyError::Busy)) => {
-                Err(BearerRejection::Busy)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "mcp raw-key check failed");
-                Err(BearerRejection::CheckFailed)
-            }
+            Err(e) => Err(e.into()),
         },
     }
 }
@@ -671,14 +679,35 @@ mod tests {
         h
     }
 
-    /// A busy hash queue is 503 + Retry-After; a 401 would send the
-    /// client off on an OAuth flow (#1748).
+    /// A busy raw-key check is 503 + Retry-After, through the same
+    /// conversion `authenticate_bearer` uses (#1748).
     #[test]
-    fn a_busy_bearer_check_is_503_not_401() {
+    fn a_busy_raw_key_check_is_503_not_401() {
+        use crate::tenancy::{AgentError, TenancyError};
         let uri: Uri = "/mcp".parse().unwrap();
-        let r = BearerRejection::Busy.into_response(&headers("app.example"), &uri);
+        let r = BearerRejection::from(AgentError::Tenancy(TenancyError::Busy))
+            .into_response(&headers("app.example"), &uri);
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(r.headers().contains_key(header::RETRY_AFTER));
+    }
+
+    /// A raw-key check that errors (here: no agent table) is a 500,
+    /// not a 401 that sends the client off on an OAuth flow (#1748).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_failed_raw_key_check_is_500_not_401() {
+        use crate::tenancy::jwt_lifecycle::JwtLifecycle;
+        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let Err(e) = authenticate_bearer(&jwt, &pool, "acme", "abcdef12.0123456789abcdef").await
+        else {
+            panic!("a failed check must not authenticate");
+        };
+        let uri: Uri = "/mcp".parse().unwrap();
+        let r = e.into_response(&headers("app.example"), &uri);
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
