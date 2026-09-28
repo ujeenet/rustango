@@ -1169,10 +1169,16 @@ def saas_suite(rec, browser):
                         [("login", "/__login"), ("admin", "/__admin"), ("app route", "/")])
 
     csrf_user, csrf_pw = tuser("csrf")
+    # A sabotage run leaves the password changed; use whichever works.
+    try:
+        c, _, login_pw = login_either(browser, tenant, csrf_user, [csrf_pw, csrf_pw + "-2"])
+        c.close()
+    except RuntimeError:
+        login_pw = csrf_pw
     csrf_matrix(rec, browser, None, ta, "login", "#1607", tenant.url("/__login"),
                 "form:has(input[name=password])",
                 fill=lambda f, t: (f.locator("[name=username]").fill(csrf_user),
-                                   f.locator("[name=password]").fill(csrf_pw)),
+                                   f.locator("[name=password]").fill(login_pw)),
                 ok=lambda r, p: r.status in (302, 303) and has_session(p.context, tenant))
     section(rec, "admin_write_matrix", admin_write_matrix, rec, browser, sup, tenant, ta, "#1713")
 
