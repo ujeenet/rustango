@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SQLite NULLs decode as `null`, not `0` (#1766)
+
+On SQLite a NULL cell came back as `0` / `false` / `""` in ViewSet JSON,
+the admin form and `values_dict`; it is `null` now, as on PG and MySQL.
+
 ## [0.58.0] — 2026-09-28
 
 ### Security — bare admin logout needs a CSRF token

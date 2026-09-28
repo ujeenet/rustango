@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### SQLite NULLs are `null` in JSON and `values_dict`
+
+Code that read `0` / `false` / `""` for a NULL SQLite cell now gets `null` / `SqlValue::Null`.
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token
