@@ -62,8 +62,8 @@ pub struct ReceiverId(u64);
 /// receivers usually copy them straight into their record.
 #[derive(Debug, Clone, Default)]
 pub struct AuthRequestMeta {
-    /// Origin IP, from the `real_ip` middleware when it ran, else
-    /// the peer socket address.
+    /// Origin IP: the `TrustedRealIp` from `RealIpLayer`, else the
+    /// peer socket address.
     pub ip_address: Option<String>,
     /// The `User-Agent` header.
     pub user_agent: Option<String>,
@@ -266,24 +266,21 @@ pub async fn send_user_login_failed(ctx: UserLoginFailedContext) {
 
 // ---------------------------------------------------------------- Helpers
 
-/// Read what [`AuthRequestMeta`] it can from request headers:
-/// `User-Agent`, plus the `X-Real-IP` and `X-Forwarded-For` chain the
-/// `real_ip` middleware sets. With none of them present it returns
-/// all-`None`, so a caller can always fill `request:` unconditionally.
-pub fn meta_from_headers(headers: &axum::http::HeaderMap, path: Option<&str>) -> AuthRequestMeta {
-    let header_str = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-    };
-    let ip_address = header_str("x-real-ip").or_else(|| {
-        header_str("x-forwarded-for").and_then(|s| s.split(',').next().map(|f| f.trim().to_owned()))
-    });
-    let user_agent = header_str("user-agent");
+/// Build [`AuthRequestMeta`] from request parts: `User-Agent`, and the
+/// client IP from [`crate::rate_limit::client_ip`] (a `TrustedRealIp`,
+/// else the socket). Raw forwarding headers are never read (#1745).
+#[cfg(feature = "admin")]
+pub fn meta_from_parts(
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+    path: Option<&str>,
+) -> AuthRequestMeta {
     AuthRequestMeta {
-        ip_address,
-        user_agent,
+        ip_address: crate::rate_limit::client_ip(extensions, headers).map(|ip| ip.to_string()),
+        user_agent: headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
         path: path.map(str::to_owned),
     }
 }

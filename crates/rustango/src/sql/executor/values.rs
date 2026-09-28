@@ -116,12 +116,12 @@ fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize) -> SqlValue 
         // Decode while `raw` is still in scope: calling `type_info()`
         // inline just before this can make it fail for no reason.
         let as_text = row.try_get_unchecked::<String, _>(i);
+        // A NULL would decode as `0` below (#1766).
+        if is_null {
+            return SqlValue::Null;
+        }
         if is_text {
-            return if is_null {
-                SqlValue::Null
-            } else {
-                as_text.map_or(SqlValue::Null, SqlValue::String)
-            };
+            return as_text.map_or(SqlValue::Null, SqlValue::String);
         }
     }
     if let Ok(v) = row.try_get::<i64, _>(i) {

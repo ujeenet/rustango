@@ -167,6 +167,8 @@ Cuando se agota: `429 Too Many Requests` con la cabecera `Retry-After`. Cada res
 >
 > **`trust_proxies` no es decoración opcional.** `X-Forwarded-For` lo fija quien lo envía. Sin una lista de proxies declarada la cabecera es solo una afirmación, así que el limitador la ignora por completo y se basa en el socket — deliberadamente. Si no lo hiciera, cualquier cliente podría acuñar un cubo nuevo por petición variando una cabecera, convirtiendo «el límite es demasiado grueso» en «no hay límite». `RealIp` (la afirmación) sirve para registro; solo `TrustedRealIp`, que aparece cuando el par coincide con `trust_proxies`, basa un limitador.
 >
+> **Una regla para cada lector de IP.** Límites de tasa, throttles de ViewSet, límites de login, señales de auth y el log de acceso usan la misma dirección: `TrustedRealIp` (leer `X-Forwarded-For` de derecha a izquierda, tomar el primer salto que no esté en `trust_proxies`), si no el socket. Ninguno lee el salto de la izquierda: lo escribe el cliente.
+>
 > Nombra las direcciones desde las que tu ingress conecta realmente. Confiar en un rango más amplio entrega la elusión a cualquiera dentro de él.
 
 `RateLimitLayer` es **local al proceso** — cuenta las peticiones solo dentro de una instancia en ejecución, lo cual está bien si ejecutas una sola instancia. Si ejecutas varias instancias (réplicas) detrás de un balanceador de carga, cada una mantendría su propio recuento, de modo que el límite real se multiplica. Para compartir un único recuento entre todas las réplicas, usa `rate_limit_cache::CacheRateLimitLayer`, que delega en cualquier implementación de `cache::Cache` (empareja con `cache::RedisCache` para un contador compartido incrementado atómicamente por el `INCRBY` de Redis):

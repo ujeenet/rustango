@@ -483,23 +483,32 @@ where
                     resp
                 }
                 axum::http::Method::POST => {
-                    let ip = crate::login_throttle::ClientIp::from_parts(
+                    login_submit(
+                        &org,
+                        cfg,
+                        &pool,
+                        routes,
                         &parts.extensions,
-                        &parts.headers,
-                    );
-                    login_submit(&org, cfg, &pool, routes, ip, parts.headers, body).await
+                        parts.headers,
+                        body,
+                    )
+                    .await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
         }
         if path == routes.logout_url && method == axum::http::Method::POST {
             use crate::signals::auth::{
-                meta_from_headers, send_user_logged_out, UserLoggedOutContext,
+                meta_from_parts, send_user_logged_out, UserLoggedOutContext,
             };
             // Best-effort: decode the session cookie so the signal
             // carries user_id / username. Receivers tolerate `None`.
             let (uid, uname) = decode_session_user(&parts.headers, cfg, &org.slug);
-            let meta = meta_from_headers(&parts.headers, Some(routes.logout_url.as_str()));
+            let meta = meta_from_parts(
+                &parts.extensions,
+                &parts.headers,
+                Some(routes.logout_url.as_str()),
+            );
             send_user_logged_out(UserLoggedOutContext {
                 source: "tenant_admin",
                 user_id: uid,
@@ -956,19 +965,20 @@ async fn login_submit(
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
-    ip: crate::login_throttle::ClientIp,
+    extensions: &axum::http::Extensions,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     use crate::core::Column as _;
     use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
-        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
     };
     use crate::sql::FetcherPool as _;
 
-    let meta = meta_from_headers(&headers, Some(routes.login_url.as_str()));
+    let ip = crate::login_throttle::ClientIp::from_parts(extensions, &headers);
+    let meta = meta_from_parts(extensions, &headers, Some(routes.login_url.as_str()));
 
     let bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(b) => b.to_bytes(),

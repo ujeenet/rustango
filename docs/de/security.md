@@ -167,6 +167,8 @@ Bei Erschöpfung: `429 Too Many Requests` mit `Retry-After`-Header. Jede erfolgr
 >
 > **`trust_proxies` ist keine optionale Dekoration.** `X-Forwarded-For` setzt, wer ihn sendet. Ohne deklarierte Proxy-Liste ist der Header nur eine Behauptung, also ignoriert ihn der Limiter vollständig und schlüsselt auf den Socket — absichtlich. Täte er es nicht, könnte jeder Client durch Variieren eines Headers pro Anfrage einen frischen Bucket erzeugen und aus „das Limit ist zu grob" würde „es gibt kein Limit". `RealIp` (die Behauptung) ist für Logging in Ordnung; nur `TrustedRealIp`, das erscheint, wenn der Peer zu `trust_proxies` passt, schlüsselt einen Limiter.
 >
+> **Eine Regel für jeden IP-Leser.** Rate Limits, ViewSet-Throttles, Login-Limits, Auth-Signale und das Access-Log nutzen dieselbe Adresse: `TrustedRealIp` (`X-Forwarded-For` von rechts nach links lesen, den ersten Hop nehmen, der nicht in `trust_proxies` steht), sonst den Socket. Keiner liest den linken Hop: den schreibt der Client.
+>
 > Benenne die Adressen, von denen dein Ingress tatsächlich verbindet. Einen weiteren Bereich zu vertrauen, reicht den Bypass an jeden darin weiter.
 
 `RateLimitLayer` ist **prozesslokal** — es zählt Anfragen nur innerhalb einer laufenden Instanz, was in Ordnung ist, wenn du eine einzelne Instanz betreibst. Wenn du mehrere Instanzen (Replicas) hinter einem Load Balancer betreibst, würde jede ihre eigene Zählung führen, sodass sich das reale Limit vervielfacht. Um eine Zählung über alle Replicas hinweg zu teilen, nutze `rate_limit_cache::CacheRateLimitLayer`, das an eine beliebige `cache::Cache`-Implementierung delegiert (kombiniere es mit `cache::RedisCache` für einen gemeinsamen Zähler, der atomar per Redis `INCRBY` inkrementiert wird):

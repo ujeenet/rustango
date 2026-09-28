@@ -167,6 +167,8 @@ When exhausted: `429 Too Many Requests` with `Retry-After` header. Every success
 >
 > **`trust_proxies` is not optional decoration.** `X-Forwarded-For` is set by whoever sends it. Without a declared proxy list the header is only a claim, so the limiter ignores it entirely and keys on the socket — deliberately. If it did otherwise, any client could mint a fresh bucket per request by varying a header, turning "the limit is too coarse" into "there is no limit". `RealIp` (the claim) is fine for logging; only `TrustedRealIp`, which appears when the peer matches `trust_proxies`, keys a limiter.
 >
+> **One rule for every IP reader.** Rate limits, ViewSet throttles, login limits, auth signals and the access log all use the same address: `TrustedRealIp` (read `X-Forwarded-For` right to left, take the first hop not in `trust_proxies`), else the socket. None reads the leftmost hop: the client writes it.
+>
 > Name the addresses your ingress actually connects from. Trusting a range wider than that hands the bypass to anyone inside it.
 
 ### Built-in login limits

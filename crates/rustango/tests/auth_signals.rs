@@ -201,24 +201,30 @@ async fn disconnect_removes_only_the_named_receiver() {
     assert_eq!(*counter.lock().await, 2);
 }
 
+/// The IP is the trusted one, never a forged forwarding header (#1745).
+#[cfg(feature = "admin")]
 #[test]
-fn meta_from_headers_extracts_real_ip_and_ua() {
+fn meta_from_parts_ignores_forged_forwarding_headers() {
+    use rustango::signals::auth::meta_from_parts;
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("user-agent", "test-agent/1.0".parse().unwrap());
     headers.insert("x-forwarded-for", "203.0.113.7, 10.0.0.1".parse().unwrap());
-
-    let meta = rustango::signals::auth::meta_from_headers(&headers, Some("/login"));
-    assert_eq!(meta.user_agent.as_deref(), Some("test-agent/1.0"));
-    // First IP in X-Forwarded-For wins.
-    assert_eq!(meta.ip_address.as_deref(), Some("203.0.113.7"));
-    assert_eq!(meta.path.as_deref(), Some("/login"));
-}
-
-#[test]
-fn meta_from_headers_prefers_x_real_ip_over_xff() {
-    let mut headers = axum::http::HeaderMap::new();
     headers.insert("x-real-ip", "10.0.0.99".parse().unwrap());
-    headers.insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
-    let meta = rustango::signals::auth::meta_from_headers(&headers, None);
-    assert_eq!(meta.ip_address.as_deref(), Some("10.0.0.99"));
+    let mut ext = axum::http::Extensions::new();
+
+    let meta = meta_from_parts(&ext, &headers, Some("/login"));
+    assert_eq!(meta.user_agent.as_deref(), Some("test-agent/1.0"));
+    assert_eq!(meta.ip_address, None, "a raw header is only a claim");
+    assert_eq!(meta.path.as_deref(), Some("/login"));
+
+    let peer: std::net::SocketAddr = "192.0.2.5:4000".parse().unwrap();
+    ext.insert(axum::extract::ConnectInfo(peer));
+    let meta = meta_from_parts(&ext, &headers, None);
+    assert_eq!(meta.ip_address.as_deref(), Some("192.0.2.5"));
+
+    ext.insert(rustango::real_ip::TrustedRealIp(
+        "198.51.100.9".parse().unwrap(),
+    ));
+    let meta = meta_from_parts(&ext, &headers, None);
+    assert_eq!(meta.ip_address.as_deref(), Some("198.51.100.9"));
 }

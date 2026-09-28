@@ -1098,15 +1098,16 @@ struct LoginSubmit {
 async fn login_submit(
     State(state): State<ConsoleState>,
     ip: crate::login_throttle::ClientIp,
+    extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginSubmit>,
 ) -> Response<Body> {
     use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
-        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
     };
-    let meta = meta_from_headers(&headers, Some("/login"));
+    let meta = meta_from_parts(&extensions, &headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
 
     // Rate limits and the account lock, before the lookup (#1609).
@@ -1191,13 +1192,14 @@ async fn login_submit(
 
 async fn logout(
     State(state): State<ConsoleState>,
+    extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
 ) -> Response<Body> {
-    use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
+    use crate::signals::auth::{meta_from_parts, send_user_logged_out, UserLoggedOutContext};
     // Best-effort: decode the session cookie so the signal carries
     // operator_id. Receivers tolerate `None`.
     let oid = decode_operator_session(&headers, &state.session_secret);
-    let meta = meta_from_headers(&headers, Some("/logout"));
+    let meta = meta_from_parts(&extensions, &headers, Some("/logout"));
     let clear = Cookie::build((COOKIE_NAME, ""))
         .path("/")
         .http_only(true)

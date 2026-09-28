@@ -728,7 +728,7 @@ ViewSet::for_model(Post::SCHEMA)
 ```
 
 Over-limit → `429 Too Many Requests` + `Retry-After`. Counters are per-process;
-the client key is the connection IP (or `X-Forwarded-For` / `X-Real-IP`).
+the client key is the trusted client IP (`TrustedRealIp`, else the socket; see [security.md](security.md)).
 
 ---
 

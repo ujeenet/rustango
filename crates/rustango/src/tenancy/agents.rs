@@ -64,6 +64,11 @@ pub struct Agent {
     pub data: serde_json::Value,
 }
 
+// An agent is minted by `create_agent_pool`, which shows the secret once;
+// an admin form could only store a row nobody can use (#1763).
+#[cfg(feature = "admin")]
+crate::register_admin_object_permission!("rustango_agents", "add", |_, _| false);
+
 // ------------------------------------------------------------- operations
 
 /// Outcome of [`create_agent_pool`] / [`rotate_agent_secret_pool`] — the
