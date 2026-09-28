@@ -9,16 +9,23 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 The ViewSet throttle, the auth signals' `ip_address` and the access log
 no longer read the leftmost `X-Forwarded-For` / `X-Real-IP`; they use
 `TrustedRealIp`, else the socket, like the rate limiters.
-`signals::auth::meta_from_headers` is replaced by `meta_from_parts`.
+
+**Breaking:** `signals::auth::meta_from_headers` is replaced by
+`meta_from_parts` (needs `admin`). Behind a proxy without
+`RealIpLayer::trust_proxies`, every client now shares one ViewSet bucket
+and logs the proxy IP. See UPGRADING.
+
 New `server::Builder::real_ip` mounts `RealIpLayer` outside the access log
 and the tenant admin, so their IPs are the trusted client.
 
 ### Security — login-limit leftovers (#1748)
 
 `RateLimitLayer::per_ip` groups IPv6 by /64. A raw MCP key on a busy
-hash queue answers 503, not 401, and `verify_raw_agent_credential`
-returns `Result<Option<McpAgent>, AgentError>`. The admin 2FA prompt no
-longer spends login limit tokens.
+hash queue answers 503, not 401. The admin 2FA prompt no longer spends
+login limit tokens.
+
+**Breaking:** `verify_raw_agent_credential` returns
+`Result<Option<McpAgent>, AgentError>`, not `Option<McpAgent>`.
 
 ### Fixed — admin create of users, secrets and timestamps (#1763, #1764)
 

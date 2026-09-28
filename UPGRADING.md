@@ -155,8 +155,10 @@ untouched.
 The ViewSet throttle, auth signals and `AccessLogLayer::trust_proxy_headers`
 now read only `TrustedRealIp` (else the socket). Behind a proxy, mount
 `RealIpLayer` with `.trust_proxies([...])`, or every client shares one
-ViewSet bucket. Replace `meta_from_headers(&h, p)` with
-`meta_from_parts(&extensions, &h, p)`.
+ViewSet bucket. With `server::Builder`, pass it to `.real_ip(layer)`.
+Replace `meta_from_headers(&h, p)` with
+`meta_from_parts(&extensions, &h, p)`; it needs the `admin` feature, and
+without it you build `AuthRequestMeta` yourself.
 
 ### `verify_raw_agent_credential` returns a `Result`
 
