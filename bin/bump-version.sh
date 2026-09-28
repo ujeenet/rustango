@@ -20,8 +20,8 @@
 #      rustango-renamed-smoke. Rewritten in place.
 #   2. PROSE — sample `manage version` / `manage about` transcripts, the MCP
 #      `serverInfo`, the `cargo install cargo-rustango --version …` line, in
-#      all four doc languages. Also rewritten in place; these are what
-#      `docs_versions.rs` checks.
+#      all four doc languages; on a series bump also `docs/index.toml` and
+#      the `X.Y` install pins. Rewritten in place; `docs_versions.rs` checks them.
 #   3. LOCKFILES — every Cargo.lock in the tree records `rustango` at the old
 #      version. NEVER hand-edited: `cargo metadata` regenerates each one, so
 #      the lockfile stays the file cargo actually produces.
@@ -80,15 +80,41 @@ while IFS= read -r line; do [ -n "$line" ] && FILES+=("$line"); done < <(
     ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true
 )
 
-if [ ${#FILES[@]} -eq 0 ]; then
-  echo "no file claims $OLD outside CHANGELOG.md and the lockfiles"
+# The claim rewriter; the shapes are listed where it runs, below. With
+# report=1 it prints each line it would change instead of writing.
+# shellcheck disable=SC2016
+REWRITE='
+  BEGIN { ($o, $n, $os, $ns, $report) = splice(@ARGV, 0, 5) }
+  my $was = $_;
+  # Comments in these two files are examples and history, not claims (#1750).
+  my $example = $ARGV =~ m{^(bin/bump-version\.sh|crates/rustango/tests/docs_versions\.rs)$}
+    && /^\s*(#|\/\/)/;
+  unless ($example) {
+    s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
+    s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
+    s/^(rustango\s+)\Q$o\E(?![0-9.])/$1$n/;
+    s/^((?:cargo-)?rustango[a-z-]*\s*=\s*")\Q$o\E(?![0-9.])/$1$n/;
+    if ($os ne $ns) {
+      s/^(version\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/ if $ARGV eq "docs/index.toml";
+      if (/rustango/) {
+        s/(version\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
+        s/(\b(?:rustango-orm-macros|rustango-macros|cargo-rustango|rustango)\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
+      }
+    }
+  }
+  if ($report) { print STDOUT "  $ARGV:$.: $_" if $_ ne $was } else { print }
+  close ARGV if eof;
+'
+
+SITES=""
+[ ${#FILES[@]} -gt 0 ] && SITES=$(perl -ne "$REWRITE" "$OLD" "$NEW" "$OLD_SERIES" "$NEW_SERIES" 1 "${FILES[@]}" | cut -c1-160)
+if [ -z "$SITES" ]; then
+  echo "no site claims $OLD outside CHANGELOG.md and the lockfiles"
 else
-  echo "these files claim $OLD:"
-  for f in "${FILES[@]}"; do
-    printf '  %s\n' "$f"
-    git grep -nE "(^|[^0-9.])(${OLD//./\\.}|${OLD_SERIES//./\\.})([^0-9.]|\$)" -- "$f" \
-      | sed "s|^$f:|      |" | cut -c1-140
-  done
+  echo "these $(printf '%s\n' "$SITES" | wc -l | tr -d ' ') sites claim $OLD; after the rewrite they read:"
+  printf '%s\n' "$SITES"
   echo
 fi
 
@@ -138,20 +164,15 @@ fi
 #                        crate names: a third-party dep sitting at the
 #                        same version by coincidence is not our claim.
 #
+# On a series bump, also the major.minor shapes `docs_versions` checks:
+#
+#   version = "X.Y"      docs/index.toml, the published doc series
+#   version = "X.Y"      on a line naming rustango, e.g. an inline table
+#                        or `orm = { package = "rustango", version = … }`
+#   <crate> = "X.Y"      a bare pin on any crate this workspace publishes
+#
 # Anything else is left alone and reported below for you to check.
-for f in "${FILES[@]}"; do
-  perl -pi -e '
-    BEGIN { ($o, $n, $os, $ns) = @ARGV[0,1,2,3]; splice(@ARGV, 0, 4) }
-    s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g;
-    s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
-    s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
-    s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
-    s/^(rustango\s+)\Q$o\E(?![0-9.])/$1$n/gm;
-    s/^((?:cargo-)?rustango[a-z-]*\s*=\s*")\Q$o\E(?![0-9.])/$1$n/gm;
-    s/(\brustango\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
-    s/(\brustango\s*=\s*\{[^\n]*?version\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
-  ' "$OLD" "$NEW" "$OLD_SERIES" "$NEW_SERIES" "$f"
-done
+[ ${#FILES[@]} -gt 0 ] && perl -i -ne "$REWRITE" "$OLD" "$NEW" "$OLD_SERIES" "$NEW_SERIES" 0 "${FILES[@]}"
 
 # What still names the old version, now that the claims are rewritten. These
 # are prose, and prose about an old release is supposed to keep its number —
@@ -226,32 +247,35 @@ echo "verifying nothing still claims $OLD"
 # whole reason the rewrite is anchored. So the verification has to ask the
 # narrower question the rewrite asks: does any *claim about the current
 # version* still say OLD? The alternation below is the six FULL-version
-# shapes the perl pass rewrites; the two SERIES shapes are checked
-# separately just after, and only when the series changes.
+# shapes the perl pass rewrites; the series shapes are checked just after.
 #
+EXAMPLES='^(bin/bump-version\.sh|crates/rustango/tests/docs_versions\.rs):[0-9]+:[[:space:]]*(#|//)'
 CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
 stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
-  ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)
+  ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' | grep -vE "$EXAMPLES" || true)
 
-# The perl pass also rewrites two SERIES shapes (`rustango = "0.58"` bare and
-# inside an inline table). The grep above cannot see them: it looks for OLD,
-# the full version, and a series claim never contains it. So they were
-# rewritten and never verified (#1605).
-#
-# This costs nothing while the series holds — 0.57.10 to 0.57.11 leaves both
-# substitutions as no-ops — and is the whole risk at a series bump, which is
-# exactly when nobody has exercised the path. Only run it when the series
-# actually changes; otherwise OLD_SERIES == NEW_SERIES and every correct
-# claim would report as stale.
-if [ "$OLD_SERIES" != "$NEW_SERIES" ]; then
-  # No `\b` here: the perl pass can use it, `git grep -E` is POSIX ERE and
-  # silently matches nothing if you do. Spell the boundary out instead.
-  SERIES_CLAIM='(^|[^a-z-])rustango[[:space:]]*=[[:space:]]*("|\{[^#]*version[[:space:]]*=[[:space:]]*")'
-  stale_series=$(git grep -nE "${SERIES_CLAIM}${OLD_SERIES//./\\.}([^0-9.]|\$)" -- . \
-    ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)
-  if [ -n "$stale_series" ]; then
-    stale=$(printf '%s\n%s' "$stale" "$stale_series")
-  fi
+# The series sites, checked the way `docs_versions` checks them: the
+# docs/index.toml `version`, and on every tracked .md (bar CHANGELOG.md) and
+# lib.rs line naming rustango, the first `version = "X.Y"` or `<crate> = "X.Y"`.
+# Against NEW_SERIES, so it holds on a patch bump too (#1605, #1750).
+PIN_FILES=()
+while IFS= read -r line; do [ -n "$line" ] && PIN_FILES+=("$line"); done < <(
+  git ls-files '*.md' ':(exclude)CHANGELOG.md'; echo crates/rustango/src/lib.rs
+)
+# shellcheck disable=SC2016
+stale_series=$(perl -ne '
+  BEGIN { $s = shift }
+  if ($ARGV eq "docs/index.toml") {
+    print "$ARGV:$.: publishes under $1, expected $s\n" if /^version\s*=\s*"([^"]*)"/ && $1 ne $s;
+  } elsif (/rustango/) {
+    my ($v) = /version = "([^"]*)"/;
+    ($v) = /(?:rustango-orm-macros|rustango-macros|cargo-rustango|rustango) = "([^"]*)"/ unless defined $v;
+    print "$ARGV:$.: pins $v, expected $s\n" if defined $v && $v =~ /^\d+\.\d+$/ && $v ne $s;
+  }
+  close ARGV if eof;
+' "$NEW_SERIES" docs/index.toml "${PIN_FILES[@]}")
+if [ -n "$stale_series" ]; then
+  stale=$(printf '%s\n%s' "$stale" "$stale_series")
 fi
 
 # Lockfiles need a *narrower* check, not the same one. A third-party crate can

@@ -154,6 +154,12 @@ untouched.
 
 Code that read `0` / `false` / `""` for a NULL SQLite cell now gets `null` / `SqlValue::Null`.
 
+### MySQL cache keys compare exactly
+
+`DatabaseCache` now creates `cache_key` as `VARBINARY(255)` on MySQL (#1757).
+`ensure_table` does not change an existing table; run once per cache table:
+`ALTER TABLE rustango_cache MODIFY cache_key VARBINARY(255) NOT NULL;`
+
 ## 0.58.0
 
 ### Bare admin logout needs a CSRF token
