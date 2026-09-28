@@ -16,6 +16,9 @@ code must be for a later one. New `totp::matched_step` /
 once. Account lockout counts failures in a fixed window from the first
 failure; a failure no longer extends it.
 
+`migrate` now creates `rustango_admin_totp`, so a fresh install with
+`totp` no longer refuses every admin login before enrollment.
+
 ### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
 
 `RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`
