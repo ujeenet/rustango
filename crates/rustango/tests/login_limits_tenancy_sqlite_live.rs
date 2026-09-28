@@ -81,6 +81,8 @@ struct Env {
     console: Router,
     /// Tenant admin (legacy routes).
     admin: Router,
+    /// The same admin as `server::Builder` mounts it.
+    served: Router,
     /// `/whoami` behind Basic + API key, and the JWT `/api/auth/*`.
     api: Router,
     registry: Pool,
@@ -144,12 +146,21 @@ async fn boot() -> Env {
     let secret = SessionSecret::from_bytes(b"tenant-admin-session-secret-32b!".to_vec());
     let admin = TenantAdminBuilder::new(
         pools.clone(),
-        reg_url,
+        reg_url.clone(),
         ChainResolver::new().push(SubdomainResolver::new("app.test")),
     )
     .routes(RouteConfig::legacy())
     .with_session(secret.clone())
     .build();
+    let served = rustango::server::Builder::<sqlx::Sqlite>::from_pool(
+        sqlx::SqlitePool::connect(&reg_url).await.expect("registry"),
+        reg_url.clone(),
+        "app.test",
+    )
+    .routes(RouteConfig::legacy())
+    .into_router()
+    .await
+    .expect("assemble");
     let console = rustango::tenancy::operator_console::router(
         registry.clone(),
         rustango::tenancy::operator_console::SessionSecret::from_bytes(vec![9u8; 32]),
@@ -184,6 +195,7 @@ async fn boot() -> Env {
     Env {
         console,
         admin,
+        served,
         api,
         registry,
         tenant,
@@ -232,7 +244,11 @@ impl Env {
     }
 
     async fn admin_login(&self, ip: &str, user: &str, pass: &str) -> axum::response::Response {
-        let req = Request::builder()
+        send(&self.admin, ip, self.admin_login_req(user, pass)).await
+    }
+
+    fn admin_login_req(&self, user: &str, pass: &str) -> Request<Body> {
+        Request::builder()
             .method("POST")
             .uri("/__login")
             .header(header::HOST, &self.host)
@@ -241,8 +257,7 @@ impl Env {
             .body(Body::from(format!(
                 "_csrf=t&username={user}&password={pass}"
             )))
-            .unwrap();
-        send(&self.admin, ip, req).await
+            .unwrap()
     }
 
     #[cfg_attr(feature = "postgres", allow(dead_code))]
@@ -347,6 +362,21 @@ async fn tenant_admin_login_locks_with_429() {
         assert_eq!(r.status(), StatusCode::SEE_OTHER);
     }
     assert!(is_429(&env.admin_login(&next_ip(), &name, PASS).await));
+}
+
+/// Through `server::Builder`, failures from one IP get 429 once the
+/// per-IP limit is reached: the client address must reach the gate.
+#[tokio::test]
+async fn served_tenant_admin_limits_per_ip() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ip = next_ip();
+    for n in 0..IP_LIMIT {
+        let r = send(&env.served, &ip, env.admin_login_req(&unique("ghost"), "x")).await;
+        assert_eq!(r.status(), StatusCode::SEE_OTHER, "attempt {n}");
+    }
+    let r = send(&env.served, &ip, env.admin_login_req(&unique("ghost"), "x")).await;
+    assert!(is_429(&r), "got {}", r.status());
 }
 
 #[cfg(not(feature = "postgres"))]

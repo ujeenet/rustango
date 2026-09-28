@@ -126,6 +126,18 @@ async fn handle(cfg: Arc<BodyLimitLayer>, req: Request<Body>, next: Next) -> Res
     next.run(Request::from_parts(parts, body)).await
 }
 
+/// Whether a body read failed on a size cap, not on the stream.
+pub(crate) fn over_cap(e: &axum::Error) -> bool {
+    let mut err: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(e) = err {
+        if e.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        err = e.source();
+    }
+    false
+}
+
 fn too_large(limit: usize) -> Response {
     crate::api_errors::ApiError::from_status(StatusCode::PAYLOAD_TOO_LARGE, "payload too large")
         .with_details(serde_json::json!({ "limit_bytes": limit }))

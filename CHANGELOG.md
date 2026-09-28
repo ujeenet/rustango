@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — bare admin logout needs a CSRF token
+
+`POST /logout` on the bare admin now refuses a missing token or a
+foreign Origin, like the tenant admin and console.
+
 ### Security — ViewSet and template views apply global scopes (#1746)
 
 `ViewSet` and `ListView` / `DetailView` / `UpdateView` / `DeleteView`
@@ -86,7 +91,8 @@ reads only `X-Forwarded-For`. `ip_filter` and `trust_proxies` match
 IPv4-mapped IPv6 peers against IPv4 rules, so a v4 blocklist no longer
 fails open on a dual-stack listener. `BodyLimitLayer` caps chunked and
 HTTP/2 bodies as they stream (413) and checks `QUERY` by default. An
-all-trusted chain resolves to the rightmost hop.
+all-trusted chain resolves to the rightmost hop. A ViewSet create or
+update over the cap answers 413 too, not 400.
 
 ### Security — Model shortcuts honour global scopes; Pool writes are audited (#1675)
 
@@ -123,6 +129,8 @@ equal share one lock. HTTP Basic and API keys have their own scopes,
 count only failures per IP, and use at most half the hashing slots. A
 failure while locked no longer extends the lock. A busy hash queue
 answers 503 on the password-change pages and agent `/token`.
+The tenant admin behind `server::Builder` now gets the client IP, so
+its per-IP login limit applies (the route wrapper dropped it).
 
 ### Fixed — session extractors on SQLite and MySQL
 

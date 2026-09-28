@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Bare admin logout needs a CSRF token
+
+A custom form posting to the bare admin `/logout` must send `_csrf`
+(or `X-CSRF-Token`); without it the POST gets 403.
+
 ### ViewSet and template views hide scoped-out rows
 
 A model with a `global_scope` served through `ViewSet` or the template
