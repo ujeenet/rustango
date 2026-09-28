@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `bin/bump-version.sh` covers `docs/index.toml` and install pins (#1750)
+
+- A series bump now rewrites `docs/index.toml`, `orm = { package = "rustango", version = … }` and `<crate> = "X.Y"` pins, and leaves example comments alone; the verify step checks what `docs_versions` checks.
+
 ### Fixed
 
 - `DatabaseCache` keys compare exactly on MySQL: `user:1` no longer reads `User:1`, nor `café` `cafe`.
