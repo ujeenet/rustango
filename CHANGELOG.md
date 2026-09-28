@@ -12,6 +12,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 write's transaction; `truncate` writes one bulk `delete` entry. Writes
 that cannot audit return `ExecError::AuditUnsupported` on audited models.
 
+### Fixed
+
+- Admin TOTP re-enroll needs a current code from the confirmed device, so a stolen session cannot replace the factor; a failed start now shows an error (#1776).
+
+### Added
+
+- `JwtAuth::router_for::<DB>()` and `require_bearer_for::<DB>` serve a non-default `Tenant<DB>`, e.g. SQLite in a build with `postgres` on (#1778).
+
+### Security — a TOTP re-enroll keeps the confirmed factor until the new one is confirmed (#1756)
+
+Starting a re-enroll no longer replaces the confirmed device: the new
+secret waits in `pending_secret_base32` and a code for it swaps it in,
+so an unfinished re-enroll no longer lets the password alone sign in.
+The new key is shown only in the re-enroll response, and the next
+sign-in with the old factor drops an unfinished re-enroll.
+
 ## [0.58.1] — 2026-09-28
 
 Tagged only; not published to crates.io.

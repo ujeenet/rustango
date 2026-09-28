@@ -162,6 +162,18 @@ the other audited `_on` methods. On audited models these now return
 `bulk_insert_or_ignore_pool`, `QuerySet::delete_on` / `execute_on`, and
 a bulk update that sets the primary key. `ExecError` gains that variant.
 
+### TOTP re-enroll asks for a current code
+
+`POST /account/totp` with `reset=1` now needs `totp_code` from the current device (#1776).
+Custom `totp_enroll.html` overrides must add that field to the re-enroll form.
+
+### An admin TOTP re-enroll keeps the old device until confirmed
+
+`rustango_admin_totp` gains a nullable `pending_secret_base32` column
+(#1756); `totp_store::ensure_table` adds it. `AdminTotp` literals need
+the new field. `start_enrollment` on a confirmed device no longer drops it;
+`confirm` promotes the pending secret, and a successful `redeem_code` clears it.
+
 ## 0.58.1
 
 ### Forwarded IPs need `RealIpLayer::trust_proxies`
