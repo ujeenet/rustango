@@ -38,11 +38,12 @@ savepoint on the outer connection. `on_commit` callbacks fire only at
 the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
 emits invalid SQL. A transaction the server already ended (a PG
 statement error the closure ignored, a MySQL deadlock) makes `atomic`
-return `ExecError::AtomicAborted` instead of `Ok`.
+return `ExecError::AtomicAborted` instead of `Ok`; a MySQL DDL implicit
+commit returns `ExecError::AtomicEndedEarly`.
 
 **Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
 statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
-`ExecError::NestedAtomic`, `ExecError::AtomicAborted`,
+`ExecError::NestedAtomic`, `ExecError::AtomicAborted`, `ExecError::AtomicEndedEarly`,
 `QueryError::BoundedDmlUnsupported`, `BoundedDmlReason`.
 
 ### Security — SSO links accounts by provider subject, email linking opt-in
