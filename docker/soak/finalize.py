@@ -158,9 +158,10 @@ def bootstrap_exits(checks):
 def find_playwright(explicit):
     cands = [explicit] if explicit else []
     cands += [os.path.join(HERE, "soak-results", "playwright.json")]
-    cands += sorted(glob.glob(os.path.join(HERE, "..", "..", "..", "rustango-soak-playwright*",
-                                           "**", "soak-results", "playwright.json"),
-                              recursive=True))
+    # The browser agent's worktree sits next to this one; newest first.
+    sib = glob.glob(os.path.join(HERE, "..", "..", "..", "rustango-soak*", "**",
+                                 "soak-results", "playwright.json"), recursive=True)
+    cands += sorted(sib, key=os.path.getmtime, reverse=True)
     for c in cands:
         if c and os.path.exists(c):
             with open(c) as fh:

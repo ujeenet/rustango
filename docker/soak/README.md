@@ -40,7 +40,9 @@ Knobs: `SOAK_DURATION_SECS` (1800), `SOAK_CONCURRENCY` (24),
 takes an override (`SOAK_PG_PORT`, `SOAK_MY_PORT`, `SOAK_REDIS_PORT`,
 `SOAK_MINIO_PORT`, `SOAK_MINIO_CONSOLE_PORT`, `SOAK_IDP_PORT`,
 `SOAK_SINGLE_{PG,MY,SQ}_PORT`, `SOAK_SAAS_{PG,MY,SQ}_PORT`), e.g.
-`SOAK_MY_PORT=3506` when the root compose holds 3406.
+`SOAK_MY_PORT=3506` when the root compose holds 3406. `SOAK_INSTANCES=single-sq,saas-sq`
+runs the driver against a subset (the edge instances are
+`saas-pg-edge` and `single-pg-edge`).
 
 ## Reading the log
 
