@@ -4,25 +4,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed — operator console requests log once (#1788)
-
-With a `Builder::observability` access log, the console no longer adds its own,
-so an apex request writes one line that honours `trust_proxy_headers`. With
-`observability(None)` the console keeps its own line. The span always redacts `next`.
-
-### Fixed — `pluck_pairs` reads NULL the same on every backend (#1808)
-
-**Breaking:** `pluck_pairs::<K, V>` now takes `FlatScalar` types; a NULL into a
-bare `i64` errors naming the column (SQLite returned `0`), `Option<i64>` gives `None`.
-
-### Security — ViewSet, template views and soft delete audit their writes (#1794)
-
-On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView` /
-`delete_selected`, `soft_delete::{soft_delete, restore, purge}` and the
-`bulk_actions` built-ins now write one audit row per row, in the write's transaction.
-New `audit::update` / `audit::delete` pick the audited path from the schema;
-`audit::update_as` records soft delete and restore under their own operation.
-
 ### Security — OAuth2 success bodies are capped (#1793)
 
 Discovery, token and userinfo responses over 1 MiB now fail with a clear error
@@ -47,6 +28,29 @@ New `ExecError::AuditWrite` / `ExecError::GeneratedPkUnreadable`.
 instead of a table name and `&[i64]`. The built-ins write through the ORM on the
 schema's PK column, so a text PK can no longer match the wrong rows on MySQL.
 A `PkSet` holds at most `PkSet::MAX_KEYS` (10 000), under SQLite's bind cap.
+
+## [0.59.4] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — operator console requests log once (#1788)
+
+With a `Builder::observability` access log, the console no longer adds its own,
+so an apex request writes one line that honours `trust_proxy_headers`. With
+`observability(None)` the console keeps its own line. The span always redacts `next`.
+
+### Fixed — `pluck_pairs` reads NULL the same on every backend (#1808)
+
+**Breaking:** `pluck_pairs::<K, V>` now takes `FlatScalar` types; a NULL into a
+bare `i64` errors naming the column (SQLite returned `0`), `Option<i64>` gives `None`.
+
+### Security — ViewSet, template views and soft delete audit their writes (#1794)
+
+On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView` /
+`delete_selected`, `soft_delete::{soft_delete, restore, purge}` and the
+`bulk_actions` built-ins now write one audit row per row, in the write's transaction.
+New `audit::update` / `audit::delete` pick the audited path from the schema;
+`audit::update_as` records soft delete and restore under their own operation.
 
 ### Security — admin custom actions check each row (#1805)
 

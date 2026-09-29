@@ -150,26 +150,6 @@ untouched.
 
 ## Unreleased
 
-### One access-log line per operator-console request
-
-Behind `server::Builder` with observability, console requests log once, from your
-configured layer; `next` is now redacted in all its lines and spans.
-
-### `pluck_pairs` takes `FlatScalar` (breaking)
-
-`K` and `V` must be flat scalars, as for `pluck`: `i8`–`i64`, floats, `bool`,
-`String`, `Vec<u8>`, `Uuid`, `serde_json::Value`, `sqlx::types::Json<T>`, chrono
-types, `u8`–`u64` without `postgres` and `Decimal` without `sqlite`. Use
-`Option<T>` for a nullable column; a bare `T` now errors on NULL on SQLite too.
-
-### Schema-driven writes on audited models are audited
-
-ViewSet, template-view, `soft_delete` and `bulk_actions` writes on an audited
-model now lock the rows and write audit rows in one transaction. Soft delete
-and restore are recorded as `soft_delete` and `restore`, as on the typed path.
-`soft_delete::restore` now returns 0 for a row that is not deleted, and the
-audited `restore_selected` counts only deleted rows.
-
 ### OAuth2 responses are capped at 1 MiB
 
 An IdP discovery, token or userinfo body over 1 MiB is now an error.
@@ -194,6 +174,28 @@ keys with `PkSet::new(M::SCHEMA, ids)` or `PkSet::parse(M::SCHEMA, raw)`; a key
 of the wrong type is `BulkActionError::InvalidPk` (new variant). `restore_selected`
 now counts only deleted rows on every model.
 More than `PkSet::MAX_KEYS` (10 000) keys is also `InvalidPk`; split larger selections.
+
+## 0.59.4
+
+### One access-log line per operator-console request
+
+Behind `server::Builder` with observability, console requests log once, from your
+configured layer; `next` is now redacted in all its lines and spans.
+
+### `pluck_pairs` takes `FlatScalar` (breaking)
+
+`K` and `V` must be flat scalars, as for `pluck`: `i8`–`i64`, floats, `bool`,
+`String`, `Vec<u8>`, `Uuid`, `serde_json::Value`, `sqlx::types::Json<T>`, chrono
+types, `u8`–`u64` without `postgres` and `Decimal` without `sqlite`. Use
+`Option<T>` for a nullable column; a bare `T` now errors on NULL on SQLite too.
+
+### Schema-driven writes on audited models are audited
+
+ViewSet, template-view, `soft_delete` and `bulk_actions` writes on an audited
+model now lock the rows and write audit rows in one transaction. Soft delete
+and restore are recorded as `soft_delete` and `restore`, as on the typed path.
+`soft_delete::restore` now returns 0 for a row that is not deleted, and the
+audited `restore_selected` counts only deleted rows.
 
 ### Custom admin actions run object-permission hooks
 
