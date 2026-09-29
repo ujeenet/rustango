@@ -23,6 +23,11 @@ On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView`
 New `audit::update` / `audit::delete` pick the audited path from the schema;
 `audit::update_as` records soft delete and restore under their own operation.
 
+### Security — the outbound allowlist never opens cloud metadata (#1796)
+
+`RUSTANGO_OUTBOUND_ALLOW` host and CIDR entries no longer reach 169.254.169.254,
+169.254.170.2, 100.100.100.200 or fd00:ec2::254, including IPv6-embedded forms.
+
 ### Security — ViewSet create is audited (#1816)
 
 On an audited model, ViewSet single and bulk create now write one `create` audit

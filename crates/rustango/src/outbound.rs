@@ -7,7 +7,7 @@
 //! `RUSTANGO_OUTBOUND_ALLOW` to reach them, such as an IdP on your own
 //! network. Webhook delivery ignores that list.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::cidr::CidrRange;
 
@@ -198,10 +198,9 @@ async fn checked_route(url: &reqwest::Url, allow: &Allowlist) -> Result<Route, T
         .host_str()
         .ok_or_else(|| TargetError::Invalid("target url has no host".into()))?;
     let port = url.port_or_known_default().unwrap_or(80);
-    let refused = |ip: IpAddr| is_blocked_ip(ip) && !allow.allows_ip(ip);
     let literal = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = literal.parse::<IpAddr>() {
-        if refused(ip) {
+        if refused_ip(ip, allow) {
             return Err(TargetError::Blocked);
         }
         return Ok(Route::Direct);
@@ -213,10 +212,71 @@ async fn checked_route(url: &reqwest::Url, allow: &Allowlist) -> Result<Route, T
     if addrs.is_empty() {
         return Err(TargetError::Dns(format!("no addresses for {host}")));
     }
-    if !allow.allows_host(host) && addrs.iter().any(|a| refused(a.ip())) {
+    pinned_route(host, addrs, allow)
+}
+
+/// Check a host's resolved addresses. An allowlisted host skips the
+/// private-range check but never the cloud-metadata one (#1796).
+fn pinned_route(
+    host: &str,
+    addrs: Vec<SocketAddr>,
+    allow: &Allowlist,
+) -> Result<Route, TargetError> {
+    let host_allowed = allow.allows_host(host);
+    let refused = |ip| is_metadata_ip(ip) || (!host_allowed && refused_ip(ip, allow));
+    if addrs.iter().any(|a| refused(a.ip())) {
         return Err(TargetError::Blocked);
     }
     Ok(Route::Pinned(host.to_owned(), addrs))
+}
+
+fn refused_ip(ip: IpAddr, allow: &Allowlist) -> bool {
+    is_metadata_ip(ip) || (is_blocked_ip(ip) && !allow.allows_ip(ip))
+}
+
+/// Cloud instance-metadata endpoints (AWS, ECS, GCP, Azure, Oracle, Alibaba).
+/// No allowlist entry opens them: they hand out credentials.
+const METADATA_V4: [Ipv4Addr; 3] = [
+    Ipv4Addr::new(169, 254, 169, 254),
+    Ipv4Addr::new(169, 254, 170, 2),
+    Ipv4Addr::new(100, 100, 100, 200),
+];
+const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
+
+fn is_metadata_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => METADATA_V4.contains(&v4),
+        IpAddr::V6(v6) => {
+            v6 == METADATA_V6 || embedded_v4(v6).iter().any(|v4| METADATA_V4.contains(v4))
+        }
+    }
+}
+
+/// IPv4 addresses an IPv6 address carries: mapped, NAT64, translated,
+/// 6to4 and Teredo (server and client).
+fn embedded_v4(v6: Ipv6Addr) -> Vec<Ipv4Addr> {
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return vec![v4];
+    }
+    let seg = v6.segments();
+    let v4 = |hi: u16, lo: u16| {
+        let [a, b] = hi.to_be_bytes();
+        let [c, d] = lo.to_be_bytes();
+        Ipv4Addr::new(a, b, c, d)
+    };
+    // NAT64 64:ff9b::/96 and IPv4-translated ::ffff:0:0:0/96.
+    if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || seg[..6] == [0, 0, 0, 0, 0xffff, 0] {
+        return vec![v4(seg[6], seg[7])];
+    }
+    // 6to4 2002::/16 carries the IPv4 in bits 16..48.
+    if seg[0] == 0x2002 {
+        return vec![v4(seg[1], seg[2])];
+    }
+    // Teredo 2001::/32: server IPv4, then the client IPv4 XOR'd.
+    if seg[0] == 0x2001 && seg[1] == 0 {
+        return vec![v4(seg[2], seg[3]), v4(!seg[6], !seg[7])];
+    }
+    Vec::new()
 }
 
 /// Loopback, private, link-local, CGNAT, multicast, unspecified and
@@ -225,27 +285,11 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_blocked_v4(v4),
         IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_blocked_v4(v4);
+            let inner = embedded_v4(v6);
+            if !inner.is_empty() {
+                return inner.into_iter().any(is_blocked_v4);
             }
             let seg = v6.segments();
-            let v4 = |hi: u16, lo: u16| {
-                let [a, b] = hi.to_be_bytes();
-                let [c, d] = lo.to_be_bytes();
-                Ipv4Addr::new(a, b, c, d)
-            };
-            // NAT64 64:ff9b::/96 and IPv4-translated ::ffff:0:0:0/96.
-            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || seg[..6] == [0, 0, 0, 0, 0xffff, 0] {
-                return is_blocked_v4(v4(seg[6], seg[7]));
-            }
-            // 6to4 2002::/16 carries the IPv4 in bits 16..48.
-            if seg[0] == 0x2002 {
-                return is_blocked_v4(v4(seg[1], seg[2]));
-            }
-            // Teredo 2001::/32: server IPv4, then the client IPv4 XOR'd.
-            if seg[0] == 0x2001 && seg[1] == 0 {
-                return is_blocked_v4(v4(seg[2], seg[3])) || is_blocked_v4(v4(!seg[6], !seg[7]));
-            }
             v6.is_loopback()
                 || seg[..3] == [0x64, 0xff9b, 1] // local-use NAT64 64:ff9b:1::/48
                 || v6.is_unspecified()
@@ -368,6 +412,36 @@ mod tests {
             let err = CheckedTarget::check(url, &policy).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
         }
+    }
+
+    /// Metadata addresses stay refused whatever the allowlist says (#1796).
+    #[tokio::test]
+    async fn allowlist_never_opens_cloud_metadata() {
+        let allow =
+            Allowlist::parse("metadata.google.internal,169.254.0.0/16,100.64.0.0/10,fd00::/8");
+        let at = |ip: &str| vec![SocketAddr::new(ip.parse().unwrap(), 80)];
+        for ip in [
+            "169.254.169.254",
+            "fd00:ec2::254",
+            "100.100.100.200",
+            "::ffff:169.254.169.254",
+        ] {
+            let route = pinned_route("metadata.google.internal", at(ip), &allow);
+            assert!(matches!(route, Err(TargetError::Blocked)), "{ip}");
+        }
+        assert!(pinned_route("metadata.google.internal", at("169.254.1.1"), &allow).is_ok());
+        let policy = TargetPolicy::Public(allow);
+        for url in [
+            "http://169.254.169.254/",
+            "http://[fd00:ec2::254]/",
+            "http://100.100.100.200/",
+        ] {
+            let err = CheckedTarget::check(url, &policy).await.err();
+            assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
+        }
+        assert!(CheckedTarget::check("http://169.254.1.1/", &policy)
+            .await
+            .is_ok());
     }
 
     #[test]

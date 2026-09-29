@@ -170,6 +170,11 @@ and restore are recorded as `soft_delete` and `restore`, as on the typed path.
 `soft_delete::restore` now returns 0 for a row that is not deleted, and the
 audited `restore_selected` counts only deleted rows.
 
+### Cloud-metadata addresses are always refused
+
+SSO and Slack calls refuse cloud-metadata addresses even when `RUSTANGO_OUTBOUND_ALLOW`
+names the host or a CIDR that covers them.
+
 ### ViewSet create writes audit rows
 
 On an audited model, ViewSet `POST` (single and bulk) now writes a `create` audit
