@@ -152,10 +152,17 @@ fn placeholders_for(dialect: &dyn crate::sql::Dialect, n: usize) -> String {
 
 /// The registered audited model for `table`: its writes take the audit path (#1794).
 fn audited_model(table: &str) -> Option<&'static ModelSchema> {
-    inventory::iter::<crate::core::ModelEntry>
+    first_audited(inventory::iter::<crate::core::ModelEntry>, table)
+}
+
+/// Both conditions in one `find`, so an unaudited proxy on the table cannot win.
+fn first_audited<'a>(
+    entries: impl IntoIterator<Item = &'a crate::core::ModelEntry>,
+    table: &str,
+) -> Option<&'static ModelSchema> {
+    entries
         .into_iter()
-        .find(|e| e.schema.table == table)
-        .filter(|e| e.audited_delete().is_some())
+        .find(|e| e.schema.table == table && e.audited_delete().is_some())
         .map(|e| e.schema)
 }
 
@@ -513,6 +520,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BulkActionError::UnknownAction(_)));
+    }
+
+    fn fake_delete<'a>(
+        _: &'a Pool,
+        _: &'a crate::core::DeleteQuery,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
+    > {
+        Box::pin(async { Ok(0) })
+    }
+
+    /// An unaudited proxy listed first on the same table must not win.
+    #[test]
+    fn first_audited_skips_an_unaudited_model_on_the_table() {
+        static PROXY: ModelSchema = ModelSchema::new("Proxy", "shared");
+        static REAL: ModelSchema = ModelSchema::new("Real", "shared");
+        let entries = [
+            crate::core::ModelEntry::new(&PROXY, "t"),
+            crate::core::ModelEntry::new(&REAL, "t").with_audited(|| None, || Some(fake_delete)),
+        ];
+        let got = first_audited(&entries, "shared").map(|m| m.name);
+        assert_eq!(got, Some("Real"));
+        assert!(first_audited(&entries[..1], "shared").is_none());
     }
 
     #[test]
