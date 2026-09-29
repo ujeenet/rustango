@@ -724,9 +724,8 @@ mod tests {
         }
     }
 
-    /// #1809 — a revocable token on a backend without a JTI store is not silent.
-    #[tokio::test]
-    async fn a_revocable_token_without_a_jti_store_warns_once() {
+    /// Authenticate `token` twice on `backend`; count revocation warnings.
+    async fn revocation_warnings(backend: &JwtBackend, token: &str) -> usize {
         let buf = Buf::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(buf.clone())
@@ -734,10 +733,6 @@ mod tests {
             .finish();
         let _g = tracing::subscriber::set_default(subscriber);
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
-        let token = super::super::jwt_lifecycle::JwtLifecycle::new(vec![7u8; 32])
-            .issue_pair(42)
-            .access;
-        let backend = JwtBackend::new(vec![7u8; 32]);
         for _ in 0..2 {
             let (parts, ()) = axum::http::Request::builder()
                 .header("authorization", format!("Bearer {token}"))
@@ -747,10 +742,24 @@ mod tests {
             let _ = backend.authenticate(&parts, &pool).await;
         }
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        assert_eq!(
-            out.matches("not checked for revocation").count(),
-            1,
-            "{out}"
-        );
+        out.matches("not checked for revocation").count()
+    }
+
+    /// #1809 — a revocable token on a backend without a JTI store is not silent.
+    #[tokio::test]
+    async fn a_revocable_token_without_a_jti_store_warns_once() {
+        let token = super::super::jwt_lifecycle::JwtLifecycle::new(vec![7u8; 32])
+            .issue_pair(42)
+            .access;
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        assert_eq!(revocation_warnings(&backend, &token).await, 1);
+    }
+
+    /// A token with no `jti` can't be revoked, so there is nothing to warn about.
+    #[tokio::test]
+    async fn a_token_without_a_jti_stays_silent() {
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        let token = backend.issue(42);
+        assert_eq!(revocation_warnings(&backend, &token).await, 0);
     }
 }

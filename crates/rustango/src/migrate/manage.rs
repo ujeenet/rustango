@@ -6045,6 +6045,15 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             out.warnings.iter().any(|w| w.contains("stores nothing")),
             "{out:?}"
         );
+        // Also behind a tenant scope.
+        let scoped =
+            crate::cache::ScopedCache::for_tenant(Arc::new(crate::cache::NullCache), "acme");
+        let mut out = DeployAuditFindings::default();
+        login_store_audit(&Lockout::new(Arc::new(scoped)), &mut out);
+        assert!(
+            out.warnings.iter().any(|w| w.contains("stores nothing")),
+            "{out:?}"
+        );
     }
 
     /// Stands in for Redis/DB: keeps nothing, but claims nothing either.
