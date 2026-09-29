@@ -10,6 +10,10 @@ New `mcp::tenant_router_authed_for::<DB>` and
 `secure_tenant_router_from_settings_for::<DB>` serve a SQLite or MySQL
 `TenantContext` in a build that also enables `postgres`; before, it got 500.
 
+### Fixed — member SSO on a non-default backend (#1741)
+
+New `member_auth::member_sso_router_for::<DB>`, same fix for member SSO.
+
 ## [0.59.0] — 2026-09-29
 
 Tagged only; not published to crates.io.

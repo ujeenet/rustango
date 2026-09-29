@@ -167,6 +167,9 @@ let members = member_sso_router(MemberAuthConfig {
 });
 ```
 
+With several backends compiled in, `member_sso_router` is for the default
+(Postgres) tenant type; use `member_sso_router_for::<sqlx::Sqlite>` (or `MySql`).
+
 It mounts two per-slug routes off `login_base`:
 
 - `GET {login_base}/sso/{slug}` — begin the handshake, redirect to the IdP.

@@ -1,15 +1,19 @@
 //! Tenant routers serve a `TenantContext<Sqlite>` through their `*_for::<DB>`
 //! entry. With `postgres` also on, the default `Tenant` is Postgres and
-//! these got 500 (#1787).
+//! these got 500 (#1741, #1787).
 
-#![cfg(all(feature = "sqlite", feature = "tenancy", feature = "mcp"))]
+#![cfg(all(
+    feature = "sqlite",
+    feature = "tenancy",
+    any(feature = "mcp", feature = "sso")
+))]
 #![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, Request};
 use axum::Router;
 use rustango::extractors::TenantContext;
 use rustango::sql::{sqlx, Pool};
@@ -111,6 +115,7 @@ async fn send(app: &Router, req: Request<Body>) -> axum::response::Response {
 #[cfg(feature = "mcp")]
 #[tokio::test]
 async fn mcp_tenant_router_serves_a_non_default_backend() {
+    use axum::http::StatusCode;
     use base64::Engine as _;
     use rustango::tenancy::jwt_lifecycle::JwtLifecycle;
 
@@ -183,4 +188,129 @@ async fn mcp_tenant_router_serves_a_non_default_backend() {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK, "SSE GET");
+}
+
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn member_sso_router_serves_a_non_default_backend() {
+    use axum::routing::{get, post};
+    use axum::Json;
+    use rustango::sql::{Auto, FetcherPool as _};
+    use rustango::sso::SsoProvider;
+    use rustango::tenancy::member_auth::{member_sso_router_for, MemberAuthConfig};
+    use rustango::tenancy::User;
+
+    let _g = SUITE.lock().await;
+    // A fake OIDC IdP on loopback, which outbound calls allow only when listed.
+    std::env::set_var("RUSTANGO_OUTBOUND_ALLOW", "127.0.0.1");
+    std::env::set_var("RUSTANGO_SECRET_KEY", "non-default-backend-key");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let doc = serde_json::json!({
+        "authorization_endpoint": format!("{issuer}/auth"),
+        "token_endpoint": format!("{issuer}/token"),
+        "userinfo_endpoint": format!("{issuer}/userinfo"),
+    });
+    let idp = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get(move || async move { Json(doc) }),
+        )
+        .route(
+            "/token",
+            post(|| async {
+                Json(serde_json::json!({"access_token": "at", "token_type": "Bearer"}))
+            }),
+        )
+        .route(
+            "/userinfo",
+            get(|| async {
+                Json(serde_json::json!({
+                    "sub": "sub-1", "email": "m@acme.test", "email_verified": true
+                }))
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, idp).await.unwrap() });
+
+    let env = boot().await;
+    rustango::testkit::create_tables_for::<SsoProvider>(&env.tenant)
+        .await
+        .unwrap();
+    rustango::sso::link::ensure_table(&env.tenant)
+        .await
+        .unwrap();
+    let mut provider = SsoProvider {
+        id: Auto::default(),
+        slug: "idp".into(),
+        label: "idp".into(),
+        kind: "oidc".into(),
+        issuer_url: Some(issuer.clone()),
+        client_id: "cid".into(),
+        client_secret: rustango::casts::Cast::new("csecret".into()),
+        enabled: true,
+        sort_order: 0,
+        scopes: None,
+        allow_email_link: false,
+        created_at: Auto::default(),
+        updated_at: Auto::default(),
+    };
+    provider.insert_pool(&env.tenant).await.unwrap();
+    let app = env.mount(member_sso_router_for::<sqlx::Sqlite>(
+        MemberAuthConfig::default(),
+    ));
+
+    let begin = send(
+        &app,
+        Request::get("/auth/sso/idp")
+            .header(header::HOST, "acme.app.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(begin.status().is_redirection(), "begin: {}", begin.status());
+    let to = begin.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(to.starts_with(&issuer), "begin redirects to the IdP: {to}");
+    let state = to
+        .split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("state="))
+        .unwrap()
+        .to_owned();
+    let flow: Vec<String> = begin
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_owned())
+        .collect();
+
+    let done = send(
+        &app,
+        Request::get(format!("/auth/sso/idp/callback?code=c&state={state}"))
+            .header(header::HOST, "acme.app.test")
+            .header(header::COOKIE, flow.join("; "))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        done.status().is_redirection(),
+        "callback: {}",
+        done.status()
+    );
+    let cookies: Vec<&str> = done
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with("rustango_member_session=") && !c.contains("Max-Age=0")),
+        "member session minted: {cookies:?}"
+    );
+    let users = User::objects().fetch(&env.tenant).await.unwrap();
+    assert_eq!(users.len(), 1, "member provisioned in the SQLite tenant");
 }
