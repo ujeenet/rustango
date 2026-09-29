@@ -2315,9 +2315,11 @@ pub(crate) async fn delete_submit(
 ///
 /// `<name>` **must** be in the model's `admin.actions` allowlist; an
 /// unknown name is rejected. The built-in `delete_selected` runs one
-/// `DELETE WHERE pk IN (...)`. With no action or no selected rows,
+/// `DELETE WHERE pk IN (...)` after the per-row `delete` hook allows every
+/// selected row. With no action or no selected rows,
 /// redirect back to the list.
 pub(crate) async fn action_submit(
+    parts: axum::http::request::Parts,
     Path(table): Path<String>,
     State(state): State<AppState>,
     body: axum::body::Bytes,
@@ -2383,8 +2385,39 @@ pub(crate) async fn action_submit(
         &SelectQuery::by_pk_in(model, pk_field.column, pk_values.clone()),
         &action_fields,
     )
-    .await
-    .unwrap_or_default();
+    .await?;
+
+    // The built-ins run the per-row hook, as the single-row pages do. One
+    // refused row refuses the whole action, as Django's `delete_selected` does.
+    let row_perm = match action.as_str() {
+        "delete_selected" => Some("delete"),
+        "restore_selected" => Some("change"),
+        _ => None,
+    };
+    let pk_values = match row_perm {
+        Some(perm) => {
+            if before_rows.iter().any(|row| {
+                !crate::admin::object_permissions::is_allowed(model.table, perm, &parts, Some(row))
+            }) {
+                return Err(AdminError::Forbidden {
+                    table: model.table.to_owned(),
+                    action: perm,
+                });
+            }
+            // Write only the rows that were checked.
+            before_rows
+                .iter()
+                .filter_map(|row| render::read_value_as_string_json(row, pk_field))
+                .filter_map(|raw| forms::parse_pk_string(pk_field, &raw).ok())
+                .collect()
+        }
+        None => pk_values,
+    };
+    if pk_values.is_empty() {
+        return Ok(
+            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
+        );
+    }
 
     let audit_op = if action == "delete_selected" {
         if model.soft_delete_column.is_some() {

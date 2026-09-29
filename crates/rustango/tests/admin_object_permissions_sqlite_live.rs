@@ -7,7 +7,7 @@
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
-use rustango::sql::Pool;
+use rustango::sql::{FetcherPool as _, Pool};
 use rustango::Model;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -126,4 +126,106 @@ async fn add_hook_blocks_create_submit_with_403() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+// #1762: the bulk actions run the same per-row hooks.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "op_bulk",
+    admin(actions = "delete_selected, restore_selected")
+)]
+#[allow(dead_code)]
+pub struct OpBulk {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    pub owner_id: i64,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn owner_42(_parts: &axum::http::request::Parts, row: Option<&Value>) -> bool {
+    row.and_then(|r| r.get("owner_id").and_then(Value::as_i64)) == Some(42)
+}
+rustango::register_admin_object_permission!("op_bulk", "delete", owner_42);
+rustango::register_admin_object_permission!("op_bulk", "change", owner_42);
+
+/// Row 1 belongs to owner 42, row 2 to owner 7; both deleted when `deleted`.
+async fn bulk_pool(deleted: bool) -> Pool {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TABLE op_bulk (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, deleted_at TEXT)",
+        Vec::new(),
+    )
+    .await
+    .expect("create");
+    rustango::audit::ensure_table_pool(&pool)
+        .await
+        .expect("audit table");
+    let at = if deleted {
+        "'2026-01-01T00:00:00Z'"
+    } else {
+        "NULL"
+    };
+    rustango::sql::raw_execute_pool(
+        &pool,
+        &format!(
+            "INSERT INTO op_bulk (id, owner_id, deleted_at) VALUES (1, 42, {at}), (2, 7, {at})"
+        ),
+        Vec::new(),
+    )
+    .await
+    .expect("seed");
+    pool
+}
+
+async fn run_action(pool: &Pool, form: &'static str) -> StatusCode {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/op_bulk/__action")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(form))
+        .unwrap();
+    build_app(pool.clone()).oneshot(req).await.unwrap().status()
+}
+
+async fn live_ids(pool: &Pool) -> Vec<i64> {
+    OpBulk::objects()
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.deleted_at.is_none())
+        .map(|r| r.id.get().copied().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn delete_selected_refuses_when_a_row_hook_denies() {
+    let pool = bulk_pool(false).await;
+    let form = "action=delete_selected&_selected=1&_selected=2";
+    assert_eq!(run_action(&pool, form).await, StatusCode::FORBIDDEN);
+    assert_eq!(live_ids(&pool).await, vec![1, 2], "nothing deleted");
+    let audit = rustango::audit::fetch_for_entity_pool(&pool, "op_bulk", "1").await;
+    assert!(
+        audit.unwrap().is_empty(),
+        "a refused action writes no audit row"
+    );
+
+    let form = "action=delete_selected&_selected=1";
+    assert_eq!(run_action(&pool, form).await, StatusCode::SEE_OTHER);
+    assert_eq!(live_ids(&pool).await, vec![2]);
+    let audit = rustango::audit::fetch_for_entity_pool(&pool, "op_bulk", "1").await;
+    assert_eq!(audit.unwrap().len(), 1, "the allowed delete is audited");
+}
+
+#[tokio::test]
+async fn restore_selected_refuses_when_a_row_hook_denies() {
+    let pool = bulk_pool(true).await;
+    let form = "action=restore_selected&_selected=1&_selected=2";
+    assert_eq!(run_action(&pool, form).await, StatusCode::FORBIDDEN);
+    assert!(live_ids(&pool).await.is_empty(), "nothing restored");
+    let form = "action=restore_selected&_selected=1";
+    assert_eq!(run_action(&pool, form).await, StatusCode::SEE_OTHER);
+    assert_eq!(live_ids(&pool).await, vec![1]);
 }

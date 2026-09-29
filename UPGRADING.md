@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Admin bulk actions run object-permission hooks
+
+A bulk `delete_selected` / `restore_selected` that includes a row your
+`register_admin_object_permission!` hook refuses now gets `403` and writes nothing.
+
 ### Idempotency: concurrent retries get 409
 
 A request whose `Idempotency-Key` is still running gets `409` with

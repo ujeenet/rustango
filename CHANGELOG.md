@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — admin bulk actions check each row (#1762)
+
+`delete_selected` and `restore_selected` now run the per-row `delete` /
+`change` hook on every selected row; one refused row refuses the action
+with `403`, as Django does. Only rows that were read and checked are written.
+
 ### Security — idempotency holds a key while its request runs (#1724)
 
 A retry with the same `Idempotency-Key` while the first request runs now
