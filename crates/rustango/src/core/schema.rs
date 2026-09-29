@@ -1439,6 +1439,8 @@ pub struct ModelEntry {
     /// `"my_app::blog::models"`. [`Self::resolved_app_label`] infers
     /// the app label from it when none is set.
     pub module_path: &'static str,
+    audited_update: fn() -> Option<crate::audit::AuditedUpdate>,
+    audited_delete: fn() -> Option<crate::audit::AuditedDelete>,
 }
 
 impl ModelEntry {
@@ -1448,7 +1450,41 @@ impl ModelEntry {
         Self {
             schema,
             module_path,
+            audited_update: || None,
+            audited_delete: || None,
         }
+    }
+
+    /// The model's audited runners, so schema-driven views can reach them (#1794).
+    #[must_use]
+    pub const fn with_audited(
+        mut self,
+        update: fn() -> Option<crate::audit::AuditedUpdate>,
+        delete: fn() -> Option<crate::audit::AuditedDelete>,
+    ) -> Self {
+        self.audited_update = update;
+        self.audited_delete = delete;
+        self
+    }
+
+    /// The registered entry for `model`, matched by table and name.
+    #[must_use]
+    pub fn for_schema(model: &ModelSchema) -> Option<&'static Self> {
+        inventory::iter::<Self>
+            .into_iter()
+            .find(|e| e.schema.table == model.table && e.schema.name == model.name)
+    }
+
+    /// Audited `UPDATE` runner, `None` for a model without audit.
+    #[must_use]
+    pub fn audited_update(&self) -> Option<crate::audit::AuditedUpdate> {
+        (self.audited_update)()
+    }
+
+    /// Audited `DELETE` runner, `None` for a model without audit.
+    #[must_use]
+    pub fn audited_delete(&self) -> Option<crate::audit::AuditedDelete> {
+        (self.audited_delete)()
     }
 
     /// App label for this model: the `#[rustango(app = "...")]`

@@ -132,7 +132,7 @@ async fn add_hook_blocks_create_submit_with_403() {
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "op_bulk",
-    admin(actions = "delete_selected, restore_selected")
+    admin(actions = "delete_selected, restore_selected, touch_selected, stamp_selected")
 )]
 #[allow(dead_code)]
 pub struct OpBulk {
@@ -148,6 +148,11 @@ fn owner_42(_parts: &axum::http::request::Parts, row: Option<&Value>) -> bool {
 }
 rustango::register_admin_object_permission!("op_bulk", "delete", owner_42);
 rustango::register_admin_object_permission!("op_bulk", "change", owner_42);
+
+fn deny(_parts: &axum::http::request::Parts, _row: Option<&Value>) -> bool {
+    false
+}
+rustango::register_admin_object_permission!("op_bulk", "stamp_selected", deny);
 
 /// Row 1 belongs to owner 42, row 2 to owner 7; both deleted when `deleted`.
 async fn bulk_pool(deleted: bool) -> Pool {
@@ -228,4 +233,49 @@ async fn restore_selected_refuses_when_a_row_hook_denies() {
     let form = "action=restore_selected&_selected=1";
     assert_eq!(run_action(&pool, form).await, StatusCode::SEE_OTHER);
     assert_eq!(live_ids(&pool).await, vec![1]);
+}
+
+// #1805: a custom action needs the `change` hook and a hook named after it.
+static TOUCHED: std::sync::Mutex<Vec<rustango::core::SqlValue>> = std::sync::Mutex::new(Vec::new());
+
+fn record<'a>(
+    _: &'a Pool,
+    pks: &'a [rustango::core::SqlValue],
+) -> rustango::admin::AdminActionFuture<'a> {
+    TOUCHED.lock().unwrap().extend_from_slice(pks);
+    Box::pin(async { Ok(()) })
+}
+
+async fn run_custom(pool: &Pool, form: &'static str) -> StatusCode {
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .register_action("op_bulk", "touch_selected", record)
+        .register_action("op_bulk", "stamp_selected", record)
+        .build();
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/op_bulk/__action")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(form))
+        .unwrap();
+    app.oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn custom_action_refuses_when_a_row_hook_denies() {
+    let pool = bulk_pool(false).await;
+    let form = "action=touch_selected&_selected=1&_selected=2";
+    assert_eq!(run_custom(&pool, form).await, StatusCode::FORBIDDEN);
+    assert!(TOUCHED.lock().unwrap().is_empty(), "handler not run");
+
+    let form = "action=stamp_selected&_selected=1";
+    assert_eq!(run_custom(&pool, form).await, StatusCode::FORBIDDEN);
+    assert!(TOUCHED.lock().unwrap().is_empty(), "named hook refuses");
+
+    let form = "action=touch_selected&_selected=1";
+    assert_eq!(run_custom(&pool, form).await, StatusCode::SEE_OTHER);
+    assert_eq!(
+        *TOUCHED.lock().unwrap(),
+        vec![rustango::core::SqlValue::I64(1)]
+    );
 }

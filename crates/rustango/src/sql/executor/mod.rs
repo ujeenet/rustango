@@ -640,7 +640,7 @@ impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
         let query = self.compile()?;
         // Audited models audit each updated row (#1747).
         if let Some(run) = T::__rustango_audited_update() {
-            return run(pool, &query).await;
+            return run(pool, &query, crate::audit::AuditOp::Update).await;
         }
         update_pool(pool, &query).await
     }

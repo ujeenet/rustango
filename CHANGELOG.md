@@ -4,6 +4,35 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.4] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — operator console requests log once (#1788)
+
+With a `Builder::observability` access log, the console no longer adds its own,
+so an apex request writes one line that honours `trust_proxy_headers`. With
+`observability(None)` the console keeps its own line. The span always redacts `next`.
+
+### Fixed — `pluck_pairs` reads NULL the same on every backend (#1808)
+
+**Breaking:** `pluck_pairs::<K, V>` now takes `FlatScalar` types; a NULL into a
+bare `i64` errors naming the column (SQLite returned `0`), `Option<i64>` gives `None`.
+
+### Security — ViewSet, template views and soft delete audit their writes (#1794)
+
+On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView` /
+`delete_selected`, `soft_delete::{soft_delete, restore, purge}` and the
+`bulk_actions` built-ins now write one audit row per row, in the write's transaction.
+New `audit::update` / `audit::delete` pick the audited path from the schema;
+`audit::update_as` records soft delete and restore under their own operation.
+
+### Security — admin custom actions check each row (#1805)
+
+A `register_action` action now needs the `change` hook and a hook named after
+the action to allow every selected row; one refusal is a `403` and the handler
+does not run. The handler only gets PKs of rows that exist.
+
 ## [0.59.3] — 2026-09-29
 
 Tagged only; not published to crates.io.

@@ -209,6 +209,23 @@ async fn values_list_flat_null_needs_an_option(pool: &Pool) {
     assert_eq!(v, Some(None));
 }
 
+/// `pluck_pairs` reads NULL like the flat decode: an error into a bare
+/// `i64`, `None` into `Option<i64>` (#1808).
+async fn pluck_pairs_null_needs_an_option(pool: &Pool) {
+    let posts = || Post::objects().order_by(&[("id", false)]);
+    let err = posts()
+        .pluck_pairs::<String, i64>("title", "score", pool)
+        .await
+        .expect_err("NULL into i64");
+    assert!(err.to_string().contains("score"), "names the column: {err}");
+    let pairs = posts()
+        .pluck_pairs::<String, Option<i64>>("title", "score", pool)
+        .await
+        .expect("Option<i64>");
+    let scores: Vec<Option<i64>> = pairs.into_iter().map(|(_, s)| s).collect();
+    assert_eq!(scores, vec![Some(7), None, None, Some(9)]);
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
@@ -218,5 +235,6 @@ tri_dialect_test! {
         values_list_flat_decodes_a_string_column,
         values_list_flat_decodes_a_boolean_column,
         values_list_flat_null_needs_an_option,
+        pluck_pairs_null_needs_an_option,
     ],
 }
