@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `pluck_pairs` takes `FlatScalar` (breaking)
+
+`K` and `V` must be flat scalars, as for `pluck`. Use `Option<T>` for a
+nullable column; a bare `T` now errors on NULL on SQLite too.
+
 ### Schema-driven writes on audited models are audited
 
 ViewSet, template-view, `soft_delete` and `bulk_actions` writes on an audited

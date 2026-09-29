@@ -6,12 +6,6 @@
 //! or a flat list.
 
 #[cfg(feature = "postgres")]
-use super::bind_query_as;
-#[cfg(feature = "mysql")]
-use super::bind_query_as_my;
-#[cfg(feature = "sqlite")]
-use super::bind_query_as_sqlite;
-#[cfg(feature = "postgres")]
 use sqlx::postgres::{PgArguments, PgRow};
 #[cfg(feature = "postgres")]
 use sqlx::query::Query;
@@ -492,11 +486,38 @@ where
     U: FlatScalar,
     U::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
+    decode_cell(row, 0)
+}
+
+/// Decode column `index` the same NULL-checked way.
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+fn decode_cell<R, U>(row: &R, index: usize) -> Result<U, sqlx::Error>
+where
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    U: FlatScalar,
+    U::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
     use sqlx::Column as _;
-    if super::row_to_json::cell_is_null(row, 0) {
-        return U::from_null(row.columns().first().map_or("0", |c| c.name()));
+    if super::row_to_json::cell_is_null(row, index) {
+        let name = row.columns().get(index).map(|c| c.name().to_owned());
+        return U::from_null(name.as_deref().unwrap_or("?"));
     }
-    row.try_get::<U::Cell, _>(0).map(U::from_cell)
+    row.try_get::<U::Cell, _>(index).map(U::from_cell)
+}
+
+/// Decode a `(K, V)` row, each cell NULL-checked (#1808).
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+fn decode_pair<R, K, V>(row: &R) -> Result<(K, V), sqlx::Error>
+where
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    K: FlatScalar,
+    V: FlatScalar,
+    K::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    V::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    Ok((decode_cell(row, 0)?, decode_cell(row, 1)?))
 }
 
 /// Run a one-column [`SelectQuery`] and decode each row's only cell
@@ -554,42 +575,39 @@ pub async fn fetch_values_pairs<K, V>(
     query: &SelectQuery,
 ) -> Result<Vec<(K, V)>, ExecError>
 where
-    K: Send + Unpin,
-    V: Send + Unpin,
-    (K, V): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    K: FlatScalar,
+    V: FlatScalar,
 {
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::Postgres, (K, V), PgArguments> =
-                sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_as(q, v);
+                q = bind_query(q, v);
             }
-            Ok(q.fetch_all(pg).await?)
+            let rows = q.fetch_all(pg).await?;
+            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, (K, V), sqlx::mysql::MySqlArguments> =
-                sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_as_my(q, v);
+                q = bind_query_my(q, v);
             }
-            Ok(q.fetch_all(my).await?)
+            let rows = q.fetch_all(my).await?;
+            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::Sqlite,
-                (K, V),
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_as_sqlite(q, v);
+                q = bind_query_sqlite(q, v);
             }
-            Ok(q.fetch_all(sq).await?)
+            let rows = q.fetch_all(sq).await?;
+            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
         }
     }
 }
@@ -778,9 +796,8 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         pool: &Pool,
     ) -> Result<Vec<(K, V)>, ExecError>
     where
-        K: Send + Unpin,
-        V: Send + Unpin,
-        (K, V): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+        K: FlatScalar,
+        V: FlatScalar,
     {
         let q = self.values_list(&[key_col, value_col]).compile()?;
         fetch_values_pairs::<K, V>(pool, &q).await

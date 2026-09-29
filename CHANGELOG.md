@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `pluck_pairs` reads NULL the same on every backend (#1808)
+
+**Breaking:** `pluck_pairs::<K, V>` now takes `FlatScalar` types; a NULL into a
+bare `i64` errors naming the column (SQLite returned `0`), `Option<i64>` gives `None`.
+
 ### Security — ViewSet, template views and soft delete audit their writes (#1794)
 
 On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView` /
