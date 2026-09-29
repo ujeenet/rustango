@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.5
+
 ### `Cache::stores_nothing`
 
 New provided method, `true` only on `NullCache`. A wrapper cache should forward it,

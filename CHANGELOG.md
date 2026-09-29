@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.5] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
 ### Security — lockouts that never lock, and unchecked JWT revocation, are flagged (#1809)
 
 A lockout on `NullCache` now warns at the first login, and in `check --deploy` when
