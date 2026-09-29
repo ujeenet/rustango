@@ -269,26 +269,30 @@ fn refused_ip(ip: IpAddr, allow: &Allowlist) -> bool {
     is_metadata_ip(ip) || (is_blocked_ip(ip) && !allow.allows_ip(ip))
 }
 
-/// Cloud instance-metadata endpoints (AWS, ECS, GCP, Azure, Oracle, Alibaba).
-/// No allowlist entry opens them: they hand out credentials.
-const METADATA_V4: [Ipv4Addr; 3] = [
+/// Cloud instance-metadata endpoints (AWS, ECS, EKS Pod Identity, GCP, Azure,
+/// Oracle, Alibaba). No allowlist entry opens them: they hand out credentials.
+const METADATA_V4: [Ipv4Addr; 4] = [
     Ipv4Addr::new(169, 254, 169, 254),
     Ipv4Addr::new(169, 254, 170, 2),
+    Ipv4Addr::new(169, 254, 170, 23),
     Ipv4Addr::new(100, 100, 100, 200),
 ];
-const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
+const METADATA_V6: [Ipv6Addr; 2] = [
+    Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
+    Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x23),
+];
 
 fn is_metadata_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => METADATA_V4.contains(&v4),
         IpAddr::V6(v6) => {
-            v6 == METADATA_V6 || embedded_v4(v6).iter().any(|v4| METADATA_V4.contains(v4))
+            METADATA_V6.contains(&v6) || embedded_v4(v6).iter().any(|v4| METADATA_V4.contains(v4))
         }
     }
 }
 
-/// IPv4 addresses an IPv6 address carries: mapped, NAT64, translated,
-/// 6to4 and Teredo (server and client).
+/// IPv4 addresses an IPv6 address carries: mapped, compatible, NAT64
+/// (well-known and local-use), translated, 6to4 and Teredo (server and client).
 fn embedded_v4(v6: Ipv6Addr) -> Vec<Ipv4Addr> {
     if let Some(v4) = v6.to_ipv4_mapped() {
         return vec![v4];
@@ -299,8 +303,16 @@ fn embedded_v4(v6: Ipv6Addr) -> Vec<Ipv4Addr> {
         let [c, d] = lo.to_be_bytes();
         Ipv4Addr::new(a, b, c, d)
     };
-    // NAT64 64:ff9b::/96 and IPv4-translated ::ffff:0:0:0/96.
-    if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || seg[..6] == [0, 0, 0, 0, 0xffff, 0] {
+    // NAT64 64:ff9b::/96, IPv4-translated ::ffff:0:0:0/96, and
+    // IPv4-compatible ::/96 (not `::` or `::1`).
+    if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0]
+        || seg[..6] == [0, 0, 0, 0, 0xffff, 0]
+        || (seg[..6] == [0; 6] && !v6.is_unspecified() && !v6.is_loopback())
+    {
+        return vec![v4(seg[6], seg[7])];
+    }
+    // Local-use NAT64 64:ff9b:1::/48, as the usual /96 prefix: IPv4 in the low 32 bits.
+    if seg[..3] == [0x64, 0xff9b, 1] {
         return vec![v4(seg[6], seg[7])];
     }
     // 6to4 2002::/16 carries the IPv4 in bits 16..48.
@@ -320,19 +332,21 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_blocked_v4(v4),
         IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            // Local-use NAT64 64:ff9b:1::/48 and IPv4-compatible ::/96.
+            if seg[..3] == [0x64, 0xff9b, 1] || seg[..6] == [0; 6] {
+                return true;
+            }
             let inner = embedded_v4(v6);
             if !inner.is_empty() {
                 return inner.into_iter().any(is_blocked_v4);
             }
-            let seg = v6.segments();
             v6.is_loopback()
-                || seg[..3] == [0x64, 0xff9b, 1] // local-use NAT64 64:ff9b:1::/48
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || (seg[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
                 || (seg[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
                 || (seg[0] & 0xffc0) == 0xfec0 // site-local fec0::/10
-                || seg[..6] == [0, 0, 0, 0, 0, 0] // IPv4-compatible ::/96
         }
     }
 }
@@ -477,6 +491,45 @@ mod tests {
         assert!(CheckedTarget::check("http://169.254.1.1/", &policy)
             .await
             .is_ok());
+    }
+
+    /// Every IPv6 form carrying a metadata IPv4 is refused, even with its
+    /// prefix allowlisted so the private-range check can't decide it.
+    #[tokio::test]
+    async fn allowlisted_prefixes_never_open_embedded_metadata() {
+        let allow = Allowlist::parse(
+            "meta.internal,64:ff9b::/96,64:ff9b:1::/48,2002::/16,2001::/32,::/96,fd00::/8",
+        );
+        let embedded = [
+            "::ffff:169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "2001:0:a9fe:a9fe::1",
+            "2001:0:101:101::5601:5601",
+            "::a9fe:a9fe",
+            "::a9fe:aa17",
+            "fd00:ec2::23",
+        ];
+        let at = |ip: &str| vec![SocketAddr::new(ip.parse().unwrap(), 80)];
+        let policy = TargetPolicy::Public(allow.clone());
+        for ip in embedded {
+            let route = pinned_route("meta.internal", at(ip), &allow);
+            assert!(matches!(route, Err(TargetError::Blocked)), "{ip}");
+            let url = format!("http://[{ip}]/");
+            let err = CheckedTarget::check(&url, &policy).await.err();
+            assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
+        }
+        for ok in ["64:ff9b::a9fe:101", "::a9fe:101", "2002:a9fe:101::1"] {
+            let url = format!("http://[{ok}]/");
+            assert!(CheckedTarget::check(&url, &policy).await.is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn eks_pod_identity_is_metadata() {
+        assert!(is_metadata_ip("169.254.170.23".parse().unwrap()));
+        assert!(is_metadata_ip("fd00:ec2::23".parse().unwrap()));
     }
 
     #[test]

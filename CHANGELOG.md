@@ -31,7 +31,8 @@ instead of being buffered whole.
 ### Security — the outbound allowlist never opens cloud metadata (#1796)
 
 `RUSTANGO_OUTBOUND_ALLOW` host and CIDR entries no longer reach 169.254.169.254,
-169.254.170.2, 100.100.100.200 or fd00:ec2::254, including IPv6-embedded forms.
+169.254.170.2, 169.254.170.23, 100.100.100.200, fd00:ec2::254 or fd00:ec2::23,
+including IPv6-embedded forms (mapped, compatible, NAT64, 6to4, Teredo).
 
 ### Security — ViewSet create is audited (#1816)
 
