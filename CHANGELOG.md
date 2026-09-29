@@ -4,6 +4,54 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.0] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Security — bulk writes on audited models write audit rows (#1747)
+
+`destroy`, `delete_where`, `update_where`, `update_all`, `increment_each`,
+`bulk_update`, `upsert`, non-`Auto` `bulk_insert` and
+`QuerySet::update().execute_pool` now audit each affected row in the
+write's transaction; `truncate` writes one bulk `delete` entry. Writes
+that cannot audit return `ExecError::AuditUnsupported` on audited models.
+
+### Security — outbound clients check their target (#1716)
+
+Slack `webhook_callback` and OAuth2 discovery, token and userinfo calls
+refuse private and metadata addresses, never follow redirects, and keep
+at most 256 bytes of an error body. Same check as webhook delivery.
+
+**Breaking:** an IdP or Slack hook on a private address is refused until
+listed in the new `RUSTANGO_OUTBOUND_ALLOW` (hosts and CIDRs); webhook
+delivery ignores that list. `OAuth2Provider::http` is removed; use the new
+`with_client_config` / `from_discovery_with` for a custom CA or mTLS.
+
+### Security — every framework template autoescapes (#1721)
+
+New `template_extensions::html_tera()` / `html_tera_from_glob()` escape
+every template, not only `.html`. `EmailRenderer` escapes the HTML body
+and leaves the subject and text body raw.
+
+**Breaking:** `EmailRenderer::tera_mut()` is replaced by `configure()`;
+`tera()` now returns the HTML engine.
+
+### Fixed
+
+- Admin TOTP re-enroll needs a current code from the confirmed device, so a stolen session cannot replace the factor; a failed start now shows an error (#1776).
+
+### Added
+
+- `JwtAuth::router_for::<DB>()` and `require_bearer_for::<DB>` serve a non-default `Tenant<DB>`, e.g. SQLite in a build with `postgres` on (#1778).
+
+### Security — a TOTP re-enroll keeps the confirmed factor until the new one is confirmed (#1756)
+
+Starting a re-enroll no longer replaces the confirmed device: the new
+secret waits in `pending_secret_base32` and a code for it swaps it in,
+so an unfinished re-enroll no longer lets the password alone sign in.
+The new key is shown only in the re-enroll response, and the next
+sign-in with the old factor drops an unfinished re-enroll.
+
 ## [0.58.1] — 2026-09-28
 
 Tagged only; not published to crates.io.

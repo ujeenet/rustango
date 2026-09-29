@@ -8,7 +8,7 @@
 #![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -181,7 +181,15 @@ async fn boot() -> Env {
     let api = Router::new()
         .route("/whoami", get(whoami))
         .require_auth(backends)
-        .merge(jwt.router())
+        .merge(jwt.router_for::<sqlx::Sqlite>())
+        .merge(
+            Router::new()
+                .route("/bearer", get(|| async { "ok" }))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    jwt.clone(),
+                    rustango::tenancy::auth_routes::require_bearer_for::<sqlx::Sqlite>,
+                )),
+        )
         .layer(axum::middleware::from_fn(
             move |mut req: Request<Body>, next: axum::middleware::Next| {
                 let ctx = ctx.clone();
@@ -260,7 +268,6 @@ impl Env {
             .unwrap()
     }
 
-    #[cfg_attr(feature = "postgres", allow(dead_code))]
     async fn jwt_login(&self, ip: &str, user: &str, pass: &str) -> axum::response::Response {
         let req = Request::builder()
             .method("POST")
@@ -379,7 +386,6 @@ async fn served_tenant_admin_limits_per_ip() {
     assert!(is_429(&r), "got {}", r.status());
 }
 
-#[cfg(not(feature = "postgres"))]
 #[tokio::test]
 async fn jwt_login_locks_with_429() {
     let _g = SUITE.lock().await;
@@ -393,6 +399,106 @@ async fn jwt_login_locks_with_429() {
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     }
     assert!(is_429(&env.jwt_login(&next_ip(), &name, PASS).await));
+}
+
+/// #1778 — refresh, me, logout and `require_bearer_for` serve a SQLite
+/// tenant, also in a build where `postgres` is the default backend.
+#[tokio::test]
+async fn jwt_routes_serve_a_non_default_backend() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("jr");
+    env.user(&name).await;
+    let r = env.jwt_login(&next_ip(), &name, PASS).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let tokens = json_body(r).await;
+    let refresh = tokens["refresh"].as_str().unwrap().to_owned();
+    let call = |method: &str, uri: &str, bearer: Option<&str>, body: serde_json::Value| {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(b) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {b}"));
+        }
+        req.body(Body::from(body.to_string())).unwrap()
+    };
+
+    let r = send(
+        &env.api,
+        &next_ip(),
+        call(
+            "POST",
+            "/api/auth/refresh",
+            None,
+            serde_json::json!({ "refresh": refresh }),
+        ),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK, "refresh");
+    let rotated = json_body(r).await;
+    let access = rotated["access"].as_str().unwrap().to_owned();
+    let refresh = rotated["refresh"].as_str().unwrap().to_owned();
+
+    let r = send(
+        &env.api,
+        &next_ip(),
+        call("GET", "/api/auth/me", Some(&access), serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK, "me");
+    let r = send(
+        &env.api,
+        &next_ip(),
+        call("GET", "/bearer", Some(&access), serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK, "require_bearer_for");
+
+    let r = send(
+        &env.api,
+        &next_ip(),
+        call(
+            "POST",
+            "/api/auth/logout",
+            Some(&access),
+            serde_json::json!({ "refresh": refresh }),
+        ),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT, "logout");
+    let r = send(
+        &env.api,
+        &next_ip(),
+        call("GET", "/bearer", Some(&access), serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "logout revoked the bearer"
+    );
+    let r = send(
+        &env.api,
+        &next_ip(),
+        call(
+            "POST",
+            "/api/auth/refresh",
+            None,
+            serde_json::json!({ "refresh": refresh }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "logout revoked the refresh"
+    );
+}
+
+async fn json_body(r: axum::response::Response) -> serde_json::Value {
+    let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+    serde_json::from_slice(&b).unwrap()
 }
 
 /// Basic failures from one IP get 429 through the middleware; normal
@@ -473,6 +579,7 @@ async fn basic_without_a_tenant_is_refused() {
 
 /// With every hashing slot taken, each login answers 503 + Retry-After
 /// instead of queueing, and so do the password changes.
+#[cfg(feature = "testkit")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_full_hash_queue_answers_503_everywhere() {
     let _g = SUITE.lock().await;
@@ -515,20 +622,8 @@ async fn a_full_hash_queue_answers_503_everywhere() {
             .unwrap()
     };
 
-    let slots = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let run = Arc::new(AtomicBool::new(true));
-    // A queue many hashes deep, so no request reaches a slot in 50 ms.
-    let hogs: Vec<_> = (0..slots * 10)
-        .map(|_| {
-            let run = Arc::clone(&run);
-            tokio::spawn(async move {
-                while run.load(Ordering::Relaxed) {
-                    let _ = rustango::passwords::hash_async("hog").await;
-                }
-            })
-        })
-        .collect();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Every slot held, so no request gets one within the wait (#1786).
+    let held = rustango::passwords::hold_all_hash_slots().await;
 
     let change = "current_password=right-pass-123&new_password=another-pass-9&confirm_password=another-pass-9";
     let console_change = env
@@ -574,7 +669,6 @@ async fn a_full_hash_queue_answers_503_everywhere() {
         ("basic", env.basic(&next_ip(), &name, PASS).await),
         ("operator change-password", console_change),
         ("tenant change-password", admin_change),
-        #[cfg(not(feature = "postgres"))]
         ("jwt login", env.jwt_login(&next_ip(), &name, PASS).await),
     ];
     #[cfg(feature = "mcp")]
@@ -583,10 +677,7 @@ async fn a_full_hash_queue_answers_503_everywhere() {
     #[cfg(feature = "mcp")]
     let raw_auth =
         rustango::mcp::verify_raw_agent_credential(&env.tenant, &env.slug, &agent.token).await;
-    run.store(false, Ordering::Relaxed);
-    for h in hogs {
-        let _ = h.await;
-    }
+    drop(held);
     for (what, r) in answers {
         let status = r.status();
         let retry = r.headers().contains_key(header::RETRY_AFTER);

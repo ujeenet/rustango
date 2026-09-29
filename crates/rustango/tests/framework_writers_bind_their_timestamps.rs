@@ -109,9 +109,8 @@ async fn audit_emit_one_binds_occurred_at() {
     assert_canonical("audit occurred_at", &stored[0]);
 }
 
-/// The batch path is a separate statement on every dialect — a
-/// per-row loop inside a transaction here, one multi-row `VALUES` on
-/// Postgres — so it can regress on its own.
+/// The batch path is a separate statement (multi-row `VALUES`), so it
+/// can regress on its own.
 #[tokio::test]
 async fn audit_emit_many_binds_occurred_at() {
     let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");

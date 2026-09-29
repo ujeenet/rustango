@@ -2196,9 +2196,8 @@ over any `#[derive(Model)]` schema. The full CRUD surface ships:
 ```rust
 use rustango::template_views::{ListView, DetailView};
 use std::sync::Arc;
-use tera::Tera;
 
-let mut tera = Tera::default();
+let mut tera = rustango::template_extensions::html_tera();
 tera.add_raw_template("posts_list.html", r#"
     {% for post in object_list %}<h2>{{ post.title }}</h2>{% endfor %}
     {% if has_prev %}<a href="?page={{ page - 1 }}">prev</a>{% endif %}
@@ -2947,9 +2946,9 @@ combine with the existing dialect features:
 
 ```toml
 [dependencies]
-rustango = { version = "0.58", features = ["sqlite"] }
+rustango = { version = "0.59", features = ["sqlite"] }
 # or both at once:
-rustango = { version = "0.58", features = ["postgres", "sqlite"] }
+rustango = { version = "0.59", features = ["postgres", "sqlite"] }
 ```
 
 The macro emits per-backend trait impls only when the feature is
@@ -3250,7 +3249,7 @@ tenant subdomain as the admin. The companion `rustango-cms`
 crate ships a working setup:
 
 ```rust
-let mut tera = Tera::new(&templates_glob)?;
+let mut tera = rustango::template_extensions::html_tera_from_glob(&templates_glob)?;
 rustango_cms::admin::register_templates(&mut tera)?;
 let tera = std::sync::Arc::new(tera);
 
@@ -3415,7 +3414,7 @@ UPDATE`, `INSERT … RETURNING`) translated to portable equivalents.
 
 ```toml
 # Tri-dialect media
-rustango = { version = "0.58", default-features = false, features = ["sqlite", "media", "storage"] }
+rustango = { version = "0.59", default-features = false, features = ["sqlite", "media", "storage"] }
 ```
 
 ```rust,ignore
@@ -3477,7 +3476,7 @@ your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.58", features = ["mcp"] }
+rustango = { version = "0.59", features = ["mcp"] }
 # mcp pulls tenancy + sse + serializer + openapi automatically.
 ```
 

@@ -1412,6 +1412,13 @@ pub trait Model: Sized + Send + Sync + 'static {
     fn generic_reverse_relations() -> &'static [GenericReverseRelation] {
         &[]
     }
+
+    /// Audited runner for `QuerySet::update().execute_pool`; the macro
+    /// sets it on audited models (#1747).
+    #[doc(hidden)]
+    fn __rustango_audited_update() -> Option<crate::audit::AuditedUpdate> {
+        None
+    }
 }
 
 /// Inventory entry submitted by the `#[derive(Model)]` macro for each model.

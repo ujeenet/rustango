@@ -154,26 +154,7 @@ async fn handle(cfg: Arc<IpFilterLayer>, req: Request<Body>, next: Next) -> Resp
 
 // ------------------------------------------------------------------ CIDR parsing
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum CidrRange {
-    V4 { addr: u32, mask: u32 },
-    V6 { addr: u128, mask: u128 },
-}
-
-impl CidrRange {
-    /// An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) matches IPv4 rules
-    /// and any IPv6 rule covering it.
-    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
-        match self {
-            Self::V4 { addr, mask } => {
-                matches!(ip.to_canonical(), IpAddr::V4(v4) if u32::from(v4) & mask == *addr & mask)
-            }
-            Self::V6 { addr, mask } => {
-                matches!(ip, IpAddr::V6(v6) if u128::from(v6) & mask == *addr & mask)
-            }
-        }
-    }
-}
+pub(crate) use crate::cidr::CidrRange;
 
 pub(crate) fn parse_all<I, S>(nets: I) -> Result<Vec<CidrRange>, IpFilterError>
 where
@@ -184,60 +165,7 @@ where
 }
 
 fn parse_cidr(s: &str) -> Result<CidrRange, IpFilterError> {
-    let (ip_str, prefix) = match s.split_once('/') {
-        Some((ip, p)) => (ip, Some(p)),
-        None => (s, None),
-    };
-    let ip: IpAddr = ip_str
-        .parse()
-        .map_err(|_| IpFilterError::InvalidCidr(s.to_owned()))?;
-
-    match ip {
-        IpAddr::V4(v4) => {
-            let bits: u32 = match prefix {
-                Some(p) => p
-                    .parse()
-                    .map_err(|_| IpFilterError::InvalidCidr(s.to_owned()))?,
-                None => 32,
-            };
-            if bits > 32 {
-                return Err(IpFilterError::InvalidCidr(s.to_owned()));
-            }
-            let mask = if bits == 0 {
-                0
-            } else {
-                u32::MAX << (32 - bits)
-            };
-            Ok(CidrRange::V4 {
-                addr: u32::from(v4) & mask,
-                mask,
-            })
-        }
-        IpAddr::V6(v6) => {
-            let bits: u32 = match prefix {
-                Some(p) => p
-                    .parse()
-                    .map_err(|_| IpFilterError::InvalidCidr(s.to_owned()))?,
-                None => 128,
-            };
-            if bits > 128 {
-                return Err(IpFilterError::InvalidCidr(s.to_owned()));
-            }
-            // `::ffff:a.b.c.d/n` is an IPv4 range, matched as one.
-            if let (Some(v4), true) = (v6.to_ipv4_mapped(), bits >= 96) {
-                return parse_cidr(&format!("{v4}/{}", bits - 96));
-            }
-            let mask = if bits == 0 {
-                0u128
-            } else {
-                u128::MAX << (128 - bits)
-            };
-            Ok(CidrRange::V6 {
-                addr: u128::from(v6) & mask,
-                mask,
-            })
-        }
-    }
+    CidrRange::parse(s).ok_or_else(|| IpFilterError::InvalidCidr(s.to_owned()))
 }
 
 #[cfg(test)]

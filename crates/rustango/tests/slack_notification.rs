@@ -17,6 +17,17 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+/// Every test holds this: it sets the process env.
+static SUITE: Mutex<()> = Mutex::const_new(());
+
+/// The capture servers are on loopback, which the callback refuses
+/// unless the operator allowlist names it.
+async fn allow_loopback() -> tokio::sync::MutexGuard<'static, ()> {
+    let g = SUITE.lock().await;
+    std::env::set_var("RUSTANGO_OUTBOUND_ALLOW", "127.0.0.1");
+    g
+}
+
 /// Bind to 127.0.0.1:0, return (base_url, captured-bodies handle).
 async fn spawn_capture_server() -> (String, Arc<Mutex<Vec<Value>>>) {
     let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
@@ -44,6 +55,7 @@ async fn spawn_capture_server() -> (String, Arc<Mutex<Vec<Value>>>) {
 
 #[tokio::test]
 async fn webhook_callback_posts_text_envelope_for_string_payload() {
+    let _g = allow_loopback().await;
     let (url, captured) = spawn_capture_server().await;
     let cb = slack::webhook_callback(url);
     cb(json!("disk-full on prod-db-2")).await.expect("send ok");
@@ -59,6 +71,7 @@ async fn webhook_callback_posts_text_envelope_for_string_payload() {
 
 #[tokio::test]
 async fn webhook_callback_passes_through_block_payload() {
+    let _g = allow_loopback().await;
     let (url, captured) = spawn_capture_server().await;
     let cb = slack::webhook_callback(url);
 
@@ -76,6 +89,7 @@ async fn webhook_callback_passes_through_block_payload() {
 
 #[tokio::test]
 async fn webhook_callback_surfaces_non_2xx_as_error() {
+    let _g = allow_loopback().await;
     // Spin up a server that always returns 500.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");

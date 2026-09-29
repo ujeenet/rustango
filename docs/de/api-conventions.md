@@ -286,7 +286,7 @@ default = [
 Um ein Binary zu verschlanken, das nicht alles braucht, deaktivieren Sie die Standardwerte und listen Sie nur auf, was Sie verwenden:
 
 ```toml
-rustango = { version = "0.58", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.59", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

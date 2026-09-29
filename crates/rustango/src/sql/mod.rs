@@ -145,6 +145,7 @@ pub(crate) use executor::bind_query;
 pub(crate) use executor::bind_query_my;
 #[cfg(feature = "sqlite")]
 pub(crate) use executor::bind_query_sqlite;
+pub(crate) use executor::write_transaction_pool;
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]

@@ -261,7 +261,7 @@ Jusqu'à [#1395](https://github.com/ujeenet/rustango/issues/1395), ce paragraphe
 
 Le XSS (cross-site scripting) survient lorsqu'une entrée utilisateur est rendue en HTML et s'exécute comme du code dans le navigateur de quelqu'un d'autre. La solution est d'échapper toute entrée utilisateur avant qu'elle n'atteigne la page. **Rustango** gère cela de deux façons :
 
-**1. Auto-échappement des templates Tera** — Tera est le moteur de templates de **Rustango**. Chaque `{{ var }}` est automatiquement échappé en HTML — mais seulement dans les templates que Tera échappe, c'est-à-dire son ensemble par défaut `.html`, `.htm` et `.xml`. Rustango ne définit aucun `autoescape_suffixes`, donc un template `.txt`, `.j2` ou `.tera` n'est **pas** échappé. Utilisez `{{ var | safe }}` pour vous en soustraire — rare, et dangereux, donc ne le faites que pour du HTML auquel vous faites entièrement confiance.
+**1. Auto-échappement des templates Tera** — Tera est le moteur de templates de **Rustango**. Chaque `{{ var }}` est automatiquement échappé en HTML dans chaque template que construit le framework, quelle que soit son extension. `template_extensions::html_tera()` / `html_tera_from_glob(glob)` donnent la même chose à votre propre moteur ; un `Tera::new` nu n'échappe que `.html`, `.htm` et `.xml`. Seules les parties texte des e-mails (sujet et corps `.txt` d'`EmailRenderer`) sont rendues brutes. Utilisez `{{ var | safe }}` pour vous en soustraire — rare, et dangereux, donc ne le faites que pour du HTML auquel vous faites entièrement confiance.
 
 **2. Fonction d'échappement manuelle** — pour quand vous construisez du HTML dans du code Rust au lieu d'un template :
 

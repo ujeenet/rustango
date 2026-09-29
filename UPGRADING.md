@@ -150,6 +150,52 @@ untouched.
 
 ## Unreleased
 
+## 0.59.0
+
+### Bulk writes on audited models write audit rows
+
+On audited models the bulk shortcuts now lock and read the affected rows
+first and write one audit row each (#1747); expect one extra SELECT per
+500 rows. `audit::emit_many` now takes an `Acquire` (`&PgPool`,
+`&mut PgConnection`) instead of any `Executor`, so it can split large batches.
+Audited non-`Auto` `bulk_insert_on` now takes `&mut PgConnection`, like
+the other audited `_on` methods. On audited models these now return
+`ExecError::AuditUnsupported`: `bulk_upsert_pool`,
+`bulk_insert_or_ignore_pool`, `QuerySet::delete_on` / `execute_on`, and
+a bulk update that sets the primary key. `ExecError` gains that variant.
+
+### Outbound calls refuse private addresses
+
+Slack `webhook_callback` and OAuth2/OIDC calls now refuse loopback,
+private and metadata targets. For an IdP on your own network list it in
+`RUSTANGO_OUTBOUND_ALLOW=10.0.5.0/24,idp.internal` (hosts and CIDRs).
+Webhook delivery ignores that list; use `allow_private_targets(true)`.
+
+`OAuth2Provider::http` is removed: set a root CA or mTLS identity with
+`with_client_config(|b| ...)` or `from_discovery_with`. Build providers
+with `new` or a preset; struct literals no longer compile. These calls
+connect directly and cannot use an egress proxy.
+
+### Templates escape whatever their name
+
+Templates built with `html_tera*` and `EmailRenderer` HTML bodies now
+escape `.tera`, `.j2` and suffix-less templates too; output that relied on
+raw values needs `| safe`. `EmailRenderer::tera_mut()` is replaced by
+`configure(|tera| ...)`, which changes both engines; `tera()` returns the
+HTML engine.
+
+### TOTP re-enroll asks for a current code
+
+`POST /account/totp` with `reset=1` now needs `totp_code` from the current device (#1776).
+Custom `totp_enroll.html` overrides must add that field to the re-enroll form.
+
+### An admin TOTP re-enroll keeps the old device until confirmed
+
+`rustango_admin_totp` gains a nullable `pending_secret_base32` column
+(#1756); `totp_store::ensure_table` adds it. `AdminTotp` literals need
+the new field. `start_enrollment` on a confirmed device no longer drops it;
+`confirm` promotes the pending secret, and a successful `redeem_code` clears it.
+
 ## 0.58.1
 
 ### Forwarded IPs need `RealIpLayer::trust_proxies`
