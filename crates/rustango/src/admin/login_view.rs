@@ -646,20 +646,21 @@ async fn totp_enroll_submit(
     };
     let _ = super::totp_store::ensure_table(&state.pool).await;
 
-    // Re-enroll: a current code first, then stage a fresh secret. The
-    // code goes through the login gate, so it cannot be brute-forced.
+    // Every code here goes through the login gate, so none can be brute-forced.
+    let attempt = match crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Admin,
+            &ip,
+            &session.username,
+        )
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
+
+    // Re-enroll: a current code first, then stage a fresh secret.
     if form.reset.is_some() {
-        let attempt = match crate::login_throttle::shared()
-            .begin(
-                &crate::login_throttle::LoginScope::Admin,
-                &ip,
-                &session.username,
-            )
-            .await
-        {
-            Ok(a) => a,
-            Err(refused) => return refused.into_response(),
-        };
         let s = crate::totp::TotpSecret::generate();
         let code = form.totp_code.as_deref().unwrap_or("").trim();
         let started =
@@ -700,6 +701,7 @@ async fn totp_enroll_submit(
         .as_ref()
         .and_then(super::totp_store::AdminTotp::pending_secret);
     let Some(secret) = pending else {
+        attempt.prompted().await;
         return Html(render_totp_enroll(
             &state,
             false,
@@ -718,6 +720,11 @@ async fn totp_enroll_submit(
     } else {
         super::totp_store::confirm_with_code(&state.pool, session.user_id, &secret, code).await
     };
+    match (&confirmed, code.is_empty()) {
+        (Ok(true), _) => attempt.succeeded().await,
+        (Ok(false), false) => attempt.failed().await,
+        _ => attempt.prompted().await,
+    }
     if matches!(confirmed, Ok(false)) {
         // Never echo a re-enroll's key: that would hand it to any session.
         let (key, otpauth) = if reenroll {

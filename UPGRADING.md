@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Wrong enrollment codes count toward the admin lockout
+
+Failed TOTP confirms on `/account/totp` add to the same per-user lock as failed logins.
+
 ### FileCache keeps lock files in its directory
 
 `FileCache` now creates up to 256 `.lock-XX` files next to its entries. `clear`

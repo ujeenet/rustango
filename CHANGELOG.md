@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — admin TOTP enrollment codes are rate limited (#1791)
+
+A wrong code on `POST /account/totp` now counts against the admin login lock,
+like a wrong code at sign-in.
+
 ### Security — FileCache `add` has one winner over an expired key (#1811)
 
 Replacing or clearing an entry now holds an advisory lock (`.lock-XX` files in the

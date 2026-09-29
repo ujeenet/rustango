@@ -337,3 +337,40 @@ async fn a_codeless_reenroll_spends_no_limit_tokens() {
         assert_eq!(r.status(), StatusCode::OK, "reset {n} was throttled");
     }
 }
+
+/// #1791 — wrong enrollment codes count against the account like login ones.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn wrong_enrollment_codes_lock_the_account() {
+    use rustango::admin::totp_store;
+    let _g = SUITE.lock().await;
+    let (app, pool) = app_with(&[]).await;
+    let mut u = AdminUser::new_with_password("thr_ivy", "right-pass", true).unwrap();
+    u.insert_pool(&pool).await.unwrap();
+    let id = *u.id.get().unwrap();
+    let a = login(&app, "10.71.0.1", "thr_ivy", "right-pass").await;
+    let session = a.cookie.expect("session");
+    totp_store::start_enrollment(&pool, id, &rustango::totp::TotpSecret::generate())
+        .await
+        .unwrap();
+
+    let confirm = |n: usize| {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/account/totp")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::COOKIE, format!("rustango_csrf={CSRF}; {session}"))
+            .body(Body::from(format!("_csrf={CSRF}&totp_code=abcdef")))
+            .unwrap();
+        let addr: SocketAddr = format!("10.71.1.{n}:4000").parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        app.clone().oneshot(req)
+    };
+    for n in 0..5 {
+        assert_eq!(confirm(n).await.unwrap().status(), StatusCode::OK);
+    }
+    assert_eq!(
+        confirm(9).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
