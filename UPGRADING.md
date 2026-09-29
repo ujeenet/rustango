@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### Tenant routers for a non-default backend
+
+With several backends compiled in, the default `Tenant` is Postgres. Mount
+the `*_for::<sqlx::Sqlite>` (or `MySql`) variant for a SQLite or MySQL
+`TenantContext`: `mcp::tenant_router_authed_for`,
+`mcp::secure_tenant_router_from_settings_for`.
+
 ## 0.59.0
 
 ### Bulk writes on audited models write audit rows

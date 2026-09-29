@@ -38,4 +38,5 @@ mod tenant;
 
 pub use database_tenant::{DatabaseTenant, DatabaseTenantContext, DatabaseTenantRejection};
 pub use session_user::{SessionOperator, SessionUser};
+pub(crate) use tenant::TenantScope;
 pub use tenant::{Tenant, TenantContext, TenantRejection};

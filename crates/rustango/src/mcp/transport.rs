@@ -91,10 +91,19 @@ pub(crate) async fn handle_message(
 /// It needs the same agent bearer token as the JSON-RPC endpoint, and
 /// then filters the shared bus, so an agent never sees another
 /// agent's or another tenant's frames.
-pub(crate) async fn sse_handler(
-    t: crate::extractors::Tenant,
+pub(crate) fn sse_handler<DB: crate::sql::sqlx::Database>(
+    t: crate::extractors::Tenant<DB>,
     axum::extract::State(state): axum::extract::State<McpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    headers: axum::http::HeaderMap,
+) -> impl std::future::Future<Output = Response> + Send {
+    sse_in(t.into(), state, uri, headers)
+}
+
+async fn sse_in(
+    t: crate::extractors::TenantScope,
+    state: McpState,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let Some(jwt) = state.jwt.as_ref() else {
