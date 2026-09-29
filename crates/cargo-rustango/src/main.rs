@@ -770,6 +770,47 @@ mod tests {
         }
     }
 
+    /// The scaffolded examples' config tiers are what `cargo rustango new`
+    /// emits today; regenerate, don't hand-edit (#1801). `cookbook_blog`
+    /// is hand-written, and `prod_settings.toml` is tuned per app.
+    #[test]
+    fn example_configs_match_the_templates() {
+        let examples =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rustango/examples");
+        let mut drifted = Vec::new();
+        for name in [
+            "getting_started_blog",
+            "platform_commerce",
+            "platform_commerce_saas",
+        ] {
+            for (file, want) in [
+                (
+                    "default.toml",
+                    templates::config_default_toml(name, Backend::Postgres),
+                ),
+                (
+                    "dev_settings.toml",
+                    templates::config_dev_settings_toml(name, Backend::Postgres),
+                ),
+                (
+                    "staging_settings.toml",
+                    templates::config_staging_settings_toml(name, Backend::Postgres),
+                ),
+            ] {
+                let path = examples.join(name).join("config").join(file);
+                let got = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                if got != want {
+                    drifted.push(format!("{name}/config/{file}"));
+                }
+            }
+        }
+        assert!(
+            drifted.is_empty(),
+            "drifted from the scaffolder: {drifted:?}"
+        );
+    }
+
     /// Regression guard against the original #79 footgun — no
     /// scaffold template may emit a yanked version literal.
     #[test]

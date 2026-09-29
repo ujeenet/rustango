@@ -40,6 +40,11 @@ longer mount a `GET` SSE route that always answered `500`.
 **Breaking:** the `trust_proxy_headers` field is now `use_real_ip`, since it reads
 only `TrustedRealIp`, never a header. The old setter stays as a deprecated alias.
 
+### Fixed — scaffolded examples' config tiers match the scaffolder (#1801)
+
+Regenerated, so the dev tiers set `secure_cookies = false` and `getting_started_blog`
+uses its compose credentials. A test now fails when they drift again.
+
 ## [0.59.4] — 2026-09-29
 
 Tagged only; not published to crates.io.
