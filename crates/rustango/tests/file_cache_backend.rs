@@ -88,6 +88,7 @@ async fn long_or_funny_keys_dont_break_filenames() {
     let entries: Vec<_> = std::fs::read_dir(&dir)
         .expect("dir exists")
         .filter_map(Result::ok)
+        .filter(|e| !e.file_name().to_string_lossy().starts_with(".lock-"))
         .collect();
     assert_eq!(entries.len(), 1);
     let name = entries[0].file_name().to_string_lossy().into_owned();
@@ -108,7 +109,11 @@ async fn from_settings_file_backend_round_trips() {
     cache.set("k", "v", None).await.unwrap();
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     // Confirm the on-disk side: a file landed under the configured dir.
-    let count = std::fs::read_dir(&dir).unwrap().count();
+    let count = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "cache"))
+        .count();
     assert_eq!(count, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -291,7 +296,6 @@ fn concurrent_set_never_shows_a_torn_value() {
 /// Racing `add`s over an expired entry: exactly one wins. A reader that
 /// saw the old entry must not delete the winner's fresh one.
 #[test]
-#[ignore = "open: clearing an expired entry needs a per-key lock"]
 fn concurrent_adds_over_expired_entry_have_exactly_one_winner() {
     let dir = unique_tmp_dir("add-exp");
     let rt = tokio::runtime::Builder::new_current_thread()

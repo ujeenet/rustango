@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### FileCache keeps lock files in its directory
+
+`FileCache` now creates up to 256 `.lock-XX` files next to its entries. `clear`
+leaves them; don't count directory files as entries.
+
 ### OAuth2 responses are capped at 1 MiB
 
 An IdP discovery, token or userinfo body over 1 MiB is now an error.

@@ -847,8 +847,9 @@ impl Cache for InMemoryCache {
 /// ## Limits
 ///
 /// `set` writes a temp file and renames it into place, so readers see
-/// the old or the new entry, never a partial one. Clearing an expired
-/// entry is not locked, so racing `add`s on an expired key can both win.
+/// the old or the new entry, never a partial one. Replacing or clearing
+/// an existing entry holds an advisory lock (one of 256 `.lock-XX`
+/// files), so `add` has one winner across processes on the host.
 /// There is no entry cap with a cull strategy. The directory is per host.
 pub struct FileCache {
     dir: std::path::PathBuf,
@@ -965,35 +966,74 @@ impl FileCache {
         Ok(tmp)
     }
 
-    /// Put `tmp` at `path` only if `path` is free. `Ok(false)` when taken.
-    ///
-    /// Where hard links fail (FAT, some network mounts) it falls back to
-    /// an exclusive create, which a reader can briefly see half-written.
-    fn link_new(
-        tmp: &std::path::Path,
-        path: &std::path::Path,
-        bytes: &[u8],
-        link: fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
-    ) -> Result<bool, CacheError> {
-        use std::io::{ErrorKind, Write as _};
-        match link(tmp, path) {
-            Ok(()) => return Ok(true),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
-            Err(_) => {}
-        }
-        let mut file = match std::fs::OpenOptions::new()
+    /// Lock the stripe that owns `path`. POSIX has no conditional
+    /// unlink, so every replace or removal of a live-or-dead entry
+    /// happens under this lock.
+    fn lock_entry(&self, path: &std::path::Path) -> Result<EntryLock, CacheError> {
+        let stripe = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.get(..2))
+            .unwrap_or("00");
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
             .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(f) => f,
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
-            Err(e) => return Err(CacheError::Connection(format!("create_new: {e}"))),
-        };
-        file.write_all(bytes)
-            .and_then(|()| file.sync_data())
-            .map_err(|e| CacheError::Connection(format!("write: {e}")))?;
-        Ok(true)
+            .open(self.dir.join(format!(".lock-{stripe}")))
+            .map_err(|e| CacheError::Connection(format!("open lock: {e}")))?;
+        fs4::FileExt::lock(&file).map_err(|e| CacheError::Connection(format!("lock: {e}")))?;
+        Ok(EntryLock(file))
+    }
+
+    fn read_entry(path: &std::path::Path) -> Result<Entry, CacheError> {
+        match std::fs::read(path) {
+            Ok(b) => Ok(match Self::decode(&b) {
+                Some((_, v, false)) => Entry::Live(v),
+                _ => Entry::Dead,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Entry::Missing),
+            Err(e) => Err(CacheError::Connection(format!("read: {e}"))),
+        }
+    }
+
+    /// Remove `path` if it is still expired or undecodable once locked,
+    /// and return its value if a racer replaced it with a live one.
+    fn clear_dead(&self, path: &std::path::Path) -> Result<Option<String>, CacheError> {
+        let _lock = self.lock_entry(path)?;
+        match Self::read_entry(path)? {
+            Entry::Live(v) => Ok(Some(v)),
+            Entry::Dead => {
+                let _ = std::fs::remove_file(path);
+                Ok(None)
+            }
+            Entry::Missing => Ok(None),
+        }
+    }
+
+    /// Rename `tmp` onto `path`, removing `tmp` if that fails.
+    fn put(tmp: &std::path::Path, path: &std::path::Path) -> Result<(), CacheError> {
+        std::fs::rename(tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(tmp);
+            CacheError::Connection(format!("rename: {e}"))
+        })
+    }
+}
+
+/// What a key's file holds. `Dead` is expired or undecodable.
+enum Entry {
+    Missing,
+    Dead,
+    Live(String),
+}
+
+/// Held stripe lock; released on drop.
+struct EntryLock(std::fs::File);
+
+impl Drop for EntryLock {
+    fn drop(&mut self) {
+        let _ = fs4::FileExt::unlock(&self.0);
     }
 }
 
@@ -1006,30 +1046,18 @@ impl Cache for FileCache {
 
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let path = self.key_path(key);
-        let buf = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(CacheError::Connection(format!("read: {e}"))),
-        };
-        match Self::decode(&buf) {
-            Some((_, _, true)) => {
-                let _ = std::fs::remove_file(&path);
-                Ok(None)
-            }
-            Some((_, v, false)) => Ok(Some(v)),
-            None => {
-                let _ = std::fs::remove_file(&path);
-                Ok(None)
-            }
+        match Self::read_entry(&path)? {
+            Entry::Missing => Ok(None),
+            Entry::Live(v) => Ok(Some(v)),
+            Entry::Dead => self.clear_dead(&path),
         }
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        let path = self.key_path(key);
         let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
-        std::fs::rename(&tmp, self.key_path(key)).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            CacheError::Connection(format!("rename: {e}"))
-        })
+        let _lock = self.lock_entry(&path)?;
+        Self::put(&tmp, &path)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
@@ -1045,20 +1073,24 @@ impl Cache for FileCache {
         Ok(self.get(key).await?.is_some())
     }
 
-    /// Atomic across processes: the entry is written to a temp file, then
-    /// hard-linked into place, which fails when the key's file exists.
+    /// Atomic across processes on the host: the check and the rename
+    /// happen under the entry's stripe lock.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         let path = self.key_path(key);
-        let bytes = Self::encode(key, value, ttl);
-        let tmp = self.write_tmp(&bytes)?;
-        let link = || Self::link_new(&tmp, &path, &bytes, |a, b| std::fs::hard_link(a, b));
-        let mut won = link();
-        // An expired entry does not hold the key; `get` removes it, then retry once.
-        if matches!(won, Ok(false)) && self.get(key).await.is_ok_and(|v| v.is_none()) {
-            won = link();
+        let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
+        let _lock = self.lock_entry(&path)?;
+        let live = match Self::read_entry(&path) {
+            Ok(entry) => matches!(entry, Entry::Live(_)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
+        if live {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(false);
         }
-        let _ = std::fs::remove_file(&tmp);
-        won
+        Self::put(&tmp, &path).map(|()| true)
     }
 
     async fn clear(&self) -> Result<(), CacheError> {
@@ -1100,15 +1132,15 @@ impl Cache for FileCache {
                 continue;
             };
             match Self::decode(&buf) {
-                // Matching entry, or one that is dead anyway.
-                Some((key, _, expired)) if expired || key.starts_with(prefix) => {
+                // Matching entry: same path means same key, so no re-check.
+                Some((key, _, _)) if key.starts_with(prefix) => {
                     let _ = std::fs::remove_file(&path);
                 }
                 // Another namespace's live entry — leave it alone.
-                Some(_) => {}
-                // Unreadable, or written by an older format: drop it.
-                None => {
-                    let _ = std::fs::remove_file(&path);
+                Some((_, _, false)) => {}
+                // Expired, unreadable, or an older format: drop it if still dead.
+                _ => {
+                    let _ = self.clear_dead(&path);
                 }
             }
         }
@@ -1220,28 +1252,6 @@ mod file_cache_tests {
     #[test]
     fn file_cache_reports_process_local() {
         assert!(FileCache::new("unused").is_process_local());
-    }
-
-    /// Without hard links, `add` still claims the key exactly once.
-    #[test]
-    fn add_falls_back_to_exclusive_create_without_hard_links() {
-        let dir = std::env::temp_dir().join(format!("rustango-fc-nolink-{}", uuid::Uuid::new_v4()));
-        let cache = FileCache::new(&dir);
-        let path = cache.key_path("k");
-        let bytes = FileCache::encode("k", "v", None);
-        let tmp = cache.write_tmp(&bytes).unwrap();
-        let no_link = |_: &std::path::Path, _: &std::path::Path| {
-            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-        };
-        let first = FileCache::link_new(&tmp, &path, &bytes, no_link);
-        let second = FileCache::link_new(&tmp, &path, &bytes, no_link);
-        let stored = std::fs::read(&path)
-            .ok()
-            .and_then(|b| FileCache::decode(&b));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(first.unwrap(), "first claim wins");
-        assert!(!second.unwrap(), "second claim loses");
-        assert_eq!(stored.map(|(_, v, _)| v).as_deref(), Some("v"));
     }
 }
 

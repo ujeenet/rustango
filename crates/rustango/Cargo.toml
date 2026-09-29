@@ -156,7 +156,7 @@ serializer = ["forms"]
 # Caching layer (`rustango::cache`) — pluggable `Cache` trait with
 # `NullCache` (no-op) and `InMemoryCache` (tokio RwLock + TTL). Redis
 # backend is behind the separate `cache-redis` feature.
-cache = ["_async_trait", "dep:sha2"]
+cache = ["_async_trait", "dep:sha2", "dep:fs4"]
 
 # Per-view caching tower layer (`rustango::cache_page`) — caches a
 # whole successful response, plus `Cache-Control` / `Vary` builders.
@@ -541,6 +541,7 @@ argon2           = { workspace = true, optional = true }
 async-trait      = { workspace = true, optional = true }
 chacha20poly1305 = { workspace = true, optional = true }
 cookie           = { workspace = true, optional = true }
+fs4              = { workspace = true, optional = true }
 hmac             = { workspace = true, optional = true }
 password-hash    = { workspace = true, optional = true }
 rand             = { workspace = true, optional = true }

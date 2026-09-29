@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — FileCache `add` has one winner over an expired key (#1811)
+
+Replacing or clearing an entry now holds an advisory lock (`.lock-XX` files in the
+cache dir), so idempotency keys, `DistributedLock` and lockouts on `FileCache` no
+longer let two callers win.
+
 ### Security — OAuth2 success bodies are capped (#1793)
 
 Discovery, token and userinfo responses over 1 MiB now fail with a clear error

@@ -83,6 +83,8 @@ password-hash = "0.5"
 hmac    = "0.12"
 sha1    = "0.10"   # TOTP / RFC 6238 default
 sha2    = "0.10"
+# Advisory file locks for FileCache (#1811); sync API only.
+fs4     = { version = "1", default-features = false, features = ["sync"] }
 subtle  = "2"      # constant-time eq for MAC verify
 cookie  = "0.18"
 rand    = "0.8"    # session-secret auto-gen fallback
