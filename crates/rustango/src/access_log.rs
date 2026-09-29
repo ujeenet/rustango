@@ -641,34 +641,13 @@ mod observability_mount_tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
     use tower::ServiceExt as _;
-    use tracing_subscriber::fmt::MakeWriter;
 
     /// Tracing's callsite cache is process-global, so two tests
     /// installing subscribers at once would flake.
     fn lock() -> &'static std::sync::Mutex<()> {
         static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         M.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    #[derive(Clone, Default)]
-    struct Buf(Arc<Mutex<Vec<u8>>>);
-    impl Write for Buf {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> MakeWriter<'a> for Buf {
-        type Writer = Buf;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
     }
 
     /// Drive one request through `mount_observability` and return what
@@ -696,7 +675,7 @@ mod observability_mount_tests {
         access_log: Option<AccessLogLayer>,
         redact: Vec<String>,
     ) -> (StatusCode, String) {
-        let buf = Buf::default();
+        let buf = crate::testkit::CaptureWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(buf.clone())
             .with_ansi(false)
@@ -719,8 +698,7 @@ mod observability_mount_tests {
             .await
             .expect("router answers");
         let status = resp.status();
-        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        (status, out)
+        (status, buf.contents())
     }
 
     /// Turning the access log off must not narrow the span's redact

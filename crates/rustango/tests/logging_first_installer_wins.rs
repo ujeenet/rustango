@@ -29,34 +29,7 @@
 
 #![cfg(feature = "runtime")]
 
-use std::sync::{Arc, Mutex};
-
-/// Captures what a subscriber wrote.
-#[derive(Clone, Default)]
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl CaptureWriter {
-    fn contents(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap_or_default()
-    }
-}
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-    type Writer = CaptureWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
+use rustango::testkit::CaptureWriter;
 
 /// Install two subscribers writing to two different buffers, then emit
 /// one event. It lands in exactly one of them, and which one is the

@@ -29,6 +29,7 @@
 //! [`SessionOperator`]: crate::extractors::SessionOperator
 
 mod database_tenant;
+mod mounted;
 // `SessionUser` and `SessionOperator` work on every backend: they go
 // through `FetcherPool` against the `Pool` enum. Schema-mode tenancy
 // is still PG-only, but database-mode tenants on SQLite and MySQL
@@ -37,6 +38,7 @@ mod session_user;
 mod tenant;
 
 pub use database_tenant::{DatabaseTenant, DatabaseTenantContext, DatabaseTenantRejection};
+pub(crate) use mounted::MountedTenantContext;
 pub use session_user::{SessionOperator, SessionUser};
 pub(crate) use tenant::TenantScope;
 pub use tenant::{Tenant, TenantContext, TenantRejection};

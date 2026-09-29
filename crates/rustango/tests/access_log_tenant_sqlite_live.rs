@@ -14,7 +14,7 @@
 //! inside. These tests drive a real router through a real registry —
 //! the assertion is on the rendered log line, not on the plumbing.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::routing::get;
@@ -24,6 +24,7 @@ use http::Request;
 use rustango::access_log::{AccessLogLayer, AccessLogRouterExt, TenantField};
 use rustango::sql::Pool;
 use rustango::tenancy::{ChainResolver, OrgResolver};
+use rustango::testkit::CaptureWriter;
 use tower::ServiceExt;
 
 /// The host cache and the registry breaker are process-global, so these
@@ -32,27 +33,6 @@ use tower::ServiceExt;
 fn lock() -> &'static tokio::sync::Mutex<()> {
     static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     M.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-/// Captures `tracing` output for assertion.
-#[derive(Clone, Default)]
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-    type Writer = CaptureWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
 }
 
 async fn registry() -> (Pool, tempfile::TempDir) {
@@ -145,8 +125,7 @@ async fn log_line_for(host: &str, layer: AccessLogLayer) -> String {
         .expect("response");
     assert_eq!(res.status(), 200);
 
-    let bytes = buf.0.lock().unwrap().clone();
-    String::from_utf8(bytes).unwrap_or_default()
+    buf.contents()
 }
 
 /// The funnel: every request path resolves through `ChainResolver`, so
@@ -258,7 +237,7 @@ async fn the_request_span_carries_the_tenant() {
         .expect("response");
     assert_eq!(res.status(), 200);
 
-    let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap_or_default();
+    let out = buf.contents();
     assert!(
         out.contains("http.request{"),
         "expected the request span in the output, got:\n{out}"
@@ -329,7 +308,7 @@ async fn the_builder_access_log_names_the_client_behind_a_trusted_proxy() {
     ));
     app.oneshot(req).await.expect("response");
 
-    let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap_or_default();
+    let out = buf.contents();
     let line = out
         .lines()
         .find(|l| l.contains("rustango::access_log"))

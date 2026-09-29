@@ -36,6 +36,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use crate::extractors::MountedTenantContext;
 use crate::sql::Pool;
 
 use super::auth_backends::{AuthError, AuthUser, BoxedBackend};
@@ -92,49 +93,13 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
 
 // ------------------------------------------------------------------ Tenant pool resolution
 
-/// This request's Org, from whichever tenant context the app mounted.
+/// This request's Org, from the context [`MountedTenantContext`] picks.
 /// `None` when no context is mounted; `Some(Ok(None))` for an unknown tenant.
 pub(crate) async fn request_org(
     parts: &Parts,
     ext: &axum::http::Extensions,
 ) -> Option<Result<Option<Org>, TenancyError>> {
-    use crate::extractors::{DatabaseTenantContext, TenantContext};
-    use crate::tenancy::resolver::OrgResolver as _;
-
-    macro_rules! try_ctx {
-        ($db:ty) => {
-            if let Some(ctx) = ext.get::<Arc<TenantContext<$db>>>() {
-                return Some(
-                    ctx.resolver
-                        .resolve(parts, &ctx.pools.registry_pool())
-                        .await,
-                );
-            }
-        };
-    }
-    // The pure-SQLite / MySQL stack mounts `DatabaseTenantContext`
-    // instead, with its own registry handle and no schema mode.
-    macro_rules! try_db_ctx {
-        ($db:ty) => {
-            if let Some(ctx) = ext.get::<Arc<DatabaseTenantContext<$db>>>() {
-                return Some(ctx.resolver.resolve(parts, &ctx.registry).await);
-            }
-        };
-    }
-
-    #[cfg(feature = "postgres")]
-    try_ctx!(sqlx::Postgres);
-    #[cfg(feature = "sqlite")]
-    try_ctx!(sqlx::Sqlite);
-    #[cfg(feature = "mysql")]
-    try_ctx!(sqlx::MySql);
-    #[cfg(feature = "postgres")]
-    try_db_ctx!(sqlx::Postgres);
-    #[cfg(feature = "sqlite")]
-    try_db_ctx!(sqlx::Sqlite);
-    #[cfg(feature = "mysql")]
-    try_db_ctx!(sqlx::MySql);
-    None
+    Some(MountedTenantContext::of(ext)?.resolve(parts).await)
 }
 
 /// Signing keys and registry pool of the mounted tenant context.
@@ -144,47 +109,9 @@ pub(crate) struct SessionKeys<'a> {
     pub registry: Pool,
 }
 
-/// The mounted context's [`SessionKeys`], in `request_org`'s order.
-/// `None` when no context is mounted.
+/// The mounted context's [`SessionKeys`]. `None` when no context is mounted.
 pub(crate) fn session_keys(ext: &axum::http::Extensions) -> Option<SessionKeys<'_>> {
-    use crate::extractors::{DatabaseTenantContext, TenantContext};
-
-    macro_rules! try_ctx {
-        ($db:ty) => {
-            if let Some(ctx) = ext.get::<Arc<TenantContext<$db>>>() {
-                return Some(SessionKeys {
-                    session: &ctx.session_secret,
-                    operator: &ctx.operator_secret,
-                    registry: ctx.pools.registry_pool(),
-                });
-            }
-        };
-    }
-    macro_rules! try_db_ctx {
-        ($db:ty) => {
-            if let Some(ctx) = ext.get::<Arc<DatabaseTenantContext<$db>>>() {
-                return Some(SessionKeys {
-                    session: &ctx.session_secret,
-                    operator: &ctx.operator_secret,
-                    registry: ctx.registry.clone(),
-                });
-            }
-        };
-    }
-
-    #[cfg(feature = "postgres")]
-    try_ctx!(sqlx::Postgres);
-    #[cfg(feature = "sqlite")]
-    try_ctx!(sqlx::Sqlite);
-    #[cfg(feature = "mysql")]
-    try_ctx!(sqlx::MySql);
-    #[cfg(feature = "postgres")]
-    try_db_ctx!(sqlx::Postgres);
-    #[cfg(feature = "sqlite")]
-    try_db_ctx!(sqlx::Sqlite);
-    #[cfg(feature = "mysql")]
-    try_db_ctx!(sqlx::MySql);
-    None
+    Some(MountedTenantContext::of(ext)?.session_keys())
 }
 
 /// `org`'s data pool, from the same context as `request_org`.
@@ -193,41 +120,7 @@ pub(crate) async fn request_pool(
     ext: &axum::http::Extensions,
     org: &Org,
 ) -> Option<Result<Pool, TenancyError>> {
-    use crate::extractors::{DatabaseTenantContext, TenantContext};
-
-    macro_rules! try_ctx {
-        ($db:ty) => {
-            if let Some(ctx) = ext.get::<Arc<TenantContext<$db>>>() {
-                return Some(ctx.pools.scoped_pool_dyn(org).await);
-            }
-        };
-    }
-    macro_rules! try_db_ctx {
-        ($db:ty, $variant:path) => {
-            if let Some(ctx) = ext.get::<Arc<DatabaseTenantContext<$db>>>() {
-                return Some(
-                    ctx.pools
-                        .pool_for_org(org)
-                        .await
-                        .map(|dbp| $variant(dbp.pool().clone())),
-                );
-            }
-        };
-    }
-
-    #[cfg(feature = "postgres")]
-    try_ctx!(sqlx::Postgres);
-    #[cfg(feature = "sqlite")]
-    try_ctx!(sqlx::Sqlite);
-    #[cfg(feature = "mysql")]
-    try_ctx!(sqlx::MySql);
-    #[cfg(feature = "postgres")]
-    try_db_ctx!(sqlx::Postgres, Pool::Postgres);
-    #[cfg(feature = "sqlite")]
-    try_db_ctx!(sqlx::Sqlite, Pool::Sqlite);
-    #[cfg(feature = "mysql")]
-    try_db_ctx!(sqlx::MySql, Pool::Mysql);
-    None
+    Some(MountedTenantContext::of(ext)?.pool_for(org).await)
 }
 
 /// The tenant and pool this request's credential must be checked

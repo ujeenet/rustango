@@ -11,6 +11,26 @@ targets are still checked first. These calls now share pooled clients instead of
 building one per call. `HTTP(S)_PROXY` is no longer read, also for webhooks with
 `allow_private_targets(true)`.
 
+### Security — one tenant context per request (#1826)
+
+Auth, sessions, `Tenant<DB>` and `DatabaseTenant<DB>` now read the same mounted context,
+so an app with two contexts can no longer authenticate one tenant and serve another.
+
+### Changed — MCP authed handlers always have a token lifecycle (#1827)
+
+Authed routers carry their `JwtLifecycle` by type, so the unreachable "mcp auth not configured" 500s are gone.
+
+### Security — HMAC replay check is one atomic `add` (#1828)
+
+Two simultaneous copies of a signed request no longer both pass the nonce store.
+Nonces are kept `2 × tolerance_secs`, so a future-dated request cannot be replayed
+once its nonce expires. A `NullCache` nonce store, or a failing one, now warns.
+
+### Added — `testkit::CaptureWriter` (#1829)
+
+One shared writer for tests that assert on rendered `tracing` output; replaces ten copies.
+Needs the `testkit` and `runtime` features.
+
 ## [0.59.5] — 2026-09-29
 
 Tagged only; not published to crates.io.
