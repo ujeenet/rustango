@@ -912,6 +912,40 @@ mod tests {
         assert!(err.to_string().contains("exceeds"), "{err}");
     }
 
+    /// A chunked body with no Content-Length is capped as it streams.
+    #[tokio::test]
+    async fn streamed_success_bodies_are_bounded() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = sock.read(&mut [0; 4096]).await;
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                                transfer-encoding: chunked\r\n\r\n";
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let chunk = format!("10000\r\n{}\r\n", " ".repeat(0x10000));
+                    for _ in 0..=SUCCESS_BODY_MAX / 0x10000 {
+                        if sock.write_all(chunk.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                    let _ = sock.write_all(b"0\r\n\r\n").await;
+                });
+            }
+        });
+        let resp = reqwest::get(format!("{base}/x")).await.unwrap();
+        assert_eq!(resp.content_length(), None, "the body must be streamed");
+        let p = OAuth2Provider::new("t", "c", "s", "https://app/cb", "", format!("{base}/token"));
+        let (_, flow) = p.begin();
+        let err = p
+            .complete_with(&flow, "code", &flow.state, &loopback())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
     #[tokio::test]
     async fn complete_refuses_a_metadata_token_url() {
         let p = OAuth2Provider::new(
