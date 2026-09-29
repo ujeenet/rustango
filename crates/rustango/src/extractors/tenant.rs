@@ -19,8 +19,8 @@ use sqlx::Database;
 
 use crate::sql::sqlx;
 use crate::tenancy::{
-    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, OrgResolver, TenancyError,
-    TenantConn, TenantPools,
+    session::SessionSecret, ChainResolver, DatabasePools, DefaultTenantDb, Org, OrgResolver,
+    TenancyError, TenantConn, TenantPools,
 };
 
 /// What the [`Tenant`] extractor reads from request extensions.
@@ -56,7 +56,16 @@ enum TenantConnCell<DB: Database> {
     /// Postgres-only build never constructs it, but the arms that
     /// match it still have to compile.
     #[cfg_attr(not(any(feature = "sqlite", feature = "mysql")), allow(dead_code))]
-    Deferred(Arc<TenantPools<DB>>),
+    Deferred(ConnSource<DB>),
+}
+
+/// The pools a deferred connection comes from: the context the
+/// extractor found on the request.
+#[cfg_attr(not(any(feature = "sqlite", feature = "mysql")), allow(dead_code))]
+enum ConnSource<DB: Database> {
+    Tenant(Arc<TenantPools<DB>>),
+    /// The pure SQLite / MySQL stack's `DatabaseTenantContext` (#1802).
+    Database(Arc<DatabasePools<DB>>),
 }
 
 /// Finds the request's tenant and gives the handler a connection
@@ -105,11 +114,16 @@ impl<DB: Database> Tenant<DB> {
     /// Take a connection if none is held yet. Does nothing once the
     /// cell is `Ready`, which on Postgres it always is.
     async fn ensure_conn(&mut self) -> Result<(), TenancyError> {
-        let pools = match &self.conn {
+        let conn = match &self.conn {
             TenantConnCell::Ready(_) => return Ok(()),
-            TenantConnCell::Deferred(pools) => Arc::clone(pools),
+            TenantConnCell::Deferred(ConnSource::Tenant(pools)) => {
+                pools.database_acquire(&self.org).await?
+            }
+            TenantConnCell::Deferred(ConnSource::Database(pools)) => {
+                let pool = pools.pool_for_org(&self.org).await?;
+                TenantConn::database(pool.pool().acquire().await?)
+            }
         };
-        let conn = pools.database_acquire(&self.org).await?;
         self.conn = TenantConnCell::Ready(conn);
         Ok(())
     }
@@ -220,8 +234,9 @@ impl Tenant<sqlx::Postgres> {
 /// Why the [`Tenant`] extractor failed.
 #[derive(Debug)]
 pub enum TenantRejection {
-    /// No `TenantContext` extension, so the server was not built
-    /// with `rustango::server::Builder`.
+    /// No `TenantContext` extension (nor, on SQLite / MySQL, a
+    /// `DatabaseTenantContext`), so the server was not built with
+    /// `rustango::server::Builder`.
     MissingContext,
     /// No tenant matches the request's host, header or path.
     NotFound,
@@ -309,9 +324,53 @@ where
     }
 }
 
-// `Tenant<sqlx::Sqlite>` uses `TenantPools::database_acquire`.
-// Database mode only, since schema mode needs Postgres. Routing is
-// set up as in the PG case, just with no `SET search_path`.
+/// The SQLite / MySQL extractor. It reads `TenantContext<DB>`, or the
+/// pure stack's `DatabaseTenantContext<DB>` (#1802). Database mode only.
+///
+/// It takes no connection yet. A handler that only uses `t.pool()` then
+/// holds none at all; `pool_conn()` and `into_conn()` take one when
+/// asked. Otherwise every concurrent request pins a connection it may
+/// never use, and at `max_conn` later acquires time out.
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
+async fn deferred_tenant<DB>(parts: &mut Parts) -> Result<Tenant<DB>, TenantRejection>
+where
+    DB: Database,
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let internal = |e: TenancyError| TenantRejection::Internal(e.to_string());
+    if let Some(ctx) = parts.extensions.get::<Arc<TenantContext<DB>>>().cloned() {
+        let org = ctx
+            .resolver
+            .resolve(parts, &ctx.pools.registry_pool())
+            .await
+            .map_err(internal)?
+            .ok_or(TenantRejection::NotFound)?;
+        let pool = ctx.pools.scoped_pool_dyn(&org).await.map_err(internal)?;
+        return Ok(Tenant {
+            org,
+            conn: TenantConnCell::Deferred(ConnSource::Tenant(Arc::clone(&ctx.pools))),
+            pool,
+        });
+    }
+    let ctx = parts
+        .extensions
+        .get::<Arc<super::DatabaseTenantContext<DB>>>()
+        .ok_or(TenantRejection::MissingContext)?
+        .clone();
+    let org = ctx
+        .resolver
+        .resolve(parts, &ctx.registry)
+        .await
+        .map_err(internal)?
+        .ok_or(TenantRejection::NotFound)?;
+    let pool = ctx.pools.pool_for_org(&org).await.map_err(internal)?;
+    Ok(Tenant {
+        org,
+        conn: TenantConnCell::Deferred(ConnSource::Database(Arc::clone(&ctx.pools))),
+        pool: crate::sql::Pool::from(pool.pool().clone()),
+    })
+}
+
 #[cfg(feature = "sqlite")]
 impl<S> FromRequestParts<S> for Tenant<sqlx::Sqlite>
 where
@@ -320,36 +379,10 @@ where
     type Rejection = TenantRejection;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let ctx = parts
-            .extensions
-            .get::<Arc<TenantContext<sqlx::Sqlite>>>()
-            .ok_or(TenantRejection::MissingContext)?
-            .clone();
-        let org = ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?
-            .ok_or(TenantRejection::NotFound)?;
-        let pool = ctx
-            .pools
-            .scoped_pool_dyn(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        // Take no connection yet. A handler that only uses
-        // `t.pool()` then holds none at all; `pool_conn()` and
-        // `into_conn()` take one when asked. Otherwise every
-        // concurrent request pins a connection it may never use, and
-        // at `max_conn` later acquires time out.
-        Ok(Tenant {
-            org,
-            conn: TenantConnCell::Deferred(Arc::clone(&ctx.pools)),
-            pool,
-        })
+        deferred_tenant(parts).await
     }
 }
 
-// `Tenant<sqlx::MySql>` works the same way. Database mode only.
 #[cfg(feature = "mysql")]
 impl<S> FromRequestParts<S> for Tenant<sqlx::MySql>
 where
@@ -358,31 +391,6 @@ where
     type Rejection = TenantRejection;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let ctx = parts
-            .extensions
-            .get::<Arc<TenantContext<sqlx::MySql>>>()
-            .ok_or(TenantRejection::MissingContext)?
-            .clone();
-        let org = ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?
-            .ok_or(TenantRejection::NotFound)?;
-        let pool = ctx
-            .pools
-            .scoped_pool_dyn(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        // Take no connection yet. A handler that only uses
-        // `t.pool()` then holds none at all; `pool_conn()` and
-        // `into_conn()` take one when asked. Otherwise every
-        // concurrent request pins a connection it may never use, and
-        // at `max_conn` later acquires time out.
-        Ok(Tenant {
-            org,
-            conn: TenantConnCell::Deferred(Arc::clone(&ctx.pools)),
-            pool,
-        })
+        deferred_tenant(parts).await
     }
 }

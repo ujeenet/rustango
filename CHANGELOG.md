@@ -29,6 +29,12 @@ instead of a table name and `&[i64]`. The built-ins write through the ORM on the
 schema's PK column, so a text PK can no longer match the wrong rows on MySQL.
 A `PkSet` holds at most `PkSet::MAX_KEYS` (10 000), under SQLite's bind cap.
 
+### Fixed — MCP on the pure SQLite / MySQL stack (#1802)
+
+`Tenant<Sqlite>` / `Tenant<MySql>` now also read `DatabaseTenantContext`, so the
+`mcp::*_for` routers serve that stack. `mcp::router` and `mcp::tenant_router` no
+longer mount a `GET` SSE route that always answered `500`.
+
 ## [0.59.4] — 2026-09-29
 
 Tagged only; not published to crates.io.
