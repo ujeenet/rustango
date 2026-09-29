@@ -815,7 +815,10 @@ mod tests {
                 "--exact",
                 "outbound::tests::system_proxy_child",
             ])
-            .env(CHILD_ENV, "1");
+            .env(CHILD_ENV, "1")
+            // An inherited NO_PROXY=127.0.0.1 would bypass the proxy anyway.
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy");
         for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy"] {
             child.env(var, &proxy);
         }
