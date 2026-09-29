@@ -104,6 +104,7 @@ rpassword = "7.5"
 # Admin (HTTP)
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query", "original-uri"] }
 tower = { version = "0.5", features = ["util"] }
+http-body = "1"
 http-body-util = "0.1"
 serde_urlencoded = "0.7"
 base64 = "0.22"

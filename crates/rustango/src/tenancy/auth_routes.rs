@@ -244,8 +244,20 @@ impl JwtAuth {
     /// misconfigured deployment refuses to start.
     #[must_use]
     pub fn new(cfg: Config) -> Self {
+        let jwt = cfg.build_jwt();
+        if jwt.jti_store_is_process_local() {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    target: "rustango::tenancy",
+                    "JWT revocation uses an in-memory store: a logged-out token still works on \
+                     other replicas and after a restart; set `auth_routes::Config::jti_store` \
+                     to a Redis or database store"
+                );
+            });
+        }
         Self(Arc::new(AuthState {
-            jwt: cfg.build_jwt(),
+            jwt,
             extra_claims: cfg.extra_claims,
             prefix: cfg.prefix,
         }))

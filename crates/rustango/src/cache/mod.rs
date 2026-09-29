@@ -101,6 +101,12 @@ pub trait Cache: Send + Sync + 'static {
     /// Remove all entries from the cache.
     async fn clear(&self) -> Result<(), CacheError>;
 
+    /// `true` when entries live in this process only, so other replicas
+    /// never see them. `check --deploy` flags security state kept here.
+    fn is_process_local(&self) -> bool {
+        false
+    }
+
     /// Add `by` to the integer counter at `key` and return the new
     /// value. A value that is not an integer counts as 0.
     ///
@@ -675,6 +681,10 @@ impl Default for InMemoryCache {
 
 #[async_trait]
 impl Cache for InMemoryCache {
+    fn is_process_local(&self) -> bool {
+        true
+    }
+
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let store = self.inner.read().await;
         Ok(store.map.get(key).and_then(|e| {
@@ -836,15 +846,10 @@ impl Cache for InMemoryCache {
 ///
 /// ## Limits
 ///
-/// **Writes are not atomic, and a torn read does not always fail.**
-/// `std::fs::write` truncates and then writes, so a reader can see a
-/// partial file. A tear inside the header fails `decode`, and `get`
-/// then drops the entry. But the value carries no length, so a tear
-/// after the key returns `Some(_)` with a silently short value.
-///
-/// There is no per-entry lock file and no entry cap with a cull
-/// strategy. Write-to-temp plus
-/// rename, a value length, and file locking are tracked in #1530.
+/// `set` writes a temp file and renames it into place, so readers see
+/// the old or the new entry, never a partial one. Clearing an expired
+/// entry is not locked, so racing `add`s on an expired key can both win.
+/// There is no entry cap with a cull strategy. The directory is per host.
 pub struct FileCache {
     dir: std::path::PathBuf,
 }
@@ -944,10 +949,61 @@ impl FileCache {
         let expired = expires_at != 0 && Self::now_unix_millis() > expires_at;
         Some((key, value, expired))
     }
+
+    /// Write an entry to a fresh temp file in the cache dir, ready to be
+    /// renamed or linked into place. The name has no `.cache` extension.
+    fn write_tmp(&self, bytes: &[u8]) -> Result<std::path::PathBuf, CacheError> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
+        let tmp = self
+            .dir
+            .join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&tmp, bytes).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            CacheError::Connection(format!("write: {e}"))
+        })?;
+        Ok(tmp)
+    }
+
+    /// Put `tmp` at `path` only if `path` is free. `Ok(false)` when taken.
+    ///
+    /// Where hard links fail (FAT, some network mounts) it falls back to
+    /// an exclusive create, which a reader can briefly see half-written.
+    fn link_new(
+        tmp: &std::path::Path,
+        path: &std::path::Path,
+        bytes: &[u8],
+        link: fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    ) -> Result<bool, CacheError> {
+        use std::io::{ErrorKind, Write as _};
+        match link(tmp, path) {
+            Ok(()) => return Ok(true),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
+            Err(_) => {}
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
+            Err(e) => return Err(CacheError::Connection(format!("create_new: {e}"))),
+        };
+        file.write_all(bytes)
+            .and_then(|()| file.sync_data())
+            .map_err(|e| CacheError::Connection(format!("write: {e}")))?;
+        Ok(true)
+    }
 }
 
 #[async_trait]
 impl Cache for FileCache {
+    /// One directory per host: other replicas don't see these entries.
+    fn is_process_local(&self) -> bool {
+        true
+    }
+
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let path = self.key_path(key);
         let buf = match std::fs::read(&path) {
@@ -969,12 +1025,11 @@ impl Cache for FileCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
-        let path = self.key_path(key);
-        std::fs::write(&path, Self::encode(key, value, ttl))
-            .map_err(|e| CacheError::Connection(format!("write: {e}")))?;
-        Ok(())
+        let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
+        std::fs::rename(&tmp, self.key_path(key)).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            CacheError::Connection(format!("rename: {e}"))
+        })
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
@@ -988,6 +1043,22 @@ impl Cache for FileCache {
 
     async fn exists(&self, key: &str) -> Result<bool, CacheError> {
         Ok(self.get(key).await?.is_some())
+    }
+
+    /// Atomic across processes: the entry is written to a temp file, then
+    /// hard-linked into place, which fails when the key's file exists.
+    async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let path = self.key_path(key);
+        let bytes = Self::encode(key, value, ttl);
+        let tmp = self.write_tmp(&bytes)?;
+        let link = || Self::link_new(&tmp, &path, &bytes, |a, b| std::fs::hard_link(a, b));
+        let mut won = link();
+        // An expired entry does not hold the key; `get` removes it, then retry once.
+        if matches!(won, Ok(false)) && self.get(key).await.is_ok_and(|v| v.is_none()) {
+            won = link();
+        }
+        let _ = std::fs::remove_file(&tmp);
+        won
     }
 
     async fn clear(&self) -> Result<(), CacheError> {
@@ -1138,6 +1209,39 @@ mod settings_tests {
         let cache = from_settings_async(&s).await.expect("memory builds");
         cache.set("k", "v", None).await.unwrap();
         assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    }
+}
+
+#[cfg(test)]
+mod file_cache_tests {
+    use super::*;
+
+    /// Each host has its own directory, so replicas don't share entries.
+    #[test]
+    fn file_cache_reports_process_local() {
+        assert!(FileCache::new("unused").is_process_local());
+    }
+
+    /// Without hard links, `add` still claims the key exactly once.
+    #[test]
+    fn add_falls_back_to_exclusive_create_without_hard_links() {
+        let dir = std::env::temp_dir().join(format!("rustango-fc-nolink-{}", uuid::Uuid::new_v4()));
+        let cache = FileCache::new(&dir);
+        let path = cache.key_path("k");
+        let bytes = FileCache::encode("k", "v", None);
+        let tmp = cache.write_tmp(&bytes).unwrap();
+        let no_link = |_: &std::path::Path, _: &std::path::Path| {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        };
+        let first = FileCache::link_new(&tmp, &path, &bytes, no_link);
+        let second = FileCache::link_new(&tmp, &path, &bytes, no_link);
+        let stored = std::fs::read(&path)
+            .ok()
+            .and_then(|b| FileCache::decode(&b));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(first.unwrap(), "first claim wins");
+        assert!(!second.unwrap(), "second claim loses");
+        assert_eq!(stored.map(|(_, v, _)| v).as_deref(), Some("v"));
     }
 }
 

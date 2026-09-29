@@ -42,7 +42,7 @@ use crate::hex::hex_encode;
 /// True when the cell is SQL NULL or missing. sqlx-sqlite decodes NULL
 /// as `0` / `false` / `""` instead of erroring (#1766), so check first.
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-fn cell_is_null<R: sqlx::Row, I: sqlx::ColumnIndex<R>>(row: &R, index: I) -> bool {
+pub(super) fn cell_is_null<R: sqlx::Row, I: sqlx::ColumnIndex<R>>(row: &R, index: I) -> bool {
     use sqlx::ValueRef as _;
     match row.try_get_raw(index) {
         Ok(v) => v.is_null(),

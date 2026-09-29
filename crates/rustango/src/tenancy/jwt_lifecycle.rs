@@ -175,6 +175,12 @@ impl JwtLifecycle {
         self
     }
 
+    /// `true` when revocations live in this process only.
+    #[must_use]
+    pub fn jti_store_is_process_local(&self) -> bool {
+        self.jti_store.is_process_local()
+    }
+
     /// Override the access token TTL (in seconds).
     #[must_use]
     pub fn with_access_ttl(mut self, secs: i64) -> Self {

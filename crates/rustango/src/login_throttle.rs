@@ -265,6 +265,7 @@ impl LoginThrottle {
 
 async fn check_lock(key: &str) -> Result<(), LoginRefused> {
     let lockout = crate::account_lockout::shared();
+    crate::account_lockout::warn_once_if_process_local(lockout);
     if lockout.is_locked(key).await {
         return Err(LoginRefused::Throttled {
             retry_after_secs: lockout.lock_duration().as_secs().max(1),
@@ -356,6 +357,11 @@ fn account_key(scope_key: &str, username: &str) -> String {
     }
     key
 }
+
+/// The per-IP and global buckets have no shared backend; `check --deploy` says so.
+pub(crate) const PROCESS_LOCAL_NOTE: &str =
+    "login per-IP and global limits are counted per process: with N replicas each limit is N times \
+     higher; set `[auth] login_*` per replica or rate-limit logins at the proxy";
 
 static SHARED: crate::boot_slot::BootSlot<LoginThrottle> = crate::boot_slot::BootSlot::new();
 

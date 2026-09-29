@@ -202,3 +202,124 @@ async fn memory_backend_agrees_on_sub_second_ttl() {
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(cache.get("k").await.unwrap(), None);
 }
+
+/// Racing `add`s on one key: exactly one wins, and an expired entry frees it.
+#[test]
+fn concurrent_adds_have_exactly_one_winner() {
+    let dir = unique_tmp_dir("add");
+    for round in 0..40 {
+        let key = format!("k{round}");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let wins: usize = (0..8)
+            .map(|_| {
+                let (dir, key, barrier) = (dir.clone(), key.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap();
+                    barrier.wait();
+                    rt.block_on(FileCache::new(dir).add(&key, "v", None))
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| usize::from(h.join().unwrap()))
+            .sum();
+        assert_eq!(wins, 1, "round {round}");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let cache = FileCache::new(&dir);
+        assert!(cache
+            .add("ttl", "a", Some(Duration::from_millis(20)))
+            .await
+            .unwrap());
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            cache.add("ttl", "b", None).await.unwrap(),
+            "expired entry frees the key"
+        );
+        assert_eq!(cache.get("ttl").await.unwrap().as_deref(), Some("b"));
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `set` must replace the file atomically: a reader racing a rewrite sees
+/// the old or the new value, never an empty or short one.
+#[test]
+fn concurrent_set_never_shows_a_torn_value() {
+    let dir = unique_tmp_dir("torn");
+    let value = "v".repeat(256 * 1024);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(FileCache::new(&dir).set("k", &value, None))
+        .unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let readers: Vec<_> = (0..3)
+        .map(|_| {
+            let (dir, value, done) = (dir.clone(), value.clone(), done.clone());
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                let cache = FileCache::new(dir);
+                let mut bad = 0usize;
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    if rt.block_on(cache.get("k")).unwrap().as_deref() != Some(value.as_str()) {
+                        bad += 1;
+                    }
+                }
+                bad
+            })
+        })
+        .collect();
+    let cache = FileCache::new(&dir);
+    for _ in 0..300 {
+        rt.block_on(cache.set("k", &value, None)).unwrap();
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let bad: usize = readers.into_iter().map(|h| h.join().unwrap()).sum();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(bad, 0, "readers saw a missing or torn value");
+}
+
+/// Racing `add`s over an expired entry: exactly one wins. A reader that
+/// saw the old entry must not delete the winner's fresh one.
+#[test]
+#[ignore = "open: clearing an expired entry needs a per-key lock"]
+fn concurrent_adds_over_expired_entry_have_exactly_one_winner() {
+    let dir = unique_tmp_dir("add-exp");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    for round in 0..300 {
+        let key = format!("k{round}");
+        rt.block_on(FileCache::new(&dir).set(&key, "old", Some(Duration::from_millis(1))))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(3));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let wins: usize = (0..8)
+            .map(|_| {
+                let (dir, key, barrier) = (dir.clone(), key.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap();
+                    barrier.wait();
+                    rt.block_on(FileCache::new(dir).add(&key, "v", None))
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| usize::from(h.join().unwrap()))
+            .sum();
+        assert_eq!(wins, 1, "round {round}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

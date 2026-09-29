@@ -44,6 +44,7 @@ pub struct Post {
     /// SQLite — and the emitter picks per dialect, which is the point of
     /// building the table from `SCHEMA` rather than by hand.
     pub published: bool,
+    pub score: Option<i64>,
 }
 
 /// Rebuild the table and seed the four rows every scenario reads.
@@ -53,17 +54,18 @@ pub struct Post {
 async fn seeded(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Post>(pool).await;
 
-    for (title, view_count, published) in [
-        ("Intro to Rust", 100_i64, true),
-        ("Advanced Lifetimes", 50, true),
-        ("Draft Post", 0, false),
-        ("Performance Tips", 200, true),
+    for (title, view_count, published, score) in [
+        ("Intro to Rust", 100_i64, true, Some(7_i64)),
+        ("Advanced Lifetimes", 50, true, None),
+        ("Draft Post", 0, false, None),
+        ("Performance Tips", 200, true, Some(9)),
     ] {
         let mut p = Post {
             id: Auto::default(),
             title: title.into(),
             view_count,
             published,
+            score,
         };
         p.insert_pool(pool).await.expect("seed row");
     }
@@ -179,6 +181,34 @@ async fn values_list_flat_decodes_a_boolean_column(pool: &Pool) {
     );
 }
 
+/// NULL must error into a bare `i64` and read as `None` into
+/// `Option<i64>`; SQLite used to hand back `0` (#1773).
+async fn values_list_flat_null_needs_an_option(pool: &Pool) {
+    let flat = || {
+        Post::objects()
+            .order_by(&[("id", false)])
+            .values_list_flat("score")
+    };
+    let err = flat().fetch::<i64>(pool).await.expect_err("NULL into i64");
+    assert!(err.to_string().contains("score"), "names the column: {err}");
+    let scores = flat()
+        .fetch::<Option<i64>>(pool)
+        .await
+        .expect("Option<i64>");
+    assert_eq!(scores, vec![Some(7), None, None, Some(9)]);
+
+    let one = || Post::objects().where_(Post::id.eq(2_i64));
+    one()
+        .value::<i64>("score", pool)
+        .await
+        .expect_err("value NULL into i64");
+    let v = one()
+        .value::<Option<i64>>("score", pool)
+        .await
+        .expect("value Option<i64>");
+    assert_eq!(v, Some(None));
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
@@ -187,5 +217,6 @@ tri_dialect_test! {
         values_list_flat_decodes_an_integer_column,
         values_list_flat_decodes_a_string_column,
         values_list_flat_decodes_a_boolean_column,
+        values_list_flat_null_needs_an_option,
     ],
 }

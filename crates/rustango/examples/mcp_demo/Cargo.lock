@@ -1599,6 +1599,7 @@ dependencies = [
  "cookie",
  "hmac",
  "http",
+ "http-body",
  "http-body-util",
  "indexmap",
  "inventory",
