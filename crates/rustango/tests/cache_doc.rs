@@ -94,12 +94,13 @@ async fn typed_json_helpers_roundtrip() {
 async fn entries_expire_after_their_ttl() {
     let cache = InMemoryCache::new();
     cache
-        .set("flash", "x", Some(Duration::from_millis(50)))
+        .set("flash", "x", Some(Duration::from_millis(500)))
         .await
         .unwrap();
+    // Wide TTL: a loaded CI runner once let 50 ms pass before this read.
     assert_eq!(cache.get("flash").await.unwrap().as_deref(), Some("x"));
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(cache.get("flash").await.unwrap(), None, "expired after TTL");
 }
 

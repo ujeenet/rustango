@@ -5604,7 +5604,7 @@ mod gen_tests {
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[tokio::test]
     async fn sendtestemail_help_short_circuits_without_settings_lookup() {
         let mut buf: Vec<u8> = Vec::new();
