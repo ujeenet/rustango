@@ -69,7 +69,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::outbound::{bounded_text, capped_body, BodyError, CheckedTarget, TargetPolicy};
+use crate::outbound::{self, bounded_text, capped_body, BodyError, EgressCache, TargetPolicy};
 
 pub mod providers;
 pub mod registry;
@@ -173,7 +173,7 @@ pub type UserMapper = Arc<
 >;
 
 /// Changes the HTTP client builder, e.g. to add a root CA or an mTLS
-/// identity. Redirect, proxy and address pinning are set after it runs.
+/// identity. Redirect, proxy and address checks are set after it runs.
 pub type ClientConfig = Arc<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>;
 
 /// Configuration for one OAuth2/OIDC provider.
@@ -197,6 +197,7 @@ pub struct OAuth2Provider {
     /// providers where userinfo follows OIDC claims spec).
     pub user_mapper: UserMapper,
     client_config: Option<ClientConfig>,
+    http: EgressCache,
 }
 
 impl std::fmt::Debug for OAuth2Provider {
@@ -241,6 +242,7 @@ impl OAuth2Provider {
             use_pkce: true,
             user_mapper: Arc::new(default_user_mapper),
             client_config: None,
+            http: EgressCache::default(),
         }
     }
 
@@ -287,13 +289,14 @@ impl OAuth2Provider {
     }
 
     /// Adjust the token and userinfo HTTP client, e.g. a private root CA.
-    /// It cannot add a proxy: calls connect straight to checked addresses.
+    /// Any proxy it sets is dropped; use `RUSTANGO_OUTBOUND_PROXY`.
     #[must_use]
     pub fn with_client_config(
         mut self,
         f: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync + 'static,
     ) -> Self {
         self.client_config = Some(Arc::new(f));
+        self.http = EgressCache::default();
         self
     }
 
@@ -330,9 +333,9 @@ impl OAuth2Provider {
     async fn discover(mut self, issuer: &str, policy: &TargetPolicy) -> Result<Self, OAuthError> {
         let issuer = issuer.trim_end_matches('/');
         let url = format!("{issuer}/.well-known/openid-configuration");
-        let (http, target) = self.checked_client(&url, policy).await?;
-        let resp = http
-            .get(target)
+        let resp = self
+            .checked(&url, reqwest::Method::GET, policy)
+            .await?
             .send()
             .await
             .map_err(|e| OAuthError::Discovery(format!("GET {url}: {e}")))?;
@@ -448,9 +451,9 @@ impl OAuth2Provider {
         if self.use_pkce {
             body.push(("code_verifier", &flow.pkce_verifier));
         }
-        let (http, target) = self.checked_client(&self.token_url, policy).await?;
-        let resp = http
-            .post(target)
+        let resp = self
+            .checked(&self.token_url, reqwest::Method::POST, policy)
+            .await?
             .header("Accept", "application/json")
             .form(&body)
             .send()
@@ -462,9 +465,9 @@ impl OAuth2Provider {
             .as_deref()
             .ok_or(OAuthError::BadConfig("userinfo_url not set"))?;
 
-        let (http, target) = self.checked_client(userinfo_url, policy).await?;
-        let resp = http
-            .get(target)
+        let resp = self
+            .checked(userinfo_url, reqwest::Method::GET, policy)
+            .await?
             .bearer_auth(&tokens.access_token)
             .header("Accept", "application/json")
             .send()
@@ -482,25 +485,37 @@ impl OAuth2Provider {
 const ERROR_BODY_MAX: usize = 256;
 /// Cap on a success body: discovery, token and userinfo JSON (#1793).
 const SUCCESS_BODY_MAX: usize = 1 << 20;
+/// Timeout for discovery, token and userinfo calls.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl OAuth2Provider {
-    /// A no-redirect client pinned to `url`'s checked addresses: a tenant
-    /// can set the issuer, so discovered endpoints may point anywhere (#1716).
-    async fn checked_client(
+    /// Check `url`: a tenant can set the issuer, so discovered endpoints
+    /// may point anywhere (#1716). Clients are reused across calls (#1792).
+    async fn checked(
         &self,
         url: &str,
+        method: reqwest::Method,
         policy: &TargetPolicy,
-    ) -> Result<(reqwest::Client, reqwest::Url), OAuthError> {
-        let target = CheckedTarget::check(url, policy)
+    ) -> Result<reqwest::RequestBuilder, OAuthError> {
+        // The hook may set its own timeout, so only the shared client gets one per request.
+        let (egress, timeout) = match &self.client_config {
+            Some(config) => (
+                self.http.get(policy.clone(), || {
+                    config(reqwest::Client::builder().timeout(HTTP_TIMEOUT))
+                })?,
+                None,
+            ),
+            None => (outbound::shared(policy.clone())?, Some(HTTP_TIMEOUT)),
+        };
+        let target = egress
+            .check(url)
             .await
             .map_err(|e| OAuthError::Http(e.to_string()))?;
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
-        if let Some(config) = &self.client_config {
-            builder = config(builder);
-        }
-        // `client` re-applies no-redirect and pinning after the hook.
-        let client = target.client(builder)?;
-        Ok((client, target.url().clone()))
+        let req = target.request(method);
+        Ok(match timeout {
+            Some(t) => req.timeout(t),
+            None => req,
+        })
     }
 }
 
@@ -852,6 +867,57 @@ mod tests {
             matches!(err, OAuthError::BadStatus { status: 418, .. }),
             "{err}"
         );
+    }
+
+    /// Serves `/token` and `/userinfo`; the set holds each caller's peer address.
+    async fn peer_recording_provider() -> (
+        OAuth2Provider,
+        Arc<std::sync::Mutex<std::collections::HashSet<std::net::SocketAddr>>>,
+    ) {
+        use axum::extract::ConnectInfo;
+        let peers = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let (p1, p2) = (peers.clone(), peers.clone());
+        let app = axum::Router::new()
+            .route(
+                "/token",
+                axum::routing::post(move |ConnectInfo(a): ConnectInfo<std::net::SocketAddr>| {
+                    p1.lock().unwrap().insert(a);
+                    async { r#"{"access_token":"t"}"# }
+                }),
+            )
+            .route(
+                "/userinfo",
+                axum::routing::get(move |ConnectInfo(a): ConnectInfo<std::net::SocketAddr>| {
+                    p2.lock().unwrap().insert(a);
+                    async { r#"{"sub":"u1"}"# }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let svc = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        tokio::spawn(async move { axum::serve(listener, svc).await.unwrap() });
+        let p = OAuth2Provider::new("t", "c", "s", "https://app/cb", "", format!("{base}/token"))
+            .with_userinfo_url(format!("{base}/userinfo"));
+        (p, peers)
+    }
+
+    /// Token and userinfo calls reuse one pooled connection (#1792).
+    #[tokio::test]
+    async fn calls_reuse_one_connection() {
+        let (p, peers) = peer_recording_provider().await;
+        let (_, flow) = p.begin();
+        p.complete_with(&flow, "code", &flow.state, &loopback())
+            .await
+            .unwrap();
+        assert_eq!(peers.lock().unwrap().len(), 1);
+
+        let (p, peers) = peer_recording_provider().await;
+        let p = p.with_client_config(|b| b);
+        let (_, flow) = p.begin();
+        p.complete_with(&flow, "code", &flow.state, &loopback())
+            .await
+            .unwrap();
+        assert_eq!(peers.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -1,13 +1,16 @@
 //! Outbound HTTP to URLs that config can set: tenant SSO issuers,
 //! Slack hooks, webhook subscribers (#1670, #1716).
 //!
-//! [`CheckedTarget`] is the only way to get a client here: it refuses
-//! non-public addresses, pins the connection to the checked ones and
+//! [`Egress::check`] is the only way to send here: it refuses
+//! non-public addresses, the client re-checks them at connect time and
 //! never follows redirects. List private hosts and CIDRs in
 //! `RUSTANGO_OUTBOUND_ALLOW` to reach them, such as an IdP on your own
-//! network. Webhook delivery ignores that list.
+//! network. Webhook delivery ignores that list. Set
+//! `RUSTANGO_OUTBOUND_PROXY` to send every call through an egress proxy.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::cidr::CidrRange;
 
@@ -22,7 +25,7 @@ pub(crate) const ALLOW_ENV: &str = "RUSTANGO_OUTBOUND_ALLOW";
 
 /// Private targets an operator allowed. A host entry matches the URL
 /// host; a CIDR entry must cover every address the host resolves to.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Allowlist {
     hosts: Vec<String>,
     nets: Vec<CidrRange>,
@@ -65,12 +68,12 @@ fn normalize_host(host: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// Held by tests that set or read [`ALLOW_ENV`].
+/// Held by tests that set or read [`ALLOW_ENV`] or [`PROXY_ENV`].
 #[cfg(test)]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Which addresses a target may resolve to.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum TargetPolicy {
     /// Public addresses, plus what the allowlist names.
     Public(Allowlist),
@@ -120,60 +123,150 @@ impl std::fmt::Display for TargetError {
     }
 }
 
-enum Route {
-    /// `AllowPrivate`: no address check.
-    Unchecked,
-    /// IP literal that passed the check.
-    Direct,
-    /// Host name pinned to its checked (or allowlisted) addresses.
-    Pinned(String, Vec<SocketAddr>),
+impl std::error::Error for TargetError {}
+
+/// Env var: the egress proxy every checked call goes through, e.g.
+/// `http://proxy.internal:3128`. `HTTPS_PROXY` is never read.
+pub(crate) const PROXY_ENV: &str = "RUSTANGO_OUTBOUND_PROXY";
+
+fn proxy_from_env() -> Option<String> {
+    let spec = std::env::var(PROXY_ENV).ok()?;
+    let spec = spec.trim();
+    (!spec.is_empty()).then(|| spec.to_owned())
 }
 
-/// A URL whose target passed [`TargetPolicy`].
+type EgressKey = (TargetPolicy, Option<String>);
+
+/// Clients by policy and proxy, so calls reuse connections and TLS setup.
+#[derive(Default)]
+pub(crate) struct EgressCache(Mutex<HashMap<EgressKey, reqwest::Client>>);
+
+/// Clients built from a bare builder. They hold no tenant data.
+static SHARED: LazyLock<EgressCache> = LazyLock::new(EgressCache::default);
+
+/// The process-wide [`Egress`] for `policy`.
+pub(crate) fn shared(policy: TargetPolicy) -> reqwest::Result<Egress> {
+    SHARED.get(policy, reqwest::Client::builder)
+}
+
+impl EgressCache {
+    /// The client for `policy` and the current [`PROXY_ENV`], built from
+    /// `builder` on first use. The only way to get an [`Egress`].
+    pub(crate) fn get(
+        &self,
+        policy: TargetPolicy,
+        builder: impl FnOnce() -> reqwest::ClientBuilder,
+    ) -> reqwest::Result<Egress> {
+        self.get_via(policy, proxy_from_env(), builder)
+    }
+
+    fn get_via(
+        &self,
+        policy: TargetPolicy,
+        proxy: Option<String>,
+        builder: impl FnOnce() -> reqwest::ClientBuilder,
+    ) -> reqwest::Result<Egress> {
+        let key = (policy, proxy);
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let client = if let Some(c) = map.get(&key) {
+            c.clone()
+        } else {
+            let client = build_client(&key.0, key.1.as_deref(), builder())?;
+            // Keys change only with the env; stay bounded anyway.
+            if map.len() >= 16 {
+                map.clear();
+            }
+            map.insert(key.clone(), client.clone());
+            client
+        };
+        Ok(Egress {
+            policy: key.0,
+            client,
+        })
+    }
+}
+
+/// No redirects. Direct and checked, names resolve through
+/// [`CheckingResolver`]. Proxied, the proxy is operator config and is
+/// not checked.
+fn build_client(
+    policy: &TargetPolicy,
+    proxy: Option<&str>,
+    builder: reqwest::ClientBuilder,
+) -> reqwest::Result<reqwest::Client> {
+    // `no_proxy` also drops any proxy a `ClientConfig` hook added.
+    let builder = builder
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    let builder = match (proxy, policy) {
+        (Some(url), _) => builder.proxy(reqwest::Proxy::all(url)?),
+        (None, TargetPolicy::AllowPrivate) => builder,
+        (None, TargetPolicy::Public(allow)) => {
+            builder.dns_resolver(Arc::new(CheckingResolver(allow.clone())))
+        }
+    };
+    builder.build()
+}
+
+/// Checks the addresses at connect time, so a pooled client never
+/// reaches one the check did not see (DNS rebinding).
+struct CheckingResolver(Allowlist);
+
+impl reqwest::dns::Resolve for CheckingResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let allow = self.0.clone();
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs = checked_addrs(&host, lookup(&host, 0).await?, &allow)?;
+            let addrs: reqwest::dns::Addrs = Box::new(addrs.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+/// A client that only sends to targets that pass its policy.
+pub(crate) struct Egress {
+    policy: TargetPolicy,
+    client: reqwest::Client,
+}
+
+impl Egress {
+    /// Parse `url` and check it. Behind a proxy this is the only check:
+    /// the proxy resolves the name itself.
+    pub(crate) async fn check(&self, url: &str) -> Result<CheckedTarget, TargetError> {
+        Ok(CheckedTarget {
+            url: check_url(url, &self.policy).await?,
+            client: self.client.clone(),
+        })
+    }
+}
+
+/// A URL that passed its [`Egress`] policy, with the client to send it.
 pub(crate) struct CheckedTarget {
     url: reqwest::Url,
-    route: Route,
+    client: reqwest::Client,
 }
 
 impl CheckedTarget {
-    /// Parse `url` and check every address it resolves to.
-    pub(crate) async fn check(url: &str, policy: &TargetPolicy) -> Result<Self, TargetError> {
-        let url = reqwest::Url::parse(url)
-            .map_err(|e| TargetError::Invalid(format!("bad target url: {e}")))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(TargetError::Invalid(format!(
-                "scheme not allowed: {}",
-                url.scheme()
-            )));
-        }
-        let route = match policy {
-            TargetPolicy::AllowPrivate => Route::Unchecked,
-            TargetPolicy::Public(allow) => checked_route(&url, allow).await?,
-        };
-        Ok(Self { url, route })
+    /// A request to the checked URL.
+    pub(crate) fn request(&self, method: reqwest::Method) -> reqwest::RequestBuilder {
+        self.client.request(method, self.url.clone())
     }
+}
 
-    pub(crate) fn url(&self) -> &reqwest::Url {
-        &self.url
+async fn check_url(url: &str, policy: &TargetPolicy) -> Result<reqwest::Url, TargetError> {
+    let url = reqwest::Url::parse(url)
+        .map_err(|e| TargetError::Invalid(format!("bad target url: {e}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(TargetError::Invalid(format!(
+            "scheme not allowed: {}",
+            url.scheme()
+        )));
     }
-
-    /// Finish `builder`: no redirects and, when checked, no proxy and
-    /// only the checked addresses.
-    pub(crate) fn client(
-        &self,
-        builder: reqwest::ClientBuilder,
-    ) -> reqwest::Result<reqwest::Client> {
-        let mut builder = builder.redirect(reqwest::redirect::Policy::none());
-        match &self.route {
-            Route::Unchecked => {}
-            // A proxy would re-resolve the host.
-            Route::Direct => builder = builder.no_proxy(),
-            Route::Pinned(host, addrs) => {
-                builder = builder.no_proxy().resolve_to_addrs(host, addrs)
-            }
-        }
-        builder.build()
+    if let TargetPolicy::Public(allow) = policy {
+        check_host(&url, allow).await?;
     }
+    Ok(url)
 }
 
 /// Read at most `max` bytes of `resp`'s body, for an error message.
@@ -228,18 +321,23 @@ impl std::fmt::Display for BodyError {
     }
 }
 
-async fn checked_route(url: &reqwest::Url, allow: &Allowlist) -> Result<Route, TargetError> {
+async fn check_host(url: &reqwest::Url, allow: &Allowlist) -> Result<(), TargetError> {
     let host = url
         .host_str()
         .ok_or_else(|| TargetError::Invalid("target url has no host".into()))?;
     let port = url.port_or_known_default().unwrap_or(80);
     let literal = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = literal.parse::<IpAddr>() {
-        if refused_ip(ip, allow) {
-            return Err(TargetError::Blocked);
-        }
-        return Ok(Route::Direct);
+        return if refused_ip(ip, allow) {
+            Err(TargetError::Blocked)
+        } else {
+            Ok(())
+        };
     }
+    checked_addrs(host, lookup(host, port).await?, allow).map(drop)
+}
+
+async fn lookup(host: &str, port: u16) -> Result<Vec<SocketAddr>, TargetError> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
         .map_err(|e| TargetError::Dns(e.to_string()))?
@@ -247,22 +345,22 @@ async fn checked_route(url: &reqwest::Url, allow: &Allowlist) -> Result<Route, T
     if addrs.is_empty() {
         return Err(TargetError::Dns(format!("no addresses for {host}")));
     }
-    pinned_route(host, addrs, allow)
+    Ok(addrs)
 }
 
 /// Check a host's resolved addresses. An allowlisted host skips the
 /// private-range check but never the cloud-metadata one (#1796).
-fn pinned_route(
+fn checked_addrs(
     host: &str,
     addrs: Vec<SocketAddr>,
     allow: &Allowlist,
-) -> Result<Route, TargetError> {
+) -> Result<Vec<SocketAddr>, TargetError> {
     let host_allowed = allow.allows_host(host);
     let refused = |ip| is_metadata_ip(ip) || (!host_allowed && refused_ip(ip, allow));
     if addrs.iter().any(|a| refused(a.ip())) {
         return Err(TargetError::Blocked);
     }
-    Ok(Route::Pinned(host.to_owned(), addrs))
+    Ok(addrs)
 }
 
 fn refused_ip(ip: IpAddr, allow: &Allowlist) -> bool {
@@ -429,16 +527,12 @@ mod tests {
             "http://localhost/",
             "http://[::1]/",
         ] {
-            let err = CheckedTarget::check(url, &TargetPolicy::public_only())
-                .await
-                .err();
+            let err = check_url(url, &TargetPolicy::public_only()).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
         }
-        assert!(
-            CheckedTarget::check("http://10.0.0.1/", &TargetPolicy::AllowPrivate)
-                .await
-                .is_ok()
-        );
+        assert!(check_url("http://10.0.0.1/", &TargetPolicy::AllowPrivate)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -451,14 +545,14 @@ mod tests {
             "http://[::ffff:10.0.5.7]/",
             "http://localhost:9/",
         ] {
-            assert!(CheckedTarget::check(url, &policy).await.is_ok(), "{url}");
+            assert!(check_url(url, &policy).await.is_ok(), "{url}");
         }
         for url in [
             "http://169.254.169.254/latest/meta-data/",
             "http://10.0.6.1/",
             "http://127.0.0.1/",
         ] {
-            let err = CheckedTarget::check(url, &policy).await.err();
+            let err = check_url(url, &policy).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
         }
     }
@@ -475,22 +569,20 @@ mod tests {
             "100.100.100.200",
             "::ffff:169.254.169.254",
         ] {
-            let route = pinned_route("metadata.google.internal", at(ip), &allow);
+            let route = checked_addrs("metadata.google.internal", at(ip), &allow);
             assert!(matches!(route, Err(TargetError::Blocked)), "{ip}");
         }
-        assert!(pinned_route("metadata.google.internal", at("169.254.1.1"), &allow).is_ok());
+        assert!(checked_addrs("metadata.google.internal", at("169.254.1.1"), &allow).is_ok());
         let policy = TargetPolicy::Public(allow);
         for url in [
             "http://169.254.169.254/",
             "http://[fd00:ec2::254]/",
             "http://100.100.100.200/",
         ] {
-            let err = CheckedTarget::check(url, &policy).await.err();
+            let err = check_url(url, &policy).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
         }
-        assert!(CheckedTarget::check("http://169.254.1.1/", &policy)
-            .await
-            .is_ok());
+        assert!(check_url("http://169.254.1.1/", &policy).await.is_ok());
     }
 
     /// Every IPv6 form carrying a metadata IPv4 is refused, even with its
@@ -514,15 +606,15 @@ mod tests {
         let at = |ip: &str| vec![SocketAddr::new(ip.parse().unwrap(), 80)];
         let policy = TargetPolicy::Public(allow.clone());
         for ip in embedded {
-            let route = pinned_route("meta.internal", at(ip), &allow);
+            let route = checked_addrs("meta.internal", at(ip), &allow);
             assert!(matches!(route, Err(TargetError::Blocked)), "{ip}");
             let url = format!("http://[{ip}]/");
-            let err = CheckedTarget::check(&url, &policy).await.err();
+            let err = check_url(&url, &policy).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
         }
         for ok in ["64:ff9b::a9fe:101", "::a9fe:101", "2002:a9fe:101::1"] {
             let url = format!("http://[{ok}]/");
-            assert!(CheckedTarget::check(&url, &policy).await.is_ok(), "{url}");
+            assert!(check_url(&url, &policy).await.is_ok(), "{url}");
         }
     }
 
@@ -540,5 +632,123 @@ mod tests {
         assert!(!list.allows_host("idp.internal.evil.com"));
         assert!(list.allows_ip("fd00::1".parse().unwrap()));
         assert_eq!(list.hosts, ["idp.internal"]);
+    }
+
+    /// A proxy that answers every request itself and reports its request line.
+    async fn fake_proxy() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let (sock, _) = listener.accept().await.unwrap();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut r = BufReader::new(sock);
+                    let mut line = String::new();
+                    r.read_line(&mut line).await.unwrap();
+                    loop {
+                        let mut h = String::new();
+                        if r.read_line(&mut h).await.unwrap() == 0 || h == "\r\n" {
+                            break;
+                        }
+                    }
+                    let status = if line.starts_with("CONNECT") {
+                        "403 Forbidden"
+                    } else {
+                        "200 OK"
+                    };
+                    tx.send(line.trim_end().to_owned()).unwrap();
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    r.get_mut().write_all(resp.as_bytes()).await.ok();
+                });
+            }
+        });
+        (url, rx)
+    }
+
+    async fn get(egress: &Egress, url: &str) -> reqwest::Result<reqwest::Response> {
+        let target = egress.check(url).await.unwrap();
+        let req = target.request(reqwest::Method::GET);
+        req.timeout(std::time::Duration::from_secs(3)).send().await
+    }
+
+    /// The proxy itself may be private; targets are still checked (#1792).
+    #[tokio::test]
+    async fn proxied_calls_check_the_target_and_go_to_the_proxy() {
+        let (proxy, mut lines) = fake_proxy().await;
+        let egress = EgressCache::default()
+            .get_via(
+                TargetPolicy::public_only(),
+                Some(proxy),
+                reqwest::Client::builder,
+            )
+            .unwrap();
+        let resp = get(&egress, "http://93.184.216.34/hook").await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let line = lines.recv().await.unwrap();
+        assert_eq!(line, "GET http://93.184.216.34/hook HTTP/1.1");
+        assert!(get(&egress, "https://93.184.216.34/").await.is_err());
+        let line = lines.recv().await.unwrap();
+        assert_eq!(line, "CONNECT 93.184.216.34:443 HTTP/1.1");
+        for url in [
+            "http://169.254.169.254/",
+            "http://10.0.0.1/",
+            "http://localhost/",
+        ] {
+            let err = egress.check(url).await.err();
+            assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
+        }
+        assert!(lines.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn proxy_comes_from_rustango_env_only() {
+        let _g = ENV_LOCK.lock().await;
+        let (proxy, mut lines) = fake_proxy().await;
+        std::env::set_var(PROXY_ENV, &proxy);
+        let egress = shared(TargetPolicy::public_only());
+        std::env::remove_var(PROXY_ENV);
+        let resp = get(&egress.unwrap(), "http://93.184.216.34/env").await;
+        assert_eq!(resp.unwrap().status(), 200);
+        assert_eq!(
+            lines.recv().await.unwrap(),
+            "GET http://93.184.216.34/env HTTP/1.1"
+        );
+    }
+
+    /// A pooled client re-checks a name when it connects, so a name that
+    /// re-resolved to a private address after `check` is still refused.
+    #[tokio::test]
+    async fn pooled_client_rechecks_names_at_connect() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let a = accepts.clone();
+        tokio::spawn(async move {
+            while listener.accept().await.is_ok() {
+                a.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let egress = EgressCache::default()
+            .get_via(TargetPolicy::public_only(), None, reqwest::Client::builder)
+            .unwrap();
+        // Skip `check`, as if DNS had changed since.
+        let target = CheckedTarget {
+            url: format!("http://localhost:{port}/").parse().unwrap(),
+            client: egress.client.clone(),
+        };
+        let req = target.request(reqwest::Method::GET);
+        let err = req
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_connect(), "{err}");
+        assert_eq!(accepts.load(Ordering::SeqCst), 0);
     }
 }

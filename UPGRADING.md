@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Outbound calls ignore `HTTPS_PROXY`
+
+Webhook deliveries with `allow_private_targets(true)` no longer read `HTTP(S)_PROXY`,
+like every other checked call. Set `RUSTANGO_OUTBOUND_PROXY` instead.
+
 ## 0.59.5
 
 ### `Cache::stores_nothing`

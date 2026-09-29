@@ -36,7 +36,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::BroadcastFn;
-use crate::outbound::{bounded_text, CheckedTarget, TargetPolicy};
+use crate::outbound::{self, bounded_text, TargetPolicy};
 
 /// Most bytes of a failed response body kept in the error.
 pub const ERROR_BODY_MAX: usize = 256;
@@ -54,13 +54,14 @@ fn checked_callback(url: String, policy: fn() -> TargetPolicy) -> BroadcastFn {
         let url = Arc::clone(&url);
         let fut: Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> =
             Box::pin(async move {
-                let target = CheckedTarget::check(&url, &policy())
+                let egress =
+                    outbound::shared(policy()).map_err(|e| format!("slack client: {e}"))?;
+                let target = egress
+                    .check(&url)
                     .await
                     .map_err(|e| format!("slack target refused: {e}"))?;
-                let client = target
-                    .client(reqwest::Client::builder().timeout(Duration::from_secs(10)))
-                    .map_err(|e| format!("slack client: {e}"))?;
-                post(&client, target.url().as_str(), value).await
+                let req = target.request(reqwest::Method::POST);
+                send(req.timeout(Duration::from_secs(10)), value).await
             });
         fut
     })
@@ -79,14 +80,13 @@ pub fn webhook_callback_with_client(
         let url = Arc::clone(&url);
         let client = client.clone();
         let fut: Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> =
-            Box::pin(async move { post(&client, &url, value).await });
+            Box::pin(async move { send(client.post(&*url), value).await });
         fut
     })
 }
 
-async fn post(client: &reqwest::Client, url: &str, value: Value) -> Result<(), String> {
-    let resp = client
-        .post(url)
+async fn send(req: reqwest::RequestBuilder, value: Value) -> Result<(), String> {
+    let resp = req
         .json(&build_payload(value))
         .send()
         .await
@@ -178,6 +178,30 @@ mod tests {
         let cb = checked_callback(format!("{base}/hook"), || TargetPolicy::AllowPrivate);
         let err = cb(json!("hi")).await.unwrap_err();
         assert!(err.starts_with("slack returned 302"), "{err}");
+    }
+
+    /// Calls share a pooled client, so a second post reuses the connection (#1792).
+    #[tokio::test]
+    async fn calls_reuse_one_connection() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+        let peers = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let p = peers.clone();
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move |ConnectInfo(a): ConnectInfo<SocketAddr>| {
+                p.lock().unwrap().insert(a);
+                async { "ok" }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let svc = app.into_make_service_with_connect_info::<SocketAddr>();
+        tokio::spawn(async move { axum::serve(listener, svc).await.unwrap() });
+        let cb = checked_callback(url, || TargetPolicy::AllowPrivate);
+        cb(json!("one")).await.unwrap();
+        cb(json!("two")).await.unwrap();
+        assert_eq!(peers.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
