@@ -150,6 +150,31 @@ untouched.
 
 ## Unreleased
 
+### OAuth2 responses are capped at 1 MiB
+
+An IdP discovery, token or userinfo body over 1 MiB is now an error.
+
+### Cloud-metadata addresses are always refused
+
+SSO and Slack calls refuse cloud-metadata addresses even when `RUSTANGO_OUTBOUND_ALLOW`
+names the host or a CIDR that covers them.
+
+### ViewSet create writes audit rows
+
+On an audited model, ViewSet `POST` (single and bulk) now writes a `create` audit
+row per row. A single create on such a model now runs in a transaction.
+If the audit row can't be written, or the generated PK can't be read back, the
+create rolls back and answers `500`. A ViewSet write failure that is not a database
+rejection (bulk create included) is now a logged `500` with an opaque body, not `400`.
+
+### `BulkAction` takes a `PkSet` (breaking)
+
+`run(&self, pks: &PkSet, pool)` replaces `run(&self, table, &[i64], pool)`. Build
+keys with `PkSet::new(M::SCHEMA, ids)` or `PkSet::parse(M::SCHEMA, raw)`; a key
+of the wrong type is `BulkActionError::InvalidPk` (new variant). `restore_selected`
+now counts only deleted rows on every model.
+More than `PkSet::MAX_KEYS` (10 000) keys is also `InvalidPk`; split larger selections.
+
 ## 0.59.4
 
 ### One access-log line per operator-console request

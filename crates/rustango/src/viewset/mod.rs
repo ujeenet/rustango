@@ -1148,74 +1148,13 @@ impl AcquiredConn {
         crate::sql::select_rows_pool_with_related::<T>(&self.pool, q).await
     }
 
-    /// Insert a row and return its primary key (see [`created_pk`]).
+    /// Insert a row and return its primary key; audited models write a `create` row.
     async fn insert_returning_pk(
         &mut self,
         q: &InsertQuery,
         pk_field: &crate::core::FieldSchema,
     ) -> Result<SqlValue, crate::sql::ExecError> {
-        let returning = crate::sql::insert_returning_pool(&self.pool, q).await?;
-        Ok(created_pk(q, returning, pk_field))
-    }
-}
-
-/// The PK of the row `q` just inserted: the submitted value when the PK
-/// column is in the INSERT, else the database-generated one.
-/// Shared by the single-row and bulk paths.
-fn created_pk(
-    q: &InsertQuery,
-    returning: crate::sql::InsertReturningPool,
-    pk_field: &crate::core::FieldSchema,
-) -> SqlValue {
-    match q.columns.iter().position(|c| *c == pk_field.column) {
-        Some(i) => q.values[i].clone(),
-        None => generated_pk(returning, pk_field),
-    }
-}
-
-/// Read a generated PK out of an INSERT's RETURNING, or MySQL's
-/// `LAST_INSERT_ID()`.
-fn generated_pk(
-    returning: crate::sql::InsertReturningPool,
-    pk_field: &crate::core::FieldSchema,
-) -> SqlValue {
-    #[allow(unused_variables)]
-    {
-        match returning {
-            #[cfg(feature = "postgres")]
-            crate::sql::InsertReturningPool::PgRow(row) => {
-                use crate::sql::sqlx::Row as _;
-                match pk_field.ty {
-                    FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
-                    FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
-                    FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
-                    FieldType::String => {
-                        SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
-                    }
-                    _ => SqlValue::Null,
-                }
-            }
-            #[cfg(feature = "mysql")]
-            crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
-                FieldType::I64 => SqlValue::I64(id),
-                FieldType::I32 => SqlValue::I32(id as i32),
-                FieldType::I16 => SqlValue::I16(id as i16),
-                _ => SqlValue::I64(id),
-            },
-            #[cfg(feature = "sqlite")]
-            crate::sql::InsertReturningPool::SqliteRow(row) => {
-                use crate::sql::sqlx::Row as _;
-                match pk_field.ty {
-                    FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
-                    FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
-                    FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
-                    FieldType::String => {
-                        SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
-                    }
-                    _ => SqlValue::Null,
-                }
-            }
-        }
+        crate::audit::insert(&self.pool, q, pk_field).await
     }
 }
 
@@ -2476,13 +2415,14 @@ async fn insert_and_fetch_one(
 }
 
 /// A failed INSERT/UPDATE: a database rejection is the client's `400`,
-/// with the driver text withheld; anything else is a `500`.
+/// with the driver text withheld; anything else (an audit write) is a logged `500`.
 fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
-    if matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_))) {
-        let body = crate::error::client_error_body(context, e, true);
+    let client_caused = matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
+    let body = crate::error::client_error_body(context, e, client_caused);
+    if client_caused {
         (StatusCode::BAD_REQUEST, body)
     } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        (StatusCode::INTERNAL_SERVER_ERROR, body)
     }
 }
 
@@ -2607,8 +2547,8 @@ async fn create_many(
             returning: vec![pk_field.column],
             on_conflict: None,
         };
-        match crate::sql::insert_returning_tx(&mut tx, &query).await {
-            Ok(returning) => pks.push(created_pk(&query, returning, pk_field)),
+        match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
+            Ok(pk) => pks.push(pk),
             Err(e) => {
                 // Drop every row this request wrote, including the ones
                 // that succeeded before entry `i`.
@@ -2623,17 +2563,8 @@ async fn create_many(
                 // connections, and logging those at `warn` left an
                 // outage with no ERROR record anywhere (#1604 review,
                 // correctness-003).
-                let client_caused =
-                    matches!(&e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
-                let detail = crate::error::client_error_body(
-                    "viewset::bulk_create::entry",
-                    &e,
-                    client_caused,
-                );
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    &format!("bulk entry {i}: {detail}"),
-                );
+                let (status, detail) = write_failure("viewset::bulk_create::entry", &e);
+                return json_error(status, &format!("bulk entry {i}: {detail}"));
             }
         }
     }
@@ -3286,7 +3217,8 @@ mod created_pk_tests {
             vec![pk.column],
             vec![SqlValue::String("rust".into())],
         );
-        let got = created_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk);
+        let got = crate::sql::inserted_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk)
+            .expect("submitted pk");
         assert!(
             matches!(got, SqlValue::String(ref s) if s == "rust"),
             "{got:?}"

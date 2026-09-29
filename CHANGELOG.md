@@ -4,6 +4,31 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — OAuth2 success bodies are capped (#1793)
+
+Discovery, token and userinfo responses over 1 MiB now fail with a clear error
+instead of being buffered whole.
+
+### Security — the outbound allowlist never opens cloud metadata (#1796)
+
+`RUSTANGO_OUTBOUND_ALLOW` host and CIDR entries no longer reach 169.254.169.254,
+169.254.170.2, 169.254.170.23, 100.100.100.200, fd00:ec2::254 or fd00:ec2::23,
+including IPv6-embedded forms (mapped, compatible, NAT64, 6to4, Teredo).
+
+### Security — ViewSet create is audited (#1816)
+
+On an audited model, ViewSet single and bulk create now write one `create` audit
+row per row, in the insert's transaction. A create whose row can't be read back
+(an unreadable generated PK) or a failed audit write now rolls back with a `500`.
+New `ExecError::AuditWrite` / `ExecError::GeneratedPkUnreadable`.
+
+### Security — bulk actions bind keys with the model's PK type (#1817)
+
+**Breaking:** `BulkAction::run` takes a `PkSet` (keys typed from the model's PK)
+instead of a table name and `&[i64]`. The built-ins write through the ORM on the
+schema's PK column, so a text PK can no longer match the wrong rows on MySQL.
+A `PkSet` holds at most `PkSet::MAX_KEYS` (10 000), under SQLite's bind cap.
+
 ## [0.59.4] — 2026-09-29
 
 Tagged only; not published to crates.io.
