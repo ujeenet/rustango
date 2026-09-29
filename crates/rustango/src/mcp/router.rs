@@ -54,9 +54,11 @@ impl McpState {
     }
 }
 
+/// JSON-RPC only: the SSE stream needs an agent token, which these
+/// routers never check (#1802).
 fn routes(state: McpState) -> Router {
     Router::new()
-        .route("/", post(post_handler).get(sse_handler::<DefaultTenantDb>))
+        .route("/", post(post_handler))
         .with_state(state)
 }
 

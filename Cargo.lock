@@ -291,7 +291,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cargo-rustango"
-version = "0.59.4"
+version = "0.59.5"
 
 [[package]]
 name = "cc"
@@ -778,6 +778,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2220,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.59.4"
+version = "0.59.5"
 dependencies = [
  "argon2",
  "async-stream",
@@ -2233,6 +2243,7 @@ dependencies = [
  "cookie",
  "dotenvy",
  "flate2",
+ "fs4",
  "hmac",
  "http",
  "http-body",
@@ -2240,6 +2251,7 @@ dependencies = [
  "indexmap",
  "inventory",
  "lettre",
+ "libc",
  "p256",
  "password-hash",
  "rand 0.8.8",
@@ -2272,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.59.4"
+version = "0.59.5"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2283,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-orm-macros"
-version = "0.59.4"
+version = "0.59.5"
 dependencies = [
  "rustango",
  "rustango-macros",

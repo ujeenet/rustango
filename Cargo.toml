@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.59.4"
+version = "0.59.5"
 readme = "README.md"
 edition = "2021"
 rust-version = "1.88"
@@ -18,9 +18,9 @@ categories = ["web-programming::http-server", "database", "asynchronous"]
 # Internal — collapsed shape: one library facade `rustango` (with
 # feature flags for admin / tenancy) plus the proc-macro crate which
 # Rust requires to live separately.
-rustango-macros     = { version = "0.59.4", path = "crates/rustango-macros" }
-rustango-orm-macros = { version = "0.59.4", path = "crates/rustango-orm-macros" }
-rustango            = { version = "0.59.4", path = "crates/rustango" }
+rustango-macros     = { version = "0.59.5", path = "crates/rustango-macros" }
+rustango-orm-macros = { version = "0.59.5", path = "crates/rustango-orm-macros" }
+rustango            = { version = "0.59.5", path = "crates/rustango" }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
@@ -83,6 +83,10 @@ password-hash = "0.5"
 hmac    = "0.12"
 sha1    = "0.10"   # TOTP / RFC 6238 default
 sha2    = "0.10"
+# Advisory file locks for FileCache (#1811); drop for std `File::lock` at MSRV 1.89.
+fs4     = { version = "1", default-features = false, features = ["sync"] }
+# `O_NOFOLLOW` for FileCache lock files (unix only).
+libc    = "0.2"
 subtle  = "2"      # constant-time eq for MAC verify
 cookie  = "0.18"
 rand    = "0.8"    # session-secret auto-gen fallback

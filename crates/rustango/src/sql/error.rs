@@ -246,6 +246,23 @@ pub enum ExecError {
         reason: &'static str,
     },
 
+    /// The audit row for a write failed, so the write was rolled back.
+    /// A server fault, even when the driver error inside is a rejection.
+    #[error("`{table}` audit write failed: {source}")]
+    AuditWrite {
+        table: &'static str,
+        #[source]
+        source: Box<ExecError>,
+    },
+
+    /// An INSERT's database-generated PK could not be read back: a PK
+    /// type the backend can't return, or a failed decode.
+    #[error("cannot read the generated primary key `{table}.{column}`")]
+    GeneratedPkUnreadable {
+        table: &'static str,
+        column: &'static str,
+    },
+
     /// `insert_returning` was called with an `InsertQuery` carrying no
     /// `RETURNING` columns. Use `insert` for those.
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]

@@ -63,7 +63,7 @@ pub struct AccessLogLayer {
     /// Log the `TrustedRealIp` that `RealIpLayer::trust_proxies`
     /// resolved, over the TCP peer. Raw forwarding headers are never
     /// read. Default `false`.
-    pub trust_proxy_headers: bool,
+    pub use_real_ip: bool,
     /// Which tenant identifier goes on the line. Default
     /// [`TenantField::Slug`], and `-` when no tenant resolved.
     pub tenant_field: TenantField,
@@ -103,7 +103,7 @@ impl AccessLogLayer {
             include_ip: true,
             slow_threshold_ms: 1000,
             redact_query_params: default_redact_params(),
-            trust_proxy_headers: false,
+            use_real_ip: false,
             tenant_field: TenantField::default(),
         }
     }
@@ -120,9 +120,16 @@ impl AccessLogLayer {
     /// peer. Off by default. Raw forwarding headers are never read.
     /// `RealIpLayer` must wrap this layer; see `server::Builder::real_ip`.
     #[must_use]
-    pub fn trust_proxy_headers(mut self, on: bool) -> Self {
-        self.trust_proxy_headers = on;
+    pub fn use_real_ip(mut self, on: bool) -> Self {
+        self.use_real_ip = on;
         self
+    }
+
+    /// Old name of [`Self::use_real_ip`]; it reads no headers (#1785).
+    #[deprecated(since = "0.59.5", note = "renamed to `use_real_ip`")]
+    #[must_use]
+    pub fn trust_proxy_headers(self, on: bool) -> Self {
+        self.use_real_ip(on)
     }
 
     /// Replace the redaction list with `params`. An empty list turns
@@ -278,7 +285,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
         .map(|q| redact_query(q, &cfg.redact_query_params))
         .unwrap_or_default();
     let ip = if cfg.include_ip {
-        resolve_client_ip(&req, cfg.trust_proxy_headers)
+        resolve_client_ip(&req, cfg.use_real_ip)
     } else {
         None
     };
@@ -385,11 +392,11 @@ fn tenant_label(field: TenantField, tenant: Option<crate::tenant_log::TenantLabe
     }
 }
 
-/// The client IP for the line. With `trust_proxy_headers` on it is
+/// The client IP for the line. With `use_real_ip` on it is
 /// [`crate::rate_limit::client_ip`] (a `TrustedRealIp`, else the
 /// socket); off, the socket. Never a raw forwarding header (#1745).
-fn resolve_client_ip(req: &Request, trust_proxy: bool) -> Option<String> {
-    let ip = if trust_proxy {
+fn resolve_client_ip(req: &Request, use_real_ip: bool) -> Option<String> {
+    let ip = if use_real_ip {
         crate::rate_limit::client_ip(req.extensions(), req.headers())
     } else {
         req.extensions()
@@ -472,11 +479,20 @@ mod tests {
     /// The setter flips the flag, and the default is off so no
     /// project trusts forgeable headers by accident.
     #[test]
-    fn trust_proxy_headers_defaults_off_and_setter_flips() {
+    fn use_real_ip_defaults_off_and_setter_flips() {
         let l = AccessLogLayer::default();
-        assert!(!l.trust_proxy_headers, "default is off (spoof-safe)");
-        let l = AccessLogLayer::new().trust_proxy_headers(true);
-        assert!(l.trust_proxy_headers);
+        assert!(!l.use_real_ip, "default is off (spoof-safe)");
+        let l = AccessLogLayer::new().use_real_ip(true);
+        assert!(l.use_real_ip);
+    }
+
+    /// The deprecated name still sets the flag (#1785).
+    #[test]
+    #[allow(deprecated)]
+    fn trust_proxy_headers_is_an_alias_for_use_real_ip() {
+        assert!(AccessLogLayer::new().trust_proxy_headers(true).use_real_ip);
+        let on = AccessLogLayer::new().use_real_ip(true);
+        assert!(!on.trust_proxy_headers(false).use_real_ip);
     }
 
     /// A forged `X-Forwarded-For` / `X-Real-IP` never names the client,

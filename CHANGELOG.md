@@ -4,6 +4,69 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.5] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Security — lockouts that never lock, and unchecked JWT revocation, are flagged (#1809)
+
+A lockout on `NullCache` now warns at the first login, and in `check --deploy` when
+the manage binary installs the lockout (new `Cache::stores_nothing`). `JwtBackend` without a JTI store warns once when
+it accepts a revocable token.
+
+### Security — admin TOTP enrollment codes are rate limited (#1791)
+
+A wrong code on `POST /account/totp` now counts against the admin login lock,
+like a wrong code at sign-in.
+
+### Security — FileCache `add` has one winner over an expired key (#1811)
+
+`set`, `add`, `incr`, `touch` and expired-entry clears now hold an advisory lock
+(owner-only `.lock-XX` files in the cache dir), so `add` has one winner and lockout
+counts are not lost. A held lock is waited for off the async worker, for up to 5 s.
+
+### Security — OAuth2 success bodies are capped (#1793)
+
+Discovery, token and userinfo responses over 1 MiB now fail with a clear error
+instead of being buffered whole.
+
+### Security — the outbound allowlist never opens cloud metadata (#1796)
+
+`RUSTANGO_OUTBOUND_ALLOW` host and CIDR entries no longer reach 169.254.169.254,
+169.254.170.2, 169.254.170.23, 100.100.100.200, fd00:ec2::254 or fd00:ec2::23,
+including IPv6-embedded forms (mapped, compatible, NAT64, 6to4, Teredo).
+
+### Security — ViewSet create is audited (#1816)
+
+On an audited model, ViewSet single and bulk create now write one `create` audit
+row per row, in the insert's transaction. A create whose row can't be read back
+(an unreadable generated PK) or a failed audit write now rolls back with a `500`.
+New `ExecError::AuditWrite` / `ExecError::GeneratedPkUnreadable`.
+
+### Security — bulk actions bind keys with the model's PK type (#1817)
+
+**Breaking:** `BulkAction::run` takes a `PkSet` (keys typed from the model's PK)
+instead of a table name and `&[i64]`. The built-ins write through the ORM on the
+schema's PK column, so a text PK can no longer match the wrong rows on MySQL.
+A `PkSet` holds at most `PkSet::MAX_KEYS` (10 000), under SQLite's bind cap.
+
+### Fixed — MCP on the pure SQLite / MySQL stack (#1802)
+
+`Tenant<Sqlite>` / `Tenant<MySql>` now also read `DatabaseTenantContext`, so the
+`mcp::*_for` routers serve that stack. `mcp::router` and `mcp::tenant_router` no
+longer mount a `GET` SSE route that always answered `500`.
+
+### Changed — `AccessLogLayer::use_real_ip` (#1785)
+
+**Breaking:** the `trust_proxy_headers` field is now `use_real_ip`, since it reads
+only `TrustedRealIp`, never a header. The old setter stays as a deprecated alias.
+
+### Fixed — scaffolded examples' config tiers match the scaffolder (#1801)
+
+Regenerated, so the dev tiers set `secure_cookies = false` and `getting_started_blog`
+uses its compose credentials and ships its `.env.example`. A test now fails when
+they drift again.
+
 ## [0.59.4] — 2026-09-29
 
 Tagged only; not published to crates.io.

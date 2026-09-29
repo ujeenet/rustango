@@ -88,6 +88,7 @@ async fn long_or_funny_keys_dont_break_filenames() {
     let entries: Vec<_> = std::fs::read_dir(&dir)
         .expect("dir exists")
         .filter_map(Result::ok)
+        .filter(|e| !e.file_name().to_string_lossy().starts_with(".lock-"))
         .collect();
     assert_eq!(entries.len(), 1);
     let name = entries[0].file_name().to_string_lossy().into_owned();
@@ -108,7 +109,11 @@ async fn from_settings_file_backend_round_trips() {
     cache.set("k", "v", None).await.unwrap();
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     // Confirm the on-disk side: a file landed under the configured dir.
-    let count = std::fs::read_dir(&dir).unwrap().count();
+    let count = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "cache"))
+        .count();
     assert_eq!(count, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -291,7 +296,6 @@ fn concurrent_set_never_shows_a_torn_value() {
 /// Racing `add`s over an expired entry: exactly one wins. A reader that
 /// saw the old entry must not delete the winner's fresh one.
 #[test]
-#[ignore = "open: clearing an expired entry needs a per-key lock"]
 fn concurrent_adds_over_expired_entry_have_exactly_one_winner() {
     let dir = unique_tmp_dir("add-exp");
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -302,17 +306,21 @@ fn concurrent_adds_over_expired_entry_have_exactly_one_winner() {
         rt.block_on(FileCache::new(&dir).set(&key, "old", Some(Duration::from_millis(1))))
             .unwrap();
         std::thread::sleep(Duration::from_millis(3));
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
-        let wins: usize = (0..8)
-            .map(|_| {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let wins: usize = (0..12)
+            .map(|n| {
                 let (dir, key, barrier) = (dir.clone(), key.clone(), barrier.clone());
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .build()
                         .unwrap();
+                    let cache = FileCache::new(dir);
                     barrier.wait();
-                    rt.block_on(FileCache::new(dir).add(&key, "v", None))
-                        .unwrap()
+                    // Every third thread reads first, so a reader's clear races the adds.
+                    if n % 3 == 0 {
+                        let _ = rt.block_on(cache.get(&key)).unwrap();
+                    }
+                    rt.block_on(cache.add(&key, "v", None)).unwrap()
                 })
             })
             .collect::<Vec<_>>()
@@ -322,4 +330,67 @@ fn concurrent_adds_over_expired_entry_have_exactly_one_winner() {
         assert_eq!(wins, 1, "round {round}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Racing `incr`s from many threads lose no count (a lockout counts with it).
+#[test]
+fn concurrent_incrs_lose_no_count() {
+    let dir = unique_tmp_dir("incr");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let (dir, barrier) = (dir.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                let cache = FileCache::new(dir);
+                barrier.wait();
+                for _ in 0..25 {
+                    rt.block_on(cache.incr("n", 1, None)).unwrap();
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let n = rt.block_on(FileCache::new(&dir).get("n")).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(n.as_deref(), Some("200"));
+}
+
+/// `touch` keeps the value and moves the expiry.
+#[tokio::test]
+async fn touch_extends_a_live_entry() {
+    let dir = unique_tmp_dir("touch");
+    let cache = FileCache::new(&dir);
+    cache
+        .set("k", "v", Some(Duration::from_millis(30)))
+        .await
+        .unwrap();
+    assert!(cache.touch("k", None).await.unwrap());
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    assert!(!cache.touch("missing", None).await.unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `incr` with no TTL keeps a live counter's expiry, as `InMemoryCache` does.
+#[tokio::test]
+async fn incr_without_ttl_keeps_the_expiry() {
+    let dir = unique_tmp_dir("incr-ttl");
+    let cache = FileCache::new(&dir);
+    cache
+        .incr("n", 1, Some(Duration::from_millis(50)))
+        .await
+        .unwrap();
+    assert_eq!(cache.incr("n", 1, None).await.unwrap(), 2);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let left = cache.get("n").await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(left, None, "the counter lost its expiry");
 }

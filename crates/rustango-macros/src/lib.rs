@@ -996,6 +996,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 <#struct_name as #root::core::Model>::__rustango_audited_update,
                 <#struct_name as #root::core::Model>::__rustango_audited_delete,
             )
+            .with_audited_create(<#struct_name as #root::core::Model>::__rustango_audited_create)
         }
     })
 }
@@ -2684,6 +2685,9 @@ fn model_impl_tokens(
             fn __rustango_audited_delete() -> ::core::option::Option<#root::audit::AuditedDelete> {
                 ::core::option::Option::Some(Self::__rustango_delete_audited)
             }
+            fn __rustango_audited_create() -> ::core::option::Option<#root::audit::AuditedCreate> {
+                ::core::option::Option::Some(Self::__rustango_create_audited)
+            }
         }
     } else {
         quote!()
@@ -3326,6 +3330,24 @@ fn inherent_impl_tokens(
                 > + ::core::marker::Send + 'a,
             >> {
                 #update_audited_body
+            }
+
+            /// Audited `create` entry for a new row, behind `Model::__rustango_audited_create`.
+            #[doc(hidden)]
+            pub fn __rustango_create_audited<'a, 't>(
+                tx: &'a mut #root::sql::PoolTx<'t>,
+                pk: #root::core::SqlValue,
+            ) -> ::std::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<
+                    Output = ::core::result::Result<(), #root::sql::ExecError>,
+                > + ::core::marker::Send + 'a,
+            >> {
+                ::std::boxed::Box::pin(#root::audit::record_create::<Self>(
+                    tx,
+                    <Self as #root::core::Model>::SCHEMA,
+                    pk,
+                    |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Create),
+                ))
             }
 
             /// Audited bulk `DELETE`, behind `Model::__rustango_audited_delete`.

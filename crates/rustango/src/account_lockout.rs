@@ -117,6 +117,12 @@ impl Lockout {
         self.cache.is_process_local()
     }
 
+    /// `true` when the cache drops writes (`NullCache`), so no account ever locks.
+    #[must_use]
+    pub fn stores_nothing(&self) -> bool {
+        self.cache.stores_nothing()
+    }
+
     /// Check whether `account` is currently locked. Returns `true` to
     /// reject the login attempt; `false` to proceed with verification.
     pub async fn is_locked(&self, account: &str) -> bool {
@@ -343,9 +349,12 @@ pub fn configure_shared(lockout: Lockout) -> bool {
     SHARED_LOCKOUT.set_explicit(lockout)
 }
 
-/// The login-time warning for a lockout that counts per process.
+/// The login-time warning for a lockout that never locks or counts per process.
 #[cfg(feature = "admin")]
-pub(crate) fn process_local_warning(lockout: &Lockout) -> Option<&'static str> {
+pub(crate) fn store_warning(lockout: &Lockout) -> Option<&'static str> {
+    if lockout.stores_nothing() {
+        return Some(NULL_STORE_WARNING);
+    }
     lockout.is_process_local().then_some(
         "account lockout counts failed logins in process memory, so each replica \
          allows its own attempts; install a Redis or database cache with \
@@ -353,18 +362,23 @@ pub(crate) fn process_local_warning(lockout: &Lockout) -> Option<&'static str> {
     )
 }
 
+/// A lockout on a cache that drops writes.
+pub(crate) const NULL_STORE_WARNING: &str =
+    "account lockout uses a cache that stores nothing (`NullCache`), so no account ever locks; \
+     back it with a Redis, database or in-memory cache";
+
 /// `check --deploy` can't run the app's startup code, so it only advises.
 pub(crate) const CHECK_DEPLOY_NOTE: &str =
     "account lockout: no shared store is installed outside your app's startup; unless it calls \
      `account_lockout::configure_shared(Lockout::new(cache))` with a Redis or database cache, \
      each replica counts its own failed logins";
 
-/// Warn once per process, on the first login that meets an in-memory lockout.
+/// Warn once per process, on the first login that meets a weak lockout store.
 /// At login, not boot, so a lockout the app installs at startup is seen.
 #[cfg(feature = "admin")]
-pub(crate) fn warn_once_if_process_local(lockout: &Lockout) {
+pub(crate) fn warn_once_on_weak_store(lockout: &Lockout) {
     static WARNED: std::sync::Once = std::sync::Once::new();
-    if let Some(msg) = process_local_warning(lockout) {
+    if let Some(msg) = store_warning(lockout) {
         WARNED.call_once(|| tracing::warn!(target: "rustango::rate_limit", "{msg}"));
     }
 }
@@ -635,5 +649,17 @@ mod tests {
             50,
             "lost-update race: concurrent failures did not all count",
         );
+    }
+
+    /// #1809 — a lockout on `NullCache` never locks, so it must be flagged.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn a_null_cache_lockout_never_locks_and_is_flagged() {
+        let l = Lockout::new(Arc::new(crate::cache::NullCache)).max_attempts(1);
+        l.record_failure("alice").await;
+        l.record_failure("alice").await;
+        assert!(!l.is_locked("alice").await);
+        let msg = store_warning(&l).expect("flagged");
+        assert!(msg.contains("stores nothing"), "{msg}");
     }
 }

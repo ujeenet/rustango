@@ -150,6 +150,58 @@ untouched.
 
 ## Unreleased
 
+## 0.59.5
+
+### `Cache::stores_nothing`
+
+New provided method, `true` only on `NullCache`. A wrapper cache should forward it,
+like `is_process_local`, or a lockout behind it is not flagged.
+
+### Wrong enrollment codes count toward the admin lockout
+
+Failed TOTP confirms on `/account/totp` add to the same per-user lock as failed logins.
+
+### FileCache keeps lock files in its directory
+
+`FileCache` now creates up to 256 `.lock-XX` files next to its entries. `clear`
+leaves them; don't count directory files as entries. A write that waits over 5 s
+for a lock now fails. Where the filesystem has no file locks, writes run unlocked
+after one `rustango::cache` warning.
+
+### OAuth2 responses are capped at 1 MiB
+
+An IdP discovery, token or userinfo body over 1 MiB is now an error.
+
+### Cloud-metadata addresses are always refused
+
+SSO and Slack calls refuse cloud-metadata addresses even when `RUSTANGO_OUTBOUND_ALLOW`
+names the host or a CIDR that covers them.
+
+### ViewSet create writes audit rows
+
+On an audited model, ViewSet `POST` (single and bulk) now writes a `create` audit
+row per row. A single create on such a model now runs in a transaction.
+If the audit row can't be written, or the generated PK can't be read back, the
+create rolls back and answers `500`. A ViewSet write failure that is not a database
+rejection (bulk create included) is now a logged `500` with an opaque body, not `400`.
+
+### `BulkAction` takes a `PkSet` (breaking)
+
+`run(&self, pks: &PkSet, pool)` replaces `run(&self, table, &[i64], pool)`. Build
+keys with `PkSet::new(M::SCHEMA, ids)` or `PkSet::parse(M::SCHEMA, raw)`; a key
+of the wrong type is `BulkActionError::InvalidPk` (new variant). `restore_selected`
+now counts only deleted rows on every model.
+More than `PkSet::MAX_KEYS` (10 000) keys is also `InvalidPk`; split larger selections.
+
+### Unauthenticated MCP routers answer `GET` with `405`
+
+`mcp::router` and `mcp::tenant_router` have no SSE stream now; it was always a `500`.
+Use an authed router for notifications.
+
+### `AccessLogLayer::trust_proxy_headers` is now `use_real_ip`
+
+Rename the field and the setter call. The old setter still works but warns.
+
 ## 0.59.4
 
 ### One access-log line per operator-console request
