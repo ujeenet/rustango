@@ -152,7 +152,7 @@ untouched.
 
 ### Feature graph (#1739)
 
-`config` now enables `signals`. The request middleware (`cors`, `body_limit`, `security_headers`, …) and `signals::request` now come with `manage` or `admin`; `signals::request` is no longer built by other features that happened to pull axum.
+`config` now enables `signals`. The request middleware (`cors`, `body_limit`, `security_headers`, …) now comes with `manage` or `admin`.
 
 ## 0.59.0
 
