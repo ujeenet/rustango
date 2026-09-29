@@ -132,6 +132,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::media::auth` | Ablehnungen der Media-Router-Autorisierung |
 | `rustango::messages` | Flash-Messages |
 | `rustango::migrate` | Migrations-Runner |
+| `rustango::outbound` | Geprüfte ausgehende Aufrufe (SSO, Slack, Webhooks) |
 | `rustango::rate_limit` | Rate-Limiting |
 | `rustango::request_timeout` | Request-Timeout |
 | `rustango::scheduler` | Cron / geplante Tasks |
