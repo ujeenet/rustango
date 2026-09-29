@@ -107,6 +107,12 @@ pub trait Cache: Send + Sync + 'static {
         false
     }
 
+    /// `true` when writes are dropped, so nothing built on this cache
+    /// (a lockout, a limiter) ever counts.
+    fn stores_nothing(&self) -> bool {
+        false
+    }
+
     /// Add `by` to the integer counter at `key` and return the new
     /// value. A value that is not an integer counts as 0.
     ///
@@ -485,6 +491,10 @@ pub struct NullCache;
 
 #[async_trait]
 impl Cache for NullCache {
+    fn stores_nothing(&self) -> bool {
+        true
+    }
+
     async fn get(&self, _key: &str) -> Result<Option<String>, CacheError> {
         Ok(None)
     }

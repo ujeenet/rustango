@@ -4638,7 +4638,10 @@ pub(crate) fn login_store_audit(
     lockout: &crate::account_lockout::Lockout,
     out: &mut DeployAuditFindings,
 ) {
-    if lockout.is_process_local() {
+    if lockout.stores_nothing() {
+        out.warnings
+            .push(crate::account_lockout::NULL_STORE_WARNING.into());
+    } else if lockout.is_process_local() {
         out.info
             .push(crate::account_lockout::CHECK_DEPLOY_NOTE.into());
     }
@@ -6028,13 +6031,49 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "acme",
         );
         assert!(Lockout::new(Arc::new(scoped)).is_process_local());
-        // NullCache stands in for any store that isn't process-local.
+        // A store shared across replicas: nothing to say.
         let mut out = DeployAuditFindings::default();
-        login_store_audit(&Lockout::new(Arc::new(crate::cache::NullCache)), &mut out);
+        login_store_audit(&Lockout::new(Arc::new(SharedStandIn)), &mut out);
         assert!(
             !out.info.iter().any(|w| w.contains("account lockout")),
             "{out:?}"
         );
+        // NullCache never locks: a warning, not advice (#1809).
+        let mut out = DeployAuditFindings::default();
+        login_store_audit(&Lockout::new(Arc::new(crate::cache::NullCache)), &mut out);
+        assert!(
+            out.warnings.iter().any(|w| w.contains("stores nothing")),
+            "{out:?}"
+        );
+    }
+
+    /// Stands in for Redis/DB: keeps nothing, but claims nothing either.
+    #[cfg(feature = "cache")]
+    struct SharedStandIn;
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for SharedStandIn {
+        async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+        async fn delete(&self, _: &str) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+        async fn exists(&self, _: &str) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
     }
 
     #[cfg(all(feature = "cache", feature = "sqlite"))]

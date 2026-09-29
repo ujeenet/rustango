@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — lockouts that never lock, and unchecked JWT revocation, are flagged (#1809)
+
+A lockout on `NullCache` now warns at the first login and in `check --deploy`
+(new `Cache::stores_nothing`). `JwtBackend` without a JTI store warns once when
+it accepts a revocable token.
+
 ### Security — admin TOTP enrollment codes are rate limited (#1791)
 
 A wrong code on `POST /account/totp` now counts against the admin login lock,

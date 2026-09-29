@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `Cache::stores_nothing`
+
+New provided method, `true` only on `NullCache`. A wrapper cache should forward it,
+like `is_process_local`, or a lockout behind it is not flagged.
+
 ### Wrong enrollment codes count toward the admin lockout
 
 Failed TOTP confirms on `/account/totp` add to the same per-user lock as failed logins.

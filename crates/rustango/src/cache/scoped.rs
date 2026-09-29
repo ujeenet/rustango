@@ -120,6 +120,10 @@ impl Cache for ScopedCache {
         self.inner.is_process_local()
     }
 
+    fn stores_nothing(&self) -> bool {
+        self.inner.stores_nothing()
+    }
+
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         self.inner.incr(&self.k(key), by, ttl).await
     }

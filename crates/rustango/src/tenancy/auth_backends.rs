@@ -453,6 +453,8 @@ pub struct JwtBackend {
     /// **same** store the issuing [`JwtLifecycle`] holds — two stores
     /// mean logout writes to one and verification reads the other.
     jti_store: Option<std::sync::Arc<dyn crate::jti_store::JtiStore>>,
+    /// Set once this backend has warned that revocation is not checked.
+    warned_unchecked: std::sync::atomic::AtomicBool,
 }
 
 impl JwtBackend {
@@ -476,6 +478,7 @@ impl JwtBackend {
             secret,
             ttl_secs: 3600,
             jti_store: None,
+            warned_unchecked: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -496,6 +499,18 @@ impl JwtBackend {
     pub fn with_jti_store(mut self, store: std::sync::Arc<dyn crate::jti_store::JtiStore>) -> Self {
         self.jti_store = Some(store);
         self
+    }
+
+    /// A revocable token met a backend with no store: say so, once (#1809).
+    fn warn_unchecked_revocation(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.warned_unchecked.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "rustango::tenancy",
+                "JwtBackend has no JTI store, so tokens are not checked for revocation: a \
+                 logged-out token works until it expires; call `with_jti_store`"
+            );
+        }
     }
 
     /// Build from the operator-console session secret (convenient for
@@ -642,10 +657,12 @@ impl AuthBackend for JwtBackend {
         // blacklist is write-only: `revoke()` and `/api/auth/logout` record
         // a JTI that nothing ever reads, so a "logged out" token keeps
         // working for its full remaining life.
-        if let (Some(store), Some(jti)) = (self.jti_store.as_ref(), jti.as_deref()) {
-            if store.is_used(jti).await {
+        match (self.jti_store.as_ref(), jti.as_deref()) {
+            (Some(store), Some(jti)) if store.is_used(jti).await => {
                 return Err(AuthError::InvalidToken);
             }
+            (None, Some(_)) => self.warn_unchecked_revocation(),
+            _ => {}
         }
 
         let users = super::auth::User::objects()
@@ -681,4 +698,59 @@ fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
     };
     let s = value.to_str().unwrap_or("");
     Ok(s.strip_prefix("Bearer ").map(str::trim))
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    /// #1809 — a revocable token on a backend without a JTI store is not silent.
+    #[tokio::test]
+    async fn a_revocable_token_without_a_jti_store_warns_once() {
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let token = super::super::jwt_lifecycle::JwtLifecycle::new(vec![7u8; 32])
+            .issue_pair(42)
+            .access;
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        for _ in 0..2 {
+            let (parts, ()) = axum::http::Request::builder()
+                .header("authorization", format!("Bearer {token}"))
+                .body(())
+                .unwrap()
+                .into_parts();
+            let _ = backend.authenticate(&parts, &pool).await;
+        }
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            out.matches("not checked for revocation").count(),
+            1,
+            "{out}"
+        );
+    }
 }
