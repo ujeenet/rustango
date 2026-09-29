@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Outbound calls ignore `HTTPS_PROXY`
+
+Webhook deliveries with `allow_private_targets(true)` no longer read `HTTP(S)_PROXY`,
+like every other checked call. Set `RUSTANGO_OUTBOUND_PROXY` instead.
+
 ### Two tenant contexts on one request
 
 One is used for everything, picked by a fixed type order, not mount order: `TenantContext`

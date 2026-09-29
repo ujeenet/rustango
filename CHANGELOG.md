@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — egress proxy for checked outbound calls (#1792)
+
+Set `RUSTANGO_OUTBOUND_PROXY` to send SSO, Slack and webhook calls through a proxy;
+targets are still checked first. These calls now share pooled clients instead of
+building one per call. `HTTP(S)_PROXY` is no longer read, also for webhooks with
+`allow_private_targets(true)`.
+
 ### Security — one tenant context per request (#1826)
 
 Auth, sessions, `Tenant<DB>` and `DatabaseTenant<DB>` now read the same mounted context,

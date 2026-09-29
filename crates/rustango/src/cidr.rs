@@ -3,7 +3,7 @@
 
 use std::net::IpAddr;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CidrRange {
     V4 { addr: u32, mask: u32 },
     V6 { addr: u128, mask: u128 },
