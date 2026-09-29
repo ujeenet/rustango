@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### One access-log line per operator-console request
+
+Behind `server::Builder` with observability, console requests log once, from your
+configured layer; `next` is now redacted in all its lines and spans.
+
 ### `pluck_pairs` takes `FlatScalar` (breaking)
 
 `K` and `V` must be flat scalars, as for `pluck`. Use `Option<T>` for a

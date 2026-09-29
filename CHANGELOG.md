@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — operator console requests log once (#1788)
+
+With `Builder::observability` on, the console no longer adds its own access log,
+so an apex request writes one line that honours `trust_proxy_headers`. The
+builder's layer now also redacts `next`.
+
 ### Fixed — `pluck_pairs` reads NULL the same on every backend (#1808)
 
 **Breaking:** `pluck_pairs::<K, V>` now takes `FlatScalar` types; a NULL into a
