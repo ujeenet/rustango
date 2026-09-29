@@ -53,42 +53,53 @@ pub struct PkSet {
 }
 
 impl PkSet {
+    /// Most keys one set holds: one `IN` list stays under every
+    /// backend's bind cap (SQLite: 32766).
+    pub const MAX_KEYS: usize = 10_000;
+
+    fn capped(
+        model: &'static ModelSchema,
+        keys: impl Iterator<Item = Result<SqlValue, BulkActionError>>,
+    ) -> Result<Self, BulkActionError> {
+        let keys: Vec<SqlValue> = keys.take(Self::MAX_KEYS + 1).collect::<Result<_, _>>()?;
+        if keys.len() > Self::MAX_KEYS {
+            return Err(BulkActionError::InvalidPk(format!(
+                "more than {} keys in one action",
+                Self::MAX_KEYS
+            )));
+        }
+        Ok(Self { model, keys })
+    }
+
     /// Parse raw keys (form or URL values) with the PK field's type.
     ///
     /// # Errors
-    /// [`BulkActionError::InvalidPk`] when the model has no PK or a key
-    /// does not parse as its type.
+    /// [`BulkActionError::InvalidPk`] when the model has no PK, a key
+    /// does not parse as its type, or past [`Self::MAX_KEYS`] keys.
     pub fn parse<S: AsRef<str>>(
         model: &'static ModelSchema,
         raw: impl IntoIterator<Item = S>,
     ) -> Result<Self, BulkActionError> {
         let pk = pk_field(model)?;
-        let keys = raw
-            .into_iter()
-            .map(|r| {
-                crate::forms::parse_pk_string(pk, r.as_ref())
-                    .map_err(|e| BulkActionError::InvalidPk(e.to_string()))
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Self { model, keys })
+        let keys = raw.into_iter().map(|r| {
+            crate::forms::parse_pk_string(pk, r.as_ref())
+                .map_err(|e| BulkActionError::InvalidPk(e.to_string()))
+        });
+        Self::capped(model, keys)
     }
 
     /// Typed keys. Integers are narrowed to the PK's width; any other
     /// type mismatch is refused.
     ///
     /// # Errors
-    /// [`BulkActionError::InvalidPk`] when the model has no PK or a key
-    /// does not fit its type.
+    /// [`BulkActionError::InvalidPk`] when the model has no PK, a key
+    /// does not fit its type, or past [`Self::MAX_KEYS`] keys.
     pub fn new<V: Into<SqlValue>>(
         model: &'static ModelSchema,
         keys: impl IntoIterator<Item = V>,
     ) -> Result<Self, BulkActionError> {
         let pk = pk_field(model)?;
-        let keys = keys
-            .into_iter()
-            .map(|k| coerce_key(pk, k.into()))
-            .collect::<Result<_, _>>()?;
-        Ok(Self { model, keys })
+        Self::capped(model, keys.into_iter().map(|k| coerce_key(pk, k.into())))
     }
 
     /// The model the keys belong to.

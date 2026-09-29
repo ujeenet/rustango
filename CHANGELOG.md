@@ -46,6 +46,7 @@ New `ExecError::AuditWrite` / `ExecError::GeneratedPkUnreadable`.
 **Breaking:** `BulkAction::run` takes a `PkSet` (keys typed from the model's PK)
 instead of a table name and `&[i64]`. The built-ins write through the ORM on the
 schema's PK column, so a text PK can no longer match the wrong rows on MySQL.
+A `PkSet` holds at most `PkSet::MAX_KEYS` (10 000), under SQLite's bind cap.
 
 ### Security — admin custom actions check each row (#1805)
 

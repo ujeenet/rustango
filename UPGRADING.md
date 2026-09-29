@@ -193,6 +193,7 @@ rejection (bulk create included) is now a logged `500` with an opaque body, not 
 keys with `PkSet::new(M::SCHEMA, ids)` or `PkSet::parse(M::SCHEMA, raw)`; a key
 of the wrong type is `BulkActionError::InvalidPk` (new variant). `restore_selected`
 now counts only deleted rows on every model.
+More than `PkSet::MAX_KEYS` (10 000) keys is also `InvalidPk`; split larger selections.
 
 ### Custom admin actions run object-permission hooks
 

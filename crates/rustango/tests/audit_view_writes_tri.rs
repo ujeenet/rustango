@@ -356,9 +356,21 @@ mod bulk {
             assert_eq!(left, ["0", "abd"]);
         }
 
+        /// A full `PkSet` stays under every bind cap in one unaudited
+        /// `IN` list; one more key is refused.
+        async fn pk_set_is_capped_under_the_bind_limit(pool: &Pool) {
+            let codes: Vec<String> = (0..=PkSet::MAX_KEYS).map(|i| format!("k{i}")).collect();
+            assert!(PkSet::parse(Code::SCHEMA, &codes).is_err());
+            let full = PkSet::parse(Code::SCHEMA, &codes[1..]).unwrap();
+            assert_eq!(BulkDeleteAction.run(&full, pool).await.unwrap().affected, 0);
+        }
+
         tri_dialect_test! {
             model: Code,
-            scenarios: [text_pk_actions_touch_only_selected_rows],
+            scenarios: [
+                text_pk_actions_touch_only_selected_rows,
+                pk_set_is_capped_under_the_bind_limit,
+            ],
         }
     }
 }
