@@ -39,7 +39,7 @@
 //! does nothing when no extensions are registered, so call it always:
 //!
 //! ```ignore
-//! let mut tera = tera::Tera::new("templates/**/*.html")?;
+//! let mut tera = rustango::template_extensions::html_tera_from_glob("templates/**/*")?;
 //! rustango::default_filters::register_filters(&mut tera);
 //! rustango::template_extensions::apply_to_tera(&mut tera);
 //! ```
@@ -82,6 +82,29 @@ pub struct TemplateFunction {
 }
 
 inventory::collect!(TemplateFunction);
+
+/// Every name ends with `""`, so this escapes all templates, not just
+/// Tera's default `.html`/`.htm`/`.xml` (#1721).
+const ESCAPE_EVERY_TEMPLATE: &str = "";
+
+/// An empty Tera that HTML-escapes every template, whatever its name.
+/// Use `{{ value | safe }}` for markup you trust.
+#[must_use]
+pub fn html_tera() -> Tera {
+    let mut tera = Tera::default();
+    tera.autoescape_on(vec![ESCAPE_EVERY_TEMPLATE]);
+    tera
+}
+
+/// [`html_tera`] loaded from `glob`, e.g. `"templates/**/*"`.
+///
+/// # Errors
+/// The Tera error when a template does not parse or the glob is bad.
+pub fn html_tera_from_glob(glob: &str) -> tera::Result<Tera> {
+    let mut tera = Tera::new(glob)?;
+    tera.autoescape_on(vec![ESCAPE_EVERY_TEMPLATE]);
+    Ok(tera)
+}
 
 /// Add every registered filter and function to `tera`. Safe to call
 /// twice, since a repeat registration just replaces the old one.
@@ -165,6 +188,31 @@ mod tests {
             .render("smoke.html", &tera::Context::new())
             .expect("built-in filter still works");
         assert_eq!(rendered, "3");
+    }
+
+    #[test]
+    fn html_tera_escapes_templates_of_any_name() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", "<script>");
+        let mut tera = html_tera();
+        for name in ["page", "a.tera", "a.j2", "a.html"] {
+            tera.add_raw_template(name, "{{ x }}").unwrap();
+            assert_eq!(tera.render(name, &ctx).unwrap(), "&lt;script&gt;", "{name}");
+        }
+        // Tera's own default leaves a `.tera` template raw (#1721).
+        let mut bare = Tera::default();
+        bare.add_raw_template("a.tera", "{{ x }}").unwrap();
+        assert_eq!(bare.render("a.tera", &ctx).unwrap(), "<script>");
+    }
+
+    #[test]
+    fn html_tera_from_glob_escapes_tera_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("p.tera"), "{{ x }}").unwrap();
+        let tera = html_tera_from_glob(&format!("{}/**/*", dir.path().display())).unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", "<script>");
+        assert_eq!(tera.render("p.tera", &ctx).unwrap(), "&lt;script&gt;");
     }
 
     #[test]

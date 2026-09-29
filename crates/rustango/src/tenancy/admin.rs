@@ -174,7 +174,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
     /// demos and trusted intranets only.
     #[must_use]
     pub fn with_session(mut self, secret: tenant_console::SessionSecret) -> Self {
-        let mut tera = Tera::default();
+        let mut tera = crate::template_extensions::html_tera();
         // `tenant_login.html` includes `_theme_tokens.html`, so the
         // partial must be in the same Tera registry or the render
         // fails and the login page comes out blank.

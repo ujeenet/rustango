@@ -2196,9 +2196,8 @@ over any `#[derive(Model)]` schema. The full CRUD surface ships:
 ```rust
 use rustango::template_views::{ListView, DetailView};
 use std::sync::Arc;
-use tera::Tera;
 
-let mut tera = Tera::default();
+let mut tera = rustango::template_extensions::html_tera();
 tera.add_raw_template("posts_list.html", r#"
     {% for post in object_list %}<h2>{{ post.title }}</h2>{% endfor %}
     {% if has_prev %}<a href="?page={{ page - 1 }}">prev</a>{% endif %}
@@ -3250,7 +3249,7 @@ tenant subdomain as the admin. The companion `rustango-cms`
 crate ships a working setup:
 
 ```rust
-let mut tera = Tera::new(&templates_glob)?;
+let mut tera = rustango::template_extensions::html_tera_from_glob(&templates_glob)?;
 rustango_cms::admin::register_templates(&mut tera)?;
 let tera = std::sync::Arc::new(tera);
 

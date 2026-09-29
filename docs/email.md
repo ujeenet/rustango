@@ -147,7 +147,8 @@ For anything beyond a line of text, render the body from a [Tera](html-views.md)
 template instead of inlining HTML. The `email_templates` feature's `EmailRenderer`
 follows a `name.subject.txt` / `name.txt` / `name.html` convention — one template
 set produces the subject, the plain-text part, and the HTML part together, so the
-three never drift. The `Mailable` trait packages "a thing that knows how to turn
+three never drift. The HTML part autoescapes; the subject and text part render raw.
+The `Mailable` trait packages "a thing that knows how to turn
 itself into an `Email`" for reusable messages.
 
 ---

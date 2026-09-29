@@ -150,6 +150,26 @@ untouched.
 
 ## Unreleased
 
+### Outbound calls refuse private addresses
+
+Slack `webhook_callback` and OAuth2/OIDC calls now refuse loopback,
+private and metadata targets. For an IdP on your own network list it in
+`RUSTANGO_OUTBOUND_ALLOW=10.0.5.0/24,idp.internal` (hosts and CIDRs).
+Webhook delivery ignores that list; use `allow_private_targets(true)`.
+
+`OAuth2Provider::http` is removed: set a root CA or mTLS identity with
+`with_client_config(|b| ...)` or `from_discovery_with`. Build providers
+with `new` or a preset; struct literals no longer compile. These calls
+connect directly and cannot use an egress proxy.
+
+### Templates escape whatever their name
+
+Templates built with `html_tera*` and `EmailRenderer` HTML bodies now
+escape `.tera`, `.j2` and suffix-less templates too; output that relied on
+raw values needs `| safe`. `EmailRenderer::tera_mut()` is replaced by
+`configure(|tera| ...)`, which changes both engines; `tera()` returns the
+HTML engine.
+
 ### TOTP re-enroll asks for a current code
 
 `POST /account/totp` with `reset=1` now needs `totp_code` from the current device (#1776).
