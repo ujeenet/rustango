@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.3] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
 ### Fixed — flat `values_list` reads NULL the same on every backend (#1773)
 
 **Breaking:** `pluck`, `pks`, `value` and `values_list_flat().fetch/first`
