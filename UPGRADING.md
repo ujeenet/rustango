@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.3
+
 ### Flat projections take `FlatScalar` (breaking)
 
 `pluck::<U>`, `pks::<U>`, `value::<U>` and `values_list_flat(..).fetch::<U>`
