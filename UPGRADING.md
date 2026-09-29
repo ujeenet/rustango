@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.2
+
 ### Feature graph (#1739)
 
 `config` now enables `signals`. The request middleware (`cors`, `body_limit`, `security_headers`, …) now comes with `manage` or `admin`.
