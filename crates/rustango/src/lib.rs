@@ -156,6 +156,12 @@
 // Sync argon2 calls in `clippy.toml` must go through the `*_async` variants (#1709).
 #![deny(clippy::disallowed_methods)]
 
+// Name the real problem first; the empty `match pool` errors still follow (#1509).
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+compile_error!(
+    "rustango needs a database backend: enable one of the `postgres`, `mysql` or `sqlite` features"
+);
+
 // Lets `::rustango::...` paths emitted by the proc-macro resolve to
 // ourselves inside this crate.
 extern crate self as rustango;
