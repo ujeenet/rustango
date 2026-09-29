@@ -17,6 +17,11 @@ with error 1406 (`Data too long`) and reads with sqlx "mismatched types"; use `C
 A `String` without `max_length` is now `LONGTEXT` on MySQL, not `TEXT`, so long
 content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
 
+### Added — `check --deploy` flags a case-insensitive MySQL database (#1742)
+
+MySQL's default `_ai_ci` collation makes `=` and `unique` ignore case, unlike PostgreSQL
+and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900_as_cs`.
+
 ## [0.59.5] — 2026-09-29
 
 Tagged only; not published to crates.io.

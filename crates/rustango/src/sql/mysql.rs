@@ -185,6 +185,15 @@ impl Dialect for MySql {
         }
     }
 
+    // Columns inherit it, and a `_ci` one makes `=` and `unique` ignore
+    // case and accents, unlike PG and SQLite (#1742).
+    fn default_collation_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(DEFAULT_COLLATION_NAME AS CHAR) FROM information_schema.SCHEMATA \
+             WHERE SCHEMA_NAME = DATABASE()",
+        )
+    }
+
     /// Translate Postgres-native `DEFAULT` expressions to MySQL
     /// spelling.
     ///

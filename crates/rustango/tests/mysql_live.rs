@@ -282,3 +282,26 @@ async fn migrate_pool_ledger_round_trips() {
         .expect("applied_set_pool");
     assert!(applied.is_empty());
 }
+
+/// #1742: the stock `mysql:8` database defaults to `utf8mb4_0900_ai_ci`,
+/// so `check --deploy` must name it.
+#[tokio::test]
+async fn check_deploy_warns_on_a_case_insensitive_database() {
+    let Some(pool) = pool_or_skip().await else {
+        eprintln!("MYSQL_TEST_URL unset — skipping");
+        return;
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let _ = rustango::migrate::manage::run_with_writer(
+        &pool,
+        std::path::Path::new("/nonexistent"),
+        ["check".to_owned(), "--deploy".to_owned()],
+        &mut out,
+    )
+    .await;
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("[warning] database default collation `utf8mb4_0900_ai_ci`"),
+        "{out}"
+    );
+}

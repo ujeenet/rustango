@@ -164,6 +164,11 @@ the 64 KiB cap there, run `ALTER TABLE t MODIFY col LONGTEXT NOT NULL` for each
 `DATA_TYPE = 'text'` column in `information_schema.COLUMNS`. `MODIFY` resets what it
 omits: repeat the column's nullability, default and any `COLLATE`.
 
+### MySQL: `check --deploy` warns on a `_ci` or `_bin` database collation
+
+No schema change. A stock MySQL database (`utf8mb4_0900_ai_ci`) now gets a warning;
+use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
+
 ## 0.59.5
 
 ### `Cache::stores_nothing`

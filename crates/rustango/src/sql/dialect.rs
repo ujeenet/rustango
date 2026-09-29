@@ -456,6 +456,12 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// A one-row, one-column query for the database's default collation,
+    /// which `check --deploy` reads. `None` where text compares byte-wise.
+    fn default_collation_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// `true` if this dialect can write `op` as SQL. Return `false`
     /// for an operator with no equivalent; the writer then reports
     /// [`SqlError::OperatorNotSupportedInDialect`].
