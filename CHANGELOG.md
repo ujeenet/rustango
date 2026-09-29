@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — MCP authed handlers always have a token lifecycle (#1827)
+
+Authed routers carry their `JwtLifecycle` by type, so the unreachable "mcp auth not configured" 500s are gone.
+
 ### Security — HMAC replay check is one atomic `add` (#1828)
 
 Two simultaneous copies of a signed request no longer both pass the nonce store.

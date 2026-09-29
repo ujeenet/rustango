@@ -26,7 +26,7 @@ use serde_json::json;
 use crate::extractors::{Tenant, TenantScope};
 use crate::tenancy::jwt_lifecycle::{JwtIssueError, JwtLifecycle};
 
-use super::router::McpState;
+use super::router::AuthedMcpState;
 use super::transport::handle_message;
 
 /// Claim naming what kind of principal this is; see [`KIND_AGENT`].
@@ -201,17 +201,22 @@ pub(crate) async fn mint_agent_jwt(
 /// pinned to the request's tenant.
 pub(crate) fn agent_token<DB: crate::sql::sqlx::Database>(
     t: Tenant<DB>,
-    State(state): State<McpState>,
+    State(state): State<AuthedMcpState>,
     Json(input): Json<AgentTokenInput>,
 ) -> impl std::future::Future<Output = Response> + Send {
     agent_token_in(t.into(), state, input)
 }
 
-async fn agent_token_in(t: TenantScope, state: McpState, input: AgentTokenInput) -> Response {
-    let Some(jwt) = state.jwt.as_ref() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
-    };
-    match mint_agent_jwt(jwt, t.pool(), &t.org.slug, &input.name, &input.secret).await {
+async fn agent_token_in(t: TenantScope, state: AuthedMcpState, input: AgentTokenInput) -> Response {
+    match mint_agent_jwt(
+        &state.jwt,
+        t.pool(),
+        &t.org.slug,
+        &input.name,
+        &input.secret,
+    )
+    .await
+    {
         Ok(m) => Json(AgentTokenOutput {
             access_token: m.token,
             token_type: "Bearer",
@@ -323,7 +328,7 @@ pub(crate) async fn authenticate_bearer(
 /// expired one, is refused.
 pub(crate) fn post_authed<DB: crate::sql::sqlx::Database>(
     t: Tenant<DB>,
-    State(state): State<McpState>,
+    State(state): State<AuthedMcpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
     body: Bytes,
@@ -333,18 +338,15 @@ pub(crate) fn post_authed<DB: crate::sql::sqlx::Database>(
 
 async fn post_authed_in(
     t: TenantScope,
-    state: McpState,
+    state: AuthedMcpState,
     uri: axum::http::Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(jwt) = state.jwt.as_ref() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
-    };
     let Some(token) = bearer(&headers) else {
         return unauthorized(&headers, &uri);
     };
-    let agent = match authenticate_bearer(jwt, t.pool(), &t.org.slug, token).await {
+    let agent = match authenticate_bearer(&state.jwt, t.pool(), &t.org.slug, token).await {
         Ok(agent) => agent,
         Err(e) => return e.into_response(&headers, &uri),
     };
@@ -357,7 +359,7 @@ async fn post_authed_in(
         progress: super::progress::ProgressReporter::disabled(),
         cancel: super::progress::CancelToken::never(),
     };
-    handle_message(&state, &body, Some(ctx)).await
+    handle_message(&state.mcp, &body, Some(ctx)).await
 }
 
 /// Resolve a raw `prefix.secret` credential used straight as the

@@ -27,17 +27,13 @@ use crate::tenancy::DefaultTenantDb;
 use super::auth::{agent_token, default_jwt, post_authed};
 use super::transport::{post_handler, sse_handler};
 
-/// Shared state for the MCP handlers. `pub` in a private module, so the
-/// `*_for::<DB>` bounds can name it while callers cannot.
+/// Shared state for the MCP handlers.
 #[derive(Clone)]
-pub struct McpState {
+pub(crate) struct McpState {
     /// The app's pool. `None` under [`tenant_router`], where the
     /// `Tenant` extractor supplies one per request.
     #[allow(dead_code)]
     pub(crate) pool: Option<crate::sql::Pool>,
-    /// Agent-token lifecycle. `Some` only on a router that
-    /// authenticates.
-    pub(crate) jwt: Option<Arc<JwtLifecycle>>,
     /// Page size for the `*/list` methods, from
     /// `[mcp].max_tools_listed`. `None` or 0 means one page with
     /// everything in it.
@@ -48,10 +44,19 @@ impl McpState {
     fn new(pool: Option<crate::sql::Pool>) -> Self {
         Self {
             pool,
-            jwt: None,
             page_size: None,
         }
     }
+}
+
+/// State of the routers that authenticate: the token lifecycle is
+/// always there, so no handler has an "auth not configured" case.
+/// `pub` in a private module, so the `*_for::<DB>` bounds can name it
+/// while callers cannot.
+#[derive(Clone)]
+pub struct AuthedMcpState {
+    pub(crate) mcp: McpState,
+    pub(crate) jwt: Arc<JwtLifecycle>,
 }
 
 /// JSON-RPC only: the SSE stream needs an agent token, which these
@@ -96,7 +101,7 @@ pub fn secure_tenant_router() -> Router {
 pub fn secure_tenant_router_for<DB>() -> Router
 where
     DB: Database,
-    Tenant<DB>: FromRequestParts<McpState> + Send,
+    Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
 {
     tenant_router_authed_for::<DB>(default_jwt())
 }
@@ -120,15 +125,17 @@ pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings)
 pub fn secure_tenant_router_from_settings_for<DB>(settings: &crate::config::McpSettings) -> Router
 where
     DB: Database,
-    Tenant<DB>: FromRequestParts<McpState> + Send,
+    Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
 {
     let jwt = Arc::new(
         JwtLifecycle::new(super::auth::jwt_secret()).with_access_ttl(settings.token_ttl_secs()),
     );
-    let state = McpState {
-        jwt: Some(jwt),
-        page_size: settings.max_tools_listed,
-        ..McpState::new(None)
+    let state = AuthedMcpState {
+        mcp: McpState {
+            page_size: settings.max_tools_listed,
+            ..McpState::new(None)
+        },
+        jwt,
     };
     let mut router = authed_routes::<DB>(state, settings.sse_enabled());
 
@@ -170,11 +177,11 @@ pub fn tenant_router_authed(jwt: Arc<JwtLifecycle>) -> Router {
 pub fn tenant_router_authed_for<DB>(jwt: Arc<JwtLifecycle>) -> Router
 where
     DB: Database,
-    Tenant<DB>: FromRequestParts<McpState> + Send,
+    Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
 {
-    let state = McpState {
-        jwt: Some(jwt),
-        ..McpState::new(None)
+    let state = AuthedMcpState {
+        mcp: McpState::new(None),
+        jwt,
     };
     authed_routes::<DB>(state, true)
 }
@@ -182,10 +189,10 @@ where
 /// The authenticated route set: JSON-RPC on `/`, the notification
 /// stream when `enable_sse`, `/token`, and the OAuth 2.1 discovery
 /// and `client_credentials` endpoints.
-fn authed_routes<DB>(state: McpState, enable_sse: bool) -> Router
+fn authed_routes<DB>(state: AuthedMcpState, enable_sse: bool) -> Router
 where
     DB: Database,
-    Tenant<DB>: FromRequestParts<McpState> + Send,
+    Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
 {
     use super::oauth;
     let root = if enable_sse {
