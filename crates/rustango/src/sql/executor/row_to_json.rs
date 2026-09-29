@@ -192,7 +192,7 @@ pub fn row_to_json_my(
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
     row_to_json_generic(row, fields, |row, col| {
-        crate::sql::try_get_uuid_my::<uuid::Uuid>(row, col).ok()
+        crate::sql::try_get_flat_my::<uuid::Uuid>(row, col).ok()
     })
 }
 

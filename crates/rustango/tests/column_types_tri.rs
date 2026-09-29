@@ -30,6 +30,17 @@ pub struct Grant {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     pub token: ForeignKey<Token, Uuid>,
+    #[rustango(related_name = "backup_grants")]
+    pub backup: Option<ForeignKey<Token, Uuid>>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "coltypes_session", app = "column_types_tri")]
+pub struct Session {
+    #[rustango(primary_key, default_uuid_v7)]
+    pub id: Auto<Uuid>,
+    #[rustango(max_length = 32)]
+    pub label: String,
 }
 
 #[derive(Model, Debug, Clone)]
@@ -55,6 +66,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Token>(pool).await;
     rustango::testkit::matrix::fresh_table::<Grant>(pool).await;
     rustango::testkit::matrix::fresh_table::<Key>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Session>(pool).await;
     audit::ensure_table_pool(pool).await.expect("audit table");
     AuditLog::delete_where("entity_table", Key::SCHEMA.table, pool)
         .await
@@ -81,6 +93,50 @@ async fn uuid_fields_round_trip_through_the_orm(pool: &Pool) {
     assert_eq!(rows.len(), 1, "{}", pool.dialect().name());
     assert_eq!(rows[0].id, ID);
     assert_eq!(rows[0].parent, Some(PARENT));
+    let root: Vec<Token> = Token::objects()
+        .where_(Token::id.eq(PARENT))
+        .fetch(pool)
+        .await
+        .expect("fetch root");
+    assert_eq!(root[0].parent, None, "{}", pool.dialect().name());
+}
+
+/// The flat reads decode through `FlatScalar`, not the model's `FromRow`.
+async fn uuid_columns_pluck(pool: &Pool) {
+    seed_tokens(pool).await;
+    let mut pks: Vec<Uuid> = Token::objects().pks(pool).await.expect("pks");
+    pks.sort();
+    let mut want = vec![ID, PARENT];
+    want.sort();
+    assert_eq!(pks, want, "{}", pool.dialect().name());
+    let parents: Vec<Option<Uuid>> = Token::objects()
+        .order_by(&[("parent", false)])
+        .pluck::<Option<Uuid>>("parent", pool)
+        .await
+        .expect("pluck parent");
+    assert!(parents.contains(&None) && parents.contains(&Some(PARENT)));
+    let pairs: Vec<(Uuid, Option<Uuid>)> = Token::objects()
+        .where_(Token::id.eq(ID))
+        .pluck_pairs::<Uuid, Option<Uuid>>("id", "parent", pool)
+        .await
+        .expect("pluck_pairs");
+    assert_eq!(pairs, vec![(ID, Some(PARENT))]);
+}
+
+async fn auto_uuid_pk_round_trips(pool: &Pool) {
+    let mut s = Session {
+        id: Auto::default(),
+        label: "s".into(),
+    };
+    s.insert_pool(pool).await.expect("insert session");
+    let id = s.id.get().copied().expect("pk set");
+    let rows: Vec<Session> = Session::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(
+        rows[0].id.get().copied(),
+        Some(id),
+        "{}",
+        pool.dialect().name()
+    );
 }
 
 async fn uuid_fk_loads_through_select_related(pool: &Pool) {
@@ -88,6 +144,7 @@ async fn uuid_fk_loads_through_select_related(pool: &Pool) {
     let mut grant = Grant {
         id: Auto::default(),
         token: ForeignKey::unloaded(ID),
+        backup: Some(ForeignKey::unloaded(PARENT)),
     };
     grant.insert_pool(pool).await.expect("insert grant");
     let rows: Vec<Grant> = Grant::objects()
@@ -96,6 +153,7 @@ async fn uuid_fk_loads_through_select_related(pool: &Pool) {
         .await
         .expect("fetch grants");
     assert_eq!(rows[0].token.pk(), ID);
+    assert_eq!(rows[0].backup.as_ref().map(ForeignKey::pk), Some(PARENT));
     let token = rows[0].token.value().expect("token loaded");
     assert_eq!(token.parent, Some(PARENT), "{}", pool.dialect().name());
 }
@@ -171,6 +229,8 @@ tri_dialect_test! {
         uuid_fields_round_trip_through_the_orm,
         uuid_fk_loads_through_select_related,
         uuid_cells_decode_as_json,
+        uuid_columns_pluck,
+        auto_uuid_pk_round_trips,
         audit_diff_skips_an_unchanged_uuid,
     ],
 }

@@ -7,8 +7,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — MySQL `Uuid` fields save and load (#1733)
 
 A `Uuid` now binds as hyphenated text into its `CHAR(36)` column instead of 16 raw
-bytes (error 1366), and typed fetch, `select_related`, JSON rows and the audit diff
-read it back from that text.
+bytes (error 1366). Every read decodes that text: typed fetch, `Auto<Uuid>`,
+`ForeignKey<_, Uuid>`, `select_related`, `pluck` / `pks` / `values_list`, JSON rows
+and the audit diff. **Breaking:** a hand-made `BINARY(16)` column now fails writes
+with error 1406 (`Data too long`) and reads with sqlx "mismatched types"; use `CHAR(36)`.
 
 ### Fixed — MySQL unbounded `String` columns hold more than 64 KiB (#1708)
 

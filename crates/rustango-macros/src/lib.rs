@@ -1983,7 +1983,7 @@ struct ColumnEntry {
     column: String,
     /// `#root::core::FieldType::I64` etc.
     field_type_tokens: TokenStream2,
-    /// The column holds a UUID; MySQL decodes it from text.
+    /// A bare or optional `Uuid` field; MySQL decodes it from text.
     uuid_column: bool,
 }
 
@@ -3945,7 +3945,7 @@ fn inherent_impl_tokens(
             let before_pairs_pg = mk_before_pairs(&|_| quote!(#root::sql::try_get_returning));
             let before_pairs_my = mk_before_pairs(&|c| {
                 if c.uuid_column {
-                    quote!(#root::sql::try_get_uuid_my)
+                    quote!(#root::sql::try_get_flat_my)
                 } else {
                     quote!(#root::sql::try_get_returning_my)
                 }
@@ -11054,7 +11054,7 @@ struct FieldInfo<'a> {
     /// column, which MySQL keeps as `CHAR(36)` text (#1733).
     from_row_init_my: TokenStream2,
     from_aliased_row_init_my: TokenStream2,
-    /// The column holds a UUID.
+    /// A bare or optional `Uuid` field.
     uuid_column: bool,
     /// Inner type from a `ForeignKey<T, K>` field, if any. The reverse-
     /// relation helper emit (`Author::<child>_set`) needs to know `T`
@@ -11406,12 +11406,14 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             ::std::format!("{}__{}", prefix, #column_lit).as_str(),
         )?
     };
-    let uuid_column = kind == DetectedKind::Uuid;
+    // `Auto<Uuid>` and `ForeignKey<_, Uuid>` decode through their own
+    // MySQL impls; a bare or optional `Uuid` needs `FlatScalar`'s cell.
+    let uuid_column = kind == DetectedKind::Uuid && !detected_auto && fk_inner.is_none();
     let (from_row_init_my, from_aliased_row_init_my) = if uuid_column {
         (
-            quote! { #ident: #root::sql::try_get_uuid_my(row, #column_lit)? },
+            quote! { #ident: #root::sql::try_get_flat_my(row, #column_lit)? },
             quote! {
-                #ident: #root::sql::try_get_uuid_my(
+                #ident: #root::sql::try_get_flat_my(
                     row,
                     ::std::format!("{}__{}", prefix, #column_lit).as_str(),
                 )?

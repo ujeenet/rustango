@@ -154,6 +154,8 @@ untouched.
 
 The ORM now writes and reads a `Uuid` as the 36-character text its `CHAR(36)` column
 holds. A hand-made `BINARY(16)` UUID column no longer works; make it `CHAR(36)`.
+On MySQL, `ForeignKey<T, K>` and `Auto<T>` now decode through `FlatScalar`, so `K` / `T`
+must be one of its types.
 
 ### MySQL: unbounded `String` is `LONGTEXT`
 

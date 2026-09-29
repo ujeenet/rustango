@@ -1878,8 +1878,8 @@ where
 mod values;
 #[allow(unused_imports)]
 pub use values::{
-    fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, FlatScalar,
-    MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
+    fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
+    FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
 };
 
 /// Raw SQL on any backend: runs it with bound `SqlValue`
