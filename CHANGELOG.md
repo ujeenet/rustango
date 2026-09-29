@@ -10,6 +10,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `sqlite,passwords`, `sqlite,signals`, `sqlite,config` and `sqlite,manage,config`: the request middleware follows `manage`, and `config` enables `signals` (#1739).
 - The three `tenancy,sso` live suites build their `User` from `testkit::user()` (#1737).
 - A build with no database backend now starts with one clear error (#1509).
+## [0.59.1] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — MCP tenant router on a non-default backend (#1787)
+
+New `mcp::tenant_router_authed_for::<DB>`, `secure_tenant_router_for::<DB>` and
+`secure_tenant_router_from_settings_for::<DB>` serve a SQLite or MySQL
+`TenantContext` in a build that also enables `postgres`; before, it got 500.
+
+### Fixed — member SSO on a non-default backend (#1741)
+
+New `member_auth::member_sso_router_for::<DB>`, same fix for member SSO.
+
+### Fixed — example configs list the `[auth]` login-limit keys (#1740)
+
+Regenerated from the scaffolder, so `login_ip_*`, `login_global_*` and
+`hash_wait_ms` are documented where new projects copy from.
 
 ## [0.59.0] — 2026-09-29
 

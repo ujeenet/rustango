@@ -49,9 +49,12 @@ pub use notifications::{
 pub use oauth::{authorization_server_metadata, protected_resource_metadata};
 pub use progress::{cancel, CancelToken, ProgressReporter};
 pub use resources::{get_prompt, list_prompts, list_resources, read_resource, McpResource};
+pub use router::{
+    router, secure_tenant_router, secure_tenant_router_for, tenant_router, tenant_router_authed,
+    tenant_router_authed_for,
+};
 #[cfg(feature = "config")]
-pub use router::secure_tenant_router_from_settings;
-pub use router::{router, secure_tenant_router, tenant_router, tenant_router_authed};
+pub use router::{secure_tenant_router_from_settings, secure_tenant_router_from_settings_for};
 pub use tools::{
     call_tool, list_tools, McpContext, McpError, McpTool, McpToolFuture, McpToolHandler,
 };

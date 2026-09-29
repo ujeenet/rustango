@@ -153,6 +153,15 @@ untouched.
 ### Feature graph (#1739)
 
 `config` now enables `signals`. The request middleware (`cors`, `body_limit`, `security_headers`, …) now comes with `manage` or `admin`.
+## 0.59.1
+
+### Tenant routers for a non-default backend
+
+With several backends compiled in, the default `Tenant` is Postgres. Mount
+the `*_for::<sqlx::Sqlite>` (or `MySql`) variant for a SQLite or MySQL
+`TenantContext`: `mcp::tenant_router_authed_for`,
+`mcp::secure_tenant_router_from_settings_for`,
+`member_auth::member_sso_router_for`.
 
 ## 0.59.0
 

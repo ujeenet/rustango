@@ -22,7 +22,7 @@
 //!   find-or-provision the member, mint the member session cookie.
 //!
 //! Mount the router returned by [`member_sso_router`] into a
-//! [`crate::server::Builder`] stack (it reads the `Arc<TenantContext>`
+//! [`crate::server::Builder`] stack (it reads the `TenantContext`
 //! extension the builder injects — the flow is mount-agnostic, so no
 //! separate `SessionSecret` extension is required).
 //!
@@ -45,7 +45,6 @@
 //!   ([`crate::tenancy::sso::SharedSsoProvider`]) is a follow-up.
 
 use std::convert::Infallible;
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Extension, FromRequestParts, Path, Query, Request};
@@ -58,8 +57,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use crate::extractors::{Tenant, TenantContext};
+use crate::extractors::{Tenant, TenantScope};
 use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
+use crate::sql::sqlx::Database;
 use crate::sql::{Auto, Pool};
 use crate::sso::link::{
     create_link_tx, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, LinkSource,
@@ -67,6 +67,7 @@ use crate::sso::link::{
 };
 use crate::sso::provider::resolve_by_slug;
 use crate::sso::{build_provider, open_flow, seal_flow, NormalizedUser};
+use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::User;
 
 // ===================================================================
@@ -367,16 +368,27 @@ impl Default for MemberAuthConfig {
 
 /// Build the member SSO router: begin + per-slug callback. Mount into a
 /// [`crate::server::Builder`] stack — the handlers read the
-/// `Arc<TenantContext>` extension for the resolved tenant, its scoped
+/// `TenantContext` extension for the resolved tenant, its scoped
 /// pool, and the session secret.
 #[must_use]
 pub fn member_sso_router(config: MemberAuthConfig) -> Router<()> {
+    member_sso_router_for::<DefaultTenantDb>(config)
+}
+
+/// [`member_sso_router`] for a `Tenant<DB>` other than the default, e.g.
+/// SQLite in a build that also enables `postgres` (#1741).
+#[must_use]
+pub fn member_sso_router_for<DB>(config: MemberAuthConfig) -> Router<()>
+where
+    DB: Database,
+    Tenant<DB>: FromRequestParts<()> + Send,
+{
     let login = config.login_base.trim_end_matches('/').to_owned();
     let begin_path = format!("{login}/sso/{{slug}}");
     let callback_path = format!("{login}/sso/{{slug}}/callback");
     Router::new()
-        .route(&begin_path, get(sso_begin))
-        .route(&callback_path, get(sso_callback))
+        .route(&begin_path, get(sso_begin::<DB>))
+        .route(&callback_path, get(sso_callback::<DB>))
         .layer(Extension(config))
 }
 
@@ -441,25 +453,29 @@ fn callback_uri(parts: &Parts, login_base: &str, slug: &str) -> String {
 
 /// `GET {login_base}/sso/{slug}` — begin the OAuth2 flow, redirect to
 /// the IdP, seal the flow into the transient flow cookie.
-async fn sso_begin(
-    t: Tenant,
+fn sso_begin<DB: Database>(
+    t: Tenant<DB>,
     Path(slug): Path<String>,
-    Extension(ctx): Extension<Arc<TenantContext>>,
     Extension(config): Extension<MemberAuthConfig>,
+    req: Request,
+) -> impl std::future::Future<Output = Response> + Send {
+    sso_begin_in(t.into(), slug, config, req)
+}
+
+async fn sso_begin_in(
+    t: TenantScope,
+    slug: String,
+    config: MemberAuthConfig,
     req: Request,
 ) -> Response {
     let (parts, _body) = req.into_parts();
-
-    let pool = match ctx.pools.scoped_pool_dyn(&t.org).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, slug, "scoped pool build failed");
-            return sso_error("Sign-in is temporarily unavailable.", &config.login_base);
-        }
+    let Some(secret) = session_secret(&parts) else {
+        return sso_error("Sign-in is temporarily unavailable.", &config.login_base);
     };
+    let pool = t.pool();
 
     let redirect_uri = callback_uri(&parts, &config.login_base, &slug);
-    let resolved = match resolve_by_slug(&pool, &slug, redirect_uri).await {
+    let resolved = match resolve_by_slug(pool, &slug, redirect_uri).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             tracing::warn!(slug, "SSO provider not found / disabled");
@@ -480,7 +496,7 @@ async fn sso_begin(
     };
 
     let (authorize_url, flow) = provider.begin();
-    let sealed = seal_flow(&flow, ctx.session_secret.key());
+    let sealed = seal_flow(&flow, secret.key());
     let flow_cookie = format!(
         "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path=/; Max-Age={FLOW_TTL_SECS}{s}",
         s = secure_suffix(),
@@ -490,16 +506,28 @@ async fn sso_begin(
 
 /// `GET {login_base}/sso/{slug}/callback` — exchange the code,
 /// find-or-provision the member, mint the member session cookie.
-async fn sso_callback(
-    t: Tenant,
+fn sso_callback<DB: Database>(
+    t: Tenant<DB>,
     Path(slug): Path<String>,
-    Extension(ctx): Extension<Arc<TenantContext>>,
     Extension(config): Extension<MemberAuthConfig>,
     Query(params): Query<CallbackParams>,
+    req: Request,
+) -> impl std::future::Future<Output = Response> + Send {
+    sso_callback_in(t.into(), slug, config, params, req)
+}
+
+async fn sso_callback_in(
+    t: TenantScope,
+    slug: String,
+    config: MemberAuthConfig,
+    params: CallbackParams,
     req: Request,
 ) -> Response {
     let (parts, _body) = req.into_parts();
     let login_base = &config.login_base;
+    let Some(secret) = session_secret(&parts) else {
+        return sso_error("Sign-in is temporarily unavailable.", login_base);
+    };
 
     if let Some(err) = params.error {
         tracing::warn!(slug, error = %err, "IdP returned an error");
@@ -515,7 +543,7 @@ async fn sso_callback(
             login_base,
         );
     };
-    let flow = match open_flow(&sealed, ctx.session_secret.key()) {
+    let flow = match open_flow(&sealed, secret.key()) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "open_flow failed");
@@ -526,16 +554,10 @@ async fn sso_callback(
         }
     };
 
-    let pool = match ctx.pools.scoped_pool_dyn(&t.org).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, slug, "scoped pool build failed");
-            return clear_flow(sso_error("Sign-in is temporarily unavailable.", login_base));
-        }
-    };
+    let pool = t.pool();
 
     let redirect_uri = callback_uri(&parts, login_base, &slug);
-    let resolved = match resolve_by_slug(&pool, &slug, redirect_uri).await {
+    let resolved = match resolve_by_slug(pool, &slug, redirect_uri).await {
         Ok(Some(r)) => r,
         _ => {
             return clear_flow(sso_error(
@@ -562,7 +584,7 @@ async fn sso_callback(
 
     let key = resolved.key(LinkSource::Tenant);
     let member_id = match find_or_provision_member(
-        &pool,
+        pool,
         &key,
         resolved.allow_email_link,
         &normalized,
@@ -604,18 +626,18 @@ async fn sso_callback(
         }
     };
 
-    let Some(member) = tenant_user(&pool, member_id).await.filter(|u| u.active) else {
+    let Some(member) = tenant_user(pool, member_id).await.filter(|u| u.active) else {
         tracing::warn!(member_id, "member missing or inactive after sign-in");
         return clear_flow(sso_error("Could not complete sign-in.", login_base));
     };
-    let cookie = mint_cookie(
-        &ctx.session_secret,
-        &member,
-        &t.org.slug,
-        config.session_ttl,
-    );
+    let cookie = mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
     let landing = safe_landing(params.next.as_deref(), &config.landing_url);
     clear_flow(redirect_with_cookie(&landing, &cookie))
+}
+
+/// The mounted context's session secret, whichever backend it is for.
+fn session_secret(parts: &Parts) -> Option<SessionSecret> {
+    crate::tenancy::middleware::session_keys(&parts.extensions).map(|k| k.session.clone())
 }
 
 /// What [`find_or_provision_member`] decided.
