@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — idempotency holds a key while its request runs (#1724)
+
+A retry with the same `Idempotency-Key` while the first request runs now
+gets `409` with `Retry-After` instead of running the handler twice. The
+marker lives `lock_ttl` (60 s default) so a crash can't wedge the key.
+A response over `body_cap` now reaches the client whole instead of empty.
+
 ## [0.59.0] — 2026-09-29
 
 Tagged only; not published to crates.io.

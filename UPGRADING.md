@@ -150,6 +150,12 @@ untouched.
 
 ## Unreleased
 
+### Idempotency: concurrent retries get 409
+
+A request whose `Idempotency-Key` is still running gets `409` with
+`Retry-After: 1`; clients should retry. Handlers that run over 60 s need
+`IdempotencyLayer::lock_ttl`. A broken response stream now answers `500`.
+
 ## 0.59.0
 
 ### Bulk writes on audited models write audit rows

@@ -403,6 +403,7 @@ admin = [
     # tenancy-only before #253; admin now picks it up too.
     "dep:rpassword",
     "dep:http",
+    "dep:http-body",
     "dep:http-body-util",
     "dep:serde_urlencoded",
 ]
@@ -525,6 +526,7 @@ base64         = { workspace = true, optional = true }
 ciborium       = { workspace = true, optional = true }
 p256           = { workspace = true, optional = true }
 http           = { workspace = true, optional = true }
+http-body      = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 tera           = { workspace = true, optional = true }
 
