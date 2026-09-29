@@ -18,8 +18,12 @@
 //!   richer Slack `blocks` / attachments by passing a full JSON
 //!   object).
 //!
-//! HTTP 2xx → `Ok(())`. Anything else returns the response body as the
-//! error string so logging picks it up.
+//! HTTP 2xx → `Ok(())`. Anything else returns the status and at most
+//! [`ERROR_BODY_MAX`] bytes of the body as the error string.
+//!
+//! [`webhook_callback`] refuses private and metadata addresses and never
+//! follows redirects (#1716). List private hosts or CIDRs it may reach in
+//! `RUSTANGO_OUTBOUND_ALLOW`.
 //!
 //! Requires the `http-client` feature.
 
@@ -27,23 +31,44 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 
 use super::BroadcastFn;
+use crate::outbound::{bounded_text, CheckedTarget, TargetPolicy};
+
+/// Most bytes of a failed response body kept in the error.
+pub const ERROR_BODY_MAX: usize = 256;
 
 /// Build a [`BroadcastFn`] that posts to a Slack incoming webhook URL.
-/// Uses a freshly-built `reqwest::Client` per callback construction;
-/// call [`webhook_callback_with_client`] to share a client.
+/// The target is checked on every call, so the URL may come from config.
 #[must_use]
 pub fn webhook_callback(url: impl Into<String>) -> BroadcastFn {
-    let client = reqwest::Client::new();
-    webhook_callback_with_client(url, client)
+    checked_callback(url.into(), TargetPolicy::from_env)
 }
 
-/// Like [`webhook_callback`] but reuses an existing `reqwest::Client`.
-/// Useful when the app already owns a configured HTTP client (timeout,
-/// proxy, user-agent).
+fn checked_callback(url: String, policy: fn() -> TargetPolicy) -> BroadcastFn {
+    let url: Arc<str> = Arc::from(url);
+    Arc::new(move |value: Value| {
+        let url = Arc::clone(&url);
+        let fut: Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> =
+            Box::pin(async move {
+                let target = CheckedTarget::check(&url, &policy())
+                    .await
+                    .map_err(|e| format!("slack target refused: {e}"))?;
+                let client = target
+                    .client(reqwest::Client::builder().timeout(Duration::from_secs(10)))
+                    .map_err(|e| format!("slack client: {e}"))?;
+                post(&client, target.url().as_str(), value).await
+            });
+        fut
+    })
+}
+
+/// Like [`webhook_callback`] but reuses your `reqwest::Client`. Its
+/// redirect and proxy settings apply and the target is **not** checked,
+/// so pass only URLs you control.
 #[must_use]
 pub fn webhook_callback_with_client(
     url: impl Into<String>,
@@ -54,24 +79,24 @@ pub fn webhook_callback_with_client(
         let url = Arc::clone(&url);
         let client = client.clone();
         let fut: Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> =
-            Box::pin(async move {
-                let payload = build_payload(value);
-                let resp = client
-                    .post(url.as_ref())
-                    .json(&payload)
-                    .send()
-                    .await
-                    .map_err(|e| format!("slack POST failed: {e}"))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("slack returned {status}: {body}"))
-                }
-            });
+            Box::pin(async move { post(&client, &url, value).await });
         fut
     })
+}
+
+async fn post(client: &reqwest::Client, url: &str, value: Value) -> Result<(), String> {
+    let resp = client
+        .post(url)
+        .json(&build_payload(value))
+        .send()
+        .await
+        .map_err(|e| format!("slack POST failed: {e}"))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = bounded_text(resp, ERROR_BODY_MAX).await;
+    Err(format!("slack returned {status}: {body}"))
 }
 
 /// Wrap a bare string as Slack's `{"text": "..."}` envelope; pass
@@ -110,17 +135,63 @@ mod tests {
         assert_eq!(build_payload(v.clone()), v);
     }
 
-    /// Construct the callback; we don't fire HTTP here (no live test
-    /// server in unit context), but verify the BroadcastFn shape is
-    /// callable.
+    async fn serve(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        base
+    }
+
     #[tokio::test]
-    async fn callback_is_callable() {
-        let cb = webhook_callback("http://127.0.0.1:1");
-        // Calling actually fires HTTP — to keep this test offline we
-        // just check we got a closure back; runtime invocation lives
-        // in the live test against wiremock.
-        // The Arc<dyn Fn ...> doesn't implement common traits, so we
-        // can only confirm by dropping.
-        drop(cb);
+    async fn private_target_is_refused() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move || {
+                h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { "ok" }
+            }),
+        );
+        let base = serve(app).await;
+        let cb = checked_callback(format!("{base}/hook"), TargetPolicy::public_only);
+        let err = cb(json!("hi")).await.unwrap_err();
+        assert!(err.contains("blocked address"), "{err}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn redirect_to_metadata_is_not_followed() {
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::FOUND,
+                    [(
+                        axum::http::header::LOCATION,
+                        "http://169.254.169.254/latest/meta-data/",
+                    )],
+                )
+            }),
+        );
+        let base = serve(app).await;
+        let cb = checked_callback(format!("{base}/hook"), || TargetPolicy::AllowPrivate);
+        let err = cb(json!("hi")).await.unwrap_err();
+        assert!(err.starts_with("slack returned 302"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn error_body_is_bounded() {
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(|| async {
+                (axum::http::StatusCode::BAD_REQUEST, "x".repeat(1_000_000))
+            }),
+        );
+        let base = serve(app).await;
+        let cb = checked_callback(format!("{base}/hook"), || TargetPolicy::AllowPrivate);
+        let err = cb(json!("hi")).await.unwrap_err();
+        assert!(err.starts_with("slack returned 400"), "{err}");
+        assert!(err.len() < ERROR_BODY_MAX + 64, "{} bytes", err.len());
     }
 }

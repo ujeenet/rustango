@@ -261,7 +261,7 @@ Hasta [#1395](https://github.com/ujeenet/rustango/issues/1395) este párrafo afi
 
 XSS (scripting entre sitios) ocurre cuando la entrada del usuario se renderiza como HTML y se ejecuta como código en el navegador de otra persona. La solución es escapar cualquier entrada del usuario antes de que llegue a la página. **Rustango** maneja esto de dos maneras:
 
-**1. Auto-escape de plantillas Tera** — Tera es el motor de plantillas de **Rustango**. Cada `{{ var }}` se escapa como HTML automáticamente — pero solo en plantillas que Tera autoescapa, es decir su conjunto por defecto `.html`, `.htm` y `.xml`. Rustango no define `autoescape_suffixes`, así que una plantilla `.txt`, `.j2` o `.tera` **no** se escapa. Usa `{{ var | safe }}` para desactivarlo — raro, y peligroso, así que hazlo solo con HTML en el que confíes plenamente.
+**1. Auto-escape de plantillas Tera** — Tera es el motor de plantillas de **Rustango**. Cada `{{ var }}` se escapa como HTML automáticamente en toda plantilla que construye el framework, sea cual sea su extensión. Con `template_extensions::html_tera()` / `html_tera_from_glob(glob)` tu propio motor hace lo mismo; un `Tera::new` a secas solo escapa `.html`, `.htm` y `.xml`. Solo las partes de texto plano del correo (asunto y cuerpo `.txt` de `EmailRenderer`) se renderizan sin escapar. Usa `{{ var | safe }}` para desactivarlo — raro, y peligroso, así que hazlo solo con HTML en el que confíes plenamente.
 
 **2. Ayudante de escape manual** — para cuando construyes HTML en código Rust en lugar de en una plantilla:
 

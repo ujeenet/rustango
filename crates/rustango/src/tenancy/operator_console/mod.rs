@@ -442,7 +442,7 @@ fn router_inner(
     tenant_session_secret: Option<SessionSecret>,
     tenant_handoff_url: String,
 ) -> Router {
-    let mut tera = Tera::default();
+    let mut tera = crate::template_extensions::html_tera();
     tera.add_raw_templates([
         (
             "_theme_tokens.html",
