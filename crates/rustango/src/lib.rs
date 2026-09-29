@@ -454,7 +454,7 @@ pub mod events;
 pub mod prunable;
 
 /// CORS middleware — [`cors::CorsLayer`] for axum routers.
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod cors;
 
 /// Token-bucket rate limiting middleware — [`rate_limit::RateLimitLayer`].
@@ -683,18 +683,18 @@ pub mod ip_filter;
 
 /// Host-header allowlist middleware — refuses a request whose `Host` is
 /// not on the list. See [`host_validation::AllowedHostsLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod host_validation;
 
 /// HTTP → HTTPS redirect middleware, with exempt path prefixes and a
 /// trusted proxy header. See [`ssl_redirect::SslRedirectLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod ssl_redirect;
 
 /// Request body size limit middleware — fast `Content-Length` rejection
 /// returning structured `413 Payload Too Large` JSON. Complements
 /// axum's per-extractor `DefaultBodyLimit`. See [`body_limit::BodyLimitLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod body_limit;
 
 /// Per-request handler timeout — stops a handler that runs too long and
@@ -702,7 +702,7 @@ pub mod body_limit;
 /// pile up. `Cli::with_settings_from_env()` wires it from
 /// `Settings.server.request_timeout_secs`. See
 /// [`request_timeout::RequestTimeoutLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod request_timeout;
 
 /// Real-IP extraction for apps behind a trusted reverse proxy. Reads
@@ -839,7 +839,7 @@ pub mod pagination;
 
 /// Security headers middleware — HSTS / X-Frame-Options / nosniff /
 /// Referrer-Policy / Permissions-Policy / CSP. See [`security_headers::SecurityHeadersLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod security_headers;
 
 /// Per-request CSP nonce middleware — makes a fresh random nonce per
@@ -929,7 +929,7 @@ pub mod http_client;
 /// HTTP `QUERY` method routing (RFC 10008) — `query(handler)` and
 /// `.query()` chaining on axum's `MethodRouter`. See
 /// [`http_query::QueryRouterExt`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod http_query;
 
 /// Method-adaptive params extractor — [`params::Params`] reads the query

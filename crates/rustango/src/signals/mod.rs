@@ -64,6 +64,8 @@ pub mod admin;
 pub mod auth;
 pub mod m2m;
 pub mod migrate;
+// A tower layer over axum types, so it needs the HTTP stack, not just `signals`.
+#[cfg(feature = "_http_layers")]
 pub mod request;
 pub mod setting;
 

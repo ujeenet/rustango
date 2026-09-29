@@ -778,6 +778,11 @@ jobs:
           # `_signing` without axum broke `messages` (#1797, #1719).
           - sqlite,webhook-delivery
           - sqlite,oauth2
+          # Each missed a dep or a module it names (#1739).
+          - sqlite,passwords
+          - sqlite,signals
+          - sqlite,config
+          - sqlite,manage,config
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88

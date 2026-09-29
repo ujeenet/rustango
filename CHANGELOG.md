@@ -7,6 +7,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — feature sets that did not compile
 
 - `sqlite,webhook-delivery` and `sqlite,oauth2`: `messages` now also needs axum (#1797, #1719).
+- `sqlite,passwords`, `sqlite,signals`, `sqlite,config` and `sqlite,manage,config`: the request middleware follows `manage`, and `config` enables `signals` (#1739).
 
 ## [0.59.0] — 2026-09-29
 
