@@ -15,8 +15,9 @@ use crate::tenancy::{Org, OrgResolver as _, TenancyError};
 
 use super::{DatabaseTenantContext, TenantContext};
 
-/// The tenant context this request uses: the first mounted one, in
-/// [`MountedTenantContext::of`]'s order.
+/// The tenant context this request uses. With several mounted, a fixed
+/// type order wins, not mount order: `TenantContext` Postgres, SQLite,
+/// MySQL, then `DatabaseTenantContext` in the same order.
 #[derive(Clone, Copy)]
 pub(crate) enum MountedTenantContext<'a> {
     #[cfg(feature = "postgres")]

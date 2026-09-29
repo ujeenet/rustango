@@ -19,8 +19,8 @@ use sqlx::Database;
 
 use crate::sql::sqlx;
 use crate::tenancy::{
-    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, OrgResolver, TenancyError,
-    TenantConn, TenantPools,
+    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, TenancyError, TenantConn,
+    TenantPools,
 };
 
 /// What the [`Tenant`] extractor reads from request extensions.
@@ -269,12 +269,12 @@ mod rejection_tests {
 }
 
 /// #1826 — with two contexts mounted, an extractor serves the tenant
-/// that `request_org` (auth, sessions) resolved, or none at all.
+/// that `request_org` (auth, sessions) resolved, or rejects.
 #[cfg(all(test, feature = "sqlite"))]
 mod one_context_tests {
     use super::*;
     use crate::extractors::{DatabaseTenant, DatabaseTenantContext};
-    use crate::tenancy::{BackendKind, DatabasePools};
+    use crate::tenancy::{BackendKind, DatabasePools, OrgResolver};
 
     struct Fixed(Org);
 
@@ -339,20 +339,17 @@ mod one_context_tests {
                 operator_secret: secret(),
                 registry: crate::sql::Pool::connect("sqlite::memory:").await.unwrap(),
             }));
-        let auth = auth_slug(&p).await;
-        match DatabaseTenant::<sqlx::Sqlite>::from_request_parts(&mut p, &()).await {
-            Ok(t) => assert_eq!(
-                t.org.slug, auth,
-                "auth checked one tenant, the handler got another"
+        assert_eq!(auth_slug(&p).await, "full");
+        let got = DatabaseTenant::<sqlx::Sqlite>::from_request_parts(&mut p, &())
+            .await
+            .map(|t| t.org.slug);
+        assert!(
+            matches!(
+                got,
+                Err(crate::extractors::DatabaseTenantRejection::MissingContext)
             ),
-            Err(e) => assert!(
-                matches!(
-                    e,
-                    crate::extractors::DatabaseTenantRejection::MissingContext
-                ),
-                "{e:?}"
-            ),
-        }
+            "auth resolved `full`, the handler got {got:?}"
+        );
     }
 
     #[cfg(feature = "postgres")]
@@ -370,15 +367,27 @@ mod one_context_tests {
                 operator_secret: secret(),
             }));
         p.extensions.insert(sqlite_ctx("sqlite").await);
-        let auth = auth_slug(&p).await;
-        match Tenant::<sqlx::Sqlite>::from_request_parts(&mut p, &()).await {
-            Ok(t) => assert_eq!(
-                t.org.slug, auth,
-                "auth checked one tenant, the handler got another"
-            ),
-            Err(e) => assert!(matches!(e, TenantRejection::MissingContext), "{e:?}"),
-        }
+        assert_eq!(auth_slug(&p).await, "pg");
+        let got = Tenant::<sqlx::Sqlite>::from_request_parts(&mut p, &())
+            .await
+            .map(|t| t.org.slug);
+        assert!(
+            matches!(got, Err(TenantRejection::MissingContext)),
+            "auth resolved `pg`, the handler got {got:?}"
+        );
     }
+}
+
+/// The request's Org from the mounted context, as a rejection on failure.
+async fn resolved_org(
+    mounted: super::MountedTenantContext<'_>,
+    parts: &Parts,
+) -> Result<Org, TenantRejection> {
+    mounted
+        .resolve(parts)
+        .await
+        .map_err(|e| TenantRejection::Internal(e.to_string()))?
+        .ok_or(TenantRejection::NotFound)
 }
 
 // `Tenant<sqlx::Postgres>` goes through `TenantPools::acquire`,
@@ -392,16 +401,13 @@ where
     type Rejection = TenantRejection;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let ctx = super::MountedTenantContext::of(&parts.extensions)
-            .and_then(|m| m.full::<sqlx::Postgres>())
+        let mounted = super::MountedTenantContext::of(&parts.extensions)
+            .ok_or(TenantRejection::MissingContext)?;
+        let ctx = mounted
+            .full::<sqlx::Postgres>()
             .ok_or(TenantRejection::MissingContext)?
             .clone();
-        let org = ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?
-            .ok_or(TenantRejection::NotFound)?;
+        let org = resolved_org(mounted, parts).await?;
         let conn = ctx
             .pools
             .acquire(&org)
@@ -442,13 +448,11 @@ where
         .ok_or(TenantRejection::MissingContext)?;
     let full = mounted.full::<DB>().cloned();
     let db = mounted.database::<DB>().cloned();
-    let (org, pool) = if let Some(ctx) = full {
-        let org = ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-            .map_err(internal)?
-            .ok_or(TenantRejection::NotFound)?;
+    if full.is_none() && db.is_none() {
+        return Err(TenantRejection::MissingContext);
+    }
+    let org = resolved_org(mounted, parts).await?;
+    let pool = if let Some(ctx) = full {
         // Rejects a schema-mode org, which needs Postgres.
         #[cfg_attr(not(feature = "postgres"), allow(irrefutable_let_patterns))]
         let crate::tenancy::TenantPool::Database { pool } = ctx
@@ -459,17 +463,11 @@ where
         else {
             unreachable!("database_pool_for_org rejects schema-mode")
         };
-        (org, (*pool).clone())
+        (*pool).clone()
     } else {
         let ctx = db.ok_or(TenantRejection::MissingContext)?;
-        let org = ctx
-            .resolver
-            .resolve(parts, &ctx.registry)
-            .await
-            .map_err(internal)?
-            .ok_or(TenantRejection::NotFound)?;
         let pool = ctx.pools.pool_for_org(&org).await.map_err(internal)?;
-        (org, pool.pool().clone())
+        pool.pool().clone()
     };
     Ok(Tenant {
         org,
