@@ -249,7 +249,7 @@ impl JwtAuth {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
                 tracing::warn!(
-                    target: "rustango::auth",
+                    target: "rustango::tenancy",
                     "JWT revocation uses an in-memory store: a logged-out token still works on \
                      other replicas and after a restart; set `auth_routes::Config::jti_store` \
                      to a Redis or database store"
