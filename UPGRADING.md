@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Flat projections take `FlatScalar` (breaking)
+
+`pluck::<U>`, `pks::<U>`, `value::<U>` and `values_list_flat(..).fetch::<U>`
+accept built-in scalars (integers, floats, `bool`, `String`, `Vec<u8>`,
+`Uuid`, JSON, chrono types) and `Option` of them. Pluck the inner type
+and wrap it for a newtype; use `Option<T>` for a nullable column, which
+now errors into a bare `T` on SQLite too.
+
 ### Warnings for per-process login state
 
 `runserver` and `check --deploy` warn while account lockout uses the

@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — flat `values_list` reads NULL the same on every backend (#1773)
+
+**Breaking:** `pluck`, `pks`, `value` and `values_list_flat().fetch/first`
+now take a sealed `FlatScalar` type; a NULL into a bare `i64` errors
+naming the column (SQLite returned `0`), `Option<i64>` gives `None`.
+Your own newtypes can no longer be the flat `U`.
+
 ### Security — warn when login defences are per process (#1534)
 
 `check --deploy` and `runserver` now warn when account lockout runs on an

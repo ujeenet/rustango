@@ -407,48 +407,123 @@ pub trait MaybeSqliteScalar {}
 #[cfg(not(feature = "sqlite"))]
 impl<T> MaybeSqliteScalar for T {}
 
+mod flat_sealed {
+    pub trait Sealed {}
+}
+
+/// A type the flat `values_list` / `pluck` / `value` decode can return.
+/// Sealed; `Option<T>` reads NULL as `None`, a bare `T` errors on NULL.
+pub trait FlatScalar: flat_sealed::Sealed + Send + Unpin + Sized {
+    #[doc(hidden)]
+    type Cell: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin;
+    #[doc(hidden)]
+    fn from_cell(cell: Self::Cell) -> Self;
+    #[doc(hidden)]
+    fn from_null(column: &str) -> Result<Self, sqlx::Error>;
+}
+
+macro_rules! flat_scalar {
+    ($($t:ty),* $(,)?) => {$(
+        impl flat_sealed::Sealed for $t {}
+        impl flat_sealed::Sealed for Option<$t> {}
+        impl FlatScalar for $t {
+            type Cell = $t;
+            fn from_cell(cell: $t) -> Self {
+                cell
+            }
+            fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+                // The error PG and MySQL raise themselves, so all three agree.
+                Err(sqlx::Error::ColumnDecode {
+                    index: format!("{column:?}"),
+                    source: Box::new(sqlx::error::UnexpectedNullError),
+                })
+            }
+        }
+        impl FlatScalar for Option<$t> {
+            type Cell = $t;
+            fn from_cell(cell: $t) -> Self {
+                Some(cell)
+            }
+            fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+                Ok(None)
+            }
+        }
+    )*};
+}
+
+flat_scalar!(
+    i16,
+    i32,
+    i64,
+    f32,
+    f64,
+    bool,
+    String,
+    Vec<u8>,
+    uuid::Uuid,
+    serde_json::Value,
+    chrono::DateTime<chrono::Utc>,
+    chrono::NaiveDateTime,
+    chrono::NaiveDate,
+    chrono::NaiveTime,
+);
+
+/// Decode column 0, checking NULL first: sqlx-sqlite reads NULL as `0` (#1773).
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+fn decode_flat<R, U>(row: &R) -> Result<U, sqlx::Error>
+where
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    U: FlatScalar,
+    U::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    use sqlx::Column as _;
+    if super::row_to_json::cell_is_null(row, 0) {
+        return U::from_null(row.columns().first().map_or("0", |c| c.name()));
+    }
+    row.try_get::<U::Cell, _>(0).map(U::from_cell)
+}
+
 /// Run a one-column [`SelectQuery`] and decode each row's only cell
 /// into `U` — the flat form of `.values_list()`.
 ///
 /// # Errors
 /// SQL compilation or driver failure, including a decode error when
-/// `U` does not match the column's type.
-pub async fn fetch_values_flat<U>(pool: &Pool, query: &SelectQuery) -> Result<Vec<U>, ExecError>
-where
-    U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
-{
+/// `U` does not match the column's type or a bare `U` meets NULL.
+pub async fn fetch_values_flat<U: FlatScalar>(
+    pool: &Pool,
+    query: &SelectQuery,
+) -> Result<Vec<U>, ExecError> {
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let mut q: sqlx::query::QueryScalar<'_, sqlx::Postgres, U, PgArguments> =
-                sqlx::query_scalar(&stmt.sql);
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_scalar_pg(q, v);
+                q = bind_query(q, v);
             }
-            Ok(q.fetch_all(pg).await?)
+            let rows = q.fetch_all(pg).await?;
+            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryScalar<'_, sqlx::MySql, U, sqlx::mysql::MySqlArguments> =
-                sqlx::query_scalar(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_scalar_my(q, v);
+                q = bind_query_my(q, v);
             }
-            Ok(q.fetch_all(my).await?)
+            let rows = q.fetch_all(my).await?;
+            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::QueryScalar<
-                '_,
-                sqlx::Sqlite,
-                U,
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_scalar(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_scalar_sqlite(q, v);
+                q = bind_query_sqlite(q, v);
             }
-            Ok(q.fetch_all(sq).await?)
+            let rows = q.fetch_all(sq).await?;
+            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
         }
     }
 }
@@ -502,30 +577,6 @@ where
             Ok(q.fetch_all(sq).await?)
         }
     }
-}
-
-#[cfg(feature = "postgres")]
-fn bind_query_scalar_pg<U>(
-    q: sqlx::query::QueryScalar<'_, sqlx::Postgres, U, PgArguments>,
-    value: SqlValue,
-) -> sqlx::query::QueryScalar<'_, sqlx::Postgres, U, PgArguments> {
-    bind_match!(q, value)
-}
-
-#[cfg(feature = "mysql")]
-fn bind_query_scalar_my<U>(
-    q: sqlx::query::QueryScalar<'_, sqlx::MySql, U, sqlx::mysql::MySqlArguments>,
-    value: SqlValue,
-) -> sqlx::query::QueryScalar<'_, sqlx::MySql, U, sqlx::mysql::MySqlArguments> {
-    bind_match_mysql!(q, value)
-}
-
-#[cfg(feature = "sqlite")]
-fn bind_query_scalar_sqlite<'a, U>(
-    q: sqlx::query::QueryScalar<'a, sqlx::Sqlite, U, sqlx::sqlite::SqliteArguments<'a>>,
-    value: SqlValue,
-) -> sqlx::query::QueryScalar<'a, sqlx::Sqlite, U, sqlx::sqlite::SqliteArguments<'a>> {
-    bind_match_sqlite!(q, value)
 }
 
 // Bridge methods on the values builders so callers chain `.fetch(&pool)`.
@@ -653,16 +704,15 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     ///     .pluck::<String>("title", &pool).await?;
     /// ```
     ///
-    /// `U` must decode from the column's type on every backend you
-    /// target; `i64`, `String`, `bool` and `f64` are the usual
-    /// choices. Unlike `Model::pluck`, this respects the queryset's
+    /// `U` is a [`FlatScalar`]: `i64`, `String`, `bool`, `f64` and the
+    /// like, or `Option<_>` of one for a nullable column. Unlike `Model::pluck`, this respects the queryset's
     /// filters, ordering and limits.
     ///
     /// # Errors
     /// As [`crate::query::ValuesFlatQuerySet::fetch`].
     pub async fn pluck<U>(self, col: &'static str, pool: &Pool) -> Result<Vec<U>, ExecError>
     where
-        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        U: FlatScalar,
     {
         self.values_list_flat(col).fetch::<U>(pool).await
     }
@@ -681,7 +731,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// has no primary key, otherwise as [`Self::pluck`].
     pub async fn pks<K>(self, pool: &Pool) -> Result<Vec<K>, ExecError>
     where
-        K: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        K: FlatScalar,
     {
         let pk_col = T::SCHEMA.primary_key().map(|f| f.column).ok_or_else(|| {
             ExecError::Query(crate::core::QueryError::UnknownField {
@@ -738,7 +788,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// As [`crate::query::ValuesFlatQuerySet::first`].
     pub async fn value<U>(self, col: &'static str, pool: &Pool) -> Result<Option<U>, ExecError>
     where
-        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        U: FlatScalar,
     {
         self.values_list_flat(col).first::<U>(pool).await
     }
@@ -990,7 +1040,7 @@ impl<T: crate::core::Model> crate::query::ValuesFlatQuerySet<T> {
     /// error when `U` does not match the column's type.
     pub async fn fetch<U>(self, pool: &Pool) -> Result<Vec<U>, ExecError>
     where
-        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        U: FlatScalar,
     {
         let q = self.compile()?;
         fetch_values_flat::<U>(pool, &q).await
@@ -1011,7 +1061,7 @@ impl<T: crate::core::Model> crate::query::ValuesFlatQuerySet<T> {
     /// As [`Self::fetch`].
     pub async fn first<U>(self, pool: &Pool) -> Result<Option<U>, ExecError>
     where
-        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        U: FlatScalar,
     {
         // Rebuild with `LIMIT 1`. `compile()` consumes `self.qs`, so
         // the limit has to go on through the builder.

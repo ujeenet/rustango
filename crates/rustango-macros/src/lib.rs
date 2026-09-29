@@ -1748,11 +1748,7 @@ fn reverse_has_accessor_tokens(
                 #root::sql::ExecError,
             >
             where
-                U: #root::sql::MaybePgScalar
-                    + #root::sql::MaybeMyScalar
-                    + #root::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
+                U: #root::sql::FlatScalar,
             {
                 self.#accessor_ident()
                     .values_list_flat(col)
@@ -1950,11 +1946,7 @@ fn through_accessor_tokens(
                 #root::sql::ExecError,
             >
             where
-                U: #root::sql::MaybePgScalar
-                    + #root::sql::MaybeMyScalar
-                    + #root::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
+                U: #root::sql::FlatScalar,
             {
                 self.#method_ident()
                     .values_list_flat(col)
@@ -4206,11 +4198,7 @@ fn inherent_impl_tokens(
                     #root::sql::ExecError,
                 >
                 where
-                    U: #root::sql::MaybePgScalar
-                        + #root::sql::MaybeMyScalar
-                        + #root::sql::MaybeSqliteScalar
-                        + ::core::marker::Send
-                        + ::core::marker::Unpin,
+                    U: #root::sql::FlatScalar,
                 {
                     let _col_static: &'static str = Self::__resolve_col(col)?;
                     #root::query::QuerySet::<Self>::default()
@@ -4642,10 +4630,8 @@ fn inherent_impl_tokens(
             /// `Model::pluck($column)` parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
-            /// .values_list_flat(col).fetch::<U>(pool)`. `U` must
-            /// be decodable from the column's SQL type on every
-            /// dialect the binary targets (common picks: `i64` /
-            /// `i32` / `String` / `bool` / `f64`).
+            /// .values_list_flat(col).fetch::<U>(pool)`. `U` is a
+            /// `FlatScalar`; use `Option<_>` for a nullable column.
             ///
             /// # Errors
             /// As `ValuesFlatQuerySet::fetch`.
@@ -4654,11 +4640,7 @@ fn inherent_impl_tokens(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<::std::vec::Vec<U>, #root::sql::ExecError>
             where
-                U: #root::sql::MaybePgScalar
-                    + #root::sql::MaybeMyScalar
-                    + #root::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
+                U: #root::sql::FlatScalar,
             {
                 #root::query::QuerySet::<Self>::default()
                     .values_list_flat(col)
