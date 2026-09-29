@@ -23,6 +23,11 @@ On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView`
 New `audit::update` / `audit::delete` pick the audited path from the schema;
 `audit::update_as` records soft delete and restore under their own operation.
 
+### Security — OAuth2 success bodies are capped (#1793)
+
+Discovery, token and userinfo responses over 1 MiB now fail with a clear error
+instead of being buffered whole.
+
 ### Security — the outbound allowlist never opens cloud metadata (#1796)
 
 `RUSTANGO_OUTBOUND_ALLOW` host and CIDR entries no longer reach 169.254.169.254,

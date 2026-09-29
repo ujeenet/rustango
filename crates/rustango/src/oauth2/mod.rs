@@ -69,7 +69,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::outbound::{bounded_text, CheckedTarget, TargetPolicy};
+use crate::outbound::{bounded_text, capped_body, BodyError, CheckedTarget, TargetPolicy};
 
 pub mod providers;
 pub mod registry;
@@ -343,9 +343,10 @@ impl OAuth2Provider {
                 "GET {url} -> {status}: {body}"
             )));
         }
-        let doc: DiscoveryDoc = resp
-            .json()
+        let bytes = capped_body(resp, SUCCESS_BODY_MAX)
             .await
+            .map_err(|e| OAuthError::Discovery(format!("GET {url}: {e}")))?;
+        let doc: DiscoveryDoc = serde_json::from_slice(&bytes)
             .map_err(|e| OAuthError::Discovery(format!("decode discovery doc: {e}")))?;
         self.auth_url = doc.authorization_endpoint;
         self.token_url = doc.token_endpoint;
@@ -479,6 +480,8 @@ impl OAuth2Provider {
 
 /// Most bytes of a failed response body kept in an error.
 const ERROR_BODY_MAX: usize = 256;
+/// Cap on a success body: discovery, token and userinfo JSON (#1793).
+const SUCCESS_BODY_MAX: usize = 1 << 20;
 
 impl OAuth2Provider {
     /// A no-redirect client pinned to `url`'s checked addresses: a tenant
@@ -520,7 +523,12 @@ async fn decode_or_error<T: serde::de::DeserializeOwned>(
             body,
         });
     }
-    let bytes = resp.bytes().await?;
+    let bytes = capped_body(resp, SUCCESS_BODY_MAX)
+        .await
+        .map_err(|e| match e {
+            BodyError::Read(e) => OAuthError::from(e),
+            too_large => OAuthError::BadResponse(too_large.to_string()),
+        })?;
     serde_json::from_slice(&bytes).map_err(|e| {
         let preview = String::from_utf8_lossy(&bytes)
             .chars()
@@ -867,6 +875,41 @@ mod tests {
             }
             other => panic!("{other}"),
         }
+    }
+
+    /// Valid JSON padded past [`SUCCESS_BODY_MAX`].
+    fn huge_json(fields: &str) -> String {
+        format!(r#"{{{fields},"pad":"{}"}}"#, "x".repeat(SUCCESS_BODY_MAX))
+    }
+
+    /// Success bodies are capped too, even when they are valid JSON (#1793).
+    #[tokio::test]
+    async fn success_bodies_are_bounded() {
+        let token = huge_json(r#""access_token":"a","token_type":"bearer""#);
+        let doc = huge_json(r#""authorization_endpoint":"a","token_endpoint":"t""#);
+        let app = axum::Router::new()
+            .route("/token", axum::routing::post(move || async move { token }))
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || async move { doc }),
+            );
+        let base = serve(app).await;
+        let p = OAuth2Provider::new("t", "c", "s", "https://app/cb", "", format!("{base}/token"));
+        let (_, flow) = p.begin();
+        let err = p
+            .complete_with(&flow, "code", &flow.state, &loopback())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, OAuthError::BadResponse(m) if m.contains("exceeds")),
+            "{err}"
+        );
+        let err = OAuth2Provider::new("x", "c", "s", "https://app/cb", "", "")
+            .discover(&base, &loopback())
+            .await
+            .err()
+            .expect("discovery must fail");
+        assert!(err.to_string().contains("exceeds"), "{err}");
     }
 
     #[tokio::test]

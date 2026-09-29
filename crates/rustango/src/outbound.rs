@@ -193,6 +193,41 @@ pub(crate) async fn bounded_text(mut resp: reqwest::Response, max: usize) -> Str
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// Read `resp`'s whole body, or fail once it passes `max` bytes, so a
+/// hostile server cannot make us buffer an unbounded answer.
+#[cfg(feature = "oauth2")]
+pub(crate) async fn capped_body(
+    mut resp: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, BodyError> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(BodyError::Read)? {
+        if buf.len() + chunk.len() > max {
+            return Err(BodyError::TooLarge { max });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Why [`capped_body`] failed.
+#[cfg(feature = "oauth2")]
+#[derive(Debug)]
+pub(crate) enum BodyError {
+    TooLarge { max: usize },
+    Read(reqwest::Error),
+}
+
+#[cfg(feature = "oauth2")]
+impl std::fmt::Display for BodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge { max } => write!(f, "response body exceeds {max} bytes"),
+            Self::Read(e) => write!(f, "read body: {e}"),
+        }
+    }
+}
+
 async fn checked_route(url: &reqwest::Url, allow: &Allowlist) -> Result<Route, TargetError> {
     let host = url
         .host_str()

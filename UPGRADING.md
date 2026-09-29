@@ -170,6 +170,10 @@ and restore are recorded as `soft_delete` and `restore`, as on the typed path.
 `soft_delete::restore` now returns 0 for a row that is not deleted, and the
 audited `restore_selected` counts only deleted rows.
 
+### OAuth2 responses are capped at 1 MiB
+
+An IdP discovery, token or userinfo body over 1 MiB is now an error.
+
 ### Cloud-metadata addresses are always refused
 
 SSO and Slack calls refuse cloud-metadata addresses even when `RUSTANGO_OUTBOUND_ALLOW`
