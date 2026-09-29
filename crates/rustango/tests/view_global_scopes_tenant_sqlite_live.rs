@@ -1,5 +1,6 @@
 #![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds.
-//! The template views' `tenant_router()` copies apply global scopes too (#1746).
+//! The template views' `tenant_router()` copies apply global scopes too (#1746),
+//! and audit their writes (#1794).
 
 // `not(postgres)`: the `Tenant` extractor looks up `TenantContext<DefaultDb>`,
 // which is Postgres once that feature is on.
@@ -15,9 +16,10 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
+use rustango::audit::AuditLog;
 use rustango::core::{Filter, Model as _, Op, SqlValue, WhereExpr};
 use rustango::extractors::TenantContext;
-use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool, UpdaterPool as _};
+use rustango::sql::{sqlx, Auto, CounterPool as _, FetcherPool as _, Pool, UpdaterPool as _};
 use rustango::template_views::{
     DeleteView, DetailView, ListView, TenantBulkActionPoolFn, UpdateView,
 };
@@ -36,7 +38,8 @@ fn visible_only() -> WhereExpr {
 #[rustango(
     table = "scope1746t_note",
     app = "scope1746t",
-    global_scope(name = "visible", apply = visible_only)
+    global_scope(name = "visible", apply = visible_only),
+    audit(track = "tag")
 )]
 pub struct Note {
     #[rustango(primary_key)]
@@ -95,6 +98,9 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
     rustango::testkit::create_tables_for::<Note>(&pool)
         .await
         .expect("notes table");
+    rustango::audit::ensure_table_pool(&pool)
+        .await
+        .expect("audit table");
     let (mut shown, mut hidden) = (Vec::new(), Vec::new());
     for (tag, visible) in [("a", true), ("h", false), ("b", true), ("h", false)] {
         let mut row = Note {
@@ -200,6 +206,15 @@ async fn send(app: &Router, method: Method, uri: &str, form: Option<&str>) -> (S
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
+async fn audit_rows(pool: &Pool, operation: &str) -> i64 {
+    AuditLog::objects()
+        .filter("entity_table", Note::SCHEMA.table)
+        .filter("operation", operation)
+        .count(pool)
+        .await
+        .expect("count audit rows")
+}
+
 async fn row(pool: &Pool, pk: i64) -> Option<Note> {
     Note::objects()
         .without_global_scopes()
@@ -252,12 +267,14 @@ async fn tenant_pk_views_404_on_hidden_rows() {
         "UpdateView POST on a visible row: {status}"
     );
     assert_eq!(row(&pool, s).await.unwrap().tag, "x");
+    assert_eq!(audit_rows(&pool, "update").await, 1, "UpdateView audited");
     let (status, _) = send(&app, Method::POST, &format!("/notes/{s}/delete"), Some("")).await;
     assert!(
         status.is_redirection(),
         "DeleteView POST on a visible row: {status}"
     );
     assert!(row(&pool, s).await.is_none(), "visible row deleted");
+    assert_eq!(audit_rows(&pool, "delete").await, 1, "DeleteView audited");
 }
 
 #[tokio::test]

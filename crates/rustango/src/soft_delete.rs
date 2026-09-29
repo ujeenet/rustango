@@ -34,7 +34,7 @@
 use crate::core::{
     Assignment, DeleteQuery, Filter, ModelSchema, Op, SqlValue, UpdateQuery, WhereExpr,
 };
-use crate::sql::{delete_pool as sql_delete_pool, update_pool as sql_update_pool, ExecError, Pool};
+use crate::sql::{ExecError, Pool};
 
 /// `Some(<col> IS NULL)` for a soft-delete model, else `None`. It
 /// matches the rows that are still live.
@@ -110,7 +110,7 @@ pub async fn soft_delete(
     let col = model
         .soft_delete_column
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
-    let n = sql_update_pool(
+    let n = crate::audit::update_as(
         pool,
         &UpdateQuery {
             model,
@@ -124,6 +124,7 @@ pub async fn soft_delete(
                 value: pk_value,
             }),
         },
+        crate::audit::AuditOp::SoftDelete,
     )
     .await?;
     Ok(n)
@@ -145,7 +146,7 @@ pub async fn restore(
     let col = model
         .soft_delete_column
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
-    let n = sql_update_pool(
+    let n = crate::audit::update_as(
         pool,
         &UpdateQuery {
             model,
@@ -153,12 +154,21 @@ pub async fn restore(
                 column: col,
                 value: SqlValue::Null.into(),
             }],
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_column,
-                op: Op::Eq,
-                value: pk_value,
-            }),
+            // Only a deleted row, so restoring an active one writes no audit row.
+            where_clause: WhereExpr::And(vec![
+                WhereExpr::Predicate(Filter {
+                    column: pk_column,
+                    op: Op::Eq,
+                    value: pk_value,
+                }),
+                WhereExpr::Predicate(Filter {
+                    column: col,
+                    op: Op::IsNull,
+                    value: SqlValue::Bool(false),
+                }),
+            ]),
         },
+        crate::audit::AuditOp::Restore,
     )
     .await?;
     Ok(n)
@@ -175,7 +185,7 @@ pub async fn purge(
     pk_column: &'static str,
     pk_value: SqlValue,
 ) -> Result<u64, ExecError> {
-    sql_delete_pool(
+    crate::audit::delete(
         pool,
         &DeleteQuery {
             model,

@@ -2315,9 +2315,9 @@ pub(crate) async fn delete_submit(
 ///
 /// `<name>` **must** be in the model's `admin.actions` allowlist; an
 /// unknown name is rejected. The built-in `delete_selected` runs one
-/// `DELETE WHERE pk IN (...)` after the per-row `delete` hook allows every
-/// selected row. With no action or no selected rows,
-/// redirect back to the list.
+/// `DELETE WHERE pk IN (...)`. Every action first needs the per-row hooks
+/// ([`row_perms`]) to allow each selected row. With no action or no selected
+/// rows, redirect back to the list.
 pub(crate) async fn action_submit(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
@@ -2387,28 +2387,23 @@ pub(crate) async fn action_submit(
     )
     .await?;
 
-    // The built-ins run the per-row hook, as the single-row pages do. One
+    // Every action runs the per-row hooks, as the single-row pages do. One
     // refused row refuses the whole action, as Django's `delete_selected` does.
-    let row_perm = match action.as_str() {
-        "delete_selected" => Some("delete"),
-        "restore_selected" => Some("change"),
-        _ => None,
+    let (perm, named) = row_perms(&action);
+    let allowed = |row: &serde_json::Value| {
+        let is_allowed = |p: &str| {
+            crate::admin::object_permissions::is_allowed(model.table, p, &parts, Some(row))
+        };
+        is_allowed(perm) && named.map_or(true, is_allowed)
     };
-    let pk_values = match row_perm {
-        Some(perm) => {
-            if before_rows.iter().any(|row| {
-                !crate::admin::object_permissions::is_allowed(model.table, perm, &parts, Some(row))
-            }) {
-                return Err(AdminError::Forbidden {
-                    table: model.table.to_owned(),
-                    action: perm,
-                });
-            }
-            // Write only the rows that were checked, and audit exactly those.
-            rows_with_pk(&mut before_rows, pk_field)
-        }
-        None => pk_values,
-    };
+    if !before_rows.iter().all(allowed) {
+        return Err(AdminError::Forbidden {
+            table: model.table.to_owned(),
+            action: perm,
+        });
+    }
+    // Write only the rows that were checked, and audit exactly those.
+    let pk_values = rows_with_pk(&mut before_rows, pk_field);
     if pk_values.is_empty() {
         return Ok(
             Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
@@ -2547,6 +2542,16 @@ pub(crate) async fn action_submit(
     }
 
     Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
+}
+
+/// The object-permission hooks a bulk action must pass on every row. A custom
+/// action writes like an edit, so it needs `change` plus a hook named after it.
+fn row_perms(action: &str) -> (&'static str, Option<&str>) {
+    match action {
+        "delete_selected" => ("delete", None),
+        "restore_selected" => ("change", None),
+        custom => ("change", Some(custom)),
+    }
 }
 
 /// Keep the rows whose PK round-trips and return those PKs, so the rows

@@ -433,7 +433,59 @@ pub fn router_full(
     )
 }
 
+/// [`router_full`] without its own access log, for `server::Builder` when
+/// it mounts observability itself; one line per request (#1788).
+pub(crate) fn router_full_unlogged(
+    registry: crate::sql::Pool,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
+    secret: SessionSecret,
+    brand_storage: BoxedStorage,
+    tenant_session_secret: Option<SessionSecret>,
+    tenant_handoff_url: String,
+) -> Router {
+    router_unlogged(
+        registry,
+        pools,
+        provisioner,
+        secret,
+        brand_storage,
+        tenant_session_secret,
+        tenant_handoff_url,
+    )
+}
+
 fn router_inner(
+    registry: crate::sql::Pool,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
+    secret: SessionSecret,
+    brand_storage: BoxedStorage,
+    tenant_session_secret: Option<SessionSecret>,
+    tenant_handoff_url: String,
+) -> Router {
+    use crate::access_log::AccessLogRouterExt as _;
+    router_unlogged(
+        registry,
+        pools,
+        provisioner,
+        secret,
+        brand_storage,
+        tenant_session_secret,
+        tenant_handoff_url,
+    )
+    .access_log(access_log_layer())
+}
+
+/// The console's own access log. `next` is redacted because the login
+/// bounce carries the attempted URL, `token` for the impersonation handoff.
+pub(crate) fn access_log_layer() -> crate::access_log::AccessLogLayer {
+    crate::access_log::AccessLogLayer::new()
+        .redact_additional("next")
+        .redact_additional("token")
+}
+
+fn router_unlogged(
     registry: crate::sql::Pool,
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
     provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
@@ -675,11 +727,6 @@ fn router_inner(
         require_session,
     ));
 
-    // One event per request (method, path, status, duration, IP) from
-    // the same middleware the admin uses. `next` is redacted because
-    // the login bounce carries the whole attempted URL, and `token`
-    // because the impersonation handoff puts one in the query string.
-    use crate::access_log::AccessLogRouterExt as _;
     // CSRF on every console POST, login included (#1710): a tenant
     // subdomain is same-site with the apex, so `SameSite=Lax` does not
     // stop it. The layer checks token and Origin first; inside it,
@@ -695,11 +742,6 @@ fn router_inner(
         .route_layer(crate::forms::csrf::layer())
         .merge(assets)
         .with_state(state)
-        .access_log(
-            crate::access_log::AccessLogLayer::new()
-                .redact_additional("next")
-                .redact_additional("token"),
-        )
 }
 
 /// Rows per page, for every list the console renders. One number for

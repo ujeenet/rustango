@@ -992,6 +992,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 <#struct_name as #root::core::Model>::SCHEMA,
                 ::core::module_path!(),
             )
+            .with_audited(
+                <#struct_name as #root::core::Model>::__rustango_audited_update,
+                <#struct_name as #root::core::Model>::__rustango_audited_delete,
+            )
         }
     })
 }
@@ -3276,12 +3280,12 @@ fn inherent_impl_tokens(
             ::std::boxed::Box::pin(#root::audit::update_many_with_audit::<Self>(
                 pool,
                 query,
-                |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Update),
+                move |_r: &Self| _r.__rustango_audit_entry(op),
             ))
         }
     } else {
         quote! {
-            let _ = (pool, query);
+            let _ = (pool, query, op);
             ::std::boxed::Box::pin(async {
                 ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
                     table: <Self as #root::core::Model>::SCHEMA.table,
@@ -3315,6 +3319,7 @@ fn inherent_impl_tokens(
             pub fn __rustango_update_audited<'a>(
                 pool: &'a #root::sql::Pool,
                 query: &'a #root::core::UpdateQuery,
+                op: #root::audit::AuditOp,
             ) -> ::std::pin::Pin<::std::boxed::Box<
                 dyn ::core::future::Future<
                     Output = ::core::result::Result<u64, #root::sql::ExecError>,

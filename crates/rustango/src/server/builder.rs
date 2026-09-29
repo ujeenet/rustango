@@ -733,8 +733,8 @@ impl<DB: Database> Builder<DB> {
             )
             .erased()
         });
-        let operator_admin = operator_console::router_full(
-            self.registry,
+        let operator_admin = operator_console::router_full_unlogged(
+            self.registry.into(),
             Some(self.pools.clone().into_invalidator()),
             provisioner,
             operator_secret,
@@ -749,6 +749,13 @@ impl<DB: Database> Builder<DB> {
             // console.
             self.routes.impersonation_handoff_url.clone(),
         );
+        // With an outer access log, it logs the console (#1788).
+        let operator_admin = if self.access_log.is_some() {
+            operator_admin
+        } else {
+            use crate::access_log::AccessLogRouterExt as _;
+            operator_admin.access_log(operator_console::access_log_layer())
+        };
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();
@@ -814,11 +821,17 @@ impl<DB: Database> Builder<DB> {
             // `observability()` and `span_redact()` are called in
             // cannot change the result and neither can clobber the
             // other.
-            let redact = resolve_span_redact(self.span_redact.clone(), self.access_log.as_ref());
+            // It now logs the console too, whose `?next=` holds the attempted URL.
+            let access_log = self.access_log.map(|l| l.redact_additional("next"));
+            let mut redact = resolve_span_redact(self.span_redact.clone(), access_log.as_ref());
+            // The span covers the console in every case, access log or not.
+            if !redact.iter().any(|p| p == "next") {
+                redact.push("next".to_owned());
+            }
             // One definition, shared with `Cli::mount_observability` —
             // see `access_log::mount_observability` for the ordering
             // rules and why they live in one place.
-            crate::access_log::mount_observability(app, self.access_log, redact)
+            crate::access_log::mount_observability(app, access_log, redact)
         } else {
             app
         };

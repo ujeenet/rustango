@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::core::SqlValue;
+use crate::core::{Assignment, Filter, ModelSchema, Op, SqlValue, WhereExpr};
 use crate::sql::Pool;
 
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +150,54 @@ fn placeholders_for(dialect: &dyn crate::sql::Dialect, n: usize) -> String {
     s
 }
 
+/// The registered audited model for `table`: its writes take the audit path (#1794).
+fn audited_model(table: &str) -> Option<&'static ModelSchema> {
+    first_audited(inventory::iter::<crate::core::ModelEntry>, table)
+}
+
+/// Both conditions in one `find`, so an unaudited proxy on the table cannot win.
+fn first_audited<'a>(
+    entries: impl IntoIterator<Item = &'a crate::core::ModelEntry>,
+    table: &str,
+) -> Option<&'static ModelSchema> {
+    entries
+        .into_iter()
+        .find(|e| e.schema.table == table && e.audited_delete().is_some())
+        .map(|e| e.schema)
+}
+
+fn pk_in(model: &'static ModelSchema, pks: &[i64]) -> Result<WhereExpr, BulkActionError> {
+    let pk = model.primary_key().ok_or_else(|| {
+        BulkActionError::Database(format!("`{}` has no primary key", model.table))
+    })?;
+    let list = pks.iter().copied().map(SqlValue::from).collect();
+    Ok(WhereExpr::Predicate(Filter {
+        column: pk.column,
+        op: Op::In,
+        value: SqlValue::List(list),
+    }))
+}
+
+async fn audited_set(
+    pool: &Pool,
+    op: crate::audit::AuditOp,
+    model: &'static ModelSchema,
+    column: &'static str,
+    value: SqlValue,
+    filter: WhereExpr,
+) -> Result<u64, BulkActionError> {
+    let set = vec![Assignment {
+        column,
+        value: value.into(),
+    }];
+    let q = crate::core::UpdateQuery::new(model, set, filter);
+    crate::audit::update_as(pool, &q, op).await.map_err(db_err)
+}
+
+fn db_err(e: crate::sql::ExecError) -> BulkActionError {
+    BulkActionError::Database(e.to_string())
+}
+
 // ------------------------------------------------------------------ Built-in actions
 
 /// Hard-delete every selected row.
@@ -174,6 +222,15 @@ impl BulkAction for BulkDeleteAction {
         if pks.is_empty() {
             return Ok(BulkActionResult {
                 affected: 0,
+                action: self.name().to_owned(),
+                table: table.to_owned(),
+            });
+        }
+        if let Some(model) = audited_model(table) {
+            let q = crate::core::DeleteQuery::new(model, pk_in(model, pks)?);
+            let affected = crate::audit::delete(pool, &q).await.map_err(db_err)?;
+            return Ok(BulkActionResult {
+                affected,
                 action: self.name().to_owned(),
                 table: table.to_owned(),
             });
@@ -223,6 +280,22 @@ impl BulkAction for BulkSoftDeleteAction {
         if pks.is_empty() {
             return Ok(BulkActionResult {
                 affected: 0,
+                action: self.name().to_owned(),
+                table: table.to_owned(),
+            });
+        }
+        if let Some(model) = audited_model(table) {
+            let mut filter = pk_in(model, pks)?;
+            filter.push_and(WhereExpr::Predicate(Filter {
+                column: self.column,
+                op: Op::IsNull,
+                value: SqlValue::Bool(true),
+            }));
+            let set = SqlValue::DateTime(chrono::Utc::now());
+            let op = crate::audit::AuditOp::SoftDelete;
+            let affected = audited_set(pool, op, model, self.column, set, filter).await?;
+            return Ok(BulkActionResult {
+                affected,
                 action: self.name().to_owned(),
                 table: table.to_owned(),
             });
@@ -284,6 +357,23 @@ impl BulkAction for BulkRestoreAction {
         if pks.is_empty() {
             return Ok(BulkActionResult {
                 affected: 0,
+                action: self.name().to_owned(),
+                table: table.to_owned(),
+            });
+        }
+        if let Some(model) = audited_model(table) {
+            // Only deleted rows, so an active one writes no audit row.
+            let mut filter = pk_in(model, pks)?;
+            filter.push_and(WhereExpr::Predicate(Filter {
+                column: self.column,
+                op: Op::IsNull,
+                value: SqlValue::Bool(false),
+            }));
+            let op = crate::audit::AuditOp::Restore;
+            let affected =
+                audited_set(pool, op, model, self.column, SqlValue::Null, filter).await?;
+            return Ok(BulkActionResult {
+                affected,
                 action: self.name().to_owned(),
                 table: table.to_owned(),
             });
@@ -436,6 +526,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BulkActionError::UnknownAction(_)));
+    }
+
+    fn fake_delete<'a>(
+        _: &'a Pool,
+        _: &'a crate::core::DeleteQuery,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
+    > {
+        Box::pin(async { Ok(0) })
+    }
+
+    /// An unaudited proxy listed first on the same table must not win.
+    #[test]
+    fn first_audited_skips_an_unaudited_model_on_the_table() {
+        static PROXY: ModelSchema = ModelSchema::new("Proxy", "shared");
+        static REAL: ModelSchema = ModelSchema::new("Real", "shared");
+        let entries = [
+            crate::core::ModelEntry::new(&PROXY, "t"),
+            crate::core::ModelEntry::new(&REAL, "t").with_audited(|| None, || Some(fake_delete)),
+        ];
+        let got = first_audited(&entries, "shared").map(|m| m.name);
+        assert_eq!(got, Some("Real"));
+        assert!(first_audited(&entries[..1], "shared").is_none());
     }
 
     #[test]

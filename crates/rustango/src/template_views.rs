@@ -1197,7 +1197,7 @@ async fn handle_delete_submit(
     let delete_q =
         crate::core::DeleteQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
             .with_global_scopes();
-    match crate::sql::delete_pool(&state.pool, &delete_q).await {
+    match crate::audit::delete(&state.pool, &delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             // Note: typically `{pk}` in a delete success_url
@@ -2042,7 +2042,7 @@ async fn handle_update_post(
     });
     let update_q =
         crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
-    match crate::sql::update_pool(&state.pool, &update_q).await {
+    match crate::audit::update(&state.pool, &update_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             let target = substitute_pk(&state.success_url, &pk);
@@ -3000,7 +3000,7 @@ async fn run_delete_selected_pool(
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
     let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec())
         .with_global_scopes();
-    crate::sql::delete_pool(pool, &q)
+    crate::audit::delete(pool, &q)
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -3717,7 +3717,7 @@ mod tenant {
             coerce_pk(pk_field, &pk),
         )
         .with_global_scopes();
-        match crate::sql::delete_pool(t.pool(), &delete_q).await {
+        match crate::audit::delete(t.pool(), &delete_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.vs.success_url, &pk);
@@ -3892,7 +3892,7 @@ mod tenant {
         });
         let update_q =
             crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
-        match crate::sql::update_pool(t.pool(), &update_q).await {
+        match crate::audit::update(t.pool(), &update_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.success_url, &pk);
