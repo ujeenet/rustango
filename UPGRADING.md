@@ -157,8 +157,10 @@ configured layer; `next` is now redacted in all its lines and spans.
 
 ### `pluck_pairs` takes `FlatScalar` (breaking)
 
-`K` and `V` must be flat scalars, as for `pluck`. Use `Option<T>` for a
-nullable column; a bare `T` now errors on NULL on SQLite too.
+`K` and `V` must be flat scalars, as for `pluck`: `i8`–`i64`, floats, `bool`,
+`String`, `Vec<u8>`, `Uuid`, `serde_json::Value`, `sqlx::types::Json<T>`, chrono
+types, `u8`–`u64` without `postgres` and `Decimal` without `sqlite`. Use
+`Option<T>` for a nullable column; a bare `T` now errors on NULL on SQLite too.
 
 ### Schema-driven writes on audited models are audited
 

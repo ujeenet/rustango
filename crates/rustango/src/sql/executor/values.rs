@@ -407,6 +407,7 @@ mod flat_sealed {
 
 /// A type the flat `values_list` / `pluck` / `value` decode can return.
 /// Sealed; `Option<T>` reads NULL as `None`, a bare `T` errors on NULL.
+/// `u8`–`u64` need a build without `postgres`, `Decimal` one without `sqlite`.
 pub trait FlatScalar: flat_sealed::Sealed + Send + Unpin + Sized {
     #[doc(hidden)]
     type Cell: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin;
@@ -414,6 +415,14 @@ pub trait FlatScalar: flat_sealed::Sealed + Send + Unpin + Sized {
     fn from_cell(cell: Self::Cell) -> Self;
     #[doc(hidden)]
     fn from_null(column: &str) -> Result<Self, sqlx::Error>;
+}
+
+/// The error PG and MySQL raise themselves, so all three agree.
+fn unexpected_null(column: &str) -> sqlx::Error {
+    sqlx::Error::ColumnDecode {
+        index: format!("{column:?}"),
+        source: Box::new(sqlx::error::UnexpectedNullError),
+    }
 }
 
 macro_rules! flat_scalar {
@@ -426,11 +435,7 @@ macro_rules! flat_scalar {
                 cell
             }
             fn from_null(column: &str) -> Result<Self, sqlx::Error> {
-                // The error PG and MySQL raise themselves, so all three agree.
-                Err(sqlx::Error::ColumnDecode {
-                    index: format!("{column:?}"),
-                    source: Box::new(sqlx::error::UnexpectedNullError),
-                })
+                Err(unexpected_null(column))
             }
         }
         impl FlatScalar for Option<$t> {
@@ -446,6 +451,7 @@ macro_rules! flat_scalar {
 }
 
 flat_scalar!(
+    i8,
     i16,
     i32,
     i64,
@@ -464,12 +470,61 @@ flat_scalar!(
 // sqlx-sqlite has no `Decimal` decode, so only builds without SQLite get it.
 #[cfg(not(feature = "sqlite"))]
 flat_scalar!(rust_decimal::Decimal);
+// sqlx-postgres has no unsigned decode (MySQL reads them from UNSIGNED columns).
+#[cfg(not(feature = "postgres"))]
+flat_scalar!(u8, u16, u32, u64);
 
-#[cfg(all(test, not(feature = "sqlite")))]
+impl<T> flat_sealed::Sealed for sqlx::types::Json<T> {}
+impl<T> flat_sealed::Sealed for Option<sqlx::types::Json<T>> {}
+impl<T> FlatScalar for sqlx::types::Json<T>
+where
+    T: serde::de::DeserializeOwned + Send + Unpin + 'static,
+{
+    type Cell = Self;
+    fn from_cell(cell: Self) -> Self {
+        cell
+    }
+    fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+        Err(unexpected_null(column))
+    }
+}
+impl<T> FlatScalar for Option<sqlx::types::Json<T>>
+where
+    T: serde::de::DeserializeOwned + Send + Unpin + 'static,
+{
+    type Cell = sqlx::types::Json<T>;
+    fn from_cell(cell: Self::Cell) -> Self {
+        Some(cell)
+    }
+    fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
 mod flat_scalar_tests {
     fn is_flat<U: super::FlatScalar>() {}
 
+    /// The types `pluck_pairs` decoded before `FlatScalar` narrowed it.
+    #[test]
+    fn small_ints_and_json_are_flat_scalars() {
+        is_flat::<i8>();
+        is_flat::<Option<i8>>();
+        is_flat::<sqlx::types::Json<Vec<String>>>();
+        is_flat::<Option<sqlx::types::Json<Vec<String>>>>();
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    #[test]
+    fn unsigned_ints_are_flat_scalars_without_postgres() {
+        is_flat::<u8>();
+        is_flat::<u16>();
+        is_flat::<u32>();
+        is_flat::<Option<u64>>();
+    }
+
     /// `pluck::<Decimal>` compiled before `FlatScalar`; keep it that way.
+    #[cfg(not(feature = "sqlite"))]
     #[test]
     fn decimal_is_a_flat_scalar() {
         is_flat::<rust_decimal::Decimal>();
