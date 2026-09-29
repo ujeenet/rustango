@@ -35,6 +35,13 @@ pub struct Tag {
     pub label: String,
 }
 
+impl rustango::prunable::Prunable for Item {
+    fn prune_queryset() -> rustango::query::QuerySet<Self> {
+        Item::objects().filter("name", "b")
+    }
+}
+rustango::register_prunable!(Item);
+
 const ITEM: &str = "audit1747_item";
 const TAG: &str = "audit1747_tag";
 
@@ -104,6 +111,21 @@ async fn delete_where_audits_each_deleted_row(pool: &Pool) {
     assert_eq!(
         latest(pool, ITEM, &pks[0].to_string()).await.operation,
         "create"
+    );
+}
+
+async fn prune_audits_each_deleted_row(pool: &Pool) {
+    let pks = seed(pool).await;
+    let opts = rustango::prunable::PruneOptions {
+        only: vec![ITEM.to_owned()],
+        ..Default::default()
+    };
+    let report = rustango::prunable::prune_all(pool, &opts).await.unwrap();
+    assert_eq!(report[0].rows, 2);
+    assert_eq!(ops(pool, ITEM, "delete").await, 2);
+    assert_eq!(
+        latest(pool, ITEM, &pks[2].to_string()).await.operation,
+        "delete"
     );
 }
 
@@ -366,6 +388,7 @@ tri_dialect_test! {
     scenarios: [
         destroy_audits_each_deleted_row,
         delete_where_audits_each_deleted_row,
+        prune_audits_each_deleted_row,
         update_where_audits_the_written_values,
         update_all_audits_every_row,
         increment_each_audits_the_new_values,

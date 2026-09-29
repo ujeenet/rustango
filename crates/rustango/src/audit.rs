@@ -1382,6 +1382,14 @@ pub type AuditedUpdate = for<'a> fn(
     Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
 >;
 
+/// Audited `DELETE` runner, through `Model::__rustango_audited_delete`.
+pub type AuditedDelete = for<'a> fn(
+    &'a crate::sql::Pool,
+    &'a crate::core::DeleteQuery,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
+>;
+
 /// Run a `BulkUpdateQuery` (`Model::bulk_update`) and one `Update` entry
 /// per updated row, re-read after the write, in one transaction.
 ///

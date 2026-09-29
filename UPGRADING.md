@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Pruning audited models
+
+`prune_all` on an audited model now reads and locks the rows and writes one
+audit row each, in one transaction; a model without a primary key errors.
+
 ### Admin bulk actions run object-permission hooks
 
 A bulk `delete_selected` / `restore_selected` that includes a row your

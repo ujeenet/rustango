@@ -2685,6 +2685,9 @@ fn model_impl_tokens(
             fn __rustango_audited_update() -> ::core::option::Option<#root::audit::AuditedUpdate> {
                 ::core::option::Option::Some(Self::__rustango_update_audited)
             }
+            fn __rustango_audited_delete() -> ::core::option::Option<#root::audit::AuditedDelete> {
+                ::core::option::Option::Some(Self::__rustango_delete_audited)
+            }
         }
     } else {
         quote!()
@@ -3258,6 +3261,24 @@ fn inherent_impl_tokens(
     };
     // `__rustango_audit_entry`: the one place a snapshot `PendingEntry`
     // is built, so every audited write path records the same shape.
+    let delete_audited_body = if primary_key.is_some() {
+        quote! {
+            ::std::boxed::Box::pin(#root::audit::delete_many_with_audit::<Self>(
+                pool,
+                query,
+                |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Delete),
+            ))
+        }
+    } else {
+        quote! {
+            let _ = (pool, query);
+            ::std::boxed::Box::pin(async {
+                ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                })
+            })
+        }
+    };
     let update_audited_body = if primary_key.is_some() {
         quote! {
             ::std::boxed::Box::pin(#root::audit::update_many_with_audit::<Self>(
@@ -3308,6 +3329,19 @@ fn inherent_impl_tokens(
                 > + ::core::marker::Send + 'a,
             >> {
                 #update_audited_body
+            }
+
+            /// Audited bulk `DELETE`, behind `Model::__rustango_audited_delete`.
+            #[doc(hidden)]
+            pub fn __rustango_delete_audited<'a>(
+                pool: &'a #root::sql::Pool,
+                query: &'a #root::core::DeleteQuery,
+            ) -> ::std::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<
+                    Output = ::core::result::Result<u64, #root::sql::ExecError>,
+                > + ::core::marker::Send + 'a,
+            >> {
+                #delete_audited_body
             }
         }
     } else {

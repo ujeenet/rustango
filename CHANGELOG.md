@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — pruning an audited model audits each row (#1782)
+
+`prune_all` on an audited model now deletes through the audited path, one
+`delete` entry per row. Rows removed by FK cascades are still not audited.
+
 ### Security — admin bulk actions check each row (#1762)
 
 `delete_selected` and `restore_selected` now run the per-row `delete` /
