@@ -596,7 +596,7 @@ The signature comparison is constant-time, meaning it always takes the same amou
 
 Outbound calls to URLs that config can set (webhook delivery, Slack `webhook_callback`, OAuth2/OIDC discovery, token and userinfo) refuse loopback, private, link-local and metadata addresses and never follow redirects. To reach an IdP or Slack hook on your own network, list it in `RUSTANGO_OUTBOUND_ALLOW` (comma-separated hosts and CIDRs, e.g. `10.0.5.0/24,idp.internal`); everything else stays refused. A host entry trusts whatever that name resolves to, so list only names you control. The list never applies to webhook delivery: a subscription opts in with `allow_private_targets(true)`.
 
-These calls ignore `HTTPS_PROXY`/`NO_PROXY`. To send them through an egress proxy, set `RUSTANGO_OUTBOUND_PROXY` (e.g. `http://proxy.internal:3128`); the proxy itself may be private. The app still resolves and checks each target first, so it needs DNS for them. The proxy resolves the name again, so let it refuse private destinations too.
+These calls ignore `HTTPS_PROXY`/`NO_PROXY`. To send them through an egress proxy, set `RUSTANGO_OUTBOUND_PROXY` (e.g. `http://proxy.internal:3128`); the proxy itself may be private. The app still resolves and checks each target first, so it needs local DNS for them; a lookup failure refuses the call. The proxy resolves the name again, so it must refuse private and metadata destinations too: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 (incl. 169.254.169.254, 169.254.170.2, 169.254.170.23), 100.64.0.0/10 (incl. 100.100.100.200), ::1, fc00::/7 (incl. fd00:ec2::254, fd00:ec2::23) and fe80::/10. Without a proxy, addresses are checked again at connect time.
 
 ---
 

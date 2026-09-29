@@ -568,6 +568,45 @@ mod tests {
         (base, h)
     }
 
+    /// Deliveries share one connection; the default User-Agent yields to
+    /// a subscription header (#1792).
+    #[tokio::test]
+    async fn deliveries_reuse_a_client_and_default_the_user_agent() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(
+                move |ConnectInfo(a): ConnectInfo<SocketAddr>, h: axum::http::HeaderMap| {
+                    let ua: Vec<String> = h
+                        .get_all("user-agent")
+                        .iter()
+                        .map(|v| v.to_str().unwrap().to_owned())
+                        .collect();
+                    s.lock().unwrap().push((a, ua));
+                    async { "ok" }
+                },
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let svc = app.into_make_service_with_connect_info::<SocketAddr>();
+        let srv = tokio::spawn(async move { axum::serve(listener, svc).await.unwrap() });
+        deliver(&event(url.clone(), true)).await.unwrap();
+        let mut custom = event(url, true);
+        custom
+            .headers
+            .insert("User-Agent".into(), "custom/1".into());
+        deliver(&custom).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].1, [USER_AGENT]);
+        assert_eq!(seen[1].1, ["custom/1"]);
+        assert_eq!(seen[0].0, seen[1].0, "one pooled connection");
+        srv.abort();
+    }
+
     #[tokio::test]
     async fn refuses_private_targets_by_default() {
         let hits = Arc::new(AtomicUsize::new(0));

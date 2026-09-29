@@ -289,7 +289,10 @@ impl OAuth2Provider {
     }
 
     /// Adjust the token and userinfo HTTP client, e.g. a private root CA.
-    /// Any proxy it sets is dropped; use `RUSTANGO_OUTBOUND_PROXY`.
+    /// It runs once per provider and the client is reused; call this again
+    /// to pick up a rotated cert. Any proxy it sets is dropped (use
+    /// `RUSTANGO_OUTBOUND_PROXY`); a `.resolve` override skips the
+    /// connect-time address check.
     #[must_use]
     pub fn with_client_config(
         mut self,
@@ -918,6 +921,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(peers.lock().unwrap().len(), 1);
+    }
+
+    /// The shared client gets the 15 s timeout per request; a hook's
+    /// client keeps its own.
+    #[tokio::test]
+    async fn timeouts_follow_the_client_kind() {
+        const URL: &str = "http://127.0.0.1:9/token";
+        async fn timeout(p: &OAuth2Provider) -> Option<Duration> {
+            let req = p.checked(URL, reqwest::Method::POST, &loopback()).await;
+            req.unwrap().build().unwrap().timeout().copied()
+        }
+        let p = OAuth2Provider::new("t", "c", "s", "https://app/cb", "", URL);
+        assert_eq!(timeout(&p).await, Some(HTTP_TIMEOUT));
+        let p = p.with_client_config(|b| b);
+        assert_eq!(timeout(&p).await, None);
+    }
+
+    /// Calling `with_client_config` again replaces the cached client.
+    #[tokio::test]
+    async fn new_client_config_resets_the_cache() {
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|h: axum::http::HeaderMap| async move {
+                let v = h
+                    .get("x-hook")
+                    .map_or(0, |v| v.to_str().unwrap().parse().unwrap());
+                (axum::http::StatusCode::from_u16(400 + v).unwrap(), "")
+            }),
+        );
+        let base = serve(app).await;
+        let hook = |v: &'static str| {
+            move |b: reqwest::ClientBuilder| {
+                let mut h = reqwest::header::HeaderMap::new();
+                h.insert("x-hook", reqwest::header::HeaderValue::from_static(v));
+                b.default_headers(h)
+            }
+        };
+        async fn status(p: &OAuth2Provider) -> u16 {
+            let (_, flow) = p.begin();
+            match p.complete_with(&flow, "c", &flow.state, &loopback()).await {
+                Err(OAuthError::BadStatus { status, .. }) => status,
+                other => panic!("{other:?}"),
+            }
+        }
+        let p = OAuth2Provider::new("t", "c", "s", "https://app/cb", "", format!("{base}/token"))
+            .with_client_config(hook("1"));
+        assert_eq!(status(&p).await, 401);
+        let p = p.with_client_config(hook("2"));
+        assert_eq!(status(&p).await, 402);
     }
 
     #[tokio::test]

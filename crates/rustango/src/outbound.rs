@@ -2,8 +2,8 @@
 //! Slack hooks, webhook subscribers (#1670, #1716).
 //!
 //! [`Egress::check`] is the only way to send here: it refuses
-//! non-public addresses, the client re-checks them at connect time and
-//! never follows redirects. List private hosts and CIDRs in
+//! non-public addresses and never follows redirects. Without a proxy the
+//! client checks the addresses again at connect time. List private hosts and CIDRs in
 //! `RUSTANGO_OUTBOUND_ALLOW` to reach them, such as an IdP on your own
 //! network. Webhook delivery ignores that list. Set
 //! `RUSTANGO_OUTBOUND_PROXY` to send every call through an egress proxy.
@@ -68,7 +68,7 @@ fn normalize_host(host: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// Held by tests that set or read [`ALLOW_ENV`] or [`PROXY_ENV`].
+/// Held by tests that set or read [`ALLOW_ENV`].
 #[cfg(test)]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -130,8 +130,12 @@ impl std::error::Error for TargetError {}
 pub(crate) const PROXY_ENV: &str = "RUSTANGO_OUTBOUND_PROXY";
 
 fn proxy_from_env() -> Option<String> {
-    let spec = std::env::var(PROXY_ENV).ok()?;
-    let spec = spec.trim();
+    parse_proxy(std::env::var(PROXY_ENV).ok().as_deref())
+}
+
+/// A [`PROXY_ENV`] value; blank means none.
+fn parse_proxy(value: Option<&str>) -> Option<String> {
+    let spec = value?.trim();
     (!spec.is_empty()).then(|| spec.to_owned())
 }
 
@@ -180,6 +184,7 @@ impl EgressCache {
             client
         };
         Ok(Egress {
+            proxied: key.1.is_some(),
             policy: key.0,
             client,
         })
@@ -197,15 +202,32 @@ fn build_client(
     // `no_proxy` also drops any proxy a `ClientConfig` hook added.
     let builder = builder
         .redirect(reqwest::redirect::Policy::none())
-        .no_proxy();
+        .no_proxy()
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(std::time::Duration::from_secs(30));
     let builder = match (proxy, policy) {
-        (Some(url), _) => builder.proxy(reqwest::Proxy::all(url)?),
+        (Some(url), _) => {
+            warn_proxied_once();
+            builder.proxy(reqwest::Proxy::all(url)?)
+        }
         (None, TargetPolicy::AllowPrivate) => builder,
         (None, TargetPolicy::Public(allow)) => {
             builder.dns_resolver(Arc::new(CheckingResolver(allow.clone())))
         }
     };
     builder.build()
+}
+
+/// The proxy resolves targets again, so the app's check can be raced.
+fn warn_proxied_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "rustango::outbound",
+            "outbound calls go through {PROXY_ENV}; the proxy must refuse private and \
+             metadata addresses (169.254.0.0/16, 100.100.100.200, fd00:ec2::/32) itself"
+        );
+    });
 }
 
 /// Checks the addresses at connect time, so a pooled client never
@@ -228,14 +250,22 @@ impl reqwest::dns::Resolve for CheckingResolver {
 pub(crate) struct Egress {
     policy: TargetPolicy,
     client: reqwest::Client,
+    proxied: bool,
 }
 
 impl Egress {
     /// Parse `url` and check it. Behind a proxy this is the only check:
     /// the proxy resolves the name itself.
     pub(crate) async fn check(&self, url: &str) -> Result<CheckedTarget, TargetError> {
+        let url = check_url(url, &self.policy).await.map_err(|e| match e {
+            // Fail closed: without local DNS nothing checks the target.
+            TargetError::Dns(m) if self.proxied => TargetError::Dns(format!(
+                "{m} (the target check needs local DNS even with {PROXY_ENV} set)"
+            )),
+            e => e,
+        })?;
         Ok(CheckedTarget {
-            url: check_url(url, &self.policy).await?,
+            url,
             client: self.client.clone(),
         })
     }
@@ -670,6 +700,12 @@ mod tests {
         (url, rx)
     }
 
+    /// The next request line, failing fast instead of hanging.
+    async fn next_line(lines: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> String {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(3), lines.recv()).await;
+        line.expect("no request arrived").unwrap()
+    }
+
     async fn get(egress: &Egress, url: &str) -> reqwest::Result<reqwest::Response> {
         let target = egress.check(url).await.unwrap();
         let req = target.request(reqwest::Method::GET);
@@ -689,10 +725,10 @@ mod tests {
             .unwrap();
         let resp = get(&egress, "http://93.184.216.34/hook").await.unwrap();
         assert_eq!(resp.status(), 200);
-        let line = lines.recv().await.unwrap();
+        let line = next_line(&mut lines).await;
         assert_eq!(line, "GET http://93.184.216.34/hook HTTP/1.1");
         assert!(get(&egress, "https://93.184.216.34/").await.is_err());
-        let line = lines.recv().await.unwrap();
+        let line = next_line(&mut lines).await;
         assert_eq!(line, "CONNECT 93.184.216.34:443 HTTP/1.1");
         for url in [
             "http://169.254.169.254/",
@@ -705,19 +741,112 @@ mod tests {
         assert!(lines.try_recv().is_err());
     }
 
-    #[tokio::test]
-    async fn proxy_comes_from_rustango_env_only() {
-        let _g = ENV_LOCK.lock().await;
-        let (proxy, mut lines) = fake_proxy().await;
-        std::env::set_var(PROXY_ENV, &proxy);
-        let egress = shared(TargetPolicy::public_only());
-        std::env::remove_var(PROXY_ENV);
-        let resp = get(&egress.unwrap(), "http://93.184.216.34/env").await;
-        assert_eq!(resp.unwrap().status(), 200);
+    #[test]
+    fn proxy_value_parsing() {
+        assert_eq!(parse_proxy(None), None);
+        assert_eq!(parse_proxy(Some("  ")), None);
         assert_eq!(
-            lines.recv().await.unwrap(),
-            "GET http://93.184.216.34/env HTTP/1.1"
+            parse_proxy(Some(" http://p.internal:3128 ")).as_deref(),
+            Some("http://p.internal:3128")
         );
+    }
+
+    /// Behind a proxy a local DNS failure says why it is fatal.
+    #[tokio::test]
+    async fn proxied_dns_failure_names_the_local_dns_need() {
+        let egress = EgressCache::default()
+            .get_via(
+                TargetPolicy::public_only(),
+                Some("http://127.0.0.1:9".into()),
+                reqwest::Client::builder,
+            )
+            .unwrap();
+        let err = egress.check("http://no-such-host.invalid/").await.err();
+        assert!(
+            matches!(&err, Some(TargetError::Dns(m)) if m.contains("needs local DNS")),
+            "{err:?}"
+        );
+    }
+
+    /// A named, allowlisted host connects through the checking resolver.
+    #[tokio::test]
+    async fn named_host_connects_through_the_checking_resolver() {
+        let (server, mut lines) = fake_proxy().await;
+        let port = server.rsplit(':').next().unwrap();
+        let egress = EgressCache::default()
+            .get_via(
+                TargetPolicy::Public(Allowlist::parse("localhost")),
+                None,
+                reqwest::Client::builder,
+            )
+            .unwrap();
+        let resp = get(&egress, &format!("http://localhost:{port}/named")).await;
+        assert_eq!(resp.unwrap().status(), 200);
+        assert_eq!(next_line(&mut lines).await, "GET /named HTTP/1.1");
+    }
+
+    /// A proxy a `ClientConfig` hook adds is dropped.
+    #[tokio::test]
+    async fn hook_proxy_is_ignored() {
+        let (proxy, mut proxy_lines) = fake_proxy().await;
+        let (server, mut lines) = fake_proxy().await;
+        let egress = EgressCache::default()
+            .get_via(TargetPolicy::AllowPrivate, None, || {
+                reqwest::Client::builder().proxy(reqwest::Proxy::all(&proxy).unwrap())
+            })
+            .unwrap();
+        let resp = get(&egress, &format!("{server}/direct")).await;
+        assert_eq!(resp.unwrap().status(), 200);
+        assert_eq!(next_line(&mut lines).await, "GET /direct HTTP/1.1");
+        assert!(proxy_lines.try_recv().is_err());
+    }
+
+    const CHILD_ENV: &str = "RUSTANGO_TEST_SYSTEM_PROXY_CHILD";
+
+    /// `HTTP(S)_PROXY` is ignored. The env is set only in a child test
+    /// process, so no other test sees it.
+    #[tokio::test]
+    async fn system_proxy_env_is_ignored() {
+        let (proxy, mut proxy_lines) = fake_proxy().await;
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--ignored",
+                "--exact",
+                "outbound::tests::system_proxy_child",
+            ])
+            .env(CHILD_ENV, "1");
+        for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy"] {
+            child.env(var, &proxy);
+        }
+        let out = tokio::task::spawn_blocking(move || child.output().unwrap())
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{stdout}");
+        // The filter must have matched, or the child proved nothing.
+        assert!(stdout.contains("1 passed"), "{stdout}");
+        assert!(proxy_lines.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "run by system_proxy_env_is_ignored"]
+    async fn system_proxy_child() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let (server, mut lines) = fake_proxy().await;
+        for policy in [
+            TargetPolicy::AllowPrivate,
+            TargetPolicy::Public(Allowlist::parse("127.0.0.1")),
+        ] {
+            let egress = EgressCache::default()
+                .get_via(policy, None, reqwest::Client::builder)
+                .unwrap();
+            let resp = get(&egress, &format!("{server}/direct")).await;
+            assert_eq!(resp.unwrap().status(), 200);
+            assert_eq!(next_line(&mut lines).await, "GET /direct HTTP/1.1");
+        }
     }
 
     /// A pooled client re-checks a name when it connects, so a name that
