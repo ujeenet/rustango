@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.0] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
 ### Security — bulk writes on audited models write audit rows (#1747)
 
 `destroy`, `delete_where`, `update_where`, `update_all`, `increment_each`,

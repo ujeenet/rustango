@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.0
+
 ### Bulk writes on audited models write audit rows
 
 On audited models the bulk shortcuts now lock and read the affected rows

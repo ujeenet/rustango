@@ -2946,9 +2946,9 @@ combine with the existing dialect features:
 
 ```toml
 [dependencies]
-rustango = { version = "0.58", features = ["sqlite"] }
+rustango = { version = "0.59", features = ["sqlite"] }
 # or both at once:
-rustango = { version = "0.58", features = ["postgres", "sqlite"] }
+rustango = { version = "0.59", features = ["postgres", "sqlite"] }
 ```
 
 The macro emits per-backend trait impls only when the feature is
@@ -3414,7 +3414,7 @@ UPDATE`, `INSERT … RETURNING`) translated to portable equivalents.
 
 ```toml
 # Tri-dialect media
-rustango = { version = "0.58", default-features = false, features = ["sqlite", "media", "storage"] }
+rustango = { version = "0.59", default-features = false, features = ["sqlite", "media", "storage"] }
 ```
 
 ```rust,ignore
@@ -3476,7 +3476,7 @@ your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.58", features = ["mcp"] }
+rustango = { version = "0.59", features = ["mcp"] }
 # mcp pulls tenancy + sse + serializer + openapi automatically.
 ```
 
