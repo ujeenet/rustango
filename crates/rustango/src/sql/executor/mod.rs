@@ -1099,66 +1099,60 @@ pub(crate) fn inserted_pk(
     q: &InsertQuery,
     returning: crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
-) -> SqlValue {
+) -> Result<SqlValue, ExecError> {
     match q.columns.iter().position(|c| *c == pk_field.column) {
-        Some(i) => q.values[i].clone(),
-        None => generated_pk(returning, pk_field),
+        Some(i) => Ok(q.values[i].clone()),
+        None => generated_pk(returning, pk_field, q.model.table),
     }
 }
 
 /// Read a generated PK out of an INSERT's RETURNING, or MySQL's
-/// `LAST_INSERT_ID()`.
+/// `LAST_INSERT_ID()`. A PK it can't read is an error, never a stand-in.
 fn generated_pk(
     returning: crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
-) -> SqlValue {
+    table: &'static str,
+) -> Result<SqlValue, ExecError> {
+    use crate::core::FieldType as T;
+    let unreadable = || ExecError::GeneratedPkUnreadable {
+        table,
+        column: pk_field.column,
+    };
     #[allow(unused_variables)]
     {
         match returning {
             #[cfg(feature = "postgres")]
             crate::sql::InsertReturningPool::PgRow(row) => {
                 use crate::sql::sqlx::Row as _;
-                match pk_field.ty {
-                    crate::core::FieldType::I64 => {
-                        SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0))
-                    }
-                    crate::core::FieldType::I32 => {
-                        SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0))
-                    }
-                    crate::core::FieldType::I16 => {
-                        SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0))
-                    }
-                    crate::core::FieldType::String => {
-                        SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
-                    }
-                    _ => SqlValue::Null,
-                }
+                let c = pk_field.column;
+                Ok(match pk_field.ty {
+                    T::I64 => SqlValue::I64(row.try_get(c)?),
+                    T::I32 => SqlValue::I32(row.try_get(c)?),
+                    T::I16 => SqlValue::I16(row.try_get(c)?),
+                    T::String => SqlValue::String(row.try_get(c)?),
+                    T::Uuid => SqlValue::Uuid(row.try_get(c)?),
+                    _ => return Err(unreadable()),
+                })
             }
             #[cfg(feature = "mysql")]
             crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
-                crate::core::FieldType::I64 => SqlValue::I64(id),
-                crate::core::FieldType::I32 => SqlValue::I32(id as i32),
-                crate::core::FieldType::I16 => SqlValue::I16(id as i16),
-                _ => SqlValue::I64(id),
+                T::I64 => Ok(SqlValue::I64(id)),
+                T::I32 => Ok(SqlValue::I32(id as i32)),
+                T::I16 => Ok(SqlValue::I16(id as i16)),
+                _ => Err(unreadable()),
             },
             #[cfg(feature = "sqlite")]
             crate::sql::InsertReturningPool::SqliteRow(row) => {
                 use crate::sql::sqlx::Row as _;
-                match pk_field.ty {
-                    crate::core::FieldType::I64 => {
-                        SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0))
-                    }
-                    crate::core::FieldType::I32 => {
-                        SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0))
-                    }
-                    crate::core::FieldType::I16 => {
-                        SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0))
-                    }
-                    crate::core::FieldType::String => {
-                        SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
-                    }
-                    _ => SqlValue::Null,
-                }
+                let c = pk_field.column;
+                Ok(match pk_field.ty {
+                    T::I64 => SqlValue::I64(row.try_get(c)?),
+                    T::I32 => SqlValue::I32(row.try_get(c)?),
+                    T::I16 => SqlValue::I16(row.try_get(c)?),
+                    T::String => SqlValue::String(row.try_get(c)?),
+                    T::Uuid => SqlValue::Uuid(row.try_get(c)?),
+                    _ => return Err(unreadable()),
+                })
             }
         }
     }

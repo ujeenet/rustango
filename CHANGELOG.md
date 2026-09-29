@@ -36,7 +36,9 @@ instead of being buffered whole.
 ### Security — ViewSet create is audited (#1816)
 
 On an audited model, ViewSet single and bulk create now write one `create` audit
-row per row, in the insert's transaction. New `audit::insert` / `audit::insert_tx`.
+row per row, in the insert's transaction. A create whose row can't be read back
+(an unreadable generated PK) or a failed audit write now rolls back with a `500`.
+New `ExecError::AuditWrite` / `ExecError::GeneratedPkUnreadable`.
 
 ### Security — bulk actions bind keys with the model's PK type (#1817)
 

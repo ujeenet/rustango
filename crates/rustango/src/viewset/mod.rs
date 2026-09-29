@@ -2415,13 +2415,14 @@ async fn insert_and_fetch_one(
 }
 
 /// A failed INSERT/UPDATE: a database rejection is the client's `400`,
-/// with the driver text withheld; anything else is a `500`.
+/// with the driver text withheld; anything else (an audit write) is a logged `500`.
 fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
-    if matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_))) {
-        let body = crate::error::client_error_body(context, e, true);
+    let client_caused = matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
+    let body = crate::error::client_error_body(context, e, client_caused);
+    if client_caused {
         (StatusCode::BAD_REQUEST, body)
     } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        (StatusCode::INTERNAL_SERVER_ERROR, body)
     }
 }
 
@@ -2562,17 +2563,8 @@ async fn create_many(
                 // connections, and logging those at `warn` left an
                 // outage with no ERROR record anywhere (#1604 review,
                 // correctness-003).
-                let client_caused =
-                    matches!(&e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
-                let detail = crate::error::client_error_body(
-                    "viewset::bulk_create::entry",
-                    &e,
-                    client_caused,
-                );
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    &format!("bulk entry {i}: {detail}"),
-                );
+                let (status, detail) = write_failure("viewset::bulk_create::entry", &e);
+                return json_error(status, &format!("bulk entry {i}: {detail}"));
             }
         }
     }
@@ -3225,7 +3217,8 @@ mod created_pk_tests {
             vec![pk.column],
             vec![SqlValue::String("rust".into())],
         );
-        let got = crate::sql::inserted_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk);
+        let got = crate::sql::inserted_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk)
+            .expect("submitted pk");
         assert!(
             matches!(got, SqlValue::String(ref s) if s == "rust"),
             "{got:?}"

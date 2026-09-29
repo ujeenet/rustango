@@ -183,6 +183,9 @@ names the host or a CIDR that covers them.
 
 On an audited model, ViewSet `POST` (single and bulk) now writes a `create` audit
 row per row. A single create on such a model now runs in a transaction.
+If the audit row can't be written, or the generated PK can't be read back, the
+create rolls back and answers `500`. A ViewSet write failure that is not a database
+rejection (bulk create included) is now a logged `500` with an opaque body, not `400`.
 
 ### `BulkAction` takes a `PkSet` (breaking)
 
