@@ -155,6 +155,11 @@ untouched.
 Both are now `#[non_exhaustive]`; add a `_` arm. From async code use
 `api_keys::{generate_key,hash_secret,verify_key}_async` and `PasswordHasherChain::{hash,verify}_async`.
 
+### HMAC signing takes the host
+
+`sign_request` and `sign_now` take a `host` argument after `method`, and every signature
+changes. Behind a proxy that rewrites `Host`, set `HmacAuthLayer::host`.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

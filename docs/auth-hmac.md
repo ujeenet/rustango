@@ -3,8 +3,8 @@
 HMAC signing proves **both who sent a request and that it wasn't altered in
 flight**. The client signs each request with a shared secret; the server
 recomputes the signature and compares. Unlike a bearer [API key](auth-api-keys.md)
-— which is replayable if captured — an HMAC signature covers the method, path,
-query, timestamp, and body, so a tampered or stale request is rejected. It's the
+— which is replayable if captured — an HMAC signature covers the method, host,
+path, query, timestamp, and body, so a tampered or stale request is rejected. It's the
 scheme AWS SigV4 and webhook signatures use, and **Rustango** ships it as one
 tower layer.
 
@@ -52,6 +52,7 @@ The client builds a canonical string and HMAC-SHA256s it with the shared secret:
 
 ```text
 <UPPERCASE-METHOD>\n
+<LOWERCASE-HOST>\n
 <PATH>\n
 <SORTED-QUERY>\n
 <X-DATE>\n
@@ -66,6 +67,10 @@ Two request headers carry the result:
 Because the query is **sorted** on both ends, `?b=2&a=1` and `?a=1&b=2` produce
 the same signature. Because the body is hashed into the string, changing a single
 byte invalidates it.
+
+The host is the `Host` header without its port, so a signature made for one host
+fails on another that shares the key. Behind a proxy that rewrites `Host`, pin the
+name with `.host("api.example.com")`.
 
 ---
 
@@ -119,7 +124,7 @@ use rustango::hmac_auth::sign_now;
 let body = br#"{"amount": 100}"#;
 let (x_date, authorization) =
     sign_now("k_demo", b"shared-secret-at-least-32-bytes-long!!",
-             "POST", "/api/charge", "", body);
+             "POST", "api.example.com", "/api/charge", "", body);
 
 // Attach both headers and send the EXACT body you signed:
 let req = http::Request::post("/api/charge")

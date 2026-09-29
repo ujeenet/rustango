@@ -4,7 +4,7 @@ La signature HMAC prouve **à la fois qui a envoyé une requête et qu'elle n'a 
 été altérée en transit**. Le client signe chaque requête avec un secret partagé ;
 le serveur recalcule la signature et compare. Contrairement à une [clé
 d'API](auth-api-keys.md) bearer — rejouable si elle est interceptée — une
-signature HMAC couvre la méthode, le chemin, la requête, l'horodatage et le
+signature HMAC couvre la méthode, l'hôte, le chemin, la requête, l'horodatage et le
 corps, de sorte qu'une requête altérée ou périmée est rejetée. C'est le schéma
 utilisé par AWS SigV4 et les signatures de webhooks, et **Rustango** le fournit
 sous la forme d'une seule couche tower.
@@ -54,6 +54,7 @@ secret partagé :
 
 ```text
 <UPPERCASE-METHOD>\n
+<LOWERCASE-HOST>\n
 <PATH>\n
 <SORTED-QUERY>\n
 <X-DATE>\n
@@ -68,6 +69,10 @@ Deux en-têtes de requête portent le résultat :
 Parce que la requête est **triée** des deux côtés, `?b=2&a=1` et `?a=1&b=2`
 produisent la même signature. Parce que le corps est haché dans la chaîne,
 changer un seul octet l'invalide.
+
+L'hôte est l'en-tête `Host` sans son port : une signature faite pour un hôte
+échoue sur un autre qui partage la clé. Derrière un proxy qui réécrit `Host`,
+fixez le nom avec `.host("api.example.com")`.
 
 ---
 
@@ -122,7 +127,7 @@ use rustango::hmac_auth::sign_now;
 let body = br#"{"amount": 100}"#;
 let (x_date, authorization) =
     sign_now("k_demo", b"shared-secret-at-least-32-bytes-long!!",
-             "POST", "/api/charge", "", body);
+             "POST", "api.example.com", "/api/charge", "", body);
 
 // Attachez les deux en-têtes et envoyez le corps EXACT que vous avez signé :
 let req = http::Request::post("/api/charge")

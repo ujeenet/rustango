@@ -4,7 +4,7 @@ Die HMAC-Signierung beweist **sowohl, wer eine Anfrage gesendet hat, als auch,
 dass sie unterwegs nicht verändert wurde**. Der Client signiert jede Anfrage mit
 einem gemeinsamen Secret; der Server berechnet die Signatur neu und vergleicht.
 Anders als ein Bearer-[API-Schlüssel](auth-api-keys.md) — der bei Abfangen
-wiederholbar ist — deckt eine HMAC-Signatur die Methode, den Pfad, den
+wiederholbar ist — deckt eine HMAC-Signatur die Methode, den Host, den Pfad, den
 Query-String, den Zeitstempel und den Body ab, sodass eine manipulierte oder
 veraltete Anfrage abgelehnt wird. Es ist das Schema, das AWS SigV4 und
 Webhook-Signaturen verwenden, und **Rustango** liefert es als einen einzigen
@@ -55,6 +55,7 @@ gemeinsamen Secret darauf an:
 
 ```text
 <UPPERCASE-METHOD>\n
+<LOWERCASE-HOST>\n
 <PATH>\n
 <SORTED-QUERY>\n
 <X-DATE>\n
@@ -70,6 +71,10 @@ Zwei Anfrage-Header tragen das Ergebnis:
 Weil der Query-String auf beiden Seiten **sortiert** wird, erzeugen `?b=2&a=1`
 und `?a=1&b=2` dieselbe Signatur. Weil der Body in die Zeichenkette gehasht wird,
 macht das Ändern eines einzigen Bytes sie ungültig.
+
+Der Host ist der `Host`-Header ohne Port, daher scheitert eine Signatur für einen
+Host auf einem anderen mit demselben Schlüssel. Hinter einem Proxy, der `Host`
+umschreibt, legen Sie den Namen mit `.host("api.example.com")` fest.
 
 ---
 
@@ -126,7 +131,7 @@ use rustango::hmac_auth::sign_now;
 let body = br#"{"amount": 100}"#;
 let (x_date, authorization) =
     sign_now("k_demo", b"shared-secret-at-least-32-bytes-long!!",
-             "POST", "/api/charge", "", body);
+             "POST", "api.example.com", "/api/charge", "", body);
 
 // Hängen Sie beide Header an und senden Sie den EXAKTEN Body, den Sie signiert haben:
 let req = http::Request::post("/api/charge")

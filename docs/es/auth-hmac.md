@@ -4,7 +4,7 @@ La firma HMAC demuestra **tanto quién envió una solicitud como que no fue
 alterada en tránsito**. El cliente firma cada solicitud con un secreto
 compartido; el servidor recalcula la firma y las compara. A diferencia de una
 [clave de API](auth-api-keys.md) de tipo bearer — que es reproducible si se
-captura — una firma HMAC cubre el método, la ruta, la query, la marca temporal
+captura — una firma HMAC cubre el método, el host, la ruta, la query, la marca temporal
 y el cuerpo, de modo que una solicitud manipulada o caducada se rechaza. Es el
 esquema que usan AWS SigV4 y las firmas de webhooks, y **Rustango** lo incluye
 como una única capa tower.
@@ -54,6 +54,7 @@ compartido:
 
 ```text
 <UPPERCASE-METHOD>\n
+<LOWERCASE-HOST>\n
 <PATH>\n
 <SORTED-QUERY>\n
 <X-DATE>\n
@@ -68,6 +69,10 @@ Dos cabeceras de la solicitud llevan el resultado:
 Como la query se **ordena** en ambos extremos, `?b=2&a=1` y `?a=1&b=2` producen
 la misma firma. Como el cuerpo se hashea dentro de la cadena, cambiar un solo
 byte la invalida.
+
+El host es la cabecera `Host` sin su puerto, así que una firma hecha para un host
+falla en otro que comparte la clave. Detrás de un proxy que reescribe `Host`,
+fije el nombre con `.host("api.example.com")`.
 
 ---
 
@@ -122,7 +127,7 @@ use rustango::hmac_auth::sign_now;
 let body = br#"{"amount": 100}"#;
 let (x_date, authorization) =
     sign_now("k_demo", b"shared-secret-at-least-32-bytes-long!!",
-             "POST", "/api/charge", "", body);
+             "POST", "api.example.com", "/api/charge", "", body);
 
 // Attach both headers and send the EXACT body you signed:
 let req = http::Request::post("/api/charge")

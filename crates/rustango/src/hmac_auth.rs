@@ -21,12 +21,16 @@
 //!
 //! ```text
 //! <UPPER-METHOD>\n
+//! <LOWERCASE-HOST>\n
 //! <PATH>\n
 //! <SORTED-QUERY-STRING>\n
 //! <X-DATE>\n
 //! <HEX-SHA256(BODY)>
 //! ```
 //!
+//! The host is the `Host` header (or the HTTP/2 authority) without the
+//! port, so a signature for one host fails on another sharing the key.
+//! Behind a proxy that rewrites `Host`, pin it with [`HmacAuthLayer::host`].
 //! The query is sorted, so `?b=2&a=1` and `?a=1&b=2` sign the same.
 //! The body is hashed first, so the verifier hashes it only once.
 //!
@@ -90,6 +94,8 @@ struct HmacAuthConfig {
     resolver: KeyResolver,
     tolerance_secs: u64,
     body_limit: usize,
+    /// Signed host when set; else the request's own.
+    host: Option<SignedHost>,
     /// Optional replay defence. When set, each valid signature is
     /// stored for twice the tolerance and a repeat is rejected. The
     /// `X-Date` window alone only limits how long a replay works;
@@ -106,6 +112,7 @@ impl HmacAuthLayer {
                 resolver,
                 tolerance_secs: DEFAULT_TOLERANCE_SECS,
                 body_limit: DEFAULT_BODY_LIMIT,
+                host: None,
                 #[cfg(feature = "cache")]
                 nonce_store: None,
             }),
@@ -139,6 +146,14 @@ impl HmacAuthLayer {
             );
         }
         Arc::make_mut(&mut self.inner).nonce_store = Some(store);
+        self
+    }
+
+    /// Verify against this host instead of the request's `Host`, for a
+    /// proxy that rewrites it. Clients sign this same name.
+    #[must_use]
+    pub fn host(mut self, host: &str) -> Self {
+        Arc::make_mut(&mut self.inner).host = Some(SignedHost::new(host));
         self
     }
 
@@ -221,6 +236,13 @@ async fn verify_request(
         None => return Err(deny("unknown key id")),
     };
 
+    let host = match &cfg.host {
+        Some(h) => h.clone(),
+        None => match request_host(&req) {
+            Ok(h) => h,
+            Err(msg) => return Err(deny(msg)),
+        },
+    };
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let query = req.uri().query().unwrap_or("").to_owned();
@@ -232,7 +254,7 @@ async fn verify_request(
     };
     let body_hash = sha256_hex(&bytes);
 
-    let canonical = canonical_request(method.as_str(), &path, &query, &date, &body_hash);
+    let canonical = canonical_request(method.as_str(), &host, &path, &query, &date, &body_hash);
     let expected_sig = hmac_sha256(&secret, canonical.as_bytes());
 
     if expected_sig.ct_eq(&parsed.signature).unwrap_u8() == 0 {
@@ -241,7 +263,7 @@ async fn verify_request(
 
     // Replay defence. It runs only after the signature checks out, so
     // an unauthenticated attacker cannot fill the cache. A signature
-    // is unique per method, path, query, date and body, so a replay
+    // is unique per method, host, path, query, date and body, so a replay
     // carries the same one. `add` claims it in one step, so of two
     // simultaneous copies only one wins.
     #[cfg(feature = "cache")]
@@ -310,8 +332,47 @@ fn parse_auth(value: &str) -> Option<ParsedAuth> {
     })
 }
 
+/// The host a signature covers: lowercase, no port. Only built here, so
+/// signer and verifier cannot fold it differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignedHost(String);
+
+impl SignedHost {
+    fn new(raw: &str) -> Self {
+        let raw = raw.trim();
+        let host = match raw.parse::<axum::http::uri::Authority>() {
+            Ok(a) => a.host().to_ascii_lowercase(),
+            Err(_) => raw.to_ascii_lowercase(),
+        };
+        Self(host)
+    }
+}
+
+/// The `Host` header, or the HTTP/2 `:authority` when there is none.
+/// Both present and naming different hosts is refused.
+fn request_host(req: &Request<Body>) -> Result<SignedHost, &'static str> {
+    let header = match req.headers().get(axum::http::header::HOST) {
+        Some(v) => match v
+            .to_str()
+            .ok()
+            .and_then(|s| s.parse::<axum::http::uri::Authority>().ok())
+        {
+            Some(a) => Some(SignedHost::new(a.as_str())),
+            None => return Err("malformed Host"),
+        },
+        None => None,
+    };
+    let target = req.uri().authority().map(|a| SignedHost::new(a.as_str()));
+    match (header, target) {
+        (Some(h), Some(t)) if h != t => Err("Host does not match the request target"),
+        (Some(h), _) | (None, Some(h)) => Ok(h),
+        (None, None) => Err("missing Host"),
+    }
+}
+
 fn canonical_request(
     method: &str,
+    host: &SignedHost,
     path: &str,
     query: &str,
     date: &str,
@@ -319,8 +380,9 @@ fn canonical_request(
 ) -> String {
     let sorted_query = sort_query(query);
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         method.to_ascii_uppercase(),
+        host.0,
         path,
         sorted_query,
         date,
@@ -358,19 +420,29 @@ fn date_within_tolerance(date_str: &str, tolerance_secs: u64) -> bool {
 
 /// Build the `Authorization` header value for a request signed with
 /// `secret` under `key_id`. You must also set `X-Date` to the same
-/// RFC 3339 timestamp. `body` may be empty for GET or DELETE.
+/// RFC 3339 timestamp. `host` is the server's host name (a port is
+/// ignored). `body` may be empty for GET or DELETE.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn sign_request(
     key_id: &str,
     secret: &[u8],
     method: &str,
+    host: &str,
     path: &str,
     query: &str,
     date_rfc3339: &str,
     body: &[u8],
 ) -> String {
     let body_hash = sha256_hex(body);
-    let canonical = canonical_request(method, path, query, date_rfc3339, &body_hash);
+    let canonical = canonical_request(
+        method,
+        &SignedHost::new(host),
+        path,
+        query,
+        date_rfc3339,
+        &body_hash,
+    );
     let sig = hmac_sha256(secret, canonical.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig);
     format!("{SCHEME} keyId={key_id},signature={sig_b64}")
@@ -383,12 +455,13 @@ pub fn sign_now(
     key_id: &str,
     secret: &[u8],
     method: &str,
+    host: &str,
     path: &str,
     query: &str,
     body: &[u8],
 ) -> (String, String) {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let auth = sign_request(key_id, secret, method, path, query, &now, body);
+    let auth = sign_request(key_id, secret, method, host, path, query, &now, body);
     (now, auth)
 }
 
@@ -398,6 +471,8 @@ mod tests {
     use axum::routing::post;
     use axum::Router;
     use tower::{Layer, ServiceExt};
+
+    const HOST: &str = "api.test";
 
     fn resolver_for(key: &'static str, secret: &'static [u8]) -> KeyResolver {
         Arc::new(move |k| {
@@ -428,10 +503,11 @@ mod tests {
     ) -> Request<Body> {
         // Split path + query from a "/r?x=1" style input.
         let (path, query) = path_query.split_once('?').unwrap_or((path_query, ""));
-        let (date, auth) = sign_now(key_id, secret, method, path, query, body);
+        let (date, auth) = sign_now(key_id, secret, method, HOST, path, query, body);
         Request::builder()
             .method(method)
             .uri(path_query)
+            .header("host", HOST)
             .header(HEADER_DATE, date)
             .header(HEADER_AUTH, auth)
             .body(Body::from(body.to_vec()))
@@ -454,6 +530,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_AUTH, "HMAC-SHA256 keyId=k1,signature=ZA==")
             .body(Body::empty())
             .unwrap();
@@ -471,6 +548,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_DATE, "2026-05-02T12:00:00Z")
             .body(Body::empty())
             .unwrap();
@@ -497,15 +575,81 @@ mod tests {
         assert_eq!(resp.status(), 401);
     }
 
+    /// Sign for `signed_for`; send with `host` (a header) and `uri`.
+    async fn status_for(
+        layer: HmacAuthLayer,
+        signed_for: &str,
+        uri: &str,
+        host: Option<&str>,
+    ) -> u16 {
+        let (date, auth) = sign_now("k1", b"secret", "POST", signed_for, "/r", "", b"x");
+        let mut req = Request::builder().method("POST").uri(uri);
+        if let Some(h) = host {
+            req = req.header("host", h);
+        }
+        let req = req
+            .header(HEADER_DATE, date)
+            .header(HEADER_AUTH, auth)
+            .body(Body::from("x"))
+            .unwrap();
+        let svc = layer.layer(app().into_service::<Body>());
+        svc.oneshot(req).await.unwrap().status().as_u16()
+    }
+
+    /// #1836 — a signature for one host fails on another sharing the key.
+    #[tokio::test]
+    async fn a_signature_is_bound_to_its_host() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret"));
+        assert_eq!(
+            status_for(layer(), "a.test", "/r", Some("a.test")).await,
+            200
+        );
+        assert_eq!(
+            status_for(layer(), "a.test", "/r", Some("b.test")).await,
+            401
+        );
+        // Case and port do not change the signed host.
+        assert_eq!(
+            status_for(layer(), "A.test", "/r", Some("a.test:8443")).await,
+            200
+        );
+        assert_eq!(status_for(layer(), "a.test", "/r", None).await, 401);
+    }
+
+    /// The HTTP/2 authority stands in for `Host`, and must agree with it.
+    #[tokio::test]
+    async fn the_request_authority_is_the_host_and_must_agree() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret"));
+        let h2 = "https://a.test/r";
+        assert_eq!(status_for(layer(), "a.test", h2, None).await, 200);
+        assert_eq!(status_for(layer(), "b.test", h2, Some("b.test")).await, 401);
+        assert_eq!(status_for(layer(), "a.test", h2, Some("b.test")).await, 401);
+    }
+
+    /// A pinned host is what gets verified, whatever `Host` says.
+    #[tokio::test]
+    async fn a_pinned_host_replaces_the_request_host() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret")).host("api.test");
+        assert_eq!(
+            status_for(layer(), "api.test", "/r", Some("backend:8080")).await,
+            200
+        );
+        assert_eq!(
+            status_for(layer(), "backend", "/r", Some("backend:8080")).await,
+            401
+        );
+    }
+
     #[tokio::test]
     async fn body_tampering_rejected() {
         let layer = HmacAuthLayer::new(resolver_for("k1", b"secret"));
         let svc = layer.layer(app().into_service::<Body>());
         // Sign with one body, but ship a different one.
-        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "", b"original");
+        let (date, auth) = sign_now("k1", b"secret", "POST", HOST, "/r", "", b"original");
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_DATE, date)
             .header(HEADER_AUTH, auth)
             .body(Body::from("tampered".to_owned()))
@@ -521,11 +665,12 @@ mod tests {
         let store = std::sync::Arc::new(InMemoryCache::new());
         let layer = HmacAuthLayer::new(resolver_for("k1", b"secret")).nonce_store(store);
         // One signed request, replayed verbatim (identical signature).
-        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "", b"hello");
+        let (date, auth) = sign_now("k1", b"secret", "POST", HOST, "/r", "", b"hello");
         let mk = || {
             Request::builder()
                 .method("POST")
                 .uri("/r")
+                .header("host", HOST)
                 .header(HEADER_DATE, date.clone())
                 .header(HEADER_AUTH, auth.clone())
                 .body(Body::from("hello"))
@@ -586,12 +731,13 @@ mod tests {
     async fn simultaneous_replays_let_only_one_through() {
         let store = Arc::new(SlowExists(crate::cache::InMemoryCache::new()));
         let layer = HmacAuthLayer::new(resolver_for("k1", b"secret")).nonce_store(store);
-        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "", b"hello");
+        let (date, auth) = sign_now("k1", b"secret", "POST", HOST, "/r", "", b"hello");
         let send = || {
             let svc = layer.clone().layer(app().into_service::<Body>());
             let req = Request::builder()
                 .method("POST")
                 .uri("/r")
+                .header("host", HOST)
                 .header(HEADER_DATE, date.clone())
                 .header(HEADER_AUTH, auth.clone())
                 .body(Body::from("hello"))
@@ -615,12 +761,13 @@ mod tests {
             .nonce_store(store);
         let date = (chrono::Utc::now() + chrono::Duration::seconds(2))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let auth = sign_request("k1", b"secret", "POST", "/r", "", &date, b"x");
+        let auth = sign_request("k1", b"secret", "POST", HOST, "/r", "", &date, b"x");
         let send = || {
             let svc = layer.clone().layer(app().into_service::<Body>());
             let req = Request::builder()
                 .method("POST")
                 .uri("/r")
+                .header("host", HOST)
                 .header(HEADER_DATE, date.clone())
                 .header(HEADER_AUTH, auth.clone())
                 .body(Body::from("x"))
@@ -714,10 +861,11 @@ mod tests {
         let svc = layer.layer(app().into_service::<Body>());
         // Sign with one query order; ship a different order — must still pass
         // because we sort before signing on both ends.
-        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "a=1&b=2", b"");
+        let (date, auth) = sign_now("k1", b"secret", "POST", HOST, "/r", "a=1&b=2", b"");
         let req = Request::builder()
             .method("POST")
             .uri("/r?b=2&a=1")
+            .header("host", HOST)
             .header(HEADER_DATE, date)
             .header(HEADER_AUTH, auth)
             .body(Body::empty())
@@ -733,10 +881,11 @@ mod tests {
         // Sign with a date 10 min in the past.
         let old = (chrono::Utc::now() - chrono::Duration::minutes(10))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let auth = sign_request("k1", b"secret", "POST", "/r", "", &old, b"");
+        let auth = sign_request("k1", b"secret", "POST", HOST, "/r", "", &old, b"");
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_DATE, old)
             .header(HEADER_AUTH, auth)
             .body(Body::empty())
@@ -752,6 +901,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_DATE, "2026-05-02T12:00:00Z")
             .header(HEADER_AUTH, "Bearer some-token")
             .body(Body::empty())
@@ -783,8 +933,9 @@ mod tests {
 
     #[test]
     fn canonical_request_is_deterministic() {
-        let a = canonical_request("POST", "/r", "x=1&y=2", "2026-05-02T12:00:00Z", "abc");
-        let b = canonical_request("post", "/r", "y=2&x=1", "2026-05-02T12:00:00Z", "abc");
+        let h = SignedHost::new("API.test:443");
+        let a = canonical_request("POST", &h, "/r", "x=1&y=2", "2026-05-02T12:00:00Z", "abc");
+        let b = canonical_request("post", &h, "/r", "y=2&x=1", "2026-05-02T12:00:00Z", "abc");
         // Method case + query order shouldn't change the canonical form.
         assert_eq!(a, b);
     }
