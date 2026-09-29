@@ -35,6 +35,11 @@ A `PkSet` holds at most `PkSet::MAX_KEYS` (10 000), under SQLite's bind cap.
 `mcp::*_for` routers serve that stack. `mcp::router` and `mcp::tenant_router` no
 longer mount a `GET` SSE route that always answered `500`.
 
+### Changed — `AccessLogLayer::use_real_ip` (#1785)
+
+**Breaking:** the `trust_proxy_headers` field is now `use_real_ip`, since it reads
+only `TrustedRealIp`, never a header. The old setter stays as a deprecated alias.
+
 ## [0.59.4] — 2026-09-29
 
 Tagged only; not published to crates.io.
