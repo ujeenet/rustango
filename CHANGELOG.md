@@ -13,6 +13,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 A signature made for one host no longer verifies on another that shares the key.
 
+### Changed — SSO reuses OIDC discovery (#1833)
+
+An `oidc` provider fetches its discovery document once per issuer per hour, not on every login.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
