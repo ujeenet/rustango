@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.4
+
 ### One access-log line per operator-console request
 
 Behind `server::Builder` with observability, console requests log once, from your
