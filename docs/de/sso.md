@@ -40,9 +40,9 @@ Auto-Admin, sodass eine Endbenutzer-Anmeldung (Member) gebaut werden kann, ohne
 ```toml
 [dependencies]
 # Admin login with SSO:
-rustango = { version = "0.58", features = ["admin-sso"] }
+rustango = { version = "0.59", features = ["admin-sso"] }
 # Member (end-user) SSO without the auto-admin:
-rustango = { version = "0.58", features = ["tenancy", "sso"] }
+rustango = { version = "0.59", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` und die historischen `admin::sso::*`-Kernpfade sind
