@@ -378,3 +378,19 @@ async fn touch_extends_a_live_entry() {
     assert!(!cache.touch("missing", None).await.unwrap());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `incr` with no TTL keeps a live counter's expiry, as `InMemoryCache` does.
+#[tokio::test]
+async fn incr_without_ttl_keeps_the_expiry() {
+    let dir = unique_tmp_dir("incr-ttl");
+    let cache = FileCache::new(&dir);
+    cache
+        .incr("n", 1, Some(Duration::from_millis(50)))
+        .await
+        .unwrap();
+    assert_eq!(cache.incr("n", 1, None).await.unwrap(), 2);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let left = cache.get("n").await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(left, None, "the counter lost its expiry");
+}

@@ -926,6 +926,11 @@ impl FileCache {
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .map(|ms| Self::now_unix_millis().saturating_add(ms))
             .unwrap_or(0);
+        Self::encode_at(key, value, expires_at)
+    }
+
+    /// [`Self::encode`] with an absolute expiry (`0` = none).
+    fn encode_at(key: &str, value: &str, expires_at: i64) -> Vec<u8> {
         let key_len = u32::try_from(key.len()).unwrap_or(u32::MAX);
         let mut out = Vec::with_capacity(Self::MAGIC.len() + 12 + key.len() + value.len());
         out.extend_from_slice(Self::MAGIC);
@@ -936,7 +941,7 @@ impl FileCache {
         out
     }
 
-    /// Decode a file body into `(key, value, expired)`.
+    /// Decode a file body into `(key, value, expired, expires_at)`.
     ///
     /// Returns `None` for anything unreadable: a truncated write, an
     /// older format, a bad length. The caller then removes the file,
@@ -944,7 +949,7 @@ impl FileCache {
     ///
     /// Expiry uses `>`, not `>=`, so an entry stays live for the whole
     /// duration it was given.
-    fn decode(buf: &[u8]) -> Option<(String, String, bool /* expired */)> {
+    fn decode(buf: &[u8]) -> Option<(String, String, bool /* expired */, i64)> {
         let rest = buf.strip_prefix(Self::MAGIC)?;
         if rest.len() < 12 {
             return None;
@@ -962,7 +967,7 @@ impl FileCache {
         let value = std::str::from_utf8(body.get(key_len..)?).ok()?.to_owned();
 
         let expired = expires_at != 0 && Self::now_unix_millis() > expires_at;
-        Some((key, value, expired))
+        Some((key, value, expired, expires_at))
     }
 
     /// Write an entry to a fresh temp file in the cache dir, ready to be
@@ -985,13 +990,14 @@ impl FileCache {
 
     /// Lock the stripe that owns `path`. POSIX has no conditional
     /// unlink, so every replace or removal of an existing entry happens
-    /// under this lock. A held lock is waited for off the async worker.
+    /// under this lock. A held lock is waited for off the async worker,
+    /// via `spawn_blocking`, so that path needs a tokio runtime.
     async fn lock_entry(&self, path: &std::path::Path) -> Result<EntryLock, CacheError> {
         use fs4::TryLockError;
         let file = self.open_lock(path)?;
         match fs4::FileExt::try_lock(&file) {
             Ok(()) => return Ok(EntryLock(Some(file))),
-            Err(TryLockError::Error(e)) => return Ok(Self::unlocked(&e)),
+            Err(TryLockError::Error(e)) => return Self::lock_failed(&e),
             Err(TryLockError::WouldBlock) => {}
         }
         tokio::task::spawn_blocking(move || {
@@ -1000,7 +1006,7 @@ impl FileCache {
             loop {
                 match fs4::FileExt::try_lock(&file) {
                     Ok(()) => return Ok(EntryLock(Some(file))),
-                    Err(TryLockError::Error(e)) => return Ok(Self::unlocked(&e)),
+                    Err(TryLockError::Error(e)) => return Self::lock_failed(&e),
                     Err(TryLockError::WouldBlock) if std::time::Instant::now() >= deadline => {
                         return Err(CacheError::Connection("lock: timed out".into()));
                     }
@@ -1035,6 +1041,25 @@ impl FileCache {
             .map_err(|e| CacheError::Connection(format!("open lock: {e}")))
     }
 
+    /// A lock error: go on unlocked where the filesystem has no locks,
+    /// else fail the call.
+    fn lock_failed(e: &std::io::Error) -> Result<EntryLock, CacheError> {
+        if Self::no_lock_support(e) {
+            Ok(Self::unlocked(e))
+        } else {
+            Err(CacheError::Connection(format!("lock: {e}")))
+        }
+    }
+
+    /// `true` when the error means "this filesystem can't lock", not a fault.
+    fn no_lock_support(e: &std::io::Error) -> bool {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ENOLCK) {
+            return true;
+        }
+        e.kind() == std::io::ErrorKind::Unsupported
+    }
+
     /// No locks on this filesystem: go on unlocked, and say so once.
     fn unlocked(e: &std::io::Error) -> EntryLock {
         static WARNED: std::sync::Once = std::sync::Once::new();
@@ -1052,7 +1077,7 @@ impl FileCache {
     fn read_entry(path: &std::path::Path) -> Result<Entry, CacheError> {
         match std::fs::read(path) {
             Ok(b) => Ok(match Self::decode(&b) {
-                Some((_, v, false)) => Entry::Live(v),
+                Some((_, v, false, at)) => Entry::Live(v, at),
                 _ => Entry::Dead,
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Entry::Missing),
@@ -1065,7 +1090,7 @@ impl FileCache {
     async fn clear_dead(&self, path: &std::path::Path) -> Result<Option<String>, CacheError> {
         let _lock = self.lock_entry(path).await?;
         match Self::read_entry(path)? {
-            Entry::Live(v) => Ok(Some(v)),
+            Entry::Live(v, _) => Ok(Some(v)),
             Entry::Dead => {
                 let _ = std::fs::remove_file(path);
                 Ok(None)
@@ -1095,11 +1120,12 @@ impl FileCache {
     }
 }
 
-/// What a key's file holds. `Dead` is expired or undecodable.
+/// What a key's file holds. `Dead` is expired or undecodable. `Live`
+/// carries the stored expiry (epoch ms, `0` = none).
 enum Entry {
     Missing,
     Dead,
-    Live(String),
+    Live(String, i64),
 }
 
 /// Held stripe lock, released on drop. `None` where the filesystem has no locks.
@@ -1124,7 +1150,7 @@ impl Cache for FileCache {
         let path = self.key_path(key);
         match Self::read_entry(&path)? {
             Entry::Missing => Ok(None),
-            Entry::Live(v) => Ok(Some(v)),
+            Entry::Live(v, _) => Ok(Some(v)),
             Entry::Dead => self.clear_dead(&path).await,
         }
     }
@@ -1137,16 +1163,21 @@ impl Cache for FileCache {
     }
 
     /// Read, add and write under the stripe lock, so no count is lost.
-    /// Like the default, a non-integer counts as 0 and `ttl` applies each call.
+    /// A non-integer counts as 0. As in `InMemoryCache`, a live key keeps
+    /// its expiry when `ttl` is `None`; a `ttl`, or a new key, resets it.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let path = self.key_path(key);
         let _lock = self.lock_entry(&path).await?;
-        let cur = match Self::read_entry(&path)? {
-            Entry::Live(v) => v.parse::<i64>().unwrap_or(0),
-            Entry::Dead | Entry::Missing => 0,
+        let (cur, kept) = match Self::read_entry(&path)? {
+            Entry::Live(v, at) => (v.parse::<i64>().unwrap_or(0), Some(at)),
+            Entry::Dead | Entry::Missing => (0, None),
         };
         let new = cur.saturating_add(by);
-        let tmp = self.write_tmp(&Self::encode(key, &new.to_string(), ttl))?;
+        let bytes = match (ttl, kept) {
+            (None, Some(at)) => Self::encode_at(key, &new.to_string(), at),
+            _ => Self::encode(key, &new.to_string(), ttl),
+        };
+        let tmp = self.write_tmp(&bytes)?;
         Self::put(&tmp, &path)?;
         Ok(new)
     }
@@ -1155,7 +1186,7 @@ impl Cache for FileCache {
     async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         let path = self.key_path(key);
         let _lock = self.lock_entry(&path).await?;
-        let Entry::Live(value) = Self::read_entry(&path)? else {
+        let Entry::Live(value, _) = Self::read_entry(&path)? else {
             return Ok(false);
         };
         let tmp = self.write_tmp(&Self::encode(key, &value, ttl))?;
@@ -1182,7 +1213,7 @@ impl Cache for FileCache {
         let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
         let _lock = self.lock_for(&tmp, &path).await?;
         let live = match Self::read_entry(&path) {
-            Ok(entry) => matches!(entry, Entry::Live(_)),
+            Ok(entry) => matches!(entry, Entry::Live(..)),
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(e);
@@ -1235,11 +1266,11 @@ impl Cache for FileCache {
             };
             match Self::decode(&buf) {
                 // Matching entry: same path means same key, so no re-check.
-                Some((key, _, _)) if key.starts_with(prefix) => {
+                Some((key, ..)) if key.starts_with(prefix) => {
                     let _ = std::fs::remove_file(&path);
                 }
                 // Another namespace's live entry — leave it alone.
-                Some((_, _, false)) => {}
+                Some((_, _, false, _)) => {}
                 // Expired, unreadable, or an older format: drop it if still dead.
                 _ => {
                     let _ = self.clear_dead(&path).await;
@@ -1429,6 +1460,26 @@ mod file_cache_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(res.is_err());
         assert!(!created, "the symlink target was created");
+    }
+
+    /// Only "no lock support" errors fall back to unlocked; the rest fail.
+    #[test]
+    fn only_unsupported_lock_errors_go_unlocked() {
+        use std::io::{Error, ErrorKind};
+        assert!(FileCache::no_lock_support(&Error::from(
+            ErrorKind::Unsupported
+        )));
+        #[cfg(unix)]
+        assert!(FileCache::no_lock_support(&Error::from_raw_os_error(
+            libc::ENOLCK
+        )));
+        assert!(!FileCache::no_lock_support(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        #[cfg(unix)]
+        assert!(!FileCache::no_lock_support(&Error::from_raw_os_error(
+            libc::EBADF
+        )));
     }
 
     /// Lock files are owner-only.
