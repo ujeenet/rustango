@@ -16,7 +16,8 @@ Authed routers carry their `JwtLifecycle` by type, so the unreachable "mcp auth 
 ### Security — HMAC replay check is one atomic `add` (#1828)
 
 Two simultaneous copies of a signed request no longer both pass the nonce store.
-A `NullCache` nonce store now warns, since it turns replay protection off.
+Nonces are kept `2 × tolerance_secs`, so a future-dated request cannot be replayed
+once its nonce expires. A `NullCache` nonce store, or a failing one, now warns.
 
 ### Added — `testkit::CaptureWriter` (#1829)
 

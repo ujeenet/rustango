@@ -91,7 +91,7 @@ struct HmacAuthConfig {
     tolerance_secs: u64,
     body_limit: usize,
     /// Optional replay defence. When set, each valid signature is
-    /// stored for the tolerance window and a repeat is rejected. The
+    /// stored for twice the tolerance and a repeat is rejected. The
     /// `X-Date` window alone only limits how long a replay works;
     /// this stops it. Opt-in, because it needs a shared cache.
     #[cfg(feature = "cache")]
@@ -120,7 +120,7 @@ impl HmacAuthLayer {
     }
 
     /// Turn on replay protection backed by a [`crate::cache::Cache`].
-    /// A verified signature is stored for `tolerance_secs`, and the
+    /// A verified signature is stored for `2 × tolerance_secs`, and the
     /// same signature again in that window gets a 401.
     ///
     /// **Use a shared backend such as Redis.** An in-process cache
@@ -250,11 +250,19 @@ async fn verify_request(
             "hmac_nonce:{}",
             base64::engine::general_purpose::STANDARD.encode(&parsed.signature)
         );
-        let ttl = std::time::Duration::from_secs(cfg.tolerance_secs);
-        // A cache error does not block the request: auth must not
-        // depend on the cache, and X-Date still bounds a replay.
-        if let Ok(false) = store.add(&nonce_key, "1", Some(ttl)).await {
-            return Err(deny("replayed request"));
+        // X-Date is accepted ±tolerance, so a signature stays valid for
+        // up to 2 × tolerance; keep the nonce that long.
+        let ttl = std::time::Duration::from_secs(cfg.tolerance_secs.saturating_mul(2));
+        match store.add(&nonce_key, "1", Some(ttl)).await {
+            Ok(true) => {}
+            Ok(false) => return Err(deny("replayed request")),
+            // Auth must not depend on the cache, and X-Date still
+            // bounds a replay, so pass, but say so.
+            Err(e) => tracing::warn!(
+                target: "rustango::hmac_auth",
+                error = %e,
+                "HMAC nonce store failed; replay check skipped for this request"
+            ),
         }
     }
 
@@ -594,6 +602,90 @@ mod tests {
         let mut got = [a, b];
         got.sort_unstable();
         assert_eq!(got, [200, 401], "both copies of a replay were accepted");
+    }
+
+    /// A request dated `tolerance` ahead is valid for `2 × tolerance`,
+    /// so its nonce must outlive a plain `tolerance`.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn a_future_dated_request_cannot_be_replayed_after_tolerance() {
+        let store = Arc::new(crate::cache::InMemoryCache::new());
+        let layer = HmacAuthLayer::new(resolver_for("k1", b"secret"))
+            .tolerance_secs(2)
+            .nonce_store(store);
+        let date = (chrono::Utc::now() + chrono::Duration::seconds(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let auth = sign_request("k1", b"secret", "POST", "/r", "", &date, b"x");
+        let send = || {
+            let svc = layer.clone().layer(app().into_service::<Body>());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/r")
+                .header(HEADER_DATE, date.clone())
+                .header(HEADER_AUTH, auth.clone())
+                .body(Body::from("x"))
+                .unwrap();
+            async move { svc.oneshot(req).await.unwrap().status().as_u16() }
+        };
+        assert_eq!(send().await, 200);
+        // Past `tolerance`, but X-Date is still inside the window.
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        assert_eq!(send().await, 401, "the replay outlived its nonce");
+    }
+
+    /// A cache that fails every call.
+    #[cfg(feature = "cache")]
+    struct Down;
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for Down {
+        async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn set(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn delete(&self, _: &str) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn exists(&self, _: &str) -> Result<bool, crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+    }
+
+    /// A nonce store outage lets the request through, but not silently.
+    #[cfg(all(feature = "cache", feature = "runtime"))]
+    #[test]
+    fn a_failing_nonce_store_passes_and_warns() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let status = tracing::subscriber::with_default(subscriber, || {
+            let layer =
+                HmacAuthLayer::new(resolver_for("k1", b"secret")).nonce_store(Arc::new(Down));
+            let svc = layer.layer(app().into_service::<Body>());
+            let req = build_signed("POST", "/r", b"x", "k1", b"secret");
+            rt.block_on(svc.oneshot(req)).unwrap().status()
+        });
+        assert_eq!(status, 200);
+        let out = buf.contents();
+        assert!(out.contains("nonce store failed"), "{out}");
+        assert!(out.contains("rustango::hmac_auth"), "{out}");
     }
 
     /// #1828 — a nonce store that keeps nothing is not a silent no-op.
