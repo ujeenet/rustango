@@ -170,6 +170,13 @@ and restore are recorded as `soft_delete` and `restore`, as on the typed path.
 `soft_delete::restore` now returns 0 for a row that is not deleted, and the
 audited `restore_selected` counts only deleted rows.
 
+### `BulkAction` takes a `PkSet` (breaking)
+
+`run(&self, pks: &PkSet, pool)` replaces `run(&self, table, &[i64], pool)`. Build
+keys with `PkSet::new(M::SCHEMA, ids)` or `PkSet::parse(M::SCHEMA, raw)`; a key
+of the wrong type is `BulkActionError::InvalidPk` (new variant). `restore_selected`
+now counts only deleted rows on every model.
+
 ### Custom admin actions run object-permission hooks
 
 **Breaking:** a `register_action` action now gets `403` when your `change`

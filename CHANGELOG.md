@@ -23,6 +23,12 @@ On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView`
 New `audit::update` / `audit::delete` pick the audited path from the schema;
 `audit::update_as` records soft delete and restore under their own operation.
 
+### Security — bulk actions bind keys with the model's PK type (#1817)
+
+**Breaking:** `BulkAction::run` takes a `PkSet` (keys typed from the model's PK)
+instead of a table name and `&[i64]`. The built-ins write through the ORM on the
+schema's PK column, so a text PK can no longer match the wrong rows on MySQL.
+
 ### Security — admin custom actions check each row (#1805)
 
 A `register_action` action now needs the `change` hook and a hook named after

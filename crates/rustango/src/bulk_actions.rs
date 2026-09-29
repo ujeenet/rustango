@@ -2,21 +2,22 @@
 //! above a list view.
 //!
 //! A [`BulkAction`](crate::bulk_actions::BulkAction) has a codename, a
-//! label, and a `run` that acts on the selected primary keys. The admin's
-//! "Action" dropdown is built from a
+//! label, and a `run` that acts on a [`PkSet`] of selected primary keys.
+//! The admin's "Action" dropdown is built from a
 //! [`BulkActionRegistry`](crate::bulk_actions::BulkActionRegistry) mounted
 //! on the [`crate::server::Builder`].
 //!
-//! Actions work on PG, MySQL and SQLite: quoting goes through
-//! `dialect.quote_ident()`, IN-lists are expanded inline, and timestamps
-//! are bound as values instead of `NOW()`.
+//! The built-in actions write through the ORM, so they work on PG, MySQL
+//! and SQLite, and audited models get one audit row per changed row.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::core::{Assignment, Filter, ModelSchema, Op, SqlValue, WhereExpr};
+use crate::core::{
+    Assignment, FieldSchema, FieldType, Filter, ModelSchema, Op, SqlValue, WhereExpr,
+};
 use crate::sql::Pool;
 
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +26,9 @@ pub enum BulkActionError {
     UnknownAction(String),
     #[error("invalid table or column identifier: {0}")]
     InvalidIdent(String),
+    /// A key that does not fit the model's primary key type.
+    #[error("invalid primary key: {0}")]
+    InvalidPk(String),
     #[error("database error: {0}")]
     Database(String),
 }
@@ -40,6 +44,115 @@ pub struct BulkActionResult {
     pub table: String,
 }
 
+/// Selected primary keys, each typed from the model's PK field, so a key
+/// can never be bound against a PK column of another type (#1817).
+#[derive(Debug, Clone)]
+pub struct PkSet {
+    model: &'static ModelSchema,
+    keys: Vec<SqlValue>,
+}
+
+impl PkSet {
+    /// Parse raw keys (form or URL values) with the PK field's type.
+    ///
+    /// # Errors
+    /// [`BulkActionError::InvalidPk`] when the model has no PK or a key
+    /// does not parse as its type.
+    pub fn parse<S: AsRef<str>>(
+        model: &'static ModelSchema,
+        raw: impl IntoIterator<Item = S>,
+    ) -> Result<Self, BulkActionError> {
+        let pk = pk_field(model)?;
+        let keys = raw
+            .into_iter()
+            .map(|r| {
+                crate::forms::parse_pk_string(pk, r.as_ref())
+                    .map_err(|e| BulkActionError::InvalidPk(e.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self { model, keys })
+    }
+
+    /// Typed keys. Integers are narrowed to the PK's width; any other
+    /// type mismatch is refused.
+    ///
+    /// # Errors
+    /// [`BulkActionError::InvalidPk`] when the model has no PK or a key
+    /// does not fit its type.
+    pub fn new<V: Into<SqlValue>>(
+        model: &'static ModelSchema,
+        keys: impl IntoIterator<Item = V>,
+    ) -> Result<Self, BulkActionError> {
+        let pk = pk_field(model)?;
+        let keys = keys
+            .into_iter()
+            .map(|k| coerce_key(pk, k.into()))
+            .collect::<Result<_, _>>()?;
+        Ok(Self { model, keys })
+    }
+
+    /// The model the keys belong to.
+    #[must_use]
+    pub fn model(&self) -> &'static ModelSchema {
+        self.model
+    }
+
+    /// The typed keys.
+    #[must_use]
+    pub fn keys(&self) -> &[SqlValue] {
+        &self.keys
+    }
+
+    /// `true` when no key is selected.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// `<pk column> IN (keys)`.
+    fn filter(&self) -> WhereExpr {
+        // `pk_field` passed at construction, so the PK is there.
+        let column = self.model.primary_key().map_or("id", |pk| pk.column);
+        WhereExpr::Predicate(Filter::new(
+            column,
+            Op::In,
+            SqlValue::List(self.keys.clone()),
+        ))
+    }
+
+    /// The model to write through: the audited one on this table, if any (#1794).
+    fn target(&self) -> &'static ModelSchema {
+        first_audited(inventory::iter::<crate::core::ModelEntry>, self.model.table)
+            .unwrap_or(self.model)
+    }
+}
+
+fn pk_field(model: &'static ModelSchema) -> Result<&'static FieldSchema, BulkActionError> {
+    model
+        .primary_key()
+        .ok_or_else(|| BulkActionError::InvalidPk(format!("`{}` has no primary key", model.table)))
+}
+
+fn coerce_key(pk: &FieldSchema, v: SqlValue) -> Result<SqlValue, BulkActionError> {
+    let int = match v {
+        SqlValue::I16(n) => Some(i64::from(n)),
+        SqlValue::I32(n) => Some(i64::from(n)),
+        SqlValue::I64(n) => Some(n),
+        _ => None,
+    };
+    let typed = match pk.ty {
+        FieldType::I64 => int.map(SqlValue::I64),
+        FieldType::I32 => int.and_then(|n| i32::try_from(n).ok()).map(SqlValue::I32),
+        FieldType::I16 => int.and_then(|n| i16::try_from(n).ok()).map(SqlValue::I16),
+        FieldType::String if matches!(v, SqlValue::String(_)) => Some(v.clone()),
+        FieldType::Uuid if matches!(v, SqlValue::Uuid(_)) => Some(v.clone()),
+        _ => None,
+    };
+    typed.ok_or_else(|| {
+        BulkActionError::InvalidPk(format!("`{}` is {}, got {v:?}", pk.name, pk.ty.as_str()))
+    })
+}
+
 /// Pluggable bulk action.
 #[async_trait]
 pub trait BulkAction: Send + Sync + 'static {
@@ -49,13 +162,8 @@ pub trait BulkAction: Send + Sync + 'static {
     /// Human-readable label rendered in the UI dropdown.
     fn label(&self) -> &str;
 
-    /// Apply this action to the rows whose primary keys appear in `pks`.
-    async fn run(
-        &self,
-        table: &str,
-        pks: &[i64],
-        pool: &Pool,
-    ) -> Result<BulkActionResult, BulkActionError>;
+    /// Apply this action to the rows whose primary keys are in `pks`.
+    async fn run(&self, pks: &PkSet, pool: &Pool) -> Result<BulkActionResult, BulkActionError>;
 }
 
 /// `Arc<dyn BulkAction>` alias.
@@ -111,48 +219,14 @@ impl BulkActionRegistry {
     pub async fn run(
         &self,
         name: &str,
-        table: &str,
-        pks: &[i64],
+        pks: &PkSet,
         pool: &Pool,
     ) -> Result<BulkActionResult, BulkActionError> {
         let action = self
             .get(name)
             .ok_or_else(|| BulkActionError::UnknownAction(name.to_owned()))?;
-        action.run(table, pks, pool).await
+        action.run(pks, pool).await
     }
-}
-
-/// Reject identifiers (table / column names) with characters that could
-/// break out of the quoted form.
-pub(crate) fn validate_ident(name: &str) -> Result<(), BulkActionError> {
-    if name.is_empty() {
-        return Err(BulkActionError::InvalidIdent("empty".into()));
-    }
-    let bad = ['"', '`', '\0', '\n', '\r', '\\', ';', ' '];
-    if name.chars().any(|c| bad.contains(&c) || c.is_control()) {
-        return Err(BulkActionError::InvalidIdent(name.to_owned()));
-    }
-    Ok(())
-}
-
-/// Render an IN-list of `n` placeholders: `($1, $2, …)` on PG,
-/// `(?, ?, …)` on MySQL and SQLite.
-fn placeholders_for(dialect: &dyn crate::sql::Dialect, n: usize) -> String {
-    let mut s = String::with_capacity(n * 4 + 2);
-    s.push('(');
-    for i in 0..n {
-        if i > 0 {
-            s.push_str(", ");
-        }
-        s.push_str(&dialect.placeholder(i + 1));
-    }
-    s.push(')');
-    s
-}
-
-/// The registered audited model for `table`: its writes take the audit path (#1794).
-fn audited_model(table: &str) -> Option<&'static ModelSchema> {
-    first_audited(inventory::iter::<crate::core::ModelEntry>, table)
 }
 
 /// Both conditions in one `find`, so an unaudited proxy on the table cannot win.
@@ -166,32 +240,39 @@ fn first_audited<'a>(
         .map(|e| e.schema)
 }
 
-fn pk_in(model: &'static ModelSchema, pks: &[i64]) -> Result<WhereExpr, BulkActionError> {
-    let pk = model.primary_key().ok_or_else(|| {
-        BulkActionError::Database(format!("`{}` has no primary key", model.table))
-    })?;
-    let list = pks.iter().copied().map(SqlValue::from).collect();
-    Ok(WhereExpr::Predicate(Filter {
-        column: pk.column,
-        op: Op::In,
-        value: SqlValue::List(list),
-    }))
-}
-
-async fn audited_set(
+/// `SET column = value WHERE pk IN (…) AND column IS [NOT] NULL`, audited as `op`.
+async fn set_column(
     pool: &Pool,
-    op: crate::audit::AuditOp,
-    model: &'static ModelSchema,
+    pks: &PkSet,
     column: &'static str,
     value: SqlValue,
-    filter: WhereExpr,
+    op: crate::audit::AuditOp,
+    only_null: bool,
 ) -> Result<u64, BulkActionError> {
-    let set = vec![Assignment {
-        column,
-        value: value.into(),
-    }];
+    let model = pks.target();
+    let field = model
+        .field_by_column(column)
+        .ok_or_else(|| BulkActionError::InvalidIdent(format!("{}.{column}", model.table)))?;
+    if pks.is_empty() {
+        return Ok(0);
+    }
+    let mut filter = pks.filter();
+    filter.push_and(WhereExpr::Predicate(Filter::new(
+        field.column,
+        Op::IsNull,
+        only_null,
+    )));
+    let set = vec![Assignment::new(field.column, value)];
     let q = crate::core::UpdateQuery::new(model, set, filter);
     crate::audit::update_as(pool, &q, op).await.map_err(db_err)
+}
+
+fn done(action: &dyn BulkAction, pks: &PkSet, affected: u64) -> BulkActionResult {
+    BulkActionResult {
+        affected,
+        action: action.name().to_owned(),
+        table: pks.model().table.to_owned(),
+    }
 }
 
 fn db_err(e: crate::sql::ExecError) -> BulkActionError {
@@ -212,43 +293,13 @@ impl BulkAction for BulkDeleteAction {
         "Delete selected"
     }
 
-    async fn run(
-        &self,
-        table: &str,
-        pks: &[i64],
-        pool: &Pool,
-    ) -> Result<BulkActionResult, BulkActionError> {
-        validate_ident(table)?;
+    async fn run(&self, pks: &PkSet, pool: &Pool) -> Result<BulkActionResult, BulkActionError> {
         if pks.is_empty() {
-            return Ok(BulkActionResult {
-                affected: 0,
-                action: self.name().to_owned(),
-                table: table.to_owned(),
-            });
+            return Ok(done(self, pks, 0));
         }
-        if let Some(model) = audited_model(table) {
-            let q = crate::core::DeleteQuery::new(model, pk_in(model, pks)?);
-            let affected = crate::audit::delete(pool, &q).await.map_err(db_err)?;
-            return Ok(BulkActionResult {
-                affected,
-                action: self.name().to_owned(),
-                table: table.to_owned(),
-            });
-        }
-        let dialect = pool.dialect();
-        let table_q = dialect.quote_ident(table);
-        let id_col = dialect.quote_ident("id");
-        let placeholders = placeholders_for(dialect, pks.len());
-        let sql = format!("DELETE FROM {table_q} WHERE {id_col} IN {placeholders}");
-        let binds: Vec<SqlValue> = pks.iter().copied().map(SqlValue::from).collect();
-        let affected = crate::sql::raw_execute_pool(pool, &sql, binds)
-            .await
-            .map_err(|e| BulkActionError::Database(e.to_string()))?;
-        Ok(BulkActionResult {
-            affected,
-            action: self.name().to_owned(),
-            table: table.to_owned(),
-        })
+        let q = crate::core::DeleteQuery::new(pks.target(), pks.filter());
+        let affected = crate::audit::delete(pool, &q).await.map_err(db_err)?;
+        Ok(done(self, pks, affected))
     }
 }
 
@@ -269,70 +320,16 @@ impl BulkAction for BulkSoftDeleteAction {
         "Soft-delete selected"
     }
 
-    async fn run(
-        &self,
-        table: &str,
-        pks: &[i64],
-        pool: &Pool,
-    ) -> Result<BulkActionResult, BulkActionError> {
-        validate_ident(table)?;
-        validate_ident(self.column)?;
-        if pks.is_empty() {
-            return Ok(BulkActionResult {
-                affected: 0,
-                action: self.name().to_owned(),
-                table: table.to_owned(),
-            });
-        }
-        if let Some(model) = audited_model(table) {
-            let mut filter = pk_in(model, pks)?;
-            filter.push_and(WhereExpr::Predicate(Filter {
-                column: self.column,
-                op: Op::IsNull,
-                value: SqlValue::Bool(true),
-            }));
-            let set = SqlValue::DateTime(chrono::Utc::now());
-            let op = crate::audit::AuditOp::SoftDelete;
-            let affected = audited_set(pool, op, model, self.column, set, filter).await?;
-            return Ok(BulkActionResult {
-                affected,
-                action: self.name().to_owned(),
-                table: table.to_owned(),
-            });
-        }
-        let dialect = pool.dialect();
-        let table_q = dialect.quote_ident(table);
-        let col_q = dialect.quote_ident(self.column);
-        let id_col = dialect.quote_ident("id");
-        // Bind the timestamp first, then the pks, in text order.
-        let ts_ph = dialect.placeholder(1);
-        let mut binds: Vec<SqlValue> = Vec::with_capacity(pks.len() + 1);
-        binds.push(SqlValue::DateTime(chrono::Utc::now()));
-        let mut in_list = String::from("(");
-        for (i, pk) in pks.iter().enumerate() {
-            if i > 0 {
-                in_list.push_str(", ");
-            }
-            in_list.push_str(&dialect.placeholder(i + 2));
-            binds.push(SqlValue::from(*pk));
-        }
-        in_list.push(')');
-        let sql = format!(
-            "UPDATE {table_q} SET {col_q} = {ts_ph} \
-             WHERE {id_col} IN {in_list} AND {col_q} IS NULL"
-        );
-        let affected = crate::sql::raw_execute_pool(pool, &sql, binds)
-            .await
-            .map_err(|e| BulkActionError::Database(e.to_string()))?;
-        Ok(BulkActionResult {
-            affected,
-            action: self.name().to_owned(),
-            table: table.to_owned(),
-        })
+    async fn run(&self, pks: &PkSet, pool: &Pool) -> Result<BulkActionResult, BulkActionError> {
+        let now = SqlValue::DateTime(chrono::Utc::now());
+        let op = crate::audit::AuditOp::SoftDelete;
+        let affected = set_column(pool, pks, self.column, now, op, true).await?;
+        Ok(done(self, pks, affected))
     }
 }
 
-/// Restore: set a soft-delete column back to NULL for every selected row.
+/// Restore: set a soft-delete column back to NULL for every selected
+/// deleted row.
 pub struct BulkRestoreAction {
     pub column: &'static str,
 }
@@ -346,53 +343,11 @@ impl BulkAction for BulkRestoreAction {
         "Restore selected"
     }
 
-    async fn run(
-        &self,
-        table: &str,
-        pks: &[i64],
-        pool: &Pool,
-    ) -> Result<BulkActionResult, BulkActionError> {
-        validate_ident(table)?;
-        validate_ident(self.column)?;
-        if pks.is_empty() {
-            return Ok(BulkActionResult {
-                affected: 0,
-                action: self.name().to_owned(),
-                table: table.to_owned(),
-            });
-        }
-        if let Some(model) = audited_model(table) {
-            // Only deleted rows, so an active one writes no audit row.
-            let mut filter = pk_in(model, pks)?;
-            filter.push_and(WhereExpr::Predicate(Filter {
-                column: self.column,
-                op: Op::IsNull,
-                value: SqlValue::Bool(false),
-            }));
-            let op = crate::audit::AuditOp::Restore;
-            let affected =
-                audited_set(pool, op, model, self.column, SqlValue::Null, filter).await?;
-            return Ok(BulkActionResult {
-                affected,
-                action: self.name().to_owned(),
-                table: table.to_owned(),
-            });
-        }
-        let dialect = pool.dialect();
-        let table_q = dialect.quote_ident(table);
-        let col_q = dialect.quote_ident(self.column);
-        let id_col = dialect.quote_ident("id");
-        let placeholders = placeholders_for(dialect, pks.len());
-        let sql = format!("UPDATE {table_q} SET {col_q} = NULL WHERE {id_col} IN {placeholders}");
-        let binds: Vec<SqlValue> = pks.iter().copied().map(SqlValue::from).collect();
-        let affected = crate::sql::raw_execute_pool(pool, &sql, binds)
-            .await
-            .map_err(|e| BulkActionError::Database(e.to_string()))?;
-        Ok(BulkActionResult {
-            affected,
-            action: self.name().to_owned(),
-            table: table.to_owned(),
-        })
+    async fn run(&self, pks: &PkSet, pool: &Pool) -> Result<BulkActionResult, BulkActionError> {
+        // Only deleted rows, so an active one writes no audit row.
+        let op = crate::audit::AuditOp::Restore;
+        let affected = set_column(pool, pks, self.column, SqlValue::Null, op, false).await?;
+        Ok(done(self, pks, affected))
     }
 }
 
@@ -415,15 +370,10 @@ mod tests {
         }
         async fn run(
             &self,
-            table: &str,
-            _pks: &[i64],
+            pks: &PkSet,
             _pool: &Pool,
         ) -> Result<BulkActionResult, BulkActionError> {
-            Ok(BulkActionResult {
-                affected: 0,
-                action: self.name.to_owned(),
-                table: table.to_owned(),
-            })
+            Ok(done(self, pks, 0))
         }
     }
 
@@ -497,21 +447,52 @@ mod tests {
         assert_eq!(list[0].1, "new");
     }
 
+    const fn pk(ty: FieldType) -> FieldSchema {
+        let mut f = FieldSchema::new("code", "code", ty);
+        f.primary_key = true;
+        f
+    }
+    static TEXT_FIELDS: [FieldSchema; 1] = [pk(FieldType::String)];
+    static TEXT_PK: ModelSchema = {
+        let mut s = ModelSchema::new("Text", "text_pk");
+        s.fields = &TEXT_FIELDS;
+        s
+    };
+    static I32_FIELDS: [FieldSchema; 1] = [pk(FieldType::I32)];
+    static I32_PK: ModelSchema = {
+        let mut s = ModelSchema::new("Small", "small_pk");
+        s.fields = &I32_FIELDS;
+        s
+    };
+
+    /// An integer key cannot reach a text PK column (#1817).
     #[test]
-    fn validate_ident_accepts_normal() {
-        assert!(validate_ident("posts").is_ok());
-        assert!(validate_ident("rustango_users").is_ok());
-        assert!(validate_ident("deleted_at").is_ok());
+    fn pk_set_refuses_keys_of_another_type() {
+        assert!(matches!(
+            PkSet::new(&TEXT_PK, [1_i64]),
+            Err(BulkActionError::InvalidPk(_))
+        ));
+        let keys = PkSet::new(&TEXT_PK, ["a".to_owned()]).unwrap();
+        assert_eq!(keys.keys(), [SqlValue::String("a".into())]);
+        assert!(PkSet::parse(&I32_PK, ["x"]).is_err());
+        assert!(PkSet::new(&I32_PK, [i64::MAX]).is_err());
+        let keys = PkSet::new(&I32_PK, [7_i64]).unwrap();
+        assert_eq!(keys.keys(), [SqlValue::I32(7)]);
     }
 
     #[test]
-    fn validate_ident_rejects_dangerous_chars() {
-        assert!(validate_ident("evil\"").is_err());
-        assert!(validate_ident("a;b").is_err());
-        assert!(validate_ident("a b").is_err());
-        assert!(validate_ident("a\nb").is_err());
-        assert!(validate_ident("").is_err());
-        assert!(validate_ident("evil`").is_err());
+    fn pk_set_filters_on_the_schema_pk_column() {
+        let keys = PkSet::parse(&TEXT_PK, ["a"]).unwrap();
+        match keys.filter() {
+            WhereExpr::Predicate(f) => assert_eq!(f.column, "code"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn pk_set_needs_a_primary_key() {
+        static NO_PK: ModelSchema = ModelSchema::new("NoPk", "no_pk");
+        assert!(PkSet::parse(&NO_PK, ["1"]).is_err());
     }
 
     #[cfg(feature = "sqlite")]
@@ -521,10 +502,8 @@ mod tests {
         let sq = crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
         let pool: Pool = sq.into();
         let r = BulkActionRegistry::new();
-        let err = r
-            .run("nonexistent", "posts", &[1], &pool)
-            .await
-            .unwrap_err();
+        let keys = PkSet::parse(&TEXT_PK, ["a"]).unwrap();
+        let err = r.run("nonexistent", &keys, &pool).await.unwrap_err();
         assert!(matches!(err, BulkActionError::UnknownAction(_)));
     }
 
