@@ -395,8 +395,8 @@ fn tenant_label(field: TenantField, tenant: Option<crate::tenant_log::TenantLabe
 /// The client IP for the line. With `use_real_ip` on it is
 /// [`crate::rate_limit::client_ip`] (a `TrustedRealIp`, else the
 /// socket); off, the socket. Never a raw forwarding header (#1745).
-fn resolve_client_ip(req: &Request, trust_proxy: bool) -> Option<String> {
-    let ip = if trust_proxy {
+fn resolve_client_ip(req: &Request, use_real_ip: bool) -> Option<String> {
+    let ip = if use_real_ip {
         crate::rate_limit::client_ip(req.extensions(), req.headers())
     } else {
         req.extensions()
