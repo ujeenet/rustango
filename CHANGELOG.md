@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL unbounded `String` columns hold more than 64 KiB (#1708)
+
+A `String` without `max_length` is now `LONGTEXT` on MySQL, not `TEXT`, so long
+content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
+
 ## [0.59.5] — 2026-09-29
 
 Tagged only; not published to crates.io.

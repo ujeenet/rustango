@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### MySQL: unbounded `String` is `LONGTEXT`
+
+New tables get `LONGTEXT`; migrations do not change existing `TEXT` columns. To lift
+the 64 KiB cap there, run `ALTER TABLE t MODIFY col LONGTEXT NOT NULL` for each
+`DATA_TYPE = 'text'` column in `information_schema.COLUMNS`. `MODIFY` resets what it
+omits: repeat the column's nullability, default and any `COLLATE`.
+
 ## 0.59.5
 
 ### `Cache::stores_nothing`
