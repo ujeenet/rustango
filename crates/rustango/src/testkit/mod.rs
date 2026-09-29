@@ -34,7 +34,8 @@
 /// that is compiled in and configured (#1461).
 pub mod matrix;
 
-/// Captures rendered `tracing` output for assertions.
+/// Captures rendered `tracing` output for assertions. Needs `runtime`
+/// (for `tracing-subscriber`) as well as `testkit`.
 #[cfg(feature = "runtime")]
 mod tracing_capture;
 #[cfg(feature = "runtime")]

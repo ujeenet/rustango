@@ -22,6 +22,7 @@ once its nonce expires. A `NullCache` nonce store, or a failing one, now warns.
 ### Added — `testkit::CaptureWriter` (#1829)
 
 One shared writer for tests that assert on rendered `tracing` output; replaces ten copies.
+Needs the `testkit` and `runtime` features.
 
 ## [0.59.5] — 2026-09-29
 
