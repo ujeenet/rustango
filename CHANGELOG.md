@@ -34,6 +34,10 @@ A retry with the same `Idempotency-Key` while the first request runs now
 gets `409` with `Retry-After` instead of running the handler twice. The
 marker lives `lock_ttl` (60 s default) so a crash can't wedge the key.
 A response over `body_cap` now reaches the client whole instead of empty.
+The marker is renewed while the handler runs and only its owner frees it;
+a run that stored just before the marker was won is replayed, not re-run.
+`FileCache::add` is now atomic across processes. Admin bulk actions audit
+exactly the rows they write.
 
 ## [0.59.0] — 2026-09-29
 

@@ -250,33 +250,29 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
 
     // Hit: replay the stored response, if it answered this same body.
     if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
-        if stored.request_sha256 != request_sha256 {
-            return key_reused();
-        }
-        return rebuild(stored);
+        return replay(stored, &request_sha256);
     }
 
     // Miss: hold the in-flight marker, so a retry during this run can't run the handler too.
     let lock_key = format!("{cache_key}:inflight");
-    let in_flight = match cfg
-        .cache
-        .add(&lock_key, &request_sha256, Some(cfg.lock_ttl))
-        .await
-    {
-        Ok(true) => Some(InFlight {
-            cache: cfg.cache.clone(),
-            key: Some(lock_key),
-        }),
+    let token = format!("{request_sha256}:{}", uuid::Uuid::new_v4().simple());
+    let in_flight = match cfg.cache.add(&lock_key, &token, Some(cfg.lock_ttl)).await {
+        Ok(true) => {
+            let held = InFlight::hold(cfg.cache.clone(), lock_key, token, cfg.lock_ttl);
+            // A run may have stored and released between the read above and the add.
+            if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
+                release(Some(held)).await;
+                return replay(stored, &request_sha256);
+            }
+            Some(held)
+        }
         Ok(false) => {
             // The first run may have stored its answer since the read above.
             if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
-                if stored.request_sha256 == request_sha256 {
-                    return rebuild(stored);
-                }
-                return key_reused();
+                return replay(stored, &request_sha256);
             }
             let holder = cfg.cache.get(&lock_key).await.ok().flatten();
-            if holder.is_some_and(|sha| sha != request_sha256) {
+            if holder.is_some_and(|t| marker_sha(&t) != request_sha256) {
                 return key_reused();
             }
             return in_progress();
@@ -352,32 +348,89 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
     Response::from_parts(parts, Body::from(bytes))
 }
 
-/// The in-flight marker; dropping it (panic, cancelled request) frees the key.
+/// The in-flight marker, valued `<body sha>:<nonce>` so only its owner renews
+/// or deletes it. Dropping it (panic, cancelled request) frees the key.
 struct InFlight {
     cache: BoxedCache,
     key: Option<String>,
+    token: String,
+    renew: tokio::task::JoinHandle<()>,
+}
+
+impl InFlight {
+    /// Hold the marker, renewing it every `ttl / 2` while the handler runs.
+    fn hold(cache: BoxedCache, key: String, token: String, ttl: Duration) -> Self {
+        let renew = tokio::spawn({
+            let (cache, key, token) = (cache.clone(), key.clone(), token.clone());
+            async move {
+                let every = (ttl / 2).max(Duration::from_millis(10));
+                loop {
+                    tokio::time::sleep(every).await;
+                    if cache.get(&key).await.ok().flatten().as_deref() != Some(token.as_str()) {
+                        return;
+                    }
+                    let _ = cache.touch(&key, Some(ttl)).await;
+                }
+            }
+        });
+        Self {
+            cache,
+            key: Some(key),
+            token,
+            renew,
+        }
+    }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
+        self.renew.abort();
         let Some(key) = self.key.take() else { return };
-        let cache = self.cache.clone();
+        let (cache, token) = (self.cache.clone(), std::mem::take(&mut self.token));
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
-                let _ = cache.delete(&key).await;
+                let _ = delete_if_owner(&cache, &key, &token).await;
             });
         }
     }
 }
 
 async fn release(in_flight: Option<InFlight>) {
-    if let Some(mut f) = in_flight {
-        if let Some(key) = f.key.take() {
-            if let Err(e) = f.cache.delete(&key).await {
-                tracing::warn!(error = %e, "idempotency: in-flight marker not released");
-            }
+    let Some(mut f) = in_flight else { return };
+    f.renew.abort();
+    if let Some(key) = f.key.as_deref() {
+        if let Err(e) = delete_if_owner(&f.cache, key, &f.token).await {
+            tracing::warn!(error = %e, "idempotency: in-flight marker not released");
         }
     }
+    // Cleared only now, so a delete cancelled above is retried by `Drop`.
+    f.key = None;
+}
+
+/// Delete the marker only while it holds `token`, so a late run can't free a
+/// newer run's key. Get-then-delete: the `Cache` trait has no compare-and-delete.
+async fn delete_if_owner(
+    cache: &BoxedCache,
+    key: &str,
+    token: &str,
+) -> Result<(), crate::cache::CacheError> {
+    if cache.get(key).await?.as_deref() == Some(token) {
+        cache.delete(key).await?;
+    }
+    Ok(())
+}
+
+/// The request-body hash a marker carries.
+fn marker_sha(token: &str) -> &str {
+    token.split_once(':').map_or(token, |(sha, _)| sha)
+}
+
+/// Replay `stored` if it answered this body, else `422`.
+fn replay(stored: StoredResponse, request_sha256: &str) -> Response<Body> {
+    if stored.request_sha256 != request_sha256 {
+        return key_reused();
+    }
+    rebuild(stored)
 }
 
 /// Read a body up to `cap`. `Ok(Err(body))` gives back the whole body when it is larger.
@@ -1265,6 +1318,117 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Misses the first read of a stored answer, as if another run stored it just after.
+    struct MissFirstRead {
+        inner: BoxedCache,
+        missed: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for MissFirstRead {
+        async fn get(&self, key: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            if !key.ends_with(":inflight") && !self.missed.swap(true, Ordering::SeqCst) {
+                return Ok(None);
+            }
+            self.inner.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.inner.set(key, value, ttl).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), crate::cache::CacheError> {
+            self.inner.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, crate::cache::CacheError> {
+            self.inner.exists(key).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_stored_before_the_marker_is_won_is_replayed() {
+        let (inner, counter) = (cache(), StdArc::new(AtomicUsize::new(0)));
+        let first = counting_app(counter.clone(), IdempotencyLayer::new(inner.clone()))
+            .oneshot(keyed("/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(body_string(first).await, "call-0:");
+        let racing: BoxedCache = StdArc::new(MissFirstRead {
+            inner,
+            missed: false.into(),
+        });
+        let r = counting_app(counter.clone(), IdempotencyLayer::new(racing))
+            .oneshot(keyed("/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "the handler ran twice");
+    }
+
+    #[tokio::test]
+    async fn a_stale_release_keeps_a_newer_marker() {
+        let shared = cache();
+        let key = "idem:x:inflight".to_owned();
+        let stale = InFlight::hold(
+            shared.clone(),
+            key.clone(),
+            "sha:old".into(),
+            Duration::from_secs(60),
+        );
+        // The stale marker expired and a retry now holds the key.
+        shared.set(&key, "sha:new", None).await.unwrap();
+        release(Some(stale)).await;
+        assert_eq!(shared.get(&key).await.unwrap().as_deref(), Some("sha:new"));
+    }
+
+    #[tokio::test]
+    async fn a_handler_longer_than_lock_ttl_keeps_its_key() {
+        let (counter, gate) = (
+            StdArc::new(AtomicUsize::new(0)),
+            StdArc::new(tokio::sync::Notify::new()),
+        );
+        let handler = {
+            let (c, gate) = (counter.clone(), gate.clone());
+            move || {
+                let (c, gate) = (c.clone(), gate.clone());
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    gate.notified().await;
+                    "done"
+                }
+            }
+        };
+        let app = Router::new()
+            .route("/a", post(handler))
+            .idempotency(IdempotencyLayer::new(cache()).lock_ttl(Duration::from_millis(200)));
+        let first = tokio::spawn(
+            app.clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap()),
+        );
+        while counter.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        // Without renewal the retry runs the gated handler and never returns.
+        let retry = tokio::time::timeout(
+            Duration::from_secs(2),
+            app.oneshot(keyed("/a").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("the marker expired, so the retry ran the handler")
+        .unwrap();
+        assert_eq!(retry.status(), StatusCode::CONFLICT);
+        gate.notify_one();
+        first.await.unwrap().unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

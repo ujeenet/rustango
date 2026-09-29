@@ -1000,6 +1000,31 @@ impl Cache for FileCache {
         Ok(self.get(key).await?.is_some())
     }
 
+    /// Atomic across processes: the entry is written to a temp file, then
+    /// hard-linked into place, which fails when the key's file exists.
+    async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
+        let path = self.key_path(key);
+        let tmp = self
+            .dir
+            .join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&tmp, Self::encode(key, value, ttl))
+            .map_err(|e| CacheError::Connection(format!("write: {e}")))?;
+        let link = || match std::fs::hard_link(&tmp, &path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(CacheError::Connection(format!("hard_link: {e}"))),
+        };
+        let mut won = link();
+        // An expired entry does not hold the key; `get` removes it, then retry once.
+        if matches!(won, Ok(false)) && self.get(key).await.is_ok_and(|v| v.is_none()) {
+            won = link();
+        }
+        let _ = std::fs::remove_file(&tmp);
+        won
+    }
+
     async fn clear(&self) -> Result<(), CacheError> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(e) => e,
