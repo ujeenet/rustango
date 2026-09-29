@@ -149,6 +149,9 @@ async fn soft_delete_restore_and_purge_are_audited(pool: &Pool) {
             .unwrap(),
         1
     );
+    let active = SqlValue::I64(pks[1]);
+    let restored = soft_delete::restore(pool, Doc::SCHEMA, "id", active);
+    assert_eq!(restored.await.unwrap(), 0, "an active row is not restored");
     assert_eq!(ops(pool, "soft_delete").await, 1);
     assert_eq!(ops(pool, "restore").await, 1);
     assert_eq!(ops(pool, "update").await, 0);
@@ -161,42 +164,44 @@ async fn soft_delete_restore_and_purge_are_audited(pool: &Pool) {
     assert_eq!(ops(pool, "delete").await, 1);
 }
 
-/// `bulk_actions` needs `tenancy`; without it the scenario is empty.
-async fn bulk_actions_are_audited(pool: &Pool) {
-    #[cfg(feature = "tenancy")]
-    {
-        use rustango::bulk_actions::{
-            BulkAction as _, BulkDeleteAction, BulkRestoreAction, BulkSoftDeleteAction,
-        };
-        let pks = seed(pool).await;
-        let column = "deleted_at";
-        let soft = BulkSoftDeleteAction { column };
-        assert_eq!(soft.run(DOC, &pks, pool).await.unwrap().affected, 2);
-        let restore = BulkRestoreAction { column };
-        assert_eq!(restore.run(DOC, &pks[..1], pool).await.unwrap().affected, 1);
-        assert_eq!(ops(pool, "soft_delete").await, 2);
-        assert_eq!(ops(pool, "restore").await, 1);
-        assert_eq!(ops(pool, "update").await, 0);
-        assert_eq!(
-            BulkDeleteAction
-                .run(DOC, &pks, pool)
-                .await
-                .unwrap()
-                .affected,
-            2
-        );
-        assert_eq!(ops(pool, "delete").await, 2);
-    }
-    #[cfg(not(feature = "tenancy"))]
-    let _ = pool;
-}
-
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         viewset_update_and_delete_are_audited,
         template_views_writes_are_audited,
         soft_delete_restore_and_purge_are_audited,
-        bulk_actions_are_audited,
     ],
+}
+
+/// `bulk_actions` needs `tenancy`.
+#[cfg(feature = "tenancy")]
+mod bulk {
+    use super::*;
+    use rustango::bulk_actions::{
+        BulkAction as _, BulkDeleteAction, BulkRestoreAction, BulkSoftDeleteAction,
+    };
+
+    /// Soft delete skips deleted rows and restore skips active ones, so
+    /// each writes one audit row per changed row.
+    async fn bulk_actions_are_audited(pool: &Pool) {
+        let pks = seed(pool).await;
+        let column = "deleted_at";
+        let soft = BulkSoftDeleteAction { column };
+        assert_eq!(soft.run(DOC, &pks[..1], pool).await.unwrap().affected, 1);
+        assert_eq!(soft.run(DOC, &pks, pool).await.unwrap().affected, 1);
+        assert_eq!(ops(pool, "soft_delete").await, 2);
+        let restore = BulkRestoreAction { column };
+        assert_eq!(restore.run(DOC, &pks[..1], pool).await.unwrap().affected, 1);
+        assert_eq!(restore.run(DOC, &pks, pool).await.unwrap().affected, 1);
+        assert_eq!(ops(pool, "restore").await, 2);
+        assert_eq!(ops(pool, "update").await, 0);
+        let deleted = BulkDeleteAction.run(DOC, &pks, pool).await.unwrap();
+        assert_eq!(deleted.affected, 2);
+        assert_eq!(ops(pool, "delete").await, 2);
+    }
+
+    tri_dialect_test! {
+        setup: setup,
+        scenarios: [bulk_actions_are_audited],
+    }
 }

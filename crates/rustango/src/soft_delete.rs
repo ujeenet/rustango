@@ -154,11 +154,19 @@ pub async fn restore(
                 column: col,
                 value: SqlValue::Null.into(),
             }],
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_column,
-                op: Op::Eq,
-                value: pk_value,
-            }),
+            // Only a deleted row, so restoring an active one writes no audit row.
+            where_clause: WhereExpr::And(vec![
+                WhereExpr::Predicate(Filter {
+                    column: pk_column,
+                    op: Op::Eq,
+                    value: pk_value,
+                }),
+                WhereExpr::Predicate(Filter {
+                    column: col,
+                    op: Op::IsNull,
+                    value: SqlValue::Bool(false),
+                }),
+            ]),
         },
         crate::audit::AuditOp::Restore,
     )

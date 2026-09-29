@@ -167,6 +167,8 @@ types, `u8`–`u64` without `postgres` and `Decimal` without `sqlite`. Use
 ViewSet, template-view, `soft_delete` and `bulk_actions` writes on an audited
 model now lock the rows and write audit rows in one transaction. Soft delete
 and restore are recorded as `soft_delete` and `restore`, as on the typed path.
+`soft_delete::restore` now returns 0 for a row that is not deleted, and the
+audited `restore_selected` counts only deleted rows.
 
 ### Custom admin actions run object-permission hooks
 

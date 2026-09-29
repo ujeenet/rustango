@@ -362,7 +362,13 @@ impl BulkAction for BulkRestoreAction {
             });
         }
         if let Some(model) = audited_model(table) {
-            let filter = pk_in(model, pks)?;
+            // Only deleted rows, so an active one writes no audit row.
+            let mut filter = pk_in(model, pks)?;
+            filter.push_and(WhereExpr::Predicate(Filter {
+                column: self.column,
+                op: Op::IsNull,
+                value: SqlValue::Bool(false),
+            }));
             let op = crate::audit::AuditOp::Restore;
             let affected =
                 audited_set(pool, op, model, self.column, SqlValue::Null, filter).await?;
