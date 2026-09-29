@@ -34,7 +34,7 @@
 use crate::core::{
     Assignment, DeleteQuery, Filter, ModelSchema, Op, SqlValue, UpdateQuery, WhereExpr,
 };
-use crate::sql::{delete_pool as sql_delete_pool, update_pool as sql_update_pool, ExecError, Pool};
+use crate::sql::{ExecError, Pool};
 
 /// `Some(<col> IS NULL)` for a soft-delete model, else `None`. It
 /// matches the rows that are still live.
@@ -110,7 +110,7 @@ pub async fn soft_delete(
     let col = model
         .soft_delete_column
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
-    let n = sql_update_pool(
+    let n = crate::audit::update(
         pool,
         &UpdateQuery {
             model,
@@ -145,7 +145,7 @@ pub async fn restore(
     let col = model
         .soft_delete_column
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
-    let n = sql_update_pool(
+    let n = crate::audit::update(
         pool,
         &UpdateQuery {
             model,
@@ -175,7 +175,7 @@ pub async fn purge(
     pk_column: &'static str,
     pk_value: SqlValue,
 ) -> Result<u64, ExecError> {
-    sql_delete_pool(
+    crate::audit::delete(
         pool,
         &DeleteQuery {
             model,

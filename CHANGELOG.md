@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — ViewSet, template views and soft delete audit their writes (#1794)
+
+On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView` /
+`delete_selected`, `soft_delete::{soft_delete, restore, purge}` and the
+`bulk_actions` built-ins now write one audit row per row, in the write's transaction.
+New `audit::update` / `audit::delete` pick the audited path from the schema.
+
 ### Security — admin custom actions check each row (#1805)
 
 A `register_action` action now needs the `change` hook and a hook named after

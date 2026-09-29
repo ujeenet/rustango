@@ -150,6 +150,12 @@ untouched.
 
 ## Unreleased
 
+### Schema-driven writes on audited models are audited
+
+ViewSet, template-view, `soft_delete` and `bulk_actions` writes on an audited
+model now lock the rows and write audit rows in one transaction. Soft delete
+and restore are recorded as `update`.
+
 ### Custom admin actions run object-permission hooks
 
 **Breaking:** a `register_action` action now gets `403` when your `change`

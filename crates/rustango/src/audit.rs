@@ -1390,6 +1390,35 @@ pub type AuditedDelete = for<'a> fn(
     Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
 >;
 
+/// Run `query`, auditing each row when its model is audited (#1794). The
+/// choke point for schema-driven writes that have no `M` to call.
+///
+/// # Errors
+/// As [`update_many_with_audit`] or [`crate::sql::update_pool`].
+pub async fn update(
+    pool: &crate::sql::Pool,
+    query: &crate::core::UpdateQuery,
+) -> Result<u64, crate::sql::ExecError> {
+    match crate::core::ModelEntry::for_schema(query.model).and_then(|e| e.audited_update()) {
+        Some(run) => run(pool, query).await,
+        None => crate::sql::update_pool(pool, query).await,
+    }
+}
+
+/// Run `query`, auditing each deleted row when its model is audited (#1794).
+///
+/// # Errors
+/// As [`delete_many_with_audit`] or [`crate::sql::delete_pool`].
+pub async fn delete(
+    pool: &crate::sql::Pool,
+    query: &crate::core::DeleteQuery,
+) -> Result<u64, crate::sql::ExecError> {
+    match crate::core::ModelEntry::for_schema(query.model).and_then(|e| e.audited_delete()) {
+        Some(run) => run(pool, query).await,
+        None => crate::sql::delete_pool(pool, query).await,
+    }
+}
+
 /// Run a `BulkUpdateQuery` (`Model::bulk_update`) and one `Update` entry
 /// per updated row, re-read after the write, in one transaction.
 ///

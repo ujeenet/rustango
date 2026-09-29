@@ -992,6 +992,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 <#struct_name as #root::core::Model>::SCHEMA,
                 ::core::module_path!(),
             )
+            .with_audited(
+                <#struct_name as #root::core::Model>::__rustango_audited_update,
+                <#struct_name as #root::core::Model>::__rustango_audited_delete,
+            )
         }
     })
 }

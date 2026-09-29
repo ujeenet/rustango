@@ -1221,11 +1221,11 @@ fn generated_pk(
 
 impl AcquiredConn {
     async fn update(&mut self, q: &UpdateQuery) -> Result<u64, crate::sql::ExecError> {
-        crate::sql::update_pool(&self.pool, q).await
+        crate::audit::update(&self.pool, q).await
     }
 
     async fn delete(&mut self, q: &DeleteQuery) -> Result<u64, crate::sql::ExecError> {
-        crate::sql::delete_pool(&self.pool, q).await
+        crate::audit::delete(&self.pool, q).await
     }
 
     #[cfg(feature = "tenancy")]
