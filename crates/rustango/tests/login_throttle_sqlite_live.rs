@@ -374,3 +374,88 @@ async fn wrong_enrollment_codes_lock_the_account() {
         StatusCode::TOO_MANY_REQUESTS
     );
 }
+
+/// POST `/account/totp` with `code` from `ip` on `session`.
+#[cfg(feature = "totp")]
+async fn post_totp(app: &axum::Router, session: &str, ip: &str, code: &str) -> StatusCode {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/account/totp")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(header::COOKIE, format!("rustango_csrf={CSRF}; {session}"))
+        .body(Body::from(format!("_csrf={CSRF}&totp_code={code}")))
+        .unwrap();
+    let addr: SocketAddr = format!("{ip}:4000").parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+/// A superuser with a session and a known pending enrollment secret.
+#[cfg(feature = "totp")]
+async fn enrolling(name: &str, ip: &str) -> (axum::Router, String, rustango::totp::TotpSecret) {
+    let (app, pool) = app_with(&[]).await;
+    let mut u = AdminUser::new_with_password(name, "right-pass", true).unwrap();
+    u.insert_pool(&pool).await.unwrap();
+    let id = *u.id.get().unwrap();
+    let session = login(&app, ip, name, "right-pass")
+        .await
+        .cookie
+        .expect("session");
+    let secret = rustango::totp::TotpSecret::generate();
+    rustango::admin::totp_store::start_enrollment(&pool, id, &secret)
+        .await
+        .unwrap();
+    (app, session, secret)
+}
+
+/// #1791 — a blank enrollment code is no guess, so it never locks.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn blank_enrollment_codes_never_lock() {
+    let _g = SUITE.lock().await;
+    let (app, session, _) = enrolling("thr_jack", "10.72.0.1").await;
+    for n in 0..7 {
+        let status = post_totp(&app, &session, &format!("10.72.1.{n}"), "").await;
+        assert_eq!(status, StatusCode::OK, "blank {n} was counted");
+    }
+}
+
+/// #1791 — a right enrollment code clears earlier wrong ones.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn a_right_enrollment_code_clears_the_count() {
+    let _g = SUITE.lock().await;
+    let (app, session, secret) = enrolling("thr_kate", "10.73.0.1").await;
+    for n in 0..4 {
+        let status = post_totp(&app, &session, &format!("10.73.1.{n}"), "abcdef").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let code = rustango::totp::generate(&secret, 30, 6);
+    assert_eq!(
+        post_totp(&app, &session, "10.73.2.1", &code).await,
+        StatusCode::OK
+    );
+    // Uncleared, these would be failures 5 to 8 and lock the account.
+    for n in 0..4 {
+        let a = login(&app, &format!("10.73.3.{n}"), "thr_kate", "wrong-pass").await;
+        assert_eq!(a.status, StatusCode::OK, "wrong login {n}");
+    }
+}
+
+/// #1791 — a code sent with no enrollment in progress is not counted.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn a_code_without_a_pending_enrollment_never_locks() {
+    let _g = SUITE.lock().await;
+    let (app, pool) = app_with(&[]).await;
+    let mut u = AdminUser::new_with_password("thr_liam", "right-pass", true).unwrap();
+    u.insert_pool(&pool).await.unwrap();
+    let session = login(&app, "10.74.0.1", "thr_liam", "right-pass")
+        .await
+        .cookie
+        .expect("session");
+    for n in 0..7 {
+        let status = post_totp(&app, &session, &format!("10.74.1.{n}"), "abcdef").await;
+        assert_eq!(status, StatusCode::OK, "post {n} was counted");
+    }
+}
