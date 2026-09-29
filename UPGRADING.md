@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.1
+
 ### Tenant routers for a non-default backend
 
 With several backends compiled in, the default `Tenant` is Postgres. Mount
