@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — bulk writes on audited models write audit rows (#1747)
+
+`destroy`, `delete_where`, `update_where`, `update_all`, `increment_each`,
+`bulk_update`, `upsert`, non-`Auto` `bulk_insert` and
+`QuerySet::update().execute_pool` now audit each affected row in the
+write's transaction; `truncate` writes one bulk `delete` entry. Writes
+that cannot audit return `ExecError::AuditUnsupported` on audited models.
+
 ### Security — outbound clients check their target (#1716)
 
 Slack `webhook_callback` and OAuth2 discovery, token and userinfo calls

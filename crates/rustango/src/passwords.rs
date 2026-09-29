@@ -175,6 +175,8 @@ pub(crate) enum HashLane {
 /// at most half of them; a job that cannot get a slot in time gives up
 /// with [`PasswordError::Busy`].
 pub(crate) struct HashQueue {
+    #[cfg_attr(not(feature = "testkit"), allow(dead_code))]
+    size: usize,
     slots: std::sync::Arc<tokio::sync::Semaphore>,
     credential: std::sync::Arc<tokio::sync::Semaphore>,
 }
@@ -183,6 +185,7 @@ impl HashQueue {
     pub(crate) fn new(slots: usize) -> Self {
         let slots = slots.max(1);
         Self {
+            size: slots,
             slots: std::sync::Arc::new(tokio::sync::Semaphore::new(slots)),
             credential: std::sync::Arc::new(tokio::sync::Semaphore::new((slots / 2).max(1))),
         }
@@ -243,15 +246,26 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    queue().run(lane, hash_wait(), f).await
+}
+
+/// The process-wide [`HashQueue`], one slot per CPU.
+fn queue() -> &'static HashQueue {
     static QUEUE: std::sync::OnceLock<HashQueue> = std::sync::OnceLock::new();
-    QUEUE
-        .get_or_init(|| {
-            HashQueue::new(
-                std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get),
-            )
-        })
-        .run(lane, hash_wait(), f)
+    QUEUE.get_or_init(|| {
+        HashQueue::new(std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get))
+    })
+}
+
+/// Hold every hashing slot until the permit drops, so each hash job
+/// answers [`PasswordError::Busy`]. For tests of the busy path.
+#[cfg(feature = "testkit")]
+pub async fn hold_all_hash_slots() -> tokio::sync::OwnedSemaphorePermit {
+    let q = queue();
+    std::sync::Arc::clone(&q.slots)
+        .acquire_many_owned(u32::try_from(q.size).unwrap_or(u32::MAX))
         .await
+        .expect("password semaphore is never closed")
 }
 
 // ------------------------------------------------------------------ Strength check

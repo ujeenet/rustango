@@ -203,3 +203,15 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError>
         Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin().await?)),
     }
 }
+
+/// [`transaction_pool`] that takes SQLite's write lock at `BEGIN`.
+pub(crate) async fn write_transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
+    match pool {
+        // Take the write lock up front: a deferred tx that reads first
+        // fails at once on a busy WAL database instead of waiting.
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?)),
+        #[allow(unreachable_patterns)]
+        _ => transaction_pool(pool).await,
+    }
+}

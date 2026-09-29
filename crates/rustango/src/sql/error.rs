@@ -238,6 +238,14 @@ pub enum ExecError {
     #[error(transparent)]
     Driver(#[from] sqlx::Error),
 
+    /// A write that cannot record its audit rows, refused on an audited
+    /// model rather than run unaudited (#1747).
+    #[error("`{table}` is audited: {reason}")]
+    AuditUnsupported {
+        table: &'static str,
+        reason: &'static str,
+    },
+
     /// `insert_returning` was called with an `InsertQuery` carrying no
     /// `RETURNING` columns. Use `insert` for those.
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]

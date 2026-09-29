@@ -21,8 +21,7 @@
 //!
 //! Per-row writes record before/after values for every field named in the
 //! model's `audit(track = "...")`. Bulk writes collect their entries and
-//! insert them in one statement after the data write, so the cost stays at
-//! one extra round-trip even for thousands of rows.
+//! insert them in multi-row statements sized to the bind limit.
 
 use serde_json::{Map, Value};
 
@@ -180,59 +179,86 @@ where
     Ok(())
 }
 
-/// Emit a batch of entries in one Postgres statement. Used by bulk write
-/// paths on PG. SQLite and MySQL loop per row inside a transaction — see
+/// Emit a batch of entries on Postgres, one multi-row INSERT per
+/// bind-limit-sized chunk. Several chunks run in one transaction (a
+/// savepoint when `conn` is already inside one). For all backends, see
 /// [`emit_many_pool`].
 ///
 /// # Errors
 /// As [`emit_one`].
 #[cfg(feature = "postgres")]
-pub async fn emit_many<'c, E>(executor: E, entries: &[PendingEntry]) -> Result<(), sqlx::Error>
+pub async fn emit_many<'c, A>(conn: A, entries: &[PendingEntry]) -> Result<(), sqlx::Error>
 where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
 {
     if entries.is_empty() {
         return Ok(());
     }
-    // One multi-row VALUES list, not six UNNEST-ed typed arrays: simpler
-    // SQL, and sqlx handles the mixed TEXT + JSONB + TIMESTAMPTZ columns.
-    let mut sql = String::from(
-        r#"INSERT INTO "rustango_audit_log"
-              ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
-           VALUES "#,
-    );
-    let mut bind_idx = 1usize;
-    for (i, _) in entries.iter().enumerate() {
-        if i > 0 {
-            sql.push_str(", ");
-        }
-        use std::fmt::Write as _;
-        let _ = write!(
-            sql,
-            "(${}, ${}, ${}, ${}, ${}, ${})",
-            bind_idx,
-            bind_idx + 1,
-            bind_idx + 2,
-            bind_idx + 3,
-            bind_idx + 4,
-            bind_idx + 5,
-        );
-        bind_idx += 6;
+    let per_insert = audit_rows_per_insert(&crate::sql::Postgres);
+    if entries.len() <= per_insert {
+        let mut c = conn.acquire().await?;
+        return emit_chunk_pg(&mut c, entries).await;
     }
-    let mut q = sqlx::query(&sql);
-    for entry in entries {
-        // Stamped per row, not once per batch, so this matches the
-        // MySQL / SQLite fallback, which loops `emit_one_*`.
-        q = q
-            .bind(entry.entity_table)
-            .bind(&entry.entity_pk)
-            .bind(entry.operation.as_str())
-            .bind(entry.source.as_token())
-            .bind(&entry.changes)
-            .bind(chrono::Utc::now());
+    let mut tx = conn.begin().await?;
+    for chunk in entries.chunks(per_insert) {
+        emit_chunk_pg(&mut tx, chunk).await?;
     }
-    q.execute(executor).await?;
+    tx.commit().await
+}
+
+#[cfg(feature = "postgres")]
+async fn emit_chunk_pg(
+    conn: &mut sqlx::PgConnection,
+    entries: &[PendingEntry],
+) -> Result<(), sqlx::Error> {
+    let stmt = audit_insert_stmt(&crate::sql::Postgres, entries)?;
+    let mut q = sqlx::query(&stmt.sql);
+    for value in stmt.params {
+        q = crate::sql::bind_query(q, value);
+    }
+    q.execute(conn).await?;
     Ok(())
+}
+
+/// Columns of an audit INSERT, in bind order.
+const AUDIT_COLUMNS: [&str; 6] = [
+    "entity_table",
+    "entity_pk",
+    "operation",
+    "source",
+    "changes",
+    "occurred_at",
+];
+
+/// Entries per audit INSERT, so their binds fit the dialect's cap.
+fn audit_rows_per_insert(dialect: &dyn crate::sql::Dialect) -> usize {
+    (dialect.max_bind_params() / AUDIT_COLUMNS.len()).max(1)
+}
+
+/// One multi-row audit INSERT, rendered by the bulk-insert writer.
+fn audit_insert_stmt(
+    dialect: &dyn crate::sql::Dialect,
+    entries: &[PendingEntry],
+) -> Result<crate::sql::CompiledStatement, sqlx::Error> {
+    use crate::core::{Model as _, SqlValue};
+    let rows = entries
+        .iter()
+        .map(|e| {
+            vec![
+                SqlValue::String(e.entity_table.to_owned()),
+                SqlValue::String(e.entity_pk.clone()),
+                SqlValue::String(e.operation.as_str().to_owned()),
+                SqlValue::String(e.source.as_token()),
+                SqlValue::Json(e.changes.clone()),
+                // Stamped per row, as `emit_one` does.
+                SqlValue::DateTime(chrono::Utc::now()),
+            ]
+        })
+        .collect();
+    let query = crate::core::BulkInsertQuery::new(AuditLog::SCHEMA, AUDIT_COLUMNS.to_vec(), rows);
+    dialect
+        .compile_bulk_insert(&query)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))
 }
 
 /// Build a `{ "field": { "before": <v>, "after": <v> } }` JSON object from
@@ -865,9 +891,8 @@ fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
     )
 }
 
-/// Batched audit emit on any backend. Postgres uses the one-statement
-/// [`emit_many`] INSERT. MySQL and SQLite loop per row inside one
-/// transaction: a round-trip per row, but still all-or-nothing.
+/// Batched audit emit on any backend: chunked multi-row INSERTs, all in
+/// one transaction.
 ///
 /// Empty input returns at once.
 ///
@@ -880,26 +905,13 @@ pub async fn emit_many_pool(
     if entries.is_empty() {
         return Ok(());
     }
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => emit_many(pg, entries).await,
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let mut tx = my.begin().await?;
-            for entry in entries {
-                emit_one_my(&mut *tx, entry).await?;
-            }
-            tx.commit().await
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let mut tx = sq.begin().await?;
-            for entry in entries {
-                emit_one_sqlite(&mut *tx, entry).await?;
-            }
-            tx.commit().await
-        }
-    }
+    let to_sqlx = |e: crate::sql::ExecError| match e {
+        crate::sql::ExecError::Driver(err) => err,
+        other => sqlx::Error::Protocol(format!("{other}")),
+    };
+    let mut tx = crate::sql::transaction_pool(pool).await.map_err(to_sqlx)?;
+    emit_many_tx(&mut tx, entries).await.map_err(to_sqlx)?;
+    tx.commit().await
 }
 
 /// All-backend counterpart of [`fetch_for_entity`]. The `changes` column
@@ -1101,6 +1113,344 @@ where
     emit_one_tx(&mut tx, &entry(model)).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Emit a batch of entries inside an open `PoolTx`, in bind-limit-sized
+/// multi-row INSERTs.
+async fn emit_many_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    entries: &[PendingEntry],
+) -> Result<(), crate::sql::ExecError> {
+    let per_insert = audit_rows_per_insert(tx.dialect());
+    for chunk in entries.chunks(per_insert) {
+        let stmt = audit_insert_stmt(tx.dialect(), chunk)?;
+        crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    Ok(())
+}
+
+/// PKs per bulk-write statement: under SQLite's oldest bind limit (999).
+const BULK_AUDIT_CHUNK: usize = 500;
+
+/// `pk IN (pks)` on `model`.
+fn pk_in(
+    model: &'static crate::core::ModelSchema,
+    pks: Vec<crate::core::SqlValue>,
+) -> Result<crate::core::WhereExpr, crate::sql::ExecError> {
+    let pk = model
+        .primary_key()
+        .ok_or(crate::sql::ExecError::MissingPrimaryKey { table: model.table })?;
+    Ok(crate::core::WhereExpr::Predicate(crate::core::Filter::new(
+        pk.column,
+        crate::core::Op::In,
+        crate::core::SqlValue::List(pks),
+    )))
+}
+
+/// Rows matching `where_clause`, read in `tx` (`FOR UPDATE` on PG/MySQL).
+async fn rows_in_tx<M>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    where_clause: crate::core::WhereExpr,
+    lock: bool,
+) -> Result<Vec<M>, crate::sql::ExecError>
+where
+    M: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let mut select = crate::core::SelectQuery::new(model).where_clause(where_clause);
+    if lock {
+        select.lock_mode = Some(crate::core::LockMode {
+            silent_on_sqlite: true,
+            ..crate::core::LockMode::default()
+        });
+    }
+    crate::sql::select_rows_tx_with_related::<M>(tx, &select).await
+}
+
+/// `true` when only the row's own columns decide whether it matches, so
+/// writing other rows cannot move it in or out of the set.
+fn is_row_local(where_clause: &crate::core::WhereExpr) -> bool {
+    use crate::core::WhereExpr as W;
+    match where_clause {
+        W::Predicate(_) => true,
+        W::And(items) | W::Or(items) | W::Xor(items) => items.iter().all(is_row_local),
+        W::Not(child) => is_row_local(child),
+        _ => false,
+    }
+}
+
+/// Rows a bulk write goes through, one locked page of
+/// [`BULK_AUDIT_CHUNK`] at a time, inside the write's transaction.
+enum Pages<M> {
+    /// Row-local WHERE: `… AND pk > last ORDER BY pk LIMIT n FOR UPDATE`.
+    Keyset {
+        where_clause: crate::core::WhereExpr,
+        last: Option<crate::core::SqlValue>,
+        done: bool,
+    },
+    /// The WHERE reads other rows (a subquery, e.g. a `limit()` bound),
+    /// which our own writes would shift, so the set is read once.
+    Pinned(std::vec::IntoIter<M>),
+}
+
+impl<M> Pages<M>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    async fn start(
+        tx: &mut crate::sql::PoolTx<'_>,
+        model: &'static crate::core::ModelSchema,
+        where_clause: &crate::core::WhereExpr,
+    ) -> Result<Self, crate::sql::ExecError> {
+        if is_row_local(where_clause) {
+            return Ok(Self::Keyset {
+                where_clause: where_clause.clone(),
+                last: None,
+                done: false,
+            });
+        }
+        let rows: Vec<M> = rows_in_tx(tx, model, where_clause.clone(), true).await?;
+        Ok(Self::Pinned(rows.into_iter()))
+    }
+
+    /// The next page; empty when the set is exhausted.
+    async fn next(
+        &mut self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        model: &'static crate::core::ModelSchema,
+    ) -> Result<Vec<M>, crate::sql::ExecError> {
+        match self {
+            Self::Pinned(rows) => Ok(rows.by_ref().take(BULK_AUDIT_CHUNK).collect()),
+            Self::Keyset {
+                where_clause,
+                last,
+                done,
+            } => {
+                if *done {
+                    return Ok(Vec::new());
+                }
+                let pk = model
+                    .primary_key()
+                    .ok_or(crate::sql::ExecError::MissingPrimaryKey { table: model.table })?;
+                let mut page_where = where_clause.clone();
+                if let Some(last) = last.take() {
+                    page_where.push_and(crate::core::WhereExpr::Predicate(
+                        crate::core::Filter::new(pk.column, crate::core::Op::Gt, last),
+                    ));
+                }
+                let mut select = crate::core::SelectQuery::new(model).where_clause(page_where);
+                select.order_by = vec![crate::core::OrderItem::column(pk.column, false)];
+                select.limit = Some(BULK_AUDIT_CHUNK as i64);
+                select.lock_mode = Some(crate::core::LockMode {
+                    silent_on_sqlite: true,
+                    ..crate::core::LockMode::default()
+                });
+                let rows: Vec<M> =
+                    crate::sql::select_rows_tx_with_related::<M>(tx, &select).await?;
+                *done = rows.len() < BULK_AUDIT_CHUNK;
+                *last = rows.last().map(M::__rustango_pk_value_impl);
+                Ok(rows)
+            }
+        }
+    }
+}
+
+/// Run a bulk `DeleteQuery` with one `Delete` audit row per deleted row,
+/// all in one transaction. Matching rows are locked and deleted by PK a
+/// page at a time, so the audit set is exactly the deleted set.
+///
+/// # Errors
+/// As [`delete_one_with_audit`], plus the pre-delete SELECT.
+pub async fn delete_many_with_audit<M>(
+    pool: &crate::sql::Pool,
+    query: &crate::core::DeleteQuery,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<u64, crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let mut pages = Pages::<M>::start(&mut tx, query.model, &query.where_clause).await?;
+    let mut affected = 0;
+    loop {
+        let chunk = pages.next(&mut tx, query.model).await?;
+        if chunk.is_empty() {
+            break;
+        }
+        let pks = chunk.iter().map(M::__rustango_pk_value_impl).collect();
+        let delete = crate::core::DeleteQuery {
+            model: query.model,
+            where_clause: pk_in(query.model, pks)?,
+        };
+        affected += crate::sql::delete_tx(&mut tx, &delete).await?;
+        let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
+        emit_many_tx(&mut tx, &entries).await?;
+    }
+    tx.commit().await?;
+    Ok(affected)
+}
+
+/// Run a bulk `UpdateQuery` with one `Update` audit row per updated row,
+/// all in one transaction. Rows are locked a page at a time, updated by
+/// PK, then re-read so each entry is an after-write snapshot, as on `save_pool`.
+///
+/// # Errors
+/// As [`save_one_with_audit`], plus the SELECTs around the update.
+pub async fn update_many_with_audit<M>(
+    pool: &crate::sql::Pool,
+    query: &crate::core::UpdateQuery,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<u64, crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let pk = query
+        .model
+        .primary_key()
+        .ok_or(crate::sql::ExecError::MissingPrimaryKey {
+            table: query.model.table,
+        })?;
+    // The after-write re-read is by PK, so a PK change would go unaudited.
+    if query.set.iter().any(|a| a.column == pk.column) {
+        return Err(crate::sql::ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "a bulk update cannot change the primary key",
+        });
+    }
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let mut pages = Pages::<M>::start(&mut tx, query.model, &query.where_clause).await?;
+    let mut affected = 0;
+    loop {
+        let chunk = pages.next(&mut tx, query.model).await?;
+        if chunk.is_empty() {
+            break;
+        }
+        let pks: Vec<crate::core::SqlValue> =
+            chunk.iter().map(M::__rustango_pk_value_impl).collect();
+        let update = crate::core::UpdateQuery::new(
+            query.model,
+            query.set.clone(),
+            pk_in(query.model, pks.clone())?,
+        );
+        affected += crate::sql::update_tx(&mut tx, &update).await?;
+        let after: Vec<M> =
+            rows_in_tx(&mut tx, query.model, pk_in(query.model, pks)?, false).await?;
+        let entries: Vec<PendingEntry> = after.iter().map(&entry).collect();
+        emit_many_tx(&mut tx, &entries).await?;
+    }
+    tx.commit().await?;
+    Ok(affected)
+}
+
+/// Audited `UPDATE` runner a model hands to generic code, through
+/// `Model::__rustango_audited_update`.
+pub type AuditedUpdate = for<'a> fn(
+    &'a crate::sql::Pool,
+    &'a crate::core::UpdateQuery,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
+>;
+
+/// Run a `BulkUpdateQuery` (`Model::bulk_update`) and one `Update` entry
+/// per updated row, re-read after the write, in one transaction.
+///
+/// # Errors
+/// As [`crate::sql::bulk_update_pool`], plus the re-read and the emit.
+pub async fn bulk_update_with_audit<M>(
+    pool: &crate::sql::Pool,
+    query: &crate::core::BulkUpdateQuery,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<u64, crate::sql::ExecError>
+where
+    M: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    if query.rows.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let stmt = tx.dialect().compile_bulk_update(query)?;
+    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    // Each row is `[pk, …update cols]`.
+    let pks: Vec<crate::core::SqlValue> = query
+        .rows
+        .iter()
+        .filter_map(|r| r.first().cloned())
+        .collect();
+    for chunk in pks.chunks(BULK_AUDIT_CHUNK) {
+        let after: Vec<M> = rows_in_tx(
+            &mut tx,
+            query.model,
+            pk_in(query.model, chunk.to_vec())?,
+            false,
+        )
+        .await?;
+        let entries: Vec<PendingEntry> = after.iter().map(&entry).collect();
+        emit_many_tx(&mut tx, &entries).await?;
+    }
+    tx.commit().await?;
+    Ok(affected)
+}
+
+/// Run a table-wide statement (`Model::truncate`) and one bulk `Delete`
+/// entry naming it, in one transaction. No per-row PK is known here.
+///
+/// # Errors
+/// As [`crate::sql::raw_execute_tx`], plus the audit emit.
+pub async fn truncate_with_audit(
+    pool: &crate::sql::Pool,
+    entity_table: &'static str,
+    sql: &str,
+) -> Result<u64, crate::sql::ExecError> {
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let affected = crate::sql::raw_execute_tx(&mut tx, sql, Vec::new()).await?;
+    let entry = PendingEntry {
+        entity_table,
+        entity_pk: String::new(),
+        operation: AuditOp::Delete,
+        source: current_source(),
+        changes: serde_json::json!({ "bulk": "truncate" }),
+    };
+    emit_one_tx(&mut tx, &entry).await?;
+    tx.commit().await?;
+    Ok(affected)
 }
 
 /// Postgres bind helper, exposed so generated bodies on the audited
