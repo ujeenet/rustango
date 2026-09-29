@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Custom admin actions run object-permission hooks
+
+**Breaking:** a `register_action` action now gets `403` when your `change`
+hook, or a hook registered under the action's name, refuses any selected row.
+
 ## 0.59.3
 
 ### Flat projections take `FlatScalar` (breaking)

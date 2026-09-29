@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — admin custom actions check each row (#1805)
+
+A `register_action` action now needs the `change` hook and a hook named after
+the action to allow every selected row; one refusal is a `403` and the handler
+does not run. The handler only gets PKs of rows that exist.
+
 ## [0.59.3] — 2026-09-29
 
 Tagged only; not published to crates.io.
