@@ -22,6 +22,11 @@
 # argon2_iterations  = 2
 # lockout_threshold  = 5
 # lockout_duration_secs = 900
+# login_ip_limit     = 20       # failed logins per IP per window
+# login_ip_window_secs = 60
+# login_global_limit = 600      # failed logins across all clients, per login, per window
+# login_global_window_secs = 60
+# hash_wait_ms       = 5000     # wait for a hashing slot before 503
 
 # [auth.jwt]
 # access_ttl_secs   = 900       # 15 min
@@ -46,6 +51,15 @@
 
 # [audit]
 # retention_days = 90
+
+# [logging]                        # needs `Cli::with_logging()` AND
+#                                  # `#[rustango::main(logging = false)]` —
+#                                  # see config/prod_settings.toml for why
+# level             = "info,sqlx=warn"   # RUST_LOG syntax; RUST_LOG still wins
+# format            = "pretty"           # pretty | json | compact
+# with_line_numbers = false
+# file_dir          = "/var/log/platform_commerce"  # set to also write a rolling file
+# file_rotation     = "daily"            # daily | hourly | minutely | never
 
 # [mcp]                            # Model Context Protocol server (feature = "mcp")
 # prefix                = "/mcp"   # URL prefix the MCP router mounts under
