@@ -164,7 +164,7 @@ nullable column; a bare `T` now errors on NULL on SQLite too.
 
 ViewSet, template-view, `soft_delete` and `bulk_actions` writes on an audited
 model now lock the rows and write audit rows in one transaction. Soft delete
-and restore are recorded as `update`.
+and restore are recorded as `soft_delete` and `restore`, as on the typed path.
 
 ### Custom admin actions run object-permission hooks
 

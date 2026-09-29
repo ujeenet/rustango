@@ -110,7 +110,7 @@ pub async fn soft_delete(
     let col = model
         .soft_delete_column
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
-    let n = crate::audit::update(
+    let n = crate::audit::update_as(
         pool,
         &UpdateQuery {
             model,
@@ -124,6 +124,7 @@ pub async fn soft_delete(
                 value: pk_value,
             }),
         },
+        crate::audit::AuditOp::SoftDelete,
     )
     .await?;
     Ok(n)
@@ -145,7 +146,7 @@ pub async fn restore(
     let col = model
         .soft_delete_column
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
-    let n = crate::audit::update(
+    let n = crate::audit::update_as(
         pool,
         &UpdateQuery {
             model,
@@ -159,6 +160,7 @@ pub async fn restore(
                 value: pk_value,
             }),
         },
+        crate::audit::AuditOp::Restore,
     )
     .await?;
     Ok(n)

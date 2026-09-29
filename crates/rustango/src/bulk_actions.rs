@@ -173,6 +173,7 @@ fn pk_in(model: &'static ModelSchema, pks: &[i64]) -> Result<WhereExpr, BulkActi
 
 async fn audited_set(
     pool: &Pool,
+    op: crate::audit::AuditOp,
     model: &'static ModelSchema,
     column: &'static str,
     value: SqlValue,
@@ -183,7 +184,7 @@ async fn audited_set(
         value: value.into(),
     }];
     let q = crate::core::UpdateQuery::new(model, set, filter);
-    crate::audit::update(pool, &q).await.map_err(db_err)
+    crate::audit::update_as(pool, &q, op).await.map_err(db_err)
 }
 
 fn db_err(e: crate::sql::ExecError) -> BulkActionError {
@@ -284,7 +285,8 @@ impl BulkAction for BulkSoftDeleteAction {
                 value: SqlValue::Bool(true),
             }));
             let set = SqlValue::DateTime(chrono::Utc::now());
-            let affected = audited_set(pool, model, self.column, set, filter).await?;
+            let op = crate::audit::AuditOp::SoftDelete;
+            let affected = audited_set(pool, op, model, self.column, set, filter).await?;
             return Ok(BulkActionResult {
                 affected,
                 action: self.name().to_owned(),
@@ -354,7 +356,9 @@ impl BulkAction for BulkRestoreAction {
         }
         if let Some(model) = audited_model(table) {
             let filter = pk_in(model, pks)?;
-            let affected = audited_set(pool, model, self.column, SqlValue::Null, filter).await?;
+            let op = crate::audit::AuditOp::Restore;
+            let affected =
+                audited_set(pool, op, model, self.column, SqlValue::Null, filter).await?;
             return Ok(BulkActionResult {
                 affected,
                 action: self.name().to_owned(),

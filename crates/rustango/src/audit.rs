@@ -1378,6 +1378,7 @@ where
 pub type AuditedUpdate = for<'a> fn(
     &'a crate::sql::Pool,
     &'a crate::core::UpdateQuery,
+    AuditOp,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
 >;
@@ -1399,8 +1400,20 @@ pub async fn update(
     pool: &crate::sql::Pool,
     query: &crate::core::UpdateQuery,
 ) -> Result<u64, crate::sql::ExecError> {
+    update_as(pool, query, AuditOp::Update).await
+}
+
+/// [`update`], recording each row as `op` (soft delete and restore).
+///
+/// # Errors
+/// As [`update`].
+pub async fn update_as(
+    pool: &crate::sql::Pool,
+    query: &crate::core::UpdateQuery,
+    op: AuditOp,
+) -> Result<u64, crate::sql::ExecError> {
     match crate::core::ModelEntry::for_schema(query.model).and_then(|e| e.audited_update()) {
-        Some(run) => run(pool, query).await,
+        Some(run) => run(pool, query, op).await,
         None => crate::sql::update_pool(pool, query).await,
     }
 }

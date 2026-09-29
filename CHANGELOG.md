@@ -20,7 +20,8 @@ bare `i64` errors naming the column (SQLite returned `0`), `Option<i64>` gives `
 On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView` /
 `delete_selected`, `soft_delete::{soft_delete, restore, purge}` and the
 `bulk_actions` built-ins now write one audit row per row, in the write's transaction.
-New `audit::update` / `audit::delete` pick the audited path from the schema.
+New `audit::update` / `audit::delete` pick the audited path from the schema;
+`audit::update_as` records soft delete and restore under their own operation.
 
 ### Security — admin custom actions check each row (#1805)
 

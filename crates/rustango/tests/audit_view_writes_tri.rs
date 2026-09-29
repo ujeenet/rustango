@@ -149,7 +149,9 @@ async fn soft_delete_restore_and_purge_are_audited(pool: &Pool) {
             .unwrap(),
         1
     );
-    assert_eq!(ops(pool, "update").await, 2);
+    assert_eq!(ops(pool, "soft_delete").await, 1);
+    assert_eq!(ops(pool, "restore").await, 1);
+    assert_eq!(ops(pool, "update").await, 0);
     assert_eq!(
         soft_delete::purge(pool, Doc::SCHEMA, "id", pk())
             .await
@@ -172,7 +174,9 @@ async fn bulk_actions_are_audited(pool: &Pool) {
         assert_eq!(soft.run(DOC, &pks, pool).await.unwrap().affected, 2);
         let restore = BulkRestoreAction { column };
         assert_eq!(restore.run(DOC, &pks[..1], pool).await.unwrap().affected, 1);
-        assert_eq!(ops(pool, "update").await, 3);
+        assert_eq!(ops(pool, "soft_delete").await, 2);
+        assert_eq!(ops(pool, "restore").await, 1);
+        assert_eq!(ops(pool, "update").await, 0);
         assert_eq!(
             BulkDeleteAction
                 .run(DOC, &pks, pool)
