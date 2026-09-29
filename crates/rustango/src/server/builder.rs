@@ -749,8 +749,8 @@ impl<DB: Database> Builder<DB> {
             // console.
             self.routes.impersonation_handoff_url.clone(),
         );
-        // With observability on, the outer layer logs the console (#1788).
-        let operator_admin = if self.observability {
+        // With an outer access log, it logs the console (#1788).
+        let operator_admin = if self.access_log.is_some() {
             operator_admin
         } else {
             use crate::access_log::AccessLogRouterExt as _;
@@ -823,7 +823,11 @@ impl<DB: Database> Builder<DB> {
             // other.
             // It now logs the console too, whose `?next=` holds the attempted URL.
             let access_log = self.access_log.map(|l| l.redact_additional("next"));
-            let redact = resolve_span_redact(self.span_redact.clone(), access_log.as_ref());
+            let mut redact = resolve_span_redact(self.span_redact.clone(), access_log.as_ref());
+            // The span covers the console in every case, access log or not.
+            if !redact.iter().any(|p| p == "next") {
+                redact.push("next".to_owned());
+            }
             // One definition, shared with `Cli::mount_observability` —
             // see `access_log::mount_observability` for the ordering
             // rules and why they live in one place.

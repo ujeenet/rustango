@@ -55,26 +55,33 @@ fn assert_one_redacted(lines: &[String]) {
     assert!(!lines[0].contains("secret-path"), "{lines:?}");
 }
 
-async fn built(observability: bool) -> (axum::Router, tempfile::TempDir) {
+async fn built(observability: Option<Option<AccessLogLayer>>) -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
     let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
     let mut b = Builder::from_pool(pool, url, "localhost");
-    if observability {
-        b = b.observability(Some(AccessLogLayer::new()));
+    if let Some(layer) = observability {
+        b = b.observability(layer);
     }
     (b.into_router().await.expect("assemble"), tmp)
 }
 
 #[tokio::test]
 async fn the_builder_logs_a_console_request_once() {
-    let (app, _tmp) = built(true).await;
+    let (app, _tmp) = built(Some(Some(AccessLogLayer::new()))).await;
     assert_one_redacted(&access_lines(app).await);
 }
 
 #[tokio::test]
 async fn without_observability_the_console_still_logs_once() {
-    let (app, _tmp) = built(false).await;
+    let (app, _tmp) = built(None).await;
+    assert_one_redacted(&access_lines(app).await);
+}
+
+/// `[logging] access_log = false` passes `observability(None)`; the console keeps its own line.
+#[tokio::test]
+async fn observability_without_access_log_the_console_still_logs_once() {
+    let (app, _tmp) = built(Some(None)).await;
     assert_one_redacted(&access_lines(app).await);
 }
 
