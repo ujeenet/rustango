@@ -70,9 +70,12 @@ Parce que la requête est **triée** des deux côtés, `?b=2&a=1` et `?a=1&b=2`
 produisent la même signature. Parce que le corps est haché dans la chaîne,
 changer un seul octet l'invalide.
 
-L'hôte est l'en-tête `Host` sans son port : une signature faite pour un hôte
-échoue sur un autre qui partage la clé. Derrière un proxy qui réécrit `Host`,
-fixez le nom avec `.host("api.example.com")`.
+L'hôte est l'en-tête `Host` sans son port. Sans valeur fixée, la couche se fie
+au `Host` de la requête : une requête rejouée vers un autre service qui partage la
+clé, avec un `Host` qui nomme toujours le premier, passe. Quand des services
+partagent une clé, fixez chacun avec `.host("api.example.com")` ou placez-le
+derrière un proxy qui impose `Host`. Fixez-le aussi derrière un proxy qui réécrit
+`Host`.
 
 ---
 

@@ -72,9 +72,12 @@ Weil der Query-String auf beiden Seiten **sortiert** wird, erzeugen `?b=2&a=1`
 und `?a=1&b=2` dieselbe Signatur. Weil der Body in die Zeichenkette gehasht wird,
 macht das Ändern eines einzigen Bytes sie ungültig.
 
-Der Host ist der `Host`-Header ohne Port, daher scheitert eine Signatur für einen
-Host auf einem anderen mit demselben Schlüssel. Hinter einem Proxy, der `Host`
-umschreibt, legen Sie den Namen mit `.host("api.example.com")` fest.
+Der Host ist der `Host`-Header ohne Port. Ohne Festlegung vertraut die Schicht dem
+`Host` der Anfrage selbst: eine Anfrage, die an einen anderen Dienst mit demselben
+Schlüssel wiederholt wird und deren `Host` noch den ersten nennt, wird angenommen.
+Teilen Dienste einen Schlüssel, legen Sie jeden mit `.host("api.example.com")` fest
+oder setzen Sie einen Proxy davor, der `Host` erzwingt. Legen Sie ihn auch hinter
+einem Proxy fest, der `Host` umschreibt.
 
 ---
 

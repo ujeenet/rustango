@@ -68,9 +68,11 @@ Because the query is **sorted** on both ends, `?b=2&a=1` and `?a=1&b=2` produce
 the same signature. Because the body is hashed into the string, changing a single
 byte invalidates it.
 
-The host is the `Host` header without its port, so a signature made for one host
-fails on another that shares the key. Behind a proxy that rewrites `Host`, pin the
-name with `.host("api.example.com")`.
+The host is the `Host` header without its port. Unpinned, the layer trusts the
+request's own `Host`, so a request replayed to another service that shares the
+key, with `Host` still naming the first, passes. When services share a key, pin
+each one with `.host("api.example.com")` or put it behind a proxy that enforces
+`Host`. Pin it too behind a proxy that rewrites `Host`.
 
 ---
 

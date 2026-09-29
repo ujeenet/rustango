@@ -70,9 +70,12 @@ Como la query se **ordena** en ambos extremos, `?b=2&a=1` y `?a=1&b=2` producen
 la misma firma. Como el cuerpo se hashea dentro de la cadena, cambiar un solo
 byte la invalida.
 
-El host es la cabecera `Host` sin su puerto, así que una firma hecha para un host
-falla en otro que comparte la clave. Detrás de un proxy que reescribe `Host`,
-fije el nombre con `.host("api.example.com")`.
+El host es la cabecera `Host` sin su puerto. Sin fijarlo, la capa confía en el
+`Host` de la propia solicitud: una solicitud reenviada a otro servicio que comparte
+la clave, con un `Host` que aún nombra al primero, pasa. Si varios servicios
+comparten una clave, fije cada uno con `.host("api.example.com")` o póngalo detrás
+de un proxy que imponga `Host`. Fíjelo también detrás de un proxy que reescribe
+`Host`.
 
 ---
 

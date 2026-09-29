@@ -11,7 +11,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — HMAC signatures cover the host (#1836)
 
-A signature made for one host no longer verifies on another that shares the key.
+Signatures cover the host. A service sharing a key with another must pin its own with
+`HmacAuthLayer::host`; unpinned, the request's own `Host` is trusted.
 
 ### Changed — SSO reuses OIDC discovery (#1833)
 

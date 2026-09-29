@@ -29,8 +29,8 @@
 //! ```
 //!
 //! The host is the `Host` header (or the HTTP/2 authority) without the
-//! port, so a signature for one host fails on another sharing the key.
-//! Behind a proxy that rewrites `Host`, pin it with [`HmacAuthLayer::host`].
+//! port. Unpinned, a replay to another service sharing the key passes
+//! if it keeps the first `Host`; shared keys need [`HmacAuthLayer::host`].
 //! The query is sorted, so `?b=2&a=1` and `?a=1&b=2` sign the same.
 //! The body is hashed first, so the verifier hashes it only once.
 //!
@@ -149,8 +149,8 @@ impl HmacAuthLayer {
         self
     }
 
-    /// Verify against this host instead of the request's `Host`, for a
-    /// proxy that rewrites it. Clients sign this same name.
+    /// Verify against this host instead of the request's `Host`. Needed when
+    /// services share a key, or behind a proxy that rewrites `Host`.
     #[must_use]
     pub fn host(mut self, host: &str) -> Self {
         Arc::make_mut(&mut self.inner).host = Some(SignedHost::new(host));
