@@ -20,7 +20,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
-use rustango::sql::{Auto, Pool};
+use rustango::sql::Pool;
 use rustango::tenancy::permissions::{
     assign_role, auto_create_permissions, get_or_create_role, grant_role_perm, user_permissions,
 };
@@ -134,19 +134,13 @@ async fn non_superuser_with_view_perm_sees_model_in_admin() {
 
     // Provision a non-superuser.
     let mut user = User {
-        id: Auto::default(),
         username: format!(
             "vis_test_{}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ),
         password_hash: "x".into(),
-        #[cfg(feature = "admin-sso")]
-        email: None,
-        is_superuser: false,
-        active: true,
-        created_at: chrono::Utc::now(),
-        data: serde_json::json!({}),
-        password_changed_at: None,
+        // The rest from testkit, so a feature-gated field cannot break the literal.
+        ..rustango::testkit::user()
     };
     user.insert(&pool).await.unwrap();
     let user_id = *user.id.get().expect("PK assigned");

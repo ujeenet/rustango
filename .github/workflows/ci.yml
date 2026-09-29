@@ -432,6 +432,8 @@ jobs:
       # defect and its own change (#1594), not a reason to hold this job
       # back.
       - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --test oauth2_router_standalone --no-run
+      # `sso` without `admin-sso`: literals gated on the wrong one broke here (#1737).
+      - run: cargo test -p rustango --features tenancy,sso --no-run --test non_superuser_admin_visibility_live --test permissions_upsert_live --test admin_user_roles_panel_live
 
   # Primary PG test job — runs the full workspace with `--all-features`
   # against a real PostgreSQL service. Covers every PG-typed live test
