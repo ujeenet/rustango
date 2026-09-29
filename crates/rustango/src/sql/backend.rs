@@ -122,6 +122,67 @@ pub fn try_get_returning_my<T>(row: &MyReturningRow, _name: &str) -> Result<T, s
     match *row {}
 }
 
+/// A model field stored in a UUID column: `Uuid`, `Option<Uuid>`,
+/// `Auto<Uuid>`, or a `ForeignKey` keyed by `Uuid`, optional or not.
+#[doc(hidden)]
+pub trait UuidField: Sized {
+    /// `None` when the field cannot hold a NULL cell.
+    fn from_cell(cell: Option<uuid::Uuid>) -> Option<Self>;
+}
+
+impl UuidField for uuid::Uuid {
+    fn from_cell(cell: Option<uuid::Uuid>) -> Option<Self> {
+        cell
+    }
+}
+
+impl UuidField for Option<uuid::Uuid> {
+    fn from_cell(cell: Option<uuid::Uuid>) -> Option<Self> {
+        Some(cell)
+    }
+}
+
+impl UuidField for super::Auto<uuid::Uuid> {
+    fn from_cell(cell: Option<uuid::Uuid>) -> Option<Self> {
+        cell.map(Self::Set)
+    }
+}
+
+impl<T> UuidField for super::ForeignKey<T, uuid::Uuid> {
+    fn from_cell(cell: Option<uuid::Uuid>) -> Option<Self> {
+        cell.map(Self::Unloaded)
+    }
+}
+
+impl<T> UuidField for Option<super::ForeignKey<T, uuid::Uuid>> {
+    fn from_cell(cell: Option<uuid::Uuid>) -> Option<Self> {
+        Some(cell.map(super::ForeignKey::Unloaded))
+    }
+}
+
+/// Decode a [`UuidField`] from MySQL. The column is `CHAR(36)` text, and
+/// sqlx's `Uuid` decodes only 16 raw bytes (#1733).
+///
+/// # Errors
+/// `sqlx::Error` from the decode, or a NULL cell for a non-optional field.
+#[cfg(feature = "mysql")]
+pub fn try_get_uuid_my<T: UuidField>(row: &MyReturningRow, name: &str) -> Result<T, sqlx::Error> {
+    use sqlx::Row as _;
+    let cell: Option<uuid::fmt::Hyphenated> = row.try_get(name)?;
+    T::from_cell(cell.map(uuid::fmt::Hyphenated::into_uuid)).ok_or_else(|| {
+        sqlx::Error::ColumnDecode {
+            index: format!("{name:?}"),
+            source: Box::new(sqlx::error::UnexpectedNullError),
+        }
+    })
+}
+
+#[cfg(not(feature = "mysql"))]
+#[allow(clippy::missing_errors_doc)]
+pub fn try_get_uuid_my<T>(row: &MyReturningRow, _name: &str) -> Result<T, sqlx::Error> {
+    match *row {}
+}
+
 /// SQLite counterpart of [`try_get_returning`] — used by the macro-emitted
 /// `__rustango_assign_from_sqlite_row` body to decode RETURNING columns
 /// from a `SqliteRow` without the macro carrying any `#[cfg]` guards.

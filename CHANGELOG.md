@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL `Uuid` fields save and load (#1733)
+
+A `Uuid` now binds as hyphenated text into its `CHAR(36)` column instead of 16 raw
+bytes (error 1366), and typed fetch, `select_related`, JSON rows and the audit diff
+read it back from that text.
+
 ### Fixed — MySQL unbounded `String` columns hold more than 64 KiB (#1708)
 
 A `String` without `max_length` is now `LONGTEXT` on MySQL, not `TEXT`, so long

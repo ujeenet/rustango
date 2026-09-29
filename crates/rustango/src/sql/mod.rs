@@ -39,7 +39,8 @@ pub use array::Array;
 pub use auto::Auto;
 pub use backend::{
     apply_auto_pk, try_get_returning, try_get_returning_my, try_get_returning_sqlite,
-    AssignAutoPkPool, MyReturningRow, MysqlAutoIdSet, PgReturningRow, SqliteReturningRow,
+    try_get_uuid_my, AssignAutoPkPool, MyReturningRow, MysqlAutoIdSet, PgReturningRow,
+    SqliteReturningRow, UuidField,
 };
 pub use compiled::CompiledStatement;
 pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### MySQL: `Uuid` is hyphenated text
+
+The ORM now writes and reads a `Uuid` as the 36-character text its `CHAR(36)` column
+holds. A hand-made `BINARY(16)` UUID column no longer works; make it `CHAR(36)`.
+
 ### MySQL: unbounded `String` is `LONGTEXT`
 
 New tables get `LONGTEXT`; migrations do not change existing `TEXT` columns. To lift
