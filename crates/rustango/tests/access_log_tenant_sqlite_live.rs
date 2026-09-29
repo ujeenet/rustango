@@ -299,7 +299,7 @@ async fn the_builder_access_log_names_the_client_behind_a_trusted_proxy() {
     let api = Router::new().route("/app", get(|| async { "ok" }));
     let app = rustango::server::Builder::<sqlx::Sqlite>::from_pool(pool, url, "localhost")
         .api(api)
-        .observability(Some(AccessLogLayer::default().trust_proxy_headers(true)))
+        .observability(Some(AccessLogLayer::default().use_real_ip(true)))
         .real_ip(
             RealIpLayer::default()
                 .trust_proxies(["10.0.0.1"])

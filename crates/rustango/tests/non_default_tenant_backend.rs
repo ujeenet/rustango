@@ -1,6 +1,7 @@
 //! Tenant routers serve a `TenantContext<Sqlite>` through their `*_for::<DB>`
 //! entry. With `postgres` also on, the default `Tenant` is Postgres and
-//! these got 500 (#1741, #1787).
+//! these got 500 (#1741, #1787). The pure `DatabaseTenantContext` stack got
+//! 500 too (#1802).
 
 #![cfg(all(
     feature = "sqlite",
@@ -15,10 +16,12 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{header, Request};
 use axum::Router;
-use rustango::extractors::TenantContext;
+use rustango::extractors::{DatabaseTenantContext, TenantContext};
 use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::session::SessionSecret;
-use rustango::tenancy::{ChainResolver, Org, OrgResolver, TenancyError, TenantPools};
+use rustango::tenancy::{
+    BackendKind, ChainResolver, DatabasePools, Org, OrgResolver, TenancyError, TenantPools,
+};
 use tower::ServiceExt as _;
 
 static SUITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -39,6 +42,8 @@ impl OrgResolver for FixedResolver {
 
 struct Env {
     ctx: Arc<TenantContext<sqlx::Sqlite>>,
+    /// The same registry and tenant, as the pure SQLite stack mounts it.
+    db_ctx: Arc<DatabaseTenantContext<sqlx::Sqlite>>,
     tenant: Pool,
     _dir: tempfile::TempDir,
 }
@@ -79,6 +84,13 @@ async fn boot() -> Env {
         .await
         .expect("migrate framework");
     let secret = SessionSecret::from_bytes(b"non-default-backend-secret-32b!!".to_vec());
+    let db_ctx = Arc::new(DatabaseTenantContext::<sqlx::Sqlite> {
+        pools: Arc::new(DatabasePools::new(BackendKind::Sqlite)),
+        resolver: ChainResolver::new().push(FixedResolver(org.clone())),
+        session_secret: secret.clone(),
+        operator_secret: secret.clone(),
+        registry: pools.registry_pool(),
+    });
     let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
         pools,
         resolver: ChainResolver::new().push(FixedResolver(org)),
@@ -87,6 +99,7 @@ async fn boot() -> Env {
     });
     Env {
         ctx,
+        db_ctx,
         tenant,
         _dir: dir,
     }
@@ -95,26 +108,81 @@ async fn boot() -> Env {
 impl Env {
     /// `router` with the SQLite context injected, as `server::Builder` does.
     fn mount(&self, router: Router) -> Router {
-        let ctx = self.ctx.clone();
-        router.layer(axum::middleware::from_fn(
-            move |mut req: Request<Body>, next: axum::middleware::Next| {
-                let ctx = ctx.clone();
-                async move {
-                    req.extensions_mut().insert(ctx);
-                    next.run(req).await
-                }
-            },
-        ))
+        inject(router, self.ctx.clone())
     }
+
+    /// `router` with the pure-stack `DatabaseTenantContext` injected.
+    fn mount_db(&self, router: Router) -> Router {
+        inject(router, self.db_ctx.clone())
+    }
+}
+
+fn inject<T: Clone + Send + Sync + 'static>(router: Router, ctx: T) -> Router {
+    router.layer(axum::middleware::from_fn(
+        move |mut req: Request<Body>, next: axum::middleware::Next| {
+            let ctx = ctx.clone();
+            async move {
+                req.extensions_mut().insert(ctx);
+                next.run(req).await
+            }
+        },
+    ))
 }
 
 async fn send(app: &Router, req: Request<Body>) -> axum::response::Response {
     app.clone().oneshot(req).await.unwrap()
 }
 
+/// `Tenant<Sqlite>` resolves on the pure stack; `t.pool()` and the
+/// deferred `pool_conn()` both reach the tenant's database (#1802).
+#[tokio::test]
+async fn tenant_extractor_reads_the_database_tenant_context() {
+    use rustango::extractors::Tenant;
+    use rustango::sql::CounterPool as _;
+    use rustango::tenancy::agents::Agent;
+
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::tenancy::create_agent_pool(&env.tenant, "bot")
+        .await
+        .expect("agent");
+    let app = env.mount_db(Router::new().route(
+        "/",
+        axum::routing::get(|mut t: Tenant<sqlx::Sqlite>| async move {
+            let via_pool = Agent::objects().count(t.pool()).await.expect("t.pool()");
+            let conn = t.pool_conn().await.expect("deferred conn");
+            let via_conn: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_agents")
+                .fetch_one(&mut **conn)
+                .await
+                .expect("pool_conn()");
+            format!("{}:{via_pool}:{via_conn}", t.org.slug)
+        }),
+    ));
+    let r = send(&app, Request::get("/").body(Body::empty()).unwrap()).await;
+    assert_eq!(r.status(), axum::http::StatusCode::OK);
+    let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+    assert_eq!(std::str::from_utf8(&b).unwrap(), "acme:1:1");
+}
+
 #[cfg(feature = "mcp")]
 #[tokio::test]
 async fn mcp_tenant_router_serves_a_non_default_backend() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    mcp_flow(&env, Env::mount).await;
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn mcp_tenant_router_serves_the_database_tenant_stack() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    mcp_flow(&env, Env::mount_db).await;
+}
+
+/// Token, OAuth, JSON-RPC and SSE all answer through `mount`'s context.
+#[cfg(feature = "mcp")]
+async fn mcp_flow(env: &Env, mount: fn(&Env, Router) -> Router) {
     use axum::http::StatusCode;
     use base64::Engine as _;
     use rustango::tenancy::jwt_lifecycle::JwtLifecycle;
@@ -124,18 +192,19 @@ async fn mcp_tenant_router_serves_a_non_default_backend() {
         serde_json::from_slice(&b).unwrap()
     }
 
-    let _g = SUITE.lock().await;
-    let env = boot().await;
     let issued = rustango::tenancy::create_agent_pool(&env.tenant, "bot")
         .await
         .expect("agent");
     let jwt = Arc::new(JwtLifecycle::new(
         b"non-default-backend-mcp-secret-32b!!".to_vec(),
     ));
-    let app = env.mount(Router::new().nest(
-        "/mcp",
-        rustango::mcp::tenant_router_authed_for::<sqlx::Sqlite>(jwt),
-    ));
+    let app = mount(
+        env,
+        Router::new().nest(
+            "/mcp",
+            rustango::mcp::tenant_router_authed_for::<sqlx::Sqlite>(jwt),
+        ),
+    );
 
     let r = send(
         &app,
@@ -190,10 +259,13 @@ async fn mcp_tenant_router_serves_a_non_default_backend() {
     assert_eq!(r.status(), StatusCode::OK, "SSE GET");
 
     // No bearer: both mounts refuse the JSON-RPC and SSE endpoints.
-    let secure = env.mount(Router::new().nest(
-        "/mcp",
-        rustango::mcp::secure_tenant_router_for::<sqlx::Sqlite>(),
-    ));
+    let secure = mount(
+        env,
+        Router::new().nest(
+            "/mcp",
+            rustango::mcp::secure_tenant_router_for::<sqlx::Sqlite>(),
+        ),
+    );
     for app in [&app, &secure] {
         let r = send(
             app,

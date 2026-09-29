@@ -2,7 +2,10 @@
 # Loaded when RUSTANGO_ENV=dev (the default when unset).
 
 [database]
-url = "postgres://postgres:postgres@localhost:5432/getting_started_blog_dev"
+# Matches docker-compose.yml and .env.example. Host is `localhost`, not
+# the compose service name: this tier runs the app on the host against
+# the container.
+url = "postgres://rustango:rustango@localhost:5432/getting_started_blog_dev"
 
 [server]
 bind = "127.0.0.1:8080"
@@ -12,6 +15,8 @@ bind = "127.0.0.1:8080"
 # browser into HSTS.
 headers_preset    = "dev"
 hsts_max_age_secs = 0
+# Plain-HTTP dev server: a `Secure` login cookie would be dropped.
+secure_cookies    = false
 
 [brand]
 # Make the dev tier visually distinguishable from prod.

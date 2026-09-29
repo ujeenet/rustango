@@ -3171,7 +3171,7 @@ log records the real peer address rather than `"-"`.
 
 For projects behind a reverse proxy:
 ```rust,ignore
-AccessLogLayer::default().trust_proxy_headers(true)
+AccessLogLayer::default().use_real_ip(true)
 ```
 logs the `TrustedRealIp` that `RealIpLayer::trust_proxies` resolved,
 else ConnectInfo. Raw forwarding headers are never read: a direct
@@ -3179,7 +3179,7 @@ client can forge them.
 
 **API**: [`config::LoggingSettings`](../../src/config/sections.rs),
 [`logging::Setup::from_settings`](../../src/logging.rs),
-[`access_log::AccessLogLayer::trust_proxy_headers`](../../src/access_log.rs).
+[`access_log::AccessLogLayer::use_real_ip`](../../src/access_log.rs).
 
 ---
 

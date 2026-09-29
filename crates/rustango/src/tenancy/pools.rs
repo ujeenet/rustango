@@ -593,14 +593,7 @@ impl<DB: Database> TenantPools<DB> {
         else {
             unreachable!("database_pool_for_org rejects schema-mode")
         };
-        let conn = pool.acquire().await?;
-        Ok(TenantConn {
-            inner: Some(conn),
-            schema: None,
-            // Database-mode pools are per-tenant and carry no
-            // per-checkout session state, so there is nothing to undo.
-            reset: None,
-        })
+        Ok(TenantConn::database(pool.acquire().await?))
     }
 
     /// Drop a tenant's cached pools. Useful when the operator updates
@@ -1047,14 +1040,7 @@ impl TenantPools<sqlx::Postgres> {
                 rustango::sql::sqlx::query(&stmt).execute(&mut **tc).await?;
                 Ok(tc)
             }
-            TenantPool::Database { pool } => {
-                let conn = pool.acquire().await?;
-                Ok(TenantConn {
-                    inner: Some(conn),
-                    schema: None,
-                    reset: None,
-                })
-            }
+            TenantPool::Database { pool } => Ok(TenantConn::database(pool.acquire().await?)),
         }
     }
 
@@ -1288,6 +1274,16 @@ type ResetFn<DB> = fn(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 impl<DB: Database> TenantConn<DB> {
+    /// A database-mode connection. Per-tenant pools carry no session
+    /// state, so there is nothing to reset on drop.
+    pub(crate) fn database(conn: sqlx::pool::PoolConnection<DB>) -> Self {
+        Self {
+            inner: Some(conn),
+            schema: None,
+            reset: None,
+        }
+    }
+
     /// `Some(schema)` for schema-mode connections, `None` for
     /// database-mode. Useful for diagnostics / logging.
     #[must_use]

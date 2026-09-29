@@ -175,6 +175,15 @@ of the wrong type is `BulkActionError::InvalidPk` (new variant). `restore_select
 now counts only deleted rows on every model.
 More than `PkSet::MAX_KEYS` (10 000) keys is also `InvalidPk`; split larger selections.
 
+### Unauthenticated MCP routers answer `GET` with `405`
+
+`mcp::router` and `mcp::tenant_router` have no SSE stream now; it was always a `500`.
+Use an authed router for notifications.
+
+### `AccessLogLayer::trust_proxy_headers` is now `use_real_ip`
+
+Rename the field and the setter call. The old setter still works but warns.
+
 ## 0.59.4
 
 ### One access-log line per operator-console request

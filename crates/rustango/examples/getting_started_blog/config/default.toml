@@ -4,7 +4,7 @@
 # what you need.
 
 # [database]
-# url           = "postgres://localhost/getting_started_blog"
+# url           = "postgres://rustango:rustango@localhost:5432/getting_started_blog_dev"
 # pool_min_size = 2
 # pool_max_size = 20
 

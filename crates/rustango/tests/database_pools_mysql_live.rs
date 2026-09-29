@@ -68,6 +68,81 @@ async fn pool_cached_on_repeat_acquire() {
     ));
 }
 
+/// `Tenant<MySql>` resolves from a `DatabaseTenantContext`; `t.pool()` and
+/// the deferred `pool_conn()` both reach the tenant's database (#1802).
+#[tokio::test]
+async fn tenant_extractor_reads_the_database_tenant_context() {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rustango::extractors::{DatabaseTenantContext, Tenant};
+    use rustango::sql::Pool;
+    use rustango::tenancy::session::SessionSecret;
+    use rustango::tenancy::{ChainResolver, OrgResolver, TenancyError};
+    use tower::ServiceExt as _;
+
+    struct FixedResolver(Org);
+
+    #[async_trait::async_trait]
+    impl OrgResolver for FixedResolver {
+        async fn resolve(
+            &self,
+            _parts: &axum::http::request::Parts,
+            _registry: &Pool,
+        ) -> Result<Option<Org>, TenancyError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("MYSQL_TEST_URL not set — skipping");
+        return;
+    };
+    let secret = SessionSecret::from_bytes(b"mysql-tenant-extractor-secret-32".to_vec());
+    let ctx = Arc::new(DatabaseTenantContext::<sqlx::MySql> {
+        pools: Arc::new(DatabasePools::new(BackendKind::MySql)),
+        resolver: ChainResolver::new().push(FixedResolver(fake_mysql_org("acme", &url))),
+        session_secret: secret.clone(),
+        operator_secret: secret,
+        registry: Pool::Mysql(sqlx::MySqlPool::connect_lazy(&url).expect("registry")),
+    });
+    let app = axum::Router::new()
+        .route(
+            "/",
+            axum::routing::get(|mut t: Tenant<sqlx::MySql>| async move {
+                #[allow(unreachable_patterns)] // single-variant in mysql-only builds
+                let via_pool: i64 = match t.pool() {
+                    Pool::Mysql(p) => sqlx::query_scalar("SELECT 1").fetch_one(p).await,
+                    _ => panic!("t.pool() is not MySQL"),
+                }
+                .expect("t.pool()");
+                let conn = t.pool_conn().await.expect("deferred conn");
+                let via_conn: i64 = sqlx::query_scalar("SELECT 2")
+                    .fetch_one(&mut **conn)
+                    .await
+                    .expect("pool_conn()");
+                format!("{}:{via_pool}:{via_conn}", t.org.slug)
+            }),
+        )
+        .layer(axum::middleware::from_fn(
+            move |mut req: Request<Body>, next: axum::middleware::Next| {
+                let ctx = ctx.clone();
+                async move {
+                    req.extensions_mut().insert(ctx);
+                    next.run(req).await
+                }
+            },
+        ));
+    let r = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+    assert_eq!(std::str::from_utf8(&b).unwrap(), "acme:1:2");
+}
+
 #[tokio::test]
 async fn rejects_postgres_org() {
     // No DB connection required for this validation path — runs even
