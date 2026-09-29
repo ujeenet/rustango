@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.6
+
 ### Outbound calls ignore `HTTPS_PROXY`
 
 Webhook deliveries with `allow_private_targets(true)` no longer read `HTTP(S)_PROXY`,
