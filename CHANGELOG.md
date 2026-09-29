@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.1] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
 ### Fixed — MCP tenant router on a non-default backend (#1787)
 
 New `mcp::tenant_router_authed_for::<DB>`, `secure_tenant_router_for::<DB>` and
