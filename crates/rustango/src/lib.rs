@@ -1106,7 +1106,8 @@ pub mod http_methods;
 
 /// Flash messages — `messages.success/info/warning/error/debug`
 /// stored in a signed cookie until the next page renders them.
-#[cfg(feature = "_signing")]
+// Reads and writes cookies through axum, so `_signing` alone (webhook, oauth2) is not enough.
+#[cfg(all(feature = "_signing", feature = "_axum"))]
 pub mod messages;
 
 /// Access gates — `login_required` middleware and

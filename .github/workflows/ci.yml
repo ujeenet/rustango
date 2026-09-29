@@ -775,6 +775,9 @@ jobs:
           # Both enable `crypto` and did not compile alone.
           - sqlite,csrf
           - sqlite,totp
+          # `_signing` without axum broke `messages` (#1797, #1719).
+          - sqlite,webhook-delivery
+          - sqlite,oauth2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
