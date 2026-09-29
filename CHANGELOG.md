@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — one tenant context per request (#1826)
+
+Auth, sessions, `Tenant<DB>` and `DatabaseTenant<DB>` now read the same mounted context,
+so an app with two contexts can no longer authenticate one tenant and serve another.
+
 ### Changed — MCP authed handlers always have a token lifecycle (#1827)
 
 Authed routers carry their `JwtLifecycle` by type, so the unreachable "mcp auth not configured" 500s are gone.

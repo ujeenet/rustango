@@ -129,9 +129,8 @@ where
     type Rejection = DatabaseTenantRejection;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let ctx = parts
-            .extensions
-            .get::<Arc<DatabaseTenantContext<DB>>>()
+        let ctx = super::MountedTenantContext::of(&parts.extensions)
+            .and_then(|m| m.database::<DB>())
             .ok_or(DatabaseTenantRejection::MissingContext)?
             .clone();
         let org = ctx
