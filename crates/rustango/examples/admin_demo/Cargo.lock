@@ -1890,6 +1890,7 @@ dependencies = [
  "flate2",
  "hmac",
  "http",
+ "http-body",
  "http-body-util",
  "indexmap",
  "inventory",

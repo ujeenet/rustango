@@ -365,7 +365,7 @@ pub(crate) const CHECK_DEPLOY_NOTE: &str =
 pub(crate) fn warn_once_if_process_local(lockout: &Lockout) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     if let Some(msg) = process_local_warning(lockout) {
-        WARNED.call_once(|| tracing::warn!(target: "rustango::auth", "{msg}"));
+        WARNED.call_once(|| tracing::warn!(target: "rustango::rate_limit", "{msg}"));
     }
 }
 
