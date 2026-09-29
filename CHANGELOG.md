@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — feature sets that did not compile
+
+- `sqlite,webhook-delivery` and `sqlite,oauth2`: `messages` now also needs axum (#1797, #1719).
+- `sqlite,passwords`, `sqlite,signals`, `sqlite,config` and `sqlite,manage,config`: the request middleware follows `manage`, and `config` enables `signals` (#1739).
+- The three `tenancy,sso` live suites build their `User` from `testkit::user()` (#1737).
+- A build with no database backend now starts with one clear error (#1509).
 ## [0.59.1] — 2026-09-29
 
 Tagged only; not published to crates.io.

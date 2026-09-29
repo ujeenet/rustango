@@ -64,6 +64,8 @@ pub mod admin;
 pub mod auth;
 pub mod m2m;
 pub mod migrate;
+// A tower layer over axum types, so it needs axum and tower, not just `signals`.
+#[cfg(all(feature = "_axum", feature = "_tower"))]
 pub mod request;
 pub mod setting;
 
