@@ -23,7 +23,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::extractors::Tenant;
+use crate::extractors::{Tenant, TenantScope};
 use crate::tenancy::jwt_lifecycle::{JwtIssueError, JwtLifecycle};
 
 use super::router::McpState;
@@ -199,11 +199,15 @@ pub(crate) async fn mint_agent_jwt(
 
 /// `POST {prefix}/token`: trade `{name, secret}` for a scoped token,
 /// pinned to the request's tenant.
-pub(crate) async fn agent_token(
-    t: Tenant,
+pub(crate) fn agent_token<DB: crate::sql::sqlx::Database>(
+    t: Tenant<DB>,
     State(state): State<McpState>,
     Json(input): Json<AgentTokenInput>,
-) -> Response {
+) -> impl std::future::Future<Output = Response> + Send {
+    agent_token_in(t.into(), state, input)
+}
+
+async fn agent_token_in(t: TenantScope, state: McpState, input: AgentTokenInput) -> Response {
     let Some(jwt) = state.jwt.as_ref() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
     };
@@ -317,10 +321,20 @@ pub(crate) async fn authenticate_bearer(
 /// `POST {prefix}`, authenticated: require an agent token, then run
 /// the JSON-RPC message. A token for another tenant, or a revoked or
 /// expired one, is refused.
-pub(crate) async fn post_authed(
-    t: Tenant,
+pub(crate) fn post_authed<DB: crate::sql::sqlx::Database>(
+    t: Tenant<DB>,
     State(state): State<McpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl std::future::Future<Output = Response> + Send {
+    post_authed_in(t.into(), state, uri, headers, body)
+}
+
+async fn post_authed_in(
+    t: TenantScope,
+    state: McpState,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {

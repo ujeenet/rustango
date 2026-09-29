@@ -15,17 +15,22 @@
 
 use std::sync::Arc;
 
+use axum::extract::FromRequestParts;
 use axum::routing::{get, post};
 use axum::Router;
 
+use crate::extractors::Tenant;
+use crate::sql::sqlx::Database;
 use crate::tenancy::jwt_lifecycle::JwtLifecycle;
+use crate::tenancy::DefaultTenantDb;
 
 use super::auth::{agent_token, default_jwt, post_authed};
 use super::transport::{post_handler, sse_handler};
 
-/// Shared state for the MCP handlers.
+/// Shared state for the MCP handlers. `pub` in a private module, so the
+/// `*_for::<DB>` bounds can name it while callers cannot.
 #[derive(Clone)]
-pub(crate) struct McpState {
+pub struct McpState {
     /// The app's pool. `None` under [`tenant_router`], where the
     /// `Tenant` extractor supplies one per request.
     #[allow(dead_code)]
@@ -51,7 +56,7 @@ impl McpState {
 
 fn routes(state: McpState) -> Router {
     Router::new()
-        .route("/", post(post_handler).get(sse_handler))
+        .route("/", post(post_handler).get(sse_handler::<DefaultTenantDb>))
         .with_state(state)
 }
 
@@ -83,6 +88,17 @@ pub fn secure_tenant_router() -> Router {
     tenant_router_authed(default_jwt())
 }
 
+/// [`secure_tenant_router`] for a `Tenant<DB>` other than the default,
+/// so a build without `config` keeps the same key handling.
+#[must_use]
+pub fn secure_tenant_router_for<DB>() -> Router
+where
+    DB: Database,
+    Tenant<DB>: FromRequestParts<McpState> + Send,
+{
+    tenant_router_authed_for::<DB>(default_jwt())
+}
+
 /// [`secure_tenant_router`], configured from the `[mcp]` settings
 /// section. Every field there applies: `token_ttl_secs` sets the
 /// token lifetime, `max_tools_listed` the `*/list` page size,
@@ -92,6 +108,18 @@ pub fn secure_tenant_router() -> Router {
 #[cfg(feature = "config")]
 #[must_use]
 pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings) -> Router {
+    secure_tenant_router_from_settings_for::<DefaultTenantDb>(settings)
+}
+
+/// [`secure_tenant_router_from_settings`] for a `Tenant<DB>` other than
+/// the default, e.g. SQLite in a build that also enables `postgres`.
+#[cfg(feature = "config")]
+#[must_use]
+pub fn secure_tenant_router_from_settings_for<DB>(settings: &crate::config::McpSettings) -> Router
+where
+    DB: Database,
+    Tenant<DB>: FromRequestParts<McpState> + Send,
+{
     let jwt = Arc::new(
         JwtLifecycle::new(super::auth::jwt_secret()).with_access_ttl(settings.token_ttl_secs()),
     );
@@ -100,7 +128,7 @@ pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings)
         page_size: settings.max_tools_listed,
         ..McpState::new(None)
     };
-    let mut router = authed_routes(state, settings.sse_enabled());
+    let mut router = authed_routes::<DB>(state, settings.sse_enabled());
 
     // An empty allow-list means no CORS layer, so same-origin only.
     if !settings.allowed_origins.is_empty() {
@@ -131,27 +159,42 @@ pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings)
 /// variant to gate it.
 #[must_use]
 pub fn tenant_router_authed(jwt: Arc<JwtLifecycle>) -> Router {
+    tenant_router_authed_for::<DefaultTenantDb>(jwt)
+}
+
+/// [`tenant_router_authed`] for a `Tenant<DB>` other than the default,
+/// e.g. SQLite in a build that also enables `postgres` (#1787).
+#[must_use]
+pub fn tenant_router_authed_for<DB>(jwt: Arc<JwtLifecycle>) -> Router
+where
+    DB: Database,
+    Tenant<DB>: FromRequestParts<McpState> + Send,
+{
     let state = McpState {
         jwt: Some(jwt),
         ..McpState::new(None)
     };
-    authed_routes(state, true)
+    authed_routes::<DB>(state, true)
 }
 
 /// The authenticated route set: JSON-RPC on `/`, the notification
 /// stream when `enable_sse`, `/token`, and the OAuth 2.1 discovery
 /// and `client_credentials` endpoints.
-fn authed_routes(state: McpState, enable_sse: bool) -> Router {
+fn authed_routes<DB>(state: McpState, enable_sse: bool) -> Router
+where
+    DB: Database,
+    Tenant<DB>: FromRequestParts<McpState> + Send,
+{
     use super::oauth;
     let root = if enable_sse {
-        post(post_authed).get(sse_handler)
+        post(post_authed::<DB>).get(sse_handler::<DB>)
     } else {
-        post(post_authed)
+        post(post_authed::<DB>)
     };
     Router::new()
         .route("/", root)
-        .route("/token", post(agent_token))
-        .route("/oauth/token", post(oauth::oauth_token))
+        .route("/token", post(agent_token::<DB>))
+        .route("/oauth/token", post(oauth::oauth_token::<DB>))
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth::well_known_protected_resource),
