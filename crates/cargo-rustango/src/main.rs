@@ -770,41 +770,59 @@ mod tests {
         }
     }
 
-    /// The scaffolded examples' config tiers are what `cargo rustango new`
-    /// emits today; regenerate, don't hand-edit (#1801). `cookbook_blog`
-    /// is hand-written, and `prod_settings.toml` is tuned per app.
+    /// Every scaffolded example (one with a `config/`) holds what
+    /// `cargo rustango new` emits today for one backend; regenerate,
+    /// don't hand-edit (#1801). `cookbook_blog` is hand-written, and
+    /// `prod_settings.toml` is tuned per app.
     #[test]
     fn example_configs_match_the_templates() {
         let examples =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rustango/examples");
+        let mut checked = 0;
         let mut drifted = Vec::new();
-        for name in [
-            "getting_started_blog",
-            "platform_commerce",
-            "platform_commerce_saas",
-        ] {
-            for (file, want) in [
-                (
-                    "default.toml",
-                    templates::config_default_toml(name, Backend::Postgres),
-                ),
-                (
-                    "dev_settings.toml",
-                    templates::config_dev_settings_toml(name, Backend::Postgres),
-                ),
-                (
-                    "staging_settings.toml",
-                    templates::config_staging_settings_toml(name, Backend::Postgres),
-                ),
-            ] {
-                let path = examples.join(name).join("config").join(file);
-                let got = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-                if got != want {
-                    drifted.push(format!("{name}/config/{file}"));
-                }
+        for entry in std::fs::read_dir(&examples).expect("read examples/") {
+            let root = entry.expect("examples/ entry").path();
+            let name = root.file_name().unwrap().to_str().unwrap().to_owned();
+            if name == "cookbook_blog" || !root.join("config").is_dir() {
+                continue;
+            }
+            checked += 1;
+            let rendered = |backend| {
+                [
+                    (".env.example", templates::env_example(&name, backend)),
+                    (
+                        "config/default.toml",
+                        templates::config_default_toml(&name, backend),
+                    ),
+                    (
+                        "config/dev_settings.toml",
+                        templates::config_dev_settings_toml(&name, backend),
+                    ),
+                    (
+                        "config/staging_settings.toml",
+                        templates::config_staging_settings_toml(&name, backend),
+                    ),
+                ]
+            };
+            let mismatches = |backend| -> Vec<&str> {
+                rendered(backend)
+                    .into_iter()
+                    .filter(|(file, want)| {
+                        std::fs::read_to_string(root.join(file)).ok().as_ref() != Some(want)
+                    })
+                    .map(|(file, _)| file)
+                    .collect()
+            };
+            let closest = [Backend::Postgres, Backend::Sqlite, Backend::Mysql]
+                .into_iter()
+                .map(mismatches)
+                .min_by_key(Vec::len)
+                .unwrap();
+            if !closest.is_empty() {
+                drifted.push(format!("{name}: {closest:?}"));
             }
         }
+        assert!(checked >= 3, "found only {checked} scaffolded examples");
         assert!(
             drifted.is_empty(),
             "drifted from the scaffolder: {drifted:?}"

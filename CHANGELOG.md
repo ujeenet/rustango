@@ -43,7 +43,8 @@ only `TrustedRealIp`, never a header. The old setter stays as a deprecated alias
 ### Fixed — scaffolded examples' config tiers match the scaffolder (#1801)
 
 Regenerated, so the dev tiers set `secure_cookies = false` and `getting_started_blog`
-uses its compose credentials. A test now fails when they drift again.
+uses its compose credentials and ships its `.env.example`. A test now fails when
+they drift again.
 
 ## [0.59.4] — 2026-09-29
 
