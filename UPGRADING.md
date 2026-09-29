@@ -150,6 +150,17 @@ untouched.
 
 ## Unreleased
 
+### Two tenant contexts on one request
+
+One is used for everything, picked by a fixed type order, not mount order: `TenantContext`
+Postgres, SQLite, MySQL, then `DatabaseTenantContext` in the same order. An extractor for
+another backend now gets `MissingContext` instead of resolving from its own context.
+
+### `HmacAuthLayer::nonce_store` uses `Cache::add`
+
+A custom cache used as the nonce store should override `add` atomically; the default
+is still `exists` then `set`.
+
 ## 0.59.5
 
 ### `Cache::stores_nothing`

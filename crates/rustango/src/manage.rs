@@ -2243,27 +2243,7 @@ mod assemble_app_tests {
     #[test]
     fn a_handler_log_carries_the_request_id_without_asking() {
         let _serial = serialized();
-        use std::io::Write;
-        use std::sync::{Arc, Mutex};
         use tracing_subscriber::layer::SubscriberExt as _;
-
-        #[derive(Clone, Default)]
-        struct Buf(Arc<Mutex<Vec<u8>>>);
-        impl Write for Buf {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().expect("lock").extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
-            type Writer = Buf;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
 
         // A plain `#[test]` driving its own runtime, not `#[tokio::test]`.
         //
@@ -2292,7 +2272,7 @@ mod assemble_app_tests {
             ))
             .assemble_app(pool);
 
-        let buf = Buf::default();
+        let buf = crate::testkit::CaptureWriter::default();
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
                 .with_ansi(false)
@@ -2335,7 +2315,7 @@ mod assemble_app_tests {
             "the inbound id should be echoed back"
         );
 
-        let out = String::from_utf8(buf.0.lock().expect("lock").clone()).expect("utf8");
+        let out = buf.contents();
         assert!(
             out.contains("handler ran"),
             "the handler's event was not captured at all: {out}"

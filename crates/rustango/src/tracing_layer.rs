@@ -474,29 +474,7 @@ mod tests {
     #[cfg(feature = "runtime")]
     #[test]
     fn the_span_redacts_credentials_in_the_query_string() {
-        use std::io::Write;
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
-
-        #[derive(Clone, Default)]
-        struct Buf(Arc<Mutex<Vec<u8>>>);
-        impl Write for Buf {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for Buf {
-            type Writer = Buf;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        let buf = Buf::default();
+        let buf = crate::testkit::CaptureWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(buf.clone())
             .with_ansi(false)
@@ -514,7 +492,7 @@ mod tests {
             tracing::info!("handled");
         });
 
-        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let out = buf.contents();
         assert!(
             out.contains("url.query"),
             "the span did not render url.query at all, so this proves nothing:\n{out}"

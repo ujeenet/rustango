@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use crate::extractors::{Tenant, TenantScope};
 
 use super::auth::{mint_agent_jwt, MintError};
-use super::router::McpState;
+use super::router::AuthedMcpState;
 
 /// RFC 9728 Protected Resource Metadata document.
 #[must_use]
@@ -114,7 +114,7 @@ fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
 /// scoped JWT as `/token`.
 pub(crate) fn oauth_token<DB: crate::sql::sqlx::Database>(
     t: Tenant<DB>,
-    State(state): State<McpState>,
+    State(state): State<AuthedMcpState>,
     headers: HeaderMap,
     Form(form): Form<OAuthTokenForm>,
 ) -> impl std::future::Future<Output = Response> + Send {
@@ -123,17 +123,11 @@ pub(crate) fn oauth_token<DB: crate::sql::sqlx::Database>(
 
 async fn oauth_token_in(
     t: TenantScope,
-    state: McpState,
+    state: AuthedMcpState,
     headers: HeaderMap,
     form: OAuthTokenForm,
 ) -> Response {
-    let Some(jwt) = state.jwt.as_ref() else {
-        return oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "auth not configured",
-        );
-    };
+    let jwt = &state.jwt;
     if form.grant_type != "client_credentials" {
         return oauth_error(
             StatusCode::BAD_REQUEST,

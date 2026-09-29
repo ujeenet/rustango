@@ -1,4 +1,4 @@
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", feature = "runtime"))]
 //! `.select_for_update()` / `.skip_locked()` / `.nowait()` on SQLite —
 //! issue #290 / T2.9. Pins that the writer emits a `tracing::warn!`
 //! when a queryset with a `LockMode` compiles against SQLite, and
@@ -9,10 +9,9 @@
 //! `tracing-subscriber` isn't reachable (it's a transitive dep via
 //! the `runtime` feature, present in all-features CI).
 
-use std::sync::{Arc, Mutex};
-
 use rustango::query::QuerySet;
 use rustango::sql::{Dialect, Sqlite};
+use rustango::testkit::CaptureWriter;
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -23,27 +22,6 @@ pub struct Job {
     id: i64,
     #[rustango(max_length = 20)]
     status: String,
-}
-
-/// Captures `tracing` events into a shared buffer for assertion.
-#[derive(Clone, Default)]
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-    type Writer = CaptureWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
 }
 
 fn compile_with_capture<F: FnOnce()>(f: F) -> String {
@@ -61,8 +39,7 @@ fn compile_with_capture<F: FnOnce()>(f: F) -> String {
         .with_target(true)
         .finish();
     tracing::subscriber::with_default(subscriber, f);
-    let bytes = buf.0.lock().unwrap().clone();
-    String::from_utf8(bytes).unwrap_or_default()
+    buf.contents()
 }
 
 #[test]

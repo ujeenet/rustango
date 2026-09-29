@@ -125,6 +125,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::email` | Envío de correo |
 | `rustango::email::smtp` | Transporte SMTP |
 | `rustango::error` | La causa de un 5xx, que el cuerpo de la respuesta omite |
+| `rustango::hmac_auth` | Configuración de la autenticación HMAC de peticiones |
 | `rustango::humanize` | Filtros de humanize |
 | `rustango::jobs` | Colas de trabajos en segundo plano |
 | `rustango::logging` | Avisos del propio subsistema |
