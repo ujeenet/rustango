@@ -188,6 +188,27 @@ async fn mcp_tenant_router_serves_a_non_default_backend() {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK, "SSE GET");
+
+    // No bearer: both mounts refuse the JSON-RPC and SSE endpoints.
+    let secure = env.mount(Router::new().nest(
+        "/mcp",
+        rustango::mcp::secure_tenant_router_for::<sqlx::Sqlite>(),
+    ));
+    for app in [&app, &secure] {
+        let r = send(
+            app,
+            Request::post("/mcp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "POST without bearer");
+        let r = send(app, Request::get("/mcp").body(Body::empty()).unwrap()).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "GET without bearer");
+    }
 }
 
 #[cfg(feature = "sso")]
@@ -197,7 +218,7 @@ async fn member_sso_router_serves_a_non_default_backend() {
     use axum::Json;
     use rustango::sql::{Auto, FetcherPool as _};
     use rustango::sso::SsoProvider;
-    use rustango::tenancy::member_auth::{member_sso_router_for, MemberAuthConfig};
+    use rustango::tenancy::member_auth::{member_sso_router_for, CurrentMember, MemberAuthConfig};
     use rustango::tenancy::User;
 
     let _g = SUITE.lock().await;
@@ -255,9 +276,12 @@ async fn member_sso_router_serves_a_non_default_backend() {
         updated_at: Auto::default(),
     };
     provider.insert_pool(&env.tenant).await.unwrap();
-    let app = env.mount(member_sso_router_for::<sqlx::Sqlite>(
-        MemberAuthConfig::default(),
-    ));
+    let app = env.mount(
+        member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default()).route(
+            "/whoami",
+            get(|m: CurrentMember| async move { m.0.map(|u| u.username).unwrap_or_default() }),
+        ),
+    );
 
     let begin = send(
         &app,
@@ -305,12 +329,34 @@ async fn member_sso_router_serves_a_non_default_backend() {
         .iter()
         .map(|v| v.to_str().unwrap())
         .collect();
-    assert!(
-        cookies
-            .iter()
-            .any(|c| c.starts_with("rustango_member_session=") && !c.contains("Max-Age=0")),
-        "member session minted: {cookies:?}"
-    );
+    let session = cookies
+        .iter()
+        .find(|c| c.starts_with("rustango_member_session=") && !c.contains("Max-Age=0"))
+        .unwrap_or_else(|| panic!("member session minted: {cookies:?}"))
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
     let users = User::objects().fetch(&env.tenant).await.unwrap();
     assert_eq!(users.len(), 1, "member provisioned in the SQLite tenant");
+    assert!(!users[0].username.is_empty());
+
+    // The minted cookie resolves as `CurrentMember` on the SQLite context.
+    let who = send(
+        &app,
+        Request::get("/whoami")
+            .header(header::HOST, "acme.app.test")
+            .header(header::COOKIE, session)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = axum::body::to_bytes(who.into_body(), 1 << 16)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        users[0].username,
+        "cookie resolves the member"
+    );
 }

@@ -88,6 +88,17 @@ pub fn secure_tenant_router() -> Router {
     tenant_router_authed(default_jwt())
 }
 
+/// [`secure_tenant_router`] for a `Tenant<DB>` other than the default,
+/// so a build without `config` keeps the same key handling.
+#[must_use]
+pub fn secure_tenant_router_for<DB>() -> Router
+where
+    DB: Database,
+    Tenant<DB>: FromRequestParts<McpState> + Send,
+{
+    tenant_router_authed_for::<DB>(default_jwt())
+}
+
 /// [`secure_tenant_router`], configured from the `[mcp]` settings
 /// section. Every field there applies: `token_ttl_secs` sets the
 /// token lifetime, `max_tools_listed` the `*/list` page size,

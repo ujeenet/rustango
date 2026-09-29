@@ -150,7 +150,8 @@ let api = axum::Router::new()
 
 With several backends compiled in, the default tenant type is Postgres. For a
 SQLite or MySQL tenancy use `secure_tenant_router_from_settings_for::<sqlx::Sqlite>`
-(or `tenant_router_authed_for`).
+(or `tenant_router_authed_for`). Without `config`,
+`secure_tenant_router_for::<sqlx::Sqlite>()` is `secure_tenant_router()` for that backend.
 
 The authed router mounts: `POST {prefix}` (JSON-RPC), `GET {prefix}` (SSE
 notifications), `POST {prefix}/token` (credential → JWT), `POST {prefix}/oauth/token`
