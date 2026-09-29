@@ -25,7 +25,7 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::extractors::Tenant;
+use crate::extractors::{Tenant, TenantScope};
 
 use super::auth::{mint_agent_jwt, MintError};
 use super::router::McpState;
@@ -112,11 +112,20 @@ fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
 /// and secret. Send them in an HTTP Basic header, which is
 /// preferred, or as form fields. The token it returns is the same
 /// scoped JWT as `/token`.
-pub(crate) async fn oauth_token(
-    t: Tenant,
+pub(crate) fn oauth_token<DB: crate::sql::sqlx::Database>(
+    t: Tenant<DB>,
     State(state): State<McpState>,
     headers: HeaderMap,
     Form(form): Form<OAuthTokenForm>,
+) -> impl std::future::Future<Output = Response> + Send {
+    oauth_token_in(t.into(), state, headers, form)
+}
+
+async fn oauth_token_in(
+    t: TenantScope,
+    state: McpState,
+    headers: HeaderMap,
+    form: OAuthTokenForm,
 ) -> Response {
     let Some(jwt) = state.jwt.as_ref() else {
         return oauth_error(

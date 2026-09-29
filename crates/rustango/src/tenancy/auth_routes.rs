@@ -45,11 +45,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::extractors::Tenant;
+use crate::extractors::{Tenant, TenantScope};
 use crate::sql::sqlx::Database;
 use crate::sql::FetcherPool as _;
 use crate::tenancy::jwt_lifecycle::JwtLifecycle;
-use crate::tenancy::{DefaultTenantDb, Org};
+use crate::tenancy::DefaultTenantDb;
 
 // ---------------------------------------------------------------- Config
 
@@ -342,24 +342,6 @@ fn login_claims(
 
 // ---------------------------------------------------------------- Handlers
 
-/// A `Tenant<DB>` with the backend erased, so the handler bodies are not
-/// generic and their futures stay provably `Send`.
-struct Scope {
-    org: Org,
-    pool: crate::sql::Pool,
-}
-
-impl Scope {
-    fn of<DB: Database>(t: Tenant<DB>) -> Self {
-        let pool = t.pool().clone();
-        Self { org: t.org, pool }
-    }
-
-    fn pool(&self) -> &crate::sql::Pool {
-        &self.pool
-    }
-}
-
 #[derive(Debug, Deserialize)]
 pub struct LoginInput {
     pub username: String,
@@ -388,12 +370,12 @@ fn login<DB: Database>(
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginInput>,
 ) -> impl std::future::Future<Output = Result<Json<LoginOutput>, Response>> + Send {
-    login_in(auth, Scope::of(t), ip, extensions, headers, body)
+    login_in(auth, t.into(), ip, extensions, headers, body)
 }
 
 async fn login_in(
     auth: JwtAuth,
-    t: Scope,
+    t: TenantScope,
     ip: crate::login_throttle::ClientIp,
     extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
@@ -542,12 +524,12 @@ fn refresh<DB: Database>(
     t: Tenant<DB>,
     Json(body): Json<RefreshInput>,
 ) -> impl std::future::Future<Output = Result<Json<RefreshOutput>, Response>> + Send {
-    refresh_in(auth, Scope::of(t), body)
+    refresh_in(auth, t.into(), body)
 }
 
 async fn refresh_in(
     auth: JwtAuth,
-    t: Scope,
+    t: TenantScope,
     body: RefreshInput,
 ) -> Result<Json<RefreshOutput>, Response> {
     let jwt = auth.lifecycle();
@@ -630,12 +612,12 @@ fn logout<DB: Database>(
     bearer: Bearer,
     body: Option<Json<LogoutInput>>,
 ) -> impl std::future::Future<Output = Result<StatusCode, Response>> + Send {
-    logout_in(auth, Scope::of(t), extensions, headers, bearer, body)
+    logout_in(auth, t.into(), extensions, headers, bearer, body)
 }
 
 async fn logout_in(
     auth: JwtAuth,
-    t: Scope,
+    t: TenantScope,
     extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     bearer: Bearer,
@@ -712,10 +694,10 @@ fn me<DB: Database>(
     t: Tenant<DB>,
     bearer: Bearer,
 ) -> impl std::future::Future<Output = Result<Json<UserBrief>, Response>> + Send {
-    me_in(auth, Scope::of(t), bearer)
+    me_in(auth, t.into(), bearer)
 }
 
-async fn me_in(auth: JwtAuth, t: Scope, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
+async fn me_in(auth: JwtAuth, t: TenantScope, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
     use crate::tenancy::auth::User;
@@ -801,12 +783,12 @@ pub fn require_bearer_for<DB: Database>(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> impl std::future::Future<Output = Response> + Send {
-    bearer_in(auth, Scope::of(t), req, next)
+    bearer_in(auth, t.into(), req, next)
 }
 
 async fn bearer_in(
     auth: JwtAuth,
-    t: Scope,
+    t: TenantScope,
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {

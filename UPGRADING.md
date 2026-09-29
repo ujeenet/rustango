@@ -182,6 +182,15 @@ A request whose `Idempotency-Key` is still running gets `409` with
 `Retry-After: 1`; clients should retry. Handlers that run over 60 s need
 `IdempotencyLayer::lock_ttl`. A broken response stream now answers `500`.
 The marker is renewed every `lock_ttl / 2`, so a long handler keeps its key.
+## 0.59.1
+
+### Tenant routers for a non-default backend
+
+With several backends compiled in, the default `Tenant` is Postgres. Mount
+the `*_for::<sqlx::Sqlite>` (or `MySql`) variant for a SQLite or MySQL
+`TenantContext`: `mcp::tenant_router_authed_for`,
+`mcp::secure_tenant_router_from_settings_for`,
+`member_auth::member_sso_router_for`.
 
 ## 0.59.0
 

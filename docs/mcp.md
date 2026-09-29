@@ -148,6 +148,11 @@ let api = axum::Router::new()
 // hand `api` to your tenancy Cli/Builder as usual
 ```
 
+With several backends compiled in, the default tenant type is Postgres. For a
+SQLite or MySQL tenancy use `secure_tenant_router_from_settings_for::<sqlx::Sqlite>`
+(or `tenant_router_authed_for`). Without `config`,
+`secure_tenant_router_for::<sqlx::Sqlite>()` is `secure_tenant_router()` for that backend.
+
 The authed router mounts: `POST {prefix}` (JSON-RPC), `GET {prefix}` (SSE
 notifications), `POST {prefix}/token` (credential → JWT), `POST {prefix}/oauth/token`
 (OAuth 2.1), and the two `.well-known/*` discovery documents. It signs agent
@@ -164,7 +169,7 @@ The `initialize` handshake is a plain JSON-RPC POST and works on any mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.59.0" },
+    "serverInfo": { "name": "rustango", "version": "0.59.1" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 

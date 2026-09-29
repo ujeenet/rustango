@@ -180,6 +180,28 @@ impl<DB: Database> Tenant<DB> {
     }
 }
 
+/// A `Tenant<DB>` with the backend erased, so a `<DB>`-generic handler can
+/// hand off to a plain one whose future stays provably `Send` (#1778).
+pub(crate) struct TenantScope {
+    pub(crate) org: Org,
+    pool: crate::sql::Pool,
+}
+
+impl TenantScope {
+    pub(crate) fn pool(&self) -> &crate::sql::Pool {
+        &self.pool
+    }
+}
+
+impl<DB: Database> From<Tenant<DB>> for TenantScope {
+    fn from(t: Tenant<DB>) -> Self {
+        Self {
+            org: t.org,
+            pool: t.pool,
+        }
+    }
+}
+
 #[cfg(feature = "postgres")]
 impl Tenant<sqlx::Postgres> {
     /// Borrow the connection as `&mut PgConnection`, the type sqlx
