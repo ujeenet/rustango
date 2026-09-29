@@ -783,32 +783,10 @@ mod tests {
 #[cfg(all(test, feature = "runtime"))]
 mod rendered {
     use super::*;
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone, Default)]
-    struct Buf(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Buf {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("buffer lock").extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
-        type Writer = Buf;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
 
     /// Emit one event through `fmt_layer` and return what was written.
     fn render(format: Format, ansi: bool) -> String {
-        let buf = Buf::default();
+        let buf = crate::testkit::CaptureWriter::default();
         let layer = fmt_layer(format, ansi, true, false, false, Some(buf.clone()));
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
@@ -819,8 +797,7 @@ mod rendered {
             let _g = span.enter();
             tracing::info!(target: "demo::target", answer = 42, "hello");
         });
-        let bytes = buf.0.lock().expect("buffer lock").clone();
-        String::from_utf8(bytes).expect("utf8")
+        buf.contents()
     }
 
     /// Strip the RFC3339 timestamp, which differs on every render.

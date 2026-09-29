@@ -34,6 +34,12 @@
 /// that is compiled in and configured (#1461).
 pub mod matrix;
 
+/// Captures rendered `tracing` output for assertions.
+#[cfg(feature = "runtime")]
+mod tracing_capture;
+#[cfg(feature = "runtime")]
+pub use tracing_capture::CaptureWriter;
+
 use crate::core::ModelSchema;
 use crate::migrate::{ddl, MigrateError};
 use crate::sql::Pool;
