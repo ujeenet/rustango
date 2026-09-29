@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.2] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
 ### Fixed — feature sets that did not compile
 
 - `sqlite,webhook-delivery` and `sqlite,oauth2`: `messages` now also needs axum (#1797, #1719).
