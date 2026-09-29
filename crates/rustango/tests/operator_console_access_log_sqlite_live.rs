@@ -2,32 +2,18 @@
 //! #1788 — an operator-console request logs one access-log line, with or
 //! without `Builder::observability`, and so does the standalone console.
 
-use std::sync::{Arc, Mutex};
-
 use axum::body::Body;
 use axum::http::Request;
 use rustango::access_log::AccessLogLayer;
 use rustango::sql::sqlx;
+use rustango::testkit::CaptureWriter;
 use tower::ServiceExt;
 
 type Builder = rustango::server::Builder<sqlx::Sqlite>;
 
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Access-log lines one apex `GET /login?next=…` writes through `app`.
 async fn access_lines(app: axum::Router) -> Vec<String> {
-    let buf = Capture::default();
+    let buf = CaptureWriter::default();
     let writer = buf.clone();
     let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
@@ -42,8 +28,8 @@ async fn access_lines(app: axum::Router) -> Vec<String> {
         .body(Body::empty())
         .unwrap();
     app.oneshot(req).await.unwrap();
-    let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-    out.lines()
+    buf.contents()
+        .lines()
         .filter(|l| l.contains("rustango::access_log"))
         .map(str::to_owned)
         .collect()

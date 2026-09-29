@@ -704,29 +704,9 @@ fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
 mod tests {
     use super::*;
 
-    #[derive(Clone, Default)]
-    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Buf {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
-        type Writer = Buf;
-        fn make_writer(&'a self) -> Buf {
-            self.clone()
-        }
-    }
-
     /// Authenticate `token` twice on `backend`; count revocation warnings.
     async fn revocation_warnings(backend: &JwtBackend, token: &str) -> usize {
-        let buf = Buf::default();
+        let buf = crate::testkit::CaptureWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(buf.clone())
             .with_ansi(false)
@@ -741,8 +721,7 @@ mod tests {
                 .into_parts();
             let _ = backend.authenticate(&parts, &pool).await;
         }
-        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        out.matches("not checked for revocation").count()
+        buf.contents().matches("not checked for revocation").count()
     }
 
     /// #1809 — a revocable token on a backend without a JTI store is not silent.

@@ -122,6 +122,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::email` | Mail dispatch |
 | `rustango::email::smtp` | SMTP transport |
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
+| `rustango::hmac_auth` | HMAC request auth setup |
 | `rustango::humanize` | Humanize filters |
 | `rustango::jobs` | Background job queues |
 | `rustango::logging` | This subsystem's own warnings |
@@ -129,6 +130,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::media::auth` | Media-router authorization refusals |
 | `rustango::messages` | Flash messages |
 | `rustango::migrate` | Migration runner |
+| `rustango::outbound` | Checked outbound calls (SSO, Slack, webhooks) |
 | `rustango::rate_limit` | Rate limiting |
 | `rustango::request_timeout` | Per-request timeout |
 | `rustango::scheduler` | Cron / scheduled tasks |

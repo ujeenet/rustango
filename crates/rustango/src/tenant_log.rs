@@ -131,29 +131,7 @@ mod tests {
     #[cfg(feature = "runtime")]
     #[tokio::test]
     async fn a_field_is_stamped_once_however_many_resolvers_run() {
-        use std::io::Write;
-        use std::sync::{Arc as StdArc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
-
-        #[derive(Clone, Default)]
-        struct Buf(StdArc<Mutex<Vec<u8>>>);
-        impl Write for Buf {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for Buf {
-            type Writer = Buf;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        let buf = Buf::default();
+        let buf = crate::testkit::CaptureWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(buf.clone())
             .with_ansi(false)
@@ -175,7 +153,7 @@ mod tests {
         })
         .await;
 
-        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let out = buf.contents();
         assert!(out.contains("handled"), "nothing rendered:\n{out}");
         assert_eq!(
             out.matches("tenant=").count(),
