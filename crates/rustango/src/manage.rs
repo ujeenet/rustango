@@ -1100,12 +1100,6 @@ impl Cli {
         // Logging install lives in `run()` (the outermost dispatch
         // point) so the WorkerGuard outlives every runserver +
         // management-verb path uniformly.
-        #[cfg(feature = "cache")]
-        if let Some(msg) =
-            crate::account_lockout::process_local_warning(crate::account_lockout::shared())
-        {
-            tracing::warn!(target: "rustango::manage", "{msg}");
-        }
         #[cfg(feature = "tenancy")]
         if self.tenancy {
             return self.runserver_tenancy().await;

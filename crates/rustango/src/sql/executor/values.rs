@@ -467,6 +467,21 @@ flat_scalar!(
     chrono::NaiveDate,
     chrono::NaiveTime,
 );
+// sqlx-sqlite has no `Decimal` decode, so only builds without SQLite get it.
+#[cfg(not(feature = "sqlite"))]
+flat_scalar!(rust_decimal::Decimal);
+
+#[cfg(all(test, not(feature = "sqlite")))]
+mod flat_scalar_tests {
+    fn is_flat<U: super::FlatScalar>() {}
+
+    /// `pluck::<Decimal>` compiled before `FlatScalar`; keep it that way.
+    #[test]
+    fn decimal_is_a_flat_scalar() {
+        is_flat::<rust_decimal::Decimal>();
+        is_flat::<Option<rust_decimal::Decimal>>();
+    }
+}
 
 /// Decode column 0, checking NULL first: sqlx-sqlite reads NULL as `0` (#1773).
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]

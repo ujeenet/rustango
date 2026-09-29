@@ -999,6 +999,11 @@ impl FileCache {
 
 #[async_trait]
 impl Cache for FileCache {
+    /// One directory per host: other replicas don't see these entries.
+    fn is_process_local(&self) -> bool {
+        true
+    }
+
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let path = self.key_path(key);
         let buf = match std::fs::read(&path) {
@@ -1210,6 +1215,12 @@ mod settings_tests {
 #[cfg(test)]
 mod file_cache_tests {
     use super::*;
+
+    /// Each host has its own directory, so replicas don't share entries.
+    #[test]
+    fn file_cache_reports_process_local() {
+        assert!(FileCache::new("unused").is_process_local());
+    }
 
     /// Without hard links, `add` still claims the key exactly once.
     #[test]

@@ -4638,8 +4638,9 @@ pub(crate) fn login_store_audit(
     lockout: &crate::account_lockout::Lockout,
     out: &mut DeployAuditFindings,
 ) {
-    if let Some(msg) = crate::account_lockout::process_local_warning(lockout) {
-        out.warnings.push(msg.into());
+    if lockout.is_process_local() {
+        out.info
+            .push(crate::account_lockout::CHECK_DEPLOY_NOTE.into());
     }
     #[cfg(feature = "admin")]
     out.info
@@ -6013,8 +6014,13 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             &Lockout::new(Arc::new(crate::cache::InMemoryCache::new())),
             &mut out,
         );
+        // Advice, not a warning: the app may install a shared lockout at startup.
         assert!(
-            out.warnings.iter().any(|w| w.contains("account lockout")),
+            out.info.iter().any(|w| w.contains("account lockout")),
+            "{out:?}"
+        );
+        assert!(
+            !out.warnings.iter().any(|w| w.contains("account lockout")),
             "{out:?}"
         );
         let scoped = crate::cache::ScopedCache::for_tenant(
@@ -6026,14 +6032,14 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let mut out = DeployAuditFindings::default();
         login_store_audit(&Lockout::new(Arc::new(crate::cache::NullCache)), &mut out);
         assert!(
-            !out.warnings.iter().any(|w| w.contains("account lockout")),
+            !out.info.iter().any(|w| w.contains("account lockout")),
             "{out:?}"
         );
     }
 
     #[cfg(all(feature = "cache", feature = "sqlite"))]
     #[tokio::test]
-    async fn check_deploy_reports_the_default_in_memory_lockout() {
+    async fn check_deploy_notes_the_default_in_memory_lockout() {
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
         let mut buf: Vec<u8> = Vec::new();
         let _ = check_cmd(
@@ -6044,7 +6050,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         )
         .await;
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("[warning] account lockout"), "{s}");
+        assert!(s.contains("[info]    account lockout"), "{s}");
     }
 
     fn good_prod_env() -> DeployAuditEnv {

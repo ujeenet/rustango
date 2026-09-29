@@ -160,9 +160,9 @@ now errors into a bare `T` on SQLite too.
 
 ### Warnings for per-process login state
 
-`runserver` and `check --deploy` warn while account lockout uses the
-in-memory default; on more than one replica install a shared cache with
-`account_lockout::configure_shared(Lockout::new(cache))`. For JWT logout,
+The first login logs a warning, and `check --deploy` adds a note, while
+account lockout uses an in-memory or file cache; on more than one replica
+install a shared cache with `account_lockout::configure_shared(Lockout::new(cache))`. For JWT logout,
 set `auth_routes::Config::jti_store`. A custom `Cache` that keeps data in
 process memory should override `is_process_local` to return `true`.
 
