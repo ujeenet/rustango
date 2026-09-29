@@ -5552,7 +5552,7 @@ mod gen_tests {
     // backend; the `not(feature = "config")` stub short-circuits with
     // a friendly error and never reaches the parser.
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_defaults_empty() {
         let p = parse_sendtestemail_args(&[]).unwrap();
@@ -5562,7 +5562,7 @@ mod gen_tests {
         assert!(!p.help);
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_collects_to_from_subject() {
         let args: Vec<String> = vec![
@@ -5579,49 +5579,49 @@ mod gen_tests {
         assert_eq!(p.subject.as_deref(), Some("ping"));
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_help_short_circuits() {
         let p = parse_sendtestemail_args(&["--help".into()]).unwrap();
         assert!(p.help);
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_rejects_unknown_flag() {
         let r = parse_sendtestemail_args(&["--bogus".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_rejects_positional() {
         let r = parse_sendtestemail_args(&["unexpected".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_to_requires_value() {
         let r = parse_sendtestemail_args(&["--to".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_from_requires_value() {
         let r = parse_sendtestemail_args(&["--from".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_subject_requires_value() {
         let r = parse_sendtestemail_args(&["--subject".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[tokio::test]
     async fn sendtestemail_help_short_circuits_without_settings_lookup() {
         let mut buf: Vec<u8> = Vec::new();

@@ -182,6 +182,11 @@ A request whose `Idempotency-Key` is still running gets `409` with
 `Retry-After: 1`; clients should retry. Handlers that run over 60 s need
 `IdempotencyLayer::lock_ttl`. A broken response stream now answers `500`.
 The marker is renewed every `lock_ttl / 2`, so a long handler keeps its key.
+## 0.59.2
+
+### Feature graph (#1739)
+
+`config` now enables `signals`. The request middleware (`cors`, `body_limit`, `security_headers`, …) now comes with `manage` or `admin`.
 ## 0.59.1
 
 ### Tenant routers for a non-default backend

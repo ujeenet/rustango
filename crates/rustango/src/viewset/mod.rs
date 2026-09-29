@@ -1033,9 +1033,9 @@ impl ViewSet {
             get(handle_list).post(handle_create)
         };
         // RFC 10008 QUERY: the same filtered list as GET, with the
-        // criteria in the body. Gated on `admin` because the routing
-        // shim lives in the `admin`-gated `http_query` module.
-        #[cfg(feature = "admin")]
+        // criteria in the body. Gated like the `http_query` module that
+        // holds the routing shim.
+        #[cfg(feature = "_http_layers")]
         let collection_route = {
             use crate::http_query::QueryRouterExt as _;
             collection_route.query(handle_query)
@@ -2931,7 +2931,7 @@ pub(crate) async fn extract_create_body(
 
     let bytes = to_bytes(body, 4 * 1024 * 1024).await.map_err(|e| {
         // Our own cap or an outer `BodyLimitLayer` stream cap (#1673).
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         if crate::body_limit::over_cap(&e) {
             return BodyError::TooLarge;
         }

@@ -41,6 +41,16 @@ a run that stored just before the marker was won is replayed, not re-run.
 exactly the rows they write. `FileCache::set` replaces the file atomically,
 so a renewal no longer shows readers an empty marker; `add` works without
 hard links.
+## [0.59.2] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — feature sets that did not compile
+
+- `sqlite,webhook-delivery` and `sqlite,oauth2`: `messages` now also needs axum (#1797, #1719).
+- `sqlite,passwords`, `sqlite,signals`, `sqlite,config` and `sqlite,manage,config`: the request middleware follows `manage`, and `config` enables `signals` (#1739).
+- The three `tenancy,sso` live suites build their `User` from `testkit::user()` (#1737).
+- A build with no database backend now starts with one clear error (#1509).
 ## [0.59.1] — 2026-09-29
 
 Tagged only; not published to crates.io.
