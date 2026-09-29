@@ -95,6 +95,12 @@ pub trait JtiStore: Send + Sync {
     fn approx_size(&self) -> JtiFuture<'_, Option<usize>> {
         Box::pin(async { None })
     }
+
+    /// `true` when revocations live in this process only; other
+    /// replicas keep accepting a revoked token.
+    fn is_process_local(&self) -> bool {
+        false
+    }
 }
 
 /// In-process JTI store. The default for every shipped JWT / handoff
@@ -126,6 +132,10 @@ impl Default for InMemoryJtiStore {
 }
 
 impl JtiStore for InMemoryJtiStore {
+    fn is_process_local(&self) -> bool {
+        true
+    }
+
     // Bodies await nothing, so the `std::sync::Mutex` guard never
     // crosses a suspend point.
     fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> {
@@ -213,6 +223,21 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert!(!store.is_used("stale").await);
         assert!(store.is_used("fresh").await);
+    }
+
+    #[test]
+    fn only_the_in_memory_store_is_process_local() {
+        struct Shared;
+        impl JtiStore for Shared {
+            fn is_used<'a>(&'a self, _: &'a str) -> JtiFuture<'a, bool> {
+                Box::pin(async { false })
+            }
+            fn mark_used<'a>(&'a self, _: &'a str, _: i64) -> JtiFuture<'a, bool> {
+                Box::pin(async { true })
+            }
+        }
+        assert!(InMemoryJtiStore::new().is_process_local());
+        assert!(!Shared.is_process_local());
     }
 
     #[tokio::test]

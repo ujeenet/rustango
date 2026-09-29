@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — warn when login defences are per process (#1534)
+
+`check --deploy` and `runserver` now warn when account lockout runs on an
+in-memory cache, and `JwtAuth` when revocation uses `InMemoryJtiStore`.
+New `Cache::is_process_local` and `JtiStore::is_process_local` report it.
+
 ### Security — pruning an audited model audits each row (#1782)
 
 `prune_all` on an audited model now deletes through the audited path, one

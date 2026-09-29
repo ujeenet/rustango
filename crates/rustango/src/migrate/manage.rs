@@ -1775,6 +1775,8 @@ async fn check_cmd<W: Write>(
         // Gated by the `config` feature; no-op without it.
         #[cfg(feature = "config")]
         run_settings_audit(&mut audit);
+        #[cfg(feature = "cache")]
+        login_store_audit(crate::account_lockout::shared(), &mut audit);
         // `required_db_vendor` + `required_db_features`
         // audit — every model declaring `required_db_vendor = "postgres"`
         // or `required_db_features = "json_path, listen_notify"` gets
@@ -4630,6 +4632,20 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
     }
 }
 
+/// Login security state that each replica keeps to itself (#1534).
+#[cfg(feature = "cache")]
+pub(crate) fn login_store_audit(
+    lockout: &crate::account_lockout::Lockout,
+    out: &mut DeployAuditFindings,
+) {
+    if let Some(msg) = crate::account_lockout::process_local_warning(lockout) {
+        out.warnings.push(msg.into());
+    }
+    #[cfg(feature = "admin")]
+    out.info
+        .push(crate::login_throttle::PROCESS_LOCAL_NOTE.into());
+}
+
 /// `manage check --deploy` settings-side audit (#87 slice 4) —
 /// loads `Settings::load_from_env()` and flags dev-defaults left in
 /// the prod tier. Pure function over the loaded settings + resolved
@@ -5986,6 +6002,50 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     }
 
     // -------- run_deploy_audit (`manage check --deploy`) --------
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn deploy_audit_flags_a_process_local_lockout_only() {
+        use crate::account_lockout::Lockout;
+        use std::sync::Arc;
+        let mut out = DeployAuditFindings::default();
+        login_store_audit(
+            &Lockout::new(Arc::new(crate::cache::InMemoryCache::new())),
+            &mut out,
+        );
+        assert!(
+            out.warnings.iter().any(|w| w.contains("account lockout")),
+            "{out:?}"
+        );
+        let scoped = crate::cache::ScopedCache::for_tenant(
+            Arc::new(crate::cache::InMemoryCache::new()),
+            "acme",
+        );
+        assert!(Lockout::new(Arc::new(scoped)).is_process_local());
+        // NullCache stands in for any store that isn't process-local.
+        let mut out = DeployAuditFindings::default();
+        login_store_audit(&Lockout::new(Arc::new(crate::cache::NullCache)), &mut out);
+        assert!(
+            !out.warnings.iter().any(|w| w.contains("account lockout")),
+            "{out:?}"
+        );
+    }
+
+    #[cfg(all(feature = "cache", feature = "sqlite"))]
+    #[tokio::test]
+    async fn check_deploy_reports_the_default_in_memory_lockout() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let _ = check_cmd(
+            &pool,
+            Path::new("/nonexistent"),
+            &["--deploy".into()],
+            &mut buf,
+        )
+        .await;
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("[warning] account lockout"), "{s}");
+    }
 
     fn good_prod_env() -> DeployAuditEnv {
         DeployAuditEnv {

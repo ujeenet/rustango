@@ -116,6 +116,10 @@ impl Cache for ScopedCache {
         self.inner.delete_prefix(&self.prefix).await
     }
 
+    fn is_process_local(&self) -> bool {
+        self.inner.is_process_local()
+    }
+
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         self.inner.incr(&self.k(key), by, ttl).await
     }

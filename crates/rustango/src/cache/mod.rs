@@ -101,6 +101,12 @@ pub trait Cache: Send + Sync + 'static {
     /// Remove all entries from the cache.
     async fn clear(&self) -> Result<(), CacheError>;
 
+    /// `true` when entries live in this process only, so other replicas
+    /// never see them. `check --deploy` flags security state kept here.
+    fn is_process_local(&self) -> bool {
+        false
+    }
+
     /// Add `by` to the integer counter at `key` and return the new
     /// value. A value that is not an integer counts as 0.
     ///
@@ -675,6 +681,10 @@ impl Default for InMemoryCache {
 
 #[async_trait]
 impl Cache for InMemoryCache {
+    fn is_process_local(&self) -> bool {
+        true
+    }
+
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let store = self.inner.read().await;
         Ok(store.map.get(key).and_then(|e| {

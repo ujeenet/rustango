@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Warnings for per-process login state
+
+`runserver` and `check --deploy` warn while account lockout uses the
+in-memory default; on more than one replica install a shared cache with
+`account_lockout::configure_shared(Lockout::new(cache))`. For JWT logout,
+set `auth_routes::Config::jti_store`. A custom `Cache` that keeps data in
+process memory should override `is_process_local` to return `true`.
+
 ### Pruning audited models
 
 `prune_all` on an audited model now reads and locks the rows and writes one

@@ -357,6 +357,11 @@ fn account_key(scope_key: &str, username: &str) -> String {
     key
 }
 
+/// The per-IP and global buckets have no shared backend; `check --deploy` says so.
+pub(crate) const PROCESS_LOCAL_NOTE: &str =
+    "login per-IP and global limits are counted per process: with N replicas each limit is N times \
+     higher; set `[auth] login_*` per replica or rate-limit logins at the proxy";
+
 static SHARED: crate::boot_slot::BootSlot<LoginThrottle> = crate::boot_slot::BootSlot::new();
 
 /// The gate every built-in login uses, with [`LoginLimits::default`]

@@ -111,6 +111,12 @@ impl Lockout {
         self.lockout_duration
     }
 
+    /// `true` when the counters live in this process only (an in-memory cache).
+    #[must_use]
+    pub fn is_process_local(&self) -> bool {
+        self.cache.is_process_local()
+    }
+
     /// Check whether `account` is currently locked. Returns `true` to
     /// reject the login attempt; `false` to proceed with verification.
     pub async fn is_locked(&self, account: &str) -> bool {
@@ -335,6 +341,15 @@ pub fn shared() -> &'static Lockout {
 /// one built from `[auth]` settings; `false` if an earlier call won.
 pub fn configure_shared(lockout: Lockout) -> bool {
     SHARED_LOCKOUT.set_explicit(lockout)
+}
+
+/// The `check --deploy` and boot warning for a lockout that counts per process.
+pub(crate) fn process_local_warning(lockout: &Lockout) -> Option<&'static str> {
+    lockout.is_process_local().then_some(
+        "account lockout counts failed logins in process memory, so each replica \
+         allows its own attempts; install a Redis or database cache with \
+         `account_lockout::configure_shared(Lockout::new(cache))` (`[auth] lockout_*` is in-memory)",
+    )
 }
 
 /// The `[auth]` settings lockout; `false` if app code already set one.
