@@ -138,7 +138,7 @@ pub trait Dialect: Send + Sync {
     /// `now()` into a `strftime` call and drops `::type` casts.
     ///
     /// `max_length` matters only to MySQL, which needs it to tell an
-    /// unbounded `String` (a `TEXT` column, which allows no literal
+    /// unbounded `String` (a `LONGTEXT` column, which allows no literal
     /// default) from a bounded one (a `VARCHAR(n)`, which does).
     fn translate_default_expr(&self, expr: &str, _ty: &str, _max_length: Option<u32>) -> String {
         expr.to_owned()
