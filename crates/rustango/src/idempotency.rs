@@ -354,7 +354,7 @@ struct InFlight {
     cache: BoxedCache,
     key: Option<String>,
     token: String,
-    renew: tokio::task::JoinHandle<()>,
+    renew: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl InFlight {
@@ -377,18 +377,25 @@ impl InFlight {
             cache,
             key: Some(key),
             token,
-            renew,
+            renew: Some(renew),
         }
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        self.renew.abort();
+        let renew = self.renew.take();
+        if let Some(r) = &renew {
+            r.abort();
+        }
         let Some(key) = self.key.take() else { return };
         let (cache, token) = (self.cache.clone(), std::mem::take(&mut self.token));
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
+                // A renewal mid-`touch` would write the marker back after the delete.
+                if let Some(r) = renew {
+                    let _ = r.await;
+                }
                 let _ = delete_if_owner(&cache, &key, &token).await;
             });
         }
@@ -397,7 +404,12 @@ impl Drop for InFlight {
 
 async fn release(in_flight: Option<InFlight>) {
     let Some(mut f) = in_flight else { return };
-    f.renew.abort();
+    if let Some(r) = f.renew.as_mut() {
+        r.abort();
+        // Wait it out, or a renewal mid-`touch` revives the marker.
+        let _ = r.await;
+        f.renew = None;
+    }
     if let Some(key) = f.key.as_deref() {
         if let Err(e) = delete_if_owner(&f.cache, key, &f.token).await {
             tracing::warn!(error = %e, "idempotency: in-flight marker not released");
@@ -1371,6 +1383,78 @@ mod tests {
             .unwrap();
         assert_eq!(body_string(r).await, "call-0:");
         assert_eq!(counter.load(Ordering::SeqCst), 1, "the handler ran twice");
+    }
+
+    /// `touch` blocks the worker between its read and its write, as a sync
+    /// disk write does, so `abort` can't stop the write.
+    struct SlowTouch(BoxedCache, std::sync::mpsc::SyncSender<()>);
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for SlowTouch {
+        async fn get(&self, key: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.0.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.0.set(key, value, ttl).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), crate::cache::CacheError> {
+            self.0.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, crate::cache::CacheError> {
+            self.0.exists(key).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.0.clear().await
+        }
+        async fn touch(
+            &self,
+            key: &str,
+            _ttl: Option<Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            let Some(v) = self.0.get(key).await? else {
+                return Ok(false);
+            };
+            let _ = self.1.try_send(());
+            std::thread::sleep(Duration::from_millis(200));
+            self.0.set(key, &v, None).await?;
+            Ok(true)
+        }
+    }
+
+    /// Hold a marker whose renewal is mid-`touch`, free it, and read it back.
+    async fn marker_after_free_during_renewal(by_drop: bool) -> Option<String> {
+        let inner = cache();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let slow: BoxedCache = StdArc::new(SlowTouch(inner.clone(), tx));
+        let key = "idem:x:inflight".to_owned();
+        inner.set(&key, "sha:t", None).await.unwrap();
+        let held = InFlight::hold(slow, key.clone(), "sha:t".into(), Duration::from_millis(20));
+        // Free it once the renewal is inside `touch`.
+        tokio::task::spawn_blocking(move || rx.recv().unwrap())
+            .await
+            .unwrap();
+        if by_drop {
+            drop(held);
+        } else {
+            release(Some(held)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        inner.get(&key).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renewal_in_flight_does_not_revive_a_released_marker() {
+        assert_eq!(marker_after_free_during_renewal(false).await, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renewal_in_flight_does_not_revive_a_dropped_marker() {
+        assert_eq!(marker_after_free_during_renewal(true).await, None);
     }
 
     #[tokio::test]
