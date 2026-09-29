@@ -6,8 +6,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — lockouts that never lock, and unchecked JWT revocation, are flagged (#1809)
 
-A lockout on `NullCache` now warns at the first login and in `check --deploy`
-(new `Cache::stores_nothing`). `JwtBackend` without a JTI store warns once when
+A lockout on `NullCache` now warns at the first login, and in `check --deploy` when
+the manage binary installs the lockout (new `Cache::stores_nothing`). `JwtBackend` without a JTI store warns once when
 it accepts a revocable token.
 
 ### Security — admin TOTP enrollment codes are rate limited (#1791)
@@ -17,9 +17,9 @@ like a wrong code at sign-in.
 
 ### Security — FileCache `add` has one winner over an expired key (#1811)
 
-Replacing or clearing an entry now holds an advisory lock (`.lock-XX` files in the
-cache dir), so idempotency keys, `DistributedLock` and lockouts on `FileCache` no
-longer let two callers win.
+`set`, `add`, `incr`, `touch` and expired-entry clears now hold an advisory lock
+(owner-only `.lock-XX` files in the cache dir), so `add` has one winner and lockout
+counts are not lost. A held lock is waited for off the async worker, for up to 5 s.
 
 ### Security — OAuth2 success bodies are capped (#1793)
 

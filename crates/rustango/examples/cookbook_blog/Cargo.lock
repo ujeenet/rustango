@@ -1953,6 +1953,7 @@ dependencies = [
  "http-body-util",
  "indexmap",
  "inventory",
+ "libc",
  "password-hash",
  "rand 0.8.8",
  "reqwest",

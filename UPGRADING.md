@@ -162,7 +162,9 @@ Failed TOTP confirms on `/account/totp` add to the same per-user lock as failed 
 ### FileCache keeps lock files in its directory
 
 `FileCache` now creates up to 256 `.lock-XX` files next to its entries. `clear`
-leaves them; don't count directory files as entries.
+leaves them; don't count directory files as entries. A write that waits over 5 s
+for a lock now fails. Where the filesystem has no file locks, writes run unlocked
+after one `rustango::cache` warning.
 
 ### OAuth2 responses are capped at 1 MiB
 
