@@ -127,6 +127,8 @@ async fn handle(cfg: Arc<BodyLimitLayer>, req: Request<Body>, next: Next) -> Res
 }
 
 /// Whether a body read failed on a size cap, not on the stream.
+// Its callers (ViewSet, idempotency) are behind their own features.
+#[cfg_attr(not(feature = "admin"), allow(dead_code))]
 pub(crate) fn over_cap(e: &axum::Error) -> bool {
     let mut err: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(e) = err {

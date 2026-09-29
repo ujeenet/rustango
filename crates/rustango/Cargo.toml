@@ -75,7 +75,7 @@ postgres = ["sqlx/postgres", "sqlx/tls-rustls"]
 # can still use `rustango::manage::Cli::new().api(...).run().await`.
 # v0.16+. Default-on so `cargo rustango new` projects work with no
 # extra opt-ins.
-manage = ["_axum", "runtime"]
+manage = ["_axum", "_http_layers", "runtime"]
 
 # Test-only constructors for downstream live tests. Currently
 # unlocks `Tenant::for_test(org, conn)` so tenancy-aware crates
@@ -131,10 +131,14 @@ _async_trait  = ["dep:async-trait"]
 _base64       = ["dep:base64"]
 # The three that always travel together for cookie/token signing.
 _signing      = ["_base64", "dep:hmac", "dep:sha2"]
+# The request middleware (`cors`, `body_limit`, `security_headers`, …): `manage`
+# mounts them from `[server]`/`[security]` settings without `admin` (#1739).
+_http_layers  = ["_axum", "_tower", "dep:http-body-util"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
-config = ["dep:toml"]
+# `signals`: `test_settings` fires `setting_changed` (#1739).
+config = ["dep:toml", "signals"]
 
 # Public forms framework (`rustango::forms`) — value parsing for HTML
 # form payloads, shared between admin and user route handlers. Slice
@@ -344,7 +348,8 @@ api_keys = ["dep:argon2", "dep:password-hash", "_rand"]
 
 # Generic password helpers (`rustango::passwords`) — argon2id hash/verify
 # + minimal strength check. Standalone alternative to tenancy::password.
-passwords = ["dep:argon2", "dep:password-hash"]
+# `getrandom` for the salt's `OsRng`; other features only got it through `rand` (#1739).
+passwords = ["dep:argon2", "dep:password-hash", "password-hash/getrandom"]
 
 # Signed URL helpers (`rustango::signed_url`) — HMAC-SHA256 signed URLs
 # with optional expiry. For magic-link login, password resets, etc.
@@ -396,6 +401,7 @@ admin = [
     # so no admin/tenancy build can compile a login without it.
     "cache",
     "_axum",
+    "_http_layers",
     "_tera",
     "_signing",
     # `manage create-admin` (slice B) prompts for a password
@@ -498,7 +504,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.59.1", path = "../rustango-macros" }
+rustango-macros = { version = "0.59.2", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

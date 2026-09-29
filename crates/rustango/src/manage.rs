@@ -534,6 +534,8 @@ impl Cli {
         // is explicitly `false` (e.g. dev_settings.toml for local HTTP).
         // Process-wide so the operator + tenant consoles honor it without
         // per-Builder wiring; first call wins, like the other boot globals.
+        // Same gate as `crate::session`: without it there is no cookie to mark.
+        #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
         let _ = crate::session::set_secure_cookies(s.security.secure_cookies.unwrap_or(true));
 
         // #1609 / #1732 — login limits and the hash-slot wait; code-side config wins.
