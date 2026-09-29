@@ -133,29 +133,35 @@ async fn send(app: &Router, req: Request<Body>) -> axum::response::Response {
     app.clone().oneshot(req).await.unwrap()
 }
 
-/// `Tenant<Sqlite>` resolves on the pure stack and takes its deferred
-/// connection from the tenant's pool (#1802).
+/// `Tenant<Sqlite>` resolves on the pure stack; `t.pool()` and the
+/// deferred `pool_conn()` both reach the tenant's database (#1802).
 #[tokio::test]
 async fn tenant_extractor_reads_the_database_tenant_context() {
     use rustango::extractors::Tenant;
+    use rustango::sql::CounterPool as _;
+    use rustango::tenancy::agents::Agent;
 
     let _g = SUITE.lock().await;
     let env = boot().await;
+    rustango::tenancy::create_agent_pool(&env.tenant, "bot")
+        .await
+        .expect("agent");
     let app = env.mount_db(Router::new().route(
         "/",
         axum::routing::get(|mut t: Tenant<sqlx::Sqlite>| async move {
+            let via_pool = Agent::objects().count(t.pool()).await.expect("t.pool()");
             let conn = t.pool_conn().await.expect("deferred conn");
-            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_agents")
+            let via_conn: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_agents")
                 .fetch_one(&mut **conn)
                 .await
-                .expect("tenant table");
-            format!("{}:{n}", t.org.slug)
+                .expect("pool_conn()");
+            format!("{}:{via_pool}:{via_conn}", t.org.slug)
         }),
     ));
     let r = send(&app, Request::get("/").body(Body::empty()).unwrap()).await;
     assert_eq!(r.status(), axum::http::StatusCode::OK);
     let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
-    assert_eq!(std::str::from_utf8(&b).unwrap(), "acme:0");
+    assert_eq!(std::str::from_utf8(&b).unwrap(), "acme:1:1");
 }
 
 #[cfg(feature = "mcp")]

@@ -19,8 +19,8 @@ use sqlx::Database;
 
 use crate::sql::sqlx;
 use crate::tenancy::{
-    session::SessionSecret, ChainResolver, DatabasePools, DefaultTenantDb, Org, OrgResolver,
-    TenancyError, TenantConn, TenantPools,
+    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, OrgResolver, TenancyError,
+    TenantConn, TenantPools,
 };
 
 /// What the [`Tenant`] extractor reads from request extensions.
@@ -50,22 +50,14 @@ enum TenantConnCell<DB: Database> {
     /// A connection is held: always on Postgres, and on the other
     /// backends after the first `pool_conn` or `into_conn` call.
     Ready(TenantConn<DB>),
-    /// No connection yet; take one from these pools when asked.
+    /// No connection yet; take one from the tenant's pool, the same
+    /// one [`Tenant::pool`] erases, when asked.
     ///
     /// Only the SQLite and MySQL extractors build this variant, so a
     /// Postgres-only build never constructs it, but the arms that
     /// match it still have to compile.
     #[cfg_attr(not(any(feature = "sqlite", feature = "mysql")), allow(dead_code))]
-    Deferred(ConnSource<DB>),
-}
-
-/// The pools a deferred connection comes from: the context the
-/// extractor found on the request.
-#[cfg_attr(not(any(feature = "sqlite", feature = "mysql")), allow(dead_code))]
-enum ConnSource<DB: Database> {
-    Tenant(Arc<TenantPools<DB>>),
-    /// The pure SQLite / MySQL stack's `DatabaseTenantContext` (#1802).
-    Database(Arc<DatabasePools<DB>>),
+    Deferred(sqlx::Pool<DB>),
 }
 
 /// Finds the request's tenant and gives the handler a connection
@@ -114,17 +106,11 @@ impl<DB: Database> Tenant<DB> {
     /// Take a connection if none is held yet. Does nothing once the
     /// cell is `Ready`, which on Postgres it always is.
     async fn ensure_conn(&mut self) -> Result<(), TenancyError> {
-        let conn = match &self.conn {
+        let pool = match &self.conn {
             TenantConnCell::Ready(_) => return Ok(()),
-            TenantConnCell::Deferred(ConnSource::Tenant(pools)) => {
-                pools.database_acquire(&self.org).await?
-            }
-            TenantConnCell::Deferred(ConnSource::Database(pools)) => {
-                let pool = pools.pool_for_org(&self.org).await?;
-                TenantConn::database(pool.pool().acquire().await?)
-            }
+            TenantConnCell::Deferred(pool) => pool.clone(),
         };
-        self.conn = TenantConnCell::Ready(conn);
+        self.conn = TenantConnCell::Ready(TenantConn::database(pool.acquire().await?));
         Ok(())
     }
 
@@ -251,7 +237,8 @@ impl IntoResponse for TenantRejection {
             Self::MissingContext => ApiError::logged(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "extractors::tenant",
-                "rustango::server::Builder did not run — Tenant extractor cannot find TenantContext",
+                "rustango::server::Builder did not run — Tenant extractor cannot find \
+                 TenantContext or DatabaseTenantContext",
             ),
             Self::NotFound => ApiError::not_found("tenant not found"),
             Self::Internal(msg) => {
@@ -338,36 +325,43 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let internal = |e: TenancyError| TenantRejection::Internal(e.to_string());
-    if let Some(ctx) = parts.extensions.get::<Arc<TenantContext<DB>>>().cloned() {
+    let (org, pool) = if let Some(ctx) = parts.extensions.get::<Arc<TenantContext<DB>>>().cloned() {
         let org = ctx
             .resolver
             .resolve(parts, &ctx.pools.registry_pool())
             .await
             .map_err(internal)?
             .ok_or(TenantRejection::NotFound)?;
-        let pool = ctx.pools.scoped_pool_dyn(&org).await.map_err(internal)?;
-        return Ok(Tenant {
-            org,
-            conn: TenantConnCell::Deferred(ConnSource::Tenant(Arc::clone(&ctx.pools))),
-            pool,
-        });
-    }
-    let ctx = parts
-        .extensions
-        .get::<Arc<super::DatabaseTenantContext<DB>>>()
-        .ok_or(TenantRejection::MissingContext)?
-        .clone();
-    let org = ctx
-        .resolver
-        .resolve(parts, &ctx.registry)
-        .await
-        .map_err(internal)?
-        .ok_or(TenantRejection::NotFound)?;
-    let pool = ctx.pools.pool_for_org(&org).await.map_err(internal)?;
+        // Rejects a schema-mode org, which needs Postgres.
+        #[cfg_attr(not(feature = "postgres"), allow(irrefutable_let_patterns))]
+        let crate::tenancy::TenantPool::Database { pool } = ctx
+            .pools
+            .database_pool_for_org(&org)
+            .await
+            .map_err(internal)?
+        else {
+            unreachable!("database_pool_for_org rejects schema-mode")
+        };
+        (org, (*pool).clone())
+    } else {
+        let ctx = parts
+            .extensions
+            .get::<Arc<super::DatabaseTenantContext<DB>>>()
+            .ok_or(TenantRejection::MissingContext)?
+            .clone();
+        let org = ctx
+            .resolver
+            .resolve(parts, &ctx.registry)
+            .await
+            .map_err(internal)?
+            .ok_or(TenantRejection::NotFound)?;
+        let pool = ctx.pools.pool_for_org(&org).await.map_err(internal)?;
+        (org, pool.pool().clone())
+    };
     Ok(Tenant {
         org,
-        conn: TenantConnCell::Deferred(ConnSource::Database(Arc::clone(&ctx.pools))),
-        pool: crate::sql::Pool::from(pool.pool().clone()),
+        pool: crate::sql::Pool::from(pool.clone()),
+        conn: TenantConnCell::Deferred(pool),
     })
 }
 
