@@ -265,7 +265,7 @@ impl LoginThrottle {
 
 async fn check_lock(key: &str) -> Result<(), LoginRefused> {
     let lockout = crate::account_lockout::shared();
-    crate::account_lockout::warn_once_if_process_local(lockout);
+    crate::account_lockout::warn_once_on_weak_store(lockout);
     if lockout.is_locked(key).await {
         return Err(LoginRefused::Throttled {
             retry_after_secs: lockout.lock_duration().as_secs().max(1),

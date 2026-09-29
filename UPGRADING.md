@@ -150,6 +150,22 @@ untouched.
 
 ## Unreleased
 
+### `Cache::stores_nothing`
+
+New provided method, `true` only on `NullCache`. A wrapper cache should forward it,
+like `is_process_local`, or a lockout behind it is not flagged.
+
+### Wrong enrollment codes count toward the admin lockout
+
+Failed TOTP confirms on `/account/totp` add to the same per-user lock as failed logins.
+
+### FileCache keeps lock files in its directory
+
+`FileCache` now creates up to 256 `.lock-XX` files next to its entries. `clear`
+leaves them; don't count directory files as entries. A write that waits over 5 s
+for a lock now fails. Where the filesystem has no file locks, writes run unlocked
+after one `rustango::cache` warning.
+
 ### OAuth2 responses are capped at 1 MiB
 
 An IdP discovery, token or userinfo body over 1 MiB is now an error.

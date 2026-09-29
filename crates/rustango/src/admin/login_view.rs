@@ -635,6 +635,55 @@ async fn totp_enroll_form(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// Report a code check to the login gate. Only a wrong, non-empty code
+/// counts; `None` (no check made) gives the tokens back.
+#[cfg(feature = "totp")]
+async fn settle_code(attempt: crate::login_throttle::LoginAttempt, ok: Option<bool>, code: &str) {
+    match (ok, code.is_empty()) {
+        (Some(true), _) => attempt.succeeded().await,
+        (Some(false), false) => attempt.failed().await,
+        _ => attempt.prompted().await,
+    }
+}
+
+/// Re-enroll: a current code first, then stage a fresh secret.
+#[cfg(feature = "totp")]
+async fn totp_reenroll(
+    state: &AppState,
+    session: &super::session::AdminSession,
+    attempt: crate::login_throttle::LoginAttempt,
+    code: &str,
+) -> Response {
+    use super::totp_store::Reenroll;
+    let s = crate::totp::TotpSecret::generate();
+    let started =
+        super::totp_store::start_reenrollment(&state.pool, session.user_id, code, &s).await;
+    let ok = match &started {
+        Ok(Reenroll::Verified) => Some(true),
+        Ok(Reenroll::Refused) => Some(false),
+        _ => None,
+    };
+    settle_code(attempt, ok, code).await;
+    let refused = match started {
+        Ok(Reenroll::Refused) => Some("Enter a current code from your authenticator to re-enroll."),
+        Ok(_) => None,
+        Err(_) => Some("Could not start re-enrollment — please try again."),
+    };
+    if let Some(msg) = refused {
+        return Html(render_totp_enroll(state, true, "", "", Some(msg), None)).into_response();
+    }
+    let otpauth = enroll_otpauth(state, &session.username, &s);
+    Html(render_totp_enroll(
+        state,
+        false,
+        &s.to_base32(),
+        &otpauth,
+        None,
+        None,
+    ))
+    .into_response()
+}
+
 #[cfg(feature = "totp")]
 async fn totp_enroll_submit(
     State(state): State<AppState>,
@@ -646,51 +695,22 @@ async fn totp_enroll_submit(
     };
     let _ = super::totp_store::ensure_table(&state.pool).await;
 
-    // Re-enroll: a current code first, then stage a fresh secret. The
-    // code goes through the login gate, so it cannot be brute-forced.
+    // Every code here goes through the login gate, so none can be brute-forced.
+    let attempt = match crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Admin,
+            &ip,
+            &session.username,
+        )
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
+
+    let code = form.totp_code.as_deref().unwrap_or("").trim();
     if form.reset.is_some() {
-        let attempt = match crate::login_throttle::shared()
-            .begin(
-                &crate::login_throttle::LoginScope::Admin,
-                &ip,
-                &session.username,
-            )
-            .await
-        {
-            Ok(a) => a,
-            Err(refused) => return refused.into_response(),
-        };
-        let s = crate::totp::TotpSecret::generate();
-        let code = form.totp_code.as_deref().unwrap_or("").trim();
-        let started =
-            super::totp_store::start_reenrollment(&state.pool, session.user_id, code, &s).await;
-        use super::totp_store::Reenroll;
-        // Only a real code guess counts; the other arms give the tokens back.
-        match (&started, code.is_empty()) {
-            (Ok(Reenroll::Verified), _) => attempt.succeeded().await,
-            (Ok(Reenroll::Refused), false) => attempt.failed().await,
-            _ => attempt.prompted().await,
-        }
-        let refused = match started {
-            Ok(Reenroll::Refused) => {
-                Some("Enter a current code from your authenticator to re-enroll.")
-            }
-            Ok(_) => None,
-            Err(_) => Some("Could not start re-enrollment — please try again."),
-        };
-        if let Some(msg) = refused {
-            return Html(render_totp_enroll(&state, true, "", "", Some(msg), None)).into_response();
-        }
-        let otpauth = enroll_otpauth(&state, &session.username, &s);
-        return Html(render_totp_enroll(
-            &state,
-            false,
-            &s.to_base32(),
-            &otpauth,
-            None,
-            None,
-        ))
-        .into_response();
+        return totp_reenroll(&state, &session, attempt, code).await;
     }
 
     // Confirm: verify the submitted code against the pending secret.
@@ -700,6 +720,7 @@ async fn totp_enroll_submit(
         .as_ref()
         .and_then(super::totp_store::AdminTotp::pending_secret);
     let Some(secret) = pending else {
+        settle_code(attempt, None, code).await;
         return Html(render_totp_enroll(
             &state,
             false,
@@ -710,7 +731,6 @@ async fn totp_enroll_submit(
         ))
         .into_response();
     };
-    let code = form.totp_code.as_deref().unwrap_or("").trim();
     // Confirms and redeems in one write, so the confirming code cannot
     // sign in again and a failed write does not burn it.
     let confirmed = if code.is_empty() {
@@ -718,6 +738,7 @@ async fn totp_enroll_submit(
     } else {
         super::totp_store::confirm_with_code(&state.pool, session.user_id, &secret, code).await
     };
+    settle_code(attempt, confirmed.as_ref().ok().copied(), code).await;
     if matches!(confirmed, Ok(false)) {
         // Never echo a re-enroll's key: that would hand it to any session.
         let (key, otpauth) = if reenroll {
