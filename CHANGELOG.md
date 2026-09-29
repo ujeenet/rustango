@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — expired API keys are verified before they are refused (#1729)
+
+`ApiKeyBackend` no longer answers an expired key faster than an unknown one.
+`api_keys` hashes through `passwords` and gains `*_async` variants; so does `PasswordHasherChain`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
@@ -34,11 +39,6 @@ once its nonce expires. A `NullCache` nonce store, or a failing one, now warns.
 
 One shared writer for tests that assert on rendered `tracing` output; replaces ten copies.
 Needs the `testkit` and `runtime` features.
-
-### Security — expired API keys are verified before they are refused (#1729)
-
-`ApiKeyBackend` no longer answers an expired key faster than an unknown one.
-`api_keys` hashes through `passwords` and gains `*_async` variants; so does `PasswordHasherChain`.
 
 ## [0.59.5] — 2026-09-29
 

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `ApiKeyError` and `HasherError` gain `Busy`
+
+Both are now `#[non_exhaustive]`; add a `_` arm. From async code use
+`api_keys::{generate_key,hash_secret,verify_key}_async` and `PasswordHasherChain::{hash,verify}_async`.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`
@@ -167,11 +172,6 @@ another backend now gets `MissingContext` instead of resolving from its own cont
 
 A custom cache used as the nonce store should override `add` atomically; the default
 is still `exists` then `set`.
-
-### `ApiKeyError` and `HasherError` gain `Busy`
-
-Both are now `#[non_exhaustive]`; add a `_` arm. From async code use
-`api_keys::{generate_key,hash_secret,verify_key}_async` and `PasswordHasherChain::{hash,verify}_async`.
 
 ## 0.59.5
 
