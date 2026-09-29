@@ -23,6 +23,11 @@ On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView`
 New `audit::update` / `audit::delete` pick the audited path from the schema;
 `audit::update_as` records soft delete and restore under their own operation.
 
+### Security — ViewSet create is audited (#1816)
+
+On an audited model, ViewSet single and bulk create now write one `create` audit
+row per row, in the insert's transaction. New `audit::insert` / `audit::insert_tx`.
+
 ### Security — bulk actions bind keys with the model's PK type (#1817)
 
 **Breaking:** `BulkAction::run` takes a `PkSet` (keys typed from the model's PK)

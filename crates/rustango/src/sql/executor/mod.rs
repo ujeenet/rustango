@@ -1093,6 +1093,77 @@ impl ::core::fmt::Debug for InsertReturningPool {
     }
 }
 
+/// The PK of the row `q` just inserted: the submitted value when the PK
+/// column is in the INSERT, else the database-generated one.
+pub(crate) fn inserted_pk(
+    q: &InsertQuery,
+    returning: crate::sql::InsertReturningPool,
+    pk_field: &crate::core::FieldSchema,
+) -> SqlValue {
+    match q.columns.iter().position(|c| *c == pk_field.column) {
+        Some(i) => q.values[i].clone(),
+        None => generated_pk(returning, pk_field),
+    }
+}
+
+/// Read a generated PK out of an INSERT's RETURNING, or MySQL's
+/// `LAST_INSERT_ID()`.
+fn generated_pk(
+    returning: crate::sql::InsertReturningPool,
+    pk_field: &crate::core::FieldSchema,
+) -> SqlValue {
+    #[allow(unused_variables)]
+    {
+        match returning {
+            #[cfg(feature = "postgres")]
+            crate::sql::InsertReturningPool::PgRow(row) => {
+                use crate::sql::sqlx::Row as _;
+                match pk_field.ty {
+                    crate::core::FieldType::I64 => {
+                        SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0))
+                    }
+                    crate::core::FieldType::I32 => {
+                        SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0))
+                    }
+                    crate::core::FieldType::I16 => {
+                        SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0))
+                    }
+                    crate::core::FieldType::String => {
+                        SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
+                    }
+                    _ => SqlValue::Null,
+                }
+            }
+            #[cfg(feature = "mysql")]
+            crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
+                crate::core::FieldType::I64 => SqlValue::I64(id),
+                crate::core::FieldType::I32 => SqlValue::I32(id as i32),
+                crate::core::FieldType::I16 => SqlValue::I16(id as i16),
+                _ => SqlValue::I64(id),
+            },
+            #[cfg(feature = "sqlite")]
+            crate::sql::InsertReturningPool::SqliteRow(row) => {
+                use crate::sql::sqlx::Row as _;
+                match pk_field.ty {
+                    crate::core::FieldType::I64 => {
+                        SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0))
+                    }
+                    crate::core::FieldType::I32 => {
+                        SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0))
+                    }
+                    crate::core::FieldType::I16 => {
+                        SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0))
+                    }
+                    crate::core::FieldType::String => {
+                        SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
+                    }
+                    _ => SqlValue::Null,
+                }
+            }
+        }
+    }
+}
+
 /// `UPDATE` against either backend; returns rows affected.
 ///
 /// # Errors

@@ -106,6 +106,20 @@ async fn viewset_update_and_delete_are_audited(pool: &Pool) {
     assert_eq!(ops(pool, "delete").await, 1);
 }
 
+/// Single and bulk create each write one `create` row (#1816).
+async fn viewset_create_is_audited(pool: &Pool) {
+    let app =
+        || rustango::viewset::ViewSet::for_model(Doc::SCHEMA).router_pool("/docs", pool.clone());
+    let one = r#"{"title":"n"}"#.to_owned();
+    let status = send(app(), Method::POST, "/docs", one, false).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(ops(pool, "create").await, 1);
+    let many = r#"[{"title":"x"},{"title":"y"}]"#.to_owned();
+    let status = send(app(), Method::POST, "/docs", many, false).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(ops(pool, "create").await, 3);
+}
+
 async fn template_views_writes_are_audited(pool: &Pool) {
     use rustango::template_views::{DeleteView, ListView, UpdateView};
     let pks = seed(pool).await;
@@ -168,6 +182,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         viewset_update_and_delete_are_audited,
+        viewset_create_is_audited,
         template_views_writes_are_audited,
         soft_delete_restore_and_purge_are_audited,
     ],

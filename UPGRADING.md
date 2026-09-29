@@ -170,6 +170,11 @@ and restore are recorded as `soft_delete` and `restore`, as on the typed path.
 `soft_delete::restore` now returns 0 for a row that is not deleted, and the
 audited `restore_selected` counts only deleted rows.
 
+### ViewSet create writes audit rows
+
+On an audited model, ViewSet `POST` (single and bulk) now writes a `create` audit
+row per row. A single create on such a model now runs in a transaction.
+
 ### `BulkAction` takes a `PkSet` (breaking)
 
 `run(&self, pks: &PkSet, pool)` replaces `run(&self, table, &[i64], pool)`. Build

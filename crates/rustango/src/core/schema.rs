@@ -1426,6 +1426,12 @@ pub trait Model: Sized + Send + Sync + 'static {
     fn __rustango_audited_delete() -> Option<crate::audit::AuditedDelete> {
         None
     }
+
+    /// Audited `create` recorder for a schema-driven insert (#1816).
+    #[doc(hidden)]
+    fn __rustango_audited_create() -> Option<crate::audit::AuditedCreate> {
+        None
+    }
 }
 
 /// Inventory entry submitted by the `#[derive(Model)]` macro for each model.
@@ -1441,6 +1447,7 @@ pub struct ModelEntry {
     pub module_path: &'static str,
     audited_update: fn() -> Option<crate::audit::AuditedUpdate>,
     audited_delete: fn() -> Option<crate::audit::AuditedDelete>,
+    audited_create: fn() -> Option<crate::audit::AuditedCreate>,
 }
 
 impl ModelEntry {
@@ -1452,6 +1459,7 @@ impl ModelEntry {
             module_path,
             audited_update: || None,
             audited_delete: || None,
+            audited_create: || None,
         }
     }
 
@@ -1464,6 +1472,16 @@ impl ModelEntry {
     ) -> Self {
         self.audited_update = update;
         self.audited_delete = delete;
+        self
+    }
+
+    /// The model's audited `create` recorder (#1816).
+    #[must_use]
+    pub const fn with_audited_create(
+        mut self,
+        create: fn() -> Option<crate::audit::AuditedCreate>,
+    ) -> Self {
+        self.audited_create = create;
         self
     }
 
@@ -1485,6 +1503,12 @@ impl ModelEntry {
     #[must_use]
     pub fn audited_delete(&self) -> Option<crate::audit::AuditedDelete> {
         (self.audited_delete)()
+    }
+
+    /// Audited `create` recorder, `None` for a model without audit.
+    #[must_use]
+    pub fn audited_create(&self) -> Option<crate::audit::AuditedCreate> {
+        (self.audited_create)()
     }
 
     /// App label for this model: the `#[rustango(app = "...")]`

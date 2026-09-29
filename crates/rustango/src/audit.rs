@@ -1391,6 +1391,81 @@ pub type AuditedDelete = for<'a> fn(
     Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
 >;
 
+/// Audited `create` recorder, through `Model::__rustango_audited_create`:
+/// re-reads the new row by PK in the insert's transaction and emits its entry.
+pub type AuditedCreate = for<'a, 't> fn(
+    &'a mut crate::sql::PoolTx<'t>,
+    crate::core::SqlValue,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), crate::sql::ExecError>> + Send + 'a>,
+>;
+
+/// Emit a `Create` entry for the row with primary key `pk`, read in `tx`.
+///
+/// # Errors
+/// As the re-read SELECT and the emit.
+pub async fn record_create<M>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    pk: crate::core::SqlValue,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<(), crate::sql::ExecError>
+where
+    M: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let rows: Vec<M> = rows_in_tx(tx, model, pk_in(model, vec![pk])?, false).await?;
+    let entries: Vec<PendingEntry> = rows.iter().map(&entry).collect();
+    emit_many_tx(tx, &entries).await
+}
+
+fn audited_create(query: &crate::core::InsertQuery) -> Option<AuditedCreate> {
+    crate::core::ModelEntry::for_schema(query.model).and_then(|e| e.audited_create())
+}
+
+/// Run `query` and return the new row's PK, writing a `create` audit row
+/// in the same transaction when its model is audited (#1816).
+///
+/// # Errors
+/// As [`crate::sql::insert_returning_pool`], plus the audit write.
+pub async fn insert(
+    pool: &crate::sql::Pool,
+    query: &crate::core::InsertQuery,
+    pk_field: &crate::core::FieldSchema,
+) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
+    if audited_create(query).is_none() {
+        let returning = crate::sql::insert_returning_pool(pool, query).await?;
+        return Ok(crate::sql::inserted_pk(query, returning, pk_field));
+    }
+    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let pk = insert_tx(&mut tx, query, pk_field).await?;
+    tx.commit().await?;
+    Ok(pk)
+}
+
+/// [`insert`] inside an open transaction.
+///
+/// # Errors
+/// As [`crate::sql::insert_returning_tx`], plus the audit write.
+pub async fn insert_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &crate::core::InsertQuery,
+    pk_field: &crate::core::FieldSchema,
+) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
+    let returning = crate::sql::insert_returning_tx(tx, query).await?;
+    let pk = crate::sql::inserted_pk(query, returning, pk_field);
+    if let Some(record) = audited_create(query) {
+        record(tx, pk.clone()).await?;
+    }
+    Ok(pk)
+}
+
 /// Run `query`, auditing each row when its model is audited (#1794). The
 /// choke point for schema-driven writes that have no `M` to call.
 ///
