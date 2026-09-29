@@ -1419,6 +1419,13 @@ pub trait Model: Sized + Send + Sync + 'static {
     fn __rustango_audited_update() -> Option<crate::audit::AuditedUpdate> {
         None
     }
+
+    /// Audited runner for a `DeleteQuery` built from a queryset, such as
+    /// `Prunable` (#1782).
+    #[doc(hidden)]
+    fn __rustango_audited_delete() -> Option<crate::audit::AuditedDelete> {
+        None
+    }
 }
 
 /// Inventory entry submitted by the `#[derive(Model)]` macro for each model.

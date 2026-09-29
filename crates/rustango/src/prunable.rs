@@ -114,6 +114,10 @@ where
 {
     Box::pin(async move {
         let query = T::prune_queryset().compile_delete()?;
+        // Audited models audit each pruned row (#1782).
+        if let Some(run) = T::__rustango_audited_delete() {
+            return run(pool, &query).await;
+        }
         delete_pool(pool, &query).await
     })
 }

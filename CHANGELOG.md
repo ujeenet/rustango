@@ -4,6 +4,47 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.3] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — flat `values_list` reads NULL the same on every backend (#1773)
+
+**Breaking:** `pluck`, `pks`, `value` and `values_list_flat().fetch/first`
+now take a sealed `FlatScalar` type; a NULL into a bare `i64` errors
+naming the column (SQLite returned `0`), `Option<i64>` gives `None`.
+Your own newtypes can no longer be the flat `U`.
+
+### Security — warn when login defences are per process (#1534)
+
+The first login on an in-memory account lockout logs a warning and
+`check --deploy` notes it; `JwtAuth` warns when revocation uses
+`InMemoryJtiStore`. New `Cache::is_process_local` (true for `FileCache`)
+and `JtiStore::is_process_local` report it.
+
+### Security — pruning an audited model audits each row (#1782)
+
+`prune_all` on an audited model now deletes through the audited path, one
+`delete` entry per row. Rows removed by FK cascades are still not audited.
+
+### Security — admin bulk actions check each row (#1762)
+
+`delete_selected` and `restore_selected` now run the per-row `delete` /
+`change` hook on every selected row; one refused row refuses the action
+with `403`, as Django does. Only rows that were read and checked are written.
+
+### Security — idempotency holds a key while its request runs (#1724)
+
+A retry with the same `Idempotency-Key` while the first request runs now
+gets `409` with `Retry-After` instead of running the handler twice. The
+marker lives `lock_ttl` (60 s default) so a crash can't wedge the key.
+A response over `body_cap` now reaches the client whole instead of empty.
+The marker is renewed while the handler runs and only its owner frees it;
+a run that stored just before the marker was won is replayed, not re-run.
+`FileCache::add` is now atomic across processes. Admin bulk actions audit
+exactly the rows they write. `FileCache::set` replaces the file atomically,
+so a renewal no longer shows readers an empty marker; `add` works without
+hard links.
 ## [0.59.2] — 2026-09-29
 
 Tagged only; not published to crates.io.

@@ -52,7 +52,8 @@
 //! retries keeps the same key.
 //!
 //! A reused key with a different request body gets `422`. A body over
-//! [`IdempotencyLayer::body_cap`] gets `413`.
+//! [`IdempotencyLayer::body_cap`] gets `413`. A retry that arrives while
+//! the first request still runs gets `409` with `Retry-After`.
 //!
 //! [`IdempotencyLayer::scope`]: crate::idempotency::IdempotencyLayer::scope
 //! [`IdempotencyLayer::cache_status_codes`]: crate::idempotency::IdempotencyLayer::cache_status_codes
@@ -61,7 +62,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::{to_bytes, Body};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{OriginalUri, Request};
 use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HOST, SET_COOKIE};
 use axum::http::request::Parts;
@@ -97,6 +98,7 @@ pub struct IdempotencyLayer {
     ttl: Duration,
     methods: Arc<Vec<Method>>,
     body_cap: usize,
+    lock_ttl: Duration,
     cache_status: Arc<dyn Fn(StatusCode) -> bool + Send + Sync>,
 }
 
@@ -117,6 +119,7 @@ impl IdempotencyLayer {
                 Method::DELETE,
             ]),
             body_cap: DEFAULT_BODY_CAP,
+            lock_ttl: Duration::from_secs(60),
             cache_status: Arc::new(|s| s.is_success()),
         }
     }
@@ -152,10 +155,18 @@ impl IdempotencyLayer {
 
     /// Largest request or response body the layer handles, 4 MiB by
     /// default. A keyed request over it gets `413`; a response over it is
-    /// not stored.
+    /// sent whole but not stored.
     #[must_use]
     pub fn body_cap(mut self, n: usize) -> Self {
         self.body_cap = n;
+        self
+    }
+
+    /// How long a running request holds its key, 60 seconds by default.
+    /// A retry meanwhile gets `409`; the TTL frees the key if the process dies.
+    #[must_use]
+    pub fn lock_ttl(mut self, ttl: Duration) -> Self {
+        self.lock_ttl = ttl;
         self
     }
 
@@ -239,30 +250,65 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
 
     // Hit: replay the stored response, if it answered this same body.
     if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
-        if stored.request_sha256 != request_sha256 {
-            return ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "idempotency_key_reused",
-                "idempotency key was used with a different request body",
-            )
-            .into_response();
-        }
-        return rebuild(stored);
+        return replay(stored, &request_sha256);
     }
 
-    // Miss: run the handler, then store the result if it succeeded.
+    // Miss: hold the in-flight marker, so a retry during this run can't run the handler too.
+    let lock_key = format!("{cache_key}:inflight");
+    let token = format!("{request_sha256}:{}", uuid::Uuid::new_v4().simple());
+    let in_flight = match cfg.cache.add(&lock_key, &token, Some(cfg.lock_ttl)).await {
+        Ok(true) => {
+            let held = InFlight::hold(cfg.cache.clone(), lock_key, token, cfg.lock_ttl);
+            // A run may have stored and released between the read above and the add.
+            if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
+                release(Some(held)).await;
+                return replay(stored, &request_sha256);
+            }
+            Some(held)
+        }
+        Ok(false) => {
+            // The first run may have stored its answer since the read above.
+            if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
+                return replay(stored, &request_sha256);
+            }
+            let holder = cfg.cache.get(&lock_key).await.ok().flatten();
+            if holder.is_some_and(|t| marker_sha(&t) != request_sha256) {
+                return key_reused();
+            }
+            return in_progress();
+        }
+        Err(e) => {
+            // Fail open like the read and the write: a cache outage must not stop writes.
+            tracing::warn!(error = %e, cache_key, "idempotency: in-flight marker failed");
+            None
+        }
+    };
+
     let response = next
         .run(Request::from_parts(parts, Body::from(req_bytes)))
         .await;
     let (parts, body) = response.into_parts();
     let status = parts.status;
-    let bytes = match to_bytes(body, cfg.body_cap).await {
-        Ok(b) => b,
+    let bytes = match collect_capped(body, cfg.body_cap).await {
+        Ok(Ok(b)) => b,
+        Ok(Err(whole)) => {
+            // Too large to store: send it all, and a retry runs the handler again.
+            tracing::warn!(
+                cache_key,
+                "idempotency: response over body_cap, so it is not stored"
+            );
+            release(in_flight).await;
+            return Response::from_parts(parts, whole);
+        }
         Err(_) => {
-            // Body too large, or the stream broke. The original is
-            // already consumed, so return an empty body and store
-            // nothing.
-            return Response::from_parts(parts, Body::empty());
+            // The stream broke; the client gets a 500, not a truncated body.
+            release(in_flight).await;
+            return ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "response body could not be read",
+            )
+            .into_response();
         }
     };
 
@@ -296,8 +342,171 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             }
         }
     }
+    // Released after the store, so a waiting retry finds the stored answer.
+    release(in_flight).await;
 
     Response::from_parts(parts, Body::from(bytes))
+}
+
+/// The in-flight marker, valued `<body sha>:<nonce>` so only its owner renews
+/// or deletes it. Dropping it (panic, cancelled request) frees the key.
+struct InFlight {
+    cache: BoxedCache,
+    key: Option<String>,
+    token: String,
+    renew: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl InFlight {
+    /// Hold the marker, renewing it every `ttl / 2` while the handler runs.
+    fn hold(cache: BoxedCache, key: String, token: String, ttl: Duration) -> Self {
+        let renew = tokio::spawn({
+            let (cache, key, token) = (cache.clone(), key.clone(), token.clone());
+            async move {
+                let every = (ttl / 2).max(Duration::from_millis(10));
+                loop {
+                    tokio::time::sleep(every).await;
+                    if cache.get(&key).await.ok().flatten().as_deref() != Some(token.as_str()) {
+                        return;
+                    }
+                    let _ = cache.touch(&key, Some(ttl)).await;
+                }
+            }
+        });
+        Self {
+            cache,
+            key: Some(key),
+            token,
+            renew: Some(renew),
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let renew = self.renew.take();
+        if let Some(r) = &renew {
+            r.abort();
+        }
+        let Some(key) = self.key.take() else { return };
+        let (cache, token) = (self.cache.clone(), std::mem::take(&mut self.token));
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                // A renewal mid-`touch` would write the marker back after the delete.
+                if let Some(r) = renew {
+                    let _ = r.await;
+                }
+                let _ = delete_if_owner(&cache, &key, &token).await;
+            });
+        }
+    }
+}
+
+async fn release(in_flight: Option<InFlight>) {
+    let Some(mut f) = in_flight else { return };
+    if let Some(r) = f.renew.as_mut() {
+        r.abort();
+        // Wait it out, or a renewal mid-`touch` revives the marker.
+        let _ = r.await;
+        f.renew = None;
+    }
+    if let Some(key) = f.key.as_deref() {
+        if let Err(e) = delete_if_owner(&f.cache, key, &f.token).await {
+            tracing::warn!(error = %e, "idempotency: in-flight marker not released");
+        }
+    }
+    // Cleared only now, so a delete cancelled above is retried by `Drop`.
+    f.key = None;
+}
+
+/// Delete the marker only while it holds `token`, so a late run can't free a
+/// newer run's key. Get-then-delete: the `Cache` trait has no compare-and-delete.
+async fn delete_if_owner(
+    cache: &BoxedCache,
+    key: &str,
+    token: &str,
+) -> Result<(), crate::cache::CacheError> {
+    if cache.get(key).await?.as_deref() == Some(token) {
+        cache.delete(key).await?;
+    }
+    Ok(())
+}
+
+/// The request-body hash a marker carries.
+fn marker_sha(token: &str) -> &str {
+    token.split_once(':').map_or(token, |(sha, _)| sha)
+}
+
+/// Replay `stored` if it answered this body, else `422`.
+fn replay(stored: StoredResponse, request_sha256: &str) -> Response<Body> {
+    if stored.request_sha256 != request_sha256 {
+        return key_reused();
+    }
+    rebuild(stored)
+}
+
+/// Read a body up to `cap`. `Ok(Err(body))` gives back the whole body when it is larger.
+async fn collect_capped(mut body: Body, cap: usize) -> Result<Result<Bytes, Body>, axum::Error> {
+    use http_body_util::BodyExt;
+    let mut buf = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let Ok(data) = frame?.into_data() else {
+            continue;
+        };
+        if buf.len() + data.len() > cap {
+            buf.extend_from_slice(&data);
+            return Ok(Err(Body::new(Prefixed {
+                head: Some(Bytes::from(buf)),
+                rest: body,
+            })));
+        }
+        buf.extend_from_slice(&data);
+    }
+    Ok(Ok(Bytes::from(buf)))
+}
+
+/// The bytes already read, then the rest of the stream.
+struct Prefixed {
+    head: Option<Bytes>,
+    rest: Body,
+}
+
+impl http_body::Body for Prefixed {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, axum::Error>>> {
+        if let Some(head) = self.head.take() {
+            return std::task::Poll::Ready(Some(Ok(http_body::Frame::data(head))));
+        }
+        std::pin::Pin::new(&mut self.rest).poll_frame(cx)
+    }
+}
+
+fn key_reused() -> Response<Body> {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_reused",
+        "idempotency key was used with a different request body",
+    )
+    .into_response()
+}
+
+fn in_progress() -> Response<Body> {
+    let mut resp = ApiError::new(
+        StatusCode::CONFLICT,
+        "idempotency_key_in_use",
+        "a request with this idempotency key is still running",
+    )
+    .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("1"),
+    );
+    resp
 }
 
 /// Feeds length-prefixed fields to SHA-256, so no two field lists hash alike.
@@ -1015,6 +1224,323 @@ mod tests {
         let r = app.oneshot(streamed).await.unwrap();
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// A handler that counts calls and waits for `gate` before it answers.
+    fn gated_app(
+        cache: BoxedCache,
+        counter: StdArc<AtomicUsize>,
+        gate: StdArc<tokio::sync::Notify>,
+    ) -> Router {
+        let handler = move || {
+            let (c, gate) = (counter.clone(), gate.clone());
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                gate.notified().await;
+                format!("call-{n}")
+            }
+        };
+        Router::new()
+            .route("/a", post(handler))
+            .idempotency(IdempotencyLayer::new(cache))
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_key_runs_the_handler_once() {
+        let (counter, gate) = (
+            StdArc::new(AtomicUsize::new(0)),
+            StdArc::new(tokio::sync::Notify::new()),
+        );
+        let app = gated_app(cache(), counter.clone(), gate.clone());
+        let first = tokio::spawn(
+            app.clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap()),
+        );
+        while counter.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let retry = tokio::time::timeout(
+            Duration::from_secs(2),
+            app.clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("a retry during the first run must not wait for the handler")
+        .unwrap();
+        assert_eq!(retry.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            retry
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        let other = app
+            .clone()
+            .oneshot(keyed("/a").body(Body::from("x")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(other.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        gate.notify_one();
+        assert_eq!(body_string(first.await.unwrap().unwrap()).await, "call-0");
+        let replay = app
+            .oneshot(keyed("/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(body_string(replay).await, "call-0");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn panicking_handler_frees_the_key() {
+        let shared = cache();
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let app = Router::new()
+            .route(
+                "/a",
+                post(move || {
+                    let c = c.clone();
+                    async move {
+                        if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                            panic!("first call fails");
+                        }
+                        "ok"
+                    }
+                }),
+            )
+            .idempotency(IdempotencyLayer::new(shared.clone()));
+        let first = tokio::spawn(
+            app.clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap()),
+        );
+        assert!(first.await.unwrap_err().is_panic());
+        // The guard frees the marker on a spawned task.
+        let mut status = StatusCode::CONFLICT;
+        for _ in 0..100 {
+            let r = app
+                .clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            status = r.status();
+            if status != StatusCode::CONFLICT {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Misses the first read of a stored answer, as if another run stored it just after.
+    struct MissFirstRead {
+        inner: BoxedCache,
+        missed: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for MissFirstRead {
+        async fn get(&self, key: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            if !key.ends_with(":inflight") && !self.missed.swap(true, Ordering::SeqCst) {
+                return Ok(None);
+            }
+            self.inner.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.inner.set(key, value, ttl).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), crate::cache::CacheError> {
+            self.inner.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, crate::cache::CacheError> {
+            self.inner.exists(key).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_stored_before_the_marker_is_won_is_replayed() {
+        let (inner, counter) = (cache(), StdArc::new(AtomicUsize::new(0)));
+        let first = counting_app(counter.clone(), IdempotencyLayer::new(inner.clone()))
+            .oneshot(keyed("/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(body_string(first).await, "call-0:");
+        let racing: BoxedCache = StdArc::new(MissFirstRead {
+            inner,
+            missed: false.into(),
+        });
+        let r = counting_app(counter.clone(), IdempotencyLayer::new(racing))
+            .oneshot(keyed("/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "the handler ran twice");
+    }
+
+    /// `touch` blocks the worker between its read and its write, as a sync
+    /// disk write does, so `abort` can't stop the write.
+    struct SlowTouch(BoxedCache, std::sync::mpsc::SyncSender<()>);
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for SlowTouch {
+        async fn get(&self, key: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.0.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.0.set(key, value, ttl).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), crate::cache::CacheError> {
+            self.0.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, crate::cache::CacheError> {
+            self.0.exists(key).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.0.clear().await
+        }
+        async fn touch(
+            &self,
+            key: &str,
+            _ttl: Option<Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            let Some(v) = self.0.get(key).await? else {
+                return Ok(false);
+            };
+            let _ = self.1.try_send(());
+            std::thread::sleep(Duration::from_millis(200));
+            self.0.set(key, &v, None).await?;
+            Ok(true)
+        }
+    }
+
+    /// Hold a marker whose renewal is mid-`touch`, free it, and read it back.
+    async fn marker_after_free_during_renewal(by_drop: bool) -> Option<String> {
+        let inner = cache();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let slow: BoxedCache = StdArc::new(SlowTouch(inner.clone(), tx));
+        let key = "idem:x:inflight".to_owned();
+        inner.set(&key, "sha:t", None).await.unwrap();
+        let held = InFlight::hold(slow, key.clone(), "sha:t".into(), Duration::from_millis(20));
+        // Free it once the renewal is inside `touch`.
+        tokio::task::spawn_blocking(move || rx.recv().unwrap())
+            .await
+            .unwrap();
+        if by_drop {
+            drop(held);
+        } else {
+            release(Some(held)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        inner.get(&key).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renewal_in_flight_does_not_revive_a_released_marker() {
+        assert_eq!(marker_after_free_during_renewal(false).await, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renewal_in_flight_does_not_revive_a_dropped_marker() {
+        assert_eq!(marker_after_free_during_renewal(true).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_stale_release_keeps_a_newer_marker() {
+        let shared = cache();
+        let key = "idem:x:inflight".to_owned();
+        let stale = InFlight::hold(
+            shared.clone(),
+            key.clone(),
+            "sha:old".into(),
+            Duration::from_secs(60),
+        );
+        // The stale marker expired and a retry now holds the key.
+        shared.set(&key, "sha:new", None).await.unwrap();
+        release(Some(stale)).await;
+        assert_eq!(shared.get(&key).await.unwrap().as_deref(), Some("sha:new"));
+    }
+
+    #[tokio::test]
+    async fn a_handler_longer_than_lock_ttl_keeps_its_key() {
+        let (counter, gate) = (
+            StdArc::new(AtomicUsize::new(0)),
+            StdArc::new(tokio::sync::Notify::new()),
+        );
+        let handler = {
+            let (c, gate) = (counter.clone(), gate.clone());
+            move || {
+                let (c, gate) = (c.clone(), gate.clone());
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    gate.notified().await;
+                    "done"
+                }
+            }
+        };
+        let app = Router::new()
+            .route("/a", post(handler))
+            .idempotency(IdempotencyLayer::new(cache()).lock_ttl(Duration::from_millis(200)));
+        let first = tokio::spawn(
+            app.clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap()),
+        );
+        while counter.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        // Without renewal the retry runs the gated handler and never returns.
+        let retry = tokio::time::timeout(
+            Duration::from_secs(2),
+            app.oneshot(keyed("/a").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("the marker expired, so the retry ran the handler")
+        .unwrap();
+        assert_eq!(retry.status(), StatusCode::CONFLICT);
+        gate.notify_one();
+        first.await.unwrap().unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn response_over_cap_is_sent_whole_and_not_stored() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = counting_app(counter.clone(), IdempotencyLayer::new(cache()).body_cap(4));
+        for n in 0..2 {
+            let r = app
+                .clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+            assert!(r.headers().get("idempotent-replayed").is_none());
+            assert_eq!(body_string(r).await, format!("call-{n}:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn capped_collect_gives_back_every_frame() {
+        let whole = Body::new(Prefixed {
+            head: Some(Bytes::from_static(b"abc")),
+            rest: Body::from("defgh"),
+        });
+        let Ok(Err(back)) = collect_capped(whole, 4).await else {
+            panic!("over the cap");
+        };
+        assert_eq!(body_string(Response::new(back)).await, "abcdefgh");
     }
 
     #[tokio::test]

@@ -2315,9 +2315,11 @@ pub(crate) async fn delete_submit(
 ///
 /// `<name>` **must** be in the model's `admin.actions` allowlist; an
 /// unknown name is rejected. The built-in `delete_selected` runs one
-/// `DELETE WHERE pk IN (...)`. With no action or no selected rows,
+/// `DELETE WHERE pk IN (...)` after the per-row `delete` hook allows every
+/// selected row. With no action or no selected rows,
 /// redirect back to the list.
 pub(crate) async fn action_submit(
+    parts: axum::http::request::Parts,
     Path(table): Path<String>,
     State(state): State<AppState>,
     body: axum::body::Bytes,
@@ -2378,13 +2380,40 @@ pub(crate) async fn action_submit(
     // emit records what it ran against. For `delete_selected` this
     // is the only copy of the rows that are about to go.
     let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let before_rows = crate::sql::select_rows_as_json(
+    let mut before_rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery::by_pk_in(model, pk_field.column, pk_values.clone()),
         &action_fields,
     )
-    .await
-    .unwrap_or_default();
+    .await?;
+
+    // The built-ins run the per-row hook, as the single-row pages do. One
+    // refused row refuses the whole action, as Django's `delete_selected` does.
+    let row_perm = match action.as_str() {
+        "delete_selected" => Some("delete"),
+        "restore_selected" => Some("change"),
+        _ => None,
+    };
+    let pk_values = match row_perm {
+        Some(perm) => {
+            if before_rows.iter().any(|row| {
+                !crate::admin::object_permissions::is_allowed(model.table, perm, &parts, Some(row))
+            }) {
+                return Err(AdminError::Forbidden {
+                    table: model.table.to_owned(),
+                    action: perm,
+                });
+            }
+            // Write only the rows that were checked, and audit exactly those.
+            rows_with_pk(&mut before_rows, pk_field)
+        }
+        None => pk_values,
+    };
+    if pk_values.is_empty() {
+        return Ok(
+            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
+        );
+    }
 
     let audit_op = if action == "delete_selected" {
         if model.soft_delete_column.is_some() {
@@ -2520,9 +2549,38 @@ pub(crate) async fn action_submit(
     Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
 }
 
+/// Keep the rows whose PK round-trips and return those PKs, so the rows
+/// a bulk action writes and the rows it audits are the same list.
+fn rows_with_pk(rows: &mut Vec<serde_json::Value>, pk_field: &FieldSchema) -> Vec<SqlValue> {
+    let mut pks = Vec::with_capacity(rows.len());
+    rows.retain(|row| {
+        let pk = render::read_value_as_string_json(row, pk_field)
+            .and_then(|raw| forms::parse_pk_string(pk_field, &raw).ok());
+        pks.extend(pk.clone());
+        pk.is_some()
+    });
+    pks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_with_pk_drops_the_audit_row_with_its_pk() {
+        let pk = FieldSchema::new("id", "id", crate::core::FieldType::I64);
+        let mut rows = vec![
+            serde_json::json!({"id": 1}),
+            serde_json::json!({"id": null}),
+            serde_json::json!({"id": 3}),
+        ];
+        let pks = rows_with_pk(&mut rows, &pk);
+        assert_eq!(pks, vec![SqlValue::I64(1), SqlValue::I64(3)]);
+        assert_eq!(
+            rows,
+            vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 3})]
+        );
+    }
 
     // Post-save redirect routing:
     //   _continue   → detail page

@@ -1994,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.59.2"
+version = "0.59.3"
 dependencies = [
  "argon2",
  "async-trait",
@@ -2006,6 +2006,7 @@ dependencies = [
  "flate2",
  "hmac",
  "http",
+ "http-body",
  "http-body-util",
  "indexmap",
  "inventory",
@@ -2038,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.59.2"
+version = "0.59.3"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

@@ -111,6 +111,12 @@ impl Lockout {
         self.lockout_duration
     }
 
+    /// `true` when the counters live in this process only (an in-memory cache).
+    #[must_use]
+    pub fn is_process_local(&self) -> bool {
+        self.cache.is_process_local()
+    }
+
     /// Check whether `account` is currently locked. Returns `true` to
     /// reject the login attempt; `false` to proceed with verification.
     pub async fn is_locked(&self, account: &str) -> bool {
@@ -335,6 +341,32 @@ pub fn shared() -> &'static Lockout {
 /// one built from `[auth]` settings; `false` if an earlier call won.
 pub fn configure_shared(lockout: Lockout) -> bool {
     SHARED_LOCKOUT.set_explicit(lockout)
+}
+
+/// The login-time warning for a lockout that counts per process.
+#[cfg(feature = "admin")]
+pub(crate) fn process_local_warning(lockout: &Lockout) -> Option<&'static str> {
+    lockout.is_process_local().then_some(
+        "account lockout counts failed logins in process memory, so each replica \
+         allows its own attempts; install a Redis or database cache with \
+         `account_lockout::configure_shared(Lockout::new(cache))` (`[auth] lockout_*` is in-memory)",
+    )
+}
+
+/// `check --deploy` can't run the app's startup code, so it only advises.
+pub(crate) const CHECK_DEPLOY_NOTE: &str =
+    "account lockout: no shared store is installed outside your app's startup; unless it calls \
+     `account_lockout::configure_shared(Lockout::new(cache))` with a Redis or database cache, \
+     each replica counts its own failed logins";
+
+/// Warn once per process, on the first login that meets an in-memory lockout.
+/// At login, not boot, so a lockout the app installs at startup is seen.
+#[cfg(feature = "admin")]
+pub(crate) fn warn_once_if_process_local(lockout: &Lockout) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if let Some(msg) = process_local_warning(lockout) {
+        WARNED.call_once(|| tracing::warn!(target: "rustango::rate_limit", "{msg}"));
+    }
 }
 
 /// The `[auth]` settings lockout; `false` if app code already set one.

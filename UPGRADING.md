@@ -150,6 +150,40 @@ untouched.
 
 ## Unreleased
 
+## 0.59.3
+
+### Flat projections take `FlatScalar` (breaking)
+
+`pluck::<U>`, `pks::<U>`, `value::<U>` and `values_list_flat(..).fetch::<U>`
+accept built-in scalars (integers, floats, `bool`, `String`, `Vec<u8>`,
+`Uuid`, JSON, chrono types) and `Option` of them. Pluck the inner type
+and wrap it for a newtype; use `Option<T>` for a nullable column, which
+now errors into a bare `T` on SQLite too.
+
+### Warnings for per-process login state
+
+The first login logs a warning, and `check --deploy` adds a note, while
+account lockout uses an in-memory or file cache; on more than one replica
+install a shared cache with `account_lockout::configure_shared(Lockout::new(cache))`. For JWT logout,
+set `auth_routes::Config::jti_store`. A custom `Cache` that keeps data in
+process memory should override `is_process_local` to return `true`.
+
+### Pruning audited models
+
+`prune_all` on an audited model now reads and locks the rows and writes one
+audit row each, in one transaction; a model without a primary key errors.
+
+### Admin bulk actions run object-permission hooks
+
+A bulk `delete_selected` / `restore_selected` that includes a row your
+`register_admin_object_permission!` hook refuses now gets `403` and writes nothing.
+
+### Idempotency: concurrent retries get 409
+
+A request whose `Idempotency-Key` is still running gets `409` with
+`Retry-After: 1`; clients should retry. Handlers that run over 60 s need
+`IdempotencyLayer::lock_ttl`. A broken response stream now answers `500`.
+The marker is renewed every `lock_ttl / 2`, so a long handler keeps its key.
 ## 0.59.2
 
 ### Feature graph (#1739)
