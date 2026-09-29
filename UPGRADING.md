@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `HmacAuthLayer::nonce_store` uses `Cache::add`
+
+A custom cache used as the nonce store should override `add` atomically; the default
+is still `exists` then `set`.
+
 ## 0.59.5
 
 ### `Cache::stores_nothing`

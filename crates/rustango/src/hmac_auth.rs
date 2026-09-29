@@ -126,10 +126,18 @@ impl HmacAuthLayer {
     /// **Use a shared backend such as Redis.** An in-process cache
     /// only protects one replica, so a replay sent to another replica
     /// still works. Without this, a captured request can be replayed
-    /// until the `X-Date` window closes.
+    /// until the `X-Date` window closes. A `NullCache` keeps nothing,
+    /// so it is accepted with a warning.
     #[cfg(feature = "cache")]
     #[must_use]
     pub fn nonce_store(mut self, store: Arc<dyn crate::cache::Cache>) -> Self {
+        if store.stores_nothing() {
+            tracing::warn!(
+                target: "rustango::hmac_auth",
+                "HMAC nonce store keeps nothing (`NullCache`), so replay protection is off; \
+                 use a Redis or database cache"
+            );
+        }
         Arc::make_mut(&mut self.inner).nonce_store = Some(store);
         self
     }
@@ -234,25 +242,19 @@ async fn verify_request(
     // Replay defence. It runs only after the signature checks out, so
     // an unauthenticated attacker cannot fill the cache. A signature
     // is unique per method, path, query, date and body, so a replay
-    // carries the same one. `exists` then `set` is not atomic, so two
-    // truly simultaneous copies can race, but the window is tiny and
-    // `X-Date` still bounds it.
+    // carries the same one. `add` claims it in one step, so of two
+    // simultaneous copies only one wins.
     #[cfg(feature = "cache")]
     if let Some(store) = &cfg.nonce_store {
         let nonce_key = format!(
             "hmac_nonce:{}",
             base64::engine::general_purpose::STANDARD.encode(&parsed.signature)
         );
-        match store.exists(&nonce_key).await {
-            Ok(true) => return Err(deny("replayed request")),
-            Ok(false) => {
-                let ttl = std::time::Duration::from_secs(cfg.tolerance_secs);
-                // A failed write does not block the request: auth must
-                // not depend on the cache, and X-Date still bounds it.
-                let _ = store.set(&nonce_key, "1", Some(ttl)).await;
-            }
-            // Same for a failed read. The X-Date check already ran.
-            Err(_) => {}
+        let ttl = std::time::Duration::from_secs(cfg.tolerance_secs);
+        // A cache error does not block the request: auth must not
+        // depend on the cache, and X-Date still bounds a replay.
+        if let Ok(false) = store.add(&nonce_key, "1", Some(ttl)).await {
+            return Err(deny("replayed request"));
         }
     }
 
@@ -527,6 +529,91 @@ mod tests {
         // Replay: same signature, now seen → rejected (shared store).
         let svc = layer.layer(app().into_service::<Body>());
         assert_eq!(svc.oneshot(mk()).await.unwrap().status(), 401);
+    }
+
+    /// A cache whose `exists` is slow, so a check-then-set lets two
+    /// copies through; `add` stays the inner cache's atomic one.
+    #[cfg(feature = "cache")]
+    struct SlowExists(crate::cache::InMemoryCache);
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for SlowExists {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.0.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.0.set(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.0.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            // Read, then stall: the answer goes stale before the caller acts.
+            let seen = self.0.exists(k).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            seen
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.0.clear().await
+        }
+        async fn add(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.0.add(k, v, ttl).await
+        }
+    }
+
+    /// #1828 — two copies of one request sent at once: only one gets in.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn simultaneous_replays_let_only_one_through() {
+        let store = Arc::new(SlowExists(crate::cache::InMemoryCache::new()));
+        let layer = HmacAuthLayer::new(resolver_for("k1", b"secret")).nonce_store(store);
+        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "", b"hello");
+        let send = || {
+            let svc = layer.clone().layer(app().into_service::<Body>());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/r")
+                .header(HEADER_DATE, date.clone())
+                .header(HEADER_AUTH, auth.clone())
+                .body(Body::from("hello"))
+                .unwrap();
+            async move { svc.oneshot(req).await.unwrap().status().as_u16() }
+        };
+        let (a, b) = tokio::join!(send(), send());
+        let mut got = [a, b];
+        got.sort_unstable();
+        assert_eq!(got, [200, 401], "both copies of a replay were accepted");
+    }
+
+    /// #1828 — a nonce store that keeps nothing is not a silent no-op.
+    #[cfg(all(feature = "cache", feature = "runtime"))]
+    #[test]
+    fn a_null_nonce_store_warns() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = HmacAuthLayer::new(resolver_for("k1", b"secret"))
+                .nonce_store(Arc::new(crate::cache::NullCache));
+            let _ = HmacAuthLayer::new(resolver_for("k1", b"secret"))
+                .nonce_store(Arc::new(crate::cache::InMemoryCache::new()));
+        });
+        let out = buf.contents();
+        assert_eq!(out.matches("replay protection is off").count(), 1, "{out}");
+        assert!(out.contains("rustango::hmac_auth"), "{out}");
     }
 
     #[tokio::test]

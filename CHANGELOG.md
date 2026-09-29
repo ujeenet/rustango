@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — HMAC replay check is one atomic `add` (#1828)
+
+Two simultaneous copies of a signed request no longer both pass the nonce store.
+A `NullCache` nonce store now warns, since it turns replay protection off.
+
 ### Added — `testkit::CaptureWriter` (#1829)
 
 One shared writer for tests that assert on rendered `tracing` output; replaces ten copies.
