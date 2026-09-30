@@ -88,6 +88,51 @@ impl JwtClaims {
     pub fn custom_value(&self, key: &str) -> Option<&serde_json::Value> {
         self.custom.get(key)
     }
+
+    /// The user id, if this token may act as a user in `scope` (#1848).
+    ///
+    /// # Errors
+    /// The reason it may not; see [`UserTokenScope`].
+    pub fn user_id_in(&self, scope: UserTokenScope<'_>) -> Result<i64, &'static str> {
+        scope.admits(&self.custom).map(|()| self.sub)
+    }
+}
+
+/// Claim that marks a non-user principal, e.g. an MCP agent (`"agent"`).
+pub const CLAIM_KIND: &str = "kind";
+/// Claim pinning a token to one tenant slug.
+pub const CLAIM_TENANT: &str = "tenant";
+
+/// Where a user access token is presented. The one check that decides
+/// whether its `sub` names a user there (#1848).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UserTokenScope<'a> {
+    /// A resolved tenant: the `tenant` claim must equal this slug.
+    Tenant(&'a str),
+    /// No tenant resolved: only a token with no `tenant` claim.
+    Unscoped,
+}
+
+impl UserTokenScope<'_> {
+    /// Refuses a `kind` token (its `sub` is not a user id) and a tenant
+    /// binding that does not match this scope.
+    pub(crate) fn admits(
+        self,
+        claims: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), &'static str> {
+        if claims.contains_key(CLAIM_KIND) {
+            return Err("token is not a user token");
+        }
+        let bound = claims.get(CLAIM_TENANT);
+        match (self, bound) {
+            (Self::Tenant(slug), Some(v)) if v.as_str() == Some(slug) => Ok(()),
+            (Self::Tenant(_), Some(_)) => Err("token issued for different tenant"),
+            (Self::Tenant(_), None) => Err("token missing tenant binding"),
+            (Self::Unscoped, None) => Ok(()),
+            (Self::Unscoped, Some(_)) => Err("tenant token presented without a tenant"),
+        }
+    }
 }
 
 /// Reserved claim names — caller-supplied custom payloads cannot use

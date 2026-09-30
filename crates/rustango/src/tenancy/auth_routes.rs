@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use crate::extractors::{Tenant, TenantScope};
 use crate::sql::sqlx::Database;
 use crate::sql::FetcherPool as _;
-use crate::tenancy::jwt_lifecycle::JwtLifecycle;
+use crate::tenancy::jwt_lifecycle::{JwtLifecycle, UserTokenScope};
 use crate::tenancy::DefaultTenantDb;
 
 // ---------------------------------------------------------------- Config
@@ -298,26 +298,18 @@ impl JwtAuth {
     ///
     /// All tenants share one signing key, so the `tenant` claim is what
     /// stops a token minted on `acme` being replayed on `sju`. A token
-    /// without that claim is refused.
+    /// without that claim is refused, and so is an MCP agent token.
     pub async fn verify_for_tenant(
         &self,
         bearer: &str,
         expected_slug: &str,
     ) -> Result<i64, &'static str> {
-        let claims = self
-            .0
+        self.0
             .jwt
             .verify_access(bearer)
             .await
-            .ok_or("invalid or expired token")?;
-        let claim_tenant = claims
-            .custom_value("tenant")
-            .and_then(|v| v.as_str())
-            .ok_or("token missing tenant binding")?;
-        if claim_tenant != expected_slug {
-            return Err("token issued for different tenant");
-        }
-        Ok(claims.sub)
+            .ok_or("invalid or expired token")?
+            .user_id_in(UserTokenScope::Tenant(expected_slug))
     }
 }
 
@@ -992,6 +984,21 @@ mod tests {
 
         assert_eq!(a.verify_for_tenant(&token, "acme").await, Ok(1));
         assert!(b.verify_for_tenant(&token, "acme").await.is_err());
+    }
+
+    /// #1848 — an MCP agent token from the same lifecycle is not a user bearer.
+    #[tokio::test]
+    async fn an_agent_token_is_not_a_user_bearer() {
+        let auth = JwtAuth::new(Config {
+            session_secret: Some(vec![7; 32]),
+            ..Config::default()
+        });
+        let mut custom = serde_json::Map::new();
+        custom.insert("tenant".into(), "acme".into());
+        custom.insert("kind".into(), "agent".into());
+        let token = auth.lifecycle().issue_access_with(1, custom).unwrap();
+
+        assert!(auth.verify_for_tenant(&token, "acme").await.is_err());
     }
 
     #[test]

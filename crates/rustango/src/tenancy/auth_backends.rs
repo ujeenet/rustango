@@ -521,14 +521,29 @@ impl JwtBackend {
         Self::new(s.key().to_vec())
     }
 
-    /// Issue a signed JWT for `user_id` valid for `self.ttl_secs`.
+    /// Issue a signed JWT for `user_id` valid for `self.ttl_secs`, with no
+    /// tenant binding: it authenticates only where no tenant is resolved.
     #[must_use]
     pub fn issue(&self, user_id: i64) -> String {
+        self.sign_payload(&serde_json::json!({"sub": user_id, "exp": self.exp()}))
+    }
+
+    /// [`Self::issue`] bound to tenant `slug`, for `require_auth` routes (#1848).
+    #[must_use]
+    pub fn issue_for_tenant(&self, user_id: i64, slug: &str) -> String {
+        let mut payload = serde_json::json!({"sub": user_id, "exp": self.exp()});
+        payload[super::jwt_lifecycle::CLAIM_TENANT] = slug.into();
+        self.sign_payload(&payload)
+    }
+
+    fn exp(&self) -> i64 {
+        chrono::Utc::now().timestamp() + self.ttl_secs
+    }
+
+    fn sign_payload(&self, payload: &serde_json::Value) -> String {
         use base64::Engine;
-        let exp = chrono::Utc::now().timestamp() + self.ttl_secs;
-        let payload = serde_json::json!({"sub": user_id, "exp": exp});
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&payload).unwrap_or_default());
+            .encode(serde_json::to_vec(payload).unwrap_or_default());
         let sig = hmac_sha256(&self.secret, payload_b64.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
         format!("{payload_b64}.{sig_b64}")
@@ -551,7 +566,15 @@ impl JwtBackend {
     /// wire-identical to access tokens, so without this check one
     /// authenticates as a bearer credential with the refresh token's much
     /// longer life — seven days by default (#1402).
-    fn verify_claims(&self, token: &str) -> Option<(i64, Option<String>)> {
+    ///
+    /// The tenant binding and `kind` go through [`UserTokenScope`] (#1848).
+    ///
+    /// [`UserTokenScope`]: super::jwt_lifecycle::UserTokenScope
+    fn verify_claims(
+        &self,
+        token: &str,
+        scope: super::jwt_lifecycle::UserTokenScope<'_>,
+    ) -> Option<(i64, Option<String>)> {
         use base64::Engine;
         use subtle::ConstantTimeEq;
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -592,6 +615,7 @@ impl JwtBackend {
                 return None;
             }
         }
+        scope.admits(payload.as_object()?).ok()?;
         let sub = payload.get("sub")?.as_i64()?;
         let jti = payload
             .get("jti")
@@ -648,7 +672,13 @@ impl AuthBackend for JwtBackend {
             return Ok(None);
         }
 
-        let (user_id, jti) = match self.verify_claims(token) {
+        // All tenants share one key, so a resolved tenant must match the
+        // token's `tenant` claim (#1848).
+        let scope = match parts.extensions.get::<super::TenantSlug>() {
+            Some(slug) => super::jwt_lifecycle::UserTokenScope::Tenant(&slug.0),
+            None => super::jwt_lifecycle::UserTokenScope::Unscoped,
+        };
+        let (user_id, jti) = match self.verify_claims(token, scope) {
             Some(c) => c,
             None => return Err(AuthError::InvalidToken),
         };

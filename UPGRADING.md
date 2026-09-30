@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `JwtBackend` tokens need a `tenant` claim (#1848)
+
+**Breaking:** under `require_auth` a token from `JwtBackend::issue` (no tenant) is refused.
+Mint with `issue_for_tenant(user_id, slug)` or the `JwtAuth` login instead.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

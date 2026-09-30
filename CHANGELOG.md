@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — `JwtBackend` checks the tenant binding (#1848)
+
+**Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,
+so tenant A's user 1 no longer logs in as tenant B's user 1. MCP agent tokens are refused
+by `JwtBackend` and `JwtAuth::verify_for_tenant`. New `JwtBackend::issue_for_tenant`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
