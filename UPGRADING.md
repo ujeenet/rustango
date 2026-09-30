@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `AddColumn` adds the FK and UNIQUE (#1877)
+
+**Breaking:** a migration that adds a `ForeignKey` or `unique` column now creates the constraint,
+so it fails on rows that break it. Columns added by earlier migrations still lack it.
+
 ### UNIQUE constraints are named (#1880)
 
 `CREATE TABLE` writes `CONSTRAINT <table>_<column>_key UNIQUE (<column>)`; PG names do not change.

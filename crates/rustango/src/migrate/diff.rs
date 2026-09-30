@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use super::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
+use super::snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
 
 fn default_index_method_diff() -> String {
     "btree".to_owned()
@@ -817,6 +817,14 @@ fn render_changes_split_inner(
                 }
             }
             SchemaChange::DropColumn { table, column } => {
+                // SQLite refuses to drop an indexed column; AddColumn's
+                // unique index is the one this renderer creates (#1877).
+                if dialect.name() == "sqlite" {
+                    out.immediate.push(format!(
+                        "DROP INDEX IF EXISTS {}",
+                        dialect.quote_ident(&super::ddl::unique_constraint_name(table, column)),
+                    ));
+                }
                 out.immediate.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     dialect.quote_ident(table),
@@ -849,6 +857,19 @@ fn render_changes_split_inner(
                     ));
                 }
                 out.immediate.push(add_column_sql(table, f, dialect));
+                // CREATE TABLE's UNIQUE and FK, which a bare ADD COLUMN lacks (#1877).
+                if f.unique && !f.primary_key {
+                    let name = super::ddl::unique_constraint_name(table, column);
+                    out.immediate
+                        .push(dialect.add_unique_constraint_sql(table, &name, column));
+                }
+                if let Some(rel) =
+                    f.fk.as_ref()
+                        .filter(|_| !dialect.inline_fks_in_create_table())
+                {
+                    out.deferred_fks
+                        .push(field_fk_sql(table, column, rel, dialect, schema));
+                }
             }
             SchemaChange::DropTable(name) => {
                 // CASCADE is Postgres-only — MySQL's parser rejects the
@@ -1406,17 +1427,7 @@ fn create_table_sql_from_snapshot_with_dialect(
         // FK graphs resolve across the whole migration batch.
         if dialect.inline_fks_in_create_table() {
             if let Some(rel) = &f.fk {
-                let _ = write!(
-                    sql,
-                    " REFERENCES {} ({})",
-                    dialect.quote_ident(&rel.to),
-                    dialect.quote_ident(&rel.on),
-                );
-                // #1549 — the declared action, or the constraint lands as
-                // NO ACTION and a declared cascade becomes a refusal.
-                if let Some(action) = &rel.on_delete {
-                    let _ = write!(sql, " ON DELETE {action}");
-                }
+                sql.push_str(&inline_references(rel, dialect));
             }
         }
     }
@@ -1454,22 +1465,8 @@ fn constraints_sql_from_snapshot(
         .fields
         .iter()
         .filter_map(|f| {
-            f.fk.as_ref().map(|rel| {
-                let constraint = format!("{}_{}_fkey", t.name, f.column);
-                let mut s = format!(
-                    "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-                    dialect.quote_ident(&constraint),
-                    dialect.quote_ident(&f.column),
-                    fk_target(dialect, schema, &rel.to),
-                    dialect.quote_ident(&rel.on),
-                );
-                // #1549 — this is the path system migrations take, and
-                // it was silently dropping the declared action.
-                if let Some(action) = &rel.on_delete {
-                    let _ = write!(s, " ON DELETE {action}");
-                }
-                s
-            })
+            f.fk.as_ref()
+                .map(|rel| field_fk_sql(&t.name, &f.column, rel, dialect, schema))
         })
         .collect();
     for cf in &t.composite_fks {
@@ -1484,6 +1481,45 @@ fn constraints_sql_from_snapshot(
         ));
     }
     out
+}
+
+/// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
+fn inline_references(rel: &RelationSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    let mut s = format!(
+        " REFERENCES {} ({})",
+        dialect.quote_ident(&rel.to),
+        dialect.quote_ident(&rel.on),
+    );
+    // #1549 — the declared action, or the constraint lands as
+    // NO ACTION and a declared cascade becomes a refusal.
+    if let Some(action) = &rel.on_delete {
+        let _ = write!(s, " ON DELETE {action}");
+    }
+    s
+}
+
+/// `ALTER TABLE … ADD CONSTRAINT <table>_<column>_fkey FOREIGN KEY …`.
+fn field_fk_sql(
+    table: &str,
+    column: &str,
+    rel: &RelationSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> String {
+    let mut s = format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        dialect.quote_ident(table),
+        dialect.quote_ident(&format!("{table}_{column}_fkey")),
+        dialect.quote_ident(column),
+        fk_target(dialect, schema, &rel.to),
+        dialect.quote_ident(&rel.on),
+    );
+    // #1549 — this is the path system migrations take, and
+    // it was silently dropping the declared action.
+    if let Some(action) = &rel.on_delete {
+        let _ = write!(s, " ON DELETE {action}");
+    }
+    s
 }
 
 /// Render a column `DEFAULT` expression for CREATE TABLE / ADD COLUMN.
@@ -1535,6 +1571,12 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
             let _ = write!(sql, "{col_q} <= {max}");
         }
         sql.push(')');
+    }
+    // SQLite cannot `ADD CONSTRAINT`; its FK rides on the column (#1877).
+    if dialect.inline_fks_in_create_table() {
+        if let Some(rel) = &f.fk {
+            sql.push_str(&inline_references(rel, dialect));
+        }
     }
     sql
 }

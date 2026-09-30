@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `AddColumn` keeps the field's FK and UNIQUE (#1877)
+
+As `CREATE TABLE` does; SQLite gets inline `REFERENCES` and a unique index.
+
 ### Fixed — removing `unique` works for long table and column names (#1880)
 
 Every UNIQUE is named by one 63-byte helper (PG's rule), so the drop finds it.

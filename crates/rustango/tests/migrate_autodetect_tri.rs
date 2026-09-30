@@ -8,7 +8,10 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::migrate::{make_migrations_from, migrate_pool_with_ledger, SchemaSnapshot};
+use rustango::migrate::{
+    make_migrations_from, migrate_pool_with_ledger, render_changes_split_with_dialect,
+    SchemaChange, SchemaSnapshot,
+};
 use rustango::sql::{raw_execute_pool, Pool};
 use rustango::testkit::matrix::drop_table;
 use rustango::{by_dialect, tri_dialect_test};
@@ -29,6 +32,10 @@ fn col(name: &str, ty: &str, extra: Value) -> Value {
         f.as_object_mut().unwrap().extend(m);
     }
     f
+}
+
+fn fk(to: &str) -> Value {
+    json!({"fk": {"kind": "fk", "to": to, "on": "id", "on_delete": "CASCADE"}})
 }
 
 fn table(name: &str, fields: Vec<Value>) -> Value {
@@ -71,7 +78,7 @@ impl Chain {
     }
 }
 
-/// `sql` with `{name}` placeholders quoted by the pool's dialect.
+/// `sql` with each `{}` replaced by the next name, quoted by the dialect.
 fn q(pool: &Pool, sql: &str, names: &[&str]) -> String {
     let mut out = sql.to_owned();
     for n in names {
@@ -85,6 +92,17 @@ async fn exec(pool: &Pool, sql: &str, names: &[&str]) -> Result<(), String> {
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Render `changes` for the pool's dialect and run them, as `unapply` would.
+async fn apply_ops(pool: &Pool, changes: &[SchemaChange]) -> Result<(), String> {
+    let b = render_changes_split_with_dialect(changes, &SchemaSnapshot::default(), pool.dialect())?;
+    for sql in b.immediate.iter().chain(&b.deferred_fks) {
+        raw_execute_pool(pool, sql, Vec::new())
+            .await
+            .map_err(|e| format!("{sql}: {e}"))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- #1880
@@ -144,4 +162,83 @@ async fn unique_drops_on_long_names(pool: &Pool) {
     .expect("no longer unique");
 }
 
-tri_dialect_test!(setup: no_setup, scenarios: [unique_drops_on_long_names]);
+// ---------------------------------------------------------------- #1877
+
+/// A new FK column references its target and a new unique column is
+/// unique. Both used to land as a bare `ADD COLUMN`.
+async fn add_column_keeps_fk_and_unique(pool: &Pool) {
+    let (a, b) = ("mad_ac_author", "mad_ac_book");
+    let chain = Chain::new(pool, "ac", &[b, a]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), table(b, vec![id()])]}),
+        )
+        .await
+        .expect("initial");
+    chain
+        .step(
+            pool,
+            json!({"tables": [
+                table(a, vec![id()]),
+                table(b, vec![id(),
+                    col("author_id", "i64", fk(a)),
+                    col("email", "string", json!({"max_length": 64, "unique": true}))]),
+            ]}),
+        )
+        .await
+        .expect("AddColumn applies");
+
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 'x')",
+        &[b, "id", "author_id", "email"],
+    )
+    .await
+    .expect("a valid row");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, 'x')",
+            &[b, "id", "email"]
+        )
+        .await
+        .is_err(),
+        "the added column is UNIQUE on {}",
+        pool.dialect().name()
+    );
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (3, 99)",
+            &[b, "id", "author_id"]
+        )
+        .await
+        .is_err(),
+        "the added column REFERENCES its target on {}",
+        pool.dialect().name()
+    );
+
+    // The rollback: unapply inverts each AddColumn to a DropColumn.
+    let drop = |c: &str| SchemaChange::DropColumn {
+        table: b.into(),
+        column: c.into(),
+    };
+    let undo = by_dialect! { pool,
+        postgres => vec![drop("email"), drop("author_id")],
+            because "DROP COLUMN takes its constraints with it",
+        mysql => vec![drop("email")],
+            because "MySQL refuses to drop a column an FK still uses (1828), a separate gap",
+        sqlite => vec![drop("email"), drop("author_id")],
+            because "the unique index is dropped first, or SQLite refuses the column",
+    };
+    apply_ops(pool, &undo.value).await.expect(undo.why);
+}
+
+tri_dialect_test!(
+    setup: no_setup,
+    scenarios: [unique_drops_on_long_names, add_column_keeps_fk_and_unique]
+);
