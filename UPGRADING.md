@@ -163,12 +163,14 @@ reading `Extension<AdminSession>` now see the tenant user instead of nothing.
 ### Queryset hooks apply beyond the list
 
 **Breaking:** a `register_admin_queryset!` hook now also limits by-pk pages, actions,
-autocomplete and facets; rows it filters out are 404 there, and skipped by actions.
+autocomplete, facets and inline child rows; rows it filters out are 404 there, and
+skipped by actions.
 
 ### Hidden admin fields are not written
 
 **Breaking:** an admin create now omits `editable = false` fields and fields outside
 `fieldsets`, so a NOT NULL one needs a `default`, as `readonly_fields` already did.
+A natural (non-auto) primary key left out of `fieldsets` can no longer be set on create.
 
 ### MySQL: `Uuid` is hyphenated text
 
