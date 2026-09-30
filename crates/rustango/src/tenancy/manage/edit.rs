@@ -116,7 +116,8 @@ where
         // This process holds no server's pools (#1882).
         writeln!(
             w,
-            "  running servers switch to the new URL within {} s (their tenant cache TTL)",
+            "  running servers switch to the new URL within {} s (their tenant cache TTL); \
+             a secret rotated behind the same reference needs a restart",
             crate::tenancy::resolver::CACHE_TTL.as_secs()
         )?;
     }

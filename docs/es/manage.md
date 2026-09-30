@@ -856,9 +856,11 @@ Los valores se validan como los valida `create-tenant`: un patrón de host que
 lleve puerto, o un prefijo de ruta que el resolver nunca podría producir, se
 rechaza en lugar de guardarse para luego no emparejar nunca en silencio.
 
-Rotar `--database-url` desaloja el pool cacheado del tenant, de modo que la
-siguiente petición reconecta con la nueva credencial; los demás cambios dejan
-en paz las conexiones calientes.
+Rotar `--database-url` cambia la URL guardada. Cada servidor cambia en 30 s,
+cuando se refresca su caché de tenants; los demás cambios dejan en paz las
+conexiones calientes. Un secreto rotado tras la **misma** referencia (vault,
+variable de entorno) no cambia nada guardado: reinicia los servidores o
+invalida el pool del tenant en cada uno.
 
 ### `test-tenant-connection <url> [flags]`
 
@@ -899,6 +901,11 @@ borra la fila `Org` dejando la base, no hace absolutamente nada
 cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
+
+Con varios servidores, desactiva primero (`drop-tenant`) y espera 30 s. Un
+servidor cuya caché aún tiene un tenant en modo schema mantiene
+`search_path = <schema>, public`; al borrar el schema, sus consultas caen en
+`public` hasta que la caché se refresca.
 
 ### `list-tenants`
 

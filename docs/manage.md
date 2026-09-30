@@ -962,9 +962,11 @@ Values are validated the way `create-tenant` validates them, so a host
 pattern carrying a port, or a path prefix the resolver could never
 produce, is refused rather than stored to silently never match.
 
-Rotating `--database-url` evicts the tenant's cached pool, so the next
-request reconnects with the new credential; other edits leave warm
-connections alone.
+Rotating `--database-url` changes the stored URL. Every server switches
+within 30 s, when its tenant cache refreshes; other edits leave warm
+connections alone. A secret rotated behind the **same** reference (vault,
+env var) changes nothing stored: restart the servers, or invalidate the
+tenant's pool on each one.
 
 ### `test-tenant-connection <url> [flags]`
 
@@ -1004,6 +1006,11 @@ remove the `Org` row and leave the database behind, it does nothing at all
 cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
+
+With several servers, deactivate first (`drop-tenant`) and wait 30 s. A
+server whose tenant cache still holds a schema-mode tenant keeps
+`search_path = <schema>, public`; once the schema is dropped, its queries
+fall through to `public` until the cache refreshes.
 
 ### `list-tenants`
 

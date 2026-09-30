@@ -871,9 +871,12 @@ Werte werden so validiert, wie `create-tenant` sie validiert: ein Host-Muster
 mit Port oder ein Pfad-Präfix, das der Resolver nie erzeugen könnte, wird
 abgelehnt statt gespeichert, um dann stillschweigend nie zu matchen.
 
-Ein Rotieren von `--database-url` verwirft den zwischengespeicherten Pool des
-Tenants, sodass die nächste Anfrage mit der neuen Zugangsinformation
-verbindet; andere Änderungen lassen warme Verbindungen unangetastet.
+Ein Rotieren von `--database-url` ändert die gespeicherte URL. Jeder Server
+wechselt binnen 30 s, wenn sein Tenant-Cache aufgefrischt wird; andere
+Änderungen lassen warme Verbindungen unangetastet. Ein Secret, das hinter
+**derselben** Referenz rotiert wird (Vault, Env-Var), ändert nichts
+Gespeichertes: Server neu starten oder den Pool des Tenants auf jedem
+Server invalidieren.
 
 ### `test-tenant-connection <url> [flags]`
 
@@ -916,6 +919,11 @@ Datenbank stehen, er tut gar nichts (tenancy/manage/tenants.rs:479).
 cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
+
+Bei mehreren Servern erst deaktivieren (`drop-tenant`) und 30 s warten. Ein
+Server, dessen Tenant-Cache noch einen Schema-Mode-Tenant hält, behält
+`search_path = <schema>, public`; nach dem Löschen des Schemas fallen seine
+Abfragen bis zur Cache-Auffrischung auf `public` durch.
 
 ### `list-tenants`
 
