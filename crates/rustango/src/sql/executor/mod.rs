@@ -178,9 +178,8 @@ where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     {
         let select = self.compile()?;
-        let stmt = Postgres.compile_select(&select)?;
-        let sql = inject_total_count(&stmt.sql);
-        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
+        let stmt = paginated_statement(&Postgres, &select)?;
+        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
         for value in stmt.params {
             q = bind_query(q, value);
         }
@@ -249,7 +248,7 @@ where
 }
 
 mod page;
-use page::inject_total_count;
+use page::paginated_statement;
 pub use page::Page;
 
 // PG `_on` CRUD family — see pg_on.rs.
@@ -989,6 +988,39 @@ pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecErr
     Ok(())
 }
 
+/// `INSERT` that skips a duplicate: `Ok(true)` when the row went in,
+/// `Ok(false)` when a unique key already held it. `query.on_conflict` is
+/// replaced with `DoNothing`.
+///
+/// # Errors
+/// [`ExecError`] if the query is invalid or the driver rejects it.
+pub async fn insert_or_ignore(pool: &Pool, query: &InsertQuery) -> Result<bool, ExecError> {
+    let query = InsertQuery {
+        on_conflict: Some(crate::core::ConflictClause::DoNothing),
+        ..query.clone()
+    };
+    query.validate()?;
+    let stmt = pool.dialect().compile_insert(&query)?;
+    match pool {
+        // A skip reports one affected row here too (CLIENT_FOUND_ROWS),
+        // so read the insert id the conflict clause sets instead.
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            crate::test_assertions::query_counter::bump();
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            let done = q.execute(my).await?;
+            Ok(done.rows_affected() > 0
+                && done.last_insert_id() != crate::sql::mysql::SKIPPED_INSERT_ID)
+        }
+        #[allow(unreachable_patterns)]
+        _ => Ok(execute_pool(pool, &stmt.sql, stmt.params).await? > 0),
+    }
+}
+
 /// `INSERT` that returns the new row's data, on any backend. The
 /// result shape differs per backend, so callers `match` on
 /// [`InsertReturningPool`].
@@ -996,12 +1028,10 @@ pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecErr
 /// Postgres and SQLite use `INSERT … RETURNING` and give back the
 /// whole row, with every requested column.
 ///
-/// MySQL has no `RETURNING`, so it runs the INSERT and then
-/// `SELECT LAST_INSERT_ID()` on the **same connection** —
-/// `LAST_INSERT_ID()` is per-connection, and a fresh checkout could
-/// see another task's value. It can only report one auto-increment
-/// value, so `query.returning` must name exactly one column, the
-/// model's `Auto<T>` PK.
+/// MySQL has no `RETURNING`, so it reads the insert id from the INSERT's
+/// own reply. That is one auto-increment value, so `query.returning` must
+/// name exactly one column, the model's `Auto<T>` PK. A skipped
+/// `DoNothing` is `RowNotFound` on every backend.
 ///
 /// # Errors
 /// - [`ExecError::EmptyReturning`] when `query.returning` is empty.
@@ -1024,34 +1054,7 @@ pub async fn insert_returning_pool(
             Ok(InsertReturningPool::PgRow(row))
         }
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            // Plain INSERT, then LAST_INSERT_ID() on the same
-            // checked-out connection.
-            let plain = InsertQuery {
-                model: query.model,
-                columns: query.columns.clone(),
-                values: query.values.clone(),
-                returning: ::std::vec::Vec::new(),
-                on_conflict: query.on_conflict.clone(),
-            };
-            let stmt = pool.dialect().compile_insert(&plain)?;
-            let mut conn = my.acquire().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            q.execute(&mut *conn).await?;
-            use sqlx::Row as _;
-            let row = sqlx::query("SELECT LAST_INSERT_ID()")
-                .fetch_one(&mut *conn)
-                .await?;
-            // sqlx decodes LAST_INSERT_ID() as u64; surfaced as i64 to
-            // match `Auto<T>`. The conversion only fails above 2^63.
-            let id_u64: u64 = row.try_get::<u64, _>(0)?;
-            let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
-            Ok(InsertReturningPool::MySqlAutoId(id))
-        }
+        Pool::Mysql(my) => insert_mysql_auto_id(my, query).await,
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
             // SQLite 3.35+ has `INSERT … RETURNING`, so this mirrors
@@ -1090,6 +1093,36 @@ impl ::core::fmt::Debug for InsertReturningPool {
             Self::SqliteRow(_) => f.debug_tuple("SqliteRow").field(&"<SqliteRow>").finish(),
         }
     }
+}
+
+/// Run `query` without RETURNING and take the id from its own OK packet.
+/// `SELECT LAST_INSERT_ID()` would read session state an earlier skip left.
+#[cfg(feature = "mysql")]
+async fn insert_mysql_auto_id<'c, E>(
+    exec: E,
+    query: &InsertQuery,
+) -> Result<InsertReturningPool, ExecError>
+where
+    E: sqlx::Executor<'c, Database = sqlx::MySql>,
+{
+    let plain = InsertQuery {
+        returning: ::std::vec::Vec::new(),
+        ..query.clone()
+    };
+    let stmt = super::mysql::DIALECT.compile_insert(&plain)?;
+    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+        sqlx::query(&stmt.sql);
+    for v in stmt.params {
+        q = bind_query_my(q, v);
+    }
+    let done = q.execute(exec).await?;
+    // A skipped `DoNothing` inserted no row, as RETURNING shows elsewhere.
+    if done.last_insert_id() == crate::sql::mysql::SKIPPED_INSERT_ID {
+        return Err(sqlx::Error::RowNotFound.into());
+    }
+    // `Auto<T>` is i64; ids above 2^63 cannot occur below the skip marker.
+    let id = i64::try_from(done.last_insert_id()).unwrap_or(i64::MAX);
+    Ok(InsertReturningPool::MySqlAutoId(id))
 }
 
 /// The PK of the row `q` just inserted: the submitted value when the PK
@@ -1464,9 +1497,7 @@ pub async fn insert_tx(tx: &mut PoolTx<'_>, query: &InsertQuery) -> Result<(), E
     Ok(())
 }
 
-/// [`insert_returning_pool`] inside an open transaction. On MySQL the
-/// INSERT and `SELECT LAST_INSERT_ID()` share the transaction's
-/// connection, so the id is right even under concurrent inserts.
+/// [`insert_returning_pool`] inside an open transaction.
 ///
 /// # Errors
 /// As [`insert_returning_pool`].
@@ -1489,29 +1520,7 @@ pub async fn insert_returning_tx(
                     Ok(InsertReturningPool::PgRow(row))
                 }
                 #[cfg(feature = "mysql")]
-                PoolTx::Mysql(t) => {
-                    let plain = InsertQuery {
-                        model: query.model,
-                        columns: query.columns.clone(),
-                        values: query.values.clone(),
-                        returning: ::std::vec::Vec::new(),
-                        on_conflict: query.on_conflict.clone(),
-                    };
-                    let stmt = super::mysql::DIALECT.compile_insert(&plain)?;
-                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                        sqlx::query(&stmt.sql);
-                    for v in stmt.params {
-                        q = bind_query_my(q, v);
-                    }
-                    q.execute(&mut **t).await?;
-                    use sqlx::Row as _;
-                    let row = sqlx::query("SELECT LAST_INSERT_ID()")
-                        .fetch_one(&mut **t)
-                        .await?;
-                    let id_u64: u64 = row.try_get::<u64, _>(0)?;
-                    let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
-                    Ok(InsertReturningPool::MySqlAutoId(id))
-                }
+                PoolTx::Mysql(t) => insert_mysql_auto_id(&mut **t, query).await,
                 #[cfg(feature = "sqlite")]
                 PoolTx::Sqlite(t) => {
                     let stmt = super::sqlite::DIALECT.compile_insert(query)?;
@@ -2198,8 +2207,8 @@ where
 {
     crate::test_assertions::query_counter::bump();
     let select = qs.compile()?;
-    let stmt = pool.dialect().compile_select(&select)?;
-    let sql = inject_total_count(&stmt.sql);
+    let stmt = paginated_statement(pool.dialect(), &select)?;
+    let sql = stmt.sql;
 
     match pool {
         #[cfg(feature = "postgres")]

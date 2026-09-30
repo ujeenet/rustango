@@ -11,7 +11,7 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
 use super::writers::{
@@ -432,6 +432,7 @@ impl Dialect for Sqlite {
     fn write_conflict_clause(
         &self,
         sql: &mut String,
+        _model: &ModelSchema,
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {
@@ -642,7 +643,7 @@ mod tests {
     fn conflict_clause_do_nothing() {
         let mut sql = String::new();
         Sqlite
-            .write_conflict_clause(&mut sql, &ConflictClause::DoNothing)
+            .write_conflict_clause(&mut sql, &MODEL, &ConflictClause::DoNothing)
             .unwrap();
         assert_eq!(sql, " ON CONFLICT DO NOTHING");
     }
@@ -653,6 +654,7 @@ mod tests {
         Sqlite
             .write_conflict_clause(
                 &mut sql,
+                &MODEL,
                 &ConflictClause::DoUpdate {
                     target: vec!["user_id", "codename"],
                     update_columns: vec!["granted"],
@@ -665,70 +667,72 @@ mod tests {
         );
     }
 
+    use crate::core::{ModelScope, WhereExpr};
+
+    static FIELDS: &[crate::core::FieldSchema] = &[crate::core::FieldSchema {
+        name: "id",
+        column: "id",
+        ty: FieldType::I64,
+        nullable: false,
+        primary_key: true,
+        relation: None,
+        max_length: None,
+        min: None,
+        max: None,
+        default: None,
+        auto: false,
+        auto_now: false,
+        unique: false,
+        generated_as: None,
+        help_text: None,
+        choices: None,
+        db_comment: None,
+        verbose_name: None,
+        editable: true,
+        blank: false,
+        case_insensitive: false,
+        fk_on_delete: None,
+        validators: &[],
+    }];
+    static MODEL: ModelSchema = ModelSchema {
+        name: "demo",
+        table: "demo",
+        fields: FIELDS,
+        display: None,
+        app_label: None,
+        admin: None,
+        soft_delete_column: None,
+        permissions: false,
+        audit_track: None,
+        m2m: &[],
+        indexes: &[],
+        check_constraints: &[],
+        exclusion_constraints: &[],
+        default_permissions: &[],
+        composite_relations: &[],
+        generic_relations: &[],
+        scope: ModelScope::Tenant,
+        default_order: &[],
+        is_view: false,
+        verbose_name: None,
+        verbose_name_plural: None,
+        managed: true,
+        db_table_comment: None,
+        default_related_name: None,
+        base_manager_name: None,
+        required_db_vendor: None,
+        required_db_features: &[],
+        order_with_respect_to: None,
+        proxy: false,
+        get_latest_by: None,
+        extra_permissions: &[],
+        global_scopes: &[],
+    };
+
     #[test]
     fn compile_select_smoke_test() {
         // Build a minimal SelectQuery and assert the SQL emission
         // looks like SQLite.
-        use crate::core::{ModelSchema, ModelScope, SelectQuery, WhereExpr};
-        static FIELDS: &[crate::core::FieldSchema] = &[crate::core::FieldSchema {
-            name: "id",
-            column: "id",
-            ty: FieldType::I64,
-            nullable: false,
-            primary_key: true,
-            relation: None,
-            max_length: None,
-            min: None,
-            max: None,
-            default: None,
-            auto: false,
-            auto_now: false,
-            unique: false,
-            generated_as: None,
-            help_text: None,
-            choices: None,
-            db_comment: None,
-            verbose_name: None,
-            editable: true,
-            blank: false,
-            case_insensitive: false,
-            fk_on_delete: None,
-            validators: &[],
-        }];
-        static MODEL: ModelSchema = ModelSchema {
-            name: "demo",
-            table: "demo",
-            fields: FIELDS,
-            display: None,
-            app_label: None,
-            admin: None,
-            soft_delete_column: None,
-            permissions: false,
-            audit_track: None,
-            m2m: &[],
-            indexes: &[],
-            check_constraints: &[],
-            exclusion_constraints: &[],
-            default_permissions: &[],
-            composite_relations: &[],
-            generic_relations: &[],
-            scope: ModelScope::Tenant,
-            default_order: &[],
-            is_view: false,
-            verbose_name: None,
-            verbose_name_plural: None,
-            managed: true,
-            db_table_comment: None,
-            default_related_name: None,
-            base_manager_name: None,
-            required_db_vendor: None,
-            required_db_features: &[],
-            order_with_respect_to: None,
-            proxy: false,
-            get_latest_by: None,
-            extra_permissions: &[],
-            global_scopes: &[],
-        };
         let q = SelectQuery {
             model: &MODEL,
             where_clause: WhereExpr::and_predicates(vec![crate::core::Filter {

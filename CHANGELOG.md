@@ -4,6 +4,35 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `upsert` conflict target ignores field and partial unique indexes (#1935)
+
+Only a container-level `unique_together` (or `index(…, unique)`) without a `WHERE` is the
+target; otherwise the PK. An upsert on a set PK no longer fails on a field `index(unique)`.
+**Breaking:** an upsert of a new row whose field `index(unique)` value is taken now fails with
+a unique violation instead of updating that row; declare `unique_together` to keep the old target.
+
+### Fixed — `values()` reads Uuid and bytes columns on every backend (#1901)
+
+`values_dict` / `values_list` return `SqlValue::Uuid` and `SqlValue::Binary` instead of
+`Null` on SQLite and PostgreSQL, and bytes instead of `Null` on MySQL.
+
+### Fixed — compound queries keep the first branch whole (#1890)
+
+A union's first branch keeps its derived-table joins, DISTINCT and projection, and `values()`
+projects every branch. `fetch_paginated_pool` counts all branches; the MySQL/SQLite
+`distinct_on` keeps search and derived joins; `paginate()` orders by PK when unordered.
+
+### Fixed — PostgreSQL `bulk_update` of a column that is NULL in every row (#1888)
+
+Each NULL in the VALUES list is cast to its column type, so it no longer fails as text.
+
+### Fixed — MySQL do-nothing inserts use the PK and report skips (#1887)
+
+`insert_or_ignore` and friends no longer need an `id` column, and `insert_or_ignore` returns
+`false` for a skipped row. An upsert on an auto PK reads back the updated row's id, and
+`insert_returning_*` read it from the INSERT itself, not the session. New `rustango::sql::insert_or_ignore`.
+**Breaking:** `Dialect::write_conflict_clause` takes a `model: &ModelSchema` argument.
+
 ### Fixed — tenancy `migrate` verbs honour their flags and scope (#1909)
 
 `migrate-registry --dry-run` previews instead of migrating; `migrate <target>` and
