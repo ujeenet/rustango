@@ -1187,9 +1187,9 @@ pub async fn count_rows_pool(pool: &Pool, query: &CountQuery) -> Result<i64, Exe
 /// PKs the way [`bulk_insert_on`] does on Postgres, so the rows you
 /// passed in keep their unset PKs.
 ///
-/// Large batches are split to fit the backend's bind-parameter limit,
-/// so they run as several statements. Wrap the call in a transaction
-/// if you need all-or-nothing.
+/// Large batches are split to fit the backend's bind-parameter limit
+/// and run in one transaction, so a failing batch rolls back the rest.
+/// Do not hold an [`AtomicTx`] guard across this call.
 ///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
@@ -1215,15 +1215,30 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
         return Ok(());
     }
 
-    for chunk in query.rows.chunks(max_rows) {
-        let batch = BulkInsertQuery {
-            rows: chunk.to_vec(),
-            ..query.clone()
-        };
-        let stmt = pool.dialect().compile_bulk_insert(&batch)?;
-        execute_pool(pool, &stmt.sql, stmt.params).await?;
-    }
-    Ok(())
+    let stmts = query
+        .rows
+        .chunks(max_rows)
+        .map(|chunk| {
+            pool.dialect().compile_bulk_insert(&BulkInsertQuery {
+                model: query.model,
+                columns: query.columns.clone(),
+                rows: chunk.to_vec(),
+                returning: query.returning.clone(),
+                on_conflict: query.on_conflict.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // All batches or none; inside an outer `atomic` on this pool this is a savepoint.
+    atomic(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            for stmt in stmts {
+                execute_tx(&mut guard, &stmt.sql, stmt.params).await?;
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 /// `UPDATE … FROM (VALUES …)` (Postgres) / `UPDATE … INNER JOIN

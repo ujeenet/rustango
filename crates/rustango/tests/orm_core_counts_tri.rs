@@ -1,11 +1,14 @@
-//! `count` / `exists` / `sum` honour every queryset clause (#1885) and
-//! `Sum` keeps the column's type (#1886), on every backend; join aliases
+//! `count` / `exists` / `sum` honour every queryset clause (#1885),
+//! `Sum` keeps the column's type (#1886) and a multi-batch
+//! `bulk_insert_pool` is atomic (#1891), on every backend; join aliases
 //! are not leaked per `compile()` (#1889).
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::Model as _;
-use rustango::sql::{CounterPool as _, ExistsPool as _, ForeignKey, Pool};
+use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
+use rustango::sql::{
+    atomic, bulk_insert_pool, CounterPool as _, ExecError, ExistsPool as _, ForeignKey, Pool,
+};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -29,11 +32,30 @@ pub struct Book {
     pub pages: i64,
 }
 
+/// Ten columns, so a bind-limited batch is a few thousand rows.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "occ_wide")]
+#[allow(dead_code)]
+pub struct Wide {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub c1: i64,
+    pub c2: i64,
+    pub c3: i64,
+    pub c4: i64,
+    pub c5: i64,
+    pub c6: i64,
+    pub c7: i64,
+    pub c8: i64,
+    pub c9: i64,
+}
+
 /// Ada: books 1 (10.75, 100 pages) and 2 (0.5, 200). Bob: book 3 (3.0, 300).
 async fn seeded(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Book::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Author>(pool).await;
     rustango::testkit::matrix::fresh_table::<Book>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Wide>(pool).await;
     for (id, name) in [(1, "Ada"), (2, "Bob")] {
         Author {
             id,
@@ -99,6 +121,60 @@ async fn sum_keeps_float(pool: &Pool) {
     assert_eq!(i, Some(600));
 }
 
+fn wide_rows(ids: impl Iterator<Item = i64>) -> Vec<Vec<SqlValue>> {
+    ids.map(|id| (0..10).map(|_| SqlValue::I64(id)).collect())
+        .collect()
+}
+
+fn wide_query(rows: Vec<Vec<SqlValue>>) -> BulkInsertQuery {
+    BulkInsertQuery::new(
+        Wide::SCHEMA,
+        vec!["id", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"],
+        rows,
+    )
+}
+
+/// One row past what a single statement can bind.
+fn two_batches(pool: &Pool) -> i64 {
+    i64::try_from(pool.dialect().max_bind_params() / 10).unwrap() + 1
+}
+
+async fn bulk_insert_rolls_back_every_batch(pool: &Pool) {
+    let n = two_batches(pool);
+    // The last row repeats id 1, so only the second batch fails.
+    let mut rows = wide_rows(1..n);
+    rows.extend(wide_rows(std::iter::once(1)));
+    let err = bulk_insert_pool(pool, &wide_query(rows)).await;
+    assert!(err.is_err(), "duplicate pk must fail");
+    assert_eq!(
+        Wide::objects().count(pool).await.unwrap(),
+        0,
+        "the first batch must not stay committed"
+    );
+    bulk_insert_pool(pool, &wide_query(wide_rows(1..=n)))
+        .await
+        .expect("clean multi-batch insert");
+    assert_eq!(Wide::objects().count(pool).await.unwrap(), n);
+}
+
+async fn bulk_insert_joins_outer_atomic(pool: &Pool) {
+    let n = two_batches(pool);
+    let (p, q) = (pool.clone(), wide_query(wide_rows(1..=n)));
+    let r: Result<(), ExecError> = atomic(pool, move |_tx| {
+        Box::pin(async move {
+            bulk_insert_pool(&p, &q).await?;
+            Err(ExecError::AtomicAborted)
+        })
+    })
+    .await;
+    assert!(r.is_err());
+    assert_eq!(
+        Wide::objects().count(pool).await.unwrap(),
+        0,
+        "the outer rollback must undo the bulk insert"
+    );
+}
+
 /// Compile-only chain for the multi-hop alias test; never gets a table.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "occ_region")]
@@ -158,5 +234,7 @@ tri_dialect_test! {
         count_honours_compound,
         count_honours_relation_span,
         sum_keeps_float,
+        bulk_insert_rolls_back_every_batch,
+        bulk_insert_joins_outer_atomic,
     ],
 }

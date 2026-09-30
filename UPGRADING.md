@@ -159,6 +159,11 @@ public `source` field; build them with `new`, `CountQuery::from_select` or `Aggr
 
 It now decodes as `f64` (float) or `Decimal` (decimal), not `i64`; `sum::<i64>` on such a column fails.
 
+### Large `bulk_insert_pool` calls run in a transaction
+
+When the rows need more than one batch, calling it while holding an `AtomicTx` guard on the
+same pool now returns `NestedAtomic`; drop the guard first.
+
 ### `QueryError::JoinAliasLimit`
 
 New variant: returned once a process has seen 4096 distinct multi-hop relation paths.

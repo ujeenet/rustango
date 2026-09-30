@@ -13,6 +13,10 @@ filters and `union()` are counted and aggregated through a derived table instead
 
 `SUM` casts from the column type: float columns to double, decimals stay exact.
 
+### Fixed — a multi-batch `bulk_insert_pool` is all-or-nothing (#1891)
+
+Batches split by the bind limit share one transaction, or a savepoint inside `atomic()`.
+
 ### Fixed — relation-span filters no longer leak memory per query (#1889)
 
 Multi-hop join aliases are interned once per path instead of leaked on every `compile()`.
