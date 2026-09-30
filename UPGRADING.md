@@ -155,6 +155,11 @@ untouched.
 **Breaking:** grant `audit.view` (read) or `audit.delete` (cleanup) to non-superusers
 who used the feed; `auto_create_permissions_pool` seeds both codenames.
 
+### Tenant admin requests carry `AdminSession`
+
+**Breaking:** tenant-admin non-superusers get 403 on translation edits. Custom views
+reading `Extension<AdminSession>` now see the tenant user instead of nothing.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

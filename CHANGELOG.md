@@ -10,6 +10,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 sees only rows of tables they hold `{table}.view` on; cleanup needs `audit.delete`.
 The feed's record link no longer renders a raw `entity_pk` into `href`.
 
+### Security — tenant admin puts `AdminSession` in request extensions (#1863)
+
+The translations editor now refuses non-superuser writes in the tenant admin too.
+New `admin::session::from_extensions` reads the extension, else the task-local.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

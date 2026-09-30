@@ -1,5 +1,5 @@
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "admin"))]
-//! Tenant admin permission gaps: the audit feed (#1858). SQLite, no service.
+//! Tenant admin permission gaps (#1858, #1863). SQLite, no service.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -95,6 +95,9 @@ async fn boot() -> Env {
     rustango::testkit::create_tables_for::<SecNote>(&tenant)
         .await
         .expect("sec_note table");
+    rustango::i18n::db::ensure_table_pool(&tenant)
+        .await
+        .expect("translations table");
 
     let secret = SessionSecret::from_bytes(b"tenant-admin-security-secret-32b".to_vec());
     let admin = TenantAdminBuilder::new(
@@ -254,4 +257,22 @@ async fn an_audit_pk_cannot_inject_markup() {
     let (status, body) = env.get("/__admin/__audit", &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!body.contains(r#"" onmouseover=""#), "{body}");
+}
+
+/// #1863: a non-superuser in the tenant admin cannot write translations.
+#[tokio::test]
+async fn translation_edits_need_a_superuser_in_the_tenant_admin() {
+    let env = boot().await;
+    let editor = "/__admin/rustango_translations/editor";
+    let cookie = env.login(false, &["rustango_translations.view"]).await;
+    let (status, body) = env.post(editor, &cookie, "tr:en:greeting=pwned").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let rows = rustango::i18n::db::all_pool(&env.tenant).await.unwrap();
+    assert!(rows.is_empty(), "nothing written: {rows:?}");
+
+    let root = env.login(true, &[]).await;
+    let (status, body) = env.post(editor, &root, "tr:en:greeting=Hello").await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    let rows = rustango::i18n::db::all_pool(&env.tenant).await.unwrap();
+    assert_eq!(rows.len(), 1, "a superuser still saves");
 }
