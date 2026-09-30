@@ -174,6 +174,11 @@ use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
 `M2mChangedContext::src_pk` changed from `i64` to `SqlValue`. Compare with
 `SqlValue::I64(n)`, and log it with `?ctx.src_pk`.
 
+### UPDATE validates field rules
+
+Updates now fail with `QueryError::MaxLengthExceeded`, `OutOfRange`, `InvalidChoice` or
+`ValidatorFailed` where they used to write. `ModelForm` returns these as field errors.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

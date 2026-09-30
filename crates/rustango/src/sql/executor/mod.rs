@@ -1164,6 +1164,7 @@ fn generated_pk(
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecError> {
+    query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
     execute_pool(pool, &stmt.sql, stmt.params).await
 }
@@ -1520,6 +1521,7 @@ pub async fn insert_returning_tx(
 /// # Errors
 /// As [`update_pool`].
 pub async fn update_tx(tx: &mut PoolTx<'_>, query: &UpdateQuery) -> Result<u64, ExecError> {
+    query.validate()?;
     let stmt = tx.dialect().compile_update(query)?;
     execute_tx(tx, &stmt.sql, stmt.params).await
 }

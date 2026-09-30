@@ -1076,6 +1076,7 @@ pub async fn save_one_with_audit(
     query: &crate::core::UpdateQuery,
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
+    query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
@@ -1665,6 +1666,7 @@ where
 {
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
     let _ = (select_cols_pg, select_cols_my, select_cols_sqlite);
+    update_query.validate()?;
     let stmt = pool.dialect().compile_update(update_query)?;
     // Only the pre-update SELECT differs per backend: each row type is a
     // different concrete type, so each arm calls its own

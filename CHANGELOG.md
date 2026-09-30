@@ -29,6 +29,12 @@ The M2M managers bound every non-integer source PK as `0`, so all sources shared
 source with `ExecError::M2mUnsavedSource`. `M2MManager::contains` also decodes on PostgreSQL.
 **Breaking:** `M2mChangedContext::src_pk` is a `SqlValue`, not an `i64`.
 
+### Fixed — UPDATE checks field rules like INSERT (#1893)
+
+`update_pool`, `update_tx` and the audited `save_pool` now run `max_length`, `min` /
+`max`, `choices` and validators before writing, and `ModelForm::validate` reports them
+per field. **Breaking:** an update that broke these rules used to be stored; it now errors.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

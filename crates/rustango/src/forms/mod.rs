@@ -664,8 +664,15 @@ impl ModelForm {
                 continue;
             }
             let raw = self.data.get(field.name).map(String::as_str);
-            if let Err(e) = parse_form_value(field, raw) {
-                errors.add(field.name, e.to_string());
+            // The write re-checks these; a form reports them per field (#1893).
+            let checked = parse_form_value(field, raw)
+                .map_err(|e| e.to_string())
+                .and_then(|v| {
+                    crate::core::validate_value(self.schema.name, field, &v)
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(e) = checked {
+                errors.add(field.name, e);
             }
         }
         errors
