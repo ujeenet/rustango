@@ -61,10 +61,12 @@ pub(super) fn cell_is_null<R: sqlx::Row, I: sqlx::ColumnIndex<R>>(row: &R, index
 /// `Decode<'r, R::Database> + Type<R::Database>` bounds for each
 /// FieldType we decode. sqlx already provides these for `PgRow` and
 /// `MySqlRow`; the bounds compile away to nothing at the call sites.
+/// `uuid_cell` is the exception: MySQL keeps a UUID as `CHAR(36)` text.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn row_to_json_generic<'r, R>(
     row: &'r R,
     fields: &[&'static crate::core::FieldSchema],
+    uuid_cell: fn(&'r R, &str) -> Option<uuid::Uuid>,
 ) -> serde_json::Value
 where
     R: sqlx::Row,
@@ -79,7 +81,6 @@ where
     chrono::NaiveDate: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     chrono::NaiveTime: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     chrono::DateTime<chrono::Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    uuid::Uuid: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     serde_json::Value: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     rust_decimal::Decimal: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     Vec<u8>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
@@ -129,8 +130,7 @@ where
                 .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
                 .map(|dt| json!(dt.to_rfc3339()))
                 .unwrap_or(Value::Null),
-            FieldType::Uuid => row
-                .try_get::<uuid::Uuid, _>(field.column)
+            FieldType::Uuid => uuid_cell(row, field.column)
                 .map(|u| json!(u.to_string()))
                 .unwrap_or(Value::Null),
             FieldType::Json => row
@@ -175,21 +175,25 @@ pub fn row_to_json(
     row: &sqlx::postgres::PgRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_generic(row, fields)
+    row_to_json_generic(row, fields, |row, col| {
+        sqlx::Row::try_get::<uuid::Uuid, _>(row, col).ok()
+    })
 }
 
 /// MySQL counterpart of [`row_to_json`]. Decodes each column by
 /// `field.ty` against `&MySqlRow`. Type mappings mirror the
 /// `sqlx::Type<MySql>` impls emitted by `#[derive(Model)]` —
 /// `chrono::DateTime<Utc>` ↔ `DATETIME(6)`, `serde_json::Value` ↔
-/// `JSON`, `uuid::Uuid` ↔ `CHAR(36)` (sqlx-mysql's default).
+/// `JSON`, `uuid::Uuid` ↔ `CHAR(36)` hyphenated text.
 #[cfg(feature = "mysql")]
 #[must_use]
 pub fn row_to_json_my(
     row: &sqlx::mysql::MySqlRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_generic(row, fields)
+    row_to_json_generic(row, fields, |row, col| {
+        crate::sql::try_get_flat_my::<uuid::Uuid>(row, col).ok()
+    })
 }
 
 /// SQLite counterpart of [`row_to_json`]. SQLite's storage is more

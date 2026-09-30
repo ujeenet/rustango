@@ -1716,6 +1716,42 @@ async fn about_cmd<W: Write>(pool: &Pool, w: &mut W) -> Result<(), MigrateError>
     Ok(())
 }
 
+/// Warn when the database's default collation ignores case (#1742).
+async fn collation_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
+    let Some(sql) = pool.dialect().default_collation_sql() else {
+        return;
+    };
+    match crate::sql::raw_query_pool::<(String,)>(sql, Vec::new(), pool).await {
+        Ok(rows) => {
+            if let Some(w) = rows.first().and_then(|(c,)| collation_warning(c)) {
+                audit.warnings.push(w);
+            }
+        }
+        Err(e) => audit
+            .warnings
+            .push(format!("could not read the database collation: {e}")),
+    }
+}
+
+fn collation_warning(collation: &str) -> Option<String> {
+    const FIX: &str = "create the database with `COLLATE utf8mb4_0900_as_cs` \
+                       (see the MySQL section of docs/getting-started.md)";
+    if collation.ends_with("_ci") {
+        Some(format!(
+            "database default collation `{collation}` ignores case: `=` and `unique` on \
+             text columns differ from PostgreSQL/SQLite — {FIX}"
+        ))
+    } else if collation.ends_with("_bin") {
+        // MySQL flags `_bin` columns BINARY, and sqlx then refuses `String`.
+        Some(format!(
+            "database default collation `{collation}` makes text columns unreadable as \
+             `String` — {FIX}"
+        ))
+    } else {
+        None
+    }
+}
+
 /// `manage check [--deploy]` — run system audits.
 async fn check_cmd<W: Write>(
     pool: &Pool,
@@ -1777,6 +1813,7 @@ async fn check_cmd<W: Write>(
         run_settings_audit(&mut audit);
         #[cfg(feature = "cache")]
         login_store_audit(crate::account_lockout::shared(), &mut audit);
+        collation_audit(pool, &mut audit).await;
         // `required_db_vendor` + `required_db_features`
         // audit — every model declaring `required_db_vendor = "postgres"`
         // or `required_db_features = "json_path, listen_notify"` gets
@@ -6099,6 +6136,31 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         .await;
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("[info]    account lockout"), "{s}");
+    }
+
+    #[test]
+    fn ci_and_bin_collations_warn() {
+        assert!(collation_warning("utf8mb4_0900_ai_ci").is_some());
+        assert!(collation_warning("utf8mb4_general_ci").is_some());
+        assert!(collation_warning("utf8mb4_0900_as_cs").is_none());
+        assert!(collation_warning("utf8mb4_bin").is_some());
+    }
+
+    /// SQLite compares byte-wise, so there is nothing to read or warn about.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn check_deploy_has_no_collation_warning_on_sqlite() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let _ = check_cmd(
+            &pool,
+            Path::new("/nonexistent"),
+            &["--deploy".into()],
+            &mut buf,
+        )
+        .await;
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("collation"), "{s}");
     }
 
     fn good_prod_env() -> DeployAuditEnv {
