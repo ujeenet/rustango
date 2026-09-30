@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### JSON comparisons match across backends (#1898)
+
+SQLite `as_text` JSON paths now yield text: compare them to `'1'` / `'true'`, not to `1`.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

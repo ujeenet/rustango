@@ -79,9 +79,14 @@ impl<'d> Sql<'d> {
     /// own in `INSERT` or `UPDATE SET`.
     pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<&'static str>) {
         let needs_cast = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
+        let is_json = matches!(value, SqlValue::Json(_));
         self.params.push(value);
         let p = self.d.placeholder(self.params.len());
-        self.sql.push_str(&p);
+        if is_json {
+            self.d.write_json_param(&mut self.sql, &p);
+        } else {
+            self.sql.push_str(&p);
+        }
         if needs_cast {
             if let Some(ty) = cast {
                 self.sql.push_str("::");
@@ -1755,9 +1760,22 @@ fn write_json_path(
         }
         return Ok(());
     }
-    // SQLite's json_extract already returns scalars unquoted, so
-    // `as_text` changes nothing here.
-    let _ = as_text;
+    if as_text {
+        // json_extract returns 1/0 for booleans and numbers as numbers;
+        // PG's `->>` returns text such as 'true' and '1'.
+        b.sql.push_str("CASE json_type(");
+        write_expr(b, source, None)?;
+        b.sql.push_str(", '");
+        b.sql.push_str(&json_path);
+        b.sql.push_str(
+            "') WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' ELSE CAST(json_extract(",
+        );
+        write_expr(b, source, None)?;
+        b.sql.push_str(", '");
+        b.sql.push_str(&json_path);
+        b.sql.push_str("') AS TEXT) END");
+        return Ok(());
+    }
     b.sql.push_str("json_extract(");
     write_expr(b, source, None)?;
     b.sql.push_str(", '");

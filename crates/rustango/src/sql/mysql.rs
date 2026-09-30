@@ -102,8 +102,8 @@ impl Dialect for MySql {
     /// cast to `SIGNED`, floats to `FLOAT` or `DOUBLE`, booleans to
     /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME`.
     ///
-    /// UUID, JSON and binary have no CAST target, so they return
-    /// `None`; cast a string-shaped value to `CHAR` yourself.
+    /// UUID has no CAST target, so it returns `None`; cast a
+    /// string-shaped value to `CHAR` yourself.
     fn cast_type(&self, ty: FieldType) -> Option<&'static str> {
         Some(match ty {
             FieldType::I16 | FieldType::I32 | FieldType::I64 => "SIGNED",
@@ -116,11 +116,10 @@ impl Dialect for MySql {
             FieldType::Time => "TIME",
             FieldType::Decimal => "DECIMAL(38, 10)",
             FieldType::Binary => "BINARY",
-            // MySQL has no `CAST AS JSON`; use `JSON_EXTRACT`. UUID
-            // has no target either, and the array, range and other
+            FieldType::Json => "JSON",
+            // UUID has no target, and the array, range and other
             // Postgres-only types have nothing to cast to.
             FieldType::Uuid
-            | FieldType::Json
             | FieldType::Array(_)
             | FieldType::Range(_)
             | FieldType::HStore
@@ -447,6 +446,13 @@ impl Dialect for MySql {
         if distinct {
             sql.push(')');
         }
+    }
+
+    /// Bound as text, a JSON value never equals a JSON column.
+    fn write_json_param(&self, sql: &mut String, placeholder: &str) {
+        sql.push_str("CAST(");
+        sql.push_str(placeholder);
+        sql.push_str(" AS JSON)");
     }
 
     fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {

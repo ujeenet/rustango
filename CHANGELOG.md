@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — JSON equality on MySQL; `as_text` JSON paths on SQLite (#1898)
+
+MySQL now binds a JSON value as `CAST(? AS JSON)`, so `filter("data", json)` matches.
+SQLite's `json_path(.., as_text = true)` returns text (`'1'`, `'true'`) like PostgreSQL's `->>`.
+
 ## [0.59.11] — 2026-09-30
 
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)
