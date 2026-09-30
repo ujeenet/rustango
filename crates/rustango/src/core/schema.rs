@@ -1493,6 +1493,14 @@ impl ModelEntry {
             .find(|e| e.schema.table == model.table && e.schema.name == model.name)
     }
 
+    /// The registered entry whose table is `table`.
+    #[must_use]
+    pub fn for_table(table: &str) -> Option<&'static Self> {
+        inventory::iter::<Self>
+            .into_iter()
+            .find(|e| e.schema.table == table)
+    }
+
     /// Audited `UPDATE` runner, `None` for a model without audit.
     #[must_use]
     pub fn audited_update(&self) -> Option<crate::audit::AuditedUpdate> {

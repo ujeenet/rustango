@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Relation `SUM` decodes by column type (#1944)
+
+`annotate_sum` over a relation's float column now reads back as `f64`, not `i64`.
+
 ### `count()` respects `limit`, `offset`, `distinct` and `union`
 
 `qs.limit(10).count()` now returns at most 10. `CountQuery` and `AggregateQuery` gain a
