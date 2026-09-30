@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### UNIQUE constraints are named (#1880)
+
+`CREATE TABLE` writes `CONSTRAINT <table>_<column>_key UNIQUE (<column>)`; PG names do not change.
+**Breaking** on MySQL: new tables name the unique index `<table>_<column>_key`, not after the column.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

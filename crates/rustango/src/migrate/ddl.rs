@@ -88,6 +88,12 @@ pub fn create_table_sql_with_dialect(dialect: &dyn Dialect, model: &ModelSchema)
         first = false;
         write_column_def(&mut s, dialect, field);
     }
+    for field in model.scalar_fields() {
+        if field.unique && !field.primary_key && field.generated_as.is_none() {
+            s.push_str(", ");
+            s.push_str(&unique_clause(dialect, model.table, field.column));
+        }
+    }
     // SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN KEY`, so its
     // FKs must go inside this statement. PG and MySQL get theirs
     // afterwards from `create_constraints_sql_with_dialect`, which
@@ -271,6 +277,43 @@ pub fn create_constraints_sql_with_dialect(
     out
 }
 
+/// The name of the UNIQUE constraint on `table.column`, at most 63 bytes.
+///
+/// PostgreSQL's own `makeObjectName` rule, so it matches the name PG gave
+/// tables created with a bare inline `UNIQUE` (#1880).
+#[must_use]
+pub fn unique_constraint_name(table: &str, column: &str) -> String {
+    const LABEL: &str = "key";
+    // Two `_` separators plus the label; PG's NAMEDATALEN is 64.
+    let avail = 63 - (LABEL.len() + 2);
+    let (mut t, mut c) = (table.len(), column.len());
+    while t + c > avail {
+        if t > c {
+            t -= 1;
+        } else {
+            c -= 1;
+        }
+    }
+    format!("{}_{}_{LABEL}", clip(table, t), clip(column, c))
+}
+
+fn clip(s: &str, mut n: usize) -> &str {
+    while !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    &s[..n]
+}
+
+/// Table-level `CONSTRAINT <name> UNIQUE (<col>)`: every dialect parses it,
+/// and unlike an inline `UNIQUE` it fixes the name.
+pub(crate) fn unique_clause(dialect: &dyn Dialect, table: &str, column: &str) -> String {
+    format!(
+        "CONSTRAINT {} UNIQUE ({})",
+        dialect.quote_ident(&unique_constraint_name(table, column)),
+        dialect.quote_ident(column)
+    )
+}
+
 // ============================================================ internals
 
 /// FK clauses to join with `, ` into a `CREATE TABLE (...)` body, for
@@ -363,9 +406,7 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     if field.primary_key && !serial_pk_inline {
         s.push_str(" PRIMARY KEY");
     }
-    if field.unique && !field.primary_key {
-        s.push_str(" UNIQUE");
-    }
+    // UNIQUE goes table-level, named, from `create_table_sql_with_dialect`.
     write_check_constraint(s, dialect, field);
     // MySQL puts `COMMENT '...'` on the column line. PG uses a
     // separate `COMMENT ON COLUMN` statement from
@@ -791,6 +832,26 @@ mod tests {
         assert!(
             sql.contains("ON DELETE CASCADE"),
             "expected inline ON DELETE CASCADE; got: {sql}"
+        );
+    }
+
+    /// The names PostgreSQL 16 picked for a bare inline `UNIQUE` (#1880).
+    #[test]
+    fn unique_constraint_name_matches_postgres() {
+        assert_eq!(unique_constraint_name("post", "slug"), "post_slug_key");
+        assert_eq!(
+            unique_constraint_name(
+                "subscription_notification_preferences",
+                "primary_contact_email_address"
+            ),
+            "subscription_notification_pre_primary_contact_email_address_key"
+        );
+        assert_eq!(
+            unique_constraint_name(
+                "a_very_long_table_name_that_goes_on_and_on_and_on_forever_x",
+                "c"
+            ),
+            "a_very_long_table_name_that_goes_on_and_on_and_on_forever_c_key"
         );
     }
 }

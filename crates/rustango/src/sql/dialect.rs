@@ -333,6 +333,17 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Add a named UNIQUE on one column of an existing table. PG and MySQL
+    /// share this form; SQLite has no `ADD CONSTRAINT` and overrides it.
+    fn add_unique_constraint_sql(&self, table: &str, name: &str, column: &str) -> String {
+        format!(
+            "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({})",
+            self.quote_ident(table),
+            self.quote_ident(name),
+            self.quote_ident(column)
+        )
+    }
+
     /// `true` if partial indexes, `CREATE INDEX … WHERE <expr>`, are
     /// supported. MySQL has no equivalent, so the migration writer
     /// drops the WHERE clause there and warns.

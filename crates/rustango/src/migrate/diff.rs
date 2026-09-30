@@ -941,13 +941,15 @@ fn render_changes_split_inner(
                 unique,
             } => {
                 guard_alter_column_dialect(dialect, "AlterColumnUnique", table, column)?;
+                let name = super::ddl::unique_constraint_name(table, column);
                 if *unique {
-                    out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_key" UNIQUE ("{column}")"#,
-                    ));
+                    out.immediate
+                        .push(dialect.add_unique_constraint_sql(table, &name, column));
                 } else {
                     out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" DROP CONSTRAINT "{table}_{column}_key""#,
+                        "ALTER TABLE {} DROP CONSTRAINT {}",
+                        dialect.quote_ident(table),
+                        dialect.quote_ident(&name),
                     ));
                 }
             }
@@ -1376,16 +1378,6 @@ fn create_table_sql_from_snapshot_with_dialect(
         if f.primary_key && !serial_pk_inline {
             sql.push_str(" PRIMARY KEY");
         }
-        // Per-column UNIQUE constraint from #[rustango(unique)]. Without
-        // this clause the snapshot's `unique: true` flag was honoured by
-        // the diff path (AlterColumnUnique) but silently dropped when a
-        // CreateTable rendered the initial DDL — surfaced live by the
-        // cookbook /authors/new playwright session, where two Authors
-        // with the same email INSERT-ed cleanly despite the model
-        // declaring `#[rustango(unique)]`.
-        if f.unique && !f.primary_key {
-            sql.push_str(" UNIQUE");
-        }
         if f.min.is_some() || f.max.is_some() {
             sql.push_str(" CHECK (");
             let mut wrote = false;
@@ -1426,6 +1418,13 @@ fn create_table_sql_from_snapshot_with_dialect(
                     let _ = write!(sql, " ON DELETE {action}");
                 }
             }
+        }
+    }
+    // Named, table-level: `AlterColumnUnique` drops it by this name (#1880).
+    for f in &t.fields {
+        if f.unique && !f.primary_key && f.generated_as.is_none() {
+            sql.push_str(", ");
+            sql.push_str(&super::ddl::unique_clause(dialect, &t.name, &f.column));
         }
     }
     if dialect.inline_fks_in_create_table() {
