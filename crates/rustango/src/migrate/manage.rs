@@ -4444,7 +4444,8 @@ async fn sendtestemail_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), M
          Sent by `manage sendtestemail`."
         .to_owned();
 
-    let mailer = crate::email::from_settings(&settings.mail);
+    let mailer = crate::email::from_settings(&settings.mail)
+        .map_err(|e| MigrateError::Validation(format!("sendtestemail: {e}")))?;
     let backend = settings.mail.backend.as_deref().unwrap_or("console");
 
     let email = crate::email::Email::new()

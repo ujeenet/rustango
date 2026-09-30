@@ -22,7 +22,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lettre::message::{
-    header::ContentType, Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart,
+    header::{ContentType, HeaderName, HeaderValue},
+    Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart,
 };
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::Tls;
@@ -62,6 +63,27 @@ impl TlsMode {
                 );
                 Self::StartTls
             }
+        }
+    }
+
+    /// Strict form for `[mail].smtp_tls`: `none`, `starttls` or `implicit`
+    /// (plus `plain` / `off` / `smtps`). `tls` is refused: it reads as
+    /// STARTTLS but meant implicit TLS (#1923).
+    ///
+    /// # Errors
+    /// [`MailError::Config`] for `tls` or an unknown value.
+    pub fn parse(s: &str) -> Result<Self, MailError> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" | "plain" | "off" => Ok(Self::None),
+            "implicit" | "smtps" => Ok(Self::Implicit),
+            "starttls" | "" => Ok(Self::StartTls),
+            "tls" => Err(MailError::Config(
+                "smtp_tls = \"tls\" is ambiguous; use \"starttls\" (port 587) or \"implicit\" (port 465)"
+                    .into(),
+            )),
+            other => Err(MailError::Config(format!(
+                "unknown smtp_tls `{other}`; use none, starttls or implicit"
+            ))),
         }
     }
 
@@ -265,11 +287,10 @@ impl Mailer for SmtpMailer {
             builder = builder.reply_to(parse_mailbox(rt)?);
         }
         builder = builder.subject(&email.subject);
+        for (name, value) in &email.headers {
+            builder = builder.raw_header(custom_header(name, value)?);
+        }
 
-        // Custom headers go on the Message via the builder's header
-        // method; lettre validates them via the typed-header machinery,
-        // so unknown header names just become "Header" structs.
-        // We use the loose `header::Header` form via `headers_mut`.
         // Body part: text-only, or multipart/alternative when HTML present.
         let body_part = if let Some(html) = &email.html_body {
             MultiPart::alternative()
@@ -311,22 +332,6 @@ impl Mailer for SmtpMailer {
             mixed
         };
 
-        // NB: custom `email.headers` aren't forwarded in v1 — lettre's
-        // raw-header API is fiddly (requires a typed `Header` impl per
-        // name) and the existing in-process mailers don't actually
-        // wire them anywhere meaningful either. Filed as a follow-up:
-        // user code that needs `X-Mailgun-Tag` / `List-Unsubscribe`
-        // can drop to the lettre builder directly via
-        // `SmtpMailer::with_transport` until a clean abstraction lands.
-        if !email.headers.is_empty() {
-            tracing::warn!(
-                target: "rustango::email::smtp",
-                count = email.headers.len(),
-                "Email.headers ignored — SmtpMailer v1 only forwards the standard envelope; \
-                 custom headers will land in a follow-up slice."
-            );
-        }
-
         let message = builder
             .multipart(body_part)
             .map_err(|e| MailError::InvalidMessage(format!("message build: {e}")))?;
@@ -337,6 +342,35 @@ impl Mailer for SmtpMailer {
             .map_err(|e| MailError::Transport(format!("smtp send: {e}")))?;
         Ok(())
     }
+}
+
+/// Headers the envelope and MIME body own; a custom one would replace them.
+const RESERVED_HEADERS: &[&str] = &[
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "reply-to",
+    "sender",
+    "subject",
+    "mime-version",
+    "content-type",
+    "content-transfer-encoding",
+];
+
+/// One `Email.headers` entry as a raw lettre header (#1923).
+fn custom_header(name: &str, value: &str) -> Result<HeaderValue, MailError> {
+    if RESERVED_HEADERS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(name))
+    {
+        return Err(MailError::BadHeader(format!(
+            "`{name}` is set from the Email fields, not a custom header"
+        )));
+    }
+    let name = HeaderName::new_from_ascii(name.to_owned())
+        .map_err(|e| MailError::BadHeader(format!("header name `{name}`: {e}")))?;
+    Ok(HeaderValue::new(name, value.to_owned()))
 }
 
 fn parse_mailbox(addr: &str) -> Result<Mailbox, MailError> {
@@ -359,10 +393,10 @@ pub fn from_settings(
     let Some(host) = s.smtp_host.as_deref() else {
         return Ok(None);
     };
-    let tls = s
-        .smtp_tls
-        .as_deref()
-        .map_or(TlsMode::default(), TlsMode::from_str_loose);
+    let tls = match s.smtp_tls.as_deref() {
+        Some(t) => TlsMode::parse(t)?,
+        None => TlsMode::default(),
+    };
     let mut b = SmtpMailer::builder(host).tls(tls);
     if let Some(port) = s.smtp_port {
         b = b.port(port);
@@ -395,6 +429,15 @@ mod tests {
         assert_eq!(TlsMode::from_str_loose(""), TlsMode::StartTls);
         // Unknown → fallback.
         assert_eq!(TlsMode::from_str_loose("nope"), TlsMode::StartTls);
+    }
+
+    #[test]
+    fn strict_tls_parse_refuses_tls_and_unknown() {
+        assert_eq!(TlsMode::parse("STARTTLS").unwrap(), TlsMode::StartTls);
+        assert_eq!(TlsMode::parse("smtps").unwrap(), TlsMode::Implicit);
+        assert_eq!(TlsMode::parse("off").unwrap(), TlsMode::None);
+        assert!(matches!(TlsMode::parse("tls"), Err(MailError::Config(_))));
+        assert!(matches!(TlsMode::parse("nope"), Err(MailError::Config(_))));
     }
 
     #[test]

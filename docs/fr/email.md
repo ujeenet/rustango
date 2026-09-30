@@ -71,7 +71,9 @@ tenez un **`BoxedMailer`** (`Arc<dyn Mailer>`) :
 | `NullMailer` | `email` | désactive complètement l'e-mail |
 
 Construisez-le à partir de la configuration afin qu'il diffère selon l'environnement (`ConsoleMailer`
-en local, `SmtpMailer` en prod) via `email::from_settings(&settings.mail)`.
+en local, `SmtpMailer` en prod) via `email::from_settings(&settings.mail)?`. Avec
+`backend = "smtp"`, il échoue si le mailer ne peut pas être construit (pas de `smtp_host`,
+`from_address` invalide, `smtp_tls` autre que `none` / `starttls` / `implicit`).
 
 ---
 
@@ -185,7 +187,7 @@ La fonctionnalité `email_jobs` câble cela pour vous.
 `send_many(mailer, &emails)` · `from_settings(&EmailSettings)`.
 
 **`MailError` :** `InvalidMessage` (incomplet) · `BadHeader` (injection CRLF) ·
-`Transport` (échec de backend/livraison).
+`Transport` (échec de backend/livraison, le seul que `EmailJob` réessaie) · `Config` (section `[mail]` invalide).
 
 ---
 

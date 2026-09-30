@@ -1289,6 +1289,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
+      - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live

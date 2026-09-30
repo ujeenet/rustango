@@ -4,6 +4,39 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — shutdown has a drain deadline; interrupted runs are closed (#1883)
+
+After SIGTERM open connections get `[server] shutdown_timeout_secs` (default 20) to finish,
+then close; new `shutdown::serve_until_drained` and `server::Builder::drain_timeout`.
+Provisioning/migration runs left `running` for an hour are marked failed at boot, and a
+webhook retry of a failed run provisions again under the same `event_id`, resuming a
+tenant the failed run left inactive. A closed run is never reopened by its task. The stale
+limit is `WebhookConfig::stale_run_after` / `Builder::stale_run_after`.
+
+### Fixed — a broken SMTP config fails instead of mailing to stdout (#1923)
+
+**Breaking:** `email::from_settings` returns `Result`; `backend = "smtp"` with no host, a bad
+`from_address`, no `email-smtp` feature, or `smtp_tls = "tls"` / an unknown mode is a
+`MailError::Config` (new; `MailError` is now `#[non_exhaustive]`). `EmailJob` retries only
+transport errors, `dispatch_email` validates first, and `SmtpMailer` sends `Email.headers`.
+
+### Fixed — a bad settings value no longer boots on defaults (#1927)
+
+**Breaking:** with `Cli::with_settings_from_env`, a config that exists but does not load
+(bad TOML, a wrong type, a bad `RUSTANGO__*` override) now makes `Cli::run` fail. Only a
+missing `config/default.toml` still runs on Cli defaults. New `ConfigError::is_missing_config`.
+
+### Fixed — tenant pools follow `database_url` / schema edits from other processes (#1882)
+
+A cached tenant pool is keyed by the source it was built from, so a moved tenant is served
+from its new location once the Org cache refreshes (30 s), on every replica. New
+`TenantPools::cached_scoped_pool_count`.
+
+### Fixed — purging a tenant with an extra host (#1930)
+
+Purge now deactivates the tenant and evicts its pools first, drops the storage, then
+deletes its `rustango_org_hosts` rows and the Org. A failed purge can be retried.
+
 ## [0.59.9] — 2026-09-30
 
 ### Fixed — `DatabaseCache::incr` is atomic (#1871)

@@ -212,7 +212,11 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
 
     // 6. Evict cached pool, smoke-check the new location.
     pools.invalidate(&parsed.slug).await;
-    writeln!(writer, "  cached tenant pool evicted")?;
+    writeln!(
+        writer,
+        "  running servers switch to the new location within {} s (their tenant cache TTL)",
+        crate::tenancy::resolver::CACHE_TTL.as_secs()
+    )?;
 
     if let Err(e) = smoke_check(&parsed.target, &target_url, target_schema.as_deref()).await {
         writeln!(

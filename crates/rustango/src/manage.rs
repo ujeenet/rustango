@@ -84,6 +84,9 @@ pub struct Cli {
     /// the whole stack.
     #[cfg(feature = "config")]
     settings_for_layers: Option<crate::config::Settings>,
+    /// A config that exists but does not load; `run` refuses to start (#1927).
+    #[cfg(feature = "config")]
+    settings_error: Option<crate::config::ConfigError>,
     /// When `true`, mounts `/health` + `/ready` endpoints on the
     /// API router at runserver time. Set via [`Cli::with_health`].
     /// Default `false` because operators sometimes want their own
@@ -145,6 +148,8 @@ impl Cli {
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
+            #[cfg(feature = "config")]
+            settings_error: None,
             health_endpoints: false,
             provisioning_dir: None,
             #[cfg(feature = "tenancy")]
@@ -571,21 +576,37 @@ impl Cli {
     /// rustango::manage::Cli::new().with_settings(&cfg)
     /// ```
     ///
-    /// Returns the original [`Cli`] unchanged when the layered
-    /// loader fails (e.g. `config/default.toml` missing) so projects
-    /// that haven't adopted the layered loader still build cleanly.
-    /// Errors are surfaced via `tracing::warn` so they're visible
-    /// without breaking startup.
+    /// With no `config/default.toml` the [`Cli`] runs on its defaults.
+    /// Any other load error (bad TOML, a value of the wrong type, a bad
+    /// `RUSTANGO__*` override) makes [`Cli::run`] fail instead (#1927).
     #[cfg(feature = "config")]
     #[must_use]
     pub fn with_settings_from_env(self) -> Self {
-        match crate::config::Settings::load_from_env() {
+        self.with_loaded_settings(crate::config::Settings::load_from_env())
+    }
+
+    #[cfg(feature = "config")]
+    fn with_loaded_settings(
+        mut self,
+        loaded: Result<crate::config::Settings, crate::config::ConfigError>,
+    ) -> Self {
+        match loaded {
             Ok(cfg) => self.with_settings(&cfg),
+            Err(e) if e.is_missing_config() => {
+                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file; running on Cli defaults");
+                self
+            }
             Err(e) => {
-                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: failed to load Settings; falling back to Cli defaults");
+                self.settings_error = Some(e);
                 self
             }
         }
+    }
+
+    /// The config error `run` refuses to start on, if any.
+    #[cfg(feature = "config")]
+    fn boot_settings_error(&self) -> Option<&crate::config::ConfigError> {
+        self.settings_error.as_ref()
     }
 
     /// Override the migrations directory. Defaults to `./migrations`.
@@ -635,6 +656,10 @@ impl Cli {
     /// # Errors
     /// Surfaces whatever the underlying dispatcher / server returns.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(feature = "config")]
+        if let Some(e) = self.boot_settings_error() {
+            return Err(format!("refusing to start on a broken config: {e}").into());
+        }
         // v0.30.11 — install logging here (the outermost dispatch
         // point) so the WorkerGuard outlives BOTH the runserver
         // future AND the management-verb dispatch path. Installing
@@ -929,6 +954,15 @@ impl Cli {
     /// Generic over the pool type because the Postgres path extends a
     /// `PgPool` (handlers taking `Extension<PgPool>` predate the `Pool`
     /// enum) while the other two extend `crate::sql::Pool`.
+    /// `server.shutdown_timeout_secs`, or the default (#1883).
+    fn drain_timeout(&self) -> std::time::Duration {
+        #[cfg(feature = "config")]
+        if let Some(s) = &self.settings_for_layers {
+            return s.server.drain_timeout();
+        }
+        crate::shutdown::DEFAULT_DRAIN_TIMEOUT
+    }
+
     fn assemble_app<P>(&mut self, pool: P) -> Router
     where
         P: Clone + Send + Sync + 'static,
@@ -1141,14 +1175,20 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
+            let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            crate::shutdown::serve_until_drained(
+                |stop| {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(stop)
+                },
+                drain,
             )
-            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
             run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
@@ -1180,14 +1220,20 @@ impl Cli {
                         .await
                         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 }
+                let drain = self.drain_timeout();
                 let app = self.assemble_app(pool);
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                crate::shutdown::serve_until_drained(
+                    |stop| {
+                        axum::serve(
+                            listener,
+                            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                        )
+                        .with_graceful_shutdown(stop)
+                    },
+                    drain,
                 )
-                .with_graceful_shutdown(crate::shutdown::shutdown_signal())
                 .await?;
                 run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
@@ -1199,6 +1245,7 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
+            let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
@@ -1206,11 +1253,16 @@ impl Cli {
             // populates `ConnectInfo<SocketAddr>` in request extensions.
             // Without it, `access_log` (and any other middleware that
             // reads the peer address) sees "-".
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            crate::shutdown::serve_until_drained(
+                |stop| {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(stop)
+                },
+                drain,
             )
-            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
             run_shutdown_hook(self.on_shutdown).await;
             Ok(())
@@ -1255,7 +1307,10 @@ impl Cli {
         // merged with the tenant admin and dispatched beside the
         // operator console, and layers applied now would reach neither.
         // The builder applies them to the outermost router instead.
-        let mut builder = crate::server::Builder::from_env().await?.api(api);
+        let mut builder = crate::server::Builder::from_env()
+            .await?
+            .api(api)
+            .drain_timeout(self.drain_timeout());
         builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
@@ -1505,8 +1560,13 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
 /// configured (the common case for projects that never used `Settings`).
 #[cfg(feature = "config")]
 fn warn_if_settings_inert() {
-    let Ok(s) = crate::config::Settings::load_from_env() else {
-        return;
+    let s = match crate::config::Settings::load_from_env() {
+        Ok(s) => s,
+        Err(e) if e.is_missing_config() => return,
+        Err(e) => {
+            tracing::warn!(target: "rustango::manage", error = %e, "the config does not load; none of it is applied");
+            return;
+        }
     };
     let inert = inert_layer_settings(&s);
     if inert.is_empty() {
@@ -1895,6 +1955,34 @@ mod tests {
     /// of the user's API router. Without `.with_settings`, the
     /// handle stays None — projects not using the layered loader
     /// pay no overhead.
+    /// One bad value used to boot on Cli defaults — no allowed_hosts,
+    /// headers or login limits (#1927). Only a missing file falls back.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn a_bad_settings_value_fails_boot_but_a_missing_file_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("default.toml"),
+            "[security]\nsecure_ssl_redirect = 1\n",
+        )
+        .unwrap();
+        let bad = crate::config::Settings::load_from(dir.path(), "dev");
+        assert!(matches!(bad, Err(crate::config::ConfigError::Shape(_))));
+        let cli = Cli::new().with_loaded_settings(bad);
+        assert!(cli.settings_for_layers.is_none());
+        let err = cli
+            .boot_settings_error()
+            .expect("a bad value must fail boot");
+        assert!(err.to_string().contains("secure_ssl_redirect"), "{err}");
+
+        let empty = tempfile::tempdir().unwrap();
+        let missing = crate::config::Settings::load_from(empty.path(), "dev");
+        assert!(Cli::new()
+            .with_loaded_settings(missing)
+            .boot_settings_error()
+            .is_none());
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn with_settings_stashes_handle_for_runtime_layering() {

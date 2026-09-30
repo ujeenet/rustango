@@ -833,6 +833,13 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+Sur SIGTERM, il n'accepte plus de connexions et laisse aux connexions ouvertes
+`[server] shutdown_timeout_secs` (20 par défaut) pour finir, puis ferme le reste.
+SSE et long-poll ne finissent jamais seuls. Les exécutions de provisionnement et
+de migration laissées en `running` plus d'une heure par un processus arrêté sont
+marquées en échec au démarrage suivant, et une relance du webhook avec le même
+`event_id` s'exécute à nouveau.
+
 ### `create-tenant <slug> [options]`
 
 Met en place un nouveau tenant (client/organisation) et applique les
@@ -890,9 +897,11 @@ d'hôte portant un port, ou un préfixe de chemin que le résolveur ne
 pourrait jamais produire, est refusé plutôt que stocké pour n'apparier
 silencieusement jamais rien.
 
-Faire tourner `--database-url` évince le pool en cache du tenant, de
-sorte que la requête suivante se reconnecte avec le nouvel identifiant ;
-les autres modifications laissent les connexions chaudes tranquilles.
+Faire tourner `--database-url` change l'URL stockée. Chaque serveur bascule
+en 30 s, quand son cache de tenants se rafraîchit ; les autres modifications
+laissent les connexions chaudes tranquilles. Un secret tourné derrière la
+**même** référence (vault, variable d'environnement) ne change rien de
+stocké : redémarrez les serveurs, ou invalidez le pool du tenant sur chacun.
 
 ### `test-tenant-connection <url> [flags]`
 
@@ -936,6 +945,11 @@ ne supprime pas la ligne `Org` en laissant la base, elle ne fait rien du tout
 cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
+
+Avec plusieurs serveurs, désactivez d'abord (`drop-tenant`) et attendez 30 s.
+Un serveur dont le cache contient encore un tenant en mode schema garde
+`search_path = <schema>, public` ; une fois le schema supprimé, ses requêtes
+retombent sur `public` jusqu'au rafraîchissement du cache.
 
 ### `list-tenants`
 

@@ -167,3 +167,44 @@ async fn database_cache_evicts_the_idle_tenant_instead_of_refusing() {
     }
     assert_eq!(pools.cached_database_pool_count().await, 2);
 }
+
+async fn marker(pools: &TenantPools<sqlx::Sqlite>, org: &Org) -> String {
+    let mut conn = pools.database_acquire(org).await.expect("acquire");
+    sqlx::query_scalar("SELECT name FROM marker")
+        .fetch_one(&mut **conn)
+        .await
+        .expect("marker")
+}
+
+async fn seed_marker(url: &str, name: &str) -> sqlx::SqlitePool {
+    let db = sqlx::SqlitePool::connect(url).await.expect("tenant db");
+    sqlx::query("CREATE TABLE marker (name TEXT)")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO marker VALUES (?)")
+        .bind(name)
+        .execute(&db)
+        .await
+        .unwrap();
+    db
+}
+
+/// Another process moved the tenant: the fresh Org names a new URL, so
+/// the cached pool must not be served (#1882). Covers a stale pool
+/// re-inserted by a build that raced an invalidate, too.
+#[tokio::test]
+async fn cached_pool_follows_a_database_url_change_without_invalidate() {
+    let registry = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let pools: TenantPools<sqlx::Sqlite> = TenantPools::new(registry);
+    let old_url = "sqlite:file:tenant_pools_moved_old?mode=memory&cache=shared";
+    let new_url = "sqlite:file:tenant_pools_moved_new?mode=memory&cache=shared";
+    let _old = seed_marker(old_url, "old").await;
+    let _new = seed_marker(new_url, "new").await;
+
+    let mut org = fake_db_org("moved", old_url);
+    assert_eq!(marker(&pools, &org).await, "old");
+    org.database_url = Some(new_url.to_owned());
+    assert_eq!(marker(&pools, &org).await, "new", "served the old database");
+    assert_eq!(pools.cached_database_pool_count().await, 1);
+}
