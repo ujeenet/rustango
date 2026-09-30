@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)
+
+Same-name edits migrate as Drop + Add, and `Option<T>` → `T` with a default fills NULLs before `SET NOT NULL`.
+
 ### Fixed — a `max_length` change no longer undoes a type change (#1878)
 
 Shrinking a length on PostgreSQL now refuses over longer values instead of truncating them.

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Edited constraints now migrate (#1881)
+
+**Breaking:** the next `makemigrations` picks up CHECK, EXCLUDE, composite FK and M2M edits it
+ignored before. An edited M2M is dropped and recreated, so its rows are lost: copy them first.
+
 ### Shrinking `max_length` no longer truncates (#1878)
 
 **Breaking:** on PostgreSQL the migration now fails when a value is longer than the new length.

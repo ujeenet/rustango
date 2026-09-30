@@ -450,6 +450,197 @@ async fn shrinking_max_length_refuses_to_truncate(pool: &Pool) {
     );
 }
 
+// ---------------------------------------------------------------- #1881
+
+/// A CHECK whose expression changes under the same name is replaced.
+async fn edited_check_is_replaced(pool: &Pool) {
+    let t = "mad_ck_item";
+    let chain = Chain::new(pool, "ck", &[t]).await;
+    let runs = by_dialect! { pool,
+        postgres => true, because "ALTER TABLE ADD/DROP CONSTRAINT CHECK is native",
+        mysql => true, because "MySQL 8.0.16+ enforces CHECK and drops it with DROP CHECK",
+        sqlite => false, because "SQLite cannot add a CHECK to a table (#559)",
+    };
+    if !runs.value {
+        return;
+    }
+    let with = |expr: &str| {
+        json!({"tables": [table(t, vec![id(), col("price", "i64", json!({}))])],
+               "checks": [{"name": "mad_ck_price", "table": t, "expr": expr}]})
+    };
+    chain.step(pool, with("price >= 0")).await.expect("initial");
+    chain
+        .step(pool, with("price > 0"))
+        .await
+        .expect("the edit applies");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (1, 0)",
+            &[t, "id", "price"]
+        )
+        .await
+        .is_err(),
+        "the new CHECK refuses 0"
+    );
+}
+
+/// A composite FK that points elsewhere under the same name is replaced.
+async fn edited_composite_fk_is_replaced(pool: &Pool) {
+    let (p1, p2, child) = ("mad_cf_parent1", "mad_cf_parent2", "mad_cf_child");
+    let chain = Chain::new(pool, "cf", &[child, p1, p2]).await;
+    let runs = by_dialect! { pool,
+        postgres => true, because "composite FKs are added by ALTER TABLE",
+        mysql => true, because "composite FKs are added by ALTER TABLE",
+        sqlite => false, because "SQLite cannot add a composite FK to a table (#559)",
+    };
+    if !runs.value {
+        return;
+    }
+    let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
+    let with = |to: Option<&str>| {
+        let mut c = table(child, ab());
+        if let Some(to) = to {
+            c["composite_fks"] =
+                json!([{"name": "mad_cf_fk", "to": to, "from": ["a", "b"], "on": ["a", "b"]}]);
+        }
+        json!({
+            "tables": [table(p1, ab()), table(p2, ab()), c],
+            "indexes": [
+                {"name": "mad_cf_p1_uq", "table": p1, "columns": ["a", "b"], "unique": true},
+                {"name": "mad_cf_p2_uq", "table": p2, "columns": ["a", "b"], "unique": true},
+            ],
+        })
+    };
+    chain.step(pool, with(None)).await.expect("initial");
+    chain
+        .step(pool, with(Some(p1)))
+        .await
+        .expect("composite FK");
+    chain
+        .step(pool, with(Some(p2)))
+        .await
+        .expect("the edit applies");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 2)",
+        &[p2, "id", "a", "b"],
+    )
+    .await
+    .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 2)",
+        &[child, "id", "a", "b"],
+    )
+    .await
+    .expect("the FK now points at parent2");
+}
+
+/// An M2M junction whose target changes under the same name is rebuilt.
+async fn edited_m2m_is_replaced(pool: &Pool) {
+    let (post, tag, tag2, through) = (
+        "mad_mm_post",
+        "mad_mm_tag",
+        "mad_mm_tag2",
+        "mad_mm_post_tags",
+    );
+    let chain = Chain::new(pool, "mm", &[through, post, tag, tag2]).await;
+    let with = |dst: &str| {
+        json!({
+            "tables": [table(post, vec![id()]), table(tag, vec![id()]), table(tag2, vec![id()])],
+            "m2m_tables": [{"through": through, "src_table": post, "src_col": "post_id",
+                            "dst_table": dst, "dst_col": "tag_id"}],
+        })
+    };
+    chain.step(pool, with(tag)).await.expect("initial");
+    chain
+        .step(pool, with(tag2))
+        .await
+        .expect("the edit applies");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[post, "id"])
+        .await
+        .unwrap();
+    exec(pool, "INSERT INTO {} ({}) VALUES (7)", &[tag2, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 7)",
+        &[through, "post_id", "tag_id"],
+    )
+    .await
+    .expect("the junction now references tag2");
+}
+
+/// A PG EXCLUDE whose predicate changes under the same name is replaced.
+async fn edited_exclude_is_replaced(pool: &Pool) {
+    let t = "mad_ex_booking";
+    let chain = Chain::new(pool, "ex", &[t]).await;
+    let pg = by_dialect! { pool,
+        postgres => true, because "EXCLUDE is Postgres-only",
+        mysql => false, because "EXCLUDE renders nothing and warns",
+        sqlite => false, because "EXCLUDE renders nothing and warns",
+    };
+    let with = |pred: Option<&str>| {
+        json!({"tables": [table(t, vec![id(), col("during", "range_datetime", json!({}))])],
+               "excludes": [{"name": "mad_ex_no_overlap", "table": t, "using": "gist",
+                             "elements": [["during", "&&"]], "where_clause": pred}]})
+    };
+    chain.step(pool, with(None)).await.expect("initial");
+    chain
+        .step(pool, with(Some("id > 100")))
+        .await
+        .expect("the edit applies");
+    if !pg.value {
+        return;
+    }
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, '[2026-01-01,2026-01-02)')"),
+            &[t, "id", "during"],
+        )
+        .await
+        .expect("the new predicate leaves low ids unconstrained");
+    }
+}
+
+/// `Option<T>` → `T` with a default fills the NULLs before SET NOT NULL.
+async fn not_null_with_default_backfills(pool: &Pool) {
+    let t = "mad_nn_item";
+    let chain = Chain::new(pool, "nn", &[t]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("n", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "id"])
+        .await
+        .unwrap();
+    let alter = chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(),
+                col("n", "i64", json!({"nullable": false, "default": "0"}))])]}),
+        )
+        .await;
+    let runs = by_dialect! { pool,
+        postgres => true, because "AlterColumnNullable renders on Postgres",
+        mysql => false, because "AlterColumn* is refused at render until #559",
+        sqlite => false, because "AlterColumn* is refused at render until #559",
+    };
+    if !runs.value {
+        assert!(alter
+            .expect_err(runs.why)
+            .contains("is not yet supported on dialect"));
+        return;
+    }
+    alter.expect("the NULL row is backfilled first");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -461,5 +652,10 @@ tri_dialect_test!(
         composite_fk_drops_before_its_parent,
         type_change_is_not_undone_by_max_length,
         shrinking_max_length_refuses_to_truncate,
+        edited_check_is_replaced,
+        edited_composite_fk_is_replaced,
+        edited_m2m_is_replaced,
+        edited_exclude_is_replaced,
+        not_null_with_default_backfills,
     ]
 );

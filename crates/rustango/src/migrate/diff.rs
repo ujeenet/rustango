@@ -231,19 +231,23 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     // objects go in the first phase with the other drops.
     let mut creates = Vec::new();
 
-    // Dropped composite FKs on tables that stay, before the unique index
-    // they reference; a dropped table takes its own.
+    // Dropped or edited composite FKs on tables that stay, before the
+    // unique index they reference; a dropped table takes its own. An edit
+    // that keeps the name is a Drop + Add, like an index (#1881).
     for pt in &prev.tables {
         let Some(ct) = current.table(&pt.name) else {
             continue;
         };
         for pf in &pt.composite_fks {
-            if !ct.composite_fks.iter().any(|c| c.name == pf.name) {
-                changes.push(SchemaChange::DropCompositeFk {
-                    table: pt.name.clone(),
-                    name: pf.name.clone(),
-                });
+            let now = ct.composite_fks.iter().find(|c| c.name == pf.name);
+            if now == Some(pf) {
+                continue;
             }
+            changes.push(SchemaChange::DropCompositeFk {
+                table: pt.name.clone(),
+                name: pf.name.clone(),
+            });
+            creates.extend(now.map(|c| add_composite_fk(&ct.name, c)));
         }
     }
     // Dropped and changed indexes. A changed one (same name, new shape)
@@ -269,33 +273,36 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             creates.push(create_index(c));
         }
     }
-    // Dropped CHECK constraints.
+    // Dropped or edited CHECK constraints.
     for c in &prev.checks {
-        if current.check(&c.name).is_none() {
+        let now = current.check(&c.name);
+        if now != Some(c) {
             changes.push(SchemaChange::DropCheckConstraint {
                 name: c.name.clone(),
                 table: c.table.clone(),
             });
+            creates.extend(now.map(add_check));
         }
     }
-    // Dropped PG EXCLUDE constraints, by name: `SchemaSnapshot` has no
-    // accessor for excludes.
-    let current_exclude_names: std::collections::HashSet<&str> =
-        current.excludes.iter().map(|x| x.name.as_str()).collect();
+    // Dropped or edited PG EXCLUDE constraints.
     for x in &prev.excludes {
-        if !current_exclude_names.contains(x.name.as_str()) {
+        let now = current.excludes.iter().find(|c| c.name == x.name);
+        if now != Some(x) {
             changes.push(SchemaChange::DropExclusionConstraint {
                 name: x.name.clone(),
                 table: x.table.clone(),
             });
+            creates.extend(now.map(add_exclude));
         }
     }
-    // Dropped M2M junctions, before the tables they reference.
+    // Dropped or edited M2M junctions, before the tables they reference.
     for mt in &prev.m2m_tables {
-        if current.m2m_table(&mt.through).is_none() {
+        let now = current.m2m_table(&mt.through);
+        if now != Some(mt) {
             changes.push(SchemaChange::DropM2MTable {
                 through: mt.through.clone(),
             });
+            creates.extend(now.map(create_m2m));
         }
     }
 
@@ -351,7 +358,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
         changes.push(SchemaChange::DropTable(name.to_owned()));
     }
 
-    // New indexes, then the recreated halves of changed ones.
+    // New indexes, then the recreated halves of changed objects.
     for idx in &current.indexes {
         if prev.index(&idx.name).is_none() {
             changes.push(create_index(idx));
@@ -361,37 +368,19 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     // New CHECK constraints.
     for c in &current.checks {
         if prev.check(&c.name).is_none() {
-            changes.push(SchemaChange::AddCheckConstraint {
-                name: c.name.clone(),
-                table: c.table.clone(),
-                expr: c.expr.clone(),
-            });
+            changes.push(add_check(c));
         }
     }
     // New PG EXCLUDE constraints (issue #319).
-    let prev_exclude_names: std::collections::HashSet<&str> =
-        prev.excludes.iter().map(|x| x.name.as_str()).collect();
     for x in &current.excludes {
-        if !prev_exclude_names.contains(x.name.as_str()) {
-            changes.push(SchemaChange::AddExclusionConstraint {
-                name: x.name.clone(),
-                table: x.table.clone(),
-                using: x.using.clone(),
-                elements: x.elements.clone(),
-                where_clause: x.where_clause.clone(),
-            });
+        if !prev.excludes.iter().any(|p| p.name == x.name) {
+            changes.push(add_exclude(x));
         }
     }
     // New M2M junction tables.
     for mt in &current.m2m_tables {
         if prev.m2m_table(&mt.through).is_none() {
-            changes.push(SchemaChange::CreateM2MTable {
-                through: mt.through.clone(),
-                src_table: mt.src_table.clone(),
-                src_col: mt.src_col.clone(),
-                dst_table: mt.dst_table.clone(),
-                dst_col: mt.dst_col.clone(),
-            });
+            changes.push(create_m2m(mt));
         }
     }
     // New composite FK constraints (added on existing tables, or on
@@ -404,13 +393,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             .unwrap_or(&[]);
         for cf in &ct.composite_fks {
             if !prev_fks.iter().any(|p| p.name == cf.name) {
-                changes.push(SchemaChange::AddCompositeFk {
-                    table: ct.name.clone(),
-                    name: cf.name.clone(),
-                    to: cf.to.clone(),
-                    from: cf.from.clone(),
-                    on: cf.on.clone(),
-                });
+                changes.push(add_composite_fk(&ct.name, cf));
             }
         }
     }
@@ -426,6 +409,44 @@ fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
         method: idx.method.clone(),
         where_clause: idx.where_clause.clone(),
         include: idx.include.clone(),
+    }
+}
+
+fn add_check(c: &super::snapshot::CheckSnapshot) -> SchemaChange {
+    SchemaChange::AddCheckConstraint {
+        name: c.name.clone(),
+        table: c.table.clone(),
+        expr: c.expr.clone(),
+    }
+}
+
+fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
+    SchemaChange::AddExclusionConstraint {
+        name: x.name.clone(),
+        table: x.table.clone(),
+        using: x.using.clone(),
+        elements: x.elements.clone(),
+        where_clause: x.where_clause.clone(),
+    }
+}
+
+fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
+    SchemaChange::CreateM2MTable {
+        through: mt.through.clone(),
+        src_table: mt.src_table.clone(),
+        src_col: mt.src_col.clone(),
+        dst_table: mt.dst_table.clone(),
+        dst_col: mt.dst_col.clone(),
+    }
+}
+
+fn add_composite_fk(table: &str, cf: &super::snapshot::CompositeFkSnapshot) -> SchemaChange {
+    SchemaChange::AddCompositeFk {
+        table: table.to_owned(),
+        name: cf.name.clone(),
+        to: cf.to.clone(),
+        from: cf.from.clone(),
+        on: cf.on.clone(),
     }
 }
 
@@ -875,6 +896,20 @@ fn render_changes_split_inner(
                 nullable,
             } => {
                 guard_alter_column_dialect(dialect, "AlterColumnNullable", table, column)?;
+                // Option<T> → T with a default: fill the NULLs first, or
+                // SET NOT NULL fails on them (#1881).
+                let field = current.table(table).and_then(|t| t.field(column));
+                if let Some((f, expr)) = field
+                    .filter(|_| !*nullable)
+                    .and_then(|f| f.default.as_ref().map(|d| (f, d)))
+                {
+                    let value = render_column_default(expr, &f.ty, f.max_length, dialect);
+                    out.immediate.push(format!(
+                        "UPDATE {t} SET {c} = {value} WHERE {c} IS NULL",
+                        t = dialect.quote_ident(table),
+                        c = dialect.quote_ident(column),
+                    ));
+                }
                 let action = if *nullable {
                     "DROP NOT NULL"
                 } else {
