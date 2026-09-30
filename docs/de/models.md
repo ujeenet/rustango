@@ -292,6 +292,9 @@ mit `select_related` (ebenfalls im ORM-Leitfaden).
 | `blank` / `editable` | `#[rustango(editable = false)]` | Formular-/Admin-Verhalten |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | Spalten-COMMENT |
 
+INSERT und UPDATE prüfen diese Regeln bei literalen Werten. Ein `set_expr(F(..))`-Wert
+wird von der Datenbank berechnet und daher nicht geprüft.
+
 `choices`, `default`, `auto_now_add` und Soft-Delete zusammen (alle verifiziert):
 
 ```rust

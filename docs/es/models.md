@@ -293,6 +293,9 @@ filas relacionadas con `select_related` (también en la guía del ORM).
 | `blank` / `editable` | `#[rustango(editable = false)]` | comportamiento en formulario/admin |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | COMMENT de columna |
 
+INSERT y UPDATE comprueban estas reglas en valores literales. Un valor
+`set_expr(F(..))` lo calcula la base de datos, así que no se comprueba.
+
 `choices`, `default`, `auto_now_add` y borrado lógico juntos (todos verificados):
 
 ```rust
