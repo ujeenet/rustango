@@ -236,7 +236,7 @@ Umgebungsvariable pro Anbieter.
 
 Eingebaute Presets: `google`, `microsoft` (Azure AD), `github`, `gitlab`,
 `discord`. Für alles andere verwenden Sie `kind = "oidc"` mit einer `issuer_url` —
-rustango führt OpenID-Connect-Discovery aus, um die Endpunkte zu finden. (Sign in
+rustango führt OpenID-Connect-Discovery aus, um die Endpunkte zu finden (einmal pro Issuer und Stunde). (Sign in
 with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
 
 ## Sicherheitshinweise

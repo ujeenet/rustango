@@ -468,10 +468,10 @@ La liste noire en mémoire par défaut (`InMemoryJtiStore`) nettoie d'elle-même
 Les clés d'API permettent aux scripts et aux services de s'authentifier sans nom d'utilisateur, mot de passe ni session — pratique pour l'accès machine à machine. Vous générez une clé, la montrez à l'utilisateur une seule fois, et ne stockez que son préfixe et son hachage.
 
 ```rust
-use rustango::api_keys::{generate_key, verify_key, split_token};
+use rustango::api_keys::{generate_key_async, verify_key_async, split_token};
 
 // Issuance
-let (full_token, prefix, hash) = generate_key()?;
+let (full_token, prefix, hash) = generate_key_async().await?;
 // Format: {8-char hex prefix}.{32-char hex secret}
 // Show full_token to the user once. Store prefix + hash in your DB.
 
@@ -479,7 +479,7 @@ let (full_token, prefix, hash) = generate_key()?;
 let (prefix, secret) = split_token(&inbound_header)
     .ok_or(StatusCode::UNAUTHORIZED)?;
 let row = lookup_by_prefix(prefix).await?;
-if !verify_key(secret, &row.hash)? {
+if !verify_key_async(secret, &row.hash).await? {
     return Err(StatusCode::UNAUTHORIZED);
 }
 ```

@@ -168,6 +168,36 @@ same pool now returns `NestedAtomic`; drop the guard first.
 
 New variant: returned once a process has seen 4096 distinct multi-hop relation paths.
 
+### `PgJobQueue` counts attempts at pickup
+
+`rustango_jobs.attempt` now includes the running attempt. Keep the
+`reclaim_stuck_jobs_pool` threshold well above `heartbeat_interval` (10 s by default).
+
+### ViewSet `fields()` limits writes (breaking)
+
+A body key outside `fields()` is now ignored on create and update, so a required column
+left out of `fields()` fails the insert. With `OwnedBy`, a client can no longer set the
+owner, and an unauthenticated create or update is `403`. A custom `ViewSetFilter` that
+scopes by owner should also implement `write_pins`.
+
+### `?ordering=` with a serializer
+
+Without `ordering_fields`, only the fields the serializer renders are sortable.
+`readable_source_fields()` defaults to empty, so a ViewSet on a hand-written
+`ModelSerializer` ignores `?ordering=` until the impl overrides it or the ViewSet
+sets `ordering_fields`.
+
+### `ApiKeyError` and `HasherError` gain `Busy`
+
+Both are now `#[non_exhaustive]`; add a `_` arm. From async code use
+`api_keys::{generate_key,hash_secret,verify_key}_async` and `PasswordHasherChain::{hash,verify}_async`.
+
+### HMAC signing takes the host
+
+`sign_request` and `sign_now` take a `host` argument after `method`, and every signature
+changes. Services sharing a key, or behind a proxy that rewrites `Host`, set
+`HmacAuthLayer::host`; it panics on an empty or invalid host.
+
 ### MySQL: `Uuid` is hyphenated text
 
 The ORM now writes and reads a `Uuid` as the 36-character text its `CHAR(36)` column
