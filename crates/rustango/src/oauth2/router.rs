@@ -369,5 +369,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        // A reader that never finds the cookie says "missing" instead.
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("invalid flow cookie"));
+    }
+
+    /// The cookie set by `/login` is read back and opened on callback: a
+    /// wrong `state` then fails the CSRF check, not the cookie lookup.
+    #[tokio::test]
+    async fn callback_reads_the_flow_cookie_from_login() {
+        let registry = OAuth2Registry::new();
+        registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/acme/google/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let set = login.headers().get(header::SET_COOKIE).unwrap();
+        let pair = set.to_str().unwrap().split(';').next().unwrap().to_owned();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/acme/google/callback?code=abc&state=not-the-state")
+                    .header(header::COOKIE, format!("other=1; {pair}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "CSRF state mismatch");
     }
 }
