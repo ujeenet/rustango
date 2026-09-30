@@ -25,6 +25,8 @@ any size runs in a savepoint of it, so the outer rollback undoes it.
 Multi-hop join aliases are interned once per path instead of leaked on every `compile()`.
 Paths deeper than 6 hops are refused, which keeps that set bounded by the schema.
 
+## [0.59.7] — 2026-09-30
+
 ### Security — `JwtBackend` checks the tenant binding (#1848)
 
 **Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,
