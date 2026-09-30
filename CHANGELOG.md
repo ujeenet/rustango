@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — ViewSet writes stay inside `fields()` and the owner (#1845)
+
+**Breaking:** create and update now write only the `fields()` columns (and the serializer's
+writable ones); other body keys are ignored. `OwnedBy` pins its column: create stores the
+caller, update never changes it, and a write with no principal is `403`.
+`?ordering=` with a serializer falls back to the fields it renders. New
+`ViewSetFilter::write_pins`, `WritePin` and `ModelSerializer::readable_source_fields`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

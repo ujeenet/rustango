@@ -556,7 +556,7 @@ Every method on `ViewSet::for_model(SCHEMA)` (each returns `Self`):
 | Method | Purpose |
 |---|---|
 | `serializer::<S>()` | Wire a serializer for typed output + input (tri-dialect). |
-| `fields(&["…"])` | Default-projection + writable field whitelist (when no serializer). |
+| `fields(&["…"])` | Default projection + writable field whitelist. |
 | `filter_fields(&["…"])` | Enable `?field=value` filtering. |
 | `search_fields(&["…"])` | Enable `?search=`. |
 | `ordering(&[("field", desc)])` | Default sort order. |
@@ -598,8 +598,9 @@ Supported lookups: `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contains`,
 
 **Search** — `?search=term` matches `search_fields` with a case-insensitive OR.
 
-**Ordering** — `?ordering=field,-other` (`-` = DESC). Any field is sortable
-unless you set `.ordering_fields([...])` to restrict it. Without a param, the
+**Ordering** — `?ordering=field,-other` (`-` = DESC). Any field the response
+shows (with a serializer, the fields it renders) is sortable unless you set
+`.ordering_fields([...])` to restrict it. Without a param, the
 `ordering` default applies. They all compose.
 
 ---
@@ -758,6 +759,10 @@ is a **404** on the item routes, not a 403: a 403 would confirm the id exists.
 Identity must come from the credential, never from the query string. A
 `?owner_id=` filter is not a scope — it is a parameter the caller chooses.
 
+A scope narrows reads only. A backend that owns a column also implements
+`write_pins`, so create stores the owner and update cannot change it; returning
+`WritePin::Deny` refuses the write with a 403.
+
 #### `OwnedBy` — the shipped backend
 
 Most owned resources need exactly one rule: *rows whose ownership column is the
@@ -779,6 +784,9 @@ takes the name rather than assuming a convention. It fails closed on the two
 ways it can be wrong: an unauthenticated request and a column the model does not
 have both match **nothing**, so a typo at mount time cannot turn into "no
 predicates, return the table".
+
+`OwnedBy` pins its column on writes: a create stores the caller whatever the body
+says, an update never moves the row, and a write with no principal is a 403.
 
 Superusers are not special by default; `.superuser_sees_all()` opts in, because
 "admins see everything" is a product decision, not a framework one.

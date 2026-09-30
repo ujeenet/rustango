@@ -13372,6 +13372,27 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         })
         .collect();
 
+    // `readable_source_fields`: model columns the JSON output copies
+    // straight from the model, so `?ordering=` cannot sort on a column
+    // the API never shows (#1845).
+    let readable_source_lits: Vec<String> = fields_info
+        .iter()
+        .filter(|fi| {
+            !fi.attrs.write_only
+                && !fi.attrs.skip
+                && fi.attrs.method.is_none()
+                && !fi.attrs.nested
+                && fi.attrs.many.is_none()
+                && fi.attrs.slug.is_none()
+        })
+        .map(|fi| {
+            fi.attrs
+                .source
+                .clone()
+                .unwrap_or_else(|| fi.ident.to_string())
+        })
+        .collect();
+
     // `from_writable_json`: build a partial instance for input
     // validation. Writable fields are parsed from the JSON body (keyed
     // by serializer field name); every other field defaults. Per-field
@@ -13467,6 +13488,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
             fn writable_source_fields() -> &'static [&'static str] {
                 &[ #( #writable_source_lits ),* ]
+            }
+
+            fn readable_source_fields() -> &'static [&'static str] {
+                &[ #( #readable_source_lits ),* ]
             }
 
             fn from_writable_json(

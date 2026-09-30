@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### ViewSet `fields()` limits writes (breaking)
+
+A body key outside `fields()` is now ignored on create and update, so a required column
+left out of `fields()` fails the insert. With `OwnedBy`, a client can no longer set the
+owner, and an unauthenticated create or update is `403`. A custom `ViewSetFilter` that
+scopes by owner should also implement `write_pins`.
+
+### `?ordering=` with a serializer
+
+Without `ordering_fields`, only the fields the serializer renders are sortable. A
+hand-written `ModelSerializer` has none until it overrides `readable_source_fields`.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`
