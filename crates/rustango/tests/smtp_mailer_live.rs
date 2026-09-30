@@ -278,3 +278,24 @@ async fn smtp_mailer_refuses_a_custom_envelope_header() {
         "{err}"
     );
 }
+
+/// CRLF in a custom header value cannot smuggle in another header.
+#[tokio::test]
+async fn smtp_mailer_refuses_crlf_in_a_custom_header() {
+    let mailer = SmtpMailer::builder("127.0.0.1")
+        .port(2525)
+        .tls(TlsMode::None)
+        .build()
+        .expect("build ok");
+    let email = Email::new()
+        .from("noreply@example.com")
+        .to("alice@example.com")
+        .subject("s")
+        .body("b")
+        .header("X-Tag", "a\r\nBcc: eve@example.com");
+    let err = mailer.send(&email).await.expect_err("crlf header");
+    assert!(
+        matches!(err, rustango::email::MailError::BadHeader(_)),
+        "{err}"
+    );
+}
