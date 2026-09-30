@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Tests — every session and flow cookie read has a happy-path test (#1694)
+
+A cookie reader that always returns `None` now fails a test at each call site.
+
 ### Fixed — `DistributedLock` docs on `DatabaseCache` (#1837)
 
 `DatabaseCache::add` is atomic, so a DB-backed lock is safe across replicas; the page said it was not.
