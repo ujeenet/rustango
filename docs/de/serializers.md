@@ -494,6 +494,8 @@ Es schreibt ein Startmodul, das du ausfüllst:
 
 use rustango::Serializer;
 
+use crate::models::Post;
+
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = Post)]
 pub struct PostSerializer {

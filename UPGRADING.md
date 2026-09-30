@@ -150,6 +150,27 @@ untouched.
 
 ## Unreleased
 
+### Tenancy `migrate` verbs refuse unknown flags (breaking)
+
+`migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;
+now an unknown flag is an error. Use `migrate-tenants` for a tenant-scoped target.
+
+### Scaffolder refuses keyword names
+
+`make:*` and `cargo rustango new` now refuse names like `Type`, `std` or `crate`; the
+code they generated for them did not compile.
+
+### `dumpdata` / `loaddata` fail instead of losing rows (breaking)
+
+`dumpdata` now errors on a model with an Array, Range, HStore, Vector or Geometry column;
+leave it out with the new `--exclude app.Model`. `loaddata` exits non-zero if any row was skipped.
+
+### Tenancy user and permission verbs refuse unknown flags (breaking)
+
+`grant-perm`, `revoke-perm`, `create-user` and the host verbs now fail on a flag they don't
+take. A password typed at the prompt is no longer trimmed: one set with a leading or
+trailing space before now logs in without it.
+
 ### Shutdown drains for 20 s, then closes
 
 `runserver` no longer waits forever for open connections after SIGTERM. Set

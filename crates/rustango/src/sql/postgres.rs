@@ -61,6 +61,16 @@ impl Dialect for Postgres {
         ))
     }
 
+    fn reset_sequence_sql(&self, table: &str, column: &str) -> Option<String> {
+        let (t, c) = (self.quote_ident(table), self.quote_ident(column));
+        Some(format!(
+            "SELECT setval(pg_get_serial_sequence({}, {}), COALESCE(MAX({c}), 1), \
+             MAX({c}) IS NOT NULL) FROM {t}",
+            self.placeholder(1),
+            self.placeholder(2),
+        ))
+    }
+
     fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",

@@ -4,6 +4,45 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenancy `migrate` verbs honour their flags and scope (#1909)
+
+`migrate-registry --dry-run` previews instead of migrating; `migrate <target>` and
+`migrate --dry-run` see registry-scoped migrations only. **Breaking:** `migrate-registry`
+and `migrate-tenants` refuse flags they don't take, and a tenant-scoped `<target>` is refused.
+
+### Fixed — the CLI honours `with_tenant_pools` on SQLite and MySQL (#1914)
+
+Every backend now builds its `TenantPools` in one place, so `prewarm-pools` and
+`migrate-tenants` use the configured sizing, and `user_model` works without `postgres`.
+
+### Fixed — scaffolded viewsets and serializers compile (#1913)
+
+`make:viewset` (pool) and `make:serializer` import their model; the tenant viewset's mount
+comment names the file it wrote. `make:*` and `cargo rustango new` refuse names that
+become a Rust keyword or `std` / `core` / `crate` / `self` / `super`.
+
+### Fixed — `dumpdata` / `loaddata` round-trip (#1911)
+
+`loaddata` reads the fractional times `dumpdata` writes and integer strings for `i64`,
+loads parents before children, and resets Postgres id sequences, so the next insert
+doesn't collide. **Breaking:** `dumpdata` refuses Array, Range, HStore, Vector and Geometry
+columns (they were dumped as `null`), and `loaddata` exits non-zero when it skipped a row.
+New `Dialect::reset_sequence_sql` and `dumpdata --exclude`. Self-FK rows load parents first,
+and `--fail-fast` still resets sequences.
+
+### Fixed — `flush --yes` works on MySQL (#1912)
+
+Rows are deleted through the dialect's own `DELETE`; the hand-quoted `"table"` was a
+syntax error (1064) on MySQL for every table.
+
+### Fixed — tenancy user, permission and host verbs parse flags (#1910)
+
+`create-user acme --superuser` no longer makes a user named `--superuser`; a failed
+first-user check is an error, not a superuser; prompted passwords keep their spaces;
+`set-host-enabled --enabled false` reads `false` as the value. **Breaking:** `grant-perm`,
+`revoke-perm` and the host verbs refuse unknown flags (`--rol` granted to a user), and a
+valued flag refuses a following `--flag` as its value.
+
 ### Fixed — shutdown has a drain deadline; interrupted runs are closed (#1883)
 
 After SIGTERM open connections get `[server] shutdown_timeout_secs` (default 20) to finish,
@@ -2011,7 +2050,6 @@ exploitable?" answered honestly — including where the answer is no.
   emits a form MySQL rejects with error 1235 when the inner select has
   one, and `WhereExpr::RelExists` has no public builder. With those
   closed this function is about eight lines of ORM.
-
 
 - **Three write-path regressions this release introduced**, found by a
   crew review of the assembled branch. 0.57.6 had none of them.
@@ -4155,7 +4193,6 @@ neither did. Those releases are yanked; upgrade to this one.
   keep working.
 
 ### Added
-
 
 - **Squash reconciliation — `Migration.replaces`** (#1167) — a squash collapses
   a run of historical migrations into one file that recreates the same end
