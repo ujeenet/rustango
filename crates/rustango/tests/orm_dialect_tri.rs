@@ -34,6 +34,16 @@ pub struct Post {
     pub parent_id: Option<i64>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_blob")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Blob {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub token: uuid::Uuid,
+    pub data: Vec<u8>,
+}
+
 fn post(slug: &str, parent_id: Option<i64>) -> Post {
     Post {
         id: Auto::default(),
@@ -46,6 +56,7 @@ fn post(slug: &str, parent_id: Option<i64>) -> Post {
 async fn setup(pool: &Pool) {
     fresh_table::<Code>(pool).await;
     fresh_table::<Post>(pool).await;
+    fresh_table::<Blob>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -269,6 +280,34 @@ async fn paginate_orders_by_pk(pool: &Pool) {
     assert_eq!(got, ["a", "b"], "the first page is the two lowest PKs");
 }
 
+/// #1901: `values()` read a Uuid or bytes column as Null (SQLite and PG)
+/// or a Uuid as text (MySQL).
+async fn values_decode_uuid_and_bytes(pool: &Pool) {
+    let tok = uuid::uuid!("6f1c2a4e-9b7d-4c3a-8e21-0d5f4b6a7c89");
+    let mut b = Blob {
+        id: Auto::default(),
+        token: tok,
+        data: vec![0, 1, 255],
+    };
+    b.insert_pool(pool).await.expect("seed");
+    let want = [SqlValue::Uuid(tok), SqlValue::Binary(vec![0, 1, 255])];
+
+    let list = Blob::objects()
+        .values_list(&["token", "data"])
+        .fetch(pool)
+        .await
+        .expect("values_list");
+    assert_eq!(list, [want.to_vec()]);
+
+    let dict = Blob::objects()
+        .values_dict(&["token", "data"])
+        .fetch(pool)
+        .await
+        .expect("values_dict");
+    assert_eq!(dict[0]["token"], want[0]);
+    assert_eq!(dict[0]["data"], want[1]);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -281,5 +320,6 @@ tri_dialect_test! {
         paginated_union_counts_every_branch,
         distinct_on_keeps_search_and_derived_joins,
         paginate_orders_by_pk,
+        values_decode_uuid_and_bytes,
     ],
 }

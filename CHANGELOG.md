@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `values()` reads Uuid and bytes columns on every backend (#1901)
+
+`values_dict` / `values_list` return `SqlValue::Uuid` and `SqlValue::Binary` instead of
+`Null` on SQLite and PostgreSQL, and bytes instead of `Null` on MySQL.
+
 ### Fixed — compound queries keep the first branch whole (#1890)
 
 A union's first branch keeps its derived-table joins, DISTINCT and projection, and `values()`

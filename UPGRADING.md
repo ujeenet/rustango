@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `values()` returns `SqlValue::Uuid` for a Uuid column on MySQL (#1901)
+
+**Breaking:** MySQL gave `SqlValue::String`; match on `SqlValue::Uuid` as on the other backends.
+
 ### `QuerySet::paginate` orders by PK when unordered (#1890)
 
 A queryset with no `order_by` now pages in PK order instead of the database's scan order.
