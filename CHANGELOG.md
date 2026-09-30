@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a bad settings value no longer boots on defaults (#1927)
+
+**Breaking:** with `Cli::with_settings_from_env`, a config that exists but does not load
+(bad TOML, a wrong type, a bad `RUSTANGO__*` override) now makes `Cli::run` fail. Only a
+missing `config/default.toml` still runs on Cli defaults. New `ConfigError::is_missing_config`.
+
 ### Fixed — tenant pools follow `database_url` / schema edits from other processes (#1882)
 
 A cached tenant pool is keyed by the source it was built from, so a moved tenant is served

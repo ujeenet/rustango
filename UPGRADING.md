@@ -150,6 +150,12 @@ untouched.
 
 ## Unreleased
 
+### A broken config fails boot (breaking)
+
+`Cli::run` now returns an error when `config/` exists but does not load, for example
+`RUSTANGO__SECURITY__SECURE_SSL_REDIRECT=1` (use `true`). It used to warn and run without
+allowed hosts, security headers or login limits. Fix the value the error names.
+
 ### Tenant moves reach every server
 
 After `edit-tenant --database-url` or `migrate-tenant-storage`, running servers switch within
