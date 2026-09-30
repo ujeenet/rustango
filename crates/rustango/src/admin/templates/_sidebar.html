@@ -6,10 +6,12 @@
         <a href="{{ admin_prefix }}/"
            class="{% if active_table is undefined or active_table == '' %}active{% endif %}">Home</a>
     </p>
+    {% if can_view_audit %}
     <p>
         <a href="{{ admin_prefix }}{{ audit_url }}"
            class="{% if active_table == '__audit' %}active{% endif %}">Activity</a>
     </p>
+    {% endif %}
     <p>
         {# In-admin model reference: every registered model and field. #}
         <a href="{{ admin_prefix }}/__docs"

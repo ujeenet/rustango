@@ -169,26 +169,33 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
     // framework writes on every admin create, update and delete.
     // Best-effort: if the audit table does not exist yet, show an
     // empty list instead of failing the admin home.
-    let recent_actions_ctx: Vec<serde_json::Value> =
-        crate::audit::list(&state.pool, &crate::audit::AuditFilter::default(), 10, 0)
+    // Same permission gate and row scope as the `/__audit` feed.
+    let recent = match state.audit_reader() {
+        Some(reader) => reader
+            .list(&crate::audit::AuditFilter::default(), 10, 0)
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| {
-                let action_url = format!(
-                    "{}/{}/{}",
-                    state.config.admin_prefix, entry.entity_table, entry.entity_pk,
-                );
-                serde_json::json!({
-                    "table": entry.entity_table,
-                    "pk": entry.entity_pk,
-                    "operation": entry.operation,
-                    "source": entry.source,
-                    "occurred_at": entry.occurred_at.to_rfc3339(),
-                    "url": action_url,
-                })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let recent_actions_ctx: Vec<serde_json::Value> = recent
+        .into_iter()
+        .map(|entry| {
+            let action_url = format!(
+                "{}/{}/{}",
+                state.config.admin_prefix,
+                crate::url_codec::url_encode(&entry.entity_table),
+                crate::url_codec::url_encode(&entry.entity_pk),
+            );
+            serde_json::json!({
+                "table": entry.entity_table,
+                "pk": entry.entity_pk,
+                "operation": entry.operation,
+                "source": entry.source,
+                "occurred_at": entry.occurred_at.to_rfc3339(),
+                "url": action_url,
             })
-            .collect();
+        })
+        .collect();
 
     let mut ctx = serde_json::json!({
         "groups": groups_ctx,

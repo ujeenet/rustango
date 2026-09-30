@@ -49,7 +49,7 @@
     {% else %}
       <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
     {% endif %}
-    <a href="{{ e.detail_url | safe }}"><strong>{{ e.entity_table }}#{{ e.entity_pk }}</strong></a>
+    <a href="{{ e.detail_url }}"><strong>{{ e.entity_table }}#{{ e.entity_pk }}</strong></a>
     by <strong>{{ e.source }}</strong>
     <small>at {{ e.occurred_at }}</small>
     <pre class="audit-changes">{{ e.changes }}</pre>

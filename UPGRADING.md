@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Admin audit log is permission-gated
+
+**Breaking:** grant `audit.view` (read) or `audit.delete` (cleanup) to non-superusers
+who used the feed; `auto_create_permissions_pool` seeds both codenames.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

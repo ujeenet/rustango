@@ -136,6 +136,8 @@ pub(crate) fn chrome_context_with_session(
         // standalone admins. Templates compose the full
         // audit URL as `{{ admin_prefix }}{{ audit_url }}`.
         "audit_url": &state.config.audit_url,
+        // Hides the Activity links from users the feed would refuse.
+        "can_view_audit": state.audit_reader().is_some(),
         // v0.28.2 (#77) — sidebar "Change password" link target.
         // Threaded from the tenant admin's RouteConfig.
         "change_password_url": &state.config.change_password_url,
