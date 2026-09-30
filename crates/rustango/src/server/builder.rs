@@ -57,6 +57,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     provisioning_dir: Option<std::path::PathBuf>,
     /// How long `serve` lets open connections finish after SIGTERM.
     drain_timeout: std::time::Duration,
+    /// A `running` run silent this long is closed at boot.
+    stale_run_after: std::time::Duration,
     /// `(prefix, root_dir)` pairs registered via [`Builder::with_static`].
     /// Mounted at `serve` time as
     /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`
@@ -164,6 +166,7 @@ impl<DB: Database> Builder<DB> {
             health_endpoints: false,
             provisioning_dir: None,
             drain_timeout: crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+            stale_run_after: crate::tenancy::provision_store::STALE_RUN_AFTER,
             static_dirs: Vec::new(),
             observability: false,
             access_log: None,
@@ -731,7 +734,7 @@ impl<DB: Database> Builder<DB> {
         // Runs are detached tasks; close the ones a stopped process left `running` (#1883).
         if self.provisioning_dir.is_some() {
             let registry: crate::sql::Pool = self.registry.clone().into();
-            let after = crate::tenancy::provision_store::STALE_RUN_AFTER;
+            let after = self.stale_run_after;
             match crate::tenancy::provision_store::reap_stale_runs(&registry, after).await {
                 Ok(0) => {}
                 Ok(n) => tracing::warn!(
@@ -873,6 +876,16 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn drain_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.drain_timeout = timeout;
+        self
+    }
+
+    /// A provisioning/migration run `running` with no event for this long
+    /// is closed as failed at boot. Default
+    /// [`crate::tenancy::provision_store::STALE_RUN_AFTER`] (1 h); keep it
+    /// above your slowest silent step.
+    #[must_use]
+    pub fn stale_run_after(mut self, after: std::time::Duration) -> Self {
+        self.stale_run_after = after;
         self
     }
 

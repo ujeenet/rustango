@@ -156,7 +156,7 @@ untouched.
 `[server] shutdown_timeout_secs` to change it, under your orchestrator's grace period.
 `ServerSettings` gained that field, so a struct literal needs `..Default::default()`.
 A webhook delivery whose earlier run failed now provisions again instead of returning
-`duplicate: true`.
+`duplicate: true`. `WebhookConfig` gained `stale_run_after`; build it with `WebhookConfig::new`.
 
 ### `email::from_settings` returns `Result` (breaking)
 

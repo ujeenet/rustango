@@ -9,7 +9,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 After SIGTERM open connections get `[server] shutdown_timeout_secs` (default 20) to finish,
 then close; new `shutdown::serve_until_drained` and `server::Builder::drain_timeout`.
 Provisioning/migration runs left `running` for an hour are marked failed at boot, and a
-webhook retry of a failed run provisions again under the same `event_id`.
+webhook retry of a failed run provisions again under the same `event_id`, resuming a
+tenant the failed run left inactive. A closed run is never reopened by its task. The stale
+limit is `WebhookConfig::stale_run_after` / `Builder::stale_run_after`.
 
 ### Fixed — a broken SMTP config fails instead of mailing to stdout (#1923)
 

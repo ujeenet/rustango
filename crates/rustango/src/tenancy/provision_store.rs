@@ -304,7 +304,8 @@ pub async fn attach_org(registry: &Pool, run_id: i64, org_id: i64) -> Result<(),
     Ok(())
 }
 
-/// Close a run.
+/// Close a run. Only a `running` run changes, so one already closed as
+/// interrupted keeps that result (#1883).
 ///
 /// # Errors
 /// A registry write failure.
@@ -316,6 +317,7 @@ pub async fn finish_run(
 ) -> Result<(), TenancyError> {
     ProvisioningRun::objects()
         .where_(ProvisioningRun::id.eq(run_id))
+        .where_(ProvisioningRun::state.eq(RunState::Running.as_str().to_owned()))
         .update()
         .set("state", state.as_str())
         .set("error", error)
@@ -544,18 +546,20 @@ pub async fn reap_stale_runs(
 }
 
 /// Whether a delivery carrying `run`'s idempotency key may start over:
-/// the run failed, or was interrupted (closed here). Frees the key.
+/// the run failed, or has been `running` with no event for `stale_after`
+/// (closed here). Frees the key.
 ///
 /// # Errors
 /// A registry read or write failure.
 pub async fn release_for_retry(
     registry: &Pool,
     run: &ProvisioningRun,
+    stale_after: std::time::Duration,
 ) -> Result<bool, TenancyError> {
     let Some(id) = run.id.get().copied() else {
         return Ok(false);
     };
-    if is_stale(registry, run, STALE_RUN_AFTER).await? {
+    if is_stale(registry, run, stale_after).await? {
         return close_interrupted(registry, id).await;
     }
     if RunState::parse(&run.state) != RunState::Failed {
@@ -569,6 +573,24 @@ pub async fn release_for_retry(
         .execute_pool(registry)
         .await?;
     Ok(n > 0)
+}
+
+/// The provision run that created `org_id` did not finish, so a retry
+/// may pick the tenant up where it stopped.
+///
+/// # Errors
+/// A registry read failure.
+pub async fn org_left_by_failed_run(registry: &Pool, org_id: i64) -> Result<bool, TenancyError> {
+    let creator = ProvisioningRun::objects()
+        .where_(ProvisioningRun::org_id.eq(Some(org_id)))
+        .where_(ProvisioningRun::kind.eq(RunKind::Provision.as_str().to_owned()))
+        .order_by(&[("id", false)])
+        .limit(1)
+        .fetch(registry)
+        .await?
+        .into_iter()
+        .next();
+    Ok(creator.is_some_and(|r| RunState::parse(&r.state) == RunState::Failed))
 }
 
 /// Delete finished runs older than `cutoff`, and their events.

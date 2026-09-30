@@ -496,3 +496,40 @@ async fn stale_running_runs_are_reaped() {
     assert_eq!(state(live).await, RunState::Running);
     assert_eq!(state(done).await, RunState::Succeeded);
 }
+
+/// A run closed as interrupted keeps that state when its task, still
+/// alive after all, finishes later (#1883).
+#[tokio::test]
+async fn a_reaped_run_is_not_flipped_back_by_its_task() {
+    use rustango::core::Column as _;
+    use rustango::sql::UpdaterPool as _;
+    let (pools, url, _tmp) = registry().await;
+    let migrations = tempfile::tempdir().expect("migrations dir");
+    migrate_registry(&pools, &url, migrations.path()).await;
+    let reg = pools.registry_pool();
+    let run = store::open_migrate_run(&reg, Some("slow"), None)
+        .await
+        .unwrap();
+    let id = run.id.get().copied().unwrap();
+    store::ProvisioningRun::objects()
+        .where_(store::ProvisioningRun::id.eq(id))
+        .update()
+        .set(
+            "started_at",
+            chrono::Utc::now() - chrono::Duration::hours(2),
+        )
+        .execute_pool(&reg)
+        .await
+        .unwrap();
+    assert_eq!(
+        store::reap_stale_runs(&reg, std::time::Duration::from_secs(3600))
+            .await
+            .unwrap(),
+        1
+    );
+    store::finish_run(&reg, id, RunState::Succeeded, None)
+        .await
+        .unwrap();
+    let state = store::run_by_id(&reg, id).await.unwrap().unwrap().state;
+    assert_eq!(RunState::parse(&state), RunState::Failed);
+}
