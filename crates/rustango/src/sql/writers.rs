@@ -3213,11 +3213,18 @@ pub(super) fn write_bulk_update_pg(
         }
         first_row = false;
         b.sql.push('(');
+        // A NULL takes its column's cast: an all-NULL column in VALUES
+        // is otherwise typed text.
         for (i, val) in row.iter().enumerate() {
             if i > 0 {
                 b.sql.push_str(", ");
             }
-            b.push_param(val.clone());
+            let col = match i {
+                0 => Some(pk_field.column),
+                _ => query.update_columns.get(i - 1).copied(),
+            };
+            let cast = col.and_then(|c| null_cast_for(b.d, query.model, c));
+            b.push_param_typed(val.clone(), cast);
         }
         b.sql.push(')');
     }

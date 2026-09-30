@@ -137,11 +137,27 @@ async fn upsert_reports_the_updated_row(pool: &Pool) {
     assert_eq!(posts(pool).await[0].title, "A2");
 }
 
+/// #1888: PG typed an all-NULL VALUES column as text.
+async fn bulk_update_sets_null_in_every_row(pool: &Pool) {
+    post("a", Some(5)).insert_pool(pool).await.expect("seed a");
+    post("b", Some(6)).insert_pool(pool).await.expect("seed b");
+    let mut rows = posts(pool).await;
+    for r in &mut rows {
+        r.parent_id = None;
+    }
+    let n = Post::bulk_update(&rows, &["parent_id"], pool)
+        .await
+        .expect("bulk_update to NULL");
+    assert_eq!(n, 2);
+    assert!(posts(pool).await.iter().all(|p| p.parent_id.is_none()));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
         upsert_reports_the_updated_row,
+        bulk_update_sets_null_in_every_row,
     ],
 }

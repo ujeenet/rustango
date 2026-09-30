@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — PostgreSQL `bulk_update` of a column that is NULL in every row (#1888)
+
+Each NULL in the VALUES list is cast to its column type, so it no longer fails as text.
+
 ### Fixed — MySQL do-nothing inserts use the PK and report skips (#1887)
 
 `insert_or_ignore` and friends no longer need an `id` column, and `insert_or_ignore` returns
