@@ -1,4 +1,4 @@
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "storage-s3"))]
 //! Live presigned URL test against MinIO. Exercises:
 //! - presigned PUT  (browser-style upload — bound to Content-Type)
 //! - presigned GET  (private download link)

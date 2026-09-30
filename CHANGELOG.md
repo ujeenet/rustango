@@ -27,6 +27,22 @@ Inline child rows follow the child table's hooks: hidden ones are neither shown 
 `editable = false` fields and fields outside `fieldsets` are no longer read from a
 create or edit POST, and an edit leaves them unchanged instead of NULL / `false`.
 
+### Fixed — `derive(Model)` builds schemas as full literals (#1720)
+
+A new `FieldSchema`, `ModelSchema` or `AdminConfig` field is a compile error in the derive again, not a silent `new()` default.
+
+### Tests — every session and flow cookie read has a happy-path test (#1694)
+
+A cookie reader that always returns `None` now fails a test at each call site.
+
+### Fixed — `DistributedLock` docs on `DatabaseCache` (#1837)
+
+`DatabaseCache::add` is atomic, so a DB-backed lock is safe across replicas; the page said it was not.
+
+### Fixed — test suites build with `postgres,sqlite,tenancy` (#1835)
+
+`urlencoding` is a dev-dependency, and the S3 and job-queue suites are gated on their features.
+
 ### Fixed — `count()` / `exists()` / `sum()` honour the whole queryset (#1885)
 
 `.none()` now counts 0 without a query. Limit, offset, DISTINCT, joins, relation-span

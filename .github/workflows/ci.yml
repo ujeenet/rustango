@@ -419,6 +419,8 @@ jobs:
       # The `not(feature = "postgres")` family; same command `sqlite_litmus`
       # runs, which is gated.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
+      # PG suites gated on `postgres` alone that import more (#1835).
+      - run: cargo test -p rustango --no-default-features --features postgres,sqlite,tenancy --no-run
       # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
       # only shape that compiles it; nothing else in CI did.
       #

@@ -44,10 +44,10 @@
 //!   then deletes it, so a lock whose TTL ran out during release could
 //!   be freed just as the next holder takes it. A compare-and-delete
 //!   script would close that window.
-//! - **Use Redis across replicas.** `RedisCache` does `SET NX`, which
-//!   is atomic between machines. `InMemoryCache` holds its own lock
-//!   across the test-and-set. `DatabaseCache::add` is not atomic, so
-//!   a DB-backed lock is only safe inside one process.
+//! - **Across replicas use Redis or the database.** `RedisCache` does
+//!   `SET NX` and `DatabaseCache::add` is one conditional write, so
+//!   either picks a single winner between machines. `InMemoryCache`
+//!   holds its own lock, so it is only safe inside one process.
 //! - **Set `ttl` above the worst-case run time of the guarded work**,
 //!   or make that work idempotent. With a short TTL another replica
 //!   can take the lock while the first is still running.
@@ -473,7 +473,6 @@ mod tests {
     /// `scoped` names its own keyspace, apart from unscoped and other scopes.
     #[tokio::test]
     async fn scoped_locks_use_their_namespace() {
-        use crate::cache::Cache as _;
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
         let ttl = Duration::from_secs(30);
         let ns = DistributedLock::new(cache.clone()).scoped("reports");
