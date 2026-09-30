@@ -446,7 +446,7 @@ pub struct MailSettings {
     pub smtp_password: Option<String>,
     /// TLS mode: `"none"`, `"starttls"` (the default, an upgrade on
     /// port 587) or `"implicit"` (TLS from the first byte, port 465).
-    /// An unknown value warns and uses `"starttls"`.
+    /// `"tls"` or an unknown value makes `email::from_settings` fail.
     pub smtp_tls: Option<String>,
     /// SMTP connection timeout in seconds.
     /// `None` leaves lettre with no timeout. Set it in production: a

@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### `email::from_settings` returns `Result` (breaking)
+
+Add `?`. A `backend = "smtp"` that cannot be built used to fall back to `ConsoleMailer`;
+it is now an error. Replace `smtp_tls = "tls"` with `"implicit"` (what it meant) or
+`"starttls"`. Match `MailError` with a `_` arm. `SmtpMailer` refuses custom envelope headers
+such as `Bcc` or `Subject`; set them on the `Email` fields.
+
 ### A broken config fails boot (breaking)
 
 `Cli::run` now returns an error when `config/` exists but does not load, for example

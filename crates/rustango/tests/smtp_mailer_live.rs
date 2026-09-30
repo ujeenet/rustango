@@ -226,3 +226,55 @@ async fn smtp_mailer_sends_html_alternative() {
     assert!(body.contains("plain text part"), "plaintext part missing");
     assert!(body.contains("<p>html part</p>"), "html part missing");
 }
+
+/// `Email.headers` reach the wire; they were dropped with a warning (#1923).
+#[tokio::test]
+async fn smtp_mailer_forwards_custom_headers() {
+    let (port, body_rx) = spawn_mock().await;
+    let mailer = SmtpMailer::builder("127.0.0.1")
+        .port(port)
+        .tls(TlsMode::None)
+        .build()
+        .expect("build ok");
+    let email = Email::new()
+        .from("noreply@example.com")
+        .to("alice@example.com")
+        .subject("headers")
+        .body("body")
+        .header("List-Unsubscribe", "<https://example.com/u/1>")
+        .header("X-Tag", "welcome");
+    tokio::time::timeout(Duration::from_secs(5), mailer.send(&email))
+        .await
+        .expect("send within timeout")
+        .expect("send ok");
+    let body = tokio::time::timeout(Duration::from_secs(5), body_rx)
+        .await
+        .expect("body received")
+        .expect("oneshot delivered");
+    assert!(
+        body.contains("List-Unsubscribe: <https://example.com/u/1>"),
+        "{body}"
+    );
+    assert!(body.contains("X-Tag: welcome"), "{body}");
+}
+
+/// A custom header cannot replace an envelope one such as `Bcc`.
+#[tokio::test]
+async fn smtp_mailer_refuses_a_custom_envelope_header() {
+    let mailer = SmtpMailer::builder("127.0.0.1")
+        .port(2525)
+        .tls(TlsMode::None)
+        .build()
+        .expect("build ok");
+    let email = Email::new()
+        .from("noreply@example.com")
+        .to("alice@example.com")
+        .subject("s")
+        .body("b")
+        .header("bcc", "eve@example.com");
+    let err = mailer.send(&email).await.expect_err("reserved header");
+    assert!(
+        matches!(err, rustango::email::MailError::BadHeader(_)),
+        "{err}"
+    );
+}

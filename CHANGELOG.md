@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a broken SMTP config fails instead of mailing to stdout (#1923)
+
+**Breaking:** `email::from_settings` returns `Result`; `backend = "smtp"` with no host, a bad
+`from_address`, no `email-smtp` feature, or `smtp_tls = "tls"` / an unknown mode is a
+`MailError::Config` (new; `MailError` is now `#[non_exhaustive]`). `EmailJob` retries only
+transport errors, `dispatch_email` validates first, and `SmtpMailer` sends `Email.headers`.
+
 ### Fixed — a bad settings value no longer boots on defaults (#1927)
 
 **Breaking:** with `Cli::with_settings_from_env`, a config that exists but does not load

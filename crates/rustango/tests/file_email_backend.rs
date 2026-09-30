@@ -114,7 +114,7 @@ async fn from_settings_file_backend_writes_to_configured_dir() {
         file_email_dir: Some(dir.clone()),
         ..Default::default()
     };
-    let mailer: Arc<dyn Mailer> = from_settings(&s);
+    let mailer: Arc<dyn Mailer> = from_settings(&s).expect("mailer");
     let email = Email::new()
         .to("ops@example.com")
         .from("noreply@example.com")
@@ -140,7 +140,7 @@ async fn from_settings_file_backend_without_dir_falls_back() {
         ..Default::default()
     };
     // No panic, no error — just a warning + ConsoleMailer fallback.
-    let mailer = from_settings(&s);
+    let mailer = from_settings(&s).expect("mailer");
     let email = Email::new()
         .to("ops@example.com")
         .from("noreply@example.com")
