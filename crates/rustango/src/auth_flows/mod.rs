@@ -541,26 +541,30 @@ fn extract_query(url: &str, key: &str) -> Option<String> {
 /// remaining lifetime; a repeat within that window returns
 /// [`AuthFlowError::AlreadyUsed`].
 ///
-/// **Fail-closed:** a cache read error is treated as "already used" — we
-/// refuse rather than risk replaying a passwordless / reset link while
-/// the cache is unavailable. `exists`+`set` is not atomic, so two
-/// *simultaneous* redemptions of the same URL could race; that window is
-/// sub-millisecond and this is defense-in-depth over the signature+TTL
-/// the token already carries.
+/// One atomic `add`, so of two concurrent redemptions one wins (#1853).
+/// Fails closed: a cache error, or a cache that stores nothing, refuses.
 #[cfg(feature = "cache")]
 async fn consume_single_use(
     url: &str,
     cache: &std::sync::Arc<dyn crate::cache::Cache>,
 ) -> Result<(), AuthFlowError> {
     let sig = extract_query(url, "signature").ok_or(AuthFlowError::Malformed)?;
-    let key = format!("authflow_used:{sig}");
-    match cache.exists(&key).await {
-        Ok(true) => return Err(AuthFlowError::AlreadyUsed),
-        Ok(false) => {}
-        Err(_) => return Err(AuthFlowError::AlreadyUsed),
+    if cache.stores_nothing() {
+        tracing::error!(
+            target: "rustango::auth_flows",
+            "single-use token refused: the cache keeps nothing (`NullCache`); use a shared cache"
+        );
+        return Err(AuthFlowError::AlreadyUsed);
     }
-    let _ = cache.set(&key, "1", Some(single_use_ttl(url))).await;
-    Ok(())
+    let key = format!("authflow_used:{sig}");
+    match cache.add(&key, "1", Some(single_use_ttl(url))).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(AuthFlowError::AlreadyUsed),
+        Err(e) => {
+            tracing::error!(target: "rustango::auth_flows", error = %e, "single-use token refused: cache failed");
+            Err(AuthFlowError::AlreadyUsed)
+        }
+    }
 }
 
 /// Remaining lifetime of the token from its `expires` param (unix secs),
@@ -725,6 +729,123 @@ mod tests {
         assert!(MagicLink::verify_single_use(&other, SECRET, &cache)
             .await
             .is_ok());
+    }
+
+    #[cfg(feature = "cache")]
+    fn link() -> String {
+        MagicLink::issue(
+            "https://x/login",
+            "alice@example.com",
+            SECRET,
+            Duration::from_secs(900),
+        )
+    }
+
+    /// `InMemoryCache` whose `exists` waits until two callers are inside it.
+    #[cfg(feature = "cache")]
+    struct Racy(crate::cache::InMemoryCache, tokio::sync::Barrier);
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for Racy {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.0.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            t: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.0.set(k, v, t).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.0.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            let seen = self.0.exists(k).await;
+            self.1.wait().await;
+            seen
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.0.clear().await
+        }
+        async fn add(
+            &self,
+            k: &str,
+            v: &str,
+            t: Option<Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.0.add(k, v, t).await
+        }
+    }
+
+    /// #1853 — two simultaneous redemptions of one link: exactly one wins.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn concurrent_redemptions_of_one_link_yield_one() {
+        let cache: std::sync::Arc<dyn crate::cache::Cache> = std::sync::Arc::new(Racy(
+            crate::cache::InMemoryCache::new(),
+            tokio::sync::Barrier::new(2),
+        ));
+        let url = link();
+        let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                MagicLink::verify_single_use(&url, SECRET, &cache),
+                MagicLink::verify_single_use(&url, SECRET, &cache),
+            )
+        })
+        .await
+        .expect("no deadlock");
+        assert_eq!(u8::from(a.is_ok()) + u8::from(b.is_ok()), 1, "{a:?} {b:?}");
+    }
+
+    /// #1853 — a cache that keeps nothing cannot enforce single use, so it refuses.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn a_null_cache_refuses_single_use() {
+        let cache: std::sync::Arc<dyn crate::cache::Cache> =
+            std::sync::Arc::new(crate::cache::NullCache);
+        let r = MagicLink::verify_single_use(&link(), SECRET, &cache).await;
+        assert_eq!(r, Err(AuthFlowError::AlreadyUsed));
+    }
+
+    /// Accepts reads, fails every write.
+    #[cfg(feature = "cache")]
+    struct WriteFails;
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for WriteFails {
+        async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn delete(&self, _: &str) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+        async fn exists(&self, _: &str) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+    }
+
+    /// #1853 — a failed marker write would leave the link reusable, so it refuses.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn a_failed_marker_write_refuses() {
+        let cache: std::sync::Arc<dyn crate::cache::Cache> = std::sync::Arc::new(WriteFails);
+        let r = MagicLink::verify_single_use(&link(), SECRET, &cache).await;
+        assert_eq!(r, Err(AuthFlowError::AlreadyUsed));
     }
 
     // -------------------------------- query string handling

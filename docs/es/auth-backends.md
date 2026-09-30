@@ -80,6 +80,10 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+En una ruta de tenant, el claim `tenant` del token debe coincidir con el tenant resuelto, y
+los tokens de agente MCP (claim `kind`) se rechazan. Emite con el login de `JwtAuth` o
+`JwtBackend::issue_for_tenant`; los tokens de `issue` solo valen sin tenant resuelto.
+
 `JwtBackend` acepta los tokens de acceso que emite `JwtLifecycle` y rechaza sus
 tokens de refresco — ambos son idénticos en el cable salvo por `typ`, así que un
 token de refresco presentado como bearer sería una credencial de acceso con días
