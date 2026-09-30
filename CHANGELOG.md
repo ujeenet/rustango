@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a job heartbeat no longer freezes the job (#1961)
+
+The `PgJobQueue` heartbeat now runs beside the job, so a job holding the last pool
+connection (or SQLite's writer) no longer stalls until `acquire_timeout`.
+
 ## [0.59.7] — 2026-09-30
 
 ### Security — `JwtBackend` checks the tenant binding (#1848)
