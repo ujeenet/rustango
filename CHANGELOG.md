@@ -32,6 +32,11 @@ The TTL is set when the counter is created, not on every call.
 A wrong current password on the admin, tenant admin and operator console forms now
 counts toward the account lock, so a stolen session cannot guess it at hash speed.
 
+### Fixed — `TrailingSlashLayer` open redirect (#1869)
+
+`//evil.com` and `/\evil.com` redirected off-site; the target's leading slashes and
+backslashes now collapse to one `/`, for both `Append` and `Strip`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
