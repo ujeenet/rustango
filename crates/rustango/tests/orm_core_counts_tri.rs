@@ -5,7 +5,10 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::{BulkInsertQuery, CountQuery, Model as _, SqlValue};
+use rustango::core::joins::aliased;
+use rustango::core::{
+    AggregateExpr, BulkInsertQuery, CountQuery, Model as _, Op, SqlValue, WhereExpr,
+};
 use rustango::sql::{
     atomic, bulk_insert_pool, CounterPool as _, ExecError, ExistsPool as _, ForeignKey, Pool,
 };
@@ -50,12 +53,55 @@ pub struct Wide {
     pub c9: i64,
 }
 
+/// A shelf holds books through `occ_shelf_books`.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "occ_shelf",
+    m2m(
+        name = "books",
+        to = "occ_book",
+        through = "occ_shelf_books",
+        src = "shelf_id",
+        dst = "book_id",
+        auto_create = false,
+    )
+)]
+#[allow(dead_code)]
+pub struct Shelf {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "occ_shelf_books")]
+#[allow(dead_code)]
+pub struct ShelfBook {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub shelf_id: i64,
+    pub book_id: i64,
+}
+
 /// Ada: books 1 (10.75, 100 pages) and 2 (0.5, 200). Bob: book 3 (3.0, 300).
+/// Shelf 1 holds books 1 and 2.
 async fn seeded(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Book::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Author>(pool).await;
     rustango::testkit::matrix::fresh_table::<Book>(pool).await;
     rustango::testkit::matrix::fresh_table::<Wide>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Shelf>(pool).await;
+    rustango::testkit::matrix::fresh_table::<ShelfBook>(pool).await;
+    Shelf { id: 1 }.insert_pool(pool).await.expect("seed shelf");
+    for (id, book_id) in [(1, 1), (2, 2)] {
+        ShelfBook {
+            id,
+            shelf_id: 1,
+            book_id,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed shelf book");
+    }
     for (id, name) in [(1, "Ada"), (2, "Bob")] {
         Author {
             id,
@@ -149,6 +195,72 @@ async fn sum_keeps_float(pool: &Pool) {
     );
     let i: Option<i64> = Book::objects().sum("pages", pool).await.unwrap();
     assert_eq!(i, Some(600));
+}
+
+/// #1944: a relation `SUM` through a junction was cast to an integer.
+async fn relation_sum_keeps_float(pool: &Pool) {
+    let rows = Shelf::objects()
+        .annotate_sum("books", "price")
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0]["books_sum_price"],
+        SqlValue::F64(11.25),
+        "10.75 + 0.5"
+    );
+}
+
+/// `(pages, COUNT(*))` per group, sorted.
+async fn pages_counts(
+    qs: rustango::query::QuerySet<Book>,
+    pool: &Pool,
+) -> Vec<(SqlValue, SqlValue)> {
+    let mut out: Vec<(SqlValue, SqlValue)> = qs
+        .values(&["pages"])
+        .annotate("n", AggregateExpr::Count(None))
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r["pages"].clone(), r["n"].clone()))
+        .collect();
+    out.sort_by_key(|(p, _)| format!("{p:?}"));
+    out
+}
+
+/// #1944: a grouped aggregate dropped the queryset's union.
+async fn grouped_aggregate_honours_compound(pool: &Pool) {
+    let qs = Book::objects()
+        .filter("id", 1_i64)
+        .union(Book::objects().filter("id", 3_i64));
+    let one = SqlValue::I64(1);
+    assert_eq!(
+        pages_counts(qs, pool).await,
+        [(SqlValue::I64(100), one.clone()), (SqlValue::I64(300), one)]
+    );
+}
+
+/// #1944: a grouped aggregate dropped DISTINCT (and the derived join).
+async fn grouped_aggregate_honours_distinct(pool: &Pool) {
+    // Books 1 and 2 each match both of Ada's books, so twice without DISTINCT.
+    let adas = Book::objects().filter("id__lte", 2_i64).compile().unwrap();
+    let qs = Book::objects()
+        .join_sub(
+            adas,
+            "s",
+            WhereExpr::ExprCompare {
+                lhs: aliased("s", "author"),
+                op: Op::Eq,
+                rhs: aliased("occ_book", "author"),
+            },
+        )
+        .distinct();
+    let one = SqlValue::I64(1);
+    assert_eq!(
+        pages_counts(qs, pool).await,
+        [(SqlValue::I64(100), one.clone()), (SqlValue::I64(200), one)]
+    );
 }
 
 fn wide_rows(ids: impl Iterator<Item = i64>) -> Vec<Vec<SqlValue>> {
@@ -310,6 +422,9 @@ tri_dialect_test! {
         count_honours_relation_span,
         exists_reads_one_row_unordered,
         sum_keeps_float,
+        relation_sum_keeps_float,
+        grouped_aggregate_honours_compound,
+        grouped_aggregate_honours_distinct,
         bulk_insert_rolls_back_every_batch,
         bulk_insert_joins_outer_atomic,
     ],

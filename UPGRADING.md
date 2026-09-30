@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Relation `SUM` decodes by column type (#1944)
+
+`annotate_sum` over a relation's float column now reads back as `f64`, not `i64`.
+
 ### `upsert` targets the PK over a field `index(unique)` (#1935)
 
 **Breaking:** a model whose only unique index is a field `index(unique)` or a `unique_when`

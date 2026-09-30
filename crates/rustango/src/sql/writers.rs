@@ -848,27 +848,30 @@ enum AggCast {
 /// already handles its type. Count, Max and Min return i64
 /// everywhere. `SUM` follows its column, read from the current scope.
 fn aggregate_cast_kind(b: &Sql<'_>, expr: &AggregateExpr) -> Option<AggCast> {
-    use crate::core::FieldType;
     match expr {
-        AggregateExpr::Sum(col) => {
-            let ty = b
-                .scope_stack
+        AggregateExpr::Sum(col) => sum_cast(
+            b.scope_stack
                 .last()
                 .and_then(|m| m.field_by_column(col))
-                .map(|f| f.ty);
-            match ty {
-                Some(FieldType::F32 | FieldType::F64) => Some(AggCast::Float),
-                // Exact NUMERIC / DECIMAL, which the decoders read as-is.
-                Some(FieldType::Decimal) => None,
-                _ => Some(AggCast::Int),
-            }
-        }
+                .map(|f| f.ty),
+        ),
         AggregateExpr::Avg(_)
         | AggregateExpr::StdDev(_)
         | AggregateExpr::StdDevPop(_)
         | AggregateExpr::Variance(_)
         | AggregateExpr::VariancePop(_) => Some(AggCast::Float),
         _ => None,
+    }
+}
+
+/// The cast a `SUM` over a column of type `ty` needs.
+fn sum_cast(ty: Option<crate::core::FieldType>) -> Option<AggCast> {
+    use crate::core::FieldType;
+    match ty {
+        Some(FieldType::F32 | FieldType::F64) => Some(AggCast::Float),
+        // Exact NUMERIC / DECIMAL, which the decoders read as-is.
+        Some(FieldType::Decimal) => None,
+        _ => Some(AggCast::Int),
     }
 }
 
@@ -1565,7 +1568,15 @@ fn write_expr(
             let agg = match kind {
                 RelAggKind::Count => "COUNT(*)".to_string(),
                 RelAggKind::Sum => {
-                    b.d.cast_aggregate_to_int(&format!("SUM({})", col_sql(*column, "SUM")?))
+                    let bare = format!("SUM({})", col_sql(*column, "SUM")?);
+                    // The relation table has no scope frame; find its model by name.
+                    let ty = crate::core::ModelEntry::for_table(table)
+                        .and_then(|e| e.schema.field_by_column((*column)?))
+                        .map(|f| f.ty);
+                    match sum_cast(ty) {
+                        Some(kind) => apply_agg_cast(b.d, kind, &bare),
+                        None => bare,
+                    }
                 }
                 RelAggKind::Avg => {
                     b.d.cast_aggregate_to_float(&format!("AVG({})", col_sql(*column, "AVG")?))

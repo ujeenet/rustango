@@ -4047,16 +4047,29 @@ impl<T: Model> AggregateBuilder<T> {
         if let Some(e) = self.deferred_error {
             return Err(e);
         }
-        // Fold global scopes into the WHERE so aggregates honour them
-        // too: `.count()` on a `published_only` model counts published
-        // rows, not the whole table.
-        self.qs.apply_global_scopes();
         // Carry the QuerySet's ad-hoc JOINs over so the aggregate can
         // group by a related column, as in `group_by("author.name")`.
         // Empty for a plain single-table aggregate.
         let joins = std::mem::take(&mut self.qs.ad_hoc_joins);
         let model = T::SCHEMA;
-        let where_clause = resolve_pending(model, self.qs.pending)?;
+        let is_none = self.qs.is_none;
+        // DISTINCT, a set operation, a derived join or a limit shape the
+        // rows, so group the compiled queryset as a derived table.
+        let (where_clause, source) = if self.qs.distinct.is_some()
+            || !self.qs.compound.is_empty()
+            || !self.qs.subquery_joins.is_empty()
+            || self.qs.limit.is_some()
+            || self.qs.offset.is_some()
+        {
+            let select = self.qs.compile()?;
+            (WhereExpr::And(Vec::new()), Some(select.into_derived()))
+        } else {
+            // Fold global scopes into the WHERE so aggregates honour them
+            // too: `.count()` on a `published_only` model counts published
+            // rows, not the whole table.
+            self.qs.apply_global_scopes();
+            (resolve_pending(model, self.qs.pending)?, None)
+        };
         // Check each AggregateExpr for column typos. This covers the
         // partition_by, order_by and args of a window aggregate. The
         // flat `Sum("col")` / `Count(Some("col"))` shapes are a known
@@ -4140,7 +4153,7 @@ impl<T: Model> AggregateBuilder<T> {
         // Use the same never-match guard as UPDATE / DELETE, and add
         // `LIMIT 0` so the executor stops early even when a GROUP BY
         // could otherwise produce rows.
-        let (where_clause, limit) = if self.qs.is_none {
+        let (where_clause, limit) = if is_none {
             (never_match_clause(model, where_clause)?, Some(0))
         } else {
             (where_clause, self.limit)
@@ -4157,7 +4170,7 @@ impl<T: Model> AggregateBuilder<T> {
             order_by,
             limit,
             offset: self.offset,
-            source: None,
+            source,
         })
     }
 }

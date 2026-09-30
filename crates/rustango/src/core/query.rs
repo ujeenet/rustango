@@ -1553,7 +1553,7 @@ impl SelectQuery {
     }
 
     /// This query as a derived table. A row lock has no meaning there.
-    fn into_derived(mut self) -> Box<Self> {
+    pub(crate) fn into_derived(mut self) -> Box<Self> {
         self.lock_mode = None;
         self.drop_unused_order();
         Box::new(self)

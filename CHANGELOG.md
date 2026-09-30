@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)
+
+`annotate_sum` over an M2M or generic relation no longer truncates a float column.
+`values(..).annotate(..)` now honours `distinct()`, `union()`, derived joins, `limit` and `offset`.
+
 ### Fixed — `upsert` conflict target ignores field and partial unique indexes (#1935)
 
 Only a container-level `unique_together` (or `index(…, unique)`) without a `WHERE` is the
