@@ -160,6 +160,12 @@ Mint with `issue_for_tenant(user_id, slug)` or the `JwtAuth` login instead.
 **Breaking:** `verify_single_use` and `confirm_password_reset_single_use*` refuse every
 link on a `NullCache`. A custom cache should override `add` atomically.
 
+### JWT refresh: new `Config` field, old refresh tokens refused (#1854)
+
+**Breaking:** `auth_routes::Config` gains `refresh_absolute_ttl_secs`; exhaustive literals
+need it or `..Config::default()`. Refresh tokens minted before upgrading lack the new
+claims and get a 401, so clients log in again once. `pwf`, `sat`, `fam` are router claims.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

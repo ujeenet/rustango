@@ -446,6 +446,22 @@ impl JwtLifecycle {
             .then_some(claims)
     }
 
+    /// A refresh token's claims by signature, expiry and `typ`, ignoring
+    /// revocation, so a replayed token can be told from a forged one (#1854).
+    pub(crate) fn decode_refresh(&self, token: &str) -> Option<JwtClaims> {
+        self.decode_unexpired(token)
+            .filter(|c| c.typ == REFRESH_TYP)
+    }
+
+    /// Mark a refresh-token family dead until `exp` (#1854).
+    pub(crate) async fn revoke_family(&self, fam: &str, exp: i64) {
+        let _ = self.jti_store.mark_used(&family_key(fam), exp).await;
+    }
+
+    pub(crate) async fn family_revoked(&self, fam: &str) -> bool {
+        self.jti_store.is_used(&family_key(fam)).await
+    }
+
     /// Signature and expiry, no store lookup. Expiry comes first, so an
     /// expired token never costs a round trip to a durable backend.
     fn decode_unexpired(&self, token: &str) -> Option<JwtClaims> {
@@ -554,7 +570,12 @@ impl JwtLifecycle {
     }
 }
 
-fn random_jti() -> String {
+/// `:` never occurs in a base64url JTI, so the two key spaces cannot meet.
+fn family_key(fam: &str) -> String {
+    format!("fam:{fam}")
+}
+
+pub(crate) fn random_jti() -> String {
     // v0.42 — OsRng (OS CSPRNG) for JWT identifier material. A
     // predictable JTI lets an attacker pre-mint blacklist entries
     // and bypass token revocation.

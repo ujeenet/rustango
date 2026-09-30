@@ -64,6 +64,8 @@ pub struct Config {
     pub access_ttl_secs: i64,
     /// Refresh token lifetime in seconds. Default 7 days.
     pub refresh_ttl_secs: i64,
+    /// Longest a login lasts across refreshes, in seconds. Default 30 days (#1854).
+    pub refresh_absolute_ttl_secs: i64,
     /// HMAC signing key. `None` (default) reads from the
     /// `RUSTANGO_SESSION_SECRET` env var so the framework's own
     /// session secret is reused. Set explicitly for projects that
@@ -79,8 +81,8 @@ pub struct Config {
     /// `tenant` claim the router always sets (#1190).
     ///
     /// Returning a reserved name (`sub`, `exp`, `jti`, `typ`) fails the
-    /// login with a 500 rather than silently dropping it; `tenant` is
-    /// the router's own and is not overridable either.
+    /// login with a 500 rather than silently dropping it; `tenant`,
+    /// `pwf`, `sat` and `fam` are the router's own and not overridable.
     pub extra_claims: Option<ClaimsHook>,
 }
 
@@ -108,6 +110,7 @@ impl std::fmt::Debug for Config {
             .field("prefix", &self.prefix)
             .field("access_ttl_secs", &self.access_ttl_secs)
             .field("refresh_ttl_secs", &self.refresh_ttl_secs)
+            .field("refresh_absolute_ttl_secs", &self.refresh_absolute_ttl_secs)
             // Never the key itself — only whether one was set.
             .field("session_secret", &self.session_secret.is_some())
             .field("jti_store", &self.jti_store.is_some())
@@ -122,6 +125,7 @@ impl Default for Config {
             prefix: "/api/auth".to_owned(),
             access_ttl_secs: 900,
             refresh_ttl_secs: 7 * 86400,
+            refresh_absolute_ttl_secs: 30 * 86400,
             session_secret: None,
             jti_store: None,
             extra_claims: None,
@@ -138,7 +142,12 @@ impl Default for Config {
 const MIN_HMAC_KEY_LEN: usize = 32;
 
 impl Config {
+    #[cfg(test)]
     fn build_jwt(&self) -> JwtLifecycle {
+        self.build_jwt_with(self.signing_key())
+    }
+
+    fn signing_key(&self) -> Vec<u8> {
         // `RUSTANGO_SESSION_SECRET` is base64, and this used to take the
         // raw string bytes (#1396). A 32-character base64 secret is 24
         // bytes of key — it cleared the 32-byte floor below while the
@@ -165,6 +174,10 @@ impl Config {
              guessable key (would allow JWT forgery).",
             secret.len(),
         );
+        secret
+    }
+
+    fn build_jwt_with(&self, secret: Vec<u8>) -> JwtLifecycle {
         let jwt = JwtLifecycle::new(secret)
             .with_access_ttl(self.access_ttl_secs)
             .with_refresh_ttl(self.refresh_ttl_secs);
@@ -235,6 +248,9 @@ pub struct JwtAuth(Arc<AuthState>);
 
 struct AuthState {
     jwt: JwtLifecycle,
+    /// Same key as `jwt`; fingerprints the password hash into `pwf`.
+    pwf_secret: crate::session::SessionSecret,
+    session_cap_secs: i64,
     extra_claims: Option<ClaimsHook>,
     prefix: String,
 }
@@ -244,7 +260,9 @@ impl JwtAuth {
     /// misconfigured deployment refuses to start.
     #[must_use]
     pub fn new(cfg: Config) -> Self {
-        let jwt = cfg.build_jwt();
+        let key = cfg.signing_key();
+        let pwf_secret = crate::session::SessionSecret::from_bytes(key.clone());
+        let jwt = cfg.build_jwt_with(key);
         if jwt.jti_store_is_process_local() {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
@@ -258,6 +276,8 @@ impl JwtAuth {
         }
         Self(Arc::new(AuthState {
             jwt,
+            pwf_secret,
+            session_cap_secs: cfg.refresh_absolute_ttl_secs,
             extra_claims: cfg.extra_claims,
             prefix: cfg.prefix,
         }))
@@ -330,6 +350,73 @@ fn login_claims(
         serde_json::Value::String(ctx.tenant_slug.to_owned()),
     );
     custom
+}
+
+/// Router-owned claims that tie a refresh chain to one login (#1854).
+/// `jwt.refresh` copies custom claims, so every rotation carries them.
+struct RefreshSession {
+    /// Fingerprint of the password hash at login.
+    pwf: crate::session::PasswordFingerprint,
+    /// Session start: the login's `iat`, for the absolute cap.
+    sat: i64,
+    /// Family id, revoked when a rotated token is replayed.
+    fam: String,
+}
+
+impl RefreshSession {
+    const PWF: &'static str = "pwf";
+    const SAT: &'static str = "sat";
+    const FAM: &'static str = "fam";
+
+    fn start(auth: &JwtAuth, password_hash: &str) -> Self {
+        Self {
+            pwf: crate::session::PasswordFingerprint::of(&auth.0.pwf_secret, password_hash),
+            sat: chrono::Utc::now().timestamp(),
+            fam: crate::tenancy::jwt_lifecycle::random_jti(),
+        }
+    }
+
+    fn write(&self, claims: &mut serde_json::Map<String, serde_json::Value>) {
+        let pwf = serde_json::to_value(&self.pwf).unwrap_or_default();
+        claims.insert(Self::PWF.to_owned(), pwf);
+        claims.insert(Self::SAT.to_owned(), self.sat.into());
+        claims.insert(Self::FAM.to_owned(), self.fam.clone().into());
+    }
+
+    /// `None` for a token minted before these claims existed.
+    fn read(claims: &crate::tenancy::jwt_lifecycle::JwtClaims) -> Option<Self> {
+        Some(Self {
+            pwf: claims.get_custom(Self::PWF)?,
+            sat: claims.get_custom(Self::SAT)?,
+            fam: claims.get_custom(Self::FAM)?,
+        })
+    }
+
+    /// When the family stops mattering: the absolute cap.
+    fn ends_at(&self, auth: &JwtAuth) -> i64 {
+        self.sat.saturating_add(auth.0.session_cap_secs)
+    }
+}
+
+/// The login pair for `user` on `slug`: hook claims, then the router's own.
+fn issue_login_pair(
+    auth: &JwtAuth,
+    user: &crate::tenancy::auth::User,
+    user_id: i64,
+    slug: &str,
+) -> Result<crate::tenancy::jwt_lifecycle::JwtTokenPair, crate::tenancy::jwt_lifecycle::JwtIssueError>
+{
+    let mut custom = login_claims(
+        auth.0.extra_claims.as_ref(),
+        &ClaimsContext {
+            user_id,
+            username: &user.username,
+            is_superuser: user.is_superuser,
+            tenant_slug: slug,
+        },
+    );
+    RefreshSession::start(auth, &user.password_hash).write(&mut custom);
+    auth.lifecycle().issue_pair_with(user_id, custom)
 }
 
 // ---------------------------------------------------------------- Handlers
@@ -470,18 +557,7 @@ async fn login_in(
     // means "the user with id=1", and id=1 likely exists on
     // every tenant. With the binding, verify checks the resolved
     // request's tenant slug against the claim.
-    let custom = login_claims(
-        auth.0.extra_claims.as_ref(),
-        &ClaimsContext {
-            user_id,
-            username: &user.username,
-            is_superuser: user.is_superuser,
-            tenant_slug: &t.org.slug,
-        },
-    );
-    let pair = auth
-        .lifecycle()
-        .issue_pair_with(user_id, custom)
+    let pair = issue_login_pair(&auth, &user, user_id, &t.org.slug)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(LoginOutput {
@@ -506,11 +582,9 @@ pub struct RefreshOutput {
     pub refresh: String,
 }
 
-/// Rotate a refresh token. The old refresh token's `jti` is revoked
-/// at the framework level (`JwtLifecycle::refresh` does this), so a
-/// stolen refresh token is single-use — the legitimate user's next
-/// refresh succeeds and invalidates whatever the attacker also tried
-/// to use.
+/// Rotate a refresh token. Each is single use; replaying a rotated one
+/// revokes the whole chain. A password change or the absolute cap
+/// (`Config::refresh_absolute_ttl_secs`) also ends it (#1854).
 fn refresh<DB: Database>(
     State(auth): State<JwtAuth>,
     t: Tenant<DB>,
@@ -524,16 +598,16 @@ async fn refresh_in(
     t: TenantScope,
     body: RefreshInput,
 ) -> Result<Json<RefreshOutput>, Response> {
+    let refused = || err(StatusCode::UNAUTHORIZED, "invalid or expired refresh token");
     let jwt = auth.lifecycle();
+    // Revocation is checked by the rotation below; decoding without it
+    // lets a replayed token be told apart and its family revoked (#1854).
+    let claims = jwt.decode_refresh(&body.refresh).ok_or_else(refused)?;
     // Audit N3 — bind refresh to the resolved tenant. Without this, a
     // refresh token minted on tenant A could be POSTed to tenant B's
     // /refresh (they share the session secret) and rotated — burning A's
     // refresh token (a cross-tenant DoS / rotation oracle). Verify the
     // token's `tenant` claim matches this subdomain BEFORE rotating.
-    let claims = jwt
-        .verify_refresh(&body.refresh)
-        .await
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid or expired refresh token"))?;
     let tenant_ok =
         claims.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str());
     if !tenant_ok {
@@ -542,12 +616,16 @@ async fn refresh_in(
             "refresh token issued for a different tenant",
         ));
     }
+    // Pre-#1854 tokens carry no session claims: fail closed.
+    let session = RefreshSession::read(&claims).ok_or_else(refused)?;
+    if chrono::Utc::now().timestamp() >= session.ends_at(&auth)
+        || jwt.family_revoked(&session.fam).await
+    {
+        return Err(refused());
+    }
     // Audit P2 — re-check the account is still active (and exists) before
-    // minting a fresh pair. Otherwise a user deactivated/deleted after
-    // login could keep rotating refresh tokens for the whole refresh TTL,
-    // getting a fresh access token every cycle. Same uniform 401 as other
-    // refresh failures (the caller already proved token possession, so
-    // this isn't an enumeration vector, but uniformity leaks nothing).
+    // minting a fresh pair; #1854 — and that its password is unchanged.
+    // Same uniform 401 as other refresh failures.
     {
         use crate::core::Column as _;
         use crate::sql::FetcherPool as _;
@@ -557,18 +635,26 @@ async fn refresh_in(
             .fetch(t.pool())
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        let still_active = users.into_iter().next().is_some_and(|u| u.active);
-        if !still_active {
-            return Err(err(
-                StatusCode::UNAUTHORIZED,
-                "invalid or expired refresh token",
-            ));
+        let still_valid = users.into_iter().next().is_some_and(|u| {
+            u.active
+                && crate::tenancy::session::survives_password_change(
+                    &auth.0.pwf_secret,
+                    &session.pwf,
+                    session.sat,
+                    &u.password_hash,
+                    u.password_changed_at,
+                )
+        });
+        if !still_valid {
+            return Err(refused());
         }
     }
-    let pair = jwt
-        .refresh(&body.refresh)
-        .await
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid or expired refresh token"))?;
+    let Some(pair) = jwt.refresh(&body.refresh).await else {
+        // Signed and unexpired but already redeemed: a replay. End the chain.
+        jwt.revoke_family(&session.fam, session.ends_at(&auth))
+            .await;
+        return Err(refused());
+    };
     Ok(Json(RefreshOutput {
         access: pair.access,
         refresh: pair.refresh,
@@ -999,6 +1085,92 @@ mod tests {
         let token = auth.lifecycle().issue_access_with(1, custom).unwrap();
 
         assert!(auth.verify_for_tenant(&token, "acme").await.is_err());
+    }
+
+    /// A tenant pool with one user, and a `JwtAuth` capped at `cap` seconds.
+    #[cfg(feature = "sqlite")]
+    async fn refresh_env(cap: i64) -> (JwtAuth, crate::sql::Pool, crate::tenancy::auth::User) {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<crate::tenancy::auth::User>(&pool)
+            .await
+            .unwrap();
+        let mut user = crate::tenancy::auth::User {
+            password_hash: "$argon2id$old".into(),
+            ..crate::testkit::user()
+        };
+        user.insert_pool(&pool).await.unwrap();
+        let auth = JwtAuth::new(Config {
+            session_secret: Some(vec![7; 32]),
+            refresh_absolute_ttl_secs: cap,
+            ..Config::default()
+        });
+        (auth, pool, user)
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn rotate(auth: &JwtAuth, pool: &crate::sql::Pool, refresh: &str) -> Option<String> {
+        let scope = TenantScope::for_test(crate::testkit::org(), pool.clone());
+        let body = RefreshInput {
+            refresh: refresh.to_owned(),
+        };
+        refresh_in(auth.clone(), scope, body)
+            .await
+            .ok()
+            .map(|Json(p)| p.refresh)
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn login(auth: &JwtAuth, user: &crate::tenancy::auth::User) -> String {
+        let id = user.id.get().copied().unwrap();
+        issue_login_pair(auth, user, id, &crate::testkit::org().slug)
+            .unwrap()
+            .refresh
+    }
+
+    /// #1854 — a password change ends the refresh chain.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_password_change_ends_the_refresh_chain() {
+        let (auth, pool, mut user) = refresh_env(3600).await;
+        let first = login(&auth, &user);
+        let second = rotate(&auth, &pool, &first).await.expect("rotates before");
+
+        user.password_hash = "$argon2id$new".into();
+        user.save_pool(&pool).await.unwrap();
+
+        assert_eq!(rotate(&auth, &pool, &second).await, None);
+    }
+
+    /// #1854 — the cap counts from login, not from the last rotation.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_absolute_cap_survives_rotation() {
+        let (auth, pool, user) = refresh_env(2).await;
+        let first = login(&auth, &user);
+        let second = rotate(&auth, &pool, &first)
+            .await
+            .expect("rotates inside the cap");
+
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        assert_eq!(rotate(&auth, &pool, &second).await, None);
+    }
+
+    /// #1854 — replaying a rotated token revokes the chain it belongs to.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn replaying_a_rotated_token_revokes_the_family() {
+        let (auth, pool, user) = refresh_env(3600).await;
+        let first = login(&auth, &user);
+        let second = rotate(&auth, &pool, &first).await.expect("rotates");
+
+        assert_eq!(rotate(&auth, &pool, &first).await, None, "replay refused");
+        assert_eq!(rotate(&auth, &pool, &second).await, None, "chain revoked");
+
+        let other = login(&auth, &user);
+        assert!(
+            rotate(&auth, &pool, &other).await.is_some(),
+            "other logins live"
+        );
     }
 
     #[test]

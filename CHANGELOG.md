@@ -15,6 +15,12 @@ by `JwtBackend` and `JwtAuth::verify_for_tenant`. New `JwtBackend::issue_for_ten
 Two simultaneous redemptions of a reset, magic-link or verify link no longer both pass.
 A failing cache or a `NullCache` now refuses the link instead of letting it be reused.
 
+### Security — JWT refresh ends on password change, cap and replay (#1854)
+
+**Breaking:** `/api/auth/refresh` refuses a chain after a password change, past
+`Config::refresh_absolute_ttl_secs` (default 30 days) from login, and once a rotated
+token is replayed. Refresh tokens issued before this release are refused.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

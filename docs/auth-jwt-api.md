@@ -141,6 +141,10 @@ By default `refresh` **preserves** the token's custom claims. If permissions may
 have changed (role revoked, scope downgraded), use `refresh_with(token, new_claims)`
 to substitute a fresh payload while still blacklisting the old refresh JTI.
 
+`POST /api/auth/refresh` adds three checks: a password change since login ends the
+chain, no chain outlives `Config::refresh_absolute_ttl_secs` (30 days) from login, and
+replaying an already-rotated token revokes the whole chain.
+
 ---
 
 ## Revocation and the JTI store
