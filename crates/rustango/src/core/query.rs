@@ -1555,11 +1555,38 @@ impl SelectQuery {
     /// This query as a derived table. A row lock has no meaning there.
     fn into_derived(mut self) -> Box<Self> {
         self.lock_mode = None;
+        self.drop_unused_order();
         Box::new(self)
+    }
+
+    /// Drop ORDER BY clauses that pick no rows: those with no limit,
+    /// offset or DISTINCT ON next to them.
+    fn drop_unused_order(&mut self) {
+        let distinct_on = matches!(self.distinct, Some(DistinctMode::On(_)));
+        if self.limit.is_none() && self.offset.is_none() && !distinct_on {
+            self.order_by.clear();
+        }
+        if self.compound_limit.is_none() && self.compound_offset.is_none() {
+            self.compound_order_by.clear();
+        }
     }
 }
 
 impl CountQuery {
+    /// Count at most one of `select`'s rows, so `exists` stops at the
+    /// first match instead of counting them all.
+    #[must_use]
+    pub fn exists(mut select: SelectQuery) -> Self {
+        select.drop_unused_order();
+        let one = |l: Option<i64>| Some(l.map_or(1, |n| n.min(1)));
+        if select.compound.is_empty() {
+            select.limit = one(select.limit);
+        } else {
+            select.compound_limit = one(select.compound_limit);
+        }
+        Self::from_select(select)
+    }
+
     /// Count the rows `select` returns, honouring its joins, limit,
     /// offset, DISTINCT and set operations.
     #[must_use]

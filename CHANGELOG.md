@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `.none()` now counts 0 without a query. Limit, offset, DISTINCT, joins, relation-span
 filters and `union()` are counted and aggregated through a derived table instead of dropped.
+`exists()` / `is_empty()` read at most one row, and unused ORDER BYs are dropped.
 
 ### Fixed — `Sum` of a float column is no longer cast to an integer (#1886)
 

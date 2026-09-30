@@ -2094,8 +2094,8 @@ impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
 /// Boolean predicates on a `QuerySet`: `exists`,
 /// `is_empty`, `doesnt_exist` and `contains_pk`.
 ///
-/// All of them run the same `COUNT(*)` as [`CounterPool::count`] and
-/// compare it to zero, so they scan every matching row.
+/// All of them count at most one row (`LIMIT 1` in a derived table), so
+/// they stop at the first match.
 ///
 /// Import with `use rustango::sql::ExistsPool;`.
 pub trait ExistsPool<T: Model + Send> {
@@ -2144,13 +2144,14 @@ pub trait ExistsPool<T: Model + Send> {
 
 impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
     async fn exists(self, pool: &Pool) -> Result<bool, ExecError> {
-        let count = self.count(pool).await?;
-        Ok(count > 0)
+        let Some(select) = self.compile_unless_none()? else {
+            return Ok(false);
+        };
+        Ok(count_rows_pool(pool, &CountQuery::exists(select)).await? > 0)
     }
 
     async fn is_empty(self, pool: &Pool) -> Result<bool, ExecError> {
-        let count = self.count(pool).await?;
-        Ok(count == 0)
+        Ok(!self.exists(pool).await?)
     }
 
     async fn doesnt_exist(self, pool: &Pool) -> Result<bool, ExecError> {

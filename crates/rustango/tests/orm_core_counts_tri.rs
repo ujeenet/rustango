@@ -5,7 +5,7 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
+use rustango::core::{BulkInsertQuery, CountQuery, Model as _, SqlValue};
 use rustango::sql::{
     atomic, bulk_insert_pool, CounterPool as _, ExecError, ExistsPool as _, ForeignKey, Pool,
 };
@@ -100,6 +100,36 @@ async fn count_honours_compound(pool: &Pool) {
     let two = || Book::objects().filter("id__lte", 2_i64);
     assert_eq!(one().union(two()).count(pool).await.unwrap(), 2);
     assert_eq!(one().union_all(two()).count(pool).await.unwrap(), 3);
+}
+
+async fn exists_reads_one_row_unordered(pool: &Pool) {
+    let ordered = || Book::objects().order_by(&[("id", true)]);
+    let sql = |q: &CountQuery| pool.dialect().compile_count(q).unwrap().sql;
+    let exists = sql(&CountQuery::exists(ordered().compile().unwrap()));
+    assert!(exists.contains("LIMIT 1"), "{exists}");
+    assert!(!exists.contains("ORDER BY"), "{exists}");
+    let distinct = sql(&CountQuery::from_select(
+        ordered().distinct().compile().unwrap(),
+    ));
+    assert!(!distinct.contains("ORDER BY"), "{distinct}");
+    let paged = sql(&CountQuery::from_select(
+        ordered().limit(2).compile().unwrap(),
+    ));
+    assert!(
+        paged.contains("ORDER BY"),
+        "a limit keeps its order: {paged}"
+    );
+    assert!(ordered()
+        .filter("pages", 300_i64)
+        .exists(pool)
+        .await
+        .unwrap());
+    assert!(ordered()
+        .filter("pages", 1_i64)
+        .is_empty(pool)
+        .await
+        .unwrap());
+    assert!(!ordered().offset(3).exists(pool).await.unwrap());
 }
 
 async fn count_honours_relation_span(pool: &Pool) {
@@ -272,6 +302,7 @@ tri_dialect_test! {
         count_honours_limit_and_offset,
         count_honours_compound,
         count_honours_relation_span,
+        exists_reads_one_row_unordered,
         sum_keeps_float,
         bulk_insert_rolls_back_every_batch,
         bulk_insert_joins_outer_atomic,
