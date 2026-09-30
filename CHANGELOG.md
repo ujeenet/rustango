@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — test suites build with `postgres,sqlite,tenancy` (#1835)
+
+`urlencoding` is a dev-dependency, and the S3 and job-queue suites are gated on their features.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
@@ -34,10 +38,6 @@ once its nonce expires. A `NullCache` nonce store, or a failing one, now warns.
 
 One shared writer for tests that assert on rendered `tracing` output; replaces ten copies.
 Needs the `testkit` and `runtime` features.
-
-### Fixed — test suites build with `postgres,sqlite,tenancy` (#1835)
-
-`urlencoding` is a dev-dependency, and the S3 and job-queue suites are gated on their features.
 
 ## [0.59.5] — 2026-09-29
 
