@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### MySQL refuses an INSERT whose DB-default PK is not an integer (#1978)
+
+`insert_returning_pool` returns `GeneratedPkUnreadable` before writing; it used to insert, then fail.
+Submit the PK (or use `default_uuid_v7`) for such models on MySQL.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

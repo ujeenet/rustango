@@ -1105,6 +1105,25 @@ async fn insert_mysql_auto_id<'c, E>(
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
+    // The OK packet only carries an AUTO_INCREMENT id: refuse before the
+    // write, or the row lands and its PK is lost (#1978).
+    let unreadable = query.returning.iter().find(|c| {
+        !query.columns.contains(c)
+            && query.model.field_by_column(c).is_some_and(|f| {
+                !matches!(
+                    f.ty,
+                    crate::core::FieldType::I16
+                        | crate::core::FieldType::I32
+                        | crate::core::FieldType::I64
+                )
+            })
+    });
+    if let Some(column) = unreadable {
+        return Err(ExecError::GeneratedPkUnreadable {
+            table: query.model.table,
+            column: *column,
+        });
+    }
     let plain = InsertQuery {
         returning: ::std::vec::Vec::new(),
         ..query.clone()
@@ -1182,7 +1201,13 @@ fn generated_pk(
                     T::I32 => SqlValue::I32(row.try_get(c)?),
                     T::I16 => SqlValue::I16(row.try_get(c)?),
                     T::String => SqlValue::String(row.try_get(c)?),
-                    T::Uuid => SqlValue::Uuid(row.try_get(c)?),
+                    // Bound values are BLOBs; a column default may be TEXT.
+                    T::Uuid => SqlValue::Uuid(row.try_get(c).or_else(|e| {
+                        row.try_get::<String, _>(c)
+                            .ok()
+                            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+                            .ok_or(e)
+                    })?),
                     _ => return Err(unreadable()),
                 })
             }

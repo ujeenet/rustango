@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — an INSERT whose generated PK can't be read back writes no row (#1978, #1969)
+
+On MySQL a non-integer DB-default PK is refused before the INSERT, so a re-submit can't duplicate it.
+SQLite reads a TEXT UUID default back. A submitted PK is reported as written (#1969, via #1894).
+
 ### Fixed — `JtiStore` docs no longer suggest `rows_affected` after `DO NOTHING` (#1968)
 
 A MySQL skip reports one row too, so a replay passed. The example uses `sql::insert_or_ignore`.
