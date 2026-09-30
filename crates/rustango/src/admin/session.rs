@@ -31,6 +31,13 @@ pub fn current() -> Option<AdminSession> {
     CURRENT_SESSION.try_with(|s| s.clone()).ok()
 }
 
+/// The request's session: the extension, else the task-local. A
+/// handler that reads only one of them misses the other mount path.
+#[must_use]
+pub fn from_extensions(extensions: &axum::http::Extensions) -> Option<AdminSession> {
+    extensions.get::<AdminSession>().cloned().or_else(current)
+}
+
 tokio::task_local! {
     /// Per-request CSRF token, set by `csrf_context`.
     ///

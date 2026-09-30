@@ -18,8 +18,9 @@ use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
     is_secret_field, lookup_model, pager_suffix, primary_key_or_internal, render_cell_json,
-    render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
+    render_form, render_secret_cell, resolve_model, resolve_model_and_pk, FormLayout,
 };
+use super::queryset_hooks::RowScope;
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::{AppState, CREATE_SEGMENT};
@@ -169,26 +170,33 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
     // framework writes on every admin create, update and delete.
     // Best-effort: if the audit table does not exist yet, show an
     // empty list instead of failing the admin home.
-    let recent_actions_ctx: Vec<serde_json::Value> =
-        crate::audit::list(&state.pool, &crate::audit::AuditFilter::default(), 10, 0)
+    // Same permission gate and row scope as the `/__audit` feed.
+    let recent = match state.audit_reader() {
+        Some(reader) => reader
+            .list(&crate::audit::AuditFilter::default(), 10, 0)
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| {
-                let action_url = format!(
-                    "{}/{}/{}",
-                    state.config.admin_prefix, entry.entity_table, entry.entity_pk,
-                );
-                serde_json::json!({
-                    "table": entry.entity_table,
-                    "pk": entry.entity_pk,
-                    "operation": entry.operation,
-                    "source": entry.source,
-                    "occurred_at": entry.occurred_at.to_rfc3339(),
-                    "url": action_url,
-                })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let recent_actions_ctx: Vec<serde_json::Value> = recent
+        .into_iter()
+        .map(|entry| {
+            let action_url = format!(
+                "{}/{}/{}",
+                state.config.admin_prefix,
+                crate::url_codec::url_encode(&entry.entity_table),
+                crate::url_codec::url_encode(&entry.entity_pk),
+            );
+            serde_json::json!({
+                "table": entry.entity_table,
+                "pk": entry.entity_pk,
+                "operation": entry.operation,
+                "source": entry.source,
+                "occurred_at": entry.occurred_at.to_rfc3339(),
+                "url": action_url,
             })
-            .collect();
+        })
+        .collect();
 
     let mut ctx = serde_json::json!({
         "groups": groups_ctx,
@@ -299,13 +307,10 @@ pub(crate) async fn table_view(
         }
     }
 
-    // Queryset hooks. Each hook sees the request and returns extra
-    // predicates for this model's list. They only add
-    // WHERE conjuncts, so they compose with search, facets, the date
-    // hierarchy and pagination.
-    for h in crate::admin::queryset_hooks::for_table(model.table) {
-        filters.extend((h.hook)(&parts));
-    }
+    // Queryset hooks only add WHERE conjuncts, so they compose with
+    // search, facets, the date hierarchy and pagination.
+    let scope = RowScope::of(model.table, &parts);
+    filters.extend(scope.filters().iter().cloned());
 
     // Date hierarchy. With `admin(date_hierarchy = "field")` set and
     // `?year[&month[&day]]` in the URL, add the half-open `[lo, hi)`
@@ -650,6 +655,7 @@ pub(crate) async fn table_view(
     let facets_ctx: Vec<serde_json::Value> = compute_facets(
         &state,
         model,
+        &scope,
         &admin_cfg,
         &active_field_filters,
         q.as_deref(),
@@ -799,6 +805,7 @@ pub(crate) async fn table_view(
 async fn compute_facets(
     state: &AppState,
     model: &'static crate::core::ModelSchema,
+    scope: &RowScope,
     admin_cfg: &crate::core::AdminConfig,
     active_field_filters: &[(&'static str, String)],
     q: Option<&str>,
@@ -808,6 +815,18 @@ async fn compute_facets(
         return Ok(Vec::new());
     }
     let mut out = Vec::with_capacity(admin_cfg.list_filter.len());
+    // Counts only rows the queryset hooks let this request see.
+    let tail = crate::sql::compile_where_order_tail(
+        state.pool.dialect(),
+        &scope.constrain(WhereExpr::And(Vec::new())),
+        None,
+        &[],
+        None,
+        None,
+        Some(model.table),
+        Some(model),
+    )
+    .map_err(|e| AdminError::Internal(e.to_string()))?;
     for filter_name in admin_cfg.list_filter {
         let Some(field) = model.field(filter_name) else {
             continue;
@@ -835,6 +854,7 @@ async fn compute_facets(
         // requests. Identifiers go through the dialect's
         // `quote_ident`, so the same SQL works on all backends.
         let dialect = state.pool.dialect();
+        let where_sql = &tail.sql;
         let sql = if let Some((target_table, target_pk, display_col)) = fk_join {
             let src_t = dialect.quote_ident(model.table);
             let src_c = dialect.quote_ident(field.column);
@@ -846,7 +866,7 @@ async fn compute_facets(
                         {tgt_t}.{tgt_disp} AS facet_display, \
                         COUNT(*) AS facet_count \
                  FROM {src_t} \
-                 LEFT JOIN {tgt_t} ON {tgt_t}.{tgt_pk} = {src_t}.{src_c} \
+                 LEFT JOIN {tgt_t} ON {tgt_t}.{tgt_pk} = {src_t}.{src_c}{where_sql} \
                  GROUP BY {src_t}.{src_c}, {tgt_t}.{tgt_disp} \
                  ORDER BY facet_count DESC, {tgt_t}.{tgt_disp}"
             )
@@ -854,13 +874,13 @@ async fn compute_facets(
             let t = dialect.quote_ident(model.table);
             let c = dialect.quote_ident(field.column);
             format!(
-                "SELECT {c} AS facet_value, COUNT(*) AS facet_count \
-                 FROM {t} \
-                 GROUP BY {c} \
-                 ORDER BY facet_count DESC, {c}"
+                "SELECT {t}.{c} AS facet_value, COUNT(*) AS facet_count \
+                 FROM {t}{where_sql} \
+                 GROUP BY {t}.{c} \
+                 ORDER BY facet_count DESC, {t}.{c}"
             )
         };
-        let facet_rows = fetch_facet_rows(&state.pool, &sql, fk_join.is_some())
+        let facet_rows = fetch_facet_rows(&state.pool, &sql, &tail.params, fk_join.is_some())
             .await
             .map_err(|e| AdminError::Internal(e.to_string()))?;
         let mut values = Vec::with_capacity(facet_rows.len());
@@ -991,6 +1011,7 @@ async fn compute_facets(
 async fn fetch_facet_rows(
     pool: &crate::sql::Pool,
     sql: &str,
+    params: &[SqlValue],
     expect_display: bool,
 ) -> Result<Vec<(String, Option<String>, i64)>, sqlx::Error> {
     // The fetch stays per-arm because sqlx's `Executor` is bound to
@@ -999,7 +1020,11 @@ async fn fetch_facet_rows(
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
-            let rows = sqlx::query(sql).fetch_all(pg).await?;
+            let mut q = sqlx::query(sql);
+            for v in params {
+                q = crate::sql::bind_query(q, v.clone());
+            }
+            let rows = q.fetch_all(pg).await?;
             Ok(rows
                 .iter()
                 .map(|r| decode_facet_row(r, expect_display))
@@ -1007,7 +1032,11 @@ async fn fetch_facet_rows(
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            let rows = sqlx::query(sql).fetch_all(my).await?;
+            let mut q = sqlx::query(sql);
+            for v in params {
+                q = crate::sql::bind_query_my(q, v.clone());
+            }
+            let rows = q.fetch_all(my).await?;
             Ok(rows
                 .iter()
                 .map(|r| decode_facet_row(r, expect_display))
@@ -1015,7 +1044,11 @@ async fn fetch_facet_rows(
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            let rows = sqlx::query(sql).fetch_all(sq).await?;
+            let mut q = sqlx::query(sql);
+            for v in params {
+                q = crate::sql::bind_query_sqlite(q, v.clone());
+            }
+            let rows = q.fetch_all(sq).await?;
             Ok(rows
                 .iter()
                 .map(|r| decode_facet_row(r, expect_display))
@@ -1462,6 +1495,7 @@ use crate::url_codec::url_encode;
 // searchable columns returns an empty list rather than every row.
 
 pub(crate) async fn autocomplete_view(
+    parts: axum::http::request::Parts,
     Path(table): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
@@ -1514,6 +1548,7 @@ pub(crate) async fn autocomplete_view(
     let rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
+            where_clause: RowScope::of(model.table, &parts).constrain(WhereExpr::And(Vec::new())),
             search,
             order_by: vec![crate::core::OrderItem::column(display_field.column, false)],
             limit: Some(limit),
@@ -1560,8 +1595,7 @@ pub(crate) async fn detail_view(
         &state.pool,
         &SelectQuery {
             joins: build_fk_joins(&state, model),
-            limit: None,
-            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
+            ..RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone())
         },
         &detail_fields,
     )
@@ -1635,12 +1669,14 @@ pub(crate) async fn detail_view(
     // registration order. Best-effort: a fetch error, such as a
     // child table missing on this tenant, drops the panels to empty
     // instead of failing the page.
-    let mut inline_panels = super::inlines::render_for_parent(&state.pool, model, pk_value.clone())
-        .await
-        .unwrap_or_default();
-    let generic_panels = super::inlines::render_generic_for_parent(&state.pool, model, pk_value)
-        .await
-        .unwrap_or_default();
+    let mut inline_panels =
+        super::inlines::render_for_parent_in(&state.pool, model, pk_value.clone(), Some(&parts))
+            .await
+            .unwrap_or_default();
+    let generic_panels =
+        super::inlines::render_generic_for_parent_in(&state.pool, model, pk_value, Some(&parts))
+            .await
+            .unwrap_or_default();
     inline_panels.extend(generic_panels);
     inline_panels.retain(|p| lookup_model(&state, &p.child_table).is_some());
     let inline_panels_ctx: Vec<serde_json::Value> = inline_panels
@@ -1648,29 +1684,30 @@ pub(crate) async fn detail_view(
         .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
         .collect();
 
-    // Audit-trail panel for this row. Best-effort: if the audit
-    // table is missing, because the project never called
-    // `audit::ensure_table` for this tenant, render an empty
-    // section instead of failing the page.
-    let audit_entries_ctx: Vec<serde_json::Value> =
-        match crate::audit::fetch_for_entity_pool(&state.pool, model.table, &pk_raw).await {
-            Ok(entries) => entries
-                .into_iter()
-                .map(|e| {
-                    let (action_name, cleaned) = super::audit::split_action_marker(&e.changes);
-                    serde_json::json!({
-                        "id": e.id,
-                        "operation": e.operation,
-                        "action_name": action_name,
-                        "source": e.source,
-                        "occurred_at": e.occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                        "changes": serde_json::to_string_pretty(&cleaned)
-                            .unwrap_or_default(),
-                    })
+    // Audit-trail panel for this row, only for users who may read the
+    // log. Best-effort: a missing audit table renders no panel.
+    let audit_entries = match state.audit_reader() {
+        Some(reader) => reader.for_entity(model.table, &pk_raw).await,
+        None => Ok(Vec::new()),
+    };
+    let audit_entries_ctx: Vec<serde_json::Value> = match audit_entries {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|e| {
+                let (action_name, cleaned) = super::audit::split_action_marker(&e.changes);
+                serde_json::json!({
+                    "id": e.id,
+                    "operation": e.operation,
+                    "action_name": action_name,
+                    "source": e.source,
+                    "occurred_at": e.occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                    "changes": serde_json::to_string_pretty(&cleaned)
+                        .unwrap_or_default(),
                 })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
 
     // Side panel with the user's roles and effective permissions,
     // for `rustango_users` only. Best-effort, like the audit panel:
@@ -1818,6 +1855,7 @@ pub(crate) async fn create_submit(
     if pk_field.auto {
         skip.push(pk_field.name);
     }
+    skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
@@ -1987,14 +2025,9 @@ pub(crate) async fn edit_form(
     let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    // `by_pk` defaults to `limit = Some(1)`; the form wants the
-    // whole row, so clear it.
     let row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &SelectQuery {
-            limit: None,
-            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
-        },
+        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &edit_fields,
     )
     .await?
@@ -2023,14 +2056,22 @@ pub(crate) async fn edit_form(
     // come after the regular ones, in registration order.
     // Best-effort: a child-table fetch failure drops the inlines to
     // empty instead of breaking the edit page.
-    let mut inline_panels =
-        super::inlines::render_form_for_parent(&state.pool, model, pk_value.clone())
-            .await
-            .unwrap_or_default();
-    let generic_panels =
-        super::inlines::render_form_generic_for_parent(&state.pool, model, pk_value)
-            .await
-            .unwrap_or_default();
+    let mut inline_panels = super::inlines::render_form_for_parent_in(
+        &state.pool,
+        model,
+        pk_value.clone(),
+        Some(&parts),
+    )
+    .await
+    .unwrap_or_default();
+    let generic_panels = super::inlines::render_form_generic_for_parent_in(
+        &state.pool,
+        model,
+        pk_value,
+        Some(&parts),
+    )
+    .await
+    .unwrap_or_default();
     inline_panels.extend(generic_panels);
     // Only children this user may edit get a FormSet.
     inline_panels.retain(|p| {
@@ -2072,13 +2113,14 @@ pub(crate) async fn update_submit(
     let pre_update_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let pre_update_row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &SelectQuery {
-            limit: None,
-            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
-        },
+        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &pre_update_fields,
     )
     .await?;
+    // Missing, or outside the queryset hooks' scope.
+    if pre_update_row.is_none() {
+        return Err(AdminError::RowNotFound { table, pk: pk_raw });
+    }
     if !crate::admin::object_permissions::is_allowed(
         model.table,
         "change",
@@ -2098,6 +2140,8 @@ pub(crate) async fn update_submit(
     let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&'static str> = vec![pk_field.name];
     skip.extend(admin_cfg.readonly_fields.iter().copied());
+    // Fields the edit form hides are left as they are.
+    skip.extend(FormLayout::of(model, &admin_cfg, true).unrendered(model));
     // An empty secret keeps the stored one.
     skip.extend(
         model
@@ -2201,20 +2245,18 @@ pub(crate) async fn delete_submit(
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
     // Read the row before deleting it, so the audit entry records
-    // what was removed. A missing row leaves the changes payload
-    // empty, which still logs the operation and the source.
+    // what was removed. A row missing or outside the queryset hooks'
+    // scope is a 404.
     let delete_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let before_row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &SelectQuery {
-            limit: None,
-            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
-        },
+        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &delete_fields,
     )
-    .await
-    .ok()
-    .flatten();
+    .await?;
+    if before_row.is_none() {
+        return Err(AdminError::RowNotFound { table, pk: pk_raw });
+    }
 
     // `has_delete_permission(request, obj)` hook. It **must** run
     // before any soft-delete UPDATE or hard DELETE.
@@ -2382,7 +2424,7 @@ pub(crate) async fn action_submit(
     let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let mut before_rows = crate::sql::select_rows_as_json(
         &state.pool,
-        &SelectQuery::by_pk_in(model, pk_field.column, pk_values.clone()),
+        &RowScope::of(model.table, &parts).by_pk_in(model, pk_field.column, pk_values.clone()),
         &action_fields,
     )
     .await?;

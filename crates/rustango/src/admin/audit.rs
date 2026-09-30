@@ -29,6 +29,88 @@ const AUDIT_PAGE_SIZE: i64 = 50;
 /// with `?facet_show_all=<col>`.
 const AUDIT_FACET_TRUNCATE: usize = 15;
 
+/// Read access to the audit feed. Only [`AppState::audit_reader`] builds
+/// one, so every admin read of the log goes through the permission gate.
+pub(crate) struct AuditReader<'a> {
+    pool: &'a crate::sql::Pool,
+    /// Tables whose rows the user may see. `None` = every table.
+    tables: Option<Vec<String>>,
+}
+
+impl AuditReader<'_> {
+    pub(crate) async fn list(
+        &self,
+        filter: &crate::audit::AuditFilter,
+        page_size: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::audit::AuditEntry>, sqlx::Error> {
+        crate::audit::list_in(self.pool, filter, self.tables.as_deref(), page_size, offset).await
+    }
+
+    pub(crate) async fn count(
+        &self,
+        filter: &crate::audit::AuditFilter,
+    ) -> Result<i64, sqlx::Error> {
+        crate::audit::count_in(self.pool, filter, self.tables.as_deref()).await
+    }
+
+    /// One row's history. The caller already checked `{table}.view`.
+    pub(crate) async fn for_entity(
+        &self,
+        table: &str,
+        pk: &str,
+    ) -> Result<Vec<crate::audit::AuditEntry>, sqlx::Error> {
+        crate::audit::fetch_for_entity_pool(self.pool, table, pk).await
+    }
+
+    pub(crate) async fn facet_counts(
+        &self,
+        column: &str,
+    ) -> Result<Vec<(String, i64)>, sqlx::Error> {
+        crate::audit::facet_counts_in(self.pool, column, self.tables.as_deref()).await
+    }
+}
+
+impl AppState {
+    /// `None` unless the user is a superuser or holds `audit.view`; then
+    /// rows are limited to tables they hold `{table}.view` on.
+    pub(crate) fn audit_reader(&self) -> Option<AuditReader<'_>> {
+        let tables = match &self.config.user_perms {
+            None => None,
+            Some(perms) if perms.contains(crate::audit::VIEW_CODENAME) => Some(
+                perms
+                    .iter()
+                    .filter(|c| c.as_str() != crate::audit::VIEW_CODENAME)
+                    .filter_map(|c| c.strip_suffix(".view"))
+                    .filter(|t| self.is_visible(t))
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            Some(_) => return None,
+        };
+        Some(AuditReader {
+            pool: &self.pool,
+            tables,
+        })
+    }
+
+    /// `true` for a superuser or a holder of `audit.delete`. Cleanup
+    /// is not table-scoped: it trims every table's rows.
+    pub(crate) fn can_clean_audit(&self) -> bool {
+        self.config
+            .user_perms
+            .as_ref()
+            .is_none_or(|p| p.contains(crate::audit::DELETE_CODENAME))
+    }
+}
+
+fn audit_forbidden(action: &'static str) -> AdminError {
+    AdminError::Forbidden {
+        table: "rustango_audit_log".to_owned(),
+        action,
+    }
+}
+
 /// `GET /__audit`: cross-row activity feed of `rustango_audit_log`,
 /// newest first and paginated. Filters on `?entity_table=`,
 /// `?entity_pk=`, `?operation=` and `?source=`. The right rail shows
@@ -37,6 +119,9 @@ pub(crate) async fn audit_log_view(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
+    let reader = state
+        .audit_reader()
+        .ok_or_else(|| audit_forbidden("view"))?;
     let page = params
         .get("page")
         .and_then(|s| s.parse::<i64>().ok())
@@ -75,8 +160,9 @@ pub(crate) async fn audit_log_view(
     // Count, page of rows and facet group-bys all go through the
     // helpers in `crate::audit`, which render SQL per dialect, so this
     // view works on any supported backend.
-    let total = crate::audit::count(&state.pool, &filter).await.unwrap_or(0);
-    let entries = crate::audit::list(&state.pool, &filter, AUDIT_PAGE_SIZE, offset)
+    let total = reader.count(&filter).await.unwrap_or(0);
+    let entries = reader
+        .list(&filter, AUDIT_PAGE_SIZE, offset)
         .await
         .unwrap_or_default();
 
@@ -90,9 +176,7 @@ pub(crate) async fn audit_log_view(
             .iter()
             .find(|(k, _)| *k == col)
             .map(|(_, v)| v.as_str());
-        let facet_pairs = crate::audit::facet_counts(&state.pool, col)
-            .await
-            .unwrap_or_default();
+        let facet_pairs = reader.facet_counts(col).await.unwrap_or_default();
         let mut values: Vec<Value> = facet_pairs
             .iter()
             .map(|(raw, count)| {
@@ -185,7 +269,11 @@ pub(crate) async fn audit_log_view(
                 "id": e.id,
                 "entity_table": e.entity_table,
                 "entity_pk": e.entity_pk,
-                "detail_url": format!("{admin_prefix}/{}/{}", e.entity_table, e.entity_pk),
+                "detail_url": format!(
+                    "{admin_prefix}/{}/{}",
+                    url_encode_q(&e.entity_table),
+                    url_encode_q(&e.entity_pk)
+                ),
                 "operation": e.operation,
                 "action_name": action_name,
                 "source": e.source,
@@ -216,6 +304,7 @@ pub(crate) async fn audit_log_view(
         "page": page,
         "last_page": last_page,
         "pager_extras": pager_extras,
+        "can_clean_audit": state.can_clean_audit(),
     });
     Ok(Html(render_with_chrome(
         "audit_log.html",
@@ -232,6 +321,9 @@ pub(crate) async fn audit_cleanup_submit(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
+    if !state.can_clean_audit() {
+        return Err(audit_forbidden("delete"));
+    }
     let mode = form.get("mode").map(String::as_str).unwrap_or("older_than");
     let (_removed, changes) = match mode {
         "keep_last" => {
