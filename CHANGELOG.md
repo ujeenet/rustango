@@ -25,6 +25,24 @@ any size runs in a savepoint of it, so the outer rollback undoes it.
 Multi-hop join aliases are interned once per path instead of leaked on every `compile()`.
 Paths deeper than 6 hops are refused, which keeps that set bounded by the schema.
 
+### Security — `JwtBackend` checks the tenant binding (#1848)
+
+**Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,
+so tenant A's user 1 no longer logs in as tenant B's user 1. MCP agent tokens are refused
+by `JwtBackend` and `JwtAuth::verify_for_tenant`. New `JwtBackend::issue_for_tenant`.
+
+### Security — single-use auth links are one atomic `add` (#1853)
+
+Two simultaneous redemptions of a reset, magic-link or verify link no longer both pass.
+A failing cache or a `NullCache` now refuses the link instead of letting it be reused.
+
+### Security — JWT refresh ends on password change, cap and replay (#1854)
+
+**Breaking:** `/api/auth/refresh` refuses a chain after a password change, past
+`Config::refresh_absolute_ttl_secs` (default 30 days) from login, and once a rotated
+token is replayed. A retry within `refresh_reuse_grace_secs` (10 s) only gets a 401.
+Refresh tokens issued before this release are refused.
+
 ### Fixed — a panicking job no longer kills its worker (#1843)
 
 A job panic is now a retryable failure, on both queues; a panicking dead-letter callback

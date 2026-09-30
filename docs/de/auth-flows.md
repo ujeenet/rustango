@@ -200,7 +200,9 @@ Nutzung:
 
 Untermauern Sie es in der Produktion mit einem **gemeinsam genutzten** Cache (Redis), damit ein
 Token nicht gegen ein anderes Replikat wiederholt werden kann. Die Prüfung schlägt geschlossen fehl
-(ein Cache-Fehler verweigert, statt einen Wiederholungsangriff zu riskieren).
+(ein Cache-Fehler oder ein `NullCache` verweigert, statt einen Wiederholungsangriff zu riskieren).
+Die Prüfung ist ein atomares `Cache::add`; ein eigener `Cache` muss `add` atomar umsetzen,
+alle mitgelieferten Backends tun das.
 
 ---
 
