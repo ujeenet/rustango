@@ -10,6 +10,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 `migrate --dry-run` see registry-scoped migrations only. **Breaking:** `migrate-registry`
 and `migrate-tenants` refuse flags they don't take, and a tenant-scoped `<target>` is refused.
 
+### Fixed — the CLI honours `with_tenant_pools` on SQLite and MySQL (#1914)
+
+Every backend now builds its `TenantPools` in one place, so `prewarm-pools` and
+`migrate-tenants` use the configured sizing, and `user_model` works without `postgres`.
+
 ### Fixed — scaffolded viewsets and serializers compile (#1913)
 
 `make:viewset` (pool) and `make:serializer` import their model; the tenant viewset's mount

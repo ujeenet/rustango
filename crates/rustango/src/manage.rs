@@ -75,7 +75,7 @@ pub struct Cli {
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
     /// to swap in a custom [`crate::tenancy::TenantUserModel`].
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     init_tenancy_fn: crate::tenancy::manage::InitTenancyFn,
     /// Cloned [`Settings`] handle stored by [`Cli::with_settings`].
     /// Consumed at `runserver` time to apply layers (security_headers,
@@ -142,7 +142,7 @@ impl Cli {
             tenancy: false,
             #[cfg(feature = "tenancy")]
             routes: None,
-            #[cfg(all(feature = "tenancy", feature = "postgres"))]
+            #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
@@ -611,7 +611,7 @@ impl Cli {
     ///     .user_model::<myapp::AppUser>()
     ///     .run().await
     /// ```
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
         self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
@@ -653,6 +653,50 @@ impl Cli {
             "" | "runserver" | "run-server" => self.runserver().await,
             _ => self.dispatch(args).await,
         }
+    }
+
+    /// The one place a tenancy verb gets its `TenantPools`, on every backend:
+    /// the SQLite / MySQL arms each built their own and dropped
+    /// `with_tenant_pools` and `user_model` (#1456, #1914).
+    #[cfg(feature = "tenancy")]
+    async fn run_tenancy_verb<DB: crate::sql::sqlx::Database>(
+        &self,
+        registry: crate::sql::sqlx::Pool<DB>,
+        url: &str,
+        args: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
+    {
+        self.run_tenancy_verb_to(registry, url, args, &mut std::io::stdout())
+            .await
+    }
+
+    #[cfg(feature = "tenancy")]
+    async fn run_tenancy_verb_to<DB: crate::sql::sqlx::Database, W: std::io::Write + Send>(
+        &self,
+        registry: crate::sql::sqlx::Pool<DB>,
+        url: &str,
+        args: Vec<String>,
+        out: &mut W,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
+    {
+        let mut pools = crate::tenancy::TenantPools::new(registry);
+        if let Some(cfg) = self.tenant_pools.clone() {
+            pools = pools.config(cfg);
+        }
+        crate::tenancy::manage::run_with_writer_and_init(
+            &pools,
+            url,
+            &self.migrations_dir,
+            args,
+            out,
+            self.init_tenancy_fn,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn dispatch(self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -749,16 +793,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_sqlite(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(pool);
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    self.init_tenancy_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(pool, &url, args).await;
             }
             #[cfg(feature = "mysql")]
             if scheme == "mysql" {
@@ -767,16 +802,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_mysql(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(pool);
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    self.init_tenancy_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(pool, &url, args).await;
             }
             if !matches!(scheme.as_str(), "postgres" | "postgresql") {
                 return Err(format!(
@@ -794,23 +820,7 @@ impl Cli {
             } else {
                 crate::sql::Pool::connect_postgres(&url).await?
             };
-            // #1456 — honour `Cli::with_tenant_pools`. This built
-            // `TenantPools::new(pool)` unconditionally, so tenant pool
-            // sizing was unreachable from every app that boots through
-            // `Cli`, which is every app the scaffolder generates.
-            let pools = match self.tenant_pools.clone() {
-                Some(cfg) => crate::tenancy::TenantPools::new(pool).config(cfg),
-                None => crate::tenancy::TenantPools::new(pool),
-            };
-            crate::tenancy::manage::run_with_init(
-                &pools,
-                &url,
-                &self.migrations_dir,
-                args,
-                self.init_tenancy_fn,
-            )
-            .await?;
-            return Ok(());
+            return self.run_tenancy_verb(pool, &url, args).await;
         }
         #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
         if self.tenancy {
@@ -826,17 +836,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_sqlite(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
-                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    init_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(p, &url, args).await;
             }
             #[cfg(all(not(feature = "sqlite"), feature = "mysql"))]
             {
@@ -845,17 +845,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_mysql(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(p);
-                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    init_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(p, &url, args).await;
             }
             #[cfg(not(any(feature = "sqlite", feature = "mysql")))]
             {
@@ -1748,6 +1738,49 @@ fn routes_from_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `with_tenant_pools` reaches a SQLite tenancy verb (#1914): cap 0
+    /// skips the one tenant; the default config would warm it.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn sqlite_tenancy_verbs_honour_with_tenant_pools() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
+        let cli = Cli::new()
+            .tenancy()
+            .migrations_dir(tmp.path().join("migrations"))
+            .with_tenant_pools(crate::tenancy::TenantPoolsConfig {
+                max_cached_database_pools: 0,
+                ..Default::default()
+            });
+        let registry = crate::sql::Pool::connect_sqlite(&url)
+            .await
+            .expect("connect");
+        let run = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let mut out: Vec<u8> = Vec::new();
+        for args in [
+            run(&["migrate-registry"]),
+            run(&[
+                "create-tenant",
+                "acme",
+                "--mode",
+                "database",
+                "--backend",
+                "sqlite",
+                "--database-url",
+                &tenant_url,
+                "--no-migrate",
+            ]),
+            run(&["prewarm-pools"]),
+        ] {
+            cli.run_tenancy_verb_to(registry.clone(), &url, args, &mut out)
+                .await
+                .expect("verb");
+        }
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.contains("skipped (cap) 1"), "{out}");
+    }
 
     #[test]
     fn defaults_are_sensible() {
