@@ -159,6 +159,7 @@ On PostgreSQL, `__date`/`__hour`/… and `trunc_*` on a `DateTime` column use UT
 
 New tables get the wider type; existing `DECIMAL(38, 10)` columns keep rounding past 10 places.
 Widen them with `ALTER TABLE t MODIFY c DECIMAL(65, 28)`. SQLite still keeps ~15 significant digits.
+Read-back values carry 28 decimal places (`1.5000…`); call `Decimal::normalize()` before display.
 
 ### JSON comparisons match across backends (#1898)
 
