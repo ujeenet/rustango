@@ -3232,6 +3232,15 @@ async fn dumpdata_cmd<W: Write>(
             continue;
         }
 
+        // These decode as `null`, so a reload would wipe them (#1911).
+        if let Some(f) = schema.scalar_fields().find(|f| !dumpable(f.ty)) {
+            return Err(MigrateError::Validation(format!(
+                "dumpdata: `{dotted_name}.{}` is a {:?} column, which dumpdata cannot \
+                 export yet — leave `{dotted_name}` out with --model",
+                f.name, f.ty
+            )));
+        }
+
         // Identify the PK column for fixture `pk` extraction.
         let pk_field = schema.primary_key();
 
@@ -3393,8 +3402,13 @@ async fn loaddata_cmd<W: Write>(
         schemas.insert(schema.name.to_owned(), schema);
     }
 
+    // Parents first: fixtures come in registration order, and a child
+    // inserted before its parent fails its FK (#1911).
+    let entries = in_fk_order(entries, &schemas);
+
     let mut loaded = 0_usize;
     let mut skipped = 0_usize;
+    let mut touched: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -3464,7 +3478,12 @@ async fn loaddata_cmd<W: Write>(
             on_conflict: None,
         };
         match crate::sql::insert_pool(pool, &query).await {
-            Ok(()) => loaded += 1,
+            Ok(()) => {
+                loaded += 1;
+                if !touched.iter().any(|t| t.table == schema.table) {
+                    touched.push(schema);
+                }
+            }
             Err(e) => {
                 let msg = format!("loaddata: entry #{line} (`{model_name}`) insert: {e}");
                 if parsed.fail_fast {
@@ -3476,7 +3495,113 @@ async fn loaddata_cmd<W: Write>(
         }
     }
 
+    reset_sequences(pool, &touched).await?;
+
     writeln!(w, "loaddata: {loaded} loaded, {skipped} skipped")?;
+    if skipped > 0 {
+        // A partial load is a failure; exit 0 read as a clean restore (#1911).
+        return Err(MigrateError::Validation(format!(
+            "loaddata: {skipped} row(s) skipped — see the warnings above"
+        )));
+    }
+    Ok(())
+}
+
+/// `false` for the column types `select_rows_as_json` reads back as `null`.
+fn dumpable(ty: crate::core::FieldType) -> bool {
+    use crate::core::FieldType as T;
+    !matches!(
+        ty,
+        T::Array(_) | T::Range(_) | T::HStore | T::Vector(_) | T::Geometry(_)
+    )
+}
+
+/// Stable-sort fixture entries so each model's FK targets load before it.
+/// A cycle keeps its members' fixture order.
+fn in_fk_order(
+    entries: Vec<serde_json::Value>,
+    schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+) -> Vec<serde_json::Value> {
+    use std::collections::HashMap;
+    fn depth(
+        table: &'static str,
+        by_table: &HashMap<&'static str, &'static crate::core::ModelSchema>,
+        memo: &mut HashMap<&'static str, usize>,
+        visiting: &mut Vec<&'static str>,
+    ) -> usize {
+        if let Some(d) = memo.get(table) {
+            return *d;
+        }
+        if visiting.contains(&table) {
+            return 0;
+        }
+        let Some(schema) = by_table.get(table) else {
+            return 0;
+        };
+        visiting.push(table);
+        let d = schema
+            .scalar_fields()
+            .filter_map(|f| match f.relation {
+                Some(
+                    crate::core::Relation::Fk { to, .. } | crate::core::Relation::O2O { to, .. },
+                ) if to != table => Some(1 + depth(to, by_table, memo, visiting)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        visiting.pop();
+        memo.insert(table, d);
+        d
+    }
+    let by_table: HashMap<&'static str, &'static crate::core::ModelSchema> =
+        schemas.values().map(|s| (s.table, *s)).collect();
+    let mut memo = HashMap::new();
+    let mut keyed: Vec<(usize, serde_json::Value)> = entries
+        .into_iter()
+        .map(|e| {
+            let rank = e
+                .get("model")
+                .and_then(|v| v.as_str())
+                .and_then(|m| schemas.get(m))
+                .map_or(0, |s| depth(s.table, &by_table, &mut memo, &mut Vec::new()));
+            (rank, e)
+        })
+        .collect();
+    keyed.sort_by_key(|(rank, _)| *rank);
+    keyed.into_iter().map(|(_, e)| e).collect()
+}
+
+/// Move each loaded model's serial counter past the ids the fixture wrote,
+/// or the next plain insert collides on Postgres (#1911).
+async fn reset_sequences(
+    pool: &Pool,
+    schemas: &[&'static crate::core::ModelSchema],
+) -> Result<(), MigrateError> {
+    use crate::core::FieldType as T;
+    for schema in schemas {
+        let Some(pk) = schema.primary_key() else {
+            continue;
+        };
+        if !pk.auto || !matches!(pk.ty, T::I16 | T::I32 | T::I64) {
+            continue;
+        }
+        let dialect = pool.dialect();
+        let Some(sql) = dialect.reset_sequence_sql(schema.table, pk.column) else {
+            continue;
+        };
+        let binds = vec![
+            crate::core::SqlValue::String(dialect.quote_ident(schema.table)),
+            crate::core::SqlValue::String(pk.column.to_owned()),
+        ];
+        crate::sql::raw_execute_pool(pool, &sql, binds)
+            .await
+            .map_err(|e| {
+                MigrateError::Validation(format!(
+                    "loaddata: resetting `{}`'s id sequence failed: {e}",
+                    schema.table
+                ))
+            })?;
+    }
     Ok(())
 }
 
@@ -3487,7 +3612,7 @@ async fn loaddata_cmd<W: Write>(
 /// - Decimal: `rust_decimal::Decimal::from_str`
 /// - Date: `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`
 /// - DateTime: RFC 3339 / `%Y-%m-%dT%H:%M:%S`
-/// - Time: `%H:%M:%S` then `%H:%M`
+/// - Time: `%H:%M:%S%.f` then `%H:%M`
 /// - Uuid: `Uuid::parse_str`
 /// - Binary: lowercase hex
 ///
@@ -3511,14 +3636,12 @@ fn json_to_sql_value(
             .and_then(|n| i32::try_from(n).ok())
             .map(SqlValue::I32)
             .ok_or_else(|| format!("expected i32, got {v}")),
-        FieldType::I64 => v.as_i64().map(SqlValue::I64).ok_or_else(|| {
-            // Accept integer-shaped strings too (e.g. SQLite NUMERIC).
-            v.as_str()
-                .and_then(|s| s.parse::<i64>().ok())
-                .map(SqlValue::I64)
-                .map(|_| format!("expected i64, got {v}"))
-                .unwrap_or_else(|| format!("expected i64, got {v}"))
-        }),
+        // Integer-shaped strings too (e.g. SQLite NUMERIC).
+        FieldType::I64 => v
+            .as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            .map(SqlValue::I64)
+            .ok_or_else(|| format!("expected i64, got {v}")),
         FieldType::F32 => v
             .as_f64()
             .map(|n| SqlValue::F32(n as f32))
@@ -3559,7 +3682,8 @@ fn json_to_sql_value(
             let s = v
                 .as_str()
                 .ok_or_else(|| format!("expected string for Time, got {v}"))?;
-            chrono::NaiveTime::parse_from_str(s, "%H:%M:%S")
+            // `%.f` too: dumpdata writes `12:34:56.789` (#1911).
+            chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
                 .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M"))
                 .map(SqlValue::Time)
                 .map_err(|e| format!("Time parse: {e}"))
@@ -5342,6 +5466,23 @@ mod gen_tests {
         // Out of range → Err.
         let r = json_to_sql_value(&serde_json::json!(99999999999_i64), &f);
         assert!(r.is_err());
+    }
+
+    /// Both arms the I64 docs promise, and the fractional time dumpdata writes (#1911).
+    #[test]
+    fn json_to_sql_value_reads_what_dumpdata_writes() {
+        let f = field("x", crate::core::FieldType::I64);
+        let v = json_to_sql_value(&serde_json::json!("42"), &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::I64(42)), "{v:?}");
+        assert!(json_to_sql_value(&serde_json::json!("4x"), &f).is_err());
+
+        let t = field("t", crate::core::FieldType::Time);
+        let v = json_to_sql_value(&serde_json::json!("12:34:56.789"), &t).unwrap();
+        let want = chrono::NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap();
+        assert!(
+            matches!(v, crate::core::SqlValue::Time(x) if x == want),
+            "{v:?}"
+        );
     }
 
     #[test]

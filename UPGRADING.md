@@ -155,6 +155,11 @@ untouched.
 `migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;
 now an unknown flag is an error. Use `migrate-tenants` for a tenant-scoped target.
 
+### `dumpdata` / `loaddata` fail instead of losing rows (breaking)
+
+`dumpdata` now errors on a model with an Array, Range, HStore, Vector or Geometry column;
+leave it out with `--model`. `loaddata` exits non-zero if any row was skipped.
+
 ### Tenancy user and permission verbs refuse unknown flags (breaking)
 
 `grant-perm`, `revoke-perm`, `create-user` and the host verbs now fail on a flag they don't

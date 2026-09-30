@@ -10,6 +10,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 `migrate --dry-run` see registry-scoped migrations only. **Breaking:** `migrate-registry`
 and `migrate-tenants` refuse flags they don't take, and a tenant-scoped `<target>` is refused.
 
+### Fixed — `dumpdata` / `loaddata` round-trip (#1911)
+
+`loaddata` reads the fractional times `dumpdata` writes and integer strings for `i64`,
+loads parents before children, and resets Postgres id sequences, so the next insert
+doesn't collide. **Breaking:** `dumpdata` refuses Array, Range, HStore, Vector and Geometry
+columns (they were dumped as `null`), and `loaddata` exits non-zero when it skipped a row.
+New `Dialect::reset_sequence_sql`.
+
 ### Fixed — `flush --yes` works on MySQL (#1912)
 
 Rows are deleted through the dialect's own `DELETE`; the hand-quoted `"table"` was a
