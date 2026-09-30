@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.7
+
 ### `JwtBackend` tokens need a `tenant` claim (#1848)
 
 **Breaking:** under `require_auth` a token from `JwtBackend::issue` (no tenant) is refused.
