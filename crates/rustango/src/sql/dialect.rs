@@ -14,7 +14,7 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
 use super::{CompiledStatement, SqlError};
@@ -674,9 +674,10 @@ pub trait Dialect: Send + Sync {
     fn write_conflict_clause(
         &self,
         sql: &mut String,
+        model: &ModelSchema,
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
-        let _ = sql;
+        let _ = (sql, model);
         let shape = match conflict {
             ConflictClause::DoNothing => "DO NOTHING",
             ConflictClause::DoUpdate { .. } => "DO UPDATE",

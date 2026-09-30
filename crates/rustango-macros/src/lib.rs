@@ -3099,14 +3099,8 @@ fn inherent_impl_tokens(
                         <Self as #root::core::Model>::SCHEMA,
                         _columns,
                         _values,
-                    )
-                    .on_conflict(#root::core::ConflictClause::DoNothing);
-                    let dialect = pool.dialect();
-                    let stmt = dialect.compile_insert(&_query)?;
-                    let rows = #root::sql::raw_execute_pool(
-                        pool, &stmt.sql, stmt.params,
-                    ).await?;
-                    ::core::result::Result::Ok(rows > 0)
+                    );
+                    #root::sql::insert_or_ignore(pool, &_query).await
                 }
             }
         } else {
@@ -3166,14 +3160,8 @@ fn inherent_impl_tokens(
                         <Self as #root::core::Model>::SCHEMA,
                         _columns,
                         _values,
-                    )
-                    .on_conflict(#root::core::ConflictClause::DoNothing);
-                    let dialect = pool.dialect();
-                    let stmt = dialect.compile_insert(&_query)?;
-                    let rows = #root::sql::raw_execute_pool(
-                        pool, &stmt.sql, stmt.params,
-                    ).await?;
-                    ::core::result::Result::Ok(rows > 0)
+                    );
+                    #root::sql::insert_or_ignore(pool, &_query).await
                 }
             }
         }
@@ -3204,7 +3192,7 @@ fn inherent_impl_tokens(
             /// to per-dialect "INSERT ... DO NOTHING on conflict":
             /// PG `INSERT … ON CONFLICT DO NOTHING`, SQLite
             /// `INSERT … ON CONFLICT DO NOTHING` (3.24+), MySQL
-            /// `INSERT IGNORE INTO …`.
+            /// `ON DUPLICATE KEY UPDATE <pk> = <pk>`.
             ///
             /// Returns `Ok(true)` when a row was inserted,
             /// `Ok(false)` when a conflict caused the INSERT to
@@ -3226,12 +3214,8 @@ fn inherent_impl_tokens(
                     <Self as #root::core::Model>::SCHEMA,
                     ::std::vec![ #( #insert_columns ),* ],
                     ::std::vec![ #( #insert_values ),* ],
-                )
-                .on_conflict(#root::core::ConflictClause::DoNothing);
-                let dialect = pool.dialect();
-                let stmt = dialect.compile_insert(&_query)?;
-                let rows = #root::sql::raw_execute_pool(pool, &stmt.sql, stmt.params).await?;
-                ::core::result::Result::Ok(rows > 0)
+                );
+                #root::sql::insert_or_ignore(pool, &_query).await
             }
         }
     };

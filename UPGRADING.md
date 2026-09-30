@@ -150,6 +150,12 @@ untouched.
 
 ## Unreleased
 
+### `Dialect::write_conflict_clause` takes the model (#1887)
+
+**Breaking:** a custom `Dialect` adds a `model: &ModelSchema` argument. On MySQL,
+`insert_or_ignore` now returns `false` on a skip, and a skipped `DoNothing` through
+`insert_returning_pool` is `RowNotFound`, as on PostgreSQL.
+
 ### `JwtBackend` tokens need a `tenant` claim (#1848)
 
 **Breaking:** under `require_auth` a token from `JwtBackend::issue` (no tenant) is refused.

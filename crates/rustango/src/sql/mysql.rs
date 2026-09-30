@@ -8,7 +8,7 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, SelectQuery, UpdateQuery,
+    FieldSchema, FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
 };
 
 use super::writers::{
@@ -16,6 +16,10 @@ use super::writers::{
     write_update, Sql,
 };
 use super::{CompiledStatement, Dialect, SqlError};
+
+/// The insert id a skipped `DoNothing` insert reports. No auto-increment
+/// column reaches it: a signed BIGINT stops at 2^63 - 1.
+pub(crate) const SKIPPED_INSERT_ID: u64 = u64::MAX;
 
 /// The `MySQL` 8.4+ dialect. Stateless; construct with `MySql`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -503,21 +507,31 @@ impl Dialect for MySql {
     /// ON DUPLICATE KEY UPDATE `a` = VALUES(`a`), `b` = VALUES(`b`)
     /// ```
     ///
-    /// `DoNothing` becomes a self-assignment such as
-    /// `ON DUPLICATE KEY UPDATE id = id`, which skips the duplicate.
-    /// `INSERT IGNORE` would do that too, but it also hides every
-    /// other error.
+    /// `DoNothing` becomes a PK self-assignment, which skips the
+    /// duplicate. `INSERT IGNORE` would do that too, but it also hides
+    /// every other error. The assignment also sets
+    /// [`SKIPPED_INSERT_ID`]: sqlx sets `CLIENT_FOUND_ROWS`, so a skip
+    /// reports 1 affected row, the same as an insert.
+    ///
+    /// On an auto-increment PK, `DoUpdate` adds `pk = LAST_INSERT_ID(pk)`
+    /// so `LAST_INSERT_ID()` names the updated row, not a stale one.
     fn write_conflict_clause(
         &self,
         sql: &mut String,
+        model: &ModelSchema,
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
+        let pk = model.primary_key().or_else(|| model.fields.first());
         match conflict {
             ConflictClause::DoNothing => {
-                // `INSERT IGNORE` would hide every error, including
-                // FK violations. A no-op self-update skips only the
-                // duplicate.
-                sql.push_str(" ON DUPLICATE KEY UPDATE id = id");
+                let pivot = pk.ok_or(SqlError::MissingPrimaryKey)?.column;
+                sql.push_str(" ON DUPLICATE KEY UPDATE ");
+                write_my_ident(sql, pivot);
+                sql.push_str(&format!(" = IF(LAST_INSERT_ID({SKIPPED_INSERT_ID}), "));
+                write_my_ident(sql, pivot);
+                sql.push_str(", ");
+                write_my_ident(sql, pivot);
+                sql.push(')');
             }
             ConflictClause::DoUpdate {
                 target,
@@ -540,6 +554,16 @@ impl Dialect for MySql {
                     write_my_ident(sql, col);
                     sql.push_str(" = VALUES(");
                     write_my_ident(sql, col);
+                    sql.push(')');
+                }
+                let auto_int = |f: &&FieldSchema| {
+                    f.auto && matches!(f.ty, FieldType::I16 | FieldType::I32 | FieldType::I64)
+                };
+                if let Some(pk) = model.primary_key().filter(auto_int) {
+                    sql.push_str(", ");
+                    write_my_ident(sql, pk.column);
+                    sql.push_str(" = LAST_INSERT_ID(");
+                    write_my_ident(sql, pk.column);
                     sql.push(')');
                 }
             }
@@ -860,20 +884,54 @@ mod tests {
     }
 
     #[test]
-    fn conflict_do_nothing_emits_no_op_update() {
+    fn conflict_do_nothing_assigns_the_pk_and_marks_the_skip() {
+        let model = with_pk(
+            empty_model_with("t", &[("code", FieldType::String), ("n", FieldType::I64)]),
+            "code",
+            false,
+        );
         let mut sql = String::new();
         MySql
-            .write_conflict_clause(&mut sql, &ConflictClause::DoNothing)
+            .write_conflict_clause(&mut sql, model, &ConflictClause::DoNothing)
             .unwrap();
-        assert_eq!(sql, " ON DUPLICATE KEY UPDATE id = id");
+        assert_eq!(
+            sql,
+            " ON DUPLICATE KEY UPDATE `code` = IF(LAST_INSERT_ID(18446744073709551615), `code`, `code`)"
+        );
     }
 
     #[test]
-    fn conflict_do_update_with_empty_target_translates() {
+    fn conflict_do_update_on_auto_pk_reports_the_updated_id() {
+        let model = with_pk(
+            empty_model_with("t", &[("id", FieldType::I64), ("a", FieldType::String)]),
+            "id",
+            true,
+        );
         let mut sql = String::new();
         MySql
             .write_conflict_clause(
                 &mut sql,
+                model,
+                &ConflictClause::DoUpdate {
+                    target: vec![],
+                    update_columns: vec!["a"],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            sql,
+            " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`), `id` = LAST_INSERT_ID(`id`)"
+        );
+    }
+
+    #[test]
+    fn conflict_do_update_with_empty_target_translates() {
+        let model = empty_model_with("t", &[("a", FieldType::String), ("b", FieldType::String)]);
+        let mut sql = String::new();
+        MySql
+            .write_conflict_clause(
+                &mut sql,
+                model,
                 &ConflictClause::DoUpdate {
                     target: vec![],
                     update_columns: vec!["a", "b"],
@@ -890,10 +948,12 @@ mod tests {
     fn conflict_do_update_with_target_silently_ignores_target() {
         // The conflict target is ignored: MySQL matches on every
         // unique index anyway.
+        let model = empty_model_with("t", &[("id", FieldType::I64), ("a", FieldType::String)]);
         let mut sql = String::new();
         MySql
             .write_conflict_clause(
                 &mut sql,
+                model,
                 &ConflictClause::DoUpdate {
                     target: vec!["id"],
                     update_columns: vec!["a"],
@@ -1193,7 +1253,7 @@ mod tests {
             &[("id", FieldType::I64), ("name", FieldType::String)],
         );
         // Mark the id field as the PK so primary_key() resolves.
-        let pk_model = with_pk(model, "id");
+        let pk_model = with_pk(model, "id", false);
         let q = BulkUpdateQuery {
             model: pk_model,
             update_columns: vec!["name"],
@@ -1213,11 +1273,12 @@ mod tests {
         assert_eq!(stmt.params.len(), 4);
     }
 
-    /// Copy `model` with `pk_col` marked as the primary key, which
-    /// the `bulk_update` test needs.
+    /// Copy `model` with `pk_col` marked as the primary key, `auto`
+    /// making it auto-increment.
     fn with_pk(
         model: &'static crate::core::ModelSchema,
         pk_col: &'static str,
+        auto: bool,
     ) -> &'static crate::core::ModelSchema {
         let new_fields: Vec<crate::core::FieldSchema> = model
             .fields
@@ -1226,6 +1287,7 @@ mod tests {
                 let mut f = *f;
                 if f.column == pk_col {
                     f.primary_key = true;
+                    f.auto = auto;
                 }
                 f
             })

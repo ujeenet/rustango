@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL do-nothing inserts use the PK and report skips (#1887)
+
+`insert_or_ignore` and friends no longer need an `id` column, and `insert_or_ignore` returns
+`false` for a skipped row. An upsert on an auto PK reads back the updated row's id.
+New `rustango::sql::insert_or_ignore`.
+
 ### Security — `JwtBackend` checks the tenant binding (#1848)
 
 **Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,

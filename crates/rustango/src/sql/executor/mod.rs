@@ -991,6 +991,38 @@ pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecErr
     Ok(())
 }
 
+/// `INSERT` that skips a duplicate: `Ok(true)` when the row went in,
+/// `Ok(false)` when a unique key already held it.
+///
+/// # Errors
+/// [`ExecError`] if the query is invalid or the driver rejects it.
+pub async fn insert_or_ignore(pool: &Pool, query: &InsertQuery) -> Result<bool, ExecError> {
+    let query = InsertQuery {
+        on_conflict: Some(crate::core::ConflictClause::DoNothing),
+        ..query.clone()
+    };
+    query.validate()?;
+    let stmt = pool.dialect().compile_insert(&query)?;
+    match pool {
+        // A skip reports one affected row here too (CLIENT_FOUND_ROWS),
+        // so read the insert id the conflict clause sets instead.
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            crate::test_assertions::query_counter::bump();
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            let done = q.execute(my).await?;
+            Ok(done.rows_affected() > 0
+                && done.last_insert_id() != crate::sql::mysql::SKIPPED_INSERT_ID)
+        }
+        #[allow(unreachable_patterns)]
+        _ => Ok(execute_pool(pool, &stmt.sql, stmt.params).await? > 0),
+    }
+}
+
 /// `INSERT` that returns the new row's data, on any backend. The
 /// result shape differs per backend, so callers `match` on
 /// [`InsertReturningPool`].
@@ -1043,7 +1075,11 @@ pub async fn insert_returning_pool(
             for v in stmt.params {
                 q = bind_query_my(q, v);
             }
-            q.execute(&mut *conn).await?;
+            let done = q.execute(&mut *conn).await?;
+            // A skipped `DoNothing` inserted no row, as RETURNING shows elsewhere.
+            if done.last_insert_id() == crate::sql::mysql::SKIPPED_INSERT_ID {
+                return Err(sqlx::Error::RowNotFound.into());
+            }
             use sqlx::Row as _;
             let row = sqlx::query("SELECT LAST_INSERT_ID()")
                 .fetch_one(&mut *conn)
