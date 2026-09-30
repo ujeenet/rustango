@@ -75,7 +75,18 @@ async fn incr_ttl_and_reset(pool: &Pool) {
     let _ = cache.drop_table().await;
 }
 
+/// An i64 overflow is an error on every dialect and leaves the counter alone.
+async fn incr_overflow_is_an_error(pool: &Pool) {
+    let cache = fresh(pool, "rustango_cache_incr_ovf").await;
+    let big = "999999999999999999";
+    cache.set("n", big, None).await.unwrap();
+    let err = cache.incr("n", i64::MAX, None).await.unwrap_err();
+    assert!(err.to_string().contains("out of range"), "{err}");
+    assert_eq!(cache.get("n").await.unwrap().as_deref(), Some(big));
+    let _ = cache.drop_table().await;
+}
+
 tri_dialect_test! {
     setup: noop,
-    scenarios: [parallel_incr_loses_nothing, incr_ttl_and_reset],
+    scenarios: [parallel_incr_loses_nothing, incr_ttl_and_reset, incr_overflow_is_an_error],
 }

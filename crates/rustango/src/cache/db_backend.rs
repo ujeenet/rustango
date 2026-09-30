@@ -374,16 +374,17 @@ impl Cache for DatabaseCache {
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
-        let (p1, p2, p3, p4, p5) = (
+        let (p1, p2, p3, p4, p5, p6) = (
             dialect.placeholder(1),
             dialect.placeholder(2),
             dialect.placeholder(3),
             dialect.placeholder(4),
             dialect.placeholder(5),
+            dialect.placeholder(6),
         );
         let now = Self::now_unix_ms();
         // Binds in text order: MySQL and SQLite are positional.
-        let binds = vec![
+        let mut binds = vec![
             StoredKey::new(key).into_value(),
             SqlValue::String(by.to_string()),
             SqlValue::I64(Self::expires_for(ttl)),
@@ -448,14 +449,33 @@ impl Cache for DatabaseCache {
             tx.commit().await.map_err(|e| err(e.into()))?;
             rows.into_iter().next().map(|(v,)| v).unwrap_or_default()
         } else {
+            // SQLite turns an overflowing sum into a REAL; skip that update
+            // instead, and report it as PG and MySQL do.
+            let guard = if dialect.name() == "sqlite" {
+                binds.push(SqlValue::I64(now));
+                format!(
+                    " WHERE ({}) OR {not_int} OR typeof(CAST({table}.value AS INTEGER) + \
+                     CAST({new_value} AS INTEGER)) = 'integer'",
+                    expired(&p6)
+                )
+            } else {
+                String::new()
+            };
             let rows: Vec<(String,)> = raw_query_pool(
-                &format!("{insert} ON CONFLICT (cache_key) DO UPDATE SET {set} RETURNING value"),
+                &format!(
+                    "{insert} ON CONFLICT (cache_key) DO UPDATE SET {set}{guard} RETURNING value"
+                ),
                 binds,
                 &self.pool,
             )
             .await
             .map_err(err)?;
-            rows.into_iter().next().map(|(v,)| v).unwrap_or_default()
+            let Some((v,)) = rows.into_iter().next() else {
+                return Err(CacheError::Connection(
+                    "incr: integer out of range (i64 overflow)".to_owned(),
+                ));
+            };
+            v
         };
         value
             .parse()
