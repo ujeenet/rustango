@@ -1310,8 +1310,10 @@ fn render_changes_split_inner(
                 let q_src_table = fk_target(dialect, schema, src_table);
                 let q_dst_table = fk_target(dialect, schema, dst_table);
                 let q_id = dialect.quote_ident("id");
-                let q_src_fk = dialect.quote_ident(&format!("{through}_{src_col}_fkey"));
-                let q_dst_fk = dialect.quote_ident(&format!("{through}_{dst_col}_fkey"));
+                let q_src_fk =
+                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
+                let q_dst_fk =
+                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
@@ -1601,7 +1603,7 @@ fn field_fk_sql(
     let mut s = format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         dialect.quote_ident(table),
-        dialect.quote_ident(&format!("{table}_{column}_fkey")),
+        dialect.quote_ident(&super::ddl::fk_constraint_name(table, column)),
         dialect.quote_ident(column),
         fk_target(dialect, schema, &rel.to),
         dialect.quote_ident(&rel.on),

@@ -203,11 +203,11 @@ pub fn drop_constraints_sql_with_dialect(
     let mut push = |name: String| out.extend(dialect.drop_foreign_key_sql(model.table, &name));
     for field in model.scalar_fields() {
         if field.relation.is_some() {
-            push(format!("{}_{}_fkey", model.table, field.column));
+            push(fk_constraint_name(model.table, field.column));
         }
     }
     for rel in model.composite_relations {
-        push(format!("{}_{}_fkey", model.table, rel.name));
+        push(fk_constraint_name(model.table, rel.name));
     }
     out
 }
@@ -234,7 +234,7 @@ pub fn create_constraints_sql_with_dialect(
         let mut s = String::from("ALTER TABLE ");
         s.push_str(&dialect.quote_ident(model.table));
         s.push_str(" ADD CONSTRAINT ");
-        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, field.column)));
+        s.push_str(&dialect.quote_ident(&fk_constraint_name(model.table, field.column)));
         s.push_str(" FOREIGN KEY (");
         s.push_str(&dialect.quote_ident(field.column));
         s.push_str(") REFERENCES ");
@@ -254,7 +254,7 @@ pub fn create_constraints_sql_with_dialect(
         let mut s = String::from("ALTER TABLE ");
         s.push_str(&dialect.quote_ident(model.table));
         s.push_str(" ADD CONSTRAINT ");
-        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, rel.name)));
+        s.push_str(&dialect.quote_ident(&fk_constraint_name(model.table, rel.name)));
         s.push_str(" FOREIGN KEY (");
         for (i, col) in rel.from.iter().enumerate() {
             if i > 0 {
@@ -297,7 +297,16 @@ pub fn unique_constraint_name(table: &str, column: &str) -> String {
     format!("{}_{}_{LABEL}", clip(table, t), clip(column, c))
 }
 
-fn clip(s: &str, mut n: usize) -> &str {
+/// `<table>_<column>_fkey`, cut to 63 bytes: the name PG already stored
+/// for a longer one, and within MySQL's 64 (error 1059).
+#[must_use]
+pub fn fk_constraint_name(table: &str, column: &str) -> String {
+    let name = format!("{table}_{column}_fkey");
+    clip(&name, 63).to_owned()
+}
+
+fn clip(s: &str, n: usize) -> &str {
+    let mut n = n.min(s.len());
     while !s.is_char_boundary(n) {
         n -= 1;
     }
@@ -329,7 +338,7 @@ fn inline_fk_clauses(dialect: &dyn Dialect, model: &ModelSchema) -> Vec<String> 
             Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
         };
         let mut s = String::from("CONSTRAINT ");
-        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, field.column)));
+        s.push_str(&dialect.quote_ident(&fk_constraint_name(model.table, field.column)));
         s.push_str(" FOREIGN KEY (");
         s.push_str(&dialect.quote_ident(field.column));
         s.push_str(") REFERENCES ");
@@ -345,7 +354,7 @@ fn inline_fk_clauses(dialect: &dyn Dialect, model: &ModelSchema) -> Vec<String> 
     }
     for rel in model.composite_relations {
         let mut s = String::from("CONSTRAINT ");
-        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, rel.name)));
+        s.push_str(&dialect.quote_ident(&fk_constraint_name(model.table, rel.name)));
         s.push_str(" FOREIGN KEY (");
         for (i, col) in rel.from.iter().enumerate() {
             if i > 0 {
@@ -832,6 +841,22 @@ mod tests {
         assert!(
             sql.contains("ON DELETE CASCADE"),
             "expected inline ON DELETE CASCADE; got: {sql}"
+        );
+    }
+
+    /// PostgreSQL 16 stored this name for the untruncated one.
+    #[test]
+    fn fk_constraint_name_is_what_postgres_stored() {
+        assert_eq!(
+            fk_constraint_name("post", "author_id"),
+            "post_author_id_fkey"
+        );
+        assert_eq!(
+            fk_constraint_name(
+                "probe_c",
+                "subscription_notification_preferences_primary_contact_id"
+            ),
+            "probe_c_subscription_notification_preferences_primary_contact_i"
         );
     }
 

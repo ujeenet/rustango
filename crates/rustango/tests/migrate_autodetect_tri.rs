@@ -272,6 +272,42 @@ async fn add_fk_column_with_default_to_filled_table(pool: &Pool) {
     assert_eq!(bad.is_err(), enforced.value, "{}", enforced.why);
 }
 
+/// FK names over 64 bytes, from CREATE TABLE and from ADD COLUMN. MySQL
+/// refused them (1059) after the column had committed.
+async fn long_fk_names_apply(pool: &Pool) {
+    let (a, b) = (
+        "mad_lf_author",
+        "mad_lf_subscription_notification_preferences",
+    );
+    let (c1, c2) = ("primary_contact_author_id", "secondary_contact_author_id");
+    let chain = Chain::new(pool, "lf", &[b, a]).await;
+    let with = |fields: Vec<Value>| json!({"tables": [table(a, vec![id()]), table(b, fields)]});
+    chain
+        .step(pool, with(vec![id(), col(c1, "i64", fk(a))]))
+        .await
+        .expect("CREATE TABLE with a long FK name");
+    chain
+        .step(
+            pool,
+            with(vec![id(), col(c1, "i64", fk(a)), col(c2, "i64", fk(a))]),
+        )
+        .await
+        .expect("ADD COLUMN with a long FK name");
+    for c in [c1, c2] {
+        assert!(
+            exec(
+                pool,
+                "INSERT INTO {} ({}, {}) VALUES (1, 99)",
+                &[b, "id", c]
+            )
+            .await
+            .is_err(),
+            "{c} REFERENCES its target on {}",
+            pool.dialect().name()
+        );
+    }
+}
+
 // ---------------------------------------------------------------- #1879
 
 /// Dropping a column drops its index and CHECK first. SQLite refused
@@ -681,6 +717,7 @@ tri_dialect_test!(
         unique_drops_on_long_names,
         add_column_keeps_fk_and_unique,
         add_fk_column_with_default_to_filled_table,
+        long_fk_names_apply,
         column_drops_after_its_index_and_check,
         tables_drop_child_first,
         m2m_drops_before_its_tables,

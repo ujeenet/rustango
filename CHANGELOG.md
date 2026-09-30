@@ -26,6 +26,7 @@ On SQLite a column with a default skips the FK and warns: SQLite refuses it on a
 ### Fixed — removing `unique` works for long table and column names (#1880)
 
 Every UNIQUE is named by one 63-byte helper (PG's rule), so the drop finds it.
+FK names are cut to 63 bytes, as PG already stored them, so MySQL no longer refuses long ones (1059).
 Two columns whose names shorten to one UNIQUE name are refused with an error.
 
 ## [0.59.11] — 2026-09-30
