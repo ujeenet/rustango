@@ -157,11 +157,13 @@ async fn a_matching_token_passes_the_csrf_layer() {
         .await
         .unwrap();
 
-    assert_ne!(
+    assert_eq!(
         resp.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::SEE_OTHER,
         "a valid token must get past CSRF — otherwise the fix is `deny everything`"
     );
+    let to = resp.headers().get(header::LOCATION).unwrap();
+    assert!(to.to_str().unwrap().starts_with("/login"), "{to:?}");
 }
 
 /// A GET seeds the cookie even though it is redirected to login, so the
@@ -291,6 +293,111 @@ async fn a_first_visit_sets_one_csrf_cookie_that_logs_in() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER, "login must succeed");
+}
+
+/// An app with `alice` signed in: `(app, "csrf=…; session=…" cookie, csrf token)`.
+async fn signed_in() -> (axum::Router, String, String) {
+    use rustango::admin::AdminUser;
+    let pool: Pool = rustango::sql::sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite")
+        .into();
+    rustango::testkit::create_tables_for::<AdminUser>(&pool)
+        .await
+        .unwrap();
+    #[cfg(feature = "totp")]
+    rustango::admin::totp_store::ensure_table(&pool)
+        .await
+        .unwrap();
+    rustango::sql::raw_execute_pool(
+        &pool,
+        r#"CREATE TABLE "csrf_post" ("id" INTEGER PRIMARY KEY AUTOINCREMENT, "title" TEXT NOT NULL)"#,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let mut u = AdminUser::new_with_password("alice", "correct-horse", true).unwrap();
+    u.insert_pool(&pool).await.unwrap();
+    let app = app_with_session_auth(pool);
+    let token = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf={token}"))
+                .body(Body::from(format!(
+                    "_csrf={token}&username=alice&password=correct-horse"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("rustango_admin_session="))
+        .and_then(|c| c.split(';').next())
+        .expect("login sets the session cookie")
+        .to_owned();
+    (app, format!("rustango_csrf={token}; {session}"), token)
+}
+
+/// #1694 — the gate reads the session cookie: a signed-in GET is served.
+#[tokio::test]
+async fn a_signed_in_admin_passes_the_session_gate() {
+    let (app, cookie, _) = signed_in().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/csrf_post")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// #1694 — logout reads the session cookie, so the signal names the user.
+#[tokio::test]
+async fn logout_signal_names_the_signed_in_user() {
+    use rustango::signals::auth::{connect_user_logged_out, disconnect_user_logged_out};
+    use std::sync::{Arc, Mutex};
+    let (app, cookie, token) = signed_in().await;
+    let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+    let sink = seen.clone();
+    let id = connect_user_logged_out(move |ctx| {
+        sink.lock().unwrap().push(ctx.username);
+        async {}
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/logout")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookie)
+                .body(Body::from(format!("_csrf={token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    disconnect_user_logged_out(id);
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    // Other tests here log out anonymously; look for alice only.
+    assert!(
+        seen.lock().unwrap().contains(&Some("alice".to_owned())),
+        "{:?}",
+        seen.lock().unwrap()
+    );
 }
 
 /// Every POST form in every admin template renders a token.
