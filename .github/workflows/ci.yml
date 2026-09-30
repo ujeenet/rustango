@@ -503,6 +503,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+      # A `Decimal` model needs a build without `sqlite`.
+      - run: cargo test -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri decimal
 
   # Ungated too. At ~62s it is two billed minutes, and the reasoning that
   # ungated `fmt` and `clippy` applies unchanged: a broken intra-doc link

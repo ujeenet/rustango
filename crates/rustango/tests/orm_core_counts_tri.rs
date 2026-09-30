@@ -308,3 +308,44 @@ tri_dialect_test! {
         bulk_insert_joins_outer_atomic,
     ],
 }
+
+/// Decimal `SUM` is not cast, so PG NUMERIC and MySQL DECIMAL stay exact.
+/// A `Decimal` model does not build with the `sqlite` feature (SQLite has
+/// no decimal type; a NUMERIC `SUM` there reads back as `f64` / `i64`).
+#[cfg(not(feature = "sqlite"))]
+mod decimal {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "occ_ledger")]
+    #[allow(dead_code)]
+    pub struct Ledger {
+        #[rustango(primary_key)]
+        pub id: i64,
+        pub amount: Decimal,
+    }
+
+    async fn sum_keeps_decimal_exact(pool: &Pool) {
+        for (id, amount) in [(1, "0.1"), (2, "0.2")] {
+            Ledger {
+                id,
+                amount: amount.parse().unwrap(),
+            }
+            .insert_pool(pool)
+            .await
+            .expect("seed ledger");
+        }
+        let s: Option<Decimal> = Ledger::objects().sum("amount", pool).await.unwrap();
+        assert_eq!(
+            s,
+            Some("0.3".parse::<Decimal>().unwrap()),
+            "exact, not 0.30000000000000004"
+        );
+    }
+
+    tri_dialect_test! {
+        model: Ledger,
+        scenarios: [sum_keeps_decimal_exact],
+    }
+}

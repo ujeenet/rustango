@@ -770,9 +770,8 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
 }
 
 /// The cast an aggregate needs so the decoder can read it. Databases
-/// widen `SUM` and `AVG` results to NUMERIC or DECIMAL, but the
-/// `SqlValue` decoder only tries `i64` and `f64`, so the writer casts
-/// the call back to one of those.
+/// widen `SUM` and `AVG` to NUMERIC or DECIMAL; the writer casts them
+/// back to `i64` or `f64`, except a decimal column's `SUM`, which stays exact.
 #[derive(Debug, Clone, Copy)]
 enum AggCast {
     Int,

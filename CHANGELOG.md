@@ -13,6 +13,7 @@ filters and `union()` are counted and aggregated through a derived table instead
 ### Fixed — `Sum` of a float column is no longer cast to an integer (#1886)
 
 `SUM` casts from the column type: float columns to double, decimals stay exact.
+SQLite has no decimal type; a NUMERIC `SUM` there reads as `f64` / `i64`.
 
 ### Fixed — a multi-batch `bulk_insert_pool` is all-or-nothing (#1891)
 
