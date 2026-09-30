@@ -368,6 +368,7 @@ pub async fn generation(
         order_by: Vec::new(),
         limit: None,
         offset: None,
+        source: None,
     };
     // Every term is NULL-able on an empty table (`MAX` / `SUM` of no
     // rows), so each decodes as `Option` and folds to 0 — an empty

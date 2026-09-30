@@ -505,6 +505,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+      # A `Decimal` model needs a build without `sqlite`.
+      - run: cargo test -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri decimal
 
   # Ungated too. At ~62s it is two billed minutes, and the reasoning that
   # ungated `fmt` and `clippy` applies unchanged: a broken intra-doc link
@@ -1004,6 +1006,7 @@ jobs:
             --test audit_bulk_writes_tri \
             --test atomic_savepoints_tri \
             --test orm_bounded_dml_tri \
+            --test orm_core_counts_tri \
             --test bulk_update_api_sqlite_live \
             --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
@@ -1275,6 +1278,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test admin_audit_scope_tri
       - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
       - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri

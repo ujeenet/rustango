@@ -1927,6 +1927,14 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// [`Self::compile`], or `None` after [`Self::none`], so counts and
+    /// aggregates answer without a round trip.
+    pub(crate) fn compile_unless_none(self) -> Result<Option<SelectQuery>, QueryError> {
+        let none = self.is_none;
+        let select = self.compile()?;
+        Ok((!none).then_some(select))
+    }
+
     /// Validate the accumulated filters against `T::SCHEMA` and lower to
     /// the dialect-neutral `SelectQuery` IR.
     ///
@@ -2037,9 +2045,8 @@ impl<T: Model> QuerySet<T> {
                 }
             }
         }
-        // `.none()` forces an empty result with `LIMIT 0`. It is cheap
-        // on every dialect, and count / exists / first read the same
-        // SelectQuery, so they need no special case. The `LIMIT 0` goes
+        // `.none()` forces an empty result with `LIMIT 0`; counts and
+        // aggregates skip the query via `compile_unless_none`. The `LIMIT 0` goes
         // on the outermost slot: the combined result when a compound is
         // present, otherwise the single query.
         let (limit, compound_limit) = if self.is_none {
@@ -2604,21 +2611,14 @@ fn lower_select_related(
             // hop is just `field.name`; a chain accumulates `author`,
             // `author__profile`, `author__profile__country`.
             //
-            // The writer needs `&'static str`. Single-hop already has
-            // one from the schema. For a chain we leak the composite
-            // alias on purpose: depth is small and bounded by the
-            // user's schema, so it is a tiny one-time cost.
-            let alias: &'static str = if hops.len() == 1 {
+            // The writer needs `&'static str`: the first hop has the
+            // schema's field name, deeper ones are interned.
+            let alias: &'static str = if depth == 0 {
+                prev_alias_owned.push_str(hop);
                 field.name
             } else {
-                // Build the cumulative alias.
-                let owned = if depth == 0 {
-                    (*hop).to_owned()
-                } else {
-                    format!("{prev_alias_owned}__{hop}")
-                };
-                prev_alias_owned = owned.clone();
-                Box::leak(owned.into_boxed_str())
+                prev_alias_owned = format!("{prev_alias_owned}__{hop}");
+                intern_join_alias(&prev_alias_owned)?
             };
             let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
             out.push(Join {
@@ -3298,6 +3298,37 @@ fn resolve_span(
     Ok((joins, predicate))
 }
 
+/// Deepest relation path a span or `select_related` may walk. It bounds the
+/// interned aliases by the schema's FK paths, so user-built lookups
+/// (`parent__parent__…`) cannot grow the set without limit.
+const MAX_RELATION_HOPS: usize = 6;
+
+/// A `&'static` join alias for a multi-hop path (`author__profile`),
+/// leaked once per distinct path rather than once per `compile()`.
+fn intern_join_alias(path: &str) -> Result<&'static str, QueryError> {
+    use std::collections::HashSet;
+    use std::sync::{OnceLock, PoisonError, RwLock};
+    static ALIASES: OnceLock<RwLock<HashSet<&'static str>>> = OnceLock::new();
+    if path.split("__").count() > MAX_RELATION_HOPS {
+        return Err(QueryError::RelationPathTooDeep {
+            path: path.to_owned(),
+            max: MAX_RELATION_HOPS,
+        });
+    }
+    let set = ALIASES.get_or_init(RwLock::default);
+    // Read first: after warm-up every lookup is a hit and runs in parallel.
+    if let Some(alias) = set.read().unwrap_or_else(PoisonError::into_inner).get(path) {
+        return Ok(alias);
+    }
+    let mut set = set.write().unwrap_or_else(PoisonError::into_inner);
+    if let Some(alias) = set.get(path) {
+        return Ok(alias);
+    }
+    let alias: &'static str = Box::leak(path.into());
+    set.insert(alias);
+    Ok(alias)
+}
+
 /// Walk a relation-span path's FK / O2O hops into LEFT JOINs. Shared
 /// by [`resolve_span`] (the `filter()` path) and [`lower_order_items`]
 /// (the `order_by()` path), so the two cannot drift.
@@ -3347,17 +3378,16 @@ fn resolve_span_chain(
                         model: current.name,
                         field: format!("{seg} (target table `{to}` not registered)"),
                     })?;
-                alias_path = if alias_path.is_empty() {
-                    (*seg).to_owned()
+                // The first hop's alias is the schema's field name; deeper
+                // ones are interned. Same scheme as `lower_select_related`,
+                // so a span and a `select_related` over one path dedupe.
+                let alias: &'static str = if alias_path.is_empty() {
+                    alias_path.push_str(seg);
+                    field.name
                 } else {
-                    format!("{alias_path}__{seg}")
+                    alias_path = format!("{alias_path}__{seg}");
+                    intern_join_alias(&alias_path)?
                 };
-                // Leak the dotted alias: depth is bounded by the
-                // schema and the cost is paid once at compile() time.
-                // It matches `lower_select_related`'s scheme, so a
-                // span and a `select_related` over the same path
-                // dedupe against each other.
-                let alias: &'static str = Box::leak(alias_path.clone().into_boxed_str());
                 let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
                 joins.push(Join {
                     target,
@@ -4117,6 +4147,7 @@ impl<T: Model> AggregateBuilder<T> {
             order_by,
             limit,
             offset: self.offset,
+            source: None,
         })
     }
 }
@@ -4504,4 +4535,21 @@ fn compile_values_select<T: Model>(
     let mut q = qs.compile()?;
     q.projection = Some(cols);
     Ok(q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn too_deep_paths_fail_alone_and_are_not_kept() {
+        let deep = "t1__a__a__a__a__a__a";
+        assert!(matches!(
+            intern_join_alias(deep),
+            Err(QueryError::RelationPathTooDeep { max: 6, .. })
+        ));
+        let a = intern_join_alias("t1__b").unwrap();
+        assert!(std::ptr::eq(a, intern_join_alias("t1__b").unwrap()));
+        intern_join_alias("t1__a__a__a__a__a").expect("six hops still intern");
+    }
 }
