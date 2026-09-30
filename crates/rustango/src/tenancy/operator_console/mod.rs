@@ -1305,6 +1305,7 @@ struct OpChangePasswordForm {
 async fn change_password_submit(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
+    ip: crate::login_throttle::ClientIp,
     Form(form): Form<OpChangePasswordForm>,
 ) -> Response<Body> {
     let redir = |query: &str| -> Response<Body> {
@@ -1349,14 +1350,25 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let ok =
+    let verify = async {
         match super::password::verify_async(&form.current_password, &op_row.password_hash).await {
-            Ok(ok) => ok,
-            Err(super::TenancyError::Busy) => {
-                return crate::login_throttle::LoginRefused::Busy.into_response()
-            }
-            Err(_) => false,
-        };
+            Ok(ok) => Ok(ok),
+            Err(super::TenancyError::Busy) => Err(crate::login_throttle::LoginRefused::Busy),
+            Err(_) => Ok(false),
+        }
+    };
+    let ok = match crate::login_throttle::shared()
+        .verify_current_password(
+            &crate::login_throttle::LoginScope::Operator,
+            &ip,
+            &op_row.username,
+            verify,
+        )
+        .await
+    {
+        Ok(ok) => ok,
+        Err(refused) => return refused.into_response(),
+    };
     if !ok {
         return redir_err("Current password did not match.");
     }

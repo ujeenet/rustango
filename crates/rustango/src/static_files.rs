@@ -25,6 +25,8 @@
 //!   that check off, so use it only on a directory layout you trust.
 //! - A name starting with `.` gets a 404 unless
 //!   [`StaticFiles::serve_hidden`] is on.
+//! - Mount user uploads with [`StaticFiles::user_content`]: HTML, SVG
+//!   and XML then download instead of running script on your origin.
 //!
 //! ## Caching
 //!
@@ -55,6 +57,7 @@ pub struct StaticFiles {
     cache_control: String,
     serve_hidden: bool,
     canonicalize: bool,
+    user_content: bool,
 }
 
 impl StaticFiles {
@@ -66,7 +69,22 @@ impl StaticFiles {
             cache_control: "public, max-age=3600".into(),
             serve_hidden: false,
             canonicalize: true,
+            user_content: false,
         }
+    }
+
+    /// The directory files are served from.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Serve files users uploaded: HTML, SVG and XML go out as
+    /// `attachment`, and every response carries `nosniff` (#1849).
+    #[must_use]
+    pub fn user_content(mut self) -> Self {
+        self.user_content = true;
+        self
     }
 
     /// Override the `Cache-Control` header value.
@@ -98,6 +116,21 @@ impl StaticFiles {
     pub fn no_canonicalize(mut self) -> Self {
         self.canonicalize = false;
         self
+    }
+}
+
+/// Warn when a plain static mount looks like it serves user uploads,
+/// where HTML or SVG would run on the app origin (#1849).
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
+pub(crate) fn warn_if_uploads_prefix(prefix: &str) {
+    let p = prefix.to_ascii_lowercase();
+    if p.contains("upload") || p.contains("media") {
+        tracing::warn!(
+            target: "rustango::static_files",
+            prefix,
+            "static mount looks like user uploads; mount it with `with_uploads` so HTML and SVG \
+             download instead of running on this origin"
+        );
     }
 }
 
@@ -157,6 +190,18 @@ async fn serve(
         .body(body)
         .unwrap_or_else(|_| Response::new(Body::empty()));
     let h = resp.headers_mut();
+    if files.user_content {
+        h.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        if runs_script(&mime) {
+            h.insert(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("attachment"),
+            );
+        }
+    }
     h.insert(header::CONTENT_TYPE, mime);
     if !files.cache_control.is_empty() {
         if let Ok(v) = HeaderValue::from_str(&files.cache_control) {
@@ -276,6 +321,14 @@ fn mime_for(path: &Path) -> HeaderValue {
         _ => "application/octet-stream",
     };
     HeaderValue::from_static(s)
+}
+
+/// A type a browser renders with script when opened directly.
+fn runs_script(mime: &HeaderValue) -> bool {
+    let m = mime.to_str().unwrap_or_default();
+    ["text/html", "image/svg+xml", "application/xml"]
+        .iter()
+        .any(|t| m.starts_with(t))
 }
 
 /// Format unix seconds as an IMF-fixdate (RFC 7231), the HTTP date
@@ -537,6 +590,58 @@ mod tests {
             mime_for(Path::new("a.unknown")).to_str().unwrap(),
             "application/octet-stream"
         );
+    }
+
+    async fn get(app: Router, uri: &str) -> Response {
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    /// Uploaded HTML/SVG/XML must not run on the app origin (#1849).
+    #[tokio::test]
+    async fn user_content_downloads_active_types() {
+        let dir = TempDir::new().unwrap();
+        for f in ["x.html", "x.HTM", "x.svg", "x.xml", "x.png"] {
+            write_file(&dir, f, b"<script>alert(1)</script>");
+        }
+        let app = static_router(StaticFiles::new(dir.path()).user_content());
+        for f in ["x.html", "x.HTM", "x.svg", "x.xml"] {
+            let r = get(app.clone(), &format!("/{f}")).await;
+            assert_eq!(
+                r.headers()[header::CONTENT_DISPOSITION],
+                "attachment",
+                "{f}"
+            );
+            assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        }
+        let r = get(app, "/x.png").await;
+        assert!(r.headers().get(header::CONTENT_DISPOSITION).is_none());
+        assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+
+        // Plain static mounts keep serving HTML inline.
+        let r = get(server(&dir), "/x.html").await;
+        assert!(r.headers().get(header::CONTENT_DISPOSITION).is_none());
+    }
+
+    /// What `warn_if_uploads_prefix(prefix)` logs.
+    #[cfg(feature = "runtime")]
+    fn prefix_logs(prefix: &str) -> String {
+        let out = crate::testkit::CaptureWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, || warn_if_uploads_prefix(prefix));
+        out.contents()
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn upload_like_static_prefixes_warn() {
+        for p in ["/uploads", "/Media", "/user-uploads/"] {
+            assert!(prefix_logs(p).contains("with_uploads"), "{p}");
+        }
+        assert_eq!(prefix_logs("/static"), "");
     }
 
     #[test]

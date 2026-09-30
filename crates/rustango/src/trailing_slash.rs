@@ -113,9 +113,9 @@ async fn handle(cfg: Arc<TrailingSlashLayer>, req: Request<Body>, next: Next) ->
 }
 
 /// `Some(canonical)` when `path` needs a redirect, `None` when it is
-/// already canonical.
+/// already canonical. The target always stays on this origin.
 fn canonical_path(path: &str, style: SlashStyle) -> Option<String> {
-    match style {
+    let target = match style {
         SlashStyle::Append => {
             if path.ends_with('/') {
                 None
@@ -130,7 +130,9 @@ fn canonical_path(path: &str, style: SlashStyle) -> Option<String> {
                 None
             }
         }
-    }
+    }?;
+    // Browsers read `//host` and `/\host` as another host (#1869).
+    Some(format!("/{}", target.trim_start_matches(['/', '\\'])))
 }
 
 fn with_query(path: &str, query: Option<&str>) -> String {
@@ -360,5 +362,35 @@ mod tests {
         assert_eq!(with_query("/foo", None), "/foo");
         assert_eq!(with_query("/foo", Some("")), "/foo");
         assert_eq!(with_query("/foo", Some("a=1")), "/foo?a=1");
+    }
+
+    async fn location(app: Router, uri: &str) -> String {
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY, "{uri}");
+        resp.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// `//host` and `/\host` must not leave as another host (#1869).
+    #[tokio::test]
+    async fn append_never_leaves_the_origin() {
+        assert_eq!(location(append_app(), "//evil.com").await, "/evil.com/");
+        assert_eq!(location(append_app(), "/\\evil.com").await, "/evil.com/");
+        assert_eq!(
+            location(append_app(), "///evil.com?x=1").await,
+            "/evil.com/?x=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn strip_never_leaves_the_origin() {
+        assert_eq!(location(strip_app(), "//evil.com/").await, "/evil.com");
+        assert_eq!(location(strip_app(), "/\\/evil.com/").await, "/evil.com");
+        assert_eq!(location(strip_app(), "///").await, "/");
     }
 }

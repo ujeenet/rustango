@@ -85,6 +85,8 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// * `ordering = "a, -b"` — default list ordering; prefix `-` for DESC.
 /// * `page_size = N` — default page size (default: 20, max: 1000).
 /// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
+/// * `allow_anonymous` — flag; write actions without codenames are
+///   intended, so the mount warning is skipped.
 /// * `serializer = SomeSerializer` — render list / retrieve / create
 ///   responses through a `#[derive(Serializer)]` type instead of the
 ///   default field-level projection (`read_only` / `source` / `method`
@@ -12578,6 +12580,7 @@ struct ViewSetAttrs {
     ordering: Vec<(String, bool)>,
     page_size: Option<usize>,
     read_only: bool,
+    allow_anonymous: bool,
     perms: ViewSetPermsAttrs,
     /// `#[viewset(serializer = SomeSerializer)]` — render list /
     /// retrieve / create responses through this `#[derive(Serializer)]`
@@ -12664,6 +12667,11 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
     } else {
         quote!()
     };
+    let allow_anonymous_call = if attrs.allow_anonymous {
+        quote!(.allow_anonymous())
+    } else {
+        quote!()
+    };
 
     // `.serializer::<S>()` — reshape responses through a derived
     // serializer. Requires the downstream crate to enable the
@@ -12723,6 +12731,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #page_size_call
                     #perms_call
                     #read_only_call
+                    #allow_anonymous_call
                     #serializer_call
                     .router_pool(prefix, pool.into())
             }
@@ -12738,6 +12747,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
     let mut ordering: Vec<(String, bool)> = Vec::new();
     let mut page_size: Option<usize> = None;
     let mut read_only = false;
+    let mut allow_anonymous = false;
     let mut perms = ViewSetPermsAttrs::default();
     let mut serializer: Option<syn::Path> = None;
 
@@ -12785,6 +12795,10 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
                 read_only = true;
                 return Ok(());
             }
+            if meta.path.is_ident("allow_anonymous") {
+                allow_anonymous = true;
+                return Ok(());
+            }
             if meta.path.is_ident("permissions") {
                 meta.parse_nested_meta(|inner| {
                     let parse_codenames = |inner: &syn::meta::ParseNestedMeta| -> syn::Result<Vec<String>> {
@@ -12812,7 +12826,8 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             }
             Err(meta.error(
                 "unknown viewset attribute (supported: model, fields, filter_fields, \
-                 search_fields, ordering, page_size, read_only, serializer, permissions(...))",
+                 search_fields, ordering, page_size, read_only, allow_anonymous, serializer, \
+                 permissions(...))",
             ))
         })?;
     }
@@ -12829,6 +12844,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
         ordering,
         page_size,
         read_only,
+        allow_anonymous,
         perms,
         serializer,
     })

@@ -97,13 +97,12 @@ pub struct Cli {
     /// Set via [`Cli::with_tenant_pools`] (#1456).
     #[cfg(feature = "tenancy")]
     tenant_pools: Option<crate::tenancy::TenantPoolsConfig>,
-    /// `(prefix, root_dir)` pairs registered via [`Cli::with_static`].
-    /// Mounted at `runserver` time as
-    /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`.
+    /// Mounts registered via [`Cli::with_static`] and [`Cli::with_uploads`],
+    /// nested at `runserver` time as `Router::nest(prefix, static_router(files))`.
     /// Empty by default — projects that already mount their own
     /// `static_files::static_router` keep doing it.
     #[cfg(feature = "admin")]
-    static_dirs: Vec<(String, PathBuf)>,
+    static_dirs: Vec<(String, crate::static_files::StaticFiles)>,
     /// CSRF middleware config registered via [`Cli::with_csrf`]. `None`
     /// means no CSRF layer mounted — the right default for pure JSON
     /// APIs that authenticate via JWT and reject form-encoded bodies
@@ -343,14 +342,13 @@ impl Cli {
 
     /// Auto-mount a [`crate::static_files::static_router`] at `prefix`
     /// serving files under `root_dir`. Repeat the call to mount more
-    /// than one directory (e.g. `/static` from `./assets`,
-    /// `/uploads` from `./var/uploads`).
+    /// than one directory. Mount user uploads with [`Self::with_uploads`].
     ///
     /// ```ignore
     /// rustango::manage::Cli::new()
     ///     .api(urls::api())
     ///     .with_static("/static", "./assets")
-    ///     .with_static("/uploads", "./var/uploads")
+    ///     .with_uploads("/uploads", "./var/uploads")
     ///     .run().await
     /// ```
     ///
@@ -364,7 +362,21 @@ impl Cli {
     #[cfg(feature = "admin")]
     #[must_use]
     pub fn with_static(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
-        self.static_dirs.push((prefix.into(), root_dir.into()));
+        let prefix = prefix.into();
+        crate::static_files::warn_if_uploads_prefix(&prefix);
+        let files = crate::static_files::StaticFiles::new(root_dir);
+        self.static_dirs.push((prefix, files));
+        self
+    }
+
+    /// [`Self::with_static`] for files users uploaded: HTML, SVG and XML
+    /// download instead of running on this origin
+    /// ([`crate::static_files::StaticFiles::user_content`]).
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn with_uploads(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
+        let files = crate::static_files::StaticFiles::new(root_dir).user_content();
+        self.static_dirs.push((prefix.into(), files));
         self
     }
 
@@ -1251,8 +1263,8 @@ impl Cli {
         if let Some(dir) = self.provisioning_dir.clone() {
             builder = builder.with_tenant_provisioning(dir);
         }
-        for (prefix, root) in self.static_dirs {
-            builder = builder.with_static(prefix, root);
+        for (prefix, files) in self.static_dirs {
+            builder = builder.with_static_files(prefix, files);
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
@@ -1331,8 +1343,8 @@ impl Cli {
         if let Some(dir) = self.provisioning_dir.clone() {
             builder = builder.with_tenant_provisioning(dir);
         }
-        for (prefix, root) in self.static_dirs {
-            builder = builder.with_static(prefix, root);
+        for (prefix, files) in self.static_dirs {
+            builder = builder.with_static_files(prefix, files);
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
@@ -1408,13 +1420,10 @@ fn try_mount_welcome(api: Router) -> Router {
 }
 
 #[cfg(feature = "admin")]
-fn mount_static_dirs(api: Router, dirs: &[(String, PathBuf)]) -> Router {
+fn mount_static_dirs(api: Router, dirs: &[(String, crate::static_files::StaticFiles)]) -> Router {
     let mut r = api;
-    for (prefix, root) in dirs {
-        r = r.nest(
-            prefix,
-            crate::static_files::static_router(crate::static_files::StaticFiles::new(root.clone())),
-        );
+    for (prefix, files) in dirs {
+        r = r.nest(prefix, crate::static_files::static_router(files.clone()));
     }
     r
 }
@@ -2043,12 +2052,38 @@ mod tests {
             .with_static("/uploads", "./var/uploads");
         assert_eq!(cli.static_dirs.len(), 2);
         assert_eq!(cli.static_dirs[0].0, "/static");
-        assert_eq!(cli.static_dirs[0].1, std::path::PathBuf::from("./assets"));
+        assert_eq!(
+            cli.static_dirs[0].1.root(),
+            std::path::Path::new("./assets")
+        );
         assert_eq!(cli.static_dirs[1].0, "/uploads");
         assert_eq!(
-            cli.static_dirs[1].1,
+            cli.static_dirs[1].1.root(),
             std::path::PathBuf::from("./var/uploads")
         );
+    }
+
+    /// `with_uploads` serves uploaded HTML as a download, `with_static` inline (#1849).
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn with_uploads_downloads_html() {
+        use tower::ServiceExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.html"), "<script></script>").unwrap();
+        let cli = Cli::new()
+            .with_static("/static", dir.path())
+            .with_uploads("/uploads", dir.path());
+        let app = mount_static_dirs(Router::new(), &cli.static_dirs);
+        let get = |uri: &str| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let r = app.clone().oneshot(get("/uploads/x.html")).await.unwrap();
+        assert_eq!(r.headers()["content-disposition"], "attachment");
+        let r = app.oneshot(get("/static/x.html")).await.unwrap();
+        assert!(r.headers().get("content-disposition").is_none());
     }
 
     /// `Cli::with_welcome()` flips the flag for the runserver path.
@@ -2162,7 +2197,10 @@ mod tests {
 
         let app = mount_static_dirs(
             Router::new(),
-            &[("/static".into(), dir.path().to_path_buf())],
+            &[(
+                "/static".into(),
+                crate::static_files::StaticFiles::new(dir.path()),
+            )],
         );
         let resp = app
             .oneshot(

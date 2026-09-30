@@ -140,6 +140,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::sql` | Query execution |
 | `rustango::sql::lock` | Row-lock clauses |
 | `rustango::sso` | SSO account linking |
+| `rustango::static_files` | Static-file mounts |
 | `rustango::template_views` | Template-backed views |
 | `rustango::tenancy` | Tenancy, general |
 | `rustango::tenancy::admin` | Tenant admin |
@@ -151,6 +152,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::tenancy::resolver` | Tenant resolution |
 | `rustango::tenancy::sso` | Tenant SSO |
 | `rustango::tenancy::sweep` | Retention sweeps |
+| `rustango::viewset` | ViewSets mounted with open write actions |
 
 Those are the targets the framework names explicitly. Events that don't name
 one inherit their module path, which gives the same shape —

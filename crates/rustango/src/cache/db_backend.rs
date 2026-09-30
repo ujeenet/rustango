@@ -368,6 +368,120 @@ impl Cache for DatabaseCache {
         Ok(took == 1)
     }
 
+    /// One upsert, so parallel callers never lose a count (#1871). The TTL
+    /// is set on insert only; an expired or non-integer value restarts at `by`.
+    /// Overflow is an error, not a saturation.
+    async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
+        let dialect = self.pool.dialect();
+        let table = dialect.quote_ident(&self.table);
+        let (p1, p2, p3, p4, p5, p6) = (
+            dialect.placeholder(1),
+            dialect.placeholder(2),
+            dialect.placeholder(3),
+            dialect.placeholder(4),
+            dialect.placeholder(5),
+            dialect.placeholder(6),
+        );
+        let now = Self::now_unix_ms();
+        // Binds in text order: MySQL and SQLite are positional.
+        let mut binds = vec![
+            StoredKey::new(key).into_value(),
+            SqlValue::String(by.to_string()),
+            SqlValue::I64(Self::expires_for(ttl)),
+            SqlValue::I64(now),
+            SqlValue::I64(now),
+        ];
+        let err = |e: crate::sql::ExecError| CacheError::Connection(format!("incr: {e}"));
+        let mysql = dialect.name() == "mysql";
+        let excluded = |col: &str| {
+            if mysql {
+                format!("VALUES({col})")
+            } else {
+                format!("EXCLUDED.{col}")
+            }
+        };
+        let (new_value, new_expires) = (excluded("value"), excluded("expires"));
+        let expired = |p: &str| format!("{table}.expires <> 0 AND {table}.expires < {p}");
+        // A strict-mode MySQL CAST of a non-integer is an error, not 0.
+        let (not_int, int) = match dialect.name() {
+            "mysql" => (
+                format!("{table}.value NOT REGEXP '^-?[0-9]{{1,18}}$'"),
+                "SIGNED",
+            ),
+            "postgres" => (format!("{table}.value !~ '^-?[0-9]{{1,18}}$'"), "BIGINT"),
+            _ => (
+                format!("CAST(CAST({table}.value AS INTEGER) AS TEXT) <> {table}.value"),
+                "INTEGER",
+            ),
+        };
+        let text = if mysql { "CHAR" } else { "TEXT" };
+        // MySQL applies the assignments left to right, so `value` goes
+        // first while `expires` still holds the old row's value.
+        let set = format!(
+            "value = CASE WHEN ({}) OR {not_int} THEN {new_value} \
+             ELSE CAST(CAST({table}.value AS {int}) + CAST({new_value} AS {int}) AS {text}) END, \
+             expires = CASE WHEN {} THEN {new_expires} ELSE {table}.expires END",
+            expired(&p4),
+            expired(&p5),
+        );
+        let insert =
+            format!("INSERT INTO {table} (cache_key, value, expires) VALUES ({p1}, {p2}, {p3})");
+        let value: String = if dialect.name() == "mysql" {
+            // No RETURNING: read back in the same transaction, which still
+            // holds the row lock the upsert took.
+            let mut tx = crate::sql::transaction_pool(&self.pool)
+                .await
+                .map_err(err)?;
+            crate::sql::raw_execute_tx(
+                &mut tx,
+                &format!("{insert} ON DUPLICATE KEY UPDATE {set}"),
+                binds,
+            )
+            .await
+            .map_err(err)?;
+            let rows: Vec<(String,)> = crate::sql::raw_query_tx(
+                &mut tx,
+                &format!("SELECT value FROM {table} WHERE cache_key = {p1}"),
+                vec![StoredKey::new(key).into_value()],
+            )
+            .await
+            .map_err(err)?;
+            tx.commit().await.map_err(|e| err(e.into()))?;
+            rows.into_iter().next().map(|(v,)| v).unwrap_or_default()
+        } else {
+            // SQLite turns an overflowing sum into a REAL; skip that update
+            // instead, and report it as PG and MySQL do.
+            let guard = if dialect.name() == "sqlite" {
+                binds.push(SqlValue::I64(now));
+                format!(
+                    " WHERE ({}) OR {not_int} OR typeof(CAST({table}.value AS INTEGER) + \
+                     CAST({new_value} AS INTEGER)) = 'integer'",
+                    expired(&p6)
+                )
+            } else {
+                String::new()
+            };
+            let rows: Vec<(String,)> = raw_query_pool(
+                &format!(
+                    "{insert} ON CONFLICT (cache_key) DO UPDATE SET {set}{guard} RETURNING value"
+                ),
+                binds,
+                &self.pool,
+            )
+            .await
+            .map_err(err)?;
+            let Some((v,)) = rows.into_iter().next() else {
+                return Err(CacheError::Connection(
+                    "incr: integer out of range (i64 overflow)".to_owned(),
+                ));
+            };
+            v
+        };
+        value
+            .parse()
+            .map_err(|_| CacheError::Connection(format!("incr: non-integer result {value:?}")))
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);

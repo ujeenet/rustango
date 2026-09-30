@@ -2125,6 +2125,9 @@ use {crate_root}::ViewSet;
     filter_fields = "",
     search_fields = "",
     page_size    = 20,
+    // Writes need a guard: add `permissions(create = "...", ...)` behind
+    // an auth layer, then drop `read_only`.
+    read_only,
 )]
 pub struct {name};
 
@@ -2171,7 +2174,7 @@ pub fn router() -> Router<()> {{
         // .ordering(&[("created_at", true)])         // default ORDER BY
         // .ordering_fields(&["name", "created_at"])  // ?ordering=-name allowlist
         // .page_size(20)
-        // .permissions_for_model::<{model}>()        // CRUD codenames
+        .permissions_for_model::<{model}>()          // CRUD codenames
         // .read_only()                               // GET only
         .tenant_router("/api/{snake}")
 }}
@@ -5721,6 +5724,20 @@ mod gen_tests {
             body.contains("use rustango::ViewSet;"),
             "default crate root must emit `use rustango::ViewSet;`, got: {body}"
         );
+    }
+
+    /// A scaffolded ViewSet is not an anonymous CRUD API (#1857).
+    #[test]
+    fn viewset_templates_guard_writes() {
+        let live =
+            |body: &str, needle: &str| body.lines().any(|l| l.trim_start().starts_with(needle));
+        let tenant = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(
+            live(&tenant, ".permissions_for_model::<Post>()"),
+            "{tenant}"
+        );
+        let pool = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(live(&pool, "read_only,"), "{pool}");
     }
 
     #[test]

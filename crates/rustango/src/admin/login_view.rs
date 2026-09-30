@@ -391,6 +391,7 @@ struct ChangePasswordInput {
 
 async fn change_password_submit(
     State(state): State<AppState>,
+    ip: crate::login_throttle::ClientIp,
     Form(form): Form<ChangePasswordInput>,
 ) -> Response {
     // The middleware guarantees a session here. Reaching this handler
@@ -431,12 +432,30 @@ async fn change_password_submit(
         .get("password_hash")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let ok = match crate::passwords::verify_async(&form.current_password, stored_hash).await {
-        Ok(ok) => ok,
-        Err(crate::passwords::PasswordError::Busy) => {
-            return crate::login_throttle::LoginRefused::Busy.into_response()
+    let username = row
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let verify = async {
+        match crate::passwords::verify_async(&form.current_password, stored_hash).await {
+            Ok(ok) => Ok(ok),
+            Err(crate::passwords::PasswordError::Busy) => {
+                Err(crate::login_throttle::LoginRefused::Busy)
+            }
+            Err(_) => Ok(false),
         }
-        Err(_) => false,
+    };
+    let ok = match crate::login_throttle::shared()
+        .verify_current_password(
+            &crate::login_throttle::LoginScope::Admin,
+            &ip,
+            username,
+            verify,
+        )
+        .await
+    {
+        Ok(ok) => ok,
+        Err(refused) => return refused.into_response(),
     };
     if !ok {
         return Html(render_change_password_form(

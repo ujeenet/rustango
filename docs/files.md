@@ -224,7 +224,7 @@ For files on local disk rather than a bucket, the static handler already does
 this and needs no media row at all:
 
 ```rust
-Cli::new(pool).with_static("/uploads", "./var/uploads")
+Cli::new(pool).with_uploads("/uploads", "./var/uploads")
 ```
 
 **If you were about to write an `AllowAll` authorizer to make a public page
@@ -322,7 +322,7 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 **`Storage` trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`.
 
-**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.allowed_extensions(&[..])`
+**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (case-insensitive) · `.randomize_filename(bool)`. Used by
 `save_uploads(multipart, &cfg, &storage)`.
 
