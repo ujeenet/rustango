@@ -125,6 +125,9 @@ pub struct WebhookConfig {
     pub timestamp_tolerance: Duration,
     pub storage_mode: StorageMode,
     pub backend: BackendKind,
+    /// A `running` run with no event for this long is taken as dead, so
+    /// a retry of its event starts over (#1883).
+    pub stale_run_after: Duration,
 }
 
 impl WebhookConfig {
@@ -140,6 +143,7 @@ impl WebhookConfig {
             timestamp_tolerance: Duration::from_secs(300),
             storage_mode: StorageMode::Database,
             backend: BackendKind::default(),
+            stale_run_after: store::STALE_RUN_AFTER,
         }
     }
 }
@@ -276,12 +280,18 @@ async fn handle(
         .await
         .map_err(|e| Refusal::Internal(e.to_string()))?
     {
-        return Ok(Accepted {
-            run_id: existing.id.get().copied().unwrap_or_default(),
-            slug: existing.slug,
-            state: existing.state,
-            duplicate: true,
-        });
+        // A failed or interrupted run starts over under the same key (#1883).
+        let retry = store::release_for_retry(&registry, &existing, state.config.stale_run_after)
+            .await
+            .map_err(|e| Refusal::Internal(e.to_string()))?;
+        if !retry {
+            return Ok(Accepted {
+                run_id: existing.id.get().copied().unwrap_or_default(),
+                slug: existing.slug,
+                state: existing.state,
+                duplicate: true,
+            });
+        }
     }
 
     // ---- 5. Build the request under the URL policy ----

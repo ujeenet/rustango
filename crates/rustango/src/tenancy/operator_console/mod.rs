@@ -1879,7 +1879,10 @@ async fn org_edit_submit(
     emit_op_audit(&state.registry, &slug, operator_id, "edit", detail).await;
 
     let notice = if database_url_changed {
-        format!("updated `{slug}` (pool evicted — next request rebuilds with new URL)")
+        format!(
+            "updated `{slug}` (this server switched now; others within {} s)",
+            crate::tenancy::resolver::CACHE_TTL.as_secs()
+        )
     } else {
         format!("updated `{slug}`")
     };

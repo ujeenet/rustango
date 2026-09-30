@@ -902,6 +902,8 @@ jobs:
       # #1344 — the hostname verbs, and that they write the table the
       # operator console writes rather than a parallel one.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_hosts_sqlite_live
+      # #1909 / #1910 — tenancy verbs refuse flags they would have dropped.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_tenancy_cli_sqlite_live
       # #1344 — and that the CLI enforces the same operator lockout rules the
       # console does, now that both call one engine.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_operators_sqlite_live
@@ -1007,6 +1009,7 @@ jobs:
             --test atomic_savepoints_tri \
             --test orm_bounded_dml_tri \
             --test orm_core_counts_tri \
+            --test manage_data_verbs_tri \
             --test bulk_update_api_sqlite_live \
             --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
@@ -1289,6 +1292,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
+      - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
@@ -1299,6 +1303,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test m2m_non_int_pk_tri
       - run: cargo test -p rustango --features mysql,forms,testkit --test update_validation_tri
       - run: cargo test -p rustango --features mysql,testkit --test uuid_v7_pk_writes_tri
+      # #1911 / #1912 — flush / dumpdata / loaddata; MySQL rejected `"t"`.
+      - run: cargo test -p rustango --features mysql,testkit --test manage_data_verbs_tri
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.

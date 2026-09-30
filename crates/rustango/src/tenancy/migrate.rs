@@ -991,7 +991,10 @@ async fn build_schema_scoped_pool(
 /// [`ScopedDir::Original`] (no copy). Otherwise materializes a
 /// temp dir containing only the matching files and returns
 /// [`ScopedDir::Owned`].
-async fn scoped_subset(dir: &Path, scope: MigrationScope) -> Result<ScopedDir, TenancyError> {
+pub(crate) async fn scoped_subset(
+    dir: &Path,
+    scope: MigrationScope,
+) -> Result<ScopedDir, TenancyError> {
     let all = rustango::migrate::file::list_dir(dir)?;
     if all.iter().all(|m| m.scope == scope) {
         return Ok(ScopedDir::Original);
@@ -1007,7 +1010,7 @@ async fn scoped_subset(dir: &Path, scope: MigrationScope) -> Result<ScopedDir, T
     Ok(ScopedDir::Owned(temp))
 }
 
-enum ScopedDir {
+pub(crate) enum ScopedDir {
     /// All migrations in `dir` already match the requested scope —
     /// run directly against the original directory.
     Original,
@@ -1019,11 +1022,21 @@ enum ScopedDir {
 /// Minimal temp-dir RAII handle. We don't pull `tempfile` into the
 /// dep tree just for this — `std::env::temp_dir()` + a unique
 /// suffix is enough.
-struct TempDir(std::path::PathBuf);
+pub(crate) struct TempDir(std::path::PathBuf);
 
 impl TempDir {
     fn path(&self) -> &Path {
         &self.0
+    }
+}
+
+impl ScopedDir {
+    /// The directory to run: the filtered copy, or `original` itself.
+    pub(crate) fn path<'a>(&'a self, original: &'a Path) -> &'a Path {
+        match self {
+            Self::Owned(temp) => temp.path(),
+            Self::Original => original,
+        }
     }
 }
 

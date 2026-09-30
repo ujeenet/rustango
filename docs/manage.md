@@ -92,8 +92,8 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | Verb | What it does |
 |---|---|
 | `dumpdata` | Export rows as JSON fixtures |
-| `loaddata <fixture.json> [--fail-fast]` | Load JSON fixtures back in |
-| `flush [--yes] [--app <label>] [--model <name>]` | Wipe every model table; the flags limit the set |
+| `loaddata <fixture.json> [--fail-fast]` | Load JSON fixtures back in. A failed or partial load is not rolled back |
+| `flush [--yes] [--app <label>] [--model <name>]` | Wipe every model table; the flags limit the set. Postgres uses `TRUNCATE … RESTART IDENTITY CASCADE`, which also clears referencing tables outside the filter; MySQL / SQLite delete rows and keep id counters |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Streaming bulk delete; `--pretend` reports without deleting |
 | `db:dump` / `db:restore` / `db:info` | Native dump / restore / inspect |
 | `dbshell` | Exec the native client (`psql` / `mysql` / `sqlite3`). Needs only `DATABASE_URL`, not a working pool — it is handled before the pool is built, so it works when sqlx cannot connect |
@@ -724,7 +724,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.59.9
+rustango 0.59.10
 ```
 
 ### `about`
@@ -736,7 +736,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.59.9
+  version:        0.59.10
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -903,6 +903,12 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+On SIGTERM it stops accepting and gives open connections
+`[server] shutdown_timeout_secs` (default 20) to finish, then closes the rest.
+SSE and long-poll never finish by themselves. Provisioning and migration runs
+left `running` by a stopped process for over an hour are marked failed at the
+next boot, and a webhook retry with the same `event_id` runs again.
+
 ### `create-tenant <slug> [options]`
 
 Sets up a new tenant (customer/org) and applies the tenant migrations to
@@ -956,9 +962,11 @@ Values are validated the way `create-tenant` validates them, so a host
 pattern carrying a port, or a path prefix the resolver could never
 produce, is refused rather than stored to silently never match.
 
-Rotating `--database-url` evicts the tenant's cached pool, so the next
-request reconnects with the new credential; other edits leave warm
-connections alone.
+Rotating `--database-url` changes the stored URL. Every server switches
+within 30 s, when its tenant cache refreshes; other edits leave warm
+connections alone. A secret rotated behind the **same** reference (vault,
+env var) changes nothing stored: restart the servers, or invalidate the
+tenant's pool on each one.
 
 ### `test-tenant-connection <url> [flags]`
 
@@ -998,6 +1006,11 @@ remove the `Org` row and leave the database behind, it does nothing at all
 cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
+
+With several servers, deactivate first (`drop-tenant`) and wait 30 s. A
+server whose tenant cache still holds a schema-mode tenant keeps
+`search_path = <schema>, public`; once the schema is dropped, its queries
+fall through to `public` until the cache refreshes.
 
 ### `list-tenants`
 

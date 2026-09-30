@@ -89,15 +89,9 @@ async fn server_builder_applies_the_config() {
 fn no_path_builds_tenant_pools_while_ignoring_the_override() {
     let src = include_str!("../src/manage.rs");
 
-    // The management-verb dispatch path.
-    let dispatch = src
-        .find("let pools = match self.tenant_pools.clone()")
-        .is_some();
-    assert!(
-        dispatch,
-        "the management-verb dispatch path builds TenantPools without consulting \
-         `self.tenant_pools`, so `Cli::with_tenant_pools` is a no-op there (#1456)"
-    );
+    // The verb dispatch path is one method for every backend now; its
+    // behaviour is `manage::tests::sqlite_tenancy_verbs_honour_with_tenant_pools`.
+    // This text check passed while the SQLite/MySQL arms ignored it (#1914).
 
     // Both tenancy serve arms, which go through `Builder::from_pool`.
     let applied = src.matches("builder.tenant_pools(cfg)").count();

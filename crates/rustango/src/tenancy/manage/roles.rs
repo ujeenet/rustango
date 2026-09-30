@@ -15,7 +15,7 @@ use crate::tenancy::{auth_backends, permissions, Org, User};
 
 use super::super::error::TenancyError;
 use super::super::pools::TenantPools;
-use super::args::{next_value, reject_leading_flag};
+use super::args::{next_value, parse, reject_leading_flag, Spec};
 
 // ------------------------------------------------------------------ create-role
 
@@ -164,6 +164,29 @@ where
 
 // ------------------------------------------------------------------ grant-perm / revoke-perm
 
+/// `<slug> <target> <codename> [--role]`. A typo'd `--rol` used to be
+/// ignored and grant to a *user* of that name (#1910).
+fn perm_args(args: &[String], verb: &str) -> Result<(String, String, String, bool), TenancyError> {
+    let usage = format!("{verb} <slug> <role-name|username> <codename> [--role]");
+    let parsed = parse(
+        args,
+        &Spec {
+            verb,
+            usage: &usage,
+            switches: &["--role"],
+            valued: &[],
+            max_positionals: 3,
+        },
+    )?;
+    let at = |i: usize| {
+        parsed
+            .positional(i)
+            .cloned()
+            .ok_or_else(|| TenancyError::Validation(format!("usage: {usage}")))
+    };
+    Ok((at(0)?, at(1)?, at(2)?, parsed.has("--role")))
+}
+
 pub(super) async fn grant_perm_cmd<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     args: &[String],
@@ -172,22 +195,7 @@ pub(super) async fn grant_perm_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
-        args,
-        "grant-perm",
-        "slug",
-        "grant-perm <slug> <role-name|username> <codename> [--role]",
-    )?;
-    let mut iter = args.iter();
-    let slug = next_value(&mut iter, "<tenant-slug>")?;
-    let target = next_value(&mut iter, "<role-name|username>")?;
-    let codename = next_value(&mut iter, "<codename>")?;
-    let mut to_role = false;
-    while let Some(flag) = iter.next() {
-        if flag == "--role" {
-            to_role = true;
-        }
-    }
+    let (slug, target, codename, to_role) = perm_args(args, "grant-perm")?;
 
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     if to_role {
@@ -216,22 +224,7 @@ pub(super) async fn revoke_perm_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
-        args,
-        "revoke-perm",
-        "slug",
-        "revoke-perm <slug> <role-name|username> <codename> [--role]",
-    )?;
-    let mut iter = args.iter();
-    let slug = next_value(&mut iter, "<tenant-slug>")?;
-    let target = next_value(&mut iter, "<role-name|username>")?;
-    let codename = next_value(&mut iter, "<codename>")?;
-    let mut to_role = false;
-    while let Some(flag) = iter.next() {
-        if flag == "--role" {
-            to_role = true;
-        }
-    }
+    let (slug, target, codename, to_role) = perm_args(args, "revoke-perm")?;
 
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     if to_role {

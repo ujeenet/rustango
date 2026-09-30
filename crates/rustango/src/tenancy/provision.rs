@@ -216,6 +216,9 @@ pub struct ProvisionOutcome {
 pub(super) struct Reporter<'a> {
     observer: Option<&'a dyn ProvisionObserver>,
     store: Option<RunStore<'a>>,
+    /// Pick up a tenant a failed run left inactive, instead of refusing
+    /// its slug (#1883).
+    resume: bool,
 }
 
 struct RunStore<'a> {
@@ -232,6 +235,7 @@ impl<'a> Reporter<'a> {
         Self {
             observer,
             store: None,
+            resume: false,
         }
     }
 
@@ -244,6 +248,19 @@ impl<'a> Reporter<'a> {
             buffered: std::sync::Mutex::new(Vec::new()),
         });
         self
+    }
+
+    /// Link the new Org to this run as soon as it exists, so a retry can
+    /// tell which run made it.
+    async fn registered(&self, org_id: i64) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        if let Err(e) =
+            super::provision_store::attach_org(store.registry, store.run_id, org_id).await
+        {
+            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not attach org id to run");
+        }
     }
 
     fn notify(&self, event: ProvisionEvent) {
@@ -481,7 +498,7 @@ where
     .await?;
     let run_id = run.id.get().copied().unwrap_or_default();
 
-    let outcome = provision_tenant_in_run(pools, registry_url, dir, request, observer, run_id)
+    let outcome = in_run(pools, registry_url, dir, request, observer, run_id, false)
         .await
         // A pre-row failure still closed the run inside
         // `provision_tenant_in_run`; propagate the reason unchanged.
@@ -500,6 +517,10 @@ where
 /// hands the slow part to a task. Without this the task would open a
 /// second run for the same tenant.
 ///
+/// A retry resumes: if the slug's Org was made by a provision run that
+/// failed and is still inactive, it is migrated and activated instead of
+/// refused as taken (#1883).
+///
 /// # Errors
 /// As [`provision_tenant`]. The run is closed either way.
 pub async fn provision_tenant_in_run<DB: Database>(
@@ -513,10 +534,26 @@ pub async fn provision_tenant_in_run<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    in_run(pools, registry_url, dir, request, observer, run_id, true).await
+}
+
+async fn in_run<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    observer: Option<&dyn ProvisionObserver>,
+    run_id: i64,
+    resume: bool,
+) -> Result<ProvisionOutcome, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     use super::provision_store::{self as store, RunState};
 
     let registry = pools.registry_pool();
-    let rep = Reporter::new(observer).persisting(&registry, run_id);
+    let mut rep = Reporter::new(observer).persisting(&registry, run_id);
+    rep.resume = resume;
     let result = provision_reported(pools, registry_url, dir, request, &rep).await;
 
     // Close the run whatever happened, error paths included. A run
@@ -564,13 +601,39 @@ where
         Ok(rows) => rows,
         Err(e) => return rep.fail(ProvisionStep::Validate, e.into()).await,
     };
-    if !existing.is_empty() {
-        return rep
-            .fail(
-                ProvisionStep::Validate,
-                TenancyError::Validation(format!("tenant slug `{}` already exists", request.slug)),
+    if let Some(org) = existing.into_iter().next() {
+        let resumable = rep.resume
+            && !org.active
+            && org.storage_mode == request.mode.as_str()
+            && match super::provision_store::org_left_by_failed_run(
+                &registry,
+                org.id.get().copied().unwrap_or_default(),
             )
-            .await;
+            .await
+            {
+                Ok(left) => left,
+                Err(e) => return rep.fail(ProvisionStep::Validate, e).await,
+            };
+        if !resumable {
+            return rep
+                .fail(
+                    ProvisionStep::Validate,
+                    TenancyError::Validation(format!(
+                        "tenant slug `{}` already exists",
+                        request.slug
+                    )),
+                )
+                .await;
+        }
+        rep.step(ProvisionStep::Validate, StepStatus::Ok).await;
+        rep.step(
+            ProvisionStep::RegisterOrg,
+            StepStatus::Skipped("resuming the tenant an earlier run left inactive".into()),
+        )
+        .await;
+        let org_id = org.id.get().copied().unwrap_or_default();
+        rep.registered(org_id).await;
+        return migrate_and_activate(pools, registry_url, dir, request, &org, rep).await;
     }
 
     // Every free-text field, not just the slug. Returns the request
@@ -630,13 +693,32 @@ where
     // registry fingerprint (see `resolver::sync_org_generation`).
     super::invalidate_org_cache();
     let org_id = org.id.get().copied().unwrap_or_default();
+    rep.registered(org_id).await;
     rep.step(ProvisionStep::RegisterOrg, StepStatus::Ok).await;
     rep.notify(ProvisionEvent::Registered { org_id });
+
+    migrate_and_activate(pools, registry_url, dir, request, &org, rep).await
+}
+
+/// Steps 5 and 6, shared by a fresh tenant and a resumed one.
+async fn migrate_and_activate<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    org: &Org,
+    rep: &Reporter<'_>,
+) -> Result<ProvisionOutcome, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let registry = pools.registry_pool();
+    let org_id = org.id.get().copied().unwrap_or_default();
 
     // ---- 5. Migrate ----
     let migrations = if request.run_migrations {
         rep.step(ProvisionStep::Migrate, StepStatus::Started).await;
-        let outcome = migrate_new_tenant(pools, registry_url, dir, &org, rep).await;
+        let outcome = migrate_new_tenant(pools, registry_url, dir, org, rep).await;
         // The migration events arrived synchronously while the migrate
         // lock was held, so they were buffered. The lock is released by
         // now — write them before reporting the step's own outcome, so

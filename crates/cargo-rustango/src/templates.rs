@@ -894,6 +894,7 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # bind                  = "127.0.0.1:8080"
 # request_timeout_secs  = 30
 # max_body_bytes        = 2097152      # 2 MiB
+# shutdown_timeout_secs = 20           # drain after SIGTERM
 
 # [auth]
 # argon2_memory_kib  = 19456    # OWASP 2024 floor
@@ -1040,8 +1041,9 @@ pub fn config_prod_settings_toml(name: &str) -> String {
 # pool_max_size = 50
 
 [server]
-bind                 = "0.0.0.0:8080"
-request_timeout_secs = 30
+bind                  = "0.0.0.0:8080"
+request_timeout_secs  = 30
+shutdown_timeout_secs = 20
 
 [security]
 headers_preset    = "strict"

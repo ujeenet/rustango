@@ -194,20 +194,13 @@ where
     writer.flush()?;
 
     // --- Serve until Ctrl-C ---
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| TenancyError::Validation(format!("server error: {e}")))?;
+    crate::shutdown::serve_until_drained(
+        |stop| axum::serve(listener, app).with_graceful_shutdown(stop),
+        crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+    )
+    .await
+    .map_err(|e| TenancyError::Validation(format!("server error: {e}")))?;
     Ok(())
-}
-
-/// SIGINT **and** SIGTERM (#1409).
-///
-/// This waited on `tokio::signal::ctrl_c()` alone, which is SIGINT-only
-/// on Unix — so the graceful shutdown this path already had never ran
-/// under an orchestrator, which is the only place it mattered.
-async fn shutdown_signal() {
-    crate::shutdown::shutdown_signal().await;
 }
 
 /// Print a loud warning if no operators exist — the operator UI

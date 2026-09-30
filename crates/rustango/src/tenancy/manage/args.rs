@@ -38,6 +38,94 @@ pub(super) fn reject_extra_positionals(
     }
 }
 
+/// What a verb accepts. Declared once so every verb refuses the same way:
+/// an ignored flag runs the bare verb and exits 0 (#1909, #1910).
+pub(super) struct Spec<'a> {
+    pub verb: &'a str,
+    pub usage: &'a str,
+    /// Flags without a value (`--dry-run`).
+    pub switches: &'a [&'a str],
+    /// Flags that consume the next argument (`--password <p>`).
+    pub valued: &'a [&'a str],
+    pub max_positionals: usize,
+}
+
+/// Arguments split by [`parse`]: flag values are never positionals.
+#[derive(Debug)]
+pub(super) struct Parsed {
+    positionals: Vec<String>,
+    switches: Vec<String>,
+    values: Vec<(String, String)>,
+}
+
+impl Parsed {
+    pub(super) fn positional(&self, i: usize) -> Option<&String> {
+        self.positionals.get(i)
+    }
+
+    pub(super) fn has(&self, flag: &str) -> bool {
+        self.switches.iter().any(|s| s == flag)
+    }
+
+    /// Every value given for `flag`, in order.
+    fn values(&self, flag: &str) -> Vec<&str> {
+        self.values
+            .iter()
+            .filter(|(f, _)| f == flag)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    /// The value for `flag`; refuses it given twice rather than guessing.
+    pub(super) fn value(&self, flag: &str) -> Result<Option<&str>, TenancyError> {
+        match self.values(flag).as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(one)),
+            _ => Err(TenancyError::Validation(format!("{flag} given twice"))),
+        }
+    }
+}
+
+/// Split `args` per `spec`, refusing unknown flags and extra positionals.
+/// `--help` / `-h` return the usage as a validation error, never run the verb.
+pub(super) fn parse(args: &[String], spec: &Spec<'_>) -> Result<Parsed, TenancyError> {
+    let mut out = Parsed {
+        positionals: Vec::new(),
+        switches: Vec::new(),
+        values: Vec::new(),
+    };
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let a = arg.as_str();
+        if a == "--help" || a == "-h" {
+            return Err(TenancyError::Validation(spec.usage.to_owned()));
+        }
+        if spec.switches.contains(&a) {
+            out.switches.push(a.to_owned());
+        } else if spec.valued.contains(&a) {
+            // `--password --superuser` is a missing value, not a password.
+            let v = next_value(&mut iter, a)?;
+            if v.starts_with("--") {
+                return Err(TenancyError::Validation(format!("`{a}` needs a value")));
+            }
+            out.values.push((a.to_owned(), v));
+        } else if a.starts_with('-') {
+            return Err(TenancyError::Validation(format!(
+                "{}: unknown flag `{a}` — usage: {}",
+                spec.verb, spec.usage
+            )));
+        } else if out.positionals.len() == spec.max_positionals {
+            return Err(TenancyError::Validation(format!(
+                "{} does not take `{a}` — usage: {}",
+                spec.verb, spec.usage
+            )));
+        } else {
+            out.positionals.push(a.to_owned());
+        }
+    }
+    Ok(out)
+}
+
 /// Quote a SQL identifier (table / schema / database name). Doubles
 /// any embedded `"` so the quoted form survives unmodified.
 #[cfg(feature = "postgres")]
@@ -81,6 +169,37 @@ pub(super) fn reject_leading_flag(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SPEC: Spec<'static> = Spec {
+        verb: "v",
+        usage: "v <a> [--on] [--k <x>]",
+        switches: &["--on"],
+        valued: &["--k"],
+        max_positionals: 1,
+    };
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn parse_takes_flag_values_out_of_the_positionals() {
+        let p = parse(&argv(&["--k", "false", "acme", "--on"]), &SPEC).expect("ok");
+        assert_eq!(p.positional(0).map(String::as_str), Some("acme"));
+        assert!(p.has("--on"));
+        assert_eq!(p.value("--k").unwrap(), Some("false"));
+    }
+
+    #[test]
+    fn parse_refuses_unknown_flags_extra_positionals_and_help() {
+        for bad in [&["--rol"][..], &["a", "b"], &["--help"], &["-x"]] {
+            assert!(parse(&argv(bad), &SPEC).is_err(), "{bad:?}");
+        }
+        assert!(parse(&argv(&["--k", "1", "--k", "2"]), &SPEC)
+            .unwrap()
+            .value("--k")
+            .is_err());
+    }
 
     #[test]
     fn reject_leading_flag_passes_normal_positional() {

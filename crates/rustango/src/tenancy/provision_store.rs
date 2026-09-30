@@ -304,7 +304,8 @@ pub async fn attach_org(registry: &Pool, run_id: i64, org_id: i64) -> Result<(),
     Ok(())
 }
 
-/// Close a run.
+/// Close a run. Only a `running` run changes, so one already closed as
+/// interrupted keeps that result (#1883).
 ///
 /// # Errors
 /// A registry write failure.
@@ -316,6 +317,7 @@ pub async fn finish_run(
 ) -> Result<(), TenancyError> {
     ProvisioningRun::objects()
         .where_(ProvisioningRun::id.eq(run_id))
+        .where_(ProvisioningRun::state.eq(RunState::Running.as_str().to_owned()))
         .update()
         .set("state", state.as_str())
         .set("error", error)
@@ -465,6 +467,130 @@ pub async fn recent_runs_filtered(
         .offset(offset)
         .fetch(registry)
         .await?)
+}
+
+/// A `running` run with no event for this long is taken to be dead:
+/// runs are detached tasks, so a deploy kills them mid-way (#1883).
+pub const STALE_RUN_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// The run is `running` and nothing has happened to it for `after`.
+async fn is_stale(
+    registry: &Pool,
+    run: &ProvisioningRun,
+    after: std::time::Duration,
+) -> Result<bool, TenancyError> {
+    if RunState::parse(&run.state) != RunState::Running {
+        return Ok(false);
+    }
+    let Some(id) = run.id.get().copied() else {
+        return Ok(false);
+    };
+    let last_event = ProvisioningEvent::objects()
+        .where_(ProvisioningEvent::run_id.eq(id))
+        .order_by(&[("seq", true)])
+        .limit(1)
+        .fetch(registry)
+        .await?
+        .into_iter()
+        .next()
+        .and_then(|e| e.at.get().copied());
+    let Some(last) = last_event.or_else(|| run.started_at.get().copied()) else {
+        return Ok(false);
+    };
+    let after = chrono::Duration::from_std(after).unwrap_or(chrono::Duration::MAX);
+    Ok(chrono::Utc::now() - last > after)
+}
+
+/// Close `run` as failed if it is still `running`, and free its
+/// idempotency key so a retry can open a new run. Guarded on the state,
+/// so a run that finished meanwhile keeps its result.
+async fn close_interrupted(registry: &Pool, id: i64) -> Result<bool, TenancyError> {
+    let n = ProvisioningRun::objects()
+        .where_(ProvisioningRun::id.eq(id))
+        .where_(ProvisioningRun::state.eq(RunState::Running.as_str().to_owned()))
+        .update()
+        .set("state", RunState::Failed.as_str())
+        .set(
+            "error",
+            Some("interrupted: the process running it stopped before it finished"),
+        )
+        .set("finished_at", chrono::Utc::now())
+        .set("idempotency_key", None::<String>)
+        .execute_pool(registry)
+        .await?;
+    Ok(n > 0)
+}
+
+/// Close every `running` run with no progress for `after` (see
+/// [`STALE_RUN_AFTER`]). Called at boot. Returns how many were closed.
+///
+/// # Errors
+/// A registry read or write failure.
+pub async fn reap_stale_runs(
+    registry: &Pool,
+    after: std::time::Duration,
+) -> Result<usize, TenancyError> {
+    let running: Vec<ProvisioningRun> = ProvisioningRun::objects()
+        .where_(ProvisioningRun::state.eq(RunState::Running.as_str().to_owned()))
+        .fetch(registry)
+        .await?;
+    let mut closed = 0;
+    for run in running {
+        if is_stale(registry, &run, after).await?
+            && close_interrupted(registry, run.id.get().copied().unwrap_or_default()).await?
+        {
+            closed += 1;
+        }
+    }
+    Ok(closed)
+}
+
+/// Whether a delivery carrying `run`'s idempotency key may start over:
+/// the run failed, or has been `running` with no event for `stale_after`
+/// (closed here). Frees the key.
+///
+/// # Errors
+/// A registry read or write failure.
+pub async fn release_for_retry(
+    registry: &Pool,
+    run: &ProvisioningRun,
+    stale_after: std::time::Duration,
+) -> Result<bool, TenancyError> {
+    let Some(id) = run.id.get().copied() else {
+        return Ok(false);
+    };
+    if is_stale(registry, run, stale_after).await? {
+        return close_interrupted(registry, id).await;
+    }
+    if RunState::parse(&run.state) != RunState::Failed {
+        return Ok(false);
+    }
+    let n = ProvisioningRun::objects()
+        .where_(ProvisioningRun::id.eq(id))
+        .where_(ProvisioningRun::state.eq(RunState::Failed.as_str().to_owned()))
+        .update()
+        .set("idempotency_key", None::<String>)
+        .execute_pool(registry)
+        .await?;
+    Ok(n > 0)
+}
+
+/// The provision run that created `org_id` did not finish, so a retry
+/// may pick the tenant up where it stopped.
+///
+/// # Errors
+/// A registry read failure.
+pub async fn org_left_by_failed_run(registry: &Pool, org_id: i64) -> Result<bool, TenancyError> {
+    let creator = ProvisioningRun::objects()
+        .where_(ProvisioningRun::org_id.eq(Some(org_id)))
+        .where_(ProvisioningRun::kind.eq(RunKind::Provision.as_str().to_owned()))
+        .order_by(&[("id", false)])
+        .limit(1)
+        .fetch(registry)
+        .await?
+        .into_iter()
+        .next();
+    Ok(creator.is_some_and(|r| RunState::parse(&r.state) == RunState::Failed))
 }
 
 /// Delete finished runs older than `cutoff`, and their events.

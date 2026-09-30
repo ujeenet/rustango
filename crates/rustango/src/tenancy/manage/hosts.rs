@@ -20,7 +20,7 @@ use crate::tenancy::error::TenancyError;
 use crate::tenancy::org_host::{self, HostError};
 use crate::tenancy::pools::TenantPools;
 
-use super::args::next_value;
+use super::args::{parse, Parsed, Spec};
 
 /// Host errors carry the operator-facing wording already; keep it.
 fn explain(e: HostError) -> TenancyError {
@@ -82,16 +82,27 @@ fn parse_bool(raw: &str) -> Result<bool, TenancyError> {
     }
 }
 
-/// The slug and hostname every host verb needs. Flags may sit anywhere.
-fn slug_and_host(args: &[String], verb: &str) -> Result<(String, String), TenancyError> {
-    let mut positional = args.iter().filter(|a| !a.starts_with("--"));
+/// `<slug> <hostname>` plus no flags — the shape of add- and remove-host.
+fn slug_host_spec(verb: &str) -> Spec<'_> {
+    Spec {
+        verb,
+        usage: "<verb> <slug> <hostname>",
+        switches: &[],
+        valued: &[],
+        max_positionals: 2,
+    }
+}
+
+/// The slug and hostname every host verb needs. Flags may sit anywhere,
+/// and a flag's value is never one of them (#1910).
+fn slug_and_host(parsed: &Parsed, verb: &str) -> Result<(String, String), TenancyError> {
     let slug = positional_or_ask(
-        positional.next(),
+        parsed.positional(0),
         "Tenant slug: ",
         &format!("{verb} requires a tenant slug"),
     )?;
     let host = positional_or_ask(
-        positional.next(),
+        parsed.positional(1),
         "Hostname: ",
         &format!("{verb} requires a hostname"),
     )?;
@@ -106,8 +117,18 @@ pub(super) async fn list_hosts<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    let parsed = parse(
+        args,
+        &Spec {
+            verb: "list-hosts",
+            usage: "list-hosts <slug>",
+            switches: &[],
+            valued: &[],
+            max_positionals: 1,
+        },
+    )?;
     let slug = positional_or_ask(
-        args.iter().find(|a| !a.starts_with("--")),
+        parsed.positional(0),
         "Tenant slug: ",
         "list-hosts requires a tenant slug",
     )?;
@@ -144,7 +165,8 @@ pub(super) async fn add_host<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let (slug, host) = slug_and_host(args, "add-host")?;
+    let parsed = parse(args, &slug_host_spec("add-host"))?;
+    let (slug, host) = slug_and_host(&parsed, "add-host")?;
     let row = org_host::add_host(&pools.registry_pool(), &slug, &host)
         .await
         .map_err(explain)?;
@@ -164,13 +186,22 @@ pub(super) async fn remove_host<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let (slug, host) = slug_and_host(args, "remove-host")?;
+    let parsed = parse(args, &slug_host_spec("remove-host"))?;
+    let (slug, host) = slug_and_host(&parsed, "remove-host")?;
     org_host::remove_host(&pools.registry_pool(), &slug, &host)
         .await
         .map_err(explain)?;
     writeln!(w, "unbound {host} from {slug}")?;
     Ok(())
 }
+
+const SET_HOST_ENABLED: Spec<'static> = Spec {
+    verb: "set-host-enabled",
+    usage: "set-host-enabled <slug> <hostname> --on|--off",
+    switches: &["--on", "--off"],
+    valued: &["--enabled"],
+    max_positionals: 2,
+};
 
 pub(super) async fn set_host_enabled<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
@@ -180,25 +211,19 @@ pub(super) async fn set_host_enabled<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let (slug, host) = slug_and_host(args, "set-host-enabled")?;
+    let parsed = parse(args, &SET_HOST_ENABLED)?;
+    let (slug, host) = slug_and_host(&parsed, "set-host-enabled")?;
 
     let mut enabled: Option<bool> = None;
-    let mut iter = args.iter();
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--on" => set_direction(&mut enabled, true, ("--on", "--off"))?,
-            "--off" => set_direction(&mut enabled, false, ("--on", "--off"))?,
-            "--enabled" => {
-                let raw = next_value(&mut iter, "--enabled")?;
-                set_direction(&mut enabled, parse_bool(&raw)?, ("--on", "--off"))?;
-            }
-            other if other.starts_with("--") => {
-                return Err(TenancyError::Validation(format!(
-                    "unknown flag `{other}` — set-host-enabled takes --on or --off"
-                )))
-            }
-            _ => {}
-        }
+    let pair = ("--on", "--off");
+    if parsed.has("--on") {
+        set_direction(&mut enabled, true, pair)?;
+    }
+    if parsed.has("--off") {
+        set_direction(&mut enabled, false, pair)?;
+    }
+    if let Some(raw) = parsed.value("--enabled")? {
+        set_direction(&mut enabled, parse_bool(raw)?, pair)?;
     }
     // No default: "which way?" has no safe guess, and silently picking one
     // would park a live host or serve a parked one.
@@ -221,19 +246,21 @@ where
 mod tests {
     use super::*;
 
+    fn add(args: &[&str]) -> Result<(String, String), TenancyError> {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        slug_and_host(&parse(&argv, &slug_host_spec("add-host"))?, "add-host")
+    }
+
     #[test]
     fn a_missing_slug_or_host_is_named_in_the_error() {
-        let none: Vec<String> = Vec::new();
-        let err = slug_and_host(&none, "add-host").expect_err("no slug");
+        let err = add(&[]).expect_err("no slug");
         assert!(err.to_string().contains("slug"), "{err}");
 
-        let only_slug = vec!["acme".to_owned()];
-        let err = slug_and_host(&only_slug, "add-host").expect_err("no host");
+        let err = add(&["acme"]).expect_err("no host");
         assert!(err.to_string().contains("hostname"), "{err}");
 
-        let both = vec!["acme".to_owned(), "shop.test".to_owned()];
         assert_eq!(
-            slug_and_host(&both, "add-host").expect("ok"),
+            add(&["acme", "shop.test"]).expect("ok"),
             ("acme".to_owned(), "shop.test".to_owned())
         );
     }
@@ -243,14 +270,17 @@ mod tests {
     /// `set-host-enabled --off acme x.test` mean the same thing.
     #[test]
     fn flags_are_not_mistaken_for_positionals() {
-        let args = vec![
-            "--off".to_owned(),
-            "acme".to_owned(),
-            "shop.test".to_owned(),
-        ];
-        assert_eq!(
-            slug_and_host(&args, "set-host-enabled").expect("ok"),
-            ("acme".to_owned(), "shop.test".to_owned())
-        );
+        for args in [
+            &["--off", "acme", "shop.test"][..],
+            &["--enabled", "false", "acme", "shop.test"],
+        ] {
+            let argv: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+            let parsed = parse(&argv, &SET_HOST_ENABLED).expect("parse");
+            assert_eq!(
+                slug_and_host(&parsed, "set-host-enabled").expect("ok"),
+                ("acme".to_owned(), "shop.test".to_owned()),
+                "{args:?}"
+            );
+        }
     }
 }

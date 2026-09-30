@@ -150,6 +150,60 @@ untouched.
 
 ## Unreleased
 
+## 0.59.10
+
+### Tenancy `migrate` verbs refuse unknown flags (breaking)
+
+`migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;
+now an unknown flag is an error. Use `migrate-tenants` for a tenant-scoped target.
+
+### Scaffolder refuses keyword names
+
+`make:*` and `cargo rustango new` now refuse names like `Type`, `std` or `crate`; the
+code they generated for them did not compile.
+
+### `dumpdata` / `loaddata` fail instead of losing rows (breaking)
+
+`dumpdata` now errors on a model with an Array, Range, HStore, Vector or Geometry column;
+leave it out with the new `--exclude app.Model`. `loaddata` exits non-zero if any row was skipped.
+
+### Tenancy user and permission verbs refuse unknown flags (breaking)
+
+`grant-perm`, `revoke-perm`, `create-user` and the host verbs now fail on a flag they don't
+take. A password typed at the prompt is no longer trimmed: one set with a leading or
+trailing space before now logs in without it.
+
+### Shutdown drains for 20 s, then closes
+
+`runserver` no longer waits forever for open connections after SIGTERM. Set
+`[server] shutdown_timeout_secs` to change it, under your orchestrator's grace period.
+`ServerSettings` gained that field, so a struct literal needs `..Default::default()`.
+A webhook delivery whose earlier run failed now provisions again instead of returning
+`duplicate: true`. `WebhookConfig` gained `stale_run_after`; build it with `WebhookConfig::new`.
+
+### `email::from_settings` returns `Result` (breaking)
+
+Add `?`. A `backend = "smtp"` that cannot be built used to fall back to `ConsoleMailer`;
+it is now an error. Replace `smtp_tls = "tls"` with `"implicit"` (what it meant) or
+`"starttls"`. Match `MailError` with a `_` arm. `SmtpMailer` refuses custom envelope headers
+such as `Bcc` or `Subject`; set them on the `Email` fields.
+
+### A broken config fails boot (breaking)
+
+`Cli::run` now returns an error when `config/` exists but does not load, for example
+`RUSTANGO__SECURITY__SECURE_SSL_REDIRECT=1` (use `true`). It used to warn and run without
+allowed hosts, security headers or login limits. Fix the value the error names.
+
+### Tenant moves reach every server
+
+After `edit-tenant --database-url` or `migrate-tenant-storage`, running servers switch within
+30 s without a restart. The CLI no longer claims it evicted their pools.
+
+### Tenant purge deletes extra hosts
+
+`purge-tenant` now deletes the tenant's `rustango_org_hosts` rows and sets `active = false`
+before it drops anything, so a failed purge leaves an inactive tenant you can purge again.
+
 ## 0.59.9
 
 ### `DatabaseCache::incr` keeps the first TTL

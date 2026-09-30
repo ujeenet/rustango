@@ -29,8 +29,9 @@
 //!
 //! - The whole [`Email`] goes into the job payload, so the worker
 //!   rebuilds it before sending.
-//! - A send failure becomes [`crate::jobs::JobError::Retryable`], so
-//!   the queue backs off and retries. A job that runs out of attempts
+//! - A transport failure becomes [`crate::jobs::JobError::Retryable`], so
+//!   the queue backs off and retries; a rejected message is
+//!   [`crate::jobs::JobError::Fatal`]. A job that runs out of attempts
 //!   goes to the dead-letter callback.
 //! - The worker reads the [`crate::email::Mailer`] from a static
 //!   registry keyed by job name. Registering again replaces it, which
@@ -92,10 +93,13 @@ impl Job for EmailJob {
                     "EmailJob: no mailer registered (call register_email_job at startup)".into(),
                 )
             })?;
-        mailer
-            .send(&self.email)
-            .await
-            .map_err(|e| JobError::Retryable(format!("mailer: {e}")))
+        mailer.send(&self.email).await.map_err(|e| {
+            if e.is_retryable() {
+                JobError::Retryable(format!("mailer: {e}"))
+            } else {
+                JobError::Fatal(format!("mailer: {e}"))
+            }
+        })
     }
 }
 
@@ -112,9 +116,13 @@ pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
 /// Queue an email and return at once; a worker delivers it.
 ///
 /// # Errors
+/// [`JobError::Fatal`] when [`Email::validate`] rejects the message;
 /// [`JobError::Queue`] when the enqueue fails, for example the
 /// database is down or the payload will not serialize.
 pub async fn dispatch_email<Q: JobQueue>(queue: &Q, email: &Email) -> Result<(), JobError> {
+    email
+        .validate()
+        .map_err(|e| JobError::Fatal(format!("email: {e}")))?;
     queue
         .dispatch(&EmailJob {
             email: email.clone(),
@@ -235,6 +243,72 @@ mod tests {
         assert_eq!(m2.count(), 1, "new mailer should receive");
 
         q.shutdown().await;
+    }
+
+    /// Rejects every message and counts the calls.
+    struct Rejecting(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl crate::email::Mailer for Rejecting {
+        async fn send(&self, _: &Email) -> Result<(), crate::email::MailError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::email::MailError::BadHeader("x".into()))
+        }
+    }
+
+    /// A message the mailer rejects will never send; retrying it only
+    /// delays the dead letter (#1923).
+    #[tokio::test]
+    async fn a_rejected_message_dead_letters_without_retry() {
+        let _g = lock().lock().await;
+        reset_mailer_registry();
+        let mailer = StdArc::new(Rejecting(std::sync::atomic::AtomicUsize::new(0)));
+        let q = InMemoryJobQueue::with_workers(1);
+        register_email_job(&q, EmailJobConfig::new(mailer.clone())).await;
+        let dead = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let d = dead.clone();
+        q.on_dead_letter(move |_| {
+            let d = d.clone();
+            async move {
+                d.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        })
+        .await;
+        q.start().await;
+
+        dispatch_email(&q, &email()).await.unwrap();
+        for _ in 0..40 {
+            if dead.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            dead.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "not dead-lettered"
+        );
+        assert_eq!(
+            mailer.0.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "retried"
+        );
+        q.shutdown().await;
+    }
+
+    /// An invalid message is refused at dispatch, not queued (#1923).
+    #[tokio::test]
+    async fn dispatch_refuses_an_invalid_message() {
+        let _g = lock().lock().await;
+        reset_mailer_registry();
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<EmailJob>().await;
+        let bad = email().subject("");
+        assert!(matches!(
+            dispatch_email(&q, &bad).await,
+            Err(JobError::Fatal(_))
+        ));
+        assert_eq!(q.pending_count().await, 0);
     }
 
     #[tokio::test]

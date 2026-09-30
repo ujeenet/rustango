@@ -324,6 +324,15 @@ pub trait Dialect: Send + Sync {
         )
     }
 
+    /// Statement that moves `table.column`'s serial counter past the rows
+    /// already there, binding `(quoted table, column)` in that order.
+    /// `None` where the counter follows explicit ids by itself (MySQL,
+    /// SQLite); Postgres' sequence does not, so `loaddata` needs it (#1911).
+    fn reset_sequence_sql(&self, table: &str, column: &str) -> Option<String> {
+        let _ = (table, column);
+        None
+    }
+
     /// `true` if partial indexes, `CREATE INDEX … WHERE <expr>`, are
     /// supported. MySQL has no equivalent, so the migration writer
     /// drops the WHERE clause there and warns.

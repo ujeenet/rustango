@@ -5,7 +5,7 @@
 //!
 //! The work is in [`crate::tenancy::org_edit`], which both surfaces call:
 //! the write has to be followed by dropping the cached `Org` and, only on
-//! a real URL change, evicting the pool. Leaving out the cache drop is
+//! a real URL change, evicting this process's pool. Leaving out the cache drop is
 //! invisible in testing and reports success while the next request still
 //! uses the old row.
 
@@ -113,9 +113,12 @@ where
 
     writeln!(w, "updated `{slug}`: {}", applied.touched.join(", "))?;
     if applied.database_url_rotated {
+        // This process holds no server's pools (#1882).
         writeln!(
             w,
-            "  pool evicted — the next request rebuilds with the new URL"
+            "  running servers switch to the new URL within {} s (their tenant cache TTL); \
+             a secret rotated behind the same reference needs a restart",
+            crate::tenancy::resolver::CACHE_TTL.as_secs()
         )?;
     }
     Ok(())
