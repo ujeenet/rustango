@@ -27,6 +27,11 @@ and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900
 One upsert per dialect, so parallel failed logins all count toward the lockout.
 The TTL is set when the counter is created, not on every call.
 
+### Fixed — change-password checks go through the login gate (#1873)
+
+A wrong current password on the admin, tenant admin and operator console forms now
+counts toward the account lock, so a stolen session cannot guess it at hash speed.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

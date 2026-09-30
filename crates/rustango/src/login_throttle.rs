@@ -261,6 +261,29 @@ impl LoginThrottle {
             keys,
         })
     }
+
+    /// Run a signed-in user's current-password check through the gate, so a
+    /// stolen session cannot guess it at hash speed (#1873). A miss counts
+    /// toward the same account lock as the login form.
+    ///
+    /// # Errors
+    /// [`LoginRefused`] when throttled, or when `verify` returns one.
+    pub async fn verify_current_password(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+        verify: impl std::future::Future<Output = Result<bool, LoginRefused>>,
+    ) -> Result<bool, LoginRefused> {
+        let attempt = self.begin(scope, ip, username).await?;
+        let ok = verify.await?;
+        if ok {
+            attempt.succeeded().await;
+        } else {
+            attempt.failed().await;
+        }
+        Ok(ok)
+    }
 }
 
 async fn check_lock(key: &str) -> Result<(), LoginRefused> {

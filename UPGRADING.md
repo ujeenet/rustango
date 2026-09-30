@@ -173,6 +173,11 @@ use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
 
 **Breaking:** `incr` no longer moves the TTL on each call, and an `i64` overflow is an error.
 
+### Change-password misses lock the account
+
+**Breaking:** five wrong current passwords on a change-password form lock the account
+like failed logins; the form and the login page answer 429 until the lock ends.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

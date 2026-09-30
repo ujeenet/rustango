@@ -373,6 +373,81 @@ async fn tenant_admin_login_locks_with_429() {
 
 /// Through `server::Builder`, failures from one IP get 429 once the
 /// per-IP limit is reached: the client address must reach the gate.
+fn change_password_req(uri: &str, cookie: &str, current: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::COOKIE, format!("rustango_csrf=t; {cookie}"))
+        .header("x-csrf-token", "t")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(format!(
+            "current_password={current}&new_password=another-pass-9&confirm_password=another-pass-9"
+        )))
+        .unwrap()
+}
+
+/// Wrong current passwords on change-password lock the account like
+/// failed logins, so a stolen session cannot guess it (#1873).
+#[tokio::test]
+async fn change_password_misses_lock_the_account() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+
+    let op = unique("cpop");
+    env.operator(&op).await;
+    let r = env.console_login(&next_ip(), &op, PASS).await;
+    let op_cookie = r.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    for _ in 0..5 {
+        let req = change_password_req("/change-password", &op_cookie, "wrong");
+        assert_eq!(
+            send(&env.console, &next_ip(), req).await.status(),
+            StatusCode::SEE_OTHER
+        );
+    }
+    let req = change_password_req("/change-password", &op_cookie, PASS);
+    assert!(
+        is_429(&send(&env.console, &next_ip(), req).await),
+        "operator"
+    );
+    assert!(is_429(&env.console_login(&next_ip(), &op, PASS).await));
+
+    let name = unique("cpta");
+    let uid = env.user(&name).await;
+    let hash = User::objects()
+        .where_(User::id.eq(uid))
+        .fetch(&env.tenant)
+        .await
+        .unwrap()
+        .remove(0)
+        .password_hash;
+    let payload = TenantSessionPayload::new(
+        uid,
+        &env.slug,
+        3600,
+        PasswordFingerprint::of(&env.secret, &hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&env.secret, &payload));
+    let tenant_req = |current: &str| {
+        let mut req = change_password_req("/__change-password", &cookie, current);
+        req.headers_mut()
+            .insert(header::HOST, env.host.parse().unwrap());
+        req
+    };
+    for _ in 0..5 {
+        let r = send(&env.admin, &next_ip(), tenant_req("wrong")).await;
+        assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    }
+    let r = send(&env.admin, &next_ip(), tenant_req(PASS)).await;
+    assert!(is_429(&r), "tenant: {}", r.status());
+    assert!(is_429(&env.admin_login(&next_ip(), &name, PASS).await));
+}
+
 #[tokio::test]
 async fn served_tenant_admin_limits_per_ip() {
     let _g = SUITE.lock().await;
