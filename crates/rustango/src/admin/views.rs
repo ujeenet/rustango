@@ -1669,12 +1669,14 @@ pub(crate) async fn detail_view(
     // registration order. Best-effort: a fetch error, such as a
     // child table missing on this tenant, drops the panels to empty
     // instead of failing the page.
-    let mut inline_panels = super::inlines::render_for_parent(&state.pool, model, pk_value.clone())
-        .await
-        .unwrap_or_default();
-    let generic_panels = super::inlines::render_generic_for_parent(&state.pool, model, pk_value)
-        .await
-        .unwrap_or_default();
+    let mut inline_panels =
+        super::inlines::render_for_parent_in(&state.pool, model, pk_value.clone(), Some(&parts))
+            .await
+            .unwrap_or_default();
+    let generic_panels =
+        super::inlines::render_generic_for_parent_in(&state.pool, model, pk_value, Some(&parts))
+            .await
+            .unwrap_or_default();
     inline_panels.extend(generic_panels);
     inline_panels.retain(|p| lookup_model(&state, &p.child_table).is_some());
     let inline_panels_ctx: Vec<serde_json::Value> = inline_panels
@@ -2053,14 +2055,22 @@ pub(crate) async fn edit_form(
     // come after the regular ones, in registration order.
     // Best-effort: a child-table fetch failure drops the inlines to
     // empty instead of breaking the edit page.
-    let mut inline_panels =
-        super::inlines::render_form_for_parent(&state.pool, model, pk_value.clone())
-            .await
-            .unwrap_or_default();
-    let generic_panels =
-        super::inlines::render_form_generic_for_parent(&state.pool, model, pk_value)
-            .await
-            .unwrap_or_default();
+    let mut inline_panels = super::inlines::render_form_for_parent_in(
+        &state.pool,
+        model,
+        pk_value.clone(),
+        Some(&parts),
+    )
+    .await
+    .unwrap_or_default();
+    let generic_panels = super::inlines::render_form_generic_for_parent_in(
+        &state.pool,
+        model,
+        pk_value,
+        Some(&parts),
+    )
+    .await
+    .unwrap_or_default();
     inline_panels.extend(generic_panels);
     // Only children this user may edit get a FormSet.
     inline_panels.retain(|p| {

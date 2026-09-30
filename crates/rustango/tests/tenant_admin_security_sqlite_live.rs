@@ -83,6 +83,41 @@ pub struct SecForm {
     pub note: Option<String>,
 }
 
+/// A parent whose inline children are scoped by the child's hook.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "sec_parent", display = "title")]
+#[allow(dead_code)]
+pub struct SecParent {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "sec_kid", display = "title")]
+#[allow(dead_code)]
+pub struct SecKid {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(fk = "sec_parent", on = "id")]
+    pub parent_id: i64,
+    #[rustango(max_length = 200)]
+    pub title: String,
+    pub owner_id: i64,
+}
+
+rustango::register_admin_queryset!("sec_kid", own_rows);
+rustango::register_admin_inline!(
+    parent = "sec_parent",
+    child = "sec_kid",
+    fk = "parent_id",
+    kind = rustango::admin::inlines::InlineKind::Tabular,
+    label = "Kids",
+    fields = &["title"],
+    extra = 0,
+);
+
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
 fn unique(prefix: &str) -> String {
@@ -153,6 +188,12 @@ async fn boot() -> Env {
     rustango::testkit::create_tables_for::<SecForm>(&tenant)
         .await
         .expect("sec_form table");
+    rustango::testkit::create_tables_for::<SecParent>(&tenant)
+        .await
+        .expect("sec_parent table");
+    rustango::testkit::create_tables_for::<SecKid>(&tenant)
+        .await
+        .expect("sec_kid table");
     rustango::i18n::db::ensure_table_pool(&tenant)
         .await
         .expect("translations table");
@@ -490,4 +531,57 @@ async fn a_create_writes_only_rendered_fields() {
     assert_eq!(got.owner_id, 0);
     assert!(!got.is_verified);
     assert_eq!(got.note, None);
+}
+
+/// Inline children outside the child hook's scope are neither shown nor editable.
+#[tokio::test]
+async fn the_queryset_hook_scopes_inline_children() {
+    let env = boot().await;
+    let perms = [
+        "sec_parent.view",
+        "sec_parent.change",
+        "sec_kid.view",
+        "sec_kid.change",
+    ];
+    let (cookie, uid) = env.login_as(false, &perms).await;
+    let mut parent = SecParent {
+        id: rustango::Auto::default(),
+        title: "p".into(),
+    };
+    parent.insert_pool(&env.tenant).await.expect("seed parent");
+    let pid = parent.id.get().copied().unwrap();
+    let mut theirs = 0;
+    for (title, owner) in [("mine-kid", uid), ("their-kid", uid + 1000)] {
+        let mut kid = SecKid {
+            id: rustango::Auto::default(),
+            parent_id: pid,
+            title: title.into(),
+            owner_id: owner,
+        };
+        kid.insert_pool(&env.tenant).await.expect("seed kid");
+        theirs = kid.id.get().copied().unwrap();
+    }
+    for uri in [
+        format!("/__admin/sec_parent/{pid}"),
+        format!("/__admin/sec_parent/{pid}/edit"),
+    ] {
+        let (status, body) = env.get(&uri, &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert!(body.contains("mine-kid"), "{uri}: {body}");
+        assert!(!body.contains("their-kid"), "{uri}: {body}");
+    }
+    let form = format!(
+        "title=p&sec_kid-TOTAL_FORMS=1&sec_kid-INITIAL_FORMS=1\
+         &sec_kid-0-id={theirs}&sec_kid-0-title=hacked"
+    );
+    env.post(&format!("/__admin/sec_parent/{pid}"), &cookie, &form)
+        .await;
+    let titles: Vec<String> = SecKid::objects()
+        .fetch(&env.tenant)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|k| k.title)
+        .collect();
+    assert!(titles.contains(&"their-kid".to_owned()), "{titles:?}");
 }
