@@ -791,7 +791,8 @@ macro_rules! bind_match_mysql {
             SqlValue::DateTime(v) => $q.bind(v),
             SqlValue::Date(v) => $q.bind(v),
             SqlValue::Time(v) => $q.bind(v),
-            SqlValue::Uuid(v) => $q.bind(v),
+            // The column is CHAR(36); sqlx would send `Uuid` as 16 raw bytes (#1733).
+            SqlValue::Uuid(v) => $q.bind(v.hyphenated()),
             SqlValue::Json(v) => $q.bind(sqlx::types::Json(v)),
             SqlValue::Decimal(v) => $q.bind(v),
             SqlValue::Binary(v) => $q.bind(v),
@@ -1877,8 +1878,8 @@ where
 mod values;
 #[allow(unused_imports)]
 pub use values::{
-    fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, FlatScalar,
-    MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
+    fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
+    FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
 };
 
 /// Raw SQL on any backend: runs it with bound `SqlValue`

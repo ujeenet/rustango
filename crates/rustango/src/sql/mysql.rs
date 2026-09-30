@@ -133,7 +133,7 @@ impl Dialect for MySql {
     /// - no `JSONB`; `JSON` validates on write and stores binary
     /// - no `UUID`; `CHAR(36)` is the usual form
     /// - `VARCHAR` needs a length, so an unbounded `String` becomes
-    ///   `TEXT`
+    ///   `LONGTEXT`; `TEXT` caps at 64 KiB where PG/SQLite have no cap
     /// - no `DOUBLE PRECISION`; `DOUBLE`, and `REAL` is an alias for
     ///   `FLOAT`
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
@@ -146,7 +146,7 @@ impl Dialect for MySql {
             FieldType::Bool => "TINYINT(1)".into(),
             FieldType::String => match max_length {
                 Some(n) => format!("VARCHAR({n})"),
-                None => "TEXT".into(),
+                None => "LONGTEXT".into(),
             },
             FieldType::DateTime => "DATETIME(6)".into(),
             FieldType::Date => "DATE".into(),
@@ -181,8 +181,17 @@ impl Dialect for MySql {
     fn ci_text_type(&self, max_length: Option<u32>) -> String {
         match max_length {
             Some(n) => format!("VARCHAR({n}) COLLATE utf8mb4_general_ci"),
-            None => "TEXT COLLATE utf8mb4_general_ci".to_owned(),
+            None => "LONGTEXT COLLATE utf8mb4_general_ci".to_owned(),
         }
+    }
+
+    // Columns inherit it, and a `_ci` one makes `=` and `unique` ignore
+    // case and accents, unlike PG and SQLite (#1742).
+    fn default_collation_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(DEFAULT_COLLATION_NAME AS CHAR) FROM information_schema.SCHEMATA \
+             WHERE SCHEMA_NAME = DATABASE()",
+        )
     }
 
     /// Translate Postgres-native `DEFAULT` expressions to MySQL
@@ -196,7 +205,7 @@ impl Dialect for MySql {
     /// - A JSON, TEXT or BLOB column takes no literal default, only
     ///   MySQL 8.0.13+'s `DEFAULT (<expr>)` form, so those get
     ///   wrapped in parens. `max_length` is what tells an unbounded
-    ///   `String`, which is TEXT, from a `VARCHAR(n)`, which keeps
+    ///   `String`, which is LONGTEXT, from a `VARCHAR(n)`, which keeps
     ///   its literal default.
     /// - Everything else passes through.
     fn translate_default_expr(&self, expr: &str, ty: &str, max_length: Option<u32>) -> String {
@@ -741,6 +750,20 @@ mod tests {
     }
 
     #[test]
+    fn unbounded_string_is_longtext() {
+        // #1708: TEXT caps at 64 KiB; PG and SQLite text has no cap.
+        assert_eq!(MySql.column_type(FieldType::String, None), "LONGTEXT");
+        assert_eq!(
+            MySql.column_type(FieldType::String, Some(64)),
+            "VARCHAR(64)"
+        );
+        assert_eq!(
+            MySql.ci_text_type(None),
+            "LONGTEXT COLLATE utf8mb4_general_ci"
+        );
+    }
+
+    #[test]
     fn bool_literal_uses_one_zero() {
         assert_eq!(MySql.bool_literal(true), "1");
         assert_eq!(MySql.bool_literal(false), "0");
@@ -768,7 +791,7 @@ mod tests {
         // MySQL rejects a literal `DEFAULT` on JSON, TEXT, BLOB and
         // GEOMETRY columns, but accepts the `DEFAULT (<expr>)` form,
         // so those types must be wrapped. An unbounded `String` is
-        // one of them, since it renders as TEXT.
+        // one of them, since it renders as LONGTEXT.
         assert_eq!(
             MySql.translate_default_expr("'{}'", "string", None),
             "('{}')"

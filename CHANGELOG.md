@@ -25,6 +25,24 @@ the hooks too, so a row the list hides is a 404. A delete of a missing row is a 
 `editable = false` fields and fields outside `fieldsets` are no longer read from a
 create or edit POST, and an edit leaves them unchanged instead of NULL / `false`.
 
+### Fixed — MySQL `Uuid` fields save and load (#1733)
+
+A `Uuid` now binds as hyphenated text into its `CHAR(36)` column instead of 16 raw
+bytes (error 1366). Every read decodes that text: typed fetch, `Auto<Uuid>`,
+`ForeignKey<_, Uuid>`, `select_related`, `pluck` / `pks` / `values_list`, JSON rows
+and the audit diff. **Breaking:** a hand-made `BINARY(16)` column now fails writes
+with error 1406 (`Data too long`) and reads with sqlx "mismatched types"; use `CHAR(36)`.
+
+### Fixed — MySQL unbounded `String` columns hold more than 64 KiB (#1708)
+
+A `String` without `max_length` is now `LONGTEXT` on MySQL, not `TEXT`, so long
+content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
+
+### Added — `check --deploy` flags a case-insensitive MySQL database (#1742)
+
+MySQL's default `_ai_ci` collation makes `=` and `unique` ignore case, unlike PostgreSQL
+and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900_as_cs`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
