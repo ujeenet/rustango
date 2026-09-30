@@ -40,6 +40,10 @@ pub(super) struct Sql<'d> {
     /// aggregating query's projection, HAVING or ORDER BY, which are
     /// the places SQL accepts an aggregate call.
     pub aggregate_allowed: bool,
+    /// Set while writing a grouped aggregate's HAVING and ORDER BY over
+    /// a derived table: `(table, join aliases)`. An aliased column on one
+    /// of those joins reads the derived `"<table>"."<alias>__<col>"`.
+    pub derived_joins: Option<(&'static str, Vec<&'static str>)>,
 }
 
 impl<'d> Sql<'d> {
@@ -51,6 +55,7 @@ impl<'d> Sql<'d> {
             scope_stack: Vec::new(),
             current_qualify_alias: None,
             aggregate_allowed: false,
+            derived_joins: None,
         }
     }
 
@@ -62,6 +67,7 @@ impl<'d> Sql<'d> {
             scope_stack: Vec::new(),
             current_qualify_alias: None,
             aggregate_allowed: false,
+            derived_joins: None,
         }
     }
 
@@ -830,6 +836,19 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
         }
     }
 
+    // HAVING and ORDER BY see the derived table, not its joins.
+    let prev_derived = b.derived_joins.take();
+    if let Some(src) = query.source.as_deref() {
+        let aliases = src.joins.iter().map(|j| j.alias).collect();
+        b.derived_joins = Some((query.model.table, aliases));
+    }
+    let r = write_aggregate_tail(b, query);
+    b.derived_joins = prev_derived;
+    r
+}
+
+/// The HAVING, ORDER BY and LIMIT of a grouped aggregate.
+fn write_aggregate_tail(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
     if let Some(having) = &query.having {
         b.sql.push_str(" HAVING ");
         // Aggregates are legal in HAVING. Restore afterwards so
@@ -847,9 +866,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
     b.aggregate_allowed = true;
     let r = write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None);
     b.aggregate_allowed = prev;
-    r?;
-
-    Ok(())
+    r
 }
 
 /// The cast an aggregate needs so the decoder can read it. Databases
@@ -1625,8 +1642,16 @@ fn write_expr(
             Ok(())
         }
         Expr::AliasedColumn { alias, column } => {
-            // An explicit `<alias>.<col>`, written as given.
-            let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column),);
+            // An explicit `<alias>.<col>`, written as given unless the
+            // join lives inside a derived table.
+            let qualified = match &b.derived_joins {
+                Some((table, joins)) if joins.contains(alias) => format!(
+                    "{}.{}",
+                    b.d.quote_ident(table),
+                    b.d.quote_ident(&format!("{alias}__{column}"))
+                ),
+                _ => format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column)),
+            };
             b.sql.push_str(&qualified);
             Ok(())
         }

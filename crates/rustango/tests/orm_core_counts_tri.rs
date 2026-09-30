@@ -360,6 +360,56 @@ async fn grouped_aggregate_join_column_distinct(pool: &Pool) {
     );
 }
 
+/// Per-author book counts over a DISTINCT join, as `(name, n)` rows.
+fn names(rows: Vec<std::collections::HashMap<String, SqlValue>>) -> Vec<(SqlValue, SqlValue)> {
+    rows.into_iter()
+        .map(|r| (r["a__name"].clone(), r["n"].clone()))
+        .collect()
+}
+
+/// #1975: `having` on a joined column named the alias the derived rows hid.
+async fn grouped_aggregate_join_column_having(pool: &Pool) {
+    let ada = rustango::core::TypedExpr::from_where_expr(col_filter("a", "name", Op::Eq, "Ada"));
+    let rows = Book::objects()
+        .join(author_join())
+        .distinct()
+        .values(&["a.name"])
+        .annotate("n", AggregateExpr::Count(None))
+        .having(ada)
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(rows),
+        [(SqlValue::String("Ada".into()), SqlValue::I64(2))]
+    );
+}
+
+/// #1975: `order_by` on a joined column, with and without a derived table.
+async fn grouped_aggregate_join_column_order_by(pool: &Pool) {
+    for distinct in [false, true] {
+        let mut qs = Book::objects().join(author_join());
+        if distinct {
+            qs = qs.distinct();
+        }
+        let rows = qs
+            .values(&["a.name"])
+            .annotate("n", AggregateExpr::Count(None))
+            .order_by(&[("a.name", true)])
+            .fetch(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            names(rows),
+            [
+                (SqlValue::String("Bob".into()), SqlValue::I64(1)),
+                (SqlValue::String("Ada".into()), SqlValue::I64(2))
+            ],
+            "distinct = {distinct}"
+        );
+    }
+}
+
 /// A union's branches cannot grow a joined column, so that is refused.
 #[test]
 fn union_group_by_join_column_is_refused() {
@@ -542,6 +592,8 @@ tri_dialect_test! {
         grouped_aggregate_join_limit,
         grouped_aggregate_join_alias_filter,
         grouped_aggregate_join_column_distinct,
+        grouped_aggregate_join_column_having,
+        grouped_aggregate_join_column_order_by,
         bulk_insert_rolls_back_every_batch,
         bulk_insert_joins_outer_atomic,
     ],

@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — grouped aggregate `having` / `order_by` on a joined column (#1975)
+
+Over a derived table (distinct, limit, …) they now read the projected `alias__col`.
+`order_by(&[("a.name", ..)])` on a grouped aggregate now names `"a"."name"`, not one `"a.name"` identifier.
+
 ### Fixed — integer division, `__second` and date lookups agree across backends (#1900)
 
 MySQL divides two integer expressions with `DIV`; PostgreSQL floors `__second` (59.7 is 59).
