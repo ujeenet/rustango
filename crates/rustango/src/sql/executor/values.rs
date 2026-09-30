@@ -44,18 +44,44 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
         // `NUMERIC`, which PG widens a `SUM` to. Neither the i64 nor
         // the f64 probe decodes it, so it would come back as Null.
         SqlValue::Decimal(v)
+    } else if let Ok(v) = row.try_get::<uuid::Uuid, _>(i) {
+        SqlValue::Uuid(v)
     } else if let Ok(v) = row.try_get::<String, _>(i) {
         SqlValue::String(v)
     } else if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
         SqlValue::Json(v)
+    } else if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
+        SqlValue::Binary(v)
     } else {
         SqlValue::Null
     }
 }
 
+/// Per result column, whether `model` declares it a `Uuid`. MySQL and SQLite
+/// store a UUID as text or bytes, so only the model tells it apart.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn uuid_columns<R: sqlx::Row>(rows: &[R], model: &crate::core::ModelSchema) -> Vec<bool> {
+    use sqlx::Column as _;
+    rows.first().map_or_else(Vec::new, |row| {
+        row.columns()
+            .iter()
+            .map(|c| {
+                model.field_by_column(c.name()).map(|f| f.ty) == Some(crate::core::FieldType::Uuid)
+            })
+            .collect()
+    })
+}
+
 #[cfg(feature = "mysql")]
-fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize) -> SqlValue {
+fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize, is_uuid: bool) -> SqlValue {
     use sqlx::{Column as _, Row as _, TypeInfo as _};
+    if is_uuid {
+        if let Ok(Some(s)) = row.try_get::<Option<String>, _>(i) {
+            if let Ok(u) = uuid::Uuid::parse_str(&s) {
+                return SqlValue::Uuid(u);
+            }
+        }
+    }
     // `COUNT(*)` and the window ranking functions return BIGINT
     // UNSIGNED, which the i64 probe cannot decode. sqlx's permissive
     // bool decode would then claim it and lose the number, so check
@@ -86,13 +112,15 @@ fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize) -> SqlValue {
         SqlValue::Decimal(v)
     } else if let Ok(v) = row.try_get::<String, _>(i) {
         SqlValue::String(v)
+    } else if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
+        SqlValue::Binary(v)
     } else {
         SqlValue::Null
     }
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize) -> SqlValue {
+fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize, is_uuid: bool) -> SqlValue {
     use sqlx::{Row as _, TypeInfo as _, ValueRef as _};
     // SQLite is dynamically typed, and an expression column such as
     // a scalar subquery has a storage class but no useful declared
@@ -106,7 +134,10 @@ fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize) -> SqlValue 
     // whose `type_info()` SQLite also misreports.
     if let Ok(raw) = row.try_get_raw(i) {
         let is_null = raw.is_null();
-        let is_text = raw.type_info().name() == "TEXT";
+        let (is_text, is_blob) = {
+            let storage = raw.type_info();
+            (storage.name() == "TEXT", storage.name() == "BLOB")
+        };
         // Decode while `raw` is still in scope: calling `type_info()`
         // inline just before this can make it fail for no reason.
         let as_text = row.try_get_unchecked::<String, _>(i);
@@ -115,7 +146,23 @@ fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize) -> SqlValue 
             return SqlValue::Null;
         }
         if is_text {
-            return as_text.map_or(SqlValue::Null, SqlValue::String);
+            return match as_text {
+                Ok(s) if is_uuid => {
+                    uuid::Uuid::parse_str(&s).map_or(SqlValue::String(s), SqlValue::Uuid)
+                }
+                Ok(s) => SqlValue::String(s),
+                Err(_) => SqlValue::Null,
+            };
+        }
+        // sqlx writes a Uuid as 16 raw bytes; no probe below reads a BLOB.
+        if is_blob {
+            return match row.try_get_unchecked::<Vec<u8>, _>(i) {
+                Ok(b) if is_uuid && b.len() == 16 => {
+                    uuid::Uuid::from_slice(&b).map_or(SqlValue::Binary(b), SqlValue::Uuid)
+                }
+                Ok(b) => SqlValue::Binary(b),
+                Err(_) => SqlValue::Null,
+            };
         }
     }
     if let Ok(v) = row.try_get::<i64, _>(i) {
@@ -172,13 +219,17 @@ pub async fn fetch_values_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
                 for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), my_cell_to_sqlvalue(row, i));
+                    map.insert(
+                        col.name().to_owned(),
+                        my_cell_to_sqlvalue(row, i, uuid_cols[i]),
+                    );
                 }
                 out.push(map);
             }
@@ -192,13 +243,17 @@ pub async fn fetch_values_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
                 for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), sqlite_cell_to_sqlvalue(row, i));
+                    map.insert(
+                        col.name().to_owned(),
+                        sqlite_cell_to_sqlvalue(row, i, uuid_cols[i]),
+                    );
                 }
                 out.push(map);
             }
@@ -250,13 +305,17 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
                 for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), my_cell_to_sqlvalue(row, i));
+                    map.insert(
+                        col.name().to_owned(),
+                        my_cell_to_sqlvalue(row, i, uuid_cols[i]),
+                    );
                 }
                 out.push(map);
             }
@@ -270,13 +329,17 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
                 for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), sqlite_cell_to_sqlvalue(row, i));
+                    map.insert(
+                        col.name().to_owned(),
+                        sqlite_cell_to_sqlvalue(row, i, uuid_cols[i]),
+                    );
                 }
                 out.push(map);
             }
@@ -324,13 +387,14 @@ pub async fn fetch_values_list(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
                 let n = row.columns().len();
                 let mut v = Vec::with_capacity(n);
                 for i in 0..n {
-                    v.push(my_cell_to_sqlvalue(row, i));
+                    v.push(my_cell_to_sqlvalue(row, i, uuid_cols[i]));
                 }
                 out.push(v);
             }
@@ -344,13 +408,14 @@ pub async fn fetch_values_list(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
                 let n = row.columns().len();
                 let mut v = Vec::with_capacity(n);
                 for i in 0..n {
-                    v.push(sqlite_cell_to_sqlvalue(row, i));
+                    v.push(sqlite_cell_to_sqlvalue(row, i, uuid_cols[i]));
                 }
                 out.push(v);
             }
@@ -1027,7 +1092,8 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// with the same WHERE clause.
     ///
     /// `page` starts at 1, so `paginate(1, 10)` gives the first ten
-    /// rows and `paginate(2, 10)` the next ten.
+    /// rows and `paginate(2, 10)` the next ten. An unordered queryset
+    /// pages in PK order.
     ///
     /// # Errors
     /// As [`crate::sql::CounterPool::count`] and
@@ -1054,7 +1120,12 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             .count(pool)
             .await?;
         let offset = if page > 1 { (page - 1) * per_page } else { 0 };
-        let rows = self.limit(per_page).offset(offset).fetch(pool).await?;
+        let rows = self
+            .ordered_or_by_pk()
+            .limit(per_page)
+            .offset(offset)
+            .fetch(pool)
+            .await?;
         Ok((rows, total))
     }
 
@@ -1123,24 +1194,14 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             + Unpin,
     {
         let col_static = crate::sql::model_shortcuts::resolve_col::<T>(col)?;
-        // Compile the queryset to get its WHERE clause, then build
-        // the AggregateQuery by hand so its projection is exactly
-        // one aggregate column and the tuple decode lines up.
-        let select_q = self.compile()?;
-        let aggregate_q = crate::core::AggregateQuery {
-            model: <T as crate::core::Model>::SCHEMA,
-            // Keep the queryset's joins so an aggregate over a
-            // joined column still resolves.
-            joins: select_q.joins,
-            where_clause: select_q.where_clause,
-            group_by: Vec::new(),
-            aggregates: vec![("v".into(), build(col_static))],
-            aliases: Vec::new(),
-            having: None,
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
+        let Some(select_q) = self.compile_unless_none()? else {
+            return Ok(None);
         };
+        // One aggregate column, so the tuple decode lines up.
+        let aggregate_q = crate::core::AggregateQuery::over_select(
+            select_q,
+            vec![("v".into(), build(col_static))],
+        );
         let rows: Vec<(Option<U>,)> = crate::sql::fetch_aggregate_pool(pool, &aggregate_q).await?;
         Ok(rows.into_iter().next().and_then(|t| t.0))
     }

@@ -1,4 +1,4 @@
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "jobs-postgres"))]
 //! Live integration test for the Postgres-backed job queue.
 //!
 //! Reads `DATABASE_URL`. If unset, every test returns silently so

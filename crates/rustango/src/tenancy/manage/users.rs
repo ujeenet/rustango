@@ -19,7 +19,7 @@ use crate::sql::{Auto, FetcherPool};
 use crate::tenancy::error::TenancyError;
 #[cfg(feature = "postgres")]
 use crate::tenancy::manage::args::quote_ident;
-use crate::tenancy::manage::args::{next_value, reject_leading_flag};
+use crate::tenancy::manage::args::{next_value, parse, reject_leading_flag, Spec};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::pools::TenantPools;
 
@@ -135,36 +135,23 @@ pub(super) async fn create_user_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
+    // Flags may sit anywhere: `create-user acme --superuser` once made a
+    // user named `--superuser` (#1910).
+    let parsed = parse(
         args,
-        "create-user",
-        "slug",
-        "create-user <slug> <username> [--password <p> | --generate] [--superuser]",
+        &Spec {
+            verb: "create-user",
+            usage: "create-user <slug> <username> [--password <p> | --generate] [--superuser]",
+            switches: &["--generate", "--superuser"],
+            valued: &["--password"],
+            max_positionals: 2,
+        },
     )?;
-    let mut iter = args.iter();
-    let slug_arg = iter.next().cloned();
-    let username_arg = iter.next().cloned();
-    let mut password: Option<String> = None;
-    let mut generate = false;
-    let mut is_superuser = false;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--password" => password = Some(next_value(&mut iter, "--password")?),
-            "--generate" => generate = true,
-            "--superuser" => is_superuser = true,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "create-user <slug> <username> [--password <p> | --generate] [--superuser]"
-                        .into(),
-                ));
-            }
-            other => {
-                return Err(TenancyError::Validation(format!(
-                    "create-user: unknown argument `{other}`"
-                )));
-            }
-        }
-    }
+    let slug_arg = parsed.positional(0).cloned();
+    let username_arg = parsed.positional(1).cloned();
+    let password = parsed.value("--password")?.map(str::to_owned);
+    let generate = parsed.has("--generate");
+    let mut is_superuser = parsed.has("--superuser");
     if generate && password.is_some() {
         return Err(TenancyError::Validation(
             "create-user: --generate and --password are mutually exclusive".into(),
@@ -228,10 +215,11 @@ where
     // promoted to superuser even if `--superuser` wasn't passed.
     let mut auto_promoted = false;
     if !is_superuser {
+        // `?`, not a default: a failed read is not "no users" (#1910).
         let existing: Vec<crate::tenancy::User> = crate::tenancy::User::objects()
+            .limit(1)
             .fetch(&scoped)
-            .await
-            .unwrap_or_default();
+            .await?;
         if existing.is_empty() {
             is_superuser = true;
             auto_promoted = true;
@@ -287,7 +275,8 @@ pub(super) async fn create_superuser_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    // Forward to `create_user_cmd` with `--superuser` injected.
+    // Forward to `create_user_cmd` with `--superuser` injected; the
+    // parser there takes flags anywhere, so no args still prompts.
     let mut forwarded: Vec<String> = args.to_vec();
     if !forwarded.iter().any(|s| s == "--superuser") {
         forwarded.push("--superuser".into());

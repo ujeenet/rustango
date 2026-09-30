@@ -92,9 +92,7 @@ async fn clear_drops_every_entry() {
 }
 
 #[tokio::test]
-async fn incr_uses_default_get_set_path() {
-    // Cache trait provides a default non-atomic `incr` over get/set —
-    // DatabaseCache inherits it. Verify it round-trips via the table.
+async fn incr_round_trips_through_the_table() {
     let pool = fresh_pool().await;
     let cache = DatabaseCache::new(pool, "rustango_cache_inc");
     cache.ensure_table().await.unwrap();

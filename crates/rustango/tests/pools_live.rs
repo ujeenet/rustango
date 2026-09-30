@@ -498,6 +498,51 @@ async fn scoped_pool_cache_is_keyed_per_tenant_and_stays_scoped() {
     migrate::drop_all(&pool).await.unwrap();
 }
 
+/// A schema change made by another process reaches this cache: the fresh
+/// Org names another schema, so the cached pool is a miss (#1882).
+#[tokio::test]
+async fn scoped_pool_follows_a_schema_change_without_invalidate() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    for s in ["acme_src_old", "acme_src_new"] {
+        drop_schema(&pool, s).await;
+        create_schema(&pool, s).await;
+    }
+    let mut acme = seed_org(
+        &pool,
+        "acme_src",
+        StorageMode::Schema,
+        Some("acme_src_old"),
+        None,
+    )
+    .await;
+    let pools = TenantPools::new(pool.clone());
+    let old = pools.scoped_pool(&acme).await.unwrap();
+    assert_eq!(
+        current_schema(&mut old.acquire().await.unwrap()).await,
+        "acme_src_old"
+    );
+
+    // What `edit-tenant` in another process leaves: a new row, no evict here.
+    acme.schema_name = Some("acme_src_new".into());
+    let new = pools.scoped_pool(&acme).await.unwrap();
+    assert_eq!(
+        current_schema(&mut new.acquire().await.unwrap()).await,
+        "acme_src_new",
+        "served the pool cached for the old schema",
+    );
+    assert_eq!(pools.cached_scoped_pool_count().await, 1);
+
+    for s in ["acme_src_old", "acme_src_new"] {
+        drop_schema(&pool, s).await;
+    }
+    migrate::drop_all(&pool).await.unwrap();
+}
+
 #[tokio::test]
 async fn invalidate_drops_the_scoped_pool_too() {
     let _g = live_lock().lock().await;

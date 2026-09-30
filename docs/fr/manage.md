@@ -641,7 +641,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.59.7
+rustango 0.59.11
 ```
 
 ### `about`
@@ -654,7 +654,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.59.7
+  version:        0.59.11
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -833,6 +833,13 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+Sur SIGTERM, il n'accepte plus de connexions et laisse aux connexions ouvertes
+`[server] shutdown_timeout_secs` (20 par défaut) pour finir, puis ferme le reste.
+SSE et long-poll ne finissent jamais seuls. Les exécutions de provisionnement et
+de migration laissées en `running` plus d'une heure par un processus arrêté sont
+marquées en échec au démarrage suivant, et une relance du webhook avec le même
+`event_id` s'exécute à nouveau.
+
 ### `create-tenant <slug> [options]`
 
 Met en place un nouveau tenant (client/organisation) et applique les
@@ -890,9 +897,11 @@ d'hôte portant un port, ou un préfixe de chemin que le résolveur ne
 pourrait jamais produire, est refusé plutôt que stocké pour n'apparier
 silencieusement jamais rien.
 
-Faire tourner `--database-url` évince le pool en cache du tenant, de
-sorte que la requête suivante se reconnecte avec le nouvel identifiant ;
-les autres modifications laissent les connexions chaudes tranquilles.
+Faire tourner `--database-url` change l'URL stockée. Chaque serveur bascule
+en 30 s, quand son cache de tenants se rafraîchit ; les autres modifications
+laissent les connexions chaudes tranquilles. Un secret tourné derrière la
+**même** référence (vault, variable d'environnement) ne change rien de
+stocké : redémarrez les serveurs, ou invalidez le pool du tenant sur chacun.
 
 ### `test-tenant-connection <url> [flags]`
 
@@ -936,6 +945,11 @@ ne supprime pas la ligne `Org` en laissant la base, elle ne fait rien du tout
 cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
+
+Avec plusieurs serveurs, désactivez d'abord (`drop-tenant`) et attendez 30 s.
+Un serveur dont le cache contient encore un tenant en mode schema garde
+`search_path = <schema>, public` ; une fois le schema supprimé, ses requêtes
+retombent sur `public` jusqu'au rafraîchissement du cache.
 
 ### `list-tenants`
 
@@ -1597,8 +1611,8 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | Verbe | Ce qu'il fait |
 |---|---|
 | `dumpdata` | Exporte des lignes en fixtures JSON |
-| `loaddata <fixture.json> [--fail-fast]` | Recharge des fixtures JSON |
-| `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble |
+| `loaddata <fixture.json> [--fail-fast]` | Recharge des fixtures JSON. Un chargement échoué ou partiel n'est pas annulé |
+| `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble. Postgres utilise `TRUNCATE … RESTART IDENTITY CASCADE`, qui vide aussi les tables qui les référencent hors du filtre ; MySQL / SQLite suppriment les lignes et gardent les compteurs d'id |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Suppression en masse en flux ; `--pretend` signale sans supprimer |
 | `db:dump` / `db:restore` / `db:info` | Dump / restauration / inspection natifs |
 | `dbshell` | Exécute le client natif (`psql` / `mysql` / `sqlite3`). N'a besoin que de `DATABASE_URL`, pas d'un pool fonctionnel — traité avant la construction du pool, il marche donc quand sqlx n'arrive pas à se connecter |

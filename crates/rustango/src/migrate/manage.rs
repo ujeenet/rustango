@@ -391,7 +391,10 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      rows with a warning; --fail-fast aborts on the first failure.\n"
     )?;
-    writeln!(w, "  dumpdata [--model <name>] [--indent <N>]")?;
+    writeln!(
+        w,
+        "  dumpdata [--model <name>] [--exclude <name>] [--indent <N>]"
+    )?;
     writeln!(w, "      Export every registered model's rows as a JSON")?;
     writeln!(
         w,
@@ -1992,7 +1995,78 @@ fn parse_name_and_model_as(
         }
         _ => {}
     }
+    // The file becomes `pub mod <snake>;`: `pub mod type;` does not parse (#1913).
+    let module = pascal_to_snake(&name);
+    if name == "Self" || is_reserved_module_name(&module) {
+        return Err(MigrateError::Validation(format!(
+            "`{name}` would make the module `{module}`, which is a Rust keyword or \
+             shadows a built-in crate — pick another name"
+        )));
+    }
     Ok((name, model, crate_root.unwrap_or_else(|| "rustango".into())))
+}
+
+/// Keywords (2015–2024, strict and reserved) plus the crate names a module
+/// may not shadow. `cargo-rustango` keeps its own copy; it links no rustango.
+fn is_reserved_module_name(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "abstract",
+        "alloc",
+        "as",
+        "async",
+        "await",
+        "become",
+        "box",
+        "break",
+        "const",
+        "continue",
+        "core",
+        "crate",
+        "do",
+        "dyn",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "final",
+        "fn",
+        "for",
+        "gen",
+        "if",
+        "impl",
+        "in",
+        "let",
+        "loop",
+        "macro",
+        "match",
+        "mod",
+        "move",
+        "mut",
+        "override",
+        "priv",
+        "proc_macro",
+        "pub",
+        "ref",
+        "return",
+        "self",
+        "static",
+        "std",
+        "struct",
+        "super",
+        "trait",
+        "true",
+        "try",
+        "type",
+        "typeof",
+        "unsafe",
+        "unsized",
+        "use",
+        "virtual",
+        "where",
+        "while",
+        "yield",
+    ];
+    RESERVED.contains(&name)
 }
 
 fn is_valid_type_name(name: &str) -> bool {
@@ -2118,6 +2192,8 @@ fn viewset_template_pool(name: &str, model: &str, snake: &str, crate_root: &str)
 
 use {crate_root}::ViewSet;
 
+use crate::models::{model};
+
 #[derive(ViewSet)]
 #[viewset(
     model        = {model},
@@ -2125,6 +2201,9 @@ use {crate_root}::ViewSet;
     filter_fields = "",
     search_fields = "",
     page_size    = 20,
+    // Writes need a guard: add `permissions(create = "...", ...)` behind
+    // an auth layer, then drop `read_only`.
+    read_only,
 )]
 pub struct {name};
 
@@ -2171,14 +2250,14 @@ pub fn router() -> Router<()> {{
         // .ordering(&[("created_at", true)])         // default ORDER BY
         // .ordering_fields(&["name", "created_at"])  // ?ordering=-name allowlist
         // .page_size(20)
-        // .permissions_for_model::<{model}>()        // CRUD codenames
+        .permissions_for_model::<{model}>()          // CRUD codenames
         // .read_only()                               // GET only
         .tenant_router("/api/{snake}")
 }}
 
 // Mount in your urls.rs:
 //
-//   .merge(crate::viewsets::{snake}::router())
+//   .merge(crate::{snake}::router())
 "#
     )
 }
@@ -2470,11 +2549,21 @@ fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     let (name, model, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let model = model.unwrap_or_else(|| "Post".into());
-    let body = format!(
+    write_generated(
+        w,
+        &format!("{snake}.rs"),
+        serializer_template(&name, &model, &crate_root),
+    )
+}
+
+fn serializer_template(name: &str, model: &str, crate_root: &str) -> String {
+    format!(
         r#"//! Auto-scaffolded by `manage make:serializer {name}`.
 
 use {crate_root}::sql::Auto;
 use {crate_root}::Serializer;
+
+use crate::models::{model};
 
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = {model})]
@@ -2496,8 +2585,7 @@ pub struct {name} {{
     // pub content: String,
 }}
 "#
-    );
-    write_generated(w, &format!("{snake}.rs"), body)
+    )
 }
 
 fn make_form_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
@@ -3127,6 +3215,8 @@ fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 struct DumpdataArgs {
     /// Limit to these `app.Model` or `Model` names. Empty = every model.
     model_filters: Vec<String>,
+    /// `--exclude`: models left out, same name forms as `--model`.
+    excludes: Vec<String>,
     /// JSON indent. `0` = compact single-line; otherwise pretty (2-space).
     indent: usize,
     /// `true` when the user passed `--help`; cmd short-circuits to help.
@@ -3150,6 +3240,12 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
                     .next()
                     .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
                 out.model_filters.push(v.clone());
+            }
+            "--exclude" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--exclude expects a value".into()))?;
+                out.excludes.push(v.clone());
             }
             "--indent" => {
                 let v = iter
@@ -3179,7 +3275,10 @@ async fn dumpdata_cmd<W: Write>(
 ) -> Result<(), MigrateError> {
     let parsed = parse_dumpdata_args(args)?;
     if parsed.help {
-        writeln!(w, "dumpdata [--model app.Name] [--indent N]")?;
+        writeln!(
+            w,
+            "dumpdata [--model app.Name] [--exclude app.Name] [--indent N]"
+        )?;
         writeln!(w)?;
         writeln!(
             w,
@@ -3206,6 +3305,10 @@ async fn dumpdata_cmd<W: Write>(
             w,
             "  --indent <N>     JSON indent (default 2; 0 emits compact single-line)."
         )?;
+        writeln!(
+            w,
+            "  --exclude <name> Leave a model out (repeatable; same forms as --model)."
+        )?;
         return Ok(());
     }
     let model_filters = &parsed.model_filters;
@@ -3230,6 +3333,22 @@ async fn dumpdata_cmd<W: Write>(
                 .any(|f| f == &dotted_name || f == schema.name)
         {
             continue;
+        }
+        if parsed
+            .excludes
+            .iter()
+            .any(|f| f == &dotted_name || f == schema.name)
+        {
+            continue;
+        }
+
+        // These decode as `null`, so a reload would wipe them (#1911).
+        if let Some(f) = schema.scalar_fields().find(|f| !dumpable(f.ty)) {
+            return Err(MigrateError::Validation(format!(
+                "dumpdata: `{dotted_name}.{}` is a {:?} column, which dumpdata cannot \
+                 export yet — leave it out with `--exclude {dotted_name}`",
+                f.name, f.ty
+            )));
         }
 
         // Identify the PK column for fixture `pk` extraction.
@@ -3372,6 +3491,10 @@ async fn loaddata_cmd<W: Write>(
             w,
             "  --fail-fast   Abort on the first error instead of skipping the row."
         )?;
+        writeln!(
+            w,
+            "  A failed or partial load is not rolled back: rows already inserted stay."
+        )?;
         return Ok(());
     }
 
@@ -3393,8 +3516,16 @@ async fn loaddata_cmd<W: Write>(
         schemas.insert(schema.name.to_owned(), schema);
     }
 
+    // Parents first: fixtures come in registration order, and a child
+    // inserted before its parent fails its FK (#1911).
+    let entries = in_fk_order(entries, &schemas);
+
     let mut loaded = 0_usize;
     let mut skipped = 0_usize;
+    let mut touched: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    // `--fail-fast` stops here, but the rows already in still need their
+    // sequences moved, so the error is raised after the reset.
+    let mut abort: Option<String> = None;
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -3406,7 +3537,8 @@ async fn loaddata_cmd<W: Write>(
                     schemas.len() / 2, // dotted + bare keys
                 );
                 if parsed.fail_fast {
-                    return Err(MigrateError::Validation(msg));
+                    abort = Some(msg);
+                    break;
                 }
                 tracing::warn!("{msg}");
                 skipped += 1;
@@ -3449,7 +3581,8 @@ async fn loaddata_cmd<W: Write>(
         if let Some(e) = row_err {
             let msg = format!("loaddata: entry #{line} (`{model_name}`): {e}");
             if parsed.fail_fast {
-                return Err(MigrateError::Validation(msg));
+                abort = Some(msg);
+                break;
             }
             tracing::warn!("{msg}");
             skipped += 1;
@@ -3464,11 +3597,17 @@ async fn loaddata_cmd<W: Write>(
             on_conflict: None,
         };
         match crate::sql::insert_pool(pool, &query).await {
-            Ok(()) => loaded += 1,
+            Ok(()) => {
+                loaded += 1;
+                if !touched.iter().any(|t| t.table == schema.table) {
+                    touched.push(schema);
+                }
+            }
             Err(e) => {
                 let msg = format!("loaddata: entry #{line} (`{model_name}`) insert: {e}");
                 if parsed.fail_fast {
-                    return Err(MigrateError::Validation(msg));
+                    abort = Some(msg);
+                    break;
                 }
                 tracing::warn!("{msg}");
                 skipped += 1;
@@ -3476,7 +3615,195 @@ async fn loaddata_cmd<W: Write>(
         }
     }
 
+    reset_sequences(pool, &touched).await?;
+    if let Some(msg) = abort {
+        return Err(MigrateError::Validation(msg));
+    }
+
     writeln!(w, "loaddata: {loaded} loaded, {skipped} skipped")?;
+    if skipped > 0 {
+        // A partial load is a failure; exit 0 read as a clean restore (#1911).
+        return Err(MigrateError::Validation(format!(
+            "loaddata: {skipped} row(s) skipped — see the warnings above"
+        )));
+    }
+    Ok(())
+}
+
+/// `false` for the column types `select_rows_as_json` reads back as `null`.
+fn dumpable(ty: crate::core::FieldType) -> bool {
+    use crate::core::FieldType as T;
+    !matches!(
+        ty,
+        T::Array(_) | T::Range(_) | T::HStore | T::Vector(_) | T::Geometry(_)
+    )
+}
+
+/// Stable-sort fixture entries so each model's FK targets load before it,
+/// and a self-FK parent before its child. Best effort: rows in a cycle keep
+/// their fixture order.
+fn in_fk_order(
+    entries: Vec<serde_json::Value>,
+    schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+) -> Vec<serde_json::Value> {
+    use std::collections::HashMap;
+    fn depth(
+        table: &'static str,
+        by_table: &HashMap<&'static str, &'static crate::core::ModelSchema>,
+        memo: &mut HashMap<&'static str, usize>,
+        visiting: &mut Vec<&'static str>,
+    ) -> usize {
+        if let Some(d) = memo.get(table) {
+            return *d;
+        }
+        if visiting.contains(&table) {
+            return 0;
+        }
+        let Some(schema) = by_table.get(table) else {
+            return 0;
+        };
+        visiting.push(table);
+        let d = schema
+            .scalar_fields()
+            .filter_map(|f| match f.relation {
+                Some(
+                    crate::core::Relation::Fk { to, .. } | crate::core::Relation::O2O { to, .. },
+                ) if to != table => Some(1 + depth(to, by_table, memo, visiting)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        visiting.pop();
+        memo.insert(table, d);
+        d
+    }
+    let by_table: HashMap<&'static str, &'static crate::core::ModelSchema> =
+        schemas.values().map(|s| (s.table, *s)).collect();
+    let mut memo = HashMap::new();
+    let mut keyed: Vec<(usize, serde_json::Value)> = entries
+        .into_iter()
+        .map(|e| {
+            let rank = e
+                .get("model")
+                .and_then(|v| v.as_str())
+                .and_then(|m| schemas.get(m))
+                .map_or(0, |s| depth(s.table, &by_table, &mut memo, &mut Vec::new()));
+            (rank, e)
+        })
+        .collect();
+    keyed.sort_by_key(|(rank, _)| *rank);
+    let mut out = Vec::with_capacity(keyed.len());
+    let mut group: Vec<serde_json::Value> = Vec::new();
+    let mut current = None;
+    for (rank, e) in keyed {
+        if current != Some(rank) {
+            out.extend(self_parents_first(std::mem::take(&mut group), schemas));
+            current = Some(rank);
+        }
+        group.push(e);
+    }
+    out.extend(self_parents_first(group, schemas));
+    out
+}
+
+/// Within one FK depth: a row whose self-FK names a row not yet emitted
+/// waits for it (tree tables). Rows left in a cycle keep their order.
+fn self_parents_first(
+    entries: Vec<serde_json::Value>,
+    schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+) -> Vec<serde_json::Value> {
+    struct Pending {
+        entry: serde_json::Value,
+        key: Option<(&'static str, String)>,
+        parents: Vec<(&'static str, String)>,
+    }
+    let mut pending: Vec<Pending> = entries
+        .into_iter()
+        .map(|entry| {
+            let schema = entry
+                .get("model")
+                .and_then(|v| v.as_str())
+                .and_then(|m| schemas.get(m));
+            let Some(schema) = schema else {
+                return Pending {
+                    entry,
+                    key: None,
+                    parents: Vec::new(),
+                };
+            };
+            let key = entry
+                .get("pk")
+                .filter(|v| !v.is_null())
+                .map(|pk| (schema.table, pk.to_string()));
+            let parents = schema
+                .scalar_fields()
+                .filter(|f| {
+                    matches!(
+                        f.relation,
+                        Some(crate::core::Relation::Fk { to, .. }
+                            | crate::core::Relation::O2O { to, .. }) if to == schema.table
+                    )
+                })
+                .filter_map(|f| entry.get("fields")?.get(f.name))
+                .filter(|v| !v.is_null())
+                .map(|v| (schema.table, v.to_string()))
+                .filter(|p| Some(p) != key.as_ref())
+                .collect();
+            Pending {
+                entry,
+                key,
+                parents,
+            }
+        })
+        .collect();
+    let mut out = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let waiting: std::collections::HashSet<(&'static str, String)> =
+            pending.iter().filter_map(|p| p.key.clone()).collect();
+        let (ready, rest): (Vec<Pending>, Vec<Pending>) = pending
+            .into_iter()
+            .partition(|p| p.parents.iter().all(|k| !waiting.contains(k)));
+        if ready.is_empty() {
+            out.extend(rest.into_iter().map(|p| p.entry));
+            break;
+        }
+        out.extend(ready.into_iter().map(|p| p.entry));
+        pending = rest;
+    }
+    out
+}
+
+/// Move each loaded model's serial counter past the ids the fixture wrote,
+/// or the next plain insert collides on Postgres (#1911).
+async fn reset_sequences(
+    pool: &Pool,
+    schemas: &[&'static crate::core::ModelSchema],
+) -> Result<(), MigrateError> {
+    use crate::core::FieldType as T;
+    for schema in schemas {
+        let Some(pk) = schema.primary_key() else {
+            continue;
+        };
+        if !pk.auto || !matches!(pk.ty, T::I16 | T::I32 | T::I64) {
+            continue;
+        }
+        let dialect = pool.dialect();
+        let Some(sql) = dialect.reset_sequence_sql(schema.table, pk.column) else {
+            continue;
+        };
+        let binds = vec![
+            crate::core::SqlValue::String(dialect.quote_ident(schema.table)),
+            crate::core::SqlValue::String(pk.column.to_owned()),
+        ];
+        crate::sql::raw_execute_pool(pool, &sql, binds)
+            .await
+            .map_err(|e| {
+                MigrateError::Validation(format!(
+                    "loaddata: resetting `{}`'s id sequence failed: {e}",
+                    schema.table
+                ))
+            })?;
+    }
     Ok(())
 }
 
@@ -3487,7 +3814,7 @@ async fn loaddata_cmd<W: Write>(
 /// - Decimal: `rust_decimal::Decimal::from_str`
 /// - Date: `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`
 /// - DateTime: RFC 3339 / `%Y-%m-%dT%H:%M:%S`
-/// - Time: `%H:%M:%S` then `%H:%M`
+/// - Time: `%H:%M:%S%.f` then `%H:%M`
 /// - Uuid: `Uuid::parse_str`
 /// - Binary: lowercase hex
 ///
@@ -3511,14 +3838,12 @@ fn json_to_sql_value(
             .and_then(|n| i32::try_from(n).ok())
             .map(SqlValue::I32)
             .ok_or_else(|| format!("expected i32, got {v}")),
-        FieldType::I64 => v.as_i64().map(SqlValue::I64).ok_or_else(|| {
-            // Accept integer-shaped strings too (e.g. SQLite NUMERIC).
-            v.as_str()
-                .and_then(|s| s.parse::<i64>().ok())
-                .map(SqlValue::I64)
-                .map(|_| format!("expected i64, got {v}"))
-                .unwrap_or_else(|| format!("expected i64, got {v}"))
-        }),
+        // Integer-shaped strings too (e.g. SQLite NUMERIC).
+        FieldType::I64 => v
+            .as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            .map(SqlValue::I64)
+            .ok_or_else(|| format!("expected i64, got {v}")),
         FieldType::F32 => v
             .as_f64()
             .map(|n| SqlValue::F32(n as f32))
@@ -3559,7 +3884,8 @@ fn json_to_sql_value(
             let s = v
                 .as_str()
                 .ok_or_else(|| format!("expected string for Time, got {v}"))?;
-            chrono::NaiveTime::parse_from_str(s, "%H:%M:%S")
+            // `%.f` too: dumpdata writes `12:34:56.789` (#1911).
+            chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
                 .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M"))
                 .map(SqlValue::Time)
                 .map_err(|e| format!("Time parse: {e}"))
@@ -3976,11 +4302,24 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         writeln!(w, "                     and exits without touching the DB.")?;
         writeln!(w, "  --app <label>      Limit to one app (repeatable).")?;
         writeln!(w, "  --model <name>     Limit to one model (repeatable).")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Postgres runs TRUNCATE … RESTART IDENTITY CASCADE: ids restart, and tables"
+        )?;
+        writeln!(
+            w,
+            "  that reference the targets are cleared too, even outside the filter."
+        )?;
+        writeln!(
+            w,
+            "  MySQL / SQLite delete the rows and keep their id counters."
+        )?;
         return Ok(());
     }
 
     // Collect target tables in inventory order.
-    let mut targets: Vec<&'static str> = Vec::new();
+    let mut targets: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
         let app = entry.resolved_app_label().unwrap_or("");
@@ -4000,7 +4339,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         {
             continue;
         }
-        targets.push(schema.table);
+        targets.push(schema);
     }
     if targets.is_empty() {
         writeln!(w, "flush: no tables match the filter (nothing to do)")?;
@@ -4014,7 +4353,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             targets.len()
         )?;
         for t in &targets {
-            writeln!(w, "  - {t}")?;
+            writeln!(w, "  - {}", t.table)?;
         }
         return Ok(());
     }
@@ -4027,7 +4366,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         // One big TRUNCATE — atomic, FK-aware, sequence-resetting.
         let quoted: Vec<String> = targets
             .iter()
-            .map(|t| format!(r#""{}""#, t.replace('"', r#""""#)))
+            .map(|t| pool.dialect().quote_ident(t.table))
             .collect();
         let sql = format!(
             "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
@@ -4038,14 +4377,18 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
         }
     } else {
-        // MySQL / SQLite: per-table DELETE in registration order.
-        // FK constraints from referencing tables may error; caller
-        // can scope with --app / --model.
-        for table in &targets {
-            let sql = format!(r#"DELETE FROM "{}""#, table.replace('"', r#""""#));
-            match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
+        // MySQL / SQLite: per-table DELETE in registration order, through
+        // the dialect's writer — hand-quoted `"t"` is a syntax error on
+        // MySQL (#1912). FK constraints from referencing tables may error;
+        // caller can scope with --app / --model.
+        for schema in &targets {
+            let all = crate::core::DeleteQuery {
+                model: schema,
+                where_clause: crate::core::WhereExpr::And(Vec::new()),
+            };
+            match crate::sql::delete_pool(pool, &all).await {
                 Ok(_) => cleared += 1,
-                Err(e) => failures.push(((*table).to_owned(), e.to_string())),
+                Err(e) => failures.push((schema.table.to_owned(), e.to_string())),
             }
         }
     }
@@ -4441,7 +4784,8 @@ async fn sendtestemail_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), M
          Sent by `manage sendtestemail`."
         .to_owned();
 
-    let mailer = crate::email::from_settings(&settings.mail);
+    let mailer = crate::email::from_settings(&settings.mail)
+        .map_err(|e| MigrateError::Validation(format!("sendtestemail: {e}")))?;
     let backend = settings.mail.backend.as_deref().unwrap_or("console");
 
     let email = crate::email::Email::new()
@@ -5192,6 +5536,36 @@ mod gen_tests {
         assert!(r.is_err());
     }
 
+    /// `pub mod type;` / `pub mod std;` do not build (#1913).
+    #[test]
+    fn names_that_make_a_reserved_module_are_refused() {
+        for n in ["Type", "Match", "Std", "Core", "Crate", "Self", "Super"] {
+            assert!(parse_name_and_model(&[n.into()]).is_err(), "{n}");
+        }
+        for n in ["type", "self", "std"] {
+            assert!(
+                parse_name_and_model_as(&[n.into()], NameShape::Identifier).is_err(),
+                "{n}"
+            );
+        }
+        assert!(parse_name_and_model(&["Typed".into()]).is_ok());
+    }
+
+    /// The model must be in scope or the derive can't name it (#1913).
+    #[test]
+    fn pool_templates_import_their_model() {
+        let vs = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
+        let ser = serializer_template("PostSerializer", "Post", "rustango");
+        for body in [&vs, &ser] {
+            assert!(body.contains("use crate::models::Post;"), "{body}");
+        }
+        let tenant = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(
+            tenant.contains(".merge(crate::post_view_set::router())"),
+            "{tenant}"
+        );
+    }
+
     // -------- dumpdata --------
 
     #[test]
@@ -5338,6 +5712,23 @@ mod gen_tests {
         // Out of range → Err.
         let r = json_to_sql_value(&serde_json::json!(99999999999_i64), &f);
         assert!(r.is_err());
+    }
+
+    /// Both arms the I64 docs promise, and the fractional time dumpdata writes (#1911).
+    #[test]
+    fn json_to_sql_value_reads_what_dumpdata_writes() {
+        let f = field("x", crate::core::FieldType::I64);
+        let v = json_to_sql_value(&serde_json::json!("42"), &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::I64(42)), "{v:?}");
+        assert!(json_to_sql_value(&serde_json::json!("4x"), &f).is_err());
+
+        let t = field("t", crate::core::FieldType::Time);
+        let v = json_to_sql_value(&serde_json::json!("12:34:56.789"), &t).unwrap();
+        let want = chrono::NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap();
+        assert!(
+            matches!(v, crate::core::SqlValue::Time(x) if x == want),
+            "{v:?}"
+        );
     }
 
     #[test]
@@ -5721,6 +6112,20 @@ mod gen_tests {
             body.contains("use rustango::ViewSet;"),
             "default crate root must emit `use rustango::ViewSet;`, got: {body}"
         );
+    }
+
+    /// A scaffolded ViewSet is not an anonymous CRUD API (#1857).
+    #[test]
+    fn viewset_templates_guard_writes() {
+        let live =
+            |body: &str, needle: &str| body.lines().any(|l| l.trim_start().starts_with(needle));
+        let tenant = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(
+            live(&tenant, ".permissions_for_model::<Post>()"),
+            "{tenant}"
+        );
+        let pool = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(live(&pool, "read_only,"), "{pool}");
     }
 
     #[test]

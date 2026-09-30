@@ -87,8 +87,8 @@ fn no_bare_axum_serve_in_the_crate() {
         offenders.is_empty(),
         "{} bare `axum::serve` call(s) — SIGTERM kills the process outright there, so \
          anything meant to run on shutdown (a job-queue drain, a metrics flush) never \
-         does, and nothing logs (#1409). Add \
-         `.with_graceful_shutdown(crate::shutdown::shutdown_signal())`.\n  {}",
+         does, and nothing logs (#1409). Wrap it in \
+         `crate::shutdown::serve_until_drained`.\n  {}",
         offenders.len(),
         offenders.join("\n  ")
     );

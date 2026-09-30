@@ -286,6 +286,9 @@ different type, name it: `ForeignKey<User, String>`. One-to-one uses
 | `blank` / `editable` | `#[rustango(editable = false)]` | form/admin behavior |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | column COMMENT |
 
+INSERT and UPDATE check these rules on literal values. A `set_expr(F(..))` value is
+computed by the database, so it is not checked.
+
 `choices`, `default`, `auto_now_add`, and soft-delete together (all verified):
 
 ```rust

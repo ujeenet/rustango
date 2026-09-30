@@ -373,6 +373,7 @@ fn unquote_display_name(raw: &str) -> String {
 // ------------------------------------------------------------------ MailError
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MailError {
     #[error("invalid message: {0}")]
     InvalidMessage(String),
@@ -380,6 +381,17 @@ pub enum MailError {
     BadHeader(String),
     #[error("transport error: {0}")]
     Transport(String),
+    /// The `[mail]` settings cannot build the backend they ask for.
+    #[error("mail config: {0}")]
+    Config(String),
+}
+
+impl MailError {
+    /// Only a transport failure can succeed on a later try (#1923).
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transport(_))
+    }
 }
 
 /// Reject `\r` / `\n` in single-line header fields. Returns
@@ -632,30 +644,6 @@ impl Mailer for NullMailer {
     }
 }
 
-/// Build a [`BoxedMailer`] from a loaded
-/// [`crate::config::MailSettings`] section (#87 wiring, v0.29).
-///
-/// Backend selection from `s.backend`:
-/// - `"console"` (default) → [`ConsoleMailer`]
-/// - `"memory"` → [`InMemoryMailer`] (tests / staging snapshots)
-/// - `"null"` / `"none"` → [`NullMailer`]
-/// - `"smtp"` → falls back to [`ConsoleMailer`] with a warning —
-///   `SmtpMailer` is documented but not yet implemented; until
-///   that ships, projects that need real SMTP wire it themselves
-///   via [`BoxedMailer`]
-/// - any other / unset → [`ConsoleMailer`] (dev-friendly default;
-///   warn for typos)
-///
-/// `s.smtp_host` and `s.from_address` are accepted by the section
-/// but currently unused at the backend layer — `from_address`
-/// belongs on the per-message [`Email::from`] field, not the
-/// backend; `smtp_host` lights up when `SmtpMailer` ships.
-///
-/// ```ignore
-/// let cfg = rustango::config::Settings::load_from_env()?;
-/// let mailer: rustango::email::BoxedMailer =
-///     rustango::email::from_settings(&cfg.mail);
-/// ```
 /// Fire-and-forget single-message helper. Returns `Ok(())` on
 /// success.
 ///
@@ -806,11 +794,25 @@ async fn send_to_list(
     Ok(list.len())
 }
 
+/// Build a [`BoxedMailer`] from the `[mail]` section.
+///
+/// `backend`: `"console"` (default), `"memory"`, `"null"` / `"none"`,
+/// `"file"` (needs `file_email_dir`) or `"smtp"` ([`smtp::SmtpMailer`],
+/// feature `email-smtp`).
+///
+/// ```ignore
+/// let cfg = rustango::config::Settings::load_from_env()?;
+/// let mailer = rustango::email::from_settings(&cfg.mail)?;
+/// ```
+///
+/// # Errors
+/// [`MailError::Config`] when `backend = "smtp"` cannot be built: no
+/// `smtp_host`, a bad `from_address` or `smtp_tls`, or no `email-smtp`
+/// feature. Falling back to the console put reset links in logs (#1923).
 #[cfg(feature = "config")]
-#[must_use]
-pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
-    match s.backend.as_deref() {
-        Some("smtp") => smtp_from_settings_or_warn(s),
+pub fn from_settings(s: &crate::config::MailSettings) -> Result<BoxedMailer, MailError> {
+    Ok(match s.backend.as_deref() {
+        Some("smtp") => smtp_from_settings(s)?,
         Some("memory") => Arc::new(InMemoryMailer::new()),
         Some("null" | "none") => Arc::new(NullMailer),
         Some("file") => file_from_settings_or_warn(s),
@@ -823,7 +825,7 @@ pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
             );
             Arc::new(ConsoleMailer)
         }
-    }
+    })
 }
 
 /// File-backend resolver — needs `[mail].file_email_dir` to be set,
@@ -844,42 +846,25 @@ fn file_from_settings_or_warn(s: &crate::config::MailSettings) -> BoxedMailer {
     }
 }
 
-/// SMTP-backend resolver. When the `email-smtp` feature is on,
-/// builds an [`SmtpMailer`] from the section — and falls back to
-/// [`ConsoleMailer`] with a tracing warning if the build fails (so
-/// apps don't refuse to boot on a malformed `[mail]` section). When
-/// the feature is off, emits the same legacy warning the pre-#48
-/// build did and falls back to [`ConsoleMailer`].
+/// `backend = "smtp"`: an [`SmtpMailer`] or an error, never the console.
 #[cfg(all(feature = "config", feature = "email-smtp"))]
-fn smtp_from_settings_or_warn(s: &crate::config::MailSettings) -> BoxedMailer {
+fn smtp_from_settings(s: &crate::config::MailSettings) -> Result<BoxedMailer, MailError> {
     match smtp::from_settings(s) {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            tracing::warn!(
-                target: "rustango::email",
-                "mail.backend = \"smtp\" but [mail].smtp_host is unset; falling back to ConsoleMailer."
-            );
-            Arc::new(ConsoleMailer)
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: "rustango::email",
-                error = %e,
-                "mail.backend = \"smtp\" but SmtpMailer build failed; falling back to ConsoleMailer."
-            );
-            Arc::new(ConsoleMailer)
-        }
+        Ok(Some(m)) => Ok(m),
+        Ok(None) => Err(MailError::Config(
+            "mail.backend = \"smtp\" but [mail].smtp_host is unset".into(),
+        )),
+        Err(e) => Err(MailError::Config(format!(
+            "mail.backend = \"smtp\" cannot be built: {e}"
+        ))),
     }
 }
 
 #[cfg(all(feature = "config", not(feature = "email-smtp")))]
-fn smtp_from_settings_or_warn(_s: &crate::config::MailSettings) -> BoxedMailer {
-    tracing::warn!(
-        target: "rustango::email",
-        "mail.backend = \"smtp\" but the `email-smtp` feature isn't enabled in this build; \
-         falling back to ConsoleMailer. Enable `email-smtp` to ship a real SMTP transport.",
-    );
-    Arc::new(ConsoleMailer)
+fn smtp_from_settings(_s: &crate::config::MailSettings) -> Result<BoxedMailer, MailError> {
+    Err(MailError::Config(
+        "mail.backend = \"smtp\" but this build has no `email-smtp` feature".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -951,7 +936,7 @@ mod tests {
     async fn from_settings_memory_backend_captures_send() {
         let mut s = crate::config::MailSettings::default();
         s.backend = Some("memory".into());
-        let m = from_settings(&s);
+        let m = from_settings(&s).expect("mailer");
         let email = Email::new()
             .to("a@x.com")
             .from("noreply@x.com")
@@ -971,7 +956,7 @@ mod tests {
     async fn from_settings_null_backend_drops_send() {
         let mut s = crate::config::MailSettings::default();
         s.backend = Some("null".into());
-        let m = from_settings(&s);
+        let m = from_settings(&s).expect("mailer");
         let email = Email::new()
             .to("a@x.com")
             .from("noreply@x.com")
@@ -989,7 +974,7 @@ mod tests {
     #[tokio::test]
     async fn from_settings_unset_falls_back_to_console() {
         let s = crate::config::MailSettings::default();
-        let m = from_settings(&s);
+        let m = from_settings(&s).expect("mailer");
         let email = Email::new()
             .to("a@x.com")
             .from("noreply@x.com")
@@ -998,26 +983,45 @@ mod tests {
         m.send(&email).await.expect("console mailer ok");
     }
 
-    /// SMTP backend: when `email-smtp` feature is enabled,
-    /// `from_settings` with an `smtp_host` builds a real
-    /// [`crate::email::SmtpMailer`] (no network contact — just
-    /// constructs the transport). When the feature is off, the
-    /// same call falls back to `ConsoleMailer` with a warning.
-    ///
-    /// We only assert that the mailer was successfully created (no
-    /// `.send()` — there's no real relay at `mail.example.com` in
-    /// the test environment).
-    #[cfg(feature = "config")]
+    /// `smtp` with a host builds a mailer; no contact is made.
+    #[cfg(all(feature = "config", feature = "email-smtp"))]
     #[tokio::test]
     async fn from_settings_smtp_builds_mailer_when_host_given() {
         let mut s = crate::config::MailSettings::default();
         s.backend = Some("smtp".into());
         s.smtp_host = Some("mail.example.com".into());
         s.smtp_tls = Some("starttls".into());
-        let m = from_settings(&s);
-        // The mailer was constructed. On `email-smtp` builds this is a
-        // SmtpMailer; on non-smtp builds it is ConsoleMailer. Either
-        // way the `Arc<dyn Mailer>` is valid — we just don't send.
-        drop(m);
+        from_settings(&s).expect("smtp mailer");
+    }
+
+    /// A broken `smtp` section is an error, not a console that sends
+    /// reset links to the log (#1923).
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_broken_smtp_section_is_an_error() {
+        let smtp = |f: fn(&mut crate::config::MailSettings)| {
+            let mut s = crate::config::MailSettings::default();
+            s.backend = Some("smtp".into());
+            s.smtp_host = Some("mail.example.com".into());
+            f(&mut s);
+            from_settings(&s).map(|_| ())
+        };
+        assert!(matches!(
+            smtp(|s| s.smtp_host = None),
+            Err(MailError::Config(_))
+        ));
+        assert!(matches!(
+            smtp(|s| s.from_address = Some("not an address".into())),
+            Err(MailError::Config(_))
+        ));
+        // `tls` reads as STARTTLS to most people but meant implicit TLS.
+        assert!(matches!(
+            smtp(|s| s.smtp_tls = Some("tls".into())),
+            Err(MailError::Config(_))
+        ));
+        assert!(matches!(
+            smtp(|s| s.smtp_tls = Some("bogus".into())),
+            Err(MailError::Config(_))
+        ));
     }
 }

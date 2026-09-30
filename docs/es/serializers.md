@@ -480,6 +480,8 @@ Escribe un módulo inicial que rellenas:
 
 use rustango::Serializer;
 
+use crate::models::Post;
+
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = Post)]
 pub struct PostSerializer {

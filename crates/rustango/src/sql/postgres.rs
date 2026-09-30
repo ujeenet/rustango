@@ -10,10 +10,10 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 #[cfg(feature = "postgres")]
-use crate::core::{ModelSchema, SearchClause, WhereExpr};
+use crate::core::{SearchClause, WhereExpr};
 
 #[cfg(feature = "postgres")]
 use super::writers;
@@ -58,6 +58,16 @@ impl Dialect for Postgres {
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
             self.quote_ident(table),
             self.quote_ident(name)
+        ))
+    }
+
+    fn reset_sequence_sql(&self, table: &str, column: &str) -> Option<String> {
+        let (t, c) = (self.quote_ident(table), self.quote_ident(column));
+        Some(format!(
+            "SELECT setval(pg_get_serial_sequence({}, {}), COALESCE(MAX({c}), 1), \
+             MAX({c}) IS NOT NULL) FROM {t}",
+            self.placeholder(1),
+            self.placeholder(2),
         ))
     }
 
@@ -184,6 +194,7 @@ impl Dialect for Postgres {
     fn write_conflict_clause(
         &self,
         sql: &mut String,
+        _model: &ModelSchema,
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {

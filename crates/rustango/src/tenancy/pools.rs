@@ -27,7 +27,8 @@
 //! tenant takes the slot. The cap is the live pool count, so the
 //! connection budgets below are real. Before 0.57.12 database mode
 //! refused forever (#1527) and schema mode rebuilt a pool per request
-//! (#1528).
+//! (#1528). Each entry remembers the `database_url` / schema it was
+//! built from; an `Org` naming another one is a miss (#1882).
 //!
 //! Schema-mode tenants don't consume the *database* cache — acquiring
 //! a connection reuses the registry pool. Their separate cache holds
@@ -347,15 +348,44 @@ impl TenantPool<sqlx::Postgres> {
 /// different cap policies, which is how they got here (#1527).
 pub(super) struct CachedPool<DB: Database> {
     pub(super) pool: Arc<sqlx::Pool<DB>>,
+    source: PoolSource,
     last_used: AtomicU64,
 }
 
+/// What a cached pool was built from. An `Org` naming another source is
+/// a miss, so an edit made by another process reaches this one (#1882).
+/// No `Debug`: the URL can carry a password.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum PoolSource {
+    /// `Org.database_url` as stored (the secret reference, unresolved).
+    Database(Option<String>),
+    /// The schema baked into the pool's `search_path`.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    Schema(String),
+}
+
+impl PoolSource {
+    pub(super) fn database(org: &Org) -> Self {
+        Self::Database(org.database_url.clone())
+    }
+}
+
 impl<DB: Database> CachedPool<DB> {
-    pub(super) fn new(pool: Arc<sqlx::Pool<DB>>, tick: u64) -> Self {
+    pub(super) fn new(pool: Arc<sqlx::Pool<DB>>, source: PoolSource, tick: u64) -> Self {
         Self {
             pool,
+            source,
             last_used: AtomicU64::new(tick),
         }
+    }
+
+    /// The cached pool for `slug`, only if it was built from `source`.
+    pub(super) fn lookup<'a>(
+        cache: &'a HashMap<String, Self>,
+        slug: &str,
+        source: &PoolSource,
+    ) -> Option<&'a Self> {
+        cache.get(slug).filter(|entry| entry.source == *source)
     }
 
     /// Mark as just used. Takes `&self` so a hit records itself under
@@ -767,12 +797,18 @@ impl<DB: Database> TenantPools<DB> {
         self.cache.read().await.len()
     }
 
+    /// Number of schema-mode scoped pools currently cached.
+    pub async fn cached_scoped_pool_count(&self) -> usize {
+        self.scoped_cache.read().await.len()
+    }
+
     async fn pool_for_database_mode(&self, org: &Org) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
         // Fast path: cache hit. Recording the hit needs only `&`, so
         // the LRU stamp costs no write lock here.
+        let source = PoolSource::database(org);
         {
             let cache = self.cache.read().await;
-            if let Some(entry) = cache.get(&org.slug) {
+            if let Some(entry) = CachedPool::lookup(&cache, &org.slug, &source) {
                 entry.touch(self.next_tick());
                 return Ok(Arc::clone(&entry.pool));
             }
@@ -811,10 +847,12 @@ impl<DB: Database> TenantPools<DB> {
 
         // Insert under write lock; check for race, then make room.
         let mut cache = self.cache.write().await;
-        if let Some(existing) = cache.get(&org.slug) {
+        if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
             existing.touch(self.next_tick());
             return Ok(Arc::clone(&existing.pool));
         }
+        // A pool built from an older source is replaced, not kept.
+        cache.remove(&org.slug);
         // Evict rather than refuse: refusing left tenant 65 down until
         // restart (#1527).
         for slug in evict_to_fit(&mut cache, self.config.max_cached_database_pools) {
@@ -832,7 +870,7 @@ impl<DB: Database> TenantPools<DB> {
         }
         cache.insert(
             org.slug.clone(),
-            CachedPool::new(Arc::clone(&pool), self.next_tick()),
+            CachedPool::new(Arc::clone(&pool), source, self.next_tick()),
         );
         self.warn_if_near_cap(
             cache.len(),
@@ -1072,9 +1110,10 @@ impl TenantPools<sqlx::Postgres> {
         match self.pool_for_org(org).await? {
             TenantPool::Schema { schema, registry } => {
                 // Fast path: cache hit. Mirrors `pool_for_database_mode`.
+                let source = PoolSource::Schema(schema.clone());
                 {
                     let cache = self.scoped_cache.read().await;
-                    if let Some(entry) = cache.get(&org.slug) {
+                    if let Some(entry) = CachedPool::lookup(&cache, &org.slug, &source) {
                         entry.touch(self.next_tick());
                         return Ok((*entry.pool).clone());
                     }
@@ -1096,10 +1135,11 @@ impl TenantPools<sqlx::Postgres> {
 
                 // Insert under write lock; check for race, then make room.
                 let mut cache = self.scoped_cache.write().await;
-                if let Some(existing) = cache.get(&org.slug) {
+                if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
                     existing.touch(self.next_tick());
                     return Ok((*existing.pool).clone());
                 }
+                cache.remove(&org.slug);
                 // Evict rather than skip the cache: skipping built a
                 // fresh pool per request, uncapped (#1528). Safe here
                 // because a scoped pool is cheap to rebuild.
@@ -1117,7 +1157,7 @@ impl TenantPools<sqlx::Postgres> {
                 }
                 cache.insert(
                     org.slug.clone(),
-                    CachedPool::new(Arc::new(scoped.clone()), self.next_tick()),
+                    CachedPool::new(Arc::new(scoped.clone()), source, self.next_tick()),
                 );
                 self.warn_if_near_cap(cache.len(), self.config.max_cached_scoped_pools, "schema");
                 Ok(scoped)

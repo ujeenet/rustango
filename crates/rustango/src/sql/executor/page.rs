@@ -1,4 +1,4 @@
-//! `Page<T>` result + `inject_total_count` helper.
+//! `Page<T>` result + the paginated SELECT that counts its total.
 //!
 //! Extracted from `executor/mod.rs` as part of #116 step 2. The
 //! pagination shape is small and depends on nothing else from the
@@ -37,7 +37,7 @@ impl<T> Default for Page<T> {
 /// rows correctly when the inner has no LIMIT, but with LIMIT the
 /// outer COUNT would only see the limited slice — so we depend on
 /// the fast path matching).
-pub(super) fn inject_total_count(sql: &str) -> String {
+fn inject_total_count(sql: &str) -> String {
     if let Some(idx) = sql.find(" FROM ") {
         let mut out = String::with_capacity(sql.len() + 48);
         out.push_str(&sql[..idx]);
@@ -54,4 +54,22 @@ pub(super) fn inject_total_count(sql: &str) -> String {
              below will run unchanged but `total` will be 0. */ {sql}"
         )
     }
+}
+
+/// The page query: `select` plus a `__rustango_total` column holding the
+/// pre-LIMIT row count.
+pub(super) fn paginated_statement(
+    d: &dyn crate::sql::Dialect,
+    select: &crate::core::SelectQuery,
+) -> Result<crate::sql::CompiledStatement, crate::sql::SqlError> {
+    if select.compound.is_empty() {
+        let stmt = d.compile_select(select)?;
+        return Ok(crate::sql::CompiledStatement {
+            sql: inject_total_count(&stmt.sql),
+            params: stmt.params,
+        });
+    }
+    let mut b = crate::sql::writers::Sql::new(d);
+    crate::sql::writers::write_compound_with_total(&mut b, select)?;
+    Ok(b.finish())
 }

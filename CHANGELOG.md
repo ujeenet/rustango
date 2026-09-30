@@ -4,6 +4,253 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.11] — 2026-09-30
+
+### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)
+
+`annotate_sum` over an M2M or generic relation no longer truncates a float column.
+`values(..).annotate(..)` now honours `distinct()`, `union()`, derived joins, `limit` and `offset`.
+There `.join()` joins run inside the grouped rows; grouping by a joined column of a `union()` is refused.
+
+### Fixed — `upsert` conflict target ignores field and partial unique indexes (#1935)
+
+Only a container-level `unique_together` (or `index(…, unique)`) without a `WHERE` is the
+target; otherwise the PK. An upsert on a set PK no longer fails on a field `index(unique)`.
+**Breaking:** an upsert of a new row whose field `index(unique)` value is taken now fails with
+a unique violation instead of updating that row; declare `unique_together` to keep the old target.
+
+### Fixed — `values()` reads Uuid and bytes columns on every backend (#1901)
+
+`values_dict` / `values_list` return `SqlValue::Uuid` and `SqlValue::Binary` instead of
+`Null` on SQLite and PostgreSQL, and bytes instead of `Null` on MySQL.
+
+### Fixed — compound queries keep the first branch whole (#1890)
+
+A union's first branch keeps its derived-table joins, DISTINCT and projection, and `values()`
+projects every branch. `fetch_paginated_pool` counts all branches; the MySQL/SQLite
+`distinct_on` keeps search and derived joins; `paginate()` orders by PK when unordered.
+
+### Fixed — PostgreSQL `bulk_update` of a column that is NULL in every row (#1888)
+
+Each NULL in the VALUES list is cast to its column type, so it no longer fails as text.
+
+### Fixed — MySQL do-nothing inserts use the PK and report skips (#1887)
+
+`insert_or_ignore` and friends no longer need an `id` column, and `insert_or_ignore` returns
+`false` for a skipped row. An upsert on an auto PK reads back the updated row's id, and
+`insert_returning_*` read it from the INSERT itself, not the session. New `rustango::sql::insert_or_ignore`.
+**Breaking:** `Dialect::write_conflict_clause` takes a `model: &ModelSchema` argument.
+
+## [0.59.10] — 2026-09-30
+
+### Fixed — tenancy `migrate` verbs honour their flags and scope (#1909)
+
+`migrate-registry --dry-run` previews instead of migrating; `migrate <target>` and
+`migrate --dry-run` see registry-scoped migrations only. **Breaking:** `migrate-registry`
+and `migrate-tenants` refuse flags they don't take, and a tenant-scoped `<target>` is refused.
+
+### Fixed — the CLI honours `with_tenant_pools` on SQLite and MySQL (#1914)
+
+Every backend now builds its `TenantPools` in one place, so `prewarm-pools` and
+`migrate-tenants` use the configured sizing, and `user_model` works without `postgres`.
+
+### Fixed — scaffolded viewsets and serializers compile (#1913)
+
+`make:viewset` (pool) and `make:serializer` import their model; the tenant viewset's mount
+comment names the file it wrote. `make:*` and `cargo rustango new` refuse names that
+become a Rust keyword or `std` / `core` / `crate` / `self` / `super`.
+
+### Fixed — `dumpdata` / `loaddata` round-trip (#1911)
+
+`loaddata` reads the fractional times `dumpdata` writes and integer strings for `i64`,
+loads parents before children, and resets Postgres id sequences, so the next insert
+doesn't collide. **Breaking:** `dumpdata` refuses Array, Range, HStore, Vector and Geometry
+columns (they were dumped as `null`), and `loaddata` exits non-zero when it skipped a row.
+New `Dialect::reset_sequence_sql` and `dumpdata --exclude`. Self-FK rows load parents first,
+and `--fail-fast` still resets sequences.
+
+### Fixed — `flush --yes` works on MySQL (#1912)
+
+Rows are deleted through the dialect's own `DELETE`; the hand-quoted `"table"` was a
+syntax error (1064) on MySQL for every table.
+
+### Fixed — tenancy user, permission and host verbs parse flags (#1910)
+
+`create-user acme --superuser` no longer makes a user named `--superuser`; a failed
+first-user check is an error, not a superuser; prompted passwords keep their spaces;
+`set-host-enabled --enabled false` reads `false` as the value. **Breaking:** `grant-perm`,
+`revoke-perm` and the host verbs refuse unknown flags (`--rol` granted to a user), and a
+valued flag refuses a following `--flag` as its value.
+
+### Fixed — shutdown has a drain deadline; interrupted runs are closed (#1883)
+
+After SIGTERM open connections get `[server] shutdown_timeout_secs` (default 20) to finish,
+then close; new `shutdown::serve_until_drained` and `server::Builder::drain_timeout`.
+Provisioning/migration runs left `running` for an hour are marked failed at boot, and a
+webhook retry of a failed run provisions again under the same `event_id`, resuming a
+tenant the failed run left inactive. A closed run is never reopened by its task. The stale
+limit is `WebhookConfig::stale_run_after` / `Builder::stale_run_after`.
+
+### Fixed — a broken SMTP config fails instead of mailing to stdout (#1923)
+
+**Breaking:** `email::from_settings` returns `Result`; `backend = "smtp"` with no host, a bad
+`from_address`, no `email-smtp` feature, or `smtp_tls = "tls"` / an unknown mode is a
+`MailError::Config` (new; `MailError` is now `#[non_exhaustive]`). `EmailJob` retries only
+transport errors, `dispatch_email` validates first, and `SmtpMailer` sends `Email.headers`.
+
+### Fixed — a bad settings value no longer boots on defaults (#1927)
+
+**Breaking:** with `Cli::with_settings_from_env`, a config that exists but does not load
+(bad TOML, a wrong type, a bad `RUSTANGO__*` override) now makes `Cli::run` fail. Only a
+missing `config/default.toml` still runs on Cli defaults. New `ConfigError::is_missing_config`.
+
+### Fixed — tenant pools follow `database_url` / schema edits from other processes (#1882)
+
+A cached tenant pool is keyed by the source it was built from, so a moved tenant is served
+from its new location once the Org cache refreshes (30 s), on every replica. New
+`TenantPools::cached_scoped_pool_count`.
+
+### Fixed — purging a tenant with an extra host (#1930)
+
+Purge now deactivates the tenant and evicts its pools first, drops the storage, then
+deletes its `rustango_org_hosts` rows and the Org. A failed purge can be retried.
+
+## [0.59.9] — 2026-09-30
+
+### Fixed — `DatabaseCache::incr` is atomic (#1871)
+
+One upsert per dialect, so parallel failed logins all count toward the lockout.
+The TTL is set when the counter is created, not on every call.
+
+### Fixed — change-password checks go through the login gate (#1873)
+
+A wrong current password on the admin, tenant admin and operator console forms now
+counts toward the account lock, so a stolen session cannot guess it at hash speed.
+
+### Fixed — `TrailingSlashLayer` open redirect (#1869)
+
+`//evil.com` and `/\evil.com` redirected off-site; the target's leading slashes and
+backslashes now collapse to one `/`, for both `Append` and `Strip`.
+
+### Fixed — uploaded HTML/SVG no longer runs on the app origin (#1849)
+
+New `with_uploads` (on `Cli` and `server::Builder`) and `StaticFiles::user_content` serve
+HTML, SVG and XML as `attachment` with `nosniff`. An empty `allowed_extensions` now refuses
+`ACTIVE_EXTENSIONS`, and `UploadConfig::max_files` (default 20) caps files per request.
+
+### Fixed — open ViewSets warn at mount, `make:viewset` guards writes (#1857)
+
+A ViewSet whose create/update/destroy need no codename logs a `rustango::viewset` warning;
+`.allow_anonymous()` (or `#[viewset(allow_anonymous)]`) says it is intended. `make:viewset`
+now scaffolds `.permissions_for_model()` (tenant) or `read_only` (pool).
+
+### Fixed — M2M on String / Uuid primary keys (#1926)
+
+The M2M managers bound every non-integer source PK as `0`, so all sources shared rows
+(MySQL matched any letter-first key). They now bind the real key and refuse an unsaved
+source with `ExecError::M2mUnsavedSource`. `M2MManager::contains` also decodes on PostgreSQL.
+**Breaking:** `M2mChangedContext::src_pk` is a `SqlValue`, not an `i64`.
+
+### Fixed — UPDATE checks field rules like INSERT (#1893)
+
+`update_pool`, `update_tx` and the audited `save_pool` now run `max_length`, `min` /
+`max`, `choices` and validators before writing, and `ModelForm::validate` reports them
+per field. **Breaking:** an update that broke these rules used to be stored; it now errors.
+
+### Fixed — template views bind values by field type (#1915)
+
+`CreateView` / `UpdateView` forms, `ListView` `filter_fields` and FK `_display` lookups
+now parse values like the admin (`forms::parse_form_value`) instead of binding text, so
+dates, UUIDs, decimals and JSON save on PostgreSQL and bool / int filters match on SQLite.
+**Breaking:** an empty or unparsable `ListView` filter value (bools take only
+`true`/`false`/`1`/`0`/`on`/`off`) is ignored. Filters accept `YYYY-MM-DD HH:MM:SS` datetimes.
+
+### Fixed — `default_uuid_v7` PKs on audited inserts and bulk writes (#1934)
+
+Audited `insert_pool` / `save_pool` no longer fail with `EmptyReturning`, and MySQL no
+longer overwrites the id with `LAST_INSERT_ID()`. `bulk_insert`, `bulk_upsert_pool` and
+`bulk_insert_or_ignore_pool` now fill `Uuid::now_v7()` per row instead of binding NULL.
+
+### Fixed — ModelForm, admin and CreateView report the PK they wrote (#1894)
+
+A client-set PK no longer comes back as MySQL's `LAST_INSERT_ID()` (`0`, so the admin
+redirected to `/0`), a Uuid PK no longer comes back as `NULL`, and a failed read is an
+error instead of `0` / `""`. All three now use the ORM's one PK read-back.
+
+### Fixed — formsets cap `TOTAL_FORMS` at 1000 (#1892)
+
+A huge client `TOTAL_FORMS` aborted the process (`Vec::with_capacity`) or pinned a worker
+in the admin inline loop. `total_forms` now refuses more than `formset::MAX_FORMS` (1000)
+with `FormSetError::TooManyForms`, and the admin re-renders the form with that error.
+**Breaking:** `FormSetError` gained a variant and is now `#[non_exhaustive]`.
+
+## [0.59.8] — 2026-09-30
+
+### Security — admin audit log needs `audit.view` / `audit.delete` (#1858)
+
+**Breaking:** a non-superuser gets 403 on the audit feed without `audit.view`, and
+sees only rows of tables they hold `{table}.view` on; cleanup needs `audit.delete`.
+The feed's record link no longer renders a raw `entity_pk` into `href`. The detail
+page's audit panel also needs `audit.view`; the cleanup form shows only with `audit.delete`.
+
+### Security — tenant admin puts `AdminSession` in request extensions (#1863)
+
+The translations editor now refuses non-superuser writes in the tenant admin too.
+New `admin::session::from_extensions` reads the extension, else the task-local.
+
+### Security — `register_admin_queryset!` scopes every admin route (#1859)
+
+Detail, edit, update, delete, bulk actions, autocomplete and facet counts now apply
+the hooks too, so a row the list hides is a 404. A delete of a missing row is a 404.
+Inline child rows follow the child table's hooks: hidden ones are neither shown nor editable.
+
+### Security — admin forms write only the fields they render (#1860)
+
+`editable = false` fields and fields outside `fieldsets` are no longer read from a
+create or edit POST, and an edit leaves them unchanged instead of NULL / `false`.
+
+### Fixed — `derive(Model)` builds schemas as full literals (#1720)
+
+A new `FieldSchema`, `ModelSchema` or `AdminConfig` field is a compile error in the derive again, not a silent `new()` default.
+
+### Tests — every session and flow cookie read has a happy-path test (#1694)
+
+A cookie reader that always returns `None` now fails a test at each call site.
+
+### Fixed — `DistributedLock` docs on `DatabaseCache` (#1837)
+
+`DatabaseCache::add` is atomic, so a DB-backed lock is safe across replicas; the page said it was not.
+
+### Fixed — test suites build with `postgres,sqlite,tenancy` (#1835)
+
+`urlencoding` is a dev-dependency, and the S3 and job-queue suites are gated on their features.
+
+### Fixed — `count()` / `exists()` / `sum()` honour the whole queryset (#1885)
+
+`.none()` now counts 0 without a query. Limit, offset, DISTINCT, joins, relation-span
+filters and `union()` are counted and aggregated through a derived table instead of dropped.
+`exists()` / `is_empty()` read at most one row, and unused ORDER BYs are dropped.
+
+### Fixed — `Sum` of a float column is no longer cast to an integer (#1886)
+
+`SUM` casts from the column type: float columns to double, decimals stay exact.
+SQLite has no decimal type; a NUMERIC `SUM` there reads as `f64` / `i64`.
+
+### Fixed — a multi-batch `bulk_insert_pool` is all-or-nothing (#1891)
+
+Batches split by the bind limit share one transaction. Inside `atomic()` on the same pool,
+any size runs in a savepoint of it, so the outer rollback undoes it.
+
+### Fixed — relation-span filters no longer leak memory per query (#1889)
+
+Multi-hop join aliases are interned once per path instead of leaked on every `compile()`.
+Paths deeper than 6 hops are refused, which keeps that set bounded by the schema.
+
+### Fixed — a job heartbeat no longer freezes the job (#1961)
+
+The `PgJobQueue` heartbeat now runs beside the job, so a job holding the last pool
+connection (or SQLite's writer) no longer stalls until `acquire_timeout`.
+
 ## [0.59.7] — 2026-09-30
 
 ### Security — `JwtBackend` checks the tenant binding (#1848)
@@ -1842,7 +2089,6 @@ exploitable?" answered honestly — including where the answer is no.
   emits a form MySQL rejects with error 1235 when the inner select has
   one, and `WhereExpr::RelExists` has no public builder. With those
   closed this function is about eight lines of ORM.
-
 
 - **Three write-path regressions this release introduced**, found by a
   crew review of the assembled branch. 0.57.6 had none of them.
@@ -3986,7 +4232,6 @@ neither did. Those releases are yanked; upgrade to this one.
   keep working.
 
 ### Added
-
 
 - **Squash reconciliation — `Migration.replaces`** (#1167) — a squash collapses
   a run of historical migrations into one file that recreates the same end

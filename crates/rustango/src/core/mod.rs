@@ -41,6 +41,8 @@ pub use schema::{
     GlobalScope, IndexMethod, IndexSchema, ListSelectRelated, M2MRelation, Model, ModelEntry,
     ModelSchema, ModelScope, OnDeleteAction, PrepopulatedField, Relation, ReverseRelation,
 };
+#[doc(hidden)]
+pub use schema::{AdminConfigParts, FieldSchemaParts, ModelSchemaParts};
 pub use validate::validate_value;
 pub use value::SqlValue;
 pub use window::{FrameBoundary, FrameKind, WindowExpr, WindowFn, WindowFrame};

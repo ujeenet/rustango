@@ -75,7 +75,7 @@ pub struct Cli {
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
     /// to swap in a custom [`crate::tenancy::TenantUserModel`].
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     init_tenancy_fn: crate::tenancy::manage::InitTenancyFn,
     /// Cloned [`Settings`] handle stored by [`Cli::with_settings`].
     /// Consumed at `runserver` time to apply layers (security_headers,
@@ -84,6 +84,9 @@ pub struct Cli {
     /// the whole stack.
     #[cfg(feature = "config")]
     settings_for_layers: Option<crate::config::Settings>,
+    /// A config that exists but does not load; `run` refuses to start (#1927).
+    #[cfg(feature = "config")]
+    settings_error: Option<crate::config::ConfigError>,
     /// When `true`, mounts `/health` + `/ready` endpoints on the
     /// API router at runserver time. Set via [`Cli::with_health`].
     /// Default `false` because operators sometimes want their own
@@ -97,13 +100,12 @@ pub struct Cli {
     /// Set via [`Cli::with_tenant_pools`] (#1456).
     #[cfg(feature = "tenancy")]
     tenant_pools: Option<crate::tenancy::TenantPoolsConfig>,
-    /// `(prefix, root_dir)` pairs registered via [`Cli::with_static`].
-    /// Mounted at `runserver` time as
-    /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`.
+    /// Mounts registered via [`Cli::with_static`] and [`Cli::with_uploads`],
+    /// nested at `runserver` time as `Router::nest(prefix, static_router(files))`.
     /// Empty by default — projects that already mount their own
     /// `static_files::static_router` keep doing it.
     #[cfg(feature = "admin")]
-    static_dirs: Vec<(String, PathBuf)>,
+    static_dirs: Vec<(String, crate::static_files::StaticFiles)>,
     /// CSRF middleware config registered via [`Cli::with_csrf`]. `None`
     /// means no CSRF layer mounted — the right default for pure JSON
     /// APIs that authenticate via JWT and reject form-encoded bodies
@@ -142,10 +144,12 @@ impl Cli {
             tenancy: false,
             #[cfg(feature = "tenancy")]
             routes: None,
-            #[cfg(all(feature = "tenancy", feature = "postgres"))]
+            #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
+            #[cfg(feature = "config")]
+            settings_error: None,
             health_endpoints: false,
             provisioning_dir: None,
             #[cfg(feature = "tenancy")]
@@ -343,14 +347,13 @@ impl Cli {
 
     /// Auto-mount a [`crate::static_files::static_router`] at `prefix`
     /// serving files under `root_dir`. Repeat the call to mount more
-    /// than one directory (e.g. `/static` from `./assets`,
-    /// `/uploads` from `./var/uploads`).
+    /// than one directory. Mount user uploads with [`Self::with_uploads`].
     ///
     /// ```ignore
     /// rustango::manage::Cli::new()
     ///     .api(urls::api())
     ///     .with_static("/static", "./assets")
-    ///     .with_static("/uploads", "./var/uploads")
+    ///     .with_uploads("/uploads", "./var/uploads")
     ///     .run().await
     /// ```
     ///
@@ -364,7 +367,21 @@ impl Cli {
     #[cfg(feature = "admin")]
     #[must_use]
     pub fn with_static(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
-        self.static_dirs.push((prefix.into(), root_dir.into()));
+        let prefix = prefix.into();
+        crate::static_files::warn_if_uploads_prefix(&prefix);
+        let files = crate::static_files::StaticFiles::new(root_dir);
+        self.static_dirs.push((prefix, files));
+        self
+    }
+
+    /// [`Self::with_static`] for files users uploaded: HTML, SVG and XML
+    /// download instead of running on this origin
+    /// ([`crate::static_files::StaticFiles::user_content`]).
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn with_uploads(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
+        let files = crate::static_files::StaticFiles::new(root_dir).user_content();
+        self.static_dirs.push((prefix.into(), files));
         self
     }
 
@@ -559,21 +576,37 @@ impl Cli {
     /// rustango::manage::Cli::new().with_settings(&cfg)
     /// ```
     ///
-    /// Returns the original [`Cli`] unchanged when the layered
-    /// loader fails (e.g. `config/default.toml` missing) so projects
-    /// that haven't adopted the layered loader still build cleanly.
-    /// Errors are surfaced via `tracing::warn` so they're visible
-    /// without breaking startup.
+    /// With no `config/default.toml` the [`Cli`] runs on its defaults.
+    /// Any other load error (bad TOML, a value of the wrong type, a bad
+    /// `RUSTANGO__*` override) makes [`Cli::run`] fail instead (#1927).
     #[cfg(feature = "config")]
     #[must_use]
     pub fn with_settings_from_env(self) -> Self {
-        match crate::config::Settings::load_from_env() {
+        self.with_loaded_settings(crate::config::Settings::load_from_env())
+    }
+
+    #[cfg(feature = "config")]
+    fn with_loaded_settings(
+        mut self,
+        loaded: Result<crate::config::Settings, crate::config::ConfigError>,
+    ) -> Self {
+        match loaded {
             Ok(cfg) => self.with_settings(&cfg),
+            Err(e) if e.is_missing_config() => {
+                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file; running on Cli defaults");
+                self
+            }
             Err(e) => {
-                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: failed to load Settings; falling back to Cli defaults");
+                self.settings_error = Some(e);
                 self
             }
         }
+    }
+
+    /// The config error `run` refuses to start on, if any.
+    #[cfg(feature = "config")]
+    fn boot_settings_error(&self) -> Option<&crate::config::ConfigError> {
+        self.settings_error.as_ref()
     }
 
     /// Override the migrations directory. Defaults to `./migrations`.
@@ -611,7 +644,7 @@ impl Cli {
     ///     .user_model::<myapp::AppUser>()
     ///     .run().await
     /// ```
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
         self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
@@ -623,6 +656,10 @@ impl Cli {
     /// # Errors
     /// Surfaces whatever the underlying dispatcher / server returns.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(feature = "config")]
+        if let Some(e) = self.boot_settings_error() {
+            return Err(format!("refusing to start on a broken config: {e}").into());
+        }
         // v0.30.11 — install logging here (the outermost dispatch
         // point) so the WorkerGuard outlives BOTH the runserver
         // future AND the management-verb dispatch path. Installing
@@ -653,6 +690,50 @@ impl Cli {
             "" | "runserver" | "run-server" => self.runserver().await,
             _ => self.dispatch(args).await,
         }
+    }
+
+    /// The one place a tenancy verb gets its `TenantPools`, on every backend:
+    /// the SQLite / MySQL arms each built their own and dropped
+    /// `with_tenant_pools` and `user_model` (#1456, #1914).
+    #[cfg(feature = "tenancy")]
+    async fn run_tenancy_verb<DB: crate::sql::sqlx::Database>(
+        &self,
+        registry: crate::sql::sqlx::Pool<DB>,
+        url: &str,
+        args: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
+    {
+        self.run_tenancy_verb_to(registry, url, args, &mut std::io::stdout())
+            .await
+    }
+
+    #[cfg(feature = "tenancy")]
+    async fn run_tenancy_verb_to<DB: crate::sql::sqlx::Database, W: std::io::Write + Send>(
+        &self,
+        registry: crate::sql::sqlx::Pool<DB>,
+        url: &str,
+        args: Vec<String>,
+        out: &mut W,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
+    {
+        let mut pools = crate::tenancy::TenantPools::new(registry);
+        if let Some(cfg) = self.tenant_pools.clone() {
+            pools = pools.config(cfg);
+        }
+        crate::tenancy::manage::run_with_writer_and_init(
+            &pools,
+            url,
+            &self.migrations_dir,
+            args,
+            out,
+            self.init_tenancy_fn,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn dispatch(self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -749,16 +830,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_sqlite(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(pool);
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    self.init_tenancy_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(pool, &url, args).await;
             }
             #[cfg(feature = "mysql")]
             if scheme == "mysql" {
@@ -767,16 +839,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_mysql(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(pool);
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    self.init_tenancy_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(pool, &url, args).await;
             }
             if !matches!(scheme.as_str(), "postgres" | "postgresql") {
                 return Err(format!(
@@ -794,23 +857,7 @@ impl Cli {
             } else {
                 crate::sql::Pool::connect_postgres(&url).await?
             };
-            // #1456 — honour `Cli::with_tenant_pools`. This built
-            // `TenantPools::new(pool)` unconditionally, so tenant pool
-            // sizing was unreachable from every app that boots through
-            // `Cli`, which is every app the scaffolder generates.
-            let pools = match self.tenant_pools.clone() {
-                Some(cfg) => crate::tenancy::TenantPools::new(pool).config(cfg),
-                None => crate::tenancy::TenantPools::new(pool),
-            };
-            crate::tenancy::manage::run_with_init(
-                &pools,
-                &url,
-                &self.migrations_dir,
-                args,
-                self.init_tenancy_fn,
-            )
-            .await?;
-            return Ok(());
+            return self.run_tenancy_verb(pool, &url, args).await;
         }
         #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
         if self.tenancy {
@@ -826,17 +873,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_sqlite(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
-                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    init_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(p, &url, args).await;
             }
             #[cfg(all(not(feature = "sqlite"), feature = "mysql"))]
             {
@@ -845,17 +882,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_mysql(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(p);
-                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    init_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(p, &url, args).await;
             }
             #[cfg(not(any(feature = "sqlite", feature = "mysql")))]
             {
@@ -917,6 +944,15 @@ impl Cli {
     /// Generic over the pool type because the Postgres path extends a
     /// `PgPool` (handlers taking `Extension<PgPool>` predate the `Pool`
     /// enum) while the other two extend `crate::sql::Pool`.
+    /// `server.shutdown_timeout_secs`, or the default (#1883).
+    fn drain_timeout(&self) -> std::time::Duration {
+        #[cfg(feature = "config")]
+        if let Some(s) = &self.settings_for_layers {
+            return s.server.drain_timeout();
+        }
+        crate::shutdown::DEFAULT_DRAIN_TIMEOUT
+    }
+
     fn assemble_app<P>(&mut self, pool: P) -> Router
     where
         P: Clone + Send + Sync + 'static,
@@ -1129,14 +1165,20 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
+            let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            crate::shutdown::serve_until_drained(
+                |stop| {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(stop)
+                },
+                drain,
             )
-            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
             run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
@@ -1168,14 +1210,20 @@ impl Cli {
                         .await
                         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 }
+                let drain = self.drain_timeout();
                 let app = self.assemble_app(pool);
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                crate::shutdown::serve_until_drained(
+                    |stop| {
+                        axum::serve(
+                            listener,
+                            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                        )
+                        .with_graceful_shutdown(stop)
+                    },
+                    drain,
                 )
-                .with_graceful_shutdown(crate::shutdown::shutdown_signal())
                 .await?;
                 run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
@@ -1187,6 +1235,7 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
+            let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
@@ -1194,11 +1243,16 @@ impl Cli {
             // populates `ConnectInfo<SocketAddr>` in request extensions.
             // Without it, `access_log` (and any other middleware that
             // reads the peer address) sees "-".
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            crate::shutdown::serve_until_drained(
+                |stop| {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(stop)
+                },
+                drain,
             )
-            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
             run_shutdown_hook(self.on_shutdown).await;
             Ok(())
@@ -1243,7 +1297,10 @@ impl Cli {
         // merged with the tenant admin and dispatched beside the
         // operator console, and layers applied now would reach neither.
         // The builder applies them to the outermost router instead.
-        let mut builder = crate::server::Builder::from_env().await?.api(api);
+        let mut builder = crate::server::Builder::from_env()
+            .await?
+            .api(api)
+            .drain_timeout(self.drain_timeout());
         builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
@@ -1251,8 +1308,8 @@ impl Cli {
         if let Some(dir) = self.provisioning_dir.clone() {
             builder = builder.with_tenant_provisioning(dir);
         }
-        for (prefix, root) in self.static_dirs {
-            builder = builder.with_static(prefix, root);
+        for (prefix, files) in self.static_dirs {
+            builder = builder.with_static_files(prefix, files);
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
@@ -1331,8 +1388,8 @@ impl Cli {
         if let Some(dir) = self.provisioning_dir.clone() {
             builder = builder.with_tenant_provisioning(dir);
         }
-        for (prefix, root) in self.static_dirs {
-            builder = builder.with_static(prefix, root);
+        for (prefix, files) in self.static_dirs {
+            builder = builder.with_static_files(prefix, files);
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
@@ -1408,13 +1465,10 @@ fn try_mount_welcome(api: Router) -> Router {
 }
 
 #[cfg(feature = "admin")]
-fn mount_static_dirs(api: Router, dirs: &[(String, PathBuf)]) -> Router {
+fn mount_static_dirs(api: Router, dirs: &[(String, crate::static_files::StaticFiles)]) -> Router {
     let mut r = api;
-    for (prefix, root) in dirs {
-        r = r.nest(
-            prefix,
-            crate::static_files::static_router(crate::static_files::StaticFiles::new(root.clone())),
-        );
+    for (prefix, files) in dirs {
+        r = r.nest(prefix, crate::static_files::static_router(files.clone()));
     }
     r
 }
@@ -1496,8 +1550,13 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
 /// configured (the common case for projects that never used `Settings`).
 #[cfg(feature = "config")]
 fn warn_if_settings_inert() {
-    let Ok(s) = crate::config::Settings::load_from_env() else {
-        return;
+    let s = match crate::config::Settings::load_from_env() {
+        Ok(s) => s,
+        Err(e) if e.is_missing_config() => return,
+        Err(e) => {
+            tracing::warn!(target: "rustango::manage", error = %e, "the config does not load; none of it is applied");
+            return;
+        }
     };
     let inert = inert_layer_settings(&s);
     if inert.is_empty() {
@@ -1749,6 +1808,49 @@ fn routes_from_settings(
 mod tests {
     use super::*;
 
+    /// `with_tenant_pools` reaches a SQLite tenancy verb (#1914): cap 0
+    /// skips the one tenant; the default config would warm it.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn sqlite_tenancy_verbs_honour_with_tenant_pools() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
+        let cli = Cli::new()
+            .tenancy()
+            .migrations_dir(tmp.path().join("migrations"))
+            .with_tenant_pools(crate::tenancy::TenantPoolsConfig {
+                max_cached_database_pools: 0,
+                ..Default::default()
+            });
+        let registry = crate::sql::Pool::connect_sqlite(&url)
+            .await
+            .expect("connect");
+        let run = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let mut out: Vec<u8> = Vec::new();
+        for args in [
+            run(&["migrate-registry"]),
+            run(&[
+                "create-tenant",
+                "acme",
+                "--mode",
+                "database",
+                "--backend",
+                "sqlite",
+                "--database-url",
+                &tenant_url,
+                "--no-migrate",
+            ]),
+            run(&["prewarm-pools"]),
+        ] {
+            cli.run_tenancy_verb_to(registry.clone(), &url, args, &mut out)
+                .await
+                .expect("verb");
+        }
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.contains("skipped (cap) 1"), "{out}");
+    }
+
     #[test]
     fn defaults_are_sensible() {
         let cli = Cli::new().bind("0.0.0.0:8080"); // pin past any inherited RUSTANGO_BIND
@@ -1886,6 +1988,34 @@ mod tests {
     /// of the user's API router. Without `.with_settings`, the
     /// handle stays None — projects not using the layered loader
     /// pay no overhead.
+    /// One bad value used to boot on Cli defaults — no allowed_hosts,
+    /// headers or login limits (#1927). Only a missing file falls back.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn a_bad_settings_value_fails_boot_but_a_missing_file_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("default.toml"),
+            "[security]\nsecure_ssl_redirect = 1\n",
+        )
+        .unwrap();
+        let bad = crate::config::Settings::load_from(dir.path(), "dev");
+        assert!(matches!(bad, Err(crate::config::ConfigError::Shape(_))));
+        let cli = Cli::new().with_loaded_settings(bad);
+        assert!(cli.settings_for_layers.is_none());
+        let err = cli
+            .boot_settings_error()
+            .expect("a bad value must fail boot");
+        assert!(err.to_string().contains("secure_ssl_redirect"), "{err}");
+
+        let empty = tempfile::tempdir().unwrap();
+        let missing = crate::config::Settings::load_from(empty.path(), "dev");
+        assert!(Cli::new()
+            .with_loaded_settings(missing)
+            .boot_settings_error()
+            .is_none());
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn with_settings_stashes_handle_for_runtime_layering() {
@@ -2043,12 +2173,38 @@ mod tests {
             .with_static("/uploads", "./var/uploads");
         assert_eq!(cli.static_dirs.len(), 2);
         assert_eq!(cli.static_dirs[0].0, "/static");
-        assert_eq!(cli.static_dirs[0].1, std::path::PathBuf::from("./assets"));
+        assert_eq!(
+            cli.static_dirs[0].1.root(),
+            std::path::Path::new("./assets")
+        );
         assert_eq!(cli.static_dirs[1].0, "/uploads");
         assert_eq!(
-            cli.static_dirs[1].1,
+            cli.static_dirs[1].1.root(),
             std::path::PathBuf::from("./var/uploads")
         );
+    }
+
+    /// `with_uploads` serves uploaded HTML as a download, `with_static` inline (#1849).
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn with_uploads_downloads_html() {
+        use tower::ServiceExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.html"), "<script></script>").unwrap();
+        let cli = Cli::new()
+            .with_static("/static", dir.path())
+            .with_uploads("/uploads", dir.path());
+        let app = mount_static_dirs(Router::new(), &cli.static_dirs);
+        let get = |uri: &str| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let r = app.clone().oneshot(get("/uploads/x.html")).await.unwrap();
+        assert_eq!(r.headers()["content-disposition"], "attachment");
+        let r = app.oneshot(get("/static/x.html")).await.unwrap();
+        assert!(r.headers().get("content-disposition").is_none());
     }
 
     /// `Cli::with_welcome()` flips the flag for the runserver path.
@@ -2162,7 +2318,10 @@ mod tests {
 
         let app = mount_static_dirs(
             Router::new(),
-            &[("/static".into(), dir.path().to_path_buf())],
+            &[(
+                "/static".into(),
+                crate::static_files::StaticFiles::new(dir.path()),
+            )],
         );
         let resp = app
             .oneshot(

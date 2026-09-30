@@ -433,7 +433,7 @@ if let Some(layer) = rustango::body_limit::BodyLimitLayer::from_settings(&cfg.se
 let cache: rustango::cache::BoxedCache = rustango::cache::from_settings(&cfg.cache);
 
 // mailer backend selection — "console" / "memory" / "null" / "smtp"
-let mailer: rustango::email::BoxedMailer = rustango::email::from_settings(&cfg.mail);
+let mailer: rustango::email::BoxedMailer = rustango::email::from_settings(&cfg.mail)?;
 
 // jobs queue (memory only — JobQueue isn't object-safe so the trait
 // can't be a runtime backend picker; pg backend is wired manually):
@@ -2595,7 +2595,7 @@ Same builder shape as `with_health()`:
 rustango::manage::Cli::new()
     .api(urls::api())
     .with_static("/static", "./assets")        // CSS, JS, images
-    .with_static("/uploads", "./var/uploads")  // user-uploaded media
+    .with_uploads("/uploads", "./var/uploads") // user uploads: HTML/SVG download
     .run().await
 ```
 

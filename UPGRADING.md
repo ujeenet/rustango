@@ -150,6 +150,173 @@ untouched.
 
 ## Unreleased
 
+## 0.59.11
+
+### Relation `SUM` decodes by column type (#1944)
+
+`annotate_sum` over a relation's float column now reads back as `f64`, not `i64`.
+Grouping a `union()` by a `.join()` column now fails with `QueryError::GroupByJoinUnreachable`.
+
+### `upsert` targets the PK over a field `index(unique)` (#1935)
+
+**Breaking:** a model whose only unique index is a field `index(unique)` or a `unique_when`
+now upserts on the PK, so a new row with a taken value fails with a unique violation instead of
+updating the existing row. To target the column, declare `unique_together = "col"`.
+
+### `values()` returns `SqlValue::Uuid` for a Uuid column on MySQL (#1901)
+
+**Breaking:** MySQL gave `SqlValue::String`; match on `SqlValue::Uuid` as on the other backends.
+
+### `QuerySet::paginate` orders by PK when unordered (#1890)
+
+A queryset with no `order_by` now pages in PK order instead of the database's scan order.
+
+### `Dialect::write_conflict_clause` takes the model (#1887)
+
+**Breaking:** a custom `Dialect` adds a `model: &ModelSchema` argument. On MySQL,
+`insert_or_ignore` now returns `false` on a skip, and a skipped `DoNothing` through
+`insert_returning_pool` is `RowNotFound`, as on PostgreSQL.
+
+## 0.59.10
+
+### Tenancy `migrate` verbs refuse unknown flags (breaking)
+
+`migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;
+now an unknown flag is an error. Use `migrate-tenants` for a tenant-scoped target.
+
+### Scaffolder refuses keyword names
+
+`make:*` and `cargo rustango new` now refuse names like `Type`, `std` or `crate`; the
+code they generated for them did not compile.
+
+### `dumpdata` / `loaddata` fail instead of losing rows (breaking)
+
+`dumpdata` now errors on a model with an Array, Range, HStore, Vector or Geometry column;
+leave it out with the new `--exclude app.Model`. `loaddata` exits non-zero if any row was skipped.
+
+### Tenancy user and permission verbs refuse unknown flags (breaking)
+
+`grant-perm`, `revoke-perm`, `create-user` and the host verbs now fail on a flag they don't
+take. A password typed at the prompt is no longer trimmed: one set with a leading or
+trailing space before now logs in without it.
+
+### Shutdown drains for 20 s, then closes
+
+`runserver` no longer waits forever for open connections after SIGTERM. Set
+`[server] shutdown_timeout_secs` to change it, under your orchestrator's grace period.
+`ServerSettings` gained that field, so a struct literal needs `..Default::default()`.
+A webhook delivery whose earlier run failed now provisions again instead of returning
+`duplicate: true`. `WebhookConfig` gained `stale_run_after`; build it with `WebhookConfig::new`.
+
+### `email::from_settings` returns `Result` (breaking)
+
+Add `?`. A `backend = "smtp"` that cannot be built used to fall back to `ConsoleMailer`;
+it is now an error. Replace `smtp_tls = "tls"` with `"implicit"` (what it meant) or
+`"starttls"`. Match `MailError` with a `_` arm. `SmtpMailer` refuses custom envelope headers
+such as `Bcc` or `Subject`; set them on the `Email` fields.
+
+### A broken config fails boot (breaking)
+
+`Cli::run` now returns an error when `config/` exists but does not load, for example
+`RUSTANGO__SECURITY__SECURE_SSL_REDIRECT=1` (use `true`). It used to warn and run without
+allowed hosts, security headers or login limits. Fix the value the error names.
+
+### Tenant moves reach every server
+
+After `edit-tenant --database-url` or `migrate-tenant-storage`, running servers switch within
+30 s without a restart. The CLI no longer claims it evicted their pools.
+
+### Tenant purge deletes extra hosts
+
+`purge-tenant` now deletes the tenant's `rustango_org_hosts` rows and sets `active = false`
+before it drops anything, so a failed purge leaves an inactive tenant you can purge again.
+
+## 0.59.9
+
+### `DatabaseCache::incr` keeps the first TTL
+
+**Breaking:** `incr` no longer moves the TTL on each call, and an `i64` overflow is an error.
+
+### Change-password misses lock the account
+
+**Breaking:** five wrong current passwords on a change-password form lock the account
+like failed logins; the form and the login page answer 429 until the lock ends.
+
+### Uploads: active types refused, `max_files`, `with_uploads`
+
+**Breaking:** with no `allowed_extensions`, `save_uploads` refuses HTML, SVG, XML and JS
+(`uploads::ACTIVE_EXTENSIONS`); list one to accept it. More than 20 files per request is
+`UploadError::TooManyFiles` (raise with `.max_files(n)`). `UploadConfig` and `UploadError`
+are `#[non_exhaustive]`: build configs with `UploadConfig::new(..)`, add a `_` match arm.
+Mount upload directories with `with_uploads` instead of `with_static`.
+
+### ViewSets with open write actions warn
+
+No behaviour change: a ViewSet whose write actions have no codenames still serves them, but
+logs a warning at mount. Add permissions, `.read_only()`, or `.allow_anonymous()` to silence it.
+
+### `m2m_changed`: `src_pk` is a `SqlValue`
+
+`M2mChangedContext::src_pk` changed from `i64` to `SqlValue`. Compare with
+`SqlValue::I64(n)`, and log it with `?ctx.src_pk`.
+
+### UPDATE validates field rules
+
+Updates now fail with `QueryError::MaxLengthExceeded`, `OutOfRange`, `InvalidChoice` or
+`ValidatorFailed` where they used to write. `ModelForm` returns these as field errors.
+
+### Template views: typed form and filter values
+
+Form errors for bad input now use the `FormError` text. A `ListView` filter value that
+is empty or does not parse as its field type is ignored instead of matching nothing.
+
+### Formsets: at most 1000 rows
+
+`total_forms` / `parse_formset` return `FormSetError::TooManyForms` above
+`formset::MAX_FORMS`. `FormSetError` is `#[non_exhaustive]`: add a `_ =>` arm to matches.
+
+## 0.59.8
+
+### Admin audit log is permission-gated
+
+**Breaking:** grant `audit.view` (read) or `audit.delete` (cleanup) to non-superusers
+who used the feed; `auto_create_permissions_pool` seeds both codenames.
+
+### Tenant admin requests carry `AdminSession`
+
+**Breaking:** tenant-admin non-superusers get 403 on translation edits. Custom views
+reading `Extension<AdminSession>` now see the tenant user instead of nothing.
+
+### Queryset hooks apply beyond the list
+
+**Breaking:** a `register_admin_queryset!` hook now also limits by-pk pages, actions,
+autocomplete, facets and inline child rows; rows it filters out are 404 there, and
+skipped by actions.
+
+### Hidden admin fields are not written
+
+**Breaking:** an admin create now omits `editable = false` fields and fields outside
+`fieldsets`, so a NOT NULL one needs a `default`, as `readonly_fields` already did.
+A natural (non-auto) primary key left out of `fieldsets` can no longer be set on create.
+
+### `count()` respects `limit`, `offset`, `distinct` and `union`
+
+`qs.limit(10).count()` now returns at most 10. `CountQuery` and `AggregateQuery` gain a
+public `source` field; build them with `new`, `CountQuery::from_select` or `AggregateQuery::over_select`.
+
+### `Sum` over float and decimal columns
+
+It now decodes as `f64` (float) or `Decimal` (decimal), not `i64`; `sum::<i64>` on such a column fails.
+
+### `bulk_insert_pool` joins an outer `atomic()`
+
+Inside `atomic()` on the same pool it now runs in that transaction, whatever its size.
+Calling it while holding the block's `AtomicTx` guard returns `NestedAtomic`; drop the guard first.
+
+### `QueryError::RelationPathTooDeep`
+
+New variant: a relation span or `select_related` path longer than 6 hops is refused.
+
 ## 0.59.7
 
 ### `JwtBackend` tokens need a `tenant` claim (#1848)

@@ -59,7 +59,7 @@ pub use executor::{
     atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
     explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
     fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
-    fetch_with_prefetch_pool, get_or_create, insert_pool, insert_returning_pool,
+    fetch_with_prefetch_pool, get_or_create, insert_or_ignore, insert_pool, insert_returning_pool,
     insert_returning_tx, insert_tx, on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx,
     raw_query_pool, raw_query_tx, run_ddl_idempotent, select_one_row_as_json, select_one_row_pool,
     select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
@@ -175,6 +175,9 @@ pub(crate) use sqlite::SQLITE_CANONICAL_GLOB;
 /// builds its `SQLite` branch through `Dialect`, and that renderer
 /// compiles in every build whether or not the driver is linked.
 pub(crate) use sqlite::SQLITE_DATETIME_FORMAT;
+/// WHERE tail on any dialect, for callers that write their own head.
+#[cfg(feature = "admin")]
+pub(crate) use writers::compile_where_order_tail;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without
 /// requiring downstream crates to add their own dependency on it.

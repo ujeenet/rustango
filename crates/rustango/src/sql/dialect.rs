@@ -14,7 +14,7 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
 use super::{CompiledStatement, SqlError};
@@ -322,6 +322,15 @@ pub trait Dialect: Send + Sync {
              spelling, or `None` if it has none.",
             self.name()
         )
+    }
+
+    /// Statement that moves `table.column`'s serial counter past the rows
+    /// already there, binding `(quoted table, column)` in that order.
+    /// `None` where the counter follows explicit ids by itself (MySQL,
+    /// SQLite); Postgres' sequence does not, so `loaddata` needs it (#1911).
+    fn reset_sequence_sql(&self, table: &str, column: &str) -> Option<String> {
+        let _ = (table, column);
+        None
     }
 
     /// `true` if partial indexes, `CREATE INDEX … WHERE <expr>`, are
@@ -662,21 +671,20 @@ pub trait Dialect: Send + Sync {
         write_pg_array_keys(sql, qualified_col, placeholders, " ?& ARRAY[");
     }
 
-    /// Append this dialect's `ON CONFLICT` clause. Postgres takes the
-    /// full [`ConflictClause`]; MySQL handles `DoNothing` and a
-    /// `DoUpdate` with no target columns.
+    /// Append this dialect's `ON CONFLICT` clause. `model` is the insert's
+    /// table: MySQL names its PK in the clause. MySQL ignores a `DoUpdate`
+    /// target, since `ON DUPLICATE KEY UPDATE` fires on any unique key.
     ///
     /// # Errors
     /// [`SqlError::ConflictNotSupportedInDialect`] when the dialect
-    /// cannot express the requested shape. MySQL's
-    /// `ON DUPLICATE KEY UPDATE`, for one, has no target-column
-    /// syntax.
+    /// cannot express the requested shape.
     fn write_conflict_clause(
         &self,
         sql: &mut String,
+        model: &ModelSchema,
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
-        let _ = sql;
+        let _ = (sql, model);
         let shape = match conflict {
             ConflictClause::DoNothing => "DO NOTHING",
             ConflictClause::DoUpdate { .. } => "DO UPDATE",

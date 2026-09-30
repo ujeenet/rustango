@@ -693,6 +693,14 @@ pub async fn emit_one_pool(
     }
 }
 
+/// Codename a non-superuser needs to read the admin audit feed. Rows
+/// are still limited to tables they hold `{table}.view` on.
+pub const VIEW_CODENAME: &str = "audit.view";
+
+/// Codename a non-superuser needs to run the admin audit cleanup.
+/// Cleanup spans every table, whatever `{table}.view` the user holds.
+pub const DELETE_CODENAME: &str = "audit.delete";
+
 /// Filter for the admin's audit-log activity feed. Every field is
 /// optional; `None` means the column is not constrained. [`list`] and
 /// [`count`] turn this into a WHERE clause.
@@ -745,9 +753,28 @@ pub async fn list(
     page_size: i64,
     offset: i64,
 ) -> Result<Vec<AuditEntry>, sqlx::Error> {
+    list_in(pool, filter, None, page_size, offset).await
+}
+
+/// [`list`] limited to rows whose `entity_table` is in `tables`
+/// (`None` = every table). The admin feed's per-user scope.
+pub(crate) async fn list_in(
+    pool: &crate::sql::Pool,
+    filter: &AuditFilter,
+    tables: Option<&[String]>,
+    page_size: i64,
+    offset: i64,
+) -> Result<Vec<AuditEntry>, sqlx::Error> {
+    if tables.is_some_and(<[String]>::is_empty) {
+        return Ok(Vec::new());
+    }
     let pairs = filter.active_pairs();
-    let sql = audit_list_sql(pool.dialect(), &pairs);
-    let binds: Vec<&str> = pairs.iter().map(|(_, v)| *v).collect();
+    let sql = audit_list_sql(pool.dialect(), &pairs, tables);
+    let binds: Vec<&str> = pairs
+        .iter()
+        .map(|(_, v)| *v)
+        .chain(tables.unwrap_or_default().iter().map(String::as_str))
+        .collect();
     // bind+fetch cannot be shared: `sqlx::Executor` is bound per Database.
     // Only the decode is shared, via the `AuditEntry::from_*_row` helpers.
     match pool {
@@ -787,12 +814,34 @@ pub async fn list(
 /// # Errors
 /// Driver / SQL failures from the SELECT COUNT(*).
 pub async fn count(pool: &crate::sql::Pool, filter: &AuditFilter) -> Result<i64, sqlx::Error> {
+    count_in(pool, filter, None).await
+}
+
+/// [`count`] limited to `tables`, as [`list_in`].
+pub(crate) async fn count_in(
+    pool: &crate::sql::Pool,
+    filter: &AuditFilter,
+    tables: Option<&[String]>,
+) -> Result<i64, sqlx::Error> {
     use crate::core::SqlValue;
+    if tables.is_some_and(<[String]>::is_empty) {
+        return Ok(0);
+    }
     let pairs = filter.active_pairs();
-    let sql = audit_count_sql(pool.dialect(), &pairs);
+    let t = pool.dialect().quote_ident("rustango_audit_log");
+    let sql = format!(
+        "SELECT COUNT(*) FROM {t}{}",
+        audit_where_sql(pool.dialect(), &pairs, tables)
+    );
     let binds: Vec<SqlValue> = pairs
         .iter()
         .map(|(_, v)| SqlValue::String((*v).to_owned()))
+        .chain(
+            tables
+                .unwrap_or_default()
+                .iter()
+                .map(|t| SqlValue::String(t.clone())),
+        )
         .collect();
     // `raw_query_pool::<(i64,)>` decodes the single COUNT column the same
     // way on every backend, so no per-backend arm is needed.
@@ -817,14 +866,32 @@ pub async fn facet_counts(
     pool: &crate::sql::Pool,
     column: &str,
 ) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    facet_counts_in(pool, column, None).await
+}
+
+/// [`facet_counts`] limited to `tables`, as [`list_in`].
+pub(crate) async fn facet_counts_in(
+    pool: &crate::sql::Pool,
+    column: &str,
+    tables: Option<&[String]>,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    use crate::core::SqlValue;
     // `column` is interpolated into the SQL, so it must be allowlisted.
     if !matches!(column, "entity_table" | "operation" | "source") {
         return Err(sqlx::Error::ColumnNotFound(column.to_owned()));
     }
-    let sql = audit_facet_sql(pool.dialect(), column);
+    if tables.is_some_and(<[String]>::is_empty) {
+        return Ok(Vec::new());
+    }
+    let sql = audit_facet_sql(pool.dialect(), column, tables);
+    let binds: Vec<SqlValue> = tables
+        .unwrap_or_default()
+        .iter()
+        .map(|t| SqlValue::String(t.clone()))
+        .collect();
     // The `(String, i64)` tuple decodes positionally, so it matches the
     // `facet_value, facet_count` column order in `audit_facet_sql`.
-    crate::sql::raw_query_pool::<(String, i64)>(&sql, Vec::new(), pool)
+    crate::sql::raw_query_pool::<(String, i64)>(&sql, binds, pool)
         .await
         .map_err(|e| match e {
             crate::sql::ExecError::Driver(err) => err,
@@ -832,10 +899,48 @@ pub async fn facet_counts(
         })
 }
 
+/// `WHERE col = ? AND … AND entity_table IN (?, …)`. Binds go `pairs`
+/// values first, then `tables`, matching the text order on every dialect.
+fn audit_where_sql(
+    dialect: &dyn crate::sql::Dialect,
+    pairs: &[(&'static str, &str)],
+    tables: Option<&[String]>,
+) -> String {
+    use std::fmt::Write as _;
+    let mut sql = String::new();
+    let mut idx = 1usize;
+    for (col, _) in pairs {
+        let prefix = if idx == 1 { " WHERE " } else { " AND " };
+        let _ = write!(
+            sql,
+            "{prefix}{} = {}",
+            dialect.quote_ident(col),
+            dialect.placeholder(idx)
+        );
+        idx += 1;
+    }
+    if let Some(tables) = tables {
+        let prefix = if idx == 1 { " WHERE " } else { " AND " };
+        let phs: Vec<String> = (idx..idx + tables.len())
+            .map(|i| dialect.placeholder(i))
+            .collect();
+        let _ = write!(
+            sql,
+            "{prefix}{} IN ({})",
+            dialect.quote_ident("entity_table"),
+            phs.join(", ")
+        );
+    }
+    sql
+}
+
 /// Render the paginated activity-feed SELECT. `pairs` gives the active
 /// filter columns in a stable order, so placeholder numbering is fixed.
-fn audit_list_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &str)]) -> String {
-    use std::fmt::Write as _;
+fn audit_list_sql(
+    dialect: &dyn crate::sql::Dialect,
+    pairs: &[(&'static str, &str)],
+    tables: Option<&[String]>,
+) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let id = dialect.quote_ident("id");
     let et = dialect.quote_ident("entity_table");
@@ -844,50 +949,29 @@ fn audit_list_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &st
     let src = dialect.quote_ident("source");
     let ch = dialect.quote_ident("changes");
     let oa = dialect.quote_ident("occurred_at");
-    let mut sql = String::new();
-    let _ = write!(
-        sql,
-        "SELECT {id}, {et}, {ek}, {op}, {src}, {ch}, {oa} FROM {t}",
-    );
-    let mut bind_idx = 1usize;
-    for (i, (col, _)) in pairs.iter().enumerate() {
-        let prefix = if i == 0 { " WHERE " } else { " AND " };
-        let col_q = dialect.quote_ident(col);
-        let ph = dialect.placeholder(bind_idx);
-        let _ = write!(sql, "{prefix}{col_q} = {ph}");
-        bind_idx += 1;
-    }
+    let bind_idx = 1 + pairs.len() + tables.map_or(0, <[String]>::len);
     let p_limit = dialect.placeholder(bind_idx);
     let p_offset = dialect.placeholder(bind_idx + 1);
-    let _ = write!(
-        sql,
-        " ORDER BY {oa} DESC, {id} DESC LIMIT {p_limit} OFFSET {p_offset}"
-    );
-    sql
-}
-
-/// Render `SELECT COUNT(*) FROM rustango_audit_log [WHERE ...]`.
-fn audit_count_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &str)]) -> String {
-    use std::fmt::Write as _;
-    let t = dialect.quote_ident("rustango_audit_log");
-    let mut sql = format!("SELECT COUNT(*) FROM {t}");
-    for (i, (col, _)) in pairs.iter().enumerate() {
-        let prefix = if i == 0 { " WHERE " } else { " AND " };
-        let col_q = dialect.quote_ident(col);
-        let ph = dialect.placeholder(i + 1);
-        let _ = write!(sql, "{prefix}{col_q} = {ph}");
-    }
-    sql
+    format!(
+        "SELECT {id}, {et}, {ek}, {op}, {src}, {ch}, {oa} FROM {t}{} \
+         ORDER BY {oa} DESC, {id} DESC LIMIT {p_limit} OFFSET {p_offset}",
+        audit_where_sql(dialect, pairs, tables)
+    )
 }
 
 /// Render the facet group-by. `column` must already be allowlisted by
 /// [`facet_counts`].
-fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
+fn audit_facet_sql(
+    dialect: &dyn crate::sql::Dialect,
+    column: &str,
+    tables: Option<&[String]>,
+) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let col = dialect.quote_ident(column);
     format!(
         "SELECT {col} AS facet_value, COUNT(*) AS facet_count \
-         FROM {t} GROUP BY {col} ORDER BY facet_count DESC, {col}"
+         FROM {t}{} GROUP BY {col} ORDER BY facet_count DESC, {col}",
+        audit_where_sql(dialect, &[], tables)
     )
 }
 
@@ -1076,6 +1160,7 @@ pub async fn save_one_with_audit(
     query: &crate::core::UpdateQuery,
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
+    query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
@@ -1452,7 +1537,7 @@ pub(crate) async fn insert(
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
     if audited_create(query).is_none() {
         let returning = crate::sql::insert_returning_pool(pool, query).await?;
-        return crate::sql::inserted_pk(query, returning, pk_field);
+        return crate::sql::inserted_pk(query, &returning, pk_field);
     }
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let pk = insert_tx(&mut tx, query, pk_field).await?;
@@ -1471,7 +1556,7 @@ pub(crate) async fn insert_tx(
     pk_field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
     let returning = crate::sql::insert_returning_tx(tx, query).await?;
-    let pk = crate::sql::inserted_pk(query, returning, pk_field)?;
+    let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
     if let Some(record) = audited_create(query) {
         record(tx, pk.clone())
             .await
@@ -1665,6 +1750,7 @@ where
 {
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
     let _ = (select_cols_pg, select_cols_my, select_cols_sqlite);
+    update_query.validate()?;
     let stmt = pool.dialect().compile_update(update_query)?;
     // Only the pre-update SELECT differs per backend: each row type is a
     // different concrete type, so each arm calls its own

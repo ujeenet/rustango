@@ -223,7 +223,7 @@ Para archivos en disco local en lugar de un bucket, el handler de estáticos ya
 hace esto y no necesita ninguna fila de medios:
 
 ```rust
-Cli::new(pool).with_static("/uploads", "./var/uploads")
+Cli::new(pool).with_uploads("/uploads", "./var/uploads")
 ```
 
 **Si estabas a punto de escribir un authorizer `AllowAll` para que funcione
@@ -309,7 +309,7 @@ framework, cada vez que ejecutas `migrate` / aprovisionas un inquilino. No hay u
 **Trait `Storage`:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`.
 
-**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.allowed_extensions(&[..])`
+**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (insensible a mayúsculas/minúsculas) · `.randomize_filename(bool)`. Usado por
 `save_uploads(multipart, &cfg, &storage)`.
 

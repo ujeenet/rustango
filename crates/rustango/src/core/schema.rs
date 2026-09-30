@@ -1493,6 +1493,14 @@ impl ModelEntry {
             .find(|e| e.schema.table == model.table && e.schema.name == model.name)
     }
 
+    /// The registered entry whose table is `table`.
+    #[must_use]
+    pub fn for_table(table: &str) -> Option<&'static Self> {
+        inventory::iter::<Self>
+            .into_iter()
+            .find(|e| e.schema.table == table)
+    }
+
     /// Audited `UPDATE` runner, `None` for a model without audit.
     #[must_use]
     pub fn audited_update(&self) -> Option<crate::audit::AuditedUpdate> {
@@ -1550,6 +1558,291 @@ pub fn infer_app_label_from_module_path(path: &'static str) -> Option<&'static s
 }
 
 inventory::collect!(ModelEntry);
+
+/// Every [`FieldSchema`] field, for the derive to build as a literal.
+///
+/// Exhaustive on purpose: a new schema field is a compile error in the
+/// derive instead of a silent `new()` default (#1720).
+#[doc(hidden)]
+#[allow(clippy::exhaustive_structs)]
+#[derive(Debug, Clone, Copy)]
+pub struct FieldSchemaParts {
+    pub name: &'static str,
+    pub column: &'static str,
+    pub ty: FieldType,
+    pub nullable: bool,
+    pub primary_key: bool,
+    pub relation: Option<Relation>,
+    pub max_length: Option<u32>,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+    pub default: Option<&'static str>,
+    pub auto: bool,
+    pub auto_now: bool,
+    pub unique: bool,
+    pub generated_as: Option<&'static str>,
+    pub help_text: Option<&'static str>,
+    pub choices: Option<&'static [(&'static str, &'static str)]>,
+    pub db_comment: Option<&'static str>,
+    pub verbose_name: Option<&'static str>,
+    pub editable: bool,
+    pub blank: bool,
+    pub case_insensitive: bool,
+    pub fk_on_delete: Option<OnDeleteAction>,
+    pub validators: &'static [&'static str],
+}
+
+impl FieldSchema {
+    /// No `..` in the destructure: a field added on either side fails to compile.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_parts(parts: FieldSchemaParts) -> Self {
+        let FieldSchemaParts {
+            name,
+            column,
+            ty,
+            nullable,
+            primary_key,
+            relation,
+            max_length,
+            min,
+            max,
+            default,
+            auto,
+            auto_now,
+            unique,
+            generated_as,
+            help_text,
+            choices,
+            db_comment,
+            verbose_name,
+            editable,
+            blank,
+            case_insensitive,
+            fk_on_delete,
+            validators,
+        } = parts;
+        Self {
+            name,
+            column,
+            ty,
+            nullable,
+            primary_key,
+            relation,
+            max_length,
+            min,
+            max,
+            default,
+            auto,
+            auto_now,
+            unique,
+            generated_as,
+            help_text,
+            choices,
+            db_comment,
+            verbose_name,
+            editable,
+            blank,
+            case_insensitive,
+            fk_on_delete,
+            validators,
+        }
+    }
+}
+
+/// Every [`ModelSchema`] field, for the derive to build as a literal.
+///
+/// Exhaustive on purpose: a new schema field is a compile error in the
+/// derive instead of a silent `new()` default (#1720).
+#[doc(hidden)]
+#[allow(clippy::exhaustive_structs)]
+#[derive(Debug, Clone, Copy)]
+pub struct ModelSchemaParts {
+    pub name: &'static str,
+    pub table: &'static str,
+    pub fields: &'static [FieldSchema],
+    pub display: Option<&'static str>,
+    pub app_label: Option<&'static str>,
+    pub admin: Option<&'static AdminConfig>,
+    pub soft_delete_column: Option<&'static str>,
+    pub permissions: bool,
+    pub audit_track: Option<&'static [&'static str]>,
+    pub m2m: &'static [M2MRelation],
+    pub indexes: &'static [IndexSchema],
+    pub check_constraints: &'static [CheckConstraint],
+    pub exclusion_constraints: &'static [ExclusionConstraint],
+    pub default_permissions: &'static [&'static str],
+    pub composite_relations: &'static [CompositeFkRelation],
+    pub generic_relations: &'static [GenericRelation],
+    pub scope: ModelScope,
+    pub default_order: &'static [(&'static str, bool)],
+    pub is_view: bool,
+    pub verbose_name: Option<&'static str>,
+    pub verbose_name_plural: Option<&'static str>,
+    pub managed: bool,
+    pub db_table_comment: Option<&'static str>,
+    pub default_related_name: Option<&'static str>,
+    pub base_manager_name: Option<&'static str>,
+    pub required_db_vendor: Option<&'static str>,
+    pub required_db_features: &'static [&'static str],
+    pub order_with_respect_to: Option<&'static str>,
+    pub proxy: bool,
+    pub get_latest_by: Option<(&'static str, bool)>,
+    pub extra_permissions: &'static [(&'static str, &'static str)],
+    pub global_scopes: &'static [GlobalScope],
+}
+
+impl ModelSchema {
+    /// No `..` in the destructure: a field added on either side fails to compile.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_parts(parts: ModelSchemaParts) -> Self {
+        let ModelSchemaParts {
+            name,
+            table,
+            fields,
+            display,
+            app_label,
+            admin,
+            soft_delete_column,
+            permissions,
+            audit_track,
+            m2m,
+            indexes,
+            check_constraints,
+            exclusion_constraints,
+            default_permissions,
+            composite_relations,
+            generic_relations,
+            scope,
+            default_order,
+            is_view,
+            verbose_name,
+            verbose_name_plural,
+            managed,
+            db_table_comment,
+            default_related_name,
+            base_manager_name,
+            required_db_vendor,
+            required_db_features,
+            order_with_respect_to,
+            proxy,
+            get_latest_by,
+            extra_permissions,
+            global_scopes,
+        } = parts;
+        Self {
+            name,
+            table,
+            fields,
+            display,
+            app_label,
+            admin,
+            soft_delete_column,
+            permissions,
+            audit_track,
+            m2m,
+            indexes,
+            check_constraints,
+            exclusion_constraints,
+            default_permissions,
+            composite_relations,
+            generic_relations,
+            scope,
+            default_order,
+            is_view,
+            verbose_name,
+            verbose_name_plural,
+            managed,
+            db_table_comment,
+            default_related_name,
+            base_manager_name,
+            required_db_vendor,
+            required_db_features,
+            order_with_respect_to,
+            proxy,
+            get_latest_by,
+            extra_permissions,
+            global_scopes,
+        }
+    }
+}
+
+/// Every [`AdminConfig`] field, for the derive to build as a literal.
+///
+/// Exhaustive on purpose: a new schema field is a compile error in the
+/// derive instead of a silent `new()` default (#1720).
+#[doc(hidden)]
+#[allow(clippy::exhaustive_structs)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdminConfigParts {
+    pub list_display: &'static [&'static str],
+    pub search_fields: &'static [&'static str],
+    pub list_per_page: usize,
+    pub ordering: &'static [(&'static str, bool)],
+    pub readonly_fields: &'static [&'static str],
+    pub list_filter: &'static [&'static str],
+    pub actions: &'static [&'static str],
+    pub fieldsets: &'static [Fieldset],
+    pub list_display_links: &'static [&'static str],
+    pub search_help_text: &'static str,
+    pub actions_on_top: bool,
+    pub actions_on_bottom: bool,
+    pub date_hierarchy: &'static str,
+    pub prepopulated_fields: &'static [PrepopulatedField],
+    pub raw_id_fields: &'static [&'static str],
+    pub autocomplete_fields: &'static [&'static str],
+    pub list_select_related: ListSelectRelated,
+    pub formfield_overrides: &'static [(&'static str, &'static str)],
+}
+
+impl AdminConfig {
+    /// No `..` in the destructure: a field added on either side fails to compile.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_parts(parts: AdminConfigParts) -> Self {
+        let AdminConfigParts {
+            list_display,
+            search_fields,
+            list_per_page,
+            ordering,
+            readonly_fields,
+            list_filter,
+            actions,
+            fieldsets,
+            list_display_links,
+            search_help_text,
+            actions_on_top,
+            actions_on_bottom,
+            date_hierarchy,
+            prepopulated_fields,
+            raw_id_fields,
+            autocomplete_fields,
+            list_select_related,
+            formfield_overrides,
+        } = parts;
+        Self {
+            list_display,
+            search_fields,
+            list_per_page,
+            ordering,
+            readonly_fields,
+            list_filter,
+            actions,
+            fieldsets,
+            list_display_links,
+            search_help_text,
+            actions_on_top,
+            actions_on_bottom,
+            date_hierarchy,
+            prepopulated_fields,
+            raw_id_fields,
+            autocomplete_fields,
+            list_select_related,
+            formfield_overrides,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

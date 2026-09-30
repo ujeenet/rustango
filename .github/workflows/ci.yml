@@ -419,6 +419,8 @@ jobs:
       # The `not(feature = "postgres")` family; same command `sqlite_litmus`
       # runs, which is gated.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
+      # PG suites gated on `postgres` alone that import more (#1835).
+      - run: cargo test -p rustango --no-default-features --features postgres,sqlite,tenancy --no-run
       # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
       # only shape that compiles it; nothing else in CI did.
       #
@@ -503,6 +505,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+      # A `Decimal` model needs a build without `sqlite`.
+      - run: cargo test -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri decimal
 
   # Ungated too. At ~62s it is two billed minutes, and the reasoning that
   # ungated `fmt` and `clippy` applies unchanged: a broken intra-doc link
@@ -893,9 +897,13 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_filepath_field
       # Audit retention now sweeps the registry's own log, not just tenants.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test audit_cleanup_sqlite_live
+      # Tenant admin permission gaps (#1858 #1859 #1860 #1863).
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test tenant_admin_security_sqlite_live
       # #1344 — the hostname verbs, and that they write the table the
       # operator console writes rather than a parallel one.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_hosts_sqlite_live
+      # #1909 / #1910 — tenancy verbs refuse flags they would have dropped.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_tenancy_cli_sqlite_live
       # #1344 — and that the CLI enforces the same operator lockout rules the
       # console does, now that both call one engine.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_operators_sqlite_live
@@ -1000,6 +1008,9 @@ jobs:
             --test audit_bulk_writes_tri \
             --test atomic_savepoints_tri \
             --test orm_bounded_dml_tri \
+            --test orm_core_counts_tri \
+            --test manage_data_verbs_tri \
+            --test orm_dialect_tri \
             --test bulk_update_api_sqlite_live \
             --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
@@ -1021,6 +1032,9 @@ jobs:
             --test json_path_tri \
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
+            --test m2m_non_int_pk_tri \
+            --test update_validation_tri \
+            --test uuid_v7_pk_writes_tri \
             --test media_sqlite_live \
             --test migrate_registry_pool_sqlite_live \
             --test model_shortcut_scopes_tri \
@@ -1038,6 +1052,7 @@ jobs:
             --test unique_when_sqlite_live \
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
+            --test inserted_pk_readback_tri \
             --test admin_totp_2fa_sqlite_live \
             --test admin_totp_2fa_e2e \
             --test admin_totp_replay_tri \
@@ -1049,7 +1064,7 @@ jobs:
             --test orm_json_dates \
             --test orm_writes \
             --test orm_delta
-      - run: cargo test -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri
+      - run: cargo test -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri --test template_views_typed_binds_tri
       - run: >-
           cargo test -p rustango --no-default-features
           --features sqlite,tenancy,admin-sso,testkit
@@ -1268,18 +1283,30 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test audit_pool_writes_tri
       - run: cargo test -p rustango --features mysql,testkit --test audit_bulk_writes_tri
       - run: cargo test -p rustango --features mysql,testkit,tenancy --test audit_view_writes_tri
+      - run: cargo test -p rustango --features mysql,testkit --test admin_audit_scope_tri
+      - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_dialect_tri
       - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
+      - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
+      - run: cargo test -p rustango --features mysql,template_views,testkit --test template_views_typed_binds_tri
       - run: cargo test -p rustango --features mysql,testkit --test row_to_json_nulls_tri
       - run: cargo test -p rustango --features mysql,testkit --test column_types_tri
+      - run: cargo test -p rustango --features mysql,testkit --test m2m_non_int_pk_tri
+      - run: cargo test -p rustango --features mysql,forms,testkit --test update_validation_tri
+      - run: cargo test -p rustango --features mysql,testkit --test uuid_v7_pk_writes_tri
+      # #1911 / #1912 — flush / dumpdata / loaddata; MySQL rejected `"t"`.
+      - run: cargo test -p rustango --features mysql,testkit --test manage_data_verbs_tri
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.
@@ -1349,6 +1376,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_delete_prefix_live
       # VARCHAR(255) truncated long keys only on MySQL (#1674).
       - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_long_keys_tri
+      # `incr` was get-then-set, so parallel failed logins were lost (#1871).
+      - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_incr_tri
       - run: cargo test -p rustango --features mysql --test like_escape_live
       - run: cargo test -p rustango --features mysql --test migrate_progress_live
       - run: cargo test -p rustango --features mysql,tenancy --test preflight_live

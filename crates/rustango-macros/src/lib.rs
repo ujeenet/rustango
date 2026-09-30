@@ -85,6 +85,8 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// * `ordering = "a, -b"` — default list ordering; prefix `-` for DESC.
 /// * `page_size = N` — default page size (default: 20, max: 1000).
 /// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
+/// * `allow_anonymous` — flag; write actions without codenames are
+///   intended, so the mount warning is skipped.
 /// * `serializer = SomeSerializer` — render list / retrieve / create
 ///   responses through a `#[derive(Serializer)]` type instead of the
 ///   default field-level projection (`read_only` / `source` / `method`
@@ -840,6 +842,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .unwrap_or_default()
     });
 
+    // The upsert conflict target: a container-level composite unique,
+    // never a field `index(unique)` or a partial index PG can't target.
+    let upsert_unique: Option<Vec<String>> = container
+        .indexes
+        .iter()
+        .find(|i| i.unique && i.where_clause.is_none() && !i.columns.is_empty())
+        .map(|i| i.columns.clone());
+
     // Merge field-level indexes into the container's index list.
     let mut all_indexes: Vec<IndexAttr> = container.indexes;
     for field in &named.named {
@@ -929,7 +939,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         collected.primary_key.as_ref(),
         &column_consts,
         audited_fields.as_deref(),
-        &all_indexes,
+        upsert_unique.as_deref(),
         &container.manager_fns,
     );
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
@@ -2023,9 +2033,9 @@ struct CollectedFields {
     /// back into the struct after insert (MySQL has no RETURNING → the
     /// field stays at its placeholder until the next read).
     generated_field_idents: Vec<(syn::Ident, String)>,
-    /// Inner `T` of the first `Auto<T>` field, for the MySQL
-    /// `LAST_INSERT_ID()` assignment in `AssignAutoPkPool`.
-    first_auto_value_ty: Option<Type>,
+    /// First `Auto<T>` field the database fills, with its inner `T`: the
+    /// MySQL `LAST_INSERT_ID()` target. Rust-filled ones never are (#1934).
+    first_db_auto: Option<(syn::Ident, Type)>,
     /// Bulk-insert per-row pushes for **non-Auto fields only**. Used
     /// by the all-Auto-Unset bulk path (Auto cols dropped from
     /// `columns`).
@@ -2040,6 +2050,9 @@ struct CollectedFields {
     /// Column-name literals for every field including Auto (paired
     /// with `bulk_pushes_all`).
     bulk_columns_all: Vec<TokenStream2>,
+    /// Fills each `default_uuid_v7` field of `_row` in place, so a
+    /// mutable bulk insert hands the PKs back (#1934).
+    bulk_fill_in_place: Vec<TokenStream2>,
     /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
     /// + the loop that asserts every row matches. One pair per Auto
     /// field. Empty when `has_auto == false`.
@@ -2121,11 +2134,12 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         auto_assigns: Vec::new(),
         auto_field_idents: Vec::new(),
         generated_field_idents: Vec::new(),
-        first_auto_value_ty: None,
+        first_db_auto: None,
         bulk_pushes_no_auto: Vec::with_capacity(cap),
         bulk_pushes_all: Vec::with_capacity(cap),
         bulk_columns_no_auto: Vec::with_capacity(cap),
         bulk_columns_all: Vec::with_capacity(cap),
+        bulk_fill_in_place: Vec::new(),
         bulk_auto_uniformity: Vec::new(),
         first_auto_ident: None,
         has_auto: false,
@@ -2208,7 +2222,6 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.has_auto = true;
             if out.first_auto_ident.is_none() {
                 out.first_auto_ident = Some(ident.clone());
-                out.first_auto_value_ty = auto_inner_type(info.value_ty).cloned();
             }
             // `default_uuid_v7` (issue #823) generates the PK Rust-side
             // before binding, so the value is already in
@@ -2223,6 +2236,11 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // bound, so the value is already in `self` and RETURNING
             // would be a redundant column on every dialect.
             if !info.default_uuid_v7 && !info.auto_now_add && !info.auto_now {
+                if out.first_db_auto.is_none() {
+                    out.first_db_auto = auto_inner_type(info.value_ty)
+                        .cloned()
+                        .map(|ty| (ident.clone(), ty));
+                }
                 out.returning_cols.push(quote!(#column));
                 out.auto_field_idents
                     .push((ident.clone(), info.column.clone()));
@@ -2313,15 +2331,30 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // at push time rather than writing back into the struct. An
             // explicitly-Set value is still honoured; only `Unset`
             // takes the clock.
-            if info.auto_now_add || info.auto_now {
+            // `default_uuid_v7` likewise: its column has no DB default (#1934).
+            let rust_fill = if info.default_uuid_v7 {
+                Some(quote!(#root::__uuid::Uuid::now_v7()))
+            } else if info.auto_now_add || info.auto_now {
+                Some(quote!(#root::__chrono::Utc::now()))
+            } else {
+                None
+            };
+            if let Some(fill) = rust_fill {
                 out.bulk_columns_no_auto.push(quote!(#column));
                 out.bulk_pushes_no_auto.push(quote! {
                     _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
                         match &_row.#ident {
                             #root::sql::Auto::Set(_v) => ::core::clone::Clone::clone(_v),
-                            #root::sql::Auto::Unset => #root::__chrono::Utc::now(),
+                            #root::sql::Auto::Unset => #fill,
                         }
                     ));
+                });
+            }
+            if info.default_uuid_v7 {
+                out.bulk_fill_in_place.push(quote! {
+                    if matches!(&_row.#ident, #root::sql::Auto::Unset) {
+                        _row.#ident = #root::sql::Auto::Set(#root::__uuid::Uuid::now_v7());
+                    }
                 });
             }
             // Uniformity check: every row's Auto state must match the
@@ -2712,38 +2745,40 @@ fn model_impl_tokens(
     quote! {
         impl #root::core::Model for #struct_name {
             const SCHEMA: &'static #root::core::ModelSchema = &{
-                let mut s = #root::core::ModelSchema::new(#model_name, #table);
-                s.fields = #fields_slice;
-                s.display = #display_tokens;
-                s.app_label = #app_label_tokens;
-                s.admin = #admin_tokens;
-                s.soft_delete_column = #soft_delete_tokens;
-                s.permissions = #permissions;
-                s.audit_track = #audit_track_tokens;
-                s.m2m = #m2m_slice;
-                s.indexes = #indexes_slice;
-                s.check_constraints = #checks_slice;
-                s.exclusion_constraints = #excludes_slice;
-                s.composite_relations = #composite_fk_slice;
-                s.generic_relations = #generic_fk_slice;
-                s.scope = #scope_tokens;
-                s.default_order = &[ #(#default_order_tokens),* ];
-                s.is_view = #is_view;
-                s.verbose_name = #verbose_name_tokens;
-                s.verbose_name_plural = #verbose_name_plural_tokens;
-                s.managed = #managed;
-                s.base_manager_name = #base_manager_name_tokens;
-                s.order_with_respect_to = #order_with_respect_to_tokens;
-                s.proxy = #proxy;
-                s.required_db_features = &[ #(#required_db_features_lits),* ];
-                s.required_db_vendor = #required_db_vendor_tokens;
-                s.default_related_name = #default_related_name_tokens;
-                s.db_table_comment = #db_table_comment_tokens;
-                s.get_latest_by = #get_latest_by_tokens;
-                s.extra_permissions = &[ #(#extra_permission_tokens),* ];
-                s.default_permissions = &[ #(#default_permission_tokens),* ];
-                s.global_scopes = #global_scope_slice;
-                s
+                #root::core::ModelSchema::from_parts(#root::core::ModelSchemaParts {
+                    name: #model_name,
+                    table: #table,
+                    fields: #fields_slice,
+                    display: #display_tokens,
+                    app_label: #app_label_tokens,
+                    admin: #admin_tokens,
+                    soft_delete_column: #soft_delete_tokens,
+                    permissions: #permissions,
+                    audit_track: #audit_track_tokens,
+                    m2m: #m2m_slice,
+                    indexes: #indexes_slice,
+                    check_constraints: #checks_slice,
+                    exclusion_constraints: #excludes_slice,
+                    composite_relations: #composite_fk_slice,
+                    generic_relations: #generic_fk_slice,
+                    scope: #scope_tokens,
+                    default_order: &[ #(#default_order_tokens),* ],
+                    is_view: #is_view,
+                    verbose_name: #verbose_name_tokens,
+                    verbose_name_plural: #verbose_name_plural_tokens,
+                    managed: #managed,
+                    base_manager_name: #base_manager_name_tokens,
+                    order_with_respect_to: #order_with_respect_to_tokens,
+                    proxy: #proxy,
+                    required_db_features: &[ #(#required_db_features_lits),* ],
+                    required_db_vendor: #required_db_vendor_tokens,
+                    default_related_name: #default_related_name_tokens,
+                    db_table_comment: #db_table_comment_tokens,
+                    get_latest_by: #get_latest_by_tokens,
+                    extra_permissions: &[ #(#extra_permission_tokens),* ],
+                    default_permissions: &[ #(#default_permission_tokens),* ],
+                    global_scopes: #global_scope_slice,
+                })
             };
 
             #reverse_relations_override
@@ -2894,26 +2929,26 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     quote! {
         ::core::option::Option::Some({
             const ADMIN: &#root::core::AdminConfig = &{
-                let mut a = #root::core::AdminConfig::DEFAULT;
-                a.list_display = &[ #( #list_display_lits ),* ];
-                a.search_fields = &[ #( #search_fields_lits ),* ];
-                a.list_per_page = #list_per_page;
-                a.ordering = &[ #( #ordering_tokens ),* ];
-                a.readonly_fields = &[ #( #readonly_fields_lits ),* ];
-                a.list_filter = &[ #( #list_filter_lits ),* ];
-                a.actions = &[ #( #actions_lits ),* ];
-                a.fieldsets = #fieldset_tokens;
-                a.list_display_links = &[ #( #list_display_links_lits ),* ];
-                a.search_help_text = #search_help_text;
-                a.actions_on_top = #actions_on_top;
-                a.actions_on_bottom = #actions_on_bottom;
-                a.date_hierarchy = #date_hierarchy;
-                a.prepopulated_fields = #prepopulated_tokens;
-                a.raw_id_fields = &[ #( #raw_id_fields_lits ),* ];
-                a.autocomplete_fields = &[ #( #autocomplete_fields_lits ),* ];
-                a.list_select_related = #list_select_related_tokens;
-                a.formfield_overrides = &[ #( #formfield_tokens ),* ];
-                a
+                #root::core::AdminConfig::from_parts(#root::core::AdminConfigParts {
+                    list_display: &[ #( #list_display_lits ),* ],
+                    search_fields: &[ #( #search_fields_lits ),* ],
+                    list_per_page: #list_per_page,
+                    ordering: &[ #( #ordering_tokens ),* ],
+                    readonly_fields: &[ #( #readonly_fields_lits ),* ],
+                    list_filter: &[ #( #list_filter_lits ),* ],
+                    actions: &[ #( #actions_lits ),* ],
+                    fieldsets: #fieldset_tokens,
+                    list_display_links: &[ #( #list_display_links_lits ),* ],
+                    search_help_text: #search_help_text,
+                    actions_on_top: #actions_on_top,
+                    actions_on_bottom: #actions_on_bottom,
+                    date_hierarchy: #date_hierarchy,
+                    prepopulated_fields: #prepopulated_tokens,
+                    raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
+                    autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
+                    list_select_related: #list_select_related_tokens,
+                    formfield_overrides: &[ #( #formfield_tokens ),* ],
+                })
             };
             ADMIN
         })
@@ -2926,7 +2961,7 @@ fn inherent_impl_tokens(
     primary_key: Option<&(syn::Ident, String)>,
     column_consts: &TokenStream2,
     audited_fields: Option<&[&ColumnEntry]>,
-    indexes: &[IndexAttr],
+    upsert_unique: Option<&[String]>,
     manager_fns: &[syn::Ident],
 ) -> TokenStream2 {
     let root = rustango_root();
@@ -3099,14 +3134,8 @@ fn inherent_impl_tokens(
                         <Self as #root::core::Model>::SCHEMA,
                         _columns,
                         _values,
-                    )
-                    .on_conflict(#root::core::ConflictClause::DoNothing);
-                    let dialect = pool.dialect();
-                    let stmt = dialect.compile_insert(&_query)?;
-                    let rows = #root::sql::raw_execute_pool(
-                        pool, &stmt.sql, stmt.params,
-                    ).await?;
-                    ::core::result::Result::Ok(rows > 0)
+                    );
+                    #root::sql::insert_or_ignore(pool, &_query).await
                 }
             }
         } else {
@@ -3166,14 +3195,8 @@ fn inherent_impl_tokens(
                         <Self as #root::core::Model>::SCHEMA,
                         _columns,
                         _values,
-                    )
-                    .on_conflict(#root::core::ConflictClause::DoNothing);
-                    let dialect = pool.dialect();
-                    let stmt = dialect.compile_insert(&_query)?;
-                    let rows = #root::sql::raw_execute_pool(
-                        pool, &stmt.sql, stmt.params,
-                    ).await?;
-                    ::core::result::Result::Ok(rows > 0)
+                    );
+                    #root::sql::insert_or_ignore(pool, &_query).await
                 }
             }
         }
@@ -3203,8 +3226,8 @@ fn inherent_impl_tokens(
             /// or silently skip on unique-constraint violation. Maps
             /// to per-dialect "INSERT ... DO NOTHING on conflict":
             /// PG `INSERT … ON CONFLICT DO NOTHING`, SQLite
-            /// `INSERT … ON CONFLICT DO NOTHING` (3.24+), MySQL
-            /// `INSERT IGNORE INTO …`.
+            /// `INSERT … ON CONFLICT DO NOTHING` (3.24+), MySQL an
+            /// `ON DUPLICATE KEY UPDATE` that leaves the row as is.
             ///
             /// Returns `Ok(true)` when a row was inserted,
             /// `Ok(false)` when a conflict caused the INSERT to
@@ -3226,12 +3249,8 @@ fn inherent_impl_tokens(
                     <Self as #root::core::Model>::SCHEMA,
                     ::std::vec![ #( #insert_columns ),* ],
                     ::std::vec![ #( #insert_values ),* ],
-                )
-                .on_conflict(#root::core::ConflictClause::DoNothing);
-                let dialect = pool.dialect();
-                let stmt = dialect.compile_insert(&_query)?;
-                let rows = #root::sql::raw_execute_pool(pool, &stmt.sql, stmt.params).await?;
-                ::core::result::Result::Ok(rows > 0)
+                );
+                #root::sql::insert_or_ignore(pool, &_query).await
             }
         }
     };
@@ -3831,7 +3850,9 @@ fn inherent_impl_tokens(
                     })
                     .collect()
             };
-            let returning_cols: Vec<proc_macro2::TokenStream> = if fields.has_auto {
+            // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
+            let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty()
+            {
                 fields.returning_cols.clone()
             } else {
                 // Non-Auto-PK: still need RETURNING something for the
@@ -6676,11 +6697,8 @@ fn inherent_impl_tokens(
         // `RolePermission` / `UserRole` / `UserPermission` in the
         // tenancy permission engine. When no `unique_together` is
         // declared we keep the PK target (the original behaviour).
-        let upsert_target_columns: Vec<String> = indexes
-            .iter()
-            .find(|i| i.unique && !i.columns.is_empty())
-            .map(|i| i.columns.clone())
-            .unwrap_or_else(|| vec![pk_column.clone()]);
+        let upsert_target_columns: Vec<String> =
+            upsert_unique.map_or_else(|| vec![pk_column.clone()], <[String]>::to_vec);
         let upsert_target_lits = upsert_target_columns
             .iter()
             .map(String::as_str)
@@ -7368,6 +7386,27 @@ fn inherent_impl_tokens(
         let returning_cols = &fields.returning_cols;
         let auto_assigns_for_row = bulk_auto_assigns_for_row(fields);
         let uniformity = &fields.bulk_auto_uniformity;
+        let fill_in_place = &fields.bulk_fill_in_place;
+        // Nothing to read back when every Auto field is filled Rust-side (#1934).
+        let read_back = if fields.returning_cols.is_empty() {
+            quote!()
+        } else {
+            quote! {
+                if _returned.len() != rows.len() {
+                    return ::core::result::Result::Err(
+                        #root::sql::ExecError::Sql(
+                            #root::sql::SqlError::BulkInsertReturningMismatch {
+                                expected: rows.len(),
+                                actual: _returned.len(),
+                            }
+                        )
+                    );
+                }
+                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
+                    #auto_assigns_for_row
+                }
+            }
+        };
         let first_auto_ident = fields
             .first_auto_ident
             .as_ref()
@@ -7414,6 +7453,9 @@ fn inherent_impl_tokens(
                     #root::sql::Auto::Unset
                 );
                 #( #uniformity )*
+                for _row in rows.iter_mut() {
+                    #( #fill_in_place )*
+                }
 
                 let mut _all_rows: ::std::vec::Vec<
                     ::std::vec::Vec<#root::core::SqlValue>,
@@ -7446,19 +7488,7 @@ fn inherent_impl_tokens(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
-                if _returned.len() != rows.len() {
-                    return ::core::result::Result::Err(
-                        #root::sql::ExecError::Sql(
-                            #root::sql::SqlError::BulkInsertReturningMismatch {
-                                expected: rows.len(),
-                                actual: _returned.len(),
-                            }
-                        )
-                    );
-                }
-                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
-                    #auto_assigns_for_row
-                }
+                #read_back
                 #audit_bulk_insert_emit
                 ::core::result::Result::Ok(())
             }
@@ -7863,7 +7893,7 @@ fn inherent_impl_tokens(
                 }
             })
             .collect();
-        let mysql_body = if let Some(first) = fields.first_auto_ident.as_ref() {
+        let mysql_body = if let Some((first, value_ty)) = fields.first_db_auto.as_ref() {
             // The MySQL `LAST_INSERT_ID()` is always i64. Route through
             // `MysqlAutoIdSet` so Auto<i32> narrows safely and
             // Auto<Uuid>/etc. fail to link against MySQL (intended —
@@ -7881,10 +7911,6 @@ fn inherent_impl_tokens(
             // need the DB-defaulted timestamp / UUID can re-fetch the
             // row by PK after `save_pool`. Fixes the cookbook chapter
             // 12 dialect divergence.
-            let value_ty = fields
-                .first_auto_value_ty
-                .as_ref()
-                .expect("first_auto_value_ty set whenever first_auto_ident is");
             quote! {
                 let _converted = <#value_ty as #root::sql::MysqlAutoIdSet>
                     ::rustango_from_mysql_auto_id(_id)?;
@@ -11373,28 +11399,31 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     };
     let auto_now_flag = attrs.auto_now;
     let schema = quote! {{
-        let mut f = #root::core::FieldSchema::new(#name, #column_lit, #field_type_tokens);
-        f.nullable = #nullable;
-        f.primary_key = #primary_key;
-        f.relation = #relation;
-        f.max_length = #max_length;
-        f.min = #min;
-        f.max = #max;
-        f.default = #default;
-        f.auto = #auto;
-        f.auto_now = #auto_now_flag;
-        f.unique = #unique;
-        f.generated_as = #generated_as;
-        f.help_text = #help_text;
-        f.choices = #choices;
-        f.db_comment = #db_comment;
-        f.verbose_name = #verbose_name;
-        f.editable = #editable;
-        f.blank = #blank;
-        f.case_insensitive = #case_insensitive;
-        f.fk_on_delete = #fk_on_delete;
-        f.validators = &[ #(#validators_lits),* ];
-        f
+        #root::core::FieldSchema::from_parts(#root::core::FieldSchemaParts {
+            name: #name,
+            column: #column_lit,
+            ty: #field_type_tokens,
+            nullable: #nullable,
+            primary_key: #primary_key,
+            relation: #relation,
+            max_length: #max_length,
+            min: #min,
+            max: #max,
+            default: #default,
+            auto: #auto,
+            auto_now: #auto_now_flag,
+            unique: #unique,
+            generated_as: #generated_as,
+            help_text: #help_text,
+            choices: #choices,
+            db_comment: #db_comment,
+            verbose_name: #verbose_name,
+            editable: #editable,
+            blank: #blank,
+            case_insensitive: #case_insensitive,
+            fk_on_delete: #fk_on_delete,
+            validators: &[ #(#validators_lits),* ],
+        })
     }};
 
     let from_row_init = quote! {
@@ -12573,6 +12602,7 @@ struct ViewSetAttrs {
     ordering: Vec<(String, bool)>,
     page_size: Option<usize>,
     read_only: bool,
+    allow_anonymous: bool,
     perms: ViewSetPermsAttrs,
     /// `#[viewset(serializer = SomeSerializer)]` — render list /
     /// retrieve / create responses through this `#[derive(Serializer)]`
@@ -12659,6 +12689,11 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
     } else {
         quote!()
     };
+    let allow_anonymous_call = if attrs.allow_anonymous {
+        quote!(.allow_anonymous())
+    } else {
+        quote!()
+    };
 
     // `.serializer::<S>()` — reshape responses through a derived
     // serializer. Requires the downstream crate to enable the
@@ -12718,6 +12753,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #page_size_call
                     #perms_call
                     #read_only_call
+                    #allow_anonymous_call
                     #serializer_call
                     .router_pool(prefix, pool.into())
             }
@@ -12733,6 +12769,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
     let mut ordering: Vec<(String, bool)> = Vec::new();
     let mut page_size: Option<usize> = None;
     let mut read_only = false;
+    let mut allow_anonymous = false;
     let mut perms = ViewSetPermsAttrs::default();
     let mut serializer: Option<syn::Path> = None;
 
@@ -12780,6 +12817,10 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
                 read_only = true;
                 return Ok(());
             }
+            if meta.path.is_ident("allow_anonymous") {
+                allow_anonymous = true;
+                return Ok(());
+            }
             if meta.path.is_ident("permissions") {
                 meta.parse_nested_meta(|inner| {
                     let parse_codenames = |inner: &syn::meta::ParseNestedMeta| -> syn::Result<Vec<String>> {
@@ -12807,7 +12848,8 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             }
             Err(meta.error(
                 "unknown viewset attribute (supported: model, fields, filter_fields, \
-                 search_fields, ordering, page_size, read_only, serializer, permissions(...))",
+                 search_fields, ordering, page_size, read_only, allow_anonymous, serializer, \
+                 permissions(...))",
             ))
         })?;
     }
@@ -12824,6 +12866,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
         ordering,
         page_size,
         read_only,
+        allow_anonymous,
         perms,
         serializer,
     })

@@ -125,3 +125,32 @@ async fn cache_evicts_the_idle_tenant_instead_of_refusing() {
             .expect("tenant past the cap must still be served");
     }
 }
+
+/// A fresh Org with a new `database_url` is a cache miss, not the old pool (#1882).
+#[tokio::test]
+async fn cached_pool_follows_a_database_url_change() {
+    let dir = TempDir::new().expect("tempdir");
+    let url = |name: &str| format!("sqlite:{}/{name}.db?mode=rwc", dir.path().to_string_lossy());
+    let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite);
+    let mut org = fake_sqlite_org("moved");
+    for name in ["old", "new"] {
+        org.database_url = Some(url(name));
+        let pool = pools.pool_for_org(&org).await.expect("pool");
+        sqlx::query("CREATE TABLE IF NOT EXISTS marker (name TEXT NOT NULL)")
+            .execute(pool.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO marker (name) VALUES (?)")
+            .bind(name)
+            .execute(pool.pool())
+            .await
+            .unwrap();
+    }
+    let pool = pools.pool_for_org(&org).await.expect("pool");
+    let rows = sqlx::query("SELECT name FROM marker")
+        .fetch_all(pool.pool())
+        .await
+        .unwrap();
+    let names: Vec<String> = rows.iter().map(|r| r.get("name")).collect();
+    assert_eq!(names, ["new"], "the new URL was served the old database");
+}

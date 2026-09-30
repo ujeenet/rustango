@@ -590,7 +590,11 @@ where
                         .into_response()
                 }
                 axum::http::Method::POST => {
-                    change_password_submit(&org, &pool, routes, user_id, body).await
+                    let ip = crate::login_throttle::ClientIp::from_parts(
+                        &parts.extensions,
+                        &parts.headers,
+                    );
+                    change_password_submit(&org, &pool, routes, user_id, &ip, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -630,6 +634,17 @@ where
         }
     }
 
+    // Same two places the bare admin's `require_session` puts it:
+    // request extensions (handlers, custom views) and the task-local
+    // (chrome).
+    let admin_session = session_user_id.map(|uid| crate::admin::session::AdminSession {
+        user_id: uid,
+        username: session_username.clone().unwrap_or_default(),
+        is_superuser: session_is_superuser,
+    });
+    if let Some(sess) = &admin_session {
+        parts.extensions.insert(sess.clone());
+    }
     let inner_req = Request::from_parts(parts, body);
     // Dispatch inside an `audit::with_source` scope so audited writes
     // pick up the signed-in user. With no session the source stays
@@ -653,18 +668,8 @@ where
             dispatch.await
         }
     };
-    // Install the request's session into the admin task-local the inner
-    // chrome reads (`admin::session::current()`), so the tenant admin
-    // sidebar renders "Signed in as <username>" + the Logout button —
-    // the bare admin gets this from its own `require_session` middleware,
-    // which the tenant admin path bypasses.
-    let response = match session_user_id {
-        Some(uid) => {
-            let sess = crate::admin::session::AdminSession {
-                user_id: uid,
-                username: session_username.clone().unwrap_or_default(),
-                is_superuser: session_is_superuser,
-            };
+    let response = match admin_session {
+        Some(sess) => {
             crate::admin::session::CURRENT_SESSION
                 .scope(sess, audited)
                 .await
@@ -1348,10 +1353,11 @@ fn change_password_form(
 }
 
 async fn change_password_submit(
-    _org: &Org,
+    org: &Org,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
     user_id: i64,
+    ip: &crate::login_throttle::ClientIp,
     body: Body,
 ) -> Response {
     use crate::core::Column as _;
@@ -1405,13 +1411,24 @@ async fn change_password_submit(
     let Some(mut user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
-    let ok = match super::password::verify_async(&form.current_password, &user.password_hash).await
+    let verify = async {
+        match super::password::verify_async(&form.current_password, &user.password_hash).await {
+            Ok(ok) => Ok(ok),
+            Err(super::TenancyError::Busy) => Err(crate::login_throttle::LoginRefused::Busy),
+            Err(_) => Ok(false),
+        }
+    };
+    let ok = match crate::login_throttle::shared()
+        .verify_current_password(
+            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            ip,
+            &user.username,
+            verify,
+        )
+        .await
     {
         Ok(ok) => ok,
-        Err(super::TenancyError::Busy) => {
-            return crate::login_throttle::LoginRefused::Busy.into_response()
-        }
-        Err(_) => false,
+        Err(refused) => return refused.into_response(),
     };
     if !ok {
         return redir_err("Current password did not match.");

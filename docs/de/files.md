@@ -225,7 +225,7 @@ Für Dateien auf der lokalen Platte statt in einem Bucket erledigt das der
 Static-Handler bereits, ganz ohne Media-Zeile:
 
 ```rust
-Cli::new(pool).with_static("/uploads", "./var/uploads")
+Cli::new(pool).with_uploads("/uploads", "./var/uploads")
 ```
 
 **Wenn du gerade einen `AllowAll`-Authorizer schreiben wolltest, damit eine
@@ -314,7 +314,7 @@ Schritt „beim ersten Gebrauch anlegen"; ist das Feature aus, werden die Tabell
 **`Storage`-Trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`.
 
-**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.allowed_extensions(&[..])`
+**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (case-insensitiv) · `.randomize_filename(bool)`. Verwendet von
 `save_uploads(multipart, &cfg, &storage)`.
 

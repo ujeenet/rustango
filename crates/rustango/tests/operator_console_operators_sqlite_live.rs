@@ -838,6 +838,25 @@ async fn the_rendered_form_token_is_accepted() {
     assert!(b.find(&name).await.is_some());
 }
 
+/// #1694 — logout reads the session cookie, so the signal names the operator.
+#[tokio::test]
+async fn logout_signal_names_the_signed_in_operator() {
+    use rustango::signals::auth::{connect_user_logged_out, disconnect_user_logged_out};
+    let b = boot().await;
+    let seen: Arc<std::sync::Mutex<Vec<Option<i64>>>> = Arc::default();
+    let sink = seen.clone();
+    let id = connect_user_logged_out(move |ctx| {
+        sink.lock().unwrap().push(ctx.user_id);
+        async {}
+    });
+    let resp = b.post("/logout", "").await;
+    disconnect_user_logged_out(id);
+    assert!(resp.status().is_redirection(), "{}", resp.status());
+    // Other tests may log out at the same time; look for this operator only.
+    let seen = seen.lock().unwrap();
+    assert!(seen.contains(&Some(b.my_id)), "{seen:?}");
+}
+
 /// #1710 — the browser login: `/login` seeds one cookie, its form and the
 /// page's `<meta>` carry that token, and posting the form signs in.
 #[tokio::test]

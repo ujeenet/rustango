@@ -55,12 +55,15 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// operator console cannot create tenants — see that method for
     /// why this is opt-in rather than on by default.
     provisioning_dir: Option<std::path::PathBuf>,
-    /// `(prefix, root_dir)` pairs registered via [`Builder::with_static`].
-    /// Mounted at `serve` time as
-    /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`
+    /// How long `serve` lets open connections finish after SIGTERM.
+    drain_timeout: std::time::Duration,
+    /// A `running` run silent this long is closed at boot.
+    stale_run_after: std::time::Duration,
+    /// Mounts registered via [`Builder::with_static_files`].
+    /// Nested at `serve` time as `Router::nest(prefix, static_router(files))`
     /// before the admin fallback so they take precedence over the
     /// admin's catch-all.
-    static_dirs: Vec<(String, std::path::PathBuf)>,
+    static_dirs: Vec<(String, crate::static_files::StaticFiles)>,
     /// Whether to mount request observability at all, set by
     /// [`Builder::observability`].
     ///
@@ -161,6 +164,8 @@ impl<DB: Database> Builder<DB> {
             routes: crate::tenancy::RouteConfig::default(),
             health_endpoints: false,
             provisioning_dir: None,
+            drain_timeout: crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+            stale_run_after: crate::tenancy::provision_store::STALE_RUN_AFTER,
             static_dirs: Vec::new(),
             observability: false,
             access_log: None,
@@ -298,11 +303,37 @@ impl<DB: Database> Builder<DB> {
     /// [`crate::manage::Cli::with_static`] when tenancy mode is on.
     #[must_use]
     pub fn with_static(
-        mut self,
+        self,
         prefix: impl Into<String>,
         root_dir: impl Into<std::path::PathBuf>,
     ) -> Self {
-        self.static_dirs.push((prefix.into(), root_dir.into()));
+        let prefix = prefix.into();
+        crate::static_files::warn_if_uploads_prefix(&prefix);
+        let files = crate::static_files::StaticFiles::new(root_dir);
+        self.with_static_files(prefix, files)
+    }
+
+    /// [`Self::with_static`] for files users uploaded: HTML, SVG and XML
+    /// download instead of running on the tenant host
+    /// ([`crate::static_files::StaticFiles::user_content`]).
+    #[must_use]
+    pub fn with_uploads(
+        self,
+        prefix: impl Into<String>,
+        root_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let files = crate::static_files::StaticFiles::new(root_dir).user_content();
+        self.with_static_files(prefix, files)
+    }
+
+    /// Mount a configured [`crate::static_files::StaticFiles`] at `prefix`.
+    #[must_use]
+    pub fn with_static_files(
+        mut self,
+        prefix: impl Into<String>,
+        files: crate::static_files::StaticFiles,
+    ) -> Self {
+        self.static_dirs.push((prefix.into(), files));
         self
     }
 
@@ -666,13 +697,8 @@ impl<DB: Database> Builder<DB> {
         let had_api = self.api.is_some();
         let api = if had_api || self.health_endpoints || !self.static_dirs.is_empty() {
             let mut r = self.api.unwrap_or_default();
-            for (prefix, root) in &self.static_dirs {
-                r = r.nest(
-                    prefix,
-                    crate::static_files::static_router(crate::static_files::StaticFiles::new(
-                        root.clone(),
-                    )),
-                );
+            for (prefix, files) in &self.static_dirs {
+                r = r.nest(prefix, crate::static_files::static_router(files.clone()));
             }
             if self.health_endpoints {
                 r = r.merge(crate::health::health_router(self.registry.clone()));
@@ -725,6 +751,24 @@ impl<DB: Database> Builder<DB> {
         // #1322 — only when the deployment asked for it. See
         // `with_tenant_provisioning` for why creating tenants is not
         // on by default.
+        // Runs are detached tasks; close the ones a stopped process left `running` (#1883).
+        if self.provisioning_dir.is_some() {
+            let registry: crate::sql::Pool = self.registry.clone().into();
+            let after = self.stale_run_after;
+            match crate::tenancy::provision_store::reap_stale_runs(&registry, after).await {
+                Ok(0) => {}
+                Ok(n) => tracing::warn!(
+                    target: "rustango::tenancy::provision",
+                    closed = n,
+                    "closed provisioning/migration runs left running by a stopped process",
+                ),
+                Err(e) => tracing::warn!(
+                    target: "rustango::tenancy::provision",
+                    error = %e,
+                    "could not check for interrupted provisioning runs",
+                ),
+            }
+        }
         let provisioner = self.provisioning_dir.map(|dir| {
             crate::tenancy::provision::Provisioner::new(
                 self.pools.clone(),
@@ -847,6 +891,24 @@ impl<DB: Database> Builder<DB> {
         Ok(app)
     }
 
+    /// How long [`Self::serve`] lets open connections finish after the
+    /// stop signal. Default [`crate::shutdown::DEFAULT_DRAIN_TIMEOUT`].
+    #[must_use]
+    pub fn drain_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
+    /// A provisioning/migration run `running` with no event for this long
+    /// is closed as failed at boot. Default
+    /// [`crate::tenancy::provision_store::STALE_RUN_AFTER`] (1 h); keep it
+    /// above your slowest silent step.
+    #[must_use]
+    pub fn stale_run_after(mut self, after: std::time::Duration) -> Self {
+        self.stale_run_after = after;
+        self
+    }
+
     /// Assemble everything and bind.
     ///
     /// # Errors
@@ -855,17 +917,23 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        let drain = self.drain_timeout;
         let app = self.into_router().await?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         // v0.30.16 — `into_make_service_with_connect_info` is what
         // populates `ConnectInfo<SocketAddr>` in request extensions.
         // Without it, `access_log` (and any other middleware that
         // reads the peer address) sees "-".
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        crate::shutdown::serve_until_drained(
+            |stop| {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(stop)
+            },
+            drain,
         )
-        .with_graceful_shutdown(crate::shutdown::shutdown_signal())
         .await?;
         Ok(())
     }

@@ -286,6 +286,9 @@ type différent, précisez-le : `ForeignKey<User, String>`. Le un-à-un utilise
 | `blank` / `editable` | `#[rustango(editable = false)]` | comportement formulaire/admin |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | COMMENT de colonne |
 
+INSERT et UPDATE vérifient ces règles sur les valeurs littérales. Une valeur
+`set_expr(F(..))` est calculée par la base, elle n'est donc pas vérifiée.
+
 `choices`, `default`, `auto_now_add`, et la suppression logique ensemble (tous vérifiés) :
 
 ```rust

@@ -47,6 +47,14 @@ pub enum ConfigError {
     EnvOverride { var: String, detail: String },
 }
 
+impl ConfigError {
+    /// `default.toml` is absent: the one error that means "not configured" (#1927).
+    #[must_use]
+    pub fn is_missing_config(&self) -> bool {
+        matches!(self, Self::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+    }
+}
+
 pub(super) fn load_with_root(root: &Path, env: &str) -> Result<Settings, ConfigError> {
     load_with_root_and_env(root, env, std::env::vars())
 }

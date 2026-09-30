@@ -1341,6 +1341,12 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
         "Can access framework admin",
     )
     .await?;
+    for (codename, name) in [
+        (crate::audit::VIEW_CODENAME, "Can view the audit log"),
+        (crate::audit::DELETE_CODENAME, "Can clean up the audit log"),
+    ] {
+        seed_reserved_codename_pool(pool, "audit", codename, name).await?;
+    }
 
     let action_names = [
         ("add", "Can add"),

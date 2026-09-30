@@ -10,13 +10,13 @@
 //!     match ctx.action {
 //!         M2mAction::Add => tracing::info!(
 //!             through = ctx.through,
-//!             src = ctx.src_pk,
+//!             src = ?ctx.src_pk,
 //!             dst = ctx.dst_pks[0],
 //!             "m2m add"
 //!         ),
 //!         M2mAction::Remove => tracing::info!(
 //!             through = ctx.through,
-//!             src = ctx.src_pk,
+//!             src = ?ctx.src_pk,
 //!             dst = ctx.dst_pks[0],
 //!             "m2m remove"
 //!         ),
@@ -27,7 +27,7 @@
 //!         ),
 //!         M2mAction::Clear => tracing::info!(
 //!             through = ctx.through,
-//!             src = ctx.src_pk,
+//!             src = ?ctx.src_pk,
 //!             "m2m clear"
 //!         ),
 //!     }
@@ -85,8 +85,8 @@ pub struct M2mChangedContext {
     pub src_col: &'static str,
     /// The column pointing at the target model.
     pub dst_col: &'static str,
-    /// Primary key of the source row that changed.
-    pub src_pk: i64,
+    /// Primary key of the source row that changed, as bound (#1926).
+    pub src_pk: crate::core::SqlValue,
     /// The destination keys involved. One id for `Add` and
     /// `Remove`, the new set for `Set`, and empty for `Clear`.
     pub dst_pks: Vec<i64>,

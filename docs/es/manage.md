@@ -616,7 +616,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.59.7
+rustango 0.59.11
 ```
 
 ### `about`
@@ -628,7 +628,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.59.7
+  version:        0.59.11
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -796,6 +796,13 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+Con SIGTERM deja de aceptar conexiones y da a las abiertas
+`[server] shutdown_timeout_secs` (20 por defecto) para terminar; luego cierra el
+resto. SSE y long-poll nunca terminan solos. Las ejecuciones de aprovisionamiento
+y migración que un proceso detenido dejó en `running` más de una hora se marcan
+como fallidas en el siguiente arranque, y un reintento del webhook con el mismo
+`event_id` se ejecuta de nuevo.
+
 ### `create-tenant <slug> [options]`
 
 Configura un nuevo tenant (cliente/org) y le aplica las migraciones de tenant. El
@@ -849,9 +856,11 @@ Los valores se validan como los valida `create-tenant`: un patrón de host que
 lleve puerto, o un prefijo de ruta que el resolver nunca podría producir, se
 rechaza en lugar de guardarse para luego no emparejar nunca en silencio.
 
-Rotar `--database-url` desaloja el pool cacheado del tenant, de modo que la
-siguiente petición reconecta con la nueva credencial; los demás cambios dejan
-en paz las conexiones calientes.
+Rotar `--database-url` cambia la URL guardada. Cada servidor cambia en 30 s,
+cuando se refresca su caché de tenants; los demás cambios dejan en paz las
+conexiones calientes. Un secreto rotado tras la **misma** referencia (vault,
+variable de entorno) no cambia nada guardado: reinicia los servidores o
+invalida el pool del tenant en cada uno.
 
 ### `test-tenant-connection <url> [flags]`
 
@@ -892,6 +901,11 @@ borra la fila `Org` dejando la base, no hace absolutamente nada
 cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
+
+Con varios servidores, desactiva primero (`drop-tenant`) y espera 30 s. Un
+servidor cuya caché aún tiene un tenant en modo schema mantiene
+`search_path = <schema>, public`; al borrar el schema, sus consultas caen en
+`public` hasta que la caché se refresca.
 
 ### `list-tenants`
 
@@ -1529,8 +1543,8 @@ alcanzan mediante `Cli::tenancy()`.
 | Verbo | Qué hace |
 |---|---|
 | `dumpdata` | Exporta filas como fixtures JSON |
-| `loaddata <fixture.json> [--fail-fast]` | Vuelve a cargar fixtures JSON |
-| `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto |
+| `loaddata <fixture.json> [--fail-fast]` | Vuelve a cargar fixtures JSON. Una carga fallida o parcial no se revierte |
+| `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto. Postgres usa `TRUNCATE … RESTART IDENTITY CASCADE`, que también vacía tablas que las referencian fuera del filtro; MySQL / SQLite borran las filas y conservan los contadores de id |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Borrado masivo en streaming; `--pretend` informa sin borrar |
 | `db:dump` / `db:restore` / `db:info` | Dump / restauración / inspección nativos |
 | `dbshell` | Ejecuta el cliente nativo (`psql` / `mysql` / `sqlite3`). Solo necesita `DATABASE_URL`, no un pool funcional — se gestiona antes de construir el pool, así que funciona cuando sqlx no puede conectar |
