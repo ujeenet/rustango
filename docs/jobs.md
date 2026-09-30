@@ -345,6 +345,11 @@ picks the job back up:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
 
+A running job refreshes its lock every `heartbeat_interval` (10 s by default), so
+keep the threshold well above it. Each pickup spends an attempt, so a job that
+crashes its worker is dead-lettered once `MAX_ATTEMPTS` runs are used. A job that
+panics is a `Retryable` failure; the worker keeps running.
+
 Both the dispatch-and-run flow and `reclaim_stuck_jobs_pool` are dogfooded
 against SQLite in `jobs_sqlite_live.rs`.
 

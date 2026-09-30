@@ -148,6 +148,14 @@ herabgestuft), verwenden Sie `refresh_with(token, new_claims)`, um ein frisches
 Payload einzusetzen, während die alte Refresh-JTI dennoch auf die Sperrliste
 gesetzt wird.
 
+`POST /api/auth/refresh` prüft zusätzlich: Eine Passwortänderung seit dem Login beendet
+die Kette, keine Kette überlebt `Config::refresh_absolute_ttl_secs` (30 Tage) ab dem
+Login, und das erneute Senden eines bereits rotierten Tokens widerruft die ganze Kette.
+Eine Wiederholung innerhalb von etwa `Config::refresh_reuse_grace_secs` (10–20 s) nach
+der Rotation bekommt nur eine 401, damit ein ehrlicher Client mit zwei Refreshes
+angemeldet bleibt; der Preis: Ein Dieb in diesem Fenster löst keinen Widerruf aus. Der
+Widerruf ist nur so stark wie der JTI-Store (ein In-Memory-Store vergisst beim Neustart).
+
 ---
 
 ## Widerruf und der JTI-Speicher
