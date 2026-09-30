@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — compound queries keep the first branch whole (#1890)
+
+A union's first branch keeps its derived-table joins, DISTINCT and projection, and `values()`
+projects every branch. `fetch_paginated_pool` counts all branches; the MySQL/SQLite
+`distinct_on` keeps search and derived joins; `paginate()` orders by PK when unordered.
+
 ### Fixed — PostgreSQL `bulk_update` of a column that is NULL in every row (#1888)
 
 Each NULL in the VALUES list is cast to its column type, so it no longer fails as text.

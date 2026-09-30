@@ -675,6 +675,16 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Order by the PK when nothing else orders the rows, so LIMIT and
+    /// OFFSET page through a stable sequence.
+    #[must_use]
+    pub(crate) fn ordered_or_by_pk(self) -> Self {
+        match T::SCHEMA.primary_key() {
+            Some(pk) if self.order_by.is_empty() => self.order_by(&[(pk.name, false)]),
+            _ => self,
+        }
+    }
+
     /// Clear every accumulated `ORDER BY` entry, whatever added it
     /// (`.order_by(...)`, `.order_by_expr(...)`,
     /// `.with_default_order()`). Use it to drop the default order of a
@@ -4502,6 +4512,17 @@ fn compile_values_select<T: Model>(
         }
     }
     let mut q = qs.compile()?;
-    q.projection = Some(cols);
+    project_every_branch(&mut q, &cols);
     Ok(q)
+}
+
+/// Set `cols` on `q` and on each set-op branch that projects nothing,
+/// so every branch of a union returns the same columns.
+fn project_every_branch(q: &mut SelectQuery, cols: &[&'static str]) {
+    q.projection = Some(cols.to_vec());
+    for branch in &mut q.compound {
+        if branch.query.projection.is_none() {
+            project_every_branch(&mut branch.query, cols);
+        }
+    }
 }

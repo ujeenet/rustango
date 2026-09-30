@@ -128,6 +128,36 @@ pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), S
     result
 }
 
+/// A compound SELECT plus a `__rustango_total` column. The set operation
+/// becomes a derived table, so the count covers every branch before LIMIT.
+pub(super) fn write_compound_with_total(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+) -> Result<(), SqlError> {
+    let merged = SelectQuery {
+        compound_order_by: Vec::new(),
+        compound_limit: None,
+        compound_offset: None,
+        lock_mode: None,
+        ..query.clone()
+    };
+    b.sql.push_str("SELECT ");
+    b.write_ident("__rustango_page");
+    b.sql.push_str(".*, COUNT(*) OVER () AS ");
+    b.write_ident("__rustango_total");
+    b.sql.push_str(" FROM (");
+    write_select(b, &merged)?;
+    b.sql.push_str(") AS ");
+    b.write_ident("__rustango_page");
+    write_order_limit_offset(
+        b,
+        &query.compound_order_by,
+        query.compound_limit,
+        query.compound_offset,
+        None,
+    )
+}
+
 /// Emit a compound SELECT (`UNION`, `INTERSECT`, `EXCEPT`):
 ///
 /// ```text
@@ -161,14 +191,35 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     // clauses local. The alias is required: MySQL rejects a derived
     // table without one, and SQLite's grammar forbids bare parens
     // around a select-core. The head takes `__rustango_b0`.
+    // No `..`: a new SelectQuery field must say which side it is on.
+    let SelectQuery {
+        model,
+        where_clause,
+        search,
+        joins,
+        subquery_joins,
+        order_by,
+        limit,
+        offset,
+        lock_mode: _,
+        compound: _,
+        projection,
+        distinct,
+        compound_order_by: _,
+        compound_limit: _,
+        compound_offset: _,
+    } = query;
     let head = SelectQuery {
-        where_clause: query.where_clause.clone(),
-        search: query.search.clone(),
-        joins: query.joins.clone(),
-        order_by: query.order_by.clone(),
-        limit: query.limit,
-        offset: query.offset,
-        ..SelectQuery::new(query.model)
+        where_clause: where_clause.clone(),
+        search: search.clone(),
+        joins: joins.clone(),
+        subquery_joins: subquery_joins.clone(),
+        order_by: order_by.clone(),
+        limit: *limit,
+        offset: *offset,
+        projection: projection.clone(),
+        distinct: distinct.clone(),
+        ..SelectQuery::new(model)
     };
     let head_scoped = !head.order_by.is_empty() || head.limit.is_some() || head.offset.is_some();
     if head_scoped {
@@ -275,7 +326,7 @@ fn write_distinct_on_via_window(
     // The inner SELECT does the joins, so it qualifies the model's own
     // columns to avoid a name clash with a joined one. The derived
     // table `sub` then exposes them under their bare names.
-    let qualify = !query.joins.is_empty();
+    let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
 
     // Outer SELECT: projection columns only, no __rn.
     b.sql.push_str("SELECT ");
@@ -361,13 +412,82 @@ fn write_distinct_on_via_window(
     // The joins sit in the inner SELECT next to the ROW_NUMBER()
     // partition, so they shape the rows the window ranks.
     write_model_joins(b, &query.joins)?;
-    write_where(b, &query.where_clause, Some(query.model))?;
+    write_subquery_joins(b, &query.subquery_joins)?;
+    write_where_with_search(
+        b,
+        &query.where_clause,
+        query.search.as_ref(),
+        qualify.then_some(query.model.table),
+        Some(query.model),
+    )?;
 
     b.sql.push_str(") sub WHERE sub.__rn = 1");
 
     // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors.
     write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)?;
 
+    Ok(())
+}
+
+/// Derived-table joins: `JOIN [LATERAL] (<subquery>) AS alias ON …`.
+/// They project no columns; they only filter or correlate.
+fn write_subquery_joins(
+    b: &mut Sql<'_>,
+    subquery_joins: &[crate::core::SubqueryJoin],
+) -> Result<(), SqlError> {
+    for sj in subquery_joins {
+        use crate::core::JoinKind;
+        let kind_kw = match sj.kind {
+            JoinKind::Inner => "INNER JOIN",
+            JoinKind::Left => "LEFT JOIN",
+            // The builders only produce Inner / Left here.
+            JoinKind::Right => {
+                return Err(SqlError::JoinKindNotSupported {
+                    kind: "RIGHT (subquery)",
+                    dialect: b.d.name(),
+                });
+            }
+            JoinKind::Full => {
+                return Err(SqlError::JoinKindNotSupported {
+                    kind: "FULL (subquery)",
+                    dialect: b.d.name(),
+                });
+            }
+        };
+        b.sql.push(' ');
+        b.sql.push_str(kind_kw);
+        if sj.lateral {
+            // PG + MySQL ≥ 8.0.14 only; SQLite has no LATERAL.
+            if b.d.name() == "sqlite" {
+                return Err(SqlError::LateralJoinNotSupported {
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str(" LATERAL");
+        }
+        b.sql.push_str(" (");
+        // The subquery writers push their own scope frame, so an
+        // `OuterRef` inside a LATERAL subquery resolves to the
+        // enclosing query.
+        match &sj.subquery {
+            crate::core::DerivedSource::Select(s) => write_select(b, s)?,
+            crate::core::DerivedSource::Aggregate(a) => write_aggregate(b, a)?,
+        }
+        b.sql.push_str(") AS ");
+        b.write_ident(sj.alias);
+        // An empty `on` gives `ON true`, the LATERAL shape where the
+        // correlation lives in the subquery's WHERE. Otherwise the
+        // caller's predicate, with bare columns bound to the alias.
+        if sj.on.is_empty() {
+            b.sql.push_str(" ON true");
+        } else {
+            b.sql.push_str(" ON ");
+            let prior_qualify = b.current_qualify_alias.replace(sj.alias);
+            let on_result = write_where_expr(b, &sj.on, Some(sj.alias), None);
+            b.current_qualify_alias = prior_qualify;
+            on_result?;
+        }
+    }
     Ok(())
 }
 
@@ -443,61 +563,7 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
 
     write_model_joins(b, &query.joins)?;
 
-    // Derived-table joins: `JOIN [LATERAL] (<subquery>) AS alias ON …`.
-    // They project no columns; they only filter or correlate.
-    for sj in &query.subquery_joins {
-        use crate::core::JoinKind;
-        let kind_kw = match sj.kind {
-            JoinKind::Inner => "INNER JOIN",
-            JoinKind::Left => "LEFT JOIN",
-            // The builders only produce Inner / Left here.
-            JoinKind::Right => {
-                return Err(SqlError::JoinKindNotSupported {
-                    kind: "RIGHT (subquery)",
-                    dialect: b.d.name(),
-                });
-            }
-            JoinKind::Full => {
-                return Err(SqlError::JoinKindNotSupported {
-                    kind: "FULL (subquery)",
-                    dialect: b.d.name(),
-                });
-            }
-        };
-        b.sql.push(' ');
-        b.sql.push_str(kind_kw);
-        if sj.lateral {
-            // PG + MySQL ≥ 8.0.14 only; SQLite has no LATERAL.
-            if b.d.name() == "sqlite" {
-                return Err(SqlError::LateralJoinNotSupported {
-                    dialect: b.d.name(),
-                });
-            }
-            b.sql.push_str(" LATERAL");
-        }
-        b.sql.push_str(" (");
-        // The subquery writers push their own scope frame, so an
-        // `OuterRef` inside a LATERAL subquery resolves to the
-        // enclosing query.
-        match &sj.subquery {
-            crate::core::DerivedSource::Select(s) => write_select(b, s)?,
-            crate::core::DerivedSource::Aggregate(a) => write_aggregate(b, a)?,
-        }
-        b.sql.push_str(") AS ");
-        b.write_ident(sj.alias);
-        // An empty `on` gives `ON true`, the LATERAL shape where the
-        // correlation lives in the subquery's WHERE. Otherwise the
-        // caller's predicate, with bare columns bound to the alias.
-        if sj.on.is_empty() {
-            b.sql.push_str(" ON true");
-        } else {
-            b.sql.push_str(" ON ");
-            let prior_qualify = b.current_qualify_alias.replace(sj.alias);
-            let on_result = write_where_expr(b, &sj.on, Some(sj.alias), None);
-            b.current_qualify_alias = prior_qualify;
-            on_result?;
-        }
-    }
+    write_subquery_joins(b, &query.subquery_joins)?;
 
     write_where_with_search(
         b,

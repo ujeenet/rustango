@@ -3,7 +3,10 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::{ConflictClause, InsertQuery, Model as _, SqlValue};
+use rustango::core::joins::aliased;
+use rustango::core::{
+    ConflictClause, InsertQuery, Model as _, Op, SearchClause, SqlValue, WhereExpr,
+};
 use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, InsertReturningPool, Pool};
 use rustango::testkit::matrix::fresh_table;
 use rustango::{tri_dialect_test, Model};
@@ -152,6 +155,120 @@ async fn bulk_update_sets_null_in_every_row(pool: &Pool) {
     assert!(posts(pool).await.iter().all(|p| p.parent_id.is_none()));
 }
 
+/// Seed `(slug, title)` rows in order.
+async fn seed(pool: &Pool, rows: &[(&str, &str)]) {
+    for (slug, title) in rows {
+        let mut p = post(slug, None);
+        p.title = (*title).into();
+        p.insert_pool(pool).await.expect("seed");
+    }
+}
+
+fn slugs(rows: &[Post]) -> Vec<&str> {
+    let mut out: Vec<&str> = rows.iter().map(|p| p.slug.as_str()).collect();
+    out.sort_unstable();
+    out
+}
+
+/// `<table>.id = <alias>.id`, for a derived-table join on the PK.
+fn same_id(alias: &'static str) -> WhereExpr {
+    WhereExpr::ExprCompare {
+        lhs: aliased(alias, "id"),
+        op: Op::Eq,
+        rhs: aliased("orm_dialect_tri_post", "id"),
+    }
+}
+
+/// #1890: a union's first branch dropped its derived-table join.
+async fn union_keeps_the_first_branch_join(pool: &Pool) {
+    seed(pool, &[("a", "a"), ("b", "b"), ("c", "c")]).await;
+    let only_a = Post::objects().filter("slug", "a").compile().expect("sub");
+    let rows = Post::objects()
+        .join_sub(only_a, "s", same_id("s"))
+        .union(Post::objects().filter("slug", "b"))
+        .fetch(pool)
+        .await
+        .expect("union");
+    assert_eq!(slugs(&rows), ["a", "b"]);
+}
+
+/// #1890: `values_list_flat` on a union projected only part of it.
+async fn union_values_list_flat_in_a_subquery(pool: &Pool) {
+    seed(pool, &[("a", "a"), ("b", "b"), ("c", "c")]).await;
+    let ids = Post::objects()
+        .filter("slug", "a")
+        .union(Post::objects().filter("slug", "b"))
+        .values_list_flat("id")
+        .compile()
+        .expect("ids");
+    let rows = Post::objects()
+        .where_in_subquery("id", ids)
+        .fetch(pool)
+        .await
+        .expect("IN (union)");
+    assert_eq!(slugs(&rows), ["a", "b"]);
+}
+
+/// #1890: a paginated union counted its first branch only.
+async fn paginated_union_counts_every_branch(pool: &Pool) {
+    seed(pool, &[("a", "a"), ("b", "b"), ("c", "c")]).await;
+    let qs = Post::objects()
+        .filter("slug", "a")
+        .union(Post::objects().filter("slug", "b"))
+        .order_by(&[("id", false)])
+        .limit(1);
+    let page = rustango::sql::fetch_paginated_pool(qs, pool)
+        .await
+        .expect("paginated union");
+    assert_eq!(page.total, 2, "the total spans both branches");
+    assert_eq!(slugs(&page.rows), ["a"]);
+}
+
+/// #1890: the MySQL / SQLite `distinct_on` fallback dropped search and
+/// derived-table joins.
+async fn distinct_on_keeps_search_and_derived_joins(pool: &Pool) {
+    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana")]).await;
+    let by_title = || {
+        Post::objects()
+            .distinct_on(&["title"])
+            .order_by(&[("title", false), ("id", false)])
+    };
+
+    let mut q = by_title().compile().expect("compile");
+    q.search = Some(SearchClause {
+        columns: vec!["title"],
+        query: "ban".into(),
+    });
+    let rows: Vec<Post> = rustango::sql::select_rows_pool(pool, &q)
+        .await
+        .expect("search");
+    assert_eq!(slugs(&rows), ["c"]);
+
+    let only_b = Post::objects().filter("slug", "b").compile().expect("sub");
+    let rows = by_title()
+        .join_sub(only_b, "s", same_id("s"))
+        .fetch(pool)
+        .await
+        .expect("join");
+    assert_eq!(slugs(&rows), ["b"]);
+}
+
+/// #1890: `paginate()` sent no ORDER BY, so a page followed heap order.
+async fn paginate_orders_by_pk(pool: &Pool) {
+    seed(pool, &[("a", "a"), ("b", "b"), ("c", "c")]).await;
+    // An UPDATE moves the row to the end of a PostgreSQL heap.
+    let mut a = posts(pool).await.remove(0);
+    a.title = "a2".into();
+    a.save_pool(pool).await.expect("update a");
+    let (rows, total) = Post::objects()
+        .paginate(1, 2, pool)
+        .await
+        .expect("paginate");
+    assert_eq!(total, 3);
+    let got: Vec<&str> = rows.iter().map(|p| p.slug.as_str()).collect();
+    assert_eq!(got, ["a", "b"], "the first page is the two lowest PKs");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -159,5 +276,10 @@ tri_dialect_test! {
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
         upsert_reports_the_updated_row,
         bulk_update_sets_null_in_every_row,
+        union_keeps_the_first_branch_join,
+        union_values_list_flat_in_a_subquery,
+        paginated_union_counts_every_branch,
+        distinct_on_keeps_search_and_derived_joins,
+        paginate_orders_by_pk,
     ],
 }

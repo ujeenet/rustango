@@ -178,9 +178,8 @@ where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     {
         let select = self.compile()?;
-        let stmt = Postgres.compile_select(&select)?;
-        let sql = inject_total_count(&stmt.sql);
-        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
+        let stmt = paginated_statement(&Postgres, &select)?;
+        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
         for value in stmt.params {
             q = bind_query(q, value);
         }
@@ -249,7 +248,7 @@ where
 }
 
 mod page;
-use page::inject_total_count;
+use page::paginated_statement;
 pub use page::Page;
 
 // PG `_on` CRUD family — see pg_on.rs.
@@ -2221,8 +2220,8 @@ where
 {
     crate::test_assertions::query_counter::bump();
     let select = qs.compile()?;
-    let stmt = pool.dialect().compile_select(&select)?;
-    let sql = inject_total_count(&stmt.sql);
+    let stmt = paginated_statement(pool.dialect(), &select)?;
+    let sql = stmt.sql;
 
     match pool {
         #[cfg(feature = "postgres")]

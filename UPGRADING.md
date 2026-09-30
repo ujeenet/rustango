@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `QuerySet::paginate` orders by PK when unordered (#1890)
+
+A queryset with no `order_by` now pages in PK order instead of the database's scan order.
+
 ### `Dialect::write_conflict_clause` takes the model (#1887)
 
 **Breaking:** a custom `Dialect` adds a `model: &ModelSchema` argument. On MySQL,

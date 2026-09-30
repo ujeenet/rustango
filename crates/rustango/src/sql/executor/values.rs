@@ -1027,7 +1027,8 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// with the same WHERE clause.
     ///
     /// `page` starts at 1, so `paginate(1, 10)` gives the first ten
-    /// rows and `paginate(2, 10)` the next ten.
+    /// rows and `paginate(2, 10)` the next ten. An unordered queryset
+    /// pages in PK order.
     ///
     /// # Errors
     /// As [`crate::sql::CounterPool::count`] and
@@ -1054,7 +1055,12 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             .count(pool)
             .await?;
         let offset = if page > 1 { (page - 1) * per_page } else { 0 };
-        let rows = self.limit(per_page).offset(offset).fetch(pool).await?;
+        let rows = self
+            .ordered_or_by_pk()
+            .limit(per_page)
+            .offset(offset)
+            .fetch(pool)
+            .await?;
         Ok((rows, total))
     }
 
