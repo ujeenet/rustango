@@ -95,6 +95,9 @@ et les deux se vérifient. `verify_key` renvoie `Ok(false)` en cas de non-
 correspondance et `Err(ApiKeyError)` uniquement quand la chaîne stockée n'est pas
 un hash valide.
 
+Depuis du code async, appelez `generate_key_async`, `hash_secret_async` et
+`verify_key_async` ; ils calculent argon2 hors du runtime.
+
 ---
 
 ## Le backend avec stockage

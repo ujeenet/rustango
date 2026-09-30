@@ -30,73 +30,104 @@
 //! }
 //! ```
 
+// This module owns the sync calls the lint bans elsewhere.
+#![allow(clippy::disallowed_methods)]
+
 use rand::{rngs::OsRng, RngCore};
 
+use crate::passwords::PasswordError;
+
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ApiKeyError {
     #[error("hashing failed: {0}")]
     Hash(String),
     #[error("verification error: {0}")]
     Verify(String),
+    /// No hashing slot freed up in time; see [`PasswordError::Busy`].
+    #[error("password hashing is busy")]
+    Busy,
+}
+
+impl From<PasswordError> for ApiKeyError {
+    fn from(e: PasswordError) -> Self {
+        match e {
+            PasswordError::Hash(m) => Self::Hash(m),
+            PasswordError::Verify(m) => Self::Verify(m),
+            PasswordError::Busy => Self::Busy,
+        }
+    }
 }
 
 /// Make a new API key. Returns `(full_token, prefix, hash)`.
 ///
 /// Give `full_token` to the user. Store only `prefix` and `hash`;
 /// storing the token would let anyone who reads your database use
-/// the key.
+/// the key. From async code use [`generate_key_async`].
 ///
 /// # Errors
 /// [`ApiKeyError::Hash`] if argon2 fails, which is very rare.
 pub fn generate_key() -> Result<(String, String, String), ApiKeyError> {
-    // `OsRng`: these bytes are a bearer token, so they need a
-    // cryptographic source.
-    let mut prefix_bytes: [u8; 4] = [0; 4];
-    OsRng.fill_bytes(&mut prefix_bytes);
-    let prefix = to_hex(&prefix_bytes);
-    let mut secret_bytes: [u8; 16] = [0; 16];
-    OsRng.fill_bytes(&mut secret_bytes);
-    let secret = to_hex(&secret_bytes);
+    let (prefix, secret) = new_token();
     let hash = hash_secret(&secret)?;
-    let token = format!("{prefix}.{secret}");
-    Ok((token, prefix, hash))
+    Ok((format!("{prefix}.{secret}"), prefix, hash))
 }
 
-/// Hash a secret with argon2id. The result is a PHC string
-/// (`$argon2id$v=19$...`) that fits a varchar column. Store this,
-/// never the secret.
+/// [`generate_key`] with the hash on the blocking pool.
+///
+/// # Errors
+/// As [`generate_key`], or [`ApiKeyError::Busy`].
+pub async fn generate_key_async() -> Result<(String, String, String), ApiKeyError> {
+    let (prefix, secret) = new_token();
+    let hash = hash_secret_async(&secret).await?;
+    Ok((format!("{prefix}.{secret}"), prefix, hash))
+}
+
+/// A fresh `(prefix, secret)` pair from `OsRng`: the secret is a
+/// bearer credential, so it needs a cryptographic source.
+fn new_token() -> (String, String) {
+    let mut prefix_bytes: [u8; 4] = [0; 4];
+    OsRng.fill_bytes(&mut prefix_bytes);
+    let mut secret_bytes: [u8; 16] = [0; 16];
+    OsRng.fill_bytes(&mut secret_bytes);
+    (to_hex(&prefix_bytes), to_hex(&secret_bytes))
+}
+
+/// Hash a secret with argon2id via [`crate::passwords::hash`]. The
+/// result is a PHC string (`$argon2id$v=19$...`). Store this, never
+/// the secret. From async code use [`hash_secret_async`].
 ///
 /// # Errors
 /// [`ApiKeyError::Hash`] if argon2 fails.
 pub fn hash_secret(secret: &str) -> Result<String, ApiKeyError> {
-    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
-    use argon2::Argon2;
-
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    argon2
-        .hash_password(secret.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| ApiKeyError::Hash(e.to_string()))
+    Ok(crate::passwords::hash(secret)?)
 }
 
-/// Check a plaintext secret against a stored argon2 hash. Always
-/// compare this way: argon2 does the compare in constant time, so
-/// it does not leak the hash through timing. Never use `==`.
+/// [`hash_secret`] on the blocking pool.
 ///
-/// `Ok(true)` means the secret matches.
+/// # Errors
+/// As [`hash_secret`], or [`ApiKeyError::Busy`].
+pub async fn hash_secret_async(secret: &str) -> Result<String, ApiKeyError> {
+    Ok(crate::passwords::hash_async(secret).await?)
+}
+
+/// Check a plaintext secret against a stored argon2 hash, in constant
+/// time. Never use `==`. `Ok(true)` means the secret matches. From
+/// async code use [`verify_key_async`].
 ///
 /// # Errors
 /// [`ApiKeyError::Verify`] if `stored_hash` is not a valid argon2
 /// PHC string.
 pub fn verify_key(secret: &str, stored_hash: &str) -> Result<bool, ApiKeyError> {
-    use argon2::password_hash::{PasswordHash, PasswordVerifier};
-    use argon2::Argon2;
+    Ok(crate::passwords::verify(secret, stored_hash)?)
+}
 
-    let parsed = PasswordHash::new(stored_hash).map_err(|e| ApiKeyError::Verify(e.to_string()))?;
-    Ok(Argon2::default()
-        .verify_password(secret.as_bytes(), &parsed)
-        .is_ok())
+/// [`verify_key`] on the blocking pool.
+///
+/// # Errors
+/// As [`verify_key`], or [`ApiKeyError::Busy`].
+pub async fn verify_key_async(secret: &str, stored_hash: &str) -> Result<bool, ApiKeyError> {
+    Ok(crate::passwords::verify_async(secret, stored_hash).await?)
 }
 
 /// Split a `{prefix}.{secret}` token, or `None` if it is malformed.
@@ -145,6 +176,15 @@ mod tests {
     fn verify_key_fails_for_wrong_secret() {
         let (_, _, hash) = generate_key().unwrap();
         assert!(!verify_key("wrong-secret", &hash).unwrap());
+    }
+
+    #[tokio::test]
+    async fn async_variants_match_the_sync_ones() {
+        let (token, _, hash) = generate_key_async().await.unwrap();
+        let (_, secret) = split_token(&token).unwrap();
+        assert!(verify_key_async(secret, &hash).await.unwrap());
+        assert!(verify_key(secret, &hash_secret_async(secret).await.unwrap()).unwrap());
+        assert!(!verify_key_async("wrong", &hash).await.unwrap());
     }
 
     #[test]

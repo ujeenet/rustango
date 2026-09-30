@@ -44,6 +44,7 @@ use std::fmt;
 // ------------------------------------------------------------------ HasherError
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum HasherError {
     /// Hashing failed, usually an RNG or allocation failure.
     Hash(String),
@@ -55,6 +56,8 @@ pub enum HasherError {
     /// corrupt, or a hasher was dropped from the chain before its
     /// users were migrated.
     NoMatchingHasher,
+    /// No hashing slot freed up in time (the `*_async` calls only).
+    Busy,
 }
 
 impl fmt::Display for HasherError {
@@ -65,6 +68,7 @@ impl fmt::Display for HasherError {
             Self::NoMatchingHasher => {
                 f.write_str("no hasher in the chain recognized the stored hash format")
             }
+            Self::Busy => f.write_str("password hashing is busy"),
         }
     }
 }
@@ -198,11 +202,46 @@ impl PasswordHasherChain {
     }
 }
 
+/// Async variants: the chain runs on the shared argon2 queue, so it
+/// does not park a runtime worker.
+#[cfg(feature = "passwords")]
+impl PasswordHasherChain {
+    /// [`Self::hash`] on the blocking pool.
+    ///
+    /// # Errors
+    /// As [`Self::hash`], or [`HasherError::Busy`].
+    pub async fn hash_async(
+        self: &std::sync::Arc<Self>,
+        password: &str,
+    ) -> Result<String, HasherError> {
+        let (chain, password) = (std::sync::Arc::clone(self), password.to_owned());
+        crate::passwords::off_runtime(move || chain.hash(&password))
+            .await
+            .map_err(|_| HasherError::Busy)?
+    }
+
+    /// [`Self::verify`] on the blocking pool.
+    ///
+    /// # Errors
+    /// As [`Self::verify`], or [`HasherError::Busy`].
+    pub async fn verify_async(
+        self: &std::sync::Arc<Self>,
+        password: &str,
+        stored: &str,
+    ) -> Result<VerifyOutcome, HasherError> {
+        let chain = std::sync::Arc::clone(self);
+        let (password, stored) = (password.to_owned(), stored.to_owned());
+        crate::passwords::off_runtime(move || chain.verify(&password, &stored))
+            .await
+            .map_err(|_| HasherError::Busy)?
+    }
+}
+
 // ------------------------------------------------------------------ Argon2idHasher
 
 /// Argon2id hasher over [`crate::passwords::hash`] /
-/// [`crate::passwords::verify`]. Put it first in the chain. The chain
-/// is sync: from async code, run it under `spawn_blocking`.
+/// [`crate::passwords::verify`]. Put it first in the chain. From async
+/// code use [`PasswordHasherChain::verify_async`].
 #[cfg(feature = "passwords")]
 pub struct Argon2idHasher;
 
@@ -422,5 +461,17 @@ mod tests {
         // The new hash verifies through the chain too.
         let re = chain.verify("hunter2", &new_hash).unwrap();
         assert_eq!(re, VerifyOutcome::Match { needs_rehash: None });
+    }
+
+    #[cfg(feature = "passwords")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_chain_does_not_block_the_runtime() {
+        use crate::passwords::ticks_while;
+        let chain = std::sync::Arc::new(PasswordHasherChain::new().with(Box::new(Argon2idHasher)));
+        let (h, n) = ticks_while(chain.hash_async("hunter2")).await;
+        assert!(n >= 2, "hash_async stalled the runtime ({n} ticks)");
+        let (ok, n) = ticks_while(chain.verify_async("hunter2", &h.unwrap())).await;
+        assert_eq!(ok.unwrap(), VerifyOutcome::Match { needs_rehash: None });
+        assert!(n >= 2, "verify_async stalled the runtime ({n} ticks)");
     }
 }

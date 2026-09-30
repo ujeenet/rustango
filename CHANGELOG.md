@@ -27,6 +27,20 @@ Inline child rows follow the child table's hooks: hidden ones are neither shown 
 `editable = false` fields and fields outside `fieldsets` are no longer read from a
 create or edit POST, and an edit leaves them unchanged instead of NULL / `false`.
 
+### Security — expired API keys are verified before they are refused (#1729)
+
+`ApiKeyBackend` no longer answers an expired key faster than an unknown one.
+`api_keys` hashes through `passwords` and gains `*_async` variants; so does `PasswordHasherChain`.
+
+### Security — HMAC signatures cover the host (#1836)
+
+Signatures cover the host. A service sharing a key with another must pin its own with
+`HmacAuthLayer::host`; unpinned, the request's own `Host` is trusted.
+
+### Changed — SSO reuses OIDC discovery (#1833)
+
+An `oidc` provider fetches its discovery document once per issuer per hour, not on every login.
+
 ### Fixed — MySQL `Uuid` fields save and load (#1733)
 
 A `Uuid` now binds as hyphenated text into its `CHAR(36)` column instead of 16 raw
