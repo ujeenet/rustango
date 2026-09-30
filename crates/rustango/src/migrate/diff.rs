@@ -230,6 +230,8 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     // Created after the tables and columns; the drop halves of changed
     // objects go in the first phase with the other drops.
     let mut creates = Vec::new();
+    // Recreated composite FKs go last, after the unique index they reference.
+    let mut fk_creates = Vec::new();
 
     // Dropped or edited composite FKs on tables that stay, before the
     // unique index they reference; a dropped table takes its own. An edit
@@ -247,7 +249,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 table: pt.name.clone(),
                 name: pf.name.clone(),
             });
-            creates.extend(now.map(|c| add_composite_fk(&ct.name, c)));
+            fk_creates.extend(now.map(|c| add_composite_fk(&ct.name, c)));
         }
     }
     // Dropped and changed indexes. A changed one (same name, new shape)
@@ -397,6 +399,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
+    changes.append(&mut fk_creates);
     changes
 }
 
