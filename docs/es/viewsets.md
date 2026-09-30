@@ -567,7 +567,7 @@ Cada método de `ViewSet::for_model(SCHEMA)` (cada uno devuelve `Self`):
 | Método | Propósito |
 |---|---|
 | `serializer::<S>()` | Conecta un serializador para salida + entrada tipadas (tri-dialecto). |
-| `fields(&["…"])` | Lista blanca de proyección por defecto + campos escribibles (cuando no hay serializador). |
+| `fields(&["…"])` | Lista blanca de proyección por defecto + campos escribibles. |
 | `filter_fields(&["…"])` | Habilita el filtrado `?field=value`. |
 | `search_fields(&["…"])` | Habilita `?search=`. |
 | `ordering(&[("field", desc)])` | Orden de clasificación por defecto. |
@@ -610,8 +610,8 @@ Lookups soportados: `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contains`,
 **Búsqueda** — `?search=term` coincide con `search_fields` mediante un OR sin
 distinción de mayúsculas.
 
-**Ordenación** — `?ordering=field,-other` (`-` = DESC). Cualquier campo es
-ordenable a menos que establezcas `.ordering_fields([...])` para restringirlo. Sin
+**Ordenación** — `?ordering=field,-other` (`-` = DESC). Cualquier campo que la
+respuesta muestra (con un serializador, los campos que renderiza) es ordenable a menos que establezcas `.ordering_fields([...])` para restringirlo. Sin
 un parámetro, se aplica el `ordering` por defecto. Todos se componen.
 
 ---
@@ -772,6 +772,14 @@ confirmaría que el id existe.
 La identidad debe provenir de la credencial, nunca de la cadena de consulta. Un
 filtro `?owner_id=` no es un ámbito — es un parámetro que el llamador elige.
 
+Un ámbito solo restringe la lectura. Un backend dueño de una columna implementa también
+`write_pins`: la creación guarda el propietario, la actualización no puede cambiarlo, y
+`WritePin::Deny` rechaza la escritura con un 403.
+
+Los ámbitos globales estáticos de un modelo también limitan lo que se lee, no lo que se
+escribe: una creación o actualización puede salir del ámbito (201 sin cuerpo, o 204).
+Para una frontera de seguridad, usa un backend de filtro con `write_pins`.
+
 #### `OwnedBy` — the shipped backend
 
 La mayoría de los recursos con dueño necesitan exactamente una regla: *filas cuya
@@ -793,6 +801,9 @@ backend toma el nombre en lugar de asumir una convención. Falla cerrado en las 
 formas en que puede estar mal: una petición no autenticada y una columna que el
 modelo no tiene coinciden ambas con **nada**, de modo que un error tipográfico al
 montar no puede convertirse en "sin predicados, devuelve la tabla".
+
+`OwnedBy` fija su columna al escribir: la creación guarda al llamador diga lo que diga el
+cuerpo, la actualización nunca mueve la fila, y una escritura sin principal es un 403.
 
 Los superusuarios no son especiales por defecto; `.superuser_sees_all()` lo
 habilita, porque "los admins ven todo" es una decisión de producto, no del
