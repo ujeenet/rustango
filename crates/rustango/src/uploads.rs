@@ -143,7 +143,7 @@ pub struct SavedUpload {
 /// [`SavedUpload`] per file. Fields without a `filename` are skipped.
 ///
 /// The first error stops the loop. Files saved before it stay in
-/// storage, so clean them up if that matters.
+/// storage, except on [`UploadError::TooManyFiles`], which deletes them.
 ///
 /// # Errors
 /// See [`UploadError`].
@@ -163,6 +163,10 @@ pub async fn save_uploads(
             continue;
         };
         if out.len() >= cfg.max_files {
+            // The request is refused as a whole, so leave none of it behind.
+            for saved in &out {
+                let _ = storage.delete(&saved.key).await;
+            }
             return Err(UploadError::TooManyFiles { max: cfg.max_files });
         }
         let content_type = field.content_type().map(str::to_owned);
@@ -617,9 +621,16 @@ mod tests {
     #[tokio::test]
     async fn max_files_caps_one_request() {
         let cfg = UploadConfig::new("u/").max_files(2);
-        let (status, body, _) = upload(cfg.clone(), &["a.png", "b.png", "c.png"]).await;
+        let (status, body, storage) = upload(
+            cfg.clone().randomize_filename(false),
+            &["a.png", "b.png", "c.png"],
+        )
+        .await;
         assert_eq!(status, 400);
         assert!(body.contains("too many files"), "{body}");
+        for key in ["u/a.png", "u/b.png"] {
+            assert!(!storage.exists(key).await.unwrap(), "orphan {key}");
+        }
         let (status, body, _) = upload(cfg, &["a.png", "b.png"]).await;
         assert_eq!((status, body.as_str()), (200, "2"));
     }
