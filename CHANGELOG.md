@@ -89,7 +89,8 @@ per field. **Breaking:** an update that broke these rules used to be stored; it 
 `CreateView` / `UpdateView` forms, `ListView` `filter_fields` and FK `_display` lookups
 now parse values like the admin (`forms::parse_form_value`) instead of binding text, so
 dates, UUIDs, decimals and JSON save on PostgreSQL and bool / int filters match on SQLite.
-**Breaking:** an unparsable `ListView` filter value is ignored, as in `ViewSet`.
+**Breaking:** an empty or unparsable `ListView` filter value (bools take only
+`true`/`false`/`1`/`0`/`on`/`off`) is ignored. Filters accept `YYYY-MM-DD HH:MM:SS` datetimes.
 
 ### Fixed — `default_uuid_v7` PKs on audited inserts and bulk writes (#1934)
 

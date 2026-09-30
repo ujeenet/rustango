@@ -229,7 +229,7 @@ Updates now fail with `QueryError::MaxLengthExceeded`, `OutOfRange`, `InvalidCho
 ### Template views: typed form and filter values
 
 Form errors for bad input now use the `FormError` text. A `ListView` filter value that
-does not parse as its field type is ignored instead of matching nothing.
+is empty or does not parse as its field type is ignored instead of matching nothing.
 
 ### Formsets: at most 1000 rows
 

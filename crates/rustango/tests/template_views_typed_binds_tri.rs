@@ -27,6 +27,8 @@ pub struct Event {
     pub meta: serde_json::Value,
     pub done: bool,
     pub author_id: i64,
+    #[rustango(max_length = 32)]
+    pub note: Option<String>,
 }
 
 #[derive(Model, Debug, Clone)]
@@ -83,7 +85,7 @@ fn app(pool: &Pool) -> axum::Router {
         .merge(
             ListView::for_model(Event::SCHEMA)
                 .template("list.html")
-                .filter_fields(&["author_id", "done", "token", "day"])
+                .filter_fields(&["author_id", "done", "token", "day", "note", "at"])
                 .router("/events", t.clone(), pool.clone()),
         )
         .merge(
@@ -165,6 +167,12 @@ async fn list_filters_bind_typed_values(pool: &Pool) {
         ("/events?done=false", "rows=1"),
         ("/events?day=2026-09-30", "rows=1"),
         (&*format!("/events?token={UUID_A}"), "rows=2"),
+        // Empty and unparsable values are ignored, not `= NULL` / `true`.
+        ("/events?note=", "rows=2"),
+        ("/events?done=banana", "rows=2"),
+        ("/events?done=on", "rows=1"),
+        ("/events?at=2020-01-01%2000%3A00%3A00", "rows=0"),
+        ("/events?at=2026-09-29%2010%3A30%3A00", "rows=2"),
     ] {
         let (status, body) = send(pool, Method::GET, uri, "").await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");

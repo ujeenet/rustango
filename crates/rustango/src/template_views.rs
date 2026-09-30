@@ -2325,8 +2325,7 @@ fn build_list_where(
         let Some(field) = schema.field(key) else {
             continue;
         };
-        // Typed like a form value (#1915); an unparsable one is ignored, as in ViewSet.
-        let Ok(value) = crate::forms::parse_form_value(field, Some(val)) else {
+        let Some(value) = filter_value(field, val) else {
             continue;
         };
         predicates.push(WhereExpr::Predicate(Filter {
@@ -2365,6 +2364,30 @@ fn build_list_where(
         predicates.remove(0)
     } else {
         WhereExpr::And(predicates)
+    }
+}
+
+/// A `?field=value` filter typed as its field (#1915). `None` ignores the
+/// filter: an empty value, an unknown bool word, or anything unparsable.
+fn filter_value(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
+    use crate::core::FieldType as T;
+    if raw.is_empty() {
+        return None;
+    }
+    match field.ty {
+        T::Bool => match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" => Some(SqlValue::Bool(true)),
+            "false" | "0" | "off" => Some(SqlValue::Bool(false)),
+            _ => None,
+        },
+        T::DateTime => crate::forms::parse_form_value(field, Some(raw))
+            .ok()
+            .or_else(|| {
+                chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+                    .ok()
+                    .map(|d| SqlValue::DateTime(d.and_utc()))
+            }),
+        _ => crate::forms::parse_form_value(field, Some(raw)).ok(),
     }
 }
 
