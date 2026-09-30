@@ -675,6 +675,16 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Order by the PK when nothing else orders the rows, so LIMIT and
+    /// OFFSET page through a stable sequence.
+    #[must_use]
+    pub(crate) fn ordered_or_by_pk(self) -> Self {
+        match T::SCHEMA.primary_key() {
+            Some(pk) if self.order_by.is_empty() => self.order_by(&[(pk.name, false)]),
+            _ => self,
+        }
+    }
+
     /// Clear every accumulated `ORDER BY` entry, whatever added it
     /// (`.order_by(...)`, `.order_by_expr(...)`,
     /// `.with_default_order()`). Use it to drop the default order of a
@@ -4037,16 +4047,28 @@ impl<T: Model> AggregateBuilder<T> {
         if let Some(e) = self.deferred_error {
             return Err(e);
         }
-        // Fold global scopes into the WHERE so aggregates honour them
-        // too: `.count()` on a `published_only` model counts published
-        // rows, not the whole table.
-        self.qs.apply_global_scopes();
-        // Carry the QuerySet's ad-hoc JOINs over so the aggregate can
-        // group by a related column, as in `group_by("author.name")`.
-        // Empty for a plain single-table aggregate.
-        let joins = std::mem::take(&mut self.qs.ad_hoc_joins);
         let model = T::SCHEMA;
-        let where_clause = resolve_pending(model, self.qs.pending)?;
+        let is_none = self.qs.is_none;
+        // DISTINCT, a set operation, a derived join or a limit shape the
+        // rows, so group the compiled queryset (joins included) as a derived table.
+        let (where_clause, mut source, joins) = if self.qs.distinct.is_some()
+            || !self.qs.compound.is_empty()
+            || !self.qs.subquery_joins.is_empty()
+            || self.qs.limit.is_some()
+            || self.qs.offset.is_some()
+        {
+            let select = self.qs.compile()?;
+            (WhereExpr::And(Vec::new()), Some(select), Vec::new())
+        } else {
+            // Fold global scopes into the WHERE so aggregates honour them
+            // too: `.count()` on a `published_only` model counts published
+            // rows, not the whole table.
+            self.qs.apply_global_scopes();
+            // Carry the ad-hoc JOINs over so the aggregate can group by a
+            // related column, as in `group_by("author.name")`.
+            let joins = std::mem::take(&mut self.qs.ad_hoc_joins);
+            (resolve_pending(model, self.qs.pending)?, None, joins)
+        };
         // Check each AggregateExpr for column typos. This covers the
         // partition_by, order_by and args of a window aggregate. The
         // flat `Sum("col")` / `Count(Some("col"))` shapes are a known
@@ -4130,11 +4152,14 @@ impl<T: Model> AggregateBuilder<T> {
         // Use the same never-match guard as UPDATE / DELETE, and add
         // `LIMIT 0` so the executor stops early even when a GROUP BY
         // could otherwise produce rows.
-        let (where_clause, limit) = if self.qs.is_none {
+        let (where_clause, limit) = if is_none {
             (never_match_clause(model, where_clause)?, Some(0))
         } else {
             (where_clause, self.limit)
         };
+        if let Some(select) = source.as_mut() {
+            project_group_cols(model, select, &group_by)?;
+        }
 
         Ok(AggregateQuery {
             model,
@@ -4147,9 +4172,40 @@ impl<T: Model> AggregateBuilder<T> {
             order_by,
             limit,
             offset: self.offset,
-            source: None,
+            source: source.map(SelectQuery::into_derived),
         })
     }
+}
+
+/// Project each dotted `alias.col` group column out of the derived
+/// `select`, where the outer aggregate reads it back as `alias__col`.
+fn project_group_cols(
+    model: &'static ModelSchema,
+    select: &mut SelectQuery,
+    group_by: &[&'static str],
+) -> Result<(), QueryError> {
+    for col in group_by {
+        let Some((alias, c)) = col.split_once('.').filter(|(a, _)| *a != model.table) else {
+            continue;
+        };
+        let join = select.joins.iter_mut().find(|j| j.alias == alias);
+        // Every UNION branch must project the same columns, so only a
+        // plain derived select can grow one.
+        match join {
+            Some(j) if select.compound.is_empty() => {
+                if !j.project.contains(&c) {
+                    j.project.push(c);
+                }
+            }
+            _ => {
+                return Err(QueryError::GroupByJoinUnreachable {
+                    model: model.name,
+                    column: (*col).to_owned(),
+                })
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Walk an [`AggregateExpr`] for column references that must resolve
@@ -4533,8 +4589,19 @@ fn compile_values_select<T: Model>(
         }
     }
     let mut q = qs.compile()?;
-    q.projection = Some(cols);
+    project_every_branch(&mut q, &cols);
     Ok(q)
+}
+
+/// Set `cols` on `q` and on each set-op branch that projects nothing,
+/// so every branch of a union returns the same columns.
+fn project_every_branch(q: &mut SelectQuery, cols: &[&'static str]) {
+    q.projection = Some(cols.to_vec());
+    for branch in &mut q.compound {
+        if branch.query.projection.is_none() {
+            project_every_branch(&mut branch.query, cols);
+        }
+    }
 }
 
 #[cfg(test)]

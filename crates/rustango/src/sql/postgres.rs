@@ -10,10 +10,10 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 #[cfg(feature = "postgres")]
-use crate::core::{ModelSchema, SearchClause, WhereExpr};
+use crate::core::{SearchClause, WhereExpr};
 
 #[cfg(feature = "postgres")]
 use super::writers;
@@ -194,6 +194,7 @@ impl Dialect for Postgres {
     fn write_conflict_clause(
         &self,
         sql: &mut String,
+        _model: &ModelSchema,
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {

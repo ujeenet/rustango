@@ -150,6 +150,33 @@ untouched.
 
 ## Unreleased
 
+## 0.59.11
+
+### Relation `SUM` decodes by column type (#1944)
+
+`annotate_sum` over a relation's float column now reads back as `f64`, not `i64`.
+Grouping a `union()` by a `.join()` column now fails with `QueryError::GroupByJoinUnreachable`.
+
+### `upsert` targets the PK over a field `index(unique)` (#1935)
+
+**Breaking:** a model whose only unique index is a field `index(unique)` or a `unique_when`
+now upserts on the PK, so a new row with a taken value fails with a unique violation instead of
+updating the existing row. To target the column, declare `unique_together = "col"`.
+
+### `values()` returns `SqlValue::Uuid` for a Uuid column on MySQL (#1901)
+
+**Breaking:** MySQL gave `SqlValue::String`; match on `SqlValue::Uuid` as on the other backends.
+
+### `QuerySet::paginate` orders by PK when unordered (#1890)
+
+A queryset with no `order_by` now pages in PK order instead of the database's scan order.
+
+### `Dialect::write_conflict_clause` takes the model (#1887)
+
+**Breaking:** a custom `Dialect` adds a `model: &ModelSchema` argument. On MySQL,
+`insert_or_ignore` now returns `false` on a skip, and a skipped `DoNothing` through
+`insert_returning_pool` is `RowNotFound`, as on PostgreSQL.
+
 ## 0.59.10
 
 ### Tenancy `migrate` verbs refuse unknown flags (breaking)
