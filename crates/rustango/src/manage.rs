@@ -362,8 +362,10 @@ impl Cli {
     #[cfg(feature = "admin")]
     #[must_use]
     pub fn with_static(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
+        let prefix = prefix.into();
+        crate::static_files::warn_if_uploads_prefix(&prefix);
         let files = crate::static_files::StaticFiles::new(root_dir);
-        self.static_dirs.push((prefix.into(), files));
+        self.static_dirs.push((prefix, files));
         self
     }
 

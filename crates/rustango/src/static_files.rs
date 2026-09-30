@@ -119,6 +119,21 @@ impl StaticFiles {
     }
 }
 
+/// Warn when a plain static mount looks like it serves user uploads,
+/// where HTML or SVG would run on the app origin (#1849).
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
+pub(crate) fn warn_if_uploads_prefix(prefix: &str) {
+    let p = prefix.to_ascii_lowercase();
+    if p.contains("upload") || p.contains("media") {
+        tracing::warn!(
+            target: "rustango::static_files",
+            prefix,
+            "static mount looks like user uploads; mount it with `with_uploads` so HTML and SVG \
+             download instead of running on this origin"
+        );
+    }
+}
+
 /// Router that serves everything under `files.root`. Mount it with
 /// `.nest("/static", static_router(...))`.
 #[must_use]
@@ -606,6 +621,27 @@ mod tests {
         // Plain static mounts keep serving HTML inline.
         let r = get(server(&dir), "/x.html").await;
         assert!(r.headers().get(header::CONTENT_DISPOSITION).is_none());
+    }
+
+    /// What `warn_if_uploads_prefix(prefix)` logs.
+    #[cfg(feature = "runtime")]
+    fn prefix_logs(prefix: &str) -> String {
+        let out = crate::testkit::CaptureWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, || warn_if_uploads_prefix(prefix));
+        out.contents()
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn upload_like_static_prefixes_warn() {
+        for p in ["/uploads", "/Media", "/user-uploads/"] {
+            assert!(prefix_logs(p).contains("with_uploads"), "{p}");
+        }
+        assert_eq!(prefix_logs("/static"), "");
     }
 
     #[test]

@@ -139,6 +139,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::sql` | Query execution |
 | `rustango::sql::lock` | Row-lock clauses |
 | `rustango::sso` | SSO account linking |
+| `rustango::static_files` | Static-file mounts |
 | `rustango::template_views` | Template-backed views |
 | `rustango::tenancy` | Tenancy, general |
 | `rustango::tenancy::admin` | Tenant admin |

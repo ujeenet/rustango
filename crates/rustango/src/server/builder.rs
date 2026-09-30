@@ -301,6 +301,8 @@ impl<DB: Database> Builder<DB> {
         prefix: impl Into<String>,
         root_dir: impl Into<std::path::PathBuf>,
     ) -> Self {
+        let prefix = prefix.into();
+        crate::static_files::warn_if_uploads_prefix(&prefix);
         let files = crate::static_files::StaticFiles::new(root_dir);
         self.with_static_files(prefix, files)
     }
