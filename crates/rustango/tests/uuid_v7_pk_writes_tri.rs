@@ -25,7 +25,32 @@ pub struct Note {
     pub name: String,
 }
 
+/// A Rust-filled `Auto` declared before the DB-filled PK: MySQL's
+/// `LAST_INSERT_ID()` belongs to the PK, not to the first `Auto` field.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "v71934_ticket", app = "v71934")]
+pub struct Ticket {
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+/// A Rust-filled PK beside another Rust-filled `Auto`: nothing to read back.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "v71934_stamp", app = "v71934")]
+pub struct Stamp {
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(primary_key, default_uuid_v7)]
+    pub id: Auto<Uuid>,
+}
+
 async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Ticket>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Stamp>(pool).await;
     rustango::testkit::matrix::fresh_table::<Item>(pool).await;
     rustango::testkit::matrix::fresh_table::<Note>(pool).await;
     rustango::audit::ensure_table_pool(pool)
@@ -113,11 +138,34 @@ async fn pg_bulk_insert_writes_ids_back(pool: &Pool) {
     let _ = pool;
 }
 
+async fn db_pk_is_read_back_beside_a_rust_filled_auto(pool: &Pool) {
+    let mut t = Ticket {
+        created_at: Auto::Unset,
+        id: Auto::Unset,
+        name: "a".into(),
+    };
+    t.insert_pool(pool).await.expect("insert_pool");
+    let stored = Ticket::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(t.id.get(), stored[0].id.get(), "PK read back");
+    assert!(t.created_at.get().is_some());
+
+    let mut s = Stamp {
+        created_at: Auto::Unset,
+        id: Auto::Unset,
+    };
+    s.insert_pool(pool).await.expect("insert_pool");
+    let id = *s.id.get().expect("id filled");
+    let stored = Stamp::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(stored[0].id.get(), Some(&id));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         audited_insert_fills_the_pk,
         bulk_writes_fill_the_pk,
         pg_bulk_insert_writes_ids_back,
+        db_pk_is_read_back_beside_a_rust_filled_auto,
     ],
 }
