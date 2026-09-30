@@ -1345,7 +1345,7 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
         (crate::audit::VIEW_CODENAME, "Can view the audit log"),
         (crate::audit::DELETE_CODENAME, "Can clean up the audit log"),
     ] {
-        // Under the audit table, so the model loop's row for it merges in.
+        // Listed under the audit table; `AuditLog` seeds no CRUD rows.
         seed_reserved_codename_pool(pool, "rustango_audit_log", codename, name).await?;
     }
 

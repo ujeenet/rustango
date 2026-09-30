@@ -694,13 +694,13 @@ pub async fn emit_one_pool(
 }
 
 /// Codename a non-superuser needs to read the admin audit feed. Rows
-/// are still limited to tables they hold `{table}.view` on. The audit
-/// table's own codename, so no model table can share it (#1979).
-pub const VIEW_CODENAME: &str = "rustango_audit_log.view";
+/// are still limited to tables they hold `{table}.view` on. Not a CRUD
+/// action, so no table's `{table}.view` grants it (#1979).
+pub const VIEW_CODENAME: &str = "rustango_audit_log.view_feed";
 
 /// Codename a non-superuser needs to run the admin audit cleanup.
 /// Cleanup spans every table, whatever `{table}.view` the user holds.
-pub const DELETE_CODENAME: &str = "rustango_audit_log.delete";
+pub const DELETE_CODENAME: &str = "rustango_audit_log.clean_feed";
 
 /// A permission on the admin audit feed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,8 +6,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — a model on table `audit` no longer grants the audit feed (#1979)
 
-The feed now needs `rustango_audit_log.view` / `.delete`. The old `audit.*` names still work
-while no model uses table `audit`.
+The feed now needs `rustango_audit_log.view_feed` / `.clean_feed`, which no model's CRUD codename
+can equal. The old `audit.*` names still work while no model uses table `audit`.
 
 ### Fixed — a parent with 1000+ inline children can be saved again (#1977)
 

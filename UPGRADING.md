@@ -150,7 +150,7 @@ untouched.
 
 ## Unreleased
 
-### Audit feed codenames are `rustango_audit_log.view` / `.delete` (#1979)
+### Audit feed codenames are `rustango_audit_log.view_feed` / `.clean_feed` (#1979)
 
 Grant these instead of `audit.view` / `audit.delete`. The old names are ignored once a model uses table `audit`.
 
