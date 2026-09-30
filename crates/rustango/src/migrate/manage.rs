@@ -1992,7 +1992,78 @@ fn parse_name_and_model_as(
         }
         _ => {}
     }
+    // The file becomes `pub mod <snake>;`: `pub mod type;` does not parse (#1913).
+    let module = pascal_to_snake(&name);
+    if name == "Self" || is_reserved_module_name(&module) {
+        return Err(MigrateError::Validation(format!(
+            "`{name}` would make the module `{module}`, which is a Rust keyword or \
+             shadows a built-in crate — pick another name"
+        )));
+    }
     Ok((name, model, crate_root.unwrap_or_else(|| "rustango".into())))
+}
+
+/// Keywords (2015–2024, strict and reserved) plus the crate names a module
+/// may not shadow. `cargo-rustango` keeps its own copy; it links no rustango.
+fn is_reserved_module_name(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "abstract",
+        "alloc",
+        "as",
+        "async",
+        "await",
+        "become",
+        "box",
+        "break",
+        "const",
+        "continue",
+        "core",
+        "crate",
+        "do",
+        "dyn",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "final",
+        "fn",
+        "for",
+        "gen",
+        "if",
+        "impl",
+        "in",
+        "let",
+        "loop",
+        "macro",
+        "match",
+        "mod",
+        "move",
+        "mut",
+        "override",
+        "priv",
+        "proc_macro",
+        "pub",
+        "ref",
+        "return",
+        "self",
+        "static",
+        "std",
+        "struct",
+        "super",
+        "trait",
+        "true",
+        "try",
+        "type",
+        "typeof",
+        "unsafe",
+        "unsized",
+        "use",
+        "virtual",
+        "where",
+        "while",
+        "yield",
+    ];
+    RESERVED.contains(&name)
 }
 
 fn is_valid_type_name(name: &str) -> bool {
@@ -2118,6 +2189,8 @@ fn viewset_template_pool(name: &str, model: &str, snake: &str, crate_root: &str)
 
 use {crate_root}::ViewSet;
 
+use crate::models::{model};
+
 #[derive(ViewSet)]
 #[viewset(
     model        = {model},
@@ -2178,7 +2251,7 @@ pub fn router() -> Router<()> {{
 
 // Mount in your urls.rs:
 //
-//   .merge(crate::viewsets::{snake}::router())
+//   .merge(crate::{snake}::router())
 "#
     )
 }
@@ -2470,11 +2543,21 @@ fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     let (name, model, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let model = model.unwrap_or_else(|| "Post".into());
-    let body = format!(
+    write_generated(
+        w,
+        &format!("{snake}.rs"),
+        serializer_template(&name, &model, &crate_root),
+    )
+}
+
+fn serializer_template(name: &str, model: &str, crate_root: &str) -> String {
+    format!(
         r#"//! Auto-scaffolded by `manage make:serializer {name}`.
 
 use {crate_root}::sql::Auto;
 use {crate_root}::Serializer;
+
+use crate::models::{model};
 
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = {model})]
@@ -2496,8 +2579,7 @@ pub struct {name} {{
     // pub content: String,
 }}
 "#
-    );
-    write_generated(w, &format!("{snake}.rs"), body)
+    )
 }
 
 fn make_form_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
@@ -5318,6 +5400,36 @@ mod gen_tests {
     fn parse_name_and_model_rejects_lowercase_name() {
         let r = parse_name_and_model(&["postviewset".into()]);
         assert!(r.is_err());
+    }
+
+    /// `pub mod type;` / `pub mod std;` do not build (#1913).
+    #[test]
+    fn names_that_make_a_reserved_module_are_refused() {
+        for n in ["Type", "Match", "Std", "Core", "Crate", "Self", "Super"] {
+            assert!(parse_name_and_model(&[n.into()]).is_err(), "{n}");
+        }
+        for n in ["type", "self", "std"] {
+            assert!(
+                parse_name_and_model_as(&[n.into()], NameShape::Identifier).is_err(),
+                "{n}"
+            );
+        }
+        assert!(parse_name_and_model(&["Typed".into()]).is_ok());
+    }
+
+    /// The model must be in scope or the derive can't name it (#1913).
+    #[test]
+    fn pool_templates_import_their_model() {
+        let vs = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
+        let ser = serializer_template("PostSerializer", "Post", "rustango");
+        for body in [&vs, &ser] {
+            assert!(body.contains("use crate::models::Post;"), "{body}");
+        }
+        let tenant = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(
+            tenant.contains(".merge(crate::post_view_set::router())"),
+            "{tenant}"
+        );
     }
 
     // -------- dumpdata --------

@@ -470,6 +470,8 @@ It writes a starter module you fill in:
 
 use rustango::Serializer;
 
+use crate::models::Post;
+
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = Post)]
 pub struct PostSerializer {

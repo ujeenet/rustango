@@ -581,8 +581,77 @@ fn validate_name(name: &str) -> Result<(), String> {
             "`{name}` is not a valid Cargo crate name — use [A-Za-z_][A-Za-z0-9_-]*"
         ));
     }
+    // The templates write `use <crate>::urls` and `mod <name>`: a keyword
+    // does not parse and `std` shadows the real one (#1913).
+    let ident = name.replace('-', "_");
+    if RESERVED_IDENTS.contains(&ident.as_str()) {
+        return Err(format!(
+            "`{name}` cannot be a project name — `{ident}` is a Rust keyword or a \
+             built-in crate name, so the generated code would not compile"
+        ));
+    }
     Ok(())
 }
+
+/// Keywords (2015–2024, strict and reserved) plus built-in crate names.
+/// Same list as `rustango::migrate::manage`; this crate links no rustango.
+const RESERVED_IDENTS: &[&str] = &[
+    "abstract",
+    "alloc",
+    "as",
+    "async",
+    "await",
+    "become",
+    "box",
+    "break",
+    "const",
+    "continue",
+    "core",
+    "crate",
+    "do",
+    "dyn",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "final",
+    "fn",
+    "for",
+    "gen",
+    "if",
+    "impl",
+    "in",
+    "let",
+    "loop",
+    "macro",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "override",
+    "priv",
+    "proc_macro",
+    "pub",
+    "ref",
+    "return",
+    "self",
+    "static",
+    "std",
+    "struct",
+    "super",
+    "trait",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "unsafe",
+    "unsized",
+    "use",
+    "virtual",
+    "where",
+    "while",
+    "yield",
+];
 
 fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     let name = &args.name;
@@ -1097,8 +1166,20 @@ mod tests {
             );
         }
         // Not reserved — these load fine, so they stay accepted.
-        for n in ["myblog", "test", "std", "core", "crate_thing"] {
+        for n in ["myblog", "test", "crate_thing", "my-type"] {
             validate_name(n).unwrap_or_else(|e| panic!("{n} should be allowed: {e}"));
+        }
+    }
+
+    /// `use type::urls` does not parse and a crate named `std` breaks the
+    /// prelude, so the generated project would not build (#1913).
+    #[test]
+    fn keywords_and_builtin_crate_names_are_refused() {
+        for n in [
+            "type", "match", "self", "super", "crate", "std", "core", "async",
+        ] {
+            let err = validate_name(n).expect_err(n);
+            assert!(err.contains("keyword"), "{n}: {err}");
         }
     }
 

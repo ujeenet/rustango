@@ -155,6 +155,11 @@ untouched.
 `migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;
 now an unknown flag is an error. Use `migrate-tenants` for a tenant-scoped target.
 
+### Scaffolder refuses keyword names
+
+`make:*` and `cargo rustango new` now refuse names like `Type`, `std` or `crate`; the
+code they generated for them did not compile.
+
 ### `dumpdata` / `loaddata` fail instead of losing rows (breaking)
 
 `dumpdata` now errors on a model with an Array, Range, HStore, Vector or Geometry column;
