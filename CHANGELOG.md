@@ -20,6 +20,7 @@ Batches split by the bind limit share one transaction, or a savepoint inside `at
 ### Fixed — relation-span filters no longer leak memory per query (#1889)
 
 Multi-hop join aliases are interned once per path instead of leaked on every `compile()`.
+Paths deeper than 6 hops are refused, which keeps that set bounded by the schema.
 
 ### Fixed — a panicking job no longer kills its worker (#1843)
 

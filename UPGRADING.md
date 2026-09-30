@@ -164,9 +164,9 @@ It now decodes as `f64` (float) or `Decimal` (decimal), not `i64`; `sum::<i64>` 
 When the rows need more than one batch, calling it while holding an `AtomicTx` guard on the
 same pool now returns `NestedAtomic`; drop the guard first.
 
-### `QueryError::JoinAliasLimit`
+### `QueryError::RelationPathTooDeep`
 
-New variant: returned once a process has seen 4096 distinct multi-hop relation paths.
+New variant: a relation span or `select_related` path longer than 6 hops is refused.
 
 ### `PgJobQueue` counts attempts at pickup
 

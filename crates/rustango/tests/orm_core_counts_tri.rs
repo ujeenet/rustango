@@ -226,6 +226,45 @@ fn span_alias_is_not_reallocated_per_compile() {
     }
 }
 
+/// Self-FK, so a caller can build paths of any depth; never gets a table.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "occ_node")]
+#[allow(dead_code)]
+pub struct Node {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(fk = "self", on = "id")]
+    pub parent: Option<i64>,
+}
+
+/// A too-deep path fails only its own query; new paths keep compiling.
+#[test]
+fn deep_self_fk_path_is_refused_per_query() {
+    let deep = ["parent"; 7].join("__") + "__id";
+    let err = Node::objects().filter(&deep, 1_i64).compile().unwrap_err();
+    assert!(
+        matches!(
+            err,
+            rustango::core::QueryError::RelationPathTooDeep { max: 6, .. }
+        ),
+        "{err:?}"
+    );
+    let ok = ["parent"; 6].join("__") + "__id";
+    assert_eq!(
+        Node::objects()
+            .filter(&ok, 1_i64)
+            .compile()
+            .unwrap()
+            .joins
+            .len(),
+        6
+    );
+    Sale::objects()
+        .filter("store__region__id", 1_i64)
+        .compile()
+        .unwrap();
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [

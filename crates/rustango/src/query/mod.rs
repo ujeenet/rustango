@@ -3298,34 +3298,31 @@ fn resolve_span(
     Ok((joins, predicate))
 }
 
-/// Cap on distinct interned join aliases. Aliases are validated FK
-/// paths, so a real schema needs a few dozen; self-FK chains are unbounded.
-const MAX_JOIN_ALIASES: usize = 4096;
+/// Deepest relation path a span or `select_related` may walk. It bounds the
+/// interned aliases by the schema's FK paths, so user-built lookups
+/// (`parent__parent__…`) cannot grow the set without limit.
+const MAX_RELATION_HOPS: usize = 6;
 
 /// A `&'static` join alias for a multi-hop path (`author__profile`),
 /// leaked once per distinct path rather than once per `compile()`.
 fn intern_join_alias(path: &str) -> Result<&'static str, QueryError> {
-    use std::sync::{Mutex, OnceLock, PoisonError};
-    static ALIASES: OnceLock<Mutex<std::collections::HashSet<&'static str>>> = OnceLock::new();
-    let mut set = ALIASES
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    intern_in(&mut set, MAX_JOIN_ALIASES, path)
-}
-
-fn intern_in(
-    set: &mut std::collections::HashSet<&'static str>,
-    cap: usize,
-    path: &str,
-) -> Result<&'static str, QueryError> {
-    if let Some(alias) = set.get(path) {
+    use std::collections::HashSet;
+    use std::sync::{OnceLock, PoisonError, RwLock};
+    static ALIASES: OnceLock<RwLock<HashSet<&'static str>>> = OnceLock::new();
+    if path.split("__").count() > MAX_RELATION_HOPS {
+        return Err(QueryError::RelationPathTooDeep {
+            path: path.to_owned(),
+            max: MAX_RELATION_HOPS,
+        });
+    }
+    let set = ALIASES.get_or_init(RwLock::default);
+    // Read first: after warm-up every lookup is a hit and runs in parallel.
+    if let Some(alias) = set.read().unwrap_or_else(PoisonError::into_inner).get(path) {
         return Ok(alias);
     }
-    if set.len() >= cap {
-        return Err(QueryError::JoinAliasLimit {
-            path: path.to_owned(),
-        });
+    let mut set = set.write().unwrap_or_else(PoisonError::into_inner);
+    if let Some(alias) = set.get(path) {
+        return Ok(alias);
     }
     let alias: &'static str = Box::leak(path.into());
     set.insert(alias);
@@ -4545,15 +4542,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn join_aliases_are_interned_up_to_the_cap() {
-        let mut set = std::collections::HashSet::new();
-        let a = intern_in(&mut set, 2, "a__b").unwrap();
-        assert!(std::ptr::eq(a, intern_in(&mut set, 2, "a__b").unwrap()));
-        intern_in(&mut set, 2, "a__c").unwrap();
+    fn too_deep_paths_fail_alone_and_are_not_kept() {
+        let deep = "t1__a__a__a__a__a__a";
         assert!(matches!(
-            intern_in(&mut set, 2, "a__d"),
-            Err(QueryError::JoinAliasLimit { .. })
+            intern_join_alias(deep),
+            Err(QueryError::RelationPathTooDeep { max: 6, .. })
         ));
-        assert_eq!(set.len(), 2, "a refused path is not kept");
+        let a = intern_join_alias("t1__b").unwrap();
+        assert!(std::ptr::eq(a, intern_join_alias("t1__b").unwrap()));
+        intern_join_alias("t1__a__a__a__a__a").expect("six hops still intern");
     }
 }
