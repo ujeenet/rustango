@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.10
+
 ### Tenancy `migrate` verbs refuse unknown flags (breaking)
 
 `migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;

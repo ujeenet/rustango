@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.10] — 2026-09-30
+
 ### Fixed — tenancy `migrate` verbs honour their flags and scope (#1909)
 
 `migrate-registry --dry-run` previews instead of migrating; `migrate <target>` and
