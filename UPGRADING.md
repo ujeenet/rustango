@@ -186,6 +186,11 @@ like failed logins; the form and the login page answer 429 until the lock ends.
 are `#[non_exhaustive]`: build configs with `UploadConfig::new(..)`, add a `_` match arm.
 Mount upload directories with `with_uploads` instead of `with_static`.
 
+### ViewSets with open write actions warn
+
+No behaviour change: a ViewSet whose write actions have no codenames still serves them, but
+logs a warning at mount. Add permissions, `.read_only()`, or `.allow_anonymous()` to silence it.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

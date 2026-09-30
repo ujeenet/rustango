@@ -153,6 +153,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::tenancy::resolver` | Mandanten-Auflösung |
 | `rustango::tenancy::sso` | Mandanten-SSO |
 | `rustango::tenancy::sweep` | Aufbewahrungs-Sweeps |
+| `rustango::viewset` | ViewSets mit offenen Schreibaktionen |
 
 Das sind die Targets, die das Framework explizit benennt. Events ohne eigenes
 Target erben ihren Modulpfad, was dieselbe Form ergibt —

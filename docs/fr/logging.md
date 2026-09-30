@@ -155,6 +155,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::tenancy::resolver` | Résolution de locataire |
 | `rustango::tenancy::sso` | SSO de locataire |
 | `rustango::tenancy::sweep` | Balayages de rétention |
+| `rustango::viewset` | ViewSets montés avec des écritures ouvertes |
 
 Ce sont les targets que le framework nomme explicitement. Les événements qui
 n'en nomment aucun héritent de leur chemin de module, ce qui donne la même forme

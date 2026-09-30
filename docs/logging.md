@@ -150,6 +150,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::tenancy::resolver` | Tenant resolution |
 | `rustango::tenancy::sso` | Tenant SSO |
 | `rustango::tenancy::sweep` | Retention sweeps |
+| `rustango::viewset` | ViewSets mounted with open write actions |
 
 Those are the targets the framework names explicitly. Events that don't name
 one inherit their module path, which gives the same shape —

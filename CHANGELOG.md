@@ -43,6 +43,12 @@ New `with_uploads` (on `Cli` and `server::Builder`) and `StaticFiles::user_conte
 HTML, SVG and XML as `attachment` with `nosniff`. An empty `allowed_extensions` now refuses
 `ACTIVE_EXTENSIONS`, and `UploadConfig::max_files` (default 20) caps files per request.
 
+### Fixed — open ViewSets warn at mount, `make:viewset` guards writes (#1857)
+
+A ViewSet whose create/update/destroy need no codename logs a `rustango::viewset` warning;
+`.allow_anonymous()` (or `#[viewset(allow_anonymous)]`) says it is intended. `make:viewset`
+now scaffolds `.permissions_for_model()` (tenant) or `read_only` (pool).
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
