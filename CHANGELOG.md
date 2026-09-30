@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a `max_length` change no longer undoes a type change (#1878)
+
+Shrinking a length on PostgreSQL now refuses over longer values instead of truncating them.
+
 ### Fixed — migrations drop dependents first (#1879)
 
 Indexes, checks, composite FKs and M2M junctions drop before their columns and tables,

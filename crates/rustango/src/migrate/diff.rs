@@ -465,6 +465,20 @@ fn push_alter_changes(
     cf: &FieldSnapshot,
     out: &mut Vec<SchemaChange>,
 ) {
+    // `AlterColumnType` to a string renders TEXT and a length change
+    // renders VARCHAR/TEXT, so the length change goes on the string side:
+    // before the type when leaving a string, after it when entering one.
+    // Run the other way it undid the type change (#1878).
+    let max_length = (pf.max_length != cf.max_length).then(|| SchemaChange::AlterColumnMaxLength {
+        table: table.to_owned(),
+        column: cf.column.clone(),
+        from: pf.max_length,
+        to: cf.max_length,
+    });
+    let leaving_string = pf.ty != cf.ty && cf.ty != "string";
+    if leaving_string {
+        out.extend(max_length.clone());
+    }
     if pf.ty != cf.ty {
         out.push(SchemaChange::AlterColumnType {
             table: table.to_owned(),
@@ -472,6 +486,9 @@ fn push_alter_changes(
             from: pf.ty.clone(),
             to: cf.ty.clone(),
         });
+    }
+    if !leaving_string {
+        out.extend(max_length);
     }
     if pf.nullable != cf.nullable {
         out.push(SchemaChange::AlterColumnNullable {
@@ -486,14 +503,6 @@ fn push_alter_changes(
             column: cf.column.clone(),
             from: pf.default.clone(),
             to: cf.default.clone(),
-        });
-    }
-    if pf.max_length != cf.max_length {
-        out.push(SchemaChange::AlterColumnMaxLength {
-            table: table.to_owned(),
-            column: cf.column.clone(),
-            from: pf.max_length,
-            to: cf.max_length,
         });
     }
     if pf.unique != cf.unique {
@@ -917,8 +926,10 @@ fn render_changes_split_inner(
                     Some(n) => format!("VARCHAR({n})"),
                     None => "TEXT".into(),
                 };
+                // No `USING`: a `::VARCHAR(n)` cast truncates, and without
+                // it PG refuses to shrink over longer values (#1878).
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to}"#,
                 ));
             }
             SchemaChange::AlterColumnUnique {

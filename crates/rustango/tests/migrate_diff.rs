@@ -496,6 +496,7 @@ fn render_alter_column_default_drop_emits_drop_default() {
 }
 
 #[test]
+/// No `USING`: a `::VARCHAR(n)` cast silently truncates (#1878).
 fn render_alter_column_max_length_emits_varchar_or_text() {
     let to_varchar = vec![SchemaChange::AlterColumnMaxLength {
         table: "u".into(),
@@ -506,7 +507,7 @@ fn render_alter_column_max_length_emits_varchar_or_text() {
     let ddl = render_changes(&to_varchar, &empty_snap()).unwrap();
     assert_eq!(
         ddl,
-        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE VARCHAR(64) USING "name"::VARCHAR(64)"#]
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE VARCHAR(64)"#]
     );
 
     let to_text = vec![SchemaChange::AlterColumnMaxLength {
@@ -518,7 +519,7 @@ fn render_alter_column_max_length_emits_varchar_or_text() {
     let ddl = render_changes(&to_text, &empty_snap()).unwrap();
     assert_eq!(
         ddl,
-        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE TEXT USING "name"::TEXT"#]
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE TEXT"#]
     );
 }
 

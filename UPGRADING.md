@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Shrinking `max_length` no longer truncates (#1878)
+
+**Breaking:** on PostgreSQL the migration now fails when a value is longer than the new length.
+Shorten those values first.
+
 ### Drop order in new migrations (#1879)
 
 Only newly written files use it. An unapplied file that drops a column before its index,

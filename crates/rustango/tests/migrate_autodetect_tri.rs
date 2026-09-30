@@ -383,6 +383,73 @@ async fn composite_fk_drops_before_its_parent(pool: &Pool) {
         .expect("the FK drops before its index and table");
 }
 
+// ---------------------------------------------------------------- #1878
+
+/// `String(max_length = 50)` → `i32` ends as an integer column. The
+/// length change used to run after the type change and put TEXT back.
+async fn type_change_is_not_undone_by_max_length(pool: &Pool) {
+    let t = "mad_tc_item";
+    let chain = Chain::new(pool, "tc", &[t]).await;
+    let c = |ty: &str, extra: Value| json!({"tables": [table(t, vec![id(), col("c", ty, extra)])]});
+    chain
+        .step(pool, c("string", json!({"max_length": 50})))
+        .await
+        .expect("initial");
+    let alter = chain.step(pool, c("i32", json!({}))).await;
+    let runs = by_dialect! { pool,
+        postgres => true, because "AlterColumnType renders on Postgres",
+        mysql => false, because "AlterColumn* is refused at render until #559",
+        sqlite => false, because "AlterColumn* is refused at render until #559",
+    };
+    if !runs.value {
+        let err = alter.expect_err(runs.why);
+        assert!(err.contains("is not yet supported on dialect"), "{err}");
+        return;
+    }
+    alter.expect("the type change applies");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (1, 'abc')",
+            &[t, "id", "c"]
+        )
+        .await
+        .is_err(),
+        "the column is an integer, so text is refused"
+    );
+}
+
+/// Shrinking `max_length` over longer values fails instead of
+/// truncating them: `USING c::VARCHAR(n)` cut `abcdefghij` to `abc`.
+async fn shrinking_max_length_refuses_to_truncate(pool: &Pool) {
+    let t = "mad_sh_item";
+    let chain = Chain::new(pool, "sh", &[t]).await;
+    let c = |n: u32| json!({"tables": [table(t, vec![id(), col("c", "string", json!({"max_length": n}))])]});
+    chain.step(pool, c(10)).await.expect("initial");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'abcdefghij')",
+        &[t, "id", "c"],
+    )
+    .await
+    .unwrap();
+    let shrink = chain.step(pool, c(3)).await;
+    let refuses = by_dialect! { pool,
+        postgres => true, because "without USING, PG refuses a value too long for the new type",
+        mysql => true, because "AlterColumnMaxLength is refused at render until #559",
+        sqlite => false, because "SQLite never enforces VARCHAR length, so the change is a no-op",
+    };
+    if !refuses.value {
+        shrink.expect(refuses.why);
+        return;
+    }
+    let err = shrink.expect_err(refuses.why);
+    assert!(
+        err.contains("too long") || err.contains("AlterColumnMaxLength"),
+        "{err}"
+    );
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -392,5 +459,7 @@ tri_dialect_test!(
         tables_drop_child_first,
         m2m_drops_before_its_tables,
         composite_fk_drops_before_its_parent,
+        type_change_is_not_undone_by_max_length,
+        shrinking_max_length_refuses_to_truncate,
     ]
 );
