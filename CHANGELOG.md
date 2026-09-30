@@ -10,6 +10,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 so tenant A's user 1 no longer logs in as tenant B's user 1. MCP agent tokens are refused
 by `JwtBackend` and `JwtAuth::verify_for_tenant`. New `JwtBackend::issue_for_tenant`.
 
+### Security — single-use auth links are one atomic `add` (#1853)
+
+Two simultaneous redemptions of a reset, magic-link or verify link no longer both pass.
+A failing cache or a `NullCache` now refuses the link instead of letting it be reused.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

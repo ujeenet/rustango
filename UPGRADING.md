@@ -155,6 +155,11 @@ untouched.
 **Breaking:** under `require_auth` a token from `JwtBackend::issue` (no tenant) is refused.
 Mint with `issue_for_tenant(user_id, slug)` or the `JwtAuth` login instead.
 
+### Single-use auth links need a storing cache (#1853)
+
+**Breaking:** `verify_single_use` and `confirm_password_reset_single_use*` refuse every
+link on a `NullCache`. A custom cache should override `add` atomically.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

@@ -197,8 +197,8 @@ part of the same call ([above](#make-the-link-single-use)):
 ```
 
 Back it with a **shared** cache (Redis) in production so a token can't be replayed
-against a different replica. The check fails closed (a cache error refuses rather
-than risk a replay).
+against a different replica. The check is one atomic `Cache::add` and fails closed:
+a cache error, or a `NullCache`, refuses rather than risk a replay.
 
 ---
 
