@@ -229,9 +229,11 @@ where
             Ok(())
         }
         "migrate-tenants" => {
-            migrations::migrate_tenants_cmd(pools, registry_url, dir, writer).await
+            migrations::migrate_tenants_cmd(pools, registry_url, dir, &args[1..], writer).await
         }
-        "migrate-registry" => migrations::migrate_registry_cmd(pools, dir, writer).await,
+        "migrate-registry" => {
+            migrations::migrate_registry_cmd(pools, dir, &args[1..], writer).await
+        }
         #[cfg(feature = "postgres")]
         "migrate-tenant-storage" => {
             // PG-only: uses pg_dump | psql + schema-mode dispatch.

@@ -16,11 +16,23 @@ pub(super) async fn migrate_tenants_cmd<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
+    args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    // No `--dry-run` here: refusing it beats migrating every tenant (#1909).
+    super::args::parse(
+        args,
+        &super::args::Spec {
+            verb: "migrate-tenants",
+            usage: "migrate-tenants   apply tenant-scoped pending migrations across active orgs",
+            switches: &[],
+            valued: &[],
+            max_positionals: 0,
+        },
+    )?;
     // Progress goes to the same writer the report does, so `manage
     // migrate-tenants` shows each migration as it lands instead of
     // sitting silent for the length of the run.
@@ -166,11 +178,25 @@ fn write_tenant_report<W: Write>(
 pub(super) async fn migrate_registry_cmd<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     dir: &Path,
+    args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    let parsed = super::args::parse(
+        args,
+        &super::args::Spec {
+            verb: "migrate-registry",
+            usage: "migrate-registry [--dry-run]   apply (or preview) registry-scoped pending migrations",
+            switches: &["--dry-run"],
+            valued: &[],
+            max_positionals: 0,
+        },
+    )?;
+    if parsed.has("--dry-run") {
+        return run_registry_scoped(pools, dir, &["--dry-run".to_owned()], w).await;
+    }
     let applied = tenant_migrate::migrate_registry(pools, dir).await?;
     if applied.is_empty() {
         writeln!(w, "registry: nothing to migrate (already up to date)")?;
@@ -264,7 +290,7 @@ where
              migrate --fake <name> --all-tenants\n\
                                              stamp every active tenant's ledger rather than the registry\n\
                                              (combine with --system for the framework's own tables)\n\
-             migrate-registry                apply registry-scoped pending migrations only\n\
+             migrate-registry [--dry-run]    apply (or preview) registry-scoped pending migrations only\n\
              migrate-tenants                 apply tenant-scoped pending migrations across active orgs"
         )?;
         return Ok(());
@@ -290,17 +316,7 @@ where
     if target.is_some() || dry_run {
         // Targeted / dry-run mode is registry-only — tenant-scoped
         // routing for arbitrary targets isn't well-defined yet.
-        // Forward the original args to the registry runner.
-        let mut forwarded = vec!["migrate".to_owned()];
-        forwarded.extend(args.iter().cloned());
-        return rustango::migrate::manage::run_with_writer(
-            &pools.registry_pool(),
-            dir,
-            forwarded,
-            w,
-        )
-        .await
-        .map_err(TenancyError::Migrate);
+        return run_registry_scoped(pools, dir, args, w).await;
     }
 
     // Registry phase.
@@ -332,6 +348,44 @@ where
     let w = progress.into_inner();
     write_tenant_report(w, &report)?;
     Ok(())
+}
+
+/// Run the single-tenant `migrate` runner with `args` against the registry,
+/// over the registry-scoped migrations only: the whole dir would put
+/// tenant tables in the registry (#1909).
+async fn run_registry_scoped<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use rustango::migrate::MigrationScope;
+    if let Some(target) = args.iter().find(|a| !a.starts_with('-')) {
+        let all = rustango::migrate::file::list_dir(dir)?;
+        if all
+            .iter()
+            .any(|m| &m.name == target && m.scope == MigrationScope::Tenant)
+        {
+            return Err(TenancyError::Validation(format!(
+                "`{target}` is tenant-scoped — `migrate <target>` moves the registry only; \
+                 run `migrate-tenants`"
+            )));
+        }
+    }
+    let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?;
+    let mut forwarded = vec!["migrate".to_owned()];
+    forwarded.extend(args.iter().cloned());
+    rustango::migrate::manage::run_with_writer(
+        &pools.registry_pool(),
+        scoped.path(dir),
+        forwarded,
+        w,
+    )
+    .await
+    .map_err(TenancyError::Migrate)
 }
 
 // ---------- init-tenancy ----------

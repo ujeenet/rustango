@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Tenancy `migrate` verbs refuse unknown flags (breaking)
+
+`migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;
+now an unknown flag is an error. Use `migrate-tenants` for a tenant-scoped target.
+
 ### `PgJobQueue` counts attempts at pickup
 
 `rustango_jobs.attempt` now includes the running attempt. Keep the

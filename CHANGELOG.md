@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenancy `migrate` verbs honour their flags and scope (#1909)
+
+`migrate-registry --dry-run` previews instead of migrating; `migrate <target>` and
+`migrate --dry-run` see registry-scoped migrations only. **Breaking:** `migrate-registry`
+and `migrate-tenants` refuse flags they don't take, and a tenant-scoped `<target>` is refused.
+
 ### Fixed — a panicking job no longer kills its worker (#1843)
 
 A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
