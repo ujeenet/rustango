@@ -25,9 +25,7 @@ use axum::response::{IntoResponse, Response};
 use sqlx::Database;
 
 use crate::sql::sqlx;
-use crate::tenancy::{
-    session::SessionSecret, ChainResolver, DatabaseConn, DatabasePools, Org, OrgResolver,
-};
+use crate::tenancy::{session::SessionSecret, ChainResolver, DatabaseConn, DatabasePools, Org};
 
 /// What the [`DatabaseTenant`] extractor reads from request
 /// extensions. `DB` is the tenant-data backend, `sqlx::Sqlite` or
@@ -129,14 +127,14 @@ where
     type Rejection = DatabaseTenantRejection;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let ctx = parts
-            .extensions
-            .get::<Arc<DatabaseTenantContext<DB>>>()
+        let mounted = super::MountedTenantContext::of(&parts.extensions)
+            .ok_or(DatabaseTenantRejection::MissingContext)?;
+        let ctx = mounted
+            .database::<DB>()
             .ok_or(DatabaseTenantRejection::MissingContext)?
             .clone();
-        let org = ctx
-            .resolver
-            .resolve(parts, &ctx.registry)
+        let org = mounted
+            .resolve(parts)
             .await
             .map_err(|e| DatabaseTenantRejection::Internal(e.to_string()))?
             .ok_or(DatabaseTenantRejection::NotFound)?;

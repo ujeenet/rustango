@@ -11,8 +11,10 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
 
+use crate::tenancy::jwt_lifecycle::JwtLifecycle;
+
 use super::handlers::dispatch;
-use super::router::McpState;
+use super::router::{AuthedMcpState, McpState};
 use super::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 /// `POST {prefix}`: parse one JSON-RPC message, run it, reply.
@@ -93,22 +95,20 @@ pub(crate) async fn handle_message(
 /// agent's or another tenant's frames.
 pub(crate) fn sse_handler<DB: crate::sql::sqlx::Database>(
     t: crate::extractors::Tenant<DB>,
-    axum::extract::State(state): axum::extract::State<McpState>,
+    axum::extract::State(state): axum::extract::State<AuthedMcpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: axum::http::HeaderMap,
 ) -> impl std::future::Future<Output = Response> + Send {
-    sse_in(t.into(), state, uri, headers)
+    let t = t.into();
+    async move { sse_in(t, &state.jwt, uri, headers).await }
 }
 
 async fn sse_in(
     t: crate::extractors::TenantScope,
-    state: McpState,
+    jwt: &JwtLifecycle,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let Some(jwt) = state.jwt.as_ref() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
-    };
     let Some(token) = super::auth::bearer(&headers) else {
         return super::auth::unauthorized(&headers, &uri);
     };

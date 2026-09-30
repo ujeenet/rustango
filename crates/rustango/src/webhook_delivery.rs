@@ -50,8 +50,8 @@
 //!
 //! Only `http` and `https`. Redirects are not followed. Every resolved
 //! address must be public; loopback, private, link-local, CGNAT and
-//! multicast targets are dead-lettered, and the connection is pinned to
-//! the checked addresses. [`WebhookSubscription::allow_private_targets`]
+//! multicast targets are dead-lettered, and addresses are checked again
+//! at connect time. [`WebhookSubscription::allow_private_targets`]
 //! turns the address check off; the `RUSTANGO_OUTBOUND_ALLOW` list never
 //! applies, since a tenant may set the URL.
 //! Only the status code is kept on failure.
@@ -70,7 +70,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::jobs::{Job, JobError, JobQueue};
-use crate::outbound::{CheckedTarget, TargetError, TargetPolicy};
+use crate::outbound::{self, TargetError, TargetPolicy};
 use crate::webhook::{sign as sign_body, SignatureFormat};
 
 /// Per-delivery UUID. Receivers can use it to drop duplicates.
@@ -135,21 +135,16 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     } else {
         TargetPolicy::public_only()
     };
-    let target = CheckedTarget::check(&event.target_url, &policy)
-        .await
-        .map_err(|e| match e {
-            TargetError::Dns(_) => JobError::Retryable(e.to_string()),
-            _ => JobError::Fatal(e.to_string()),
-        })?;
-    let builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(event.timeout_secs.max(1)))
-        .user_agent(USER_AGENT);
-    let client = target
-        .client(builder)
-        .map_err(|e| JobError::Queue(format!("build http client: {e}")))?;
+    let egress =
+        outbound::shared(policy).map_err(|e| JobError::Queue(format!("build http client: {e}")))?;
+    let target = egress.check(&event.target_url).await.map_err(|e| match e {
+        TargetError::Dns(_) => JobError::Retryable(e.to_string()),
+        _ => JobError::Fatal(e.to_string()),
+    })?;
 
-    let mut req = client
-        .post(target.url().clone())
+    let mut req = target
+        .request(reqwest::Method::POST)
+        .timeout(Duration::from_secs(event.timeout_secs.max(1)))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(HEADER_ID, &event.id)
         .header(HEADER_EVENT, &event.event)
@@ -157,6 +152,14 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         .body(body);
     for (k, v) in &event.headers {
         req = req.header(k.as_str(), v.as_str());
+    }
+    // A default, as the per-call client had: a subscription header wins.
+    if !event
+        .headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("user-agent"))
+    {
+        req = req.header(reqwest::header::USER_AGENT, USER_AGENT);
     }
 
     let resp = match req.send().await {
@@ -563,6 +566,45 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let h = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (base, h)
+    }
+
+    /// Deliveries share one connection; the default User-Agent yields to
+    /// a subscription header (#1792).
+    #[tokio::test]
+    async fn deliveries_reuse_a_client_and_default_the_user_agent() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(
+                move |ConnectInfo(a): ConnectInfo<SocketAddr>, h: axum::http::HeaderMap| {
+                    let ua: Vec<String> = h
+                        .get_all("user-agent")
+                        .iter()
+                        .map(|v| v.to_str().unwrap().to_owned())
+                        .collect();
+                    s.lock().unwrap().push((a, ua));
+                    async { "ok" }
+                },
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let svc = app.into_make_service_with_connect_info::<SocketAddr>();
+        let srv = tokio::spawn(async move { axum::serve(listener, svc).await.unwrap() });
+        deliver(&event(url.clone(), true)).await.unwrap();
+        let mut custom = event(url, true);
+        custom
+            .headers
+            .insert("User-Agent".into(), "custom/1".into());
+        deliver(&custom).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].1, [USER_AGENT]);
+        assert_eq!(seen[1].1, ["custom/1"]);
+        assert_eq!(seen[0].0, seen[1].0, "one pooled connection");
+        srv.abort();
     }
 
     #[tokio::test]
