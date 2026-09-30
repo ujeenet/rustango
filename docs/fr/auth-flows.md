@@ -199,8 +199,9 @@ utilisation :
 ```
 
 Adossez-le à un cache **partagé** (Redis) en production, pour qu'un token ne puisse pas être rejoué
-contre un réplica différent. La vérification échoue en mode fermé (une erreur de cache refuse plutôt
-que de risquer un rejeu).
+contre un réplica différent. La vérification échoue en mode fermé (une erreur de cache ou un `NullCache`
+refuse plutôt que de risquer un rejeu). C'est un `Cache::add` atomique ; un `Cache` maison
+doit implémenter `add` de façon atomique, comme tous les backends fournis.
 
 ---
 

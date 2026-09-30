@@ -181,6 +181,23 @@ After `edit-tenant --database-url` or `migrate-tenant-storage`, running servers 
 `purge-tenant` now deletes the tenant's `rustango_org_hosts` rows and sets `active = false`
 before it drops anything, so a failed purge leaves an inactive tenant you can purge again.
 
+### `JwtBackend` tokens need a `tenant` claim (#1848)
+
+**Breaking:** under `require_auth` a token from `JwtBackend::issue` (no tenant) is refused.
+Mint with `issue_for_tenant(user_id, slug)` or the `JwtAuth` login instead.
+
+### Single-use auth links need a storing cache (#1853)
+
+**Breaking:** `verify_single_use` and `confirm_password_reset_single_use*` refuse every
+link on a `NullCache`. A custom cache should override `add` atomically.
+
+### JWT refresh: new `Config` field, old refresh tokens refused (#1854)
+
+**Breaking:** `auth_routes::Config` gains `refresh_absolute_ttl_secs` (must be > 0, else
+`JwtAuth::new` panics) and `refresh_reuse_grace_secs`; exhaustive literals need them or
+`..Config::default()`. Every refresh token issued before the upgrade gets one 401, so all
+users log in again once. `pwf`, `sat`, `fam` are router claims; a hook returning `kind` fails login.
+
 ### `PgJobQueue` counts attempts at pickup
 
 `rustango_jobs.attempt` now includes the running attempt. Keep the

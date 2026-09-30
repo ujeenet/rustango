@@ -30,6 +30,7 @@ use rustango::jti_store::InMemoryJtiStore;
 use rustango::sql::Pool;
 use rustango::tenancy::auth_backends::{AuthBackend, JwtBackend};
 use rustango::tenancy::jwt_lifecycle::JwtLifecycle;
+use rustango::tenancy::TenantSlug;
 
 fn secret() -> Vec<u8> {
     vec![7u8; 32]
@@ -59,11 +60,24 @@ async fn pool() -> Pool {
 }
 
 async fn auth(backend: &JwtBackend, pool: &Pool, token: &str) -> Option<i64> {
+    auth_on(backend, pool, token, None).await
+}
+
+/// [`auth`] on a request whose resolved tenant is `slug`, as `require_auth` sets it.
+async fn auth_on(
+    backend: &JwtBackend,
+    pool: &Pool,
+    token: &str,
+    slug: Option<&str>,
+) -> Option<i64> {
     let req = Request::builder()
         .header("authorization", format!("Bearer {token}"))
         .body(())
         .unwrap();
-    let (parts, ()) = req.into_parts();
+    let (mut parts, ()) = req.into_parts();
+    if let Some(slug) = slug {
+        parts.extensions.insert(TenantSlug(slug.to_owned()));
+    }
     backend
         .authenticate(&parts, pool)
         .await
@@ -226,4 +240,68 @@ async fn the_backends_own_tokens_still_authenticate() {
         "issue() emits the legacy shape"
     );
     assert_eq!(auth(&backend, &pool, &token).await, Some(42));
+}
+
+fn claims(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), serde_json::Value::from(*v)))
+        .collect()
+}
+
+/// #1848 — one key signs every tenant, so the `tenant` claim is the binding.
+#[tokio::test]
+async fn a_token_minted_on_tenant_a_is_refused_on_tenant_b() {
+    let pool = pool().await;
+    let life = JwtLifecycle::new(secret());
+    let backend = JwtBackend::new(secret());
+    let token = life
+        .issue_access_with(42, claims(&[("tenant", "acme")]))
+        .unwrap();
+
+    assert_eq!(
+        auth_on(&backend, &pool, &token, Some("acme")).await,
+        Some(42)
+    );
+    assert_eq!(
+        auth_on(&backend, &pool, &token, Some("globex")).await,
+        None,
+        "acme's user 42 must not be globex's user 42"
+    );
+    assert_eq!(
+        auth_on(&backend, &pool, &token, None).await,
+        None,
+        "a tenant token with no tenant resolved is refused"
+    );
+}
+
+/// #1848 — a tenantless token names no tenant, so no tenant accepts it.
+#[tokio::test]
+async fn a_tenantless_token_is_refused_where_a_tenant_is_resolved() {
+    let pool = pool().await;
+    let backend = JwtBackend::new(secret());
+
+    assert_eq!(
+        auth_on(&backend, &pool, &backend.issue(42), Some("acme")).await,
+        None
+    );
+    let bound = backend.issue_for_tenant(42, "acme");
+    assert_eq!(
+        auth_on(&backend, &pool, &bound, Some("acme")).await,
+        Some(42)
+    );
+    assert_eq!(auth_on(&backend, &pool, &bound, Some("globex")).await, None);
+}
+
+/// #1848 — an MCP agent token's `sub` is an agent id, not a user id.
+#[tokio::test]
+async fn an_agent_token_is_not_a_user_token() {
+    let pool = pool().await;
+    let life = JwtLifecycle::new(secret());
+    let backend = JwtBackend::new(secret());
+    let token = life
+        .issue_access_with(42, claims(&[("tenant", "acme"), ("kind", "agent")]))
+        .unwrap();
+
+    assert_eq!(auth_on(&backend, &pool, &token, Some("acme")).await, None);
 }

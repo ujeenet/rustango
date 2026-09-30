@@ -34,6 +34,23 @@ from its new location once the Org cache refreshes (30 s), on every replica. New
 
 Purge now deactivates the tenant and evicts its pools first, drops the storage, then
 deletes its `rustango_org_hosts` rows and the Org. A failed purge can be retried.
+### Security — `JwtBackend` checks the tenant binding (#1848)
+
+**Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,
+so tenant A's user 1 no longer logs in as tenant B's user 1. MCP agent tokens are refused
+by `JwtBackend` and `JwtAuth::verify_for_tenant`. New `JwtBackend::issue_for_tenant`.
+
+### Security — single-use auth links are one atomic `add` (#1853)
+
+Two simultaneous redemptions of a reset, magic-link or verify link no longer both pass.
+A failing cache or a `NullCache` now refuses the link instead of letting it be reused.
+
+### Security — JWT refresh ends on password change, cap and replay (#1854)
+
+**Breaking:** `/api/auth/refresh` refuses a chain after a password change, past
+`Config::refresh_absolute_ttl_secs` (default 30 days) from login, and once a rotated
+token is replayed. A retry within `refresh_reuse_grace_secs` (10 s) only gets a 401.
+Refresh tokens issued before this release are refused.
 
 ### Fixed — a panicking job no longer kills its worker (#1843)
 
