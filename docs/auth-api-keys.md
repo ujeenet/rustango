@@ -90,6 +90,9 @@ hashing the same secret twice yields different strings — and both verify.
 `verify_key` returns `Ok(false)` on a mismatch and `Err(ApiKeyError)` only when
 the stored string isn't a valid hash.
 
+From async code call `generate_key_async`, `hash_secret_async` and
+`verify_key_async`; they run argon2 off the runtime.
+
 ---
 
 ## The stored backend

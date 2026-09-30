@@ -232,7 +232,8 @@ each tenant keeps its own secret with no per-provider env var.
 
 Built-in presets: `google`, `microsoft` (Azure AD), `github`, `gitlab`,
 `discord`. For anything else, use `kind = "oidc"` with an `issuer_url` —
-rustango runs OpenID Connect discovery to find the endpoints. (Sign in
+rustango runs OpenID Connect discovery to find the endpoints, once per issuer
+per hour. (Sign in
 with Apple isn't a preset; it needs id_token/JWKS verification.)
 
 ## Security notes

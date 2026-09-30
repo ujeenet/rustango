@@ -158,7 +158,13 @@ impl HandlerRegistry {
             Box::pin(async move {
                 let job: T =
                     serde_json::from_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
-                job.run().await
+                // A panic is a failed run, not a dead worker (#1843).
+                crate::panic_guard::catch_unwind(job.run())
+                    .await
+                    .unwrap_or_else(|panic| {
+                        let msg = crate::panic_guard::panic_message(&*panic);
+                        Err(JobError::Retryable(format!("job panicked: {msg}")))
+                    })
             })
         });
         self.handlers.insert(T::NAME, (handler, T::MAX_ATTEMPTS));
@@ -181,6 +187,15 @@ pub struct JobDeadLetter {
     pub payload: serde_json::Value,
     pub attempts: u32,
     pub error: String,
+}
+
+/// Run a dead-letter callback; a panic in it is logged, not propagated.
+pub(crate) async fn deliver_dead_letter(cb: DeadLetterFn, dl: JobDeadLetter) {
+    let name = dl.name;
+    if let Err(panic) = crate::panic_guard::catch_unwind(cb(dl)).await {
+        let msg = crate::panic_guard::panic_message(&*panic);
+        tracing::error!(job = name, panic = msg, "dead-letter callback panicked");
+    }
 }
 
 /// Milliseconds to wait before the retry that follows `failed_attempt`:
@@ -389,13 +404,13 @@ async fn worker_loop(
                     // Dead-letter
                     let dl_callback = dead_letter.lock().await.clone();
                     if let Some(cb) = dl_callback {
-                        cb(JobDeadLetter {
+                        let dl = JobDeadLetter {
                             name: envelope.name,
                             payload: envelope.payload.clone(),
                             attempts: next_attempt,
                             error: msg,
-                        })
-                        .await;
+                        };
+                        deliver_dead_letter(cb, dl).await;
                     } else {
                         tracing::error!(job = envelope.name, attempts = next_attempt, error = %msg, "job exhausted retries");
                     }
@@ -416,13 +431,13 @@ async fn worker_loop(
                 let msg = e.to_string();
                 let dl_callback = dead_letter.lock().await.clone();
                 if let Some(cb) = dl_callback {
-                    cb(JobDeadLetter {
+                    let dl = JobDeadLetter {
                         name: envelope.name,
                         payload: envelope.payload.clone(),
                         attempts: envelope.attempt + 1,
                         error: msg,
-                    })
-                    .await;
+                    };
+                    deliver_dead_letter(cb, dl).await;
                 } else {
                     tracing::error!(job = envelope.name, error = %msg, "job fatal");
                 }
@@ -571,6 +586,56 @@ mod tests {
         let succ = SUCCESSES.lock().unwrap();
         assert!(succ.contains(&marker), "expected marker, got {succ:?}");
         drop(succ);
+        q.shutdown().await;
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct Panics;
+
+    #[async_trait::async_trait]
+    impl Job for Panics {
+        const NAME: &'static str = "test:panics";
+        const MAX_ATTEMPTS: u32 = 1;
+        async fn run(&self) -> Result<(), JobError> {
+            panic!("boom");
+        }
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct AfterPanic;
+
+    static AFTER_PANIC: AtomicUsize = AtomicUsize::new(0);
+
+    #[async_trait::async_trait]
+    impl Job for AfterPanic {
+        const NAME: &'static str = "test:after_panic";
+        async fn run(&self) -> Result<(), JobError> {
+            AFTER_PANIC.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// #1843: the one worker survives a panic, and the panic is a failed run.
+    #[tokio::test]
+    async fn a_panicking_job_keeps_the_worker() {
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<Panics>().await;
+        q.register::<AfterPanic>().await;
+        let dead: Arc<Mutex<Vec<JobDeadLetter>>> = Arc::default();
+        let d = dead.clone();
+        q.on_dead_letter(move |dl| {
+            let d = d.clone();
+            async move { d.lock().await.push(dl) }
+        })
+        .await;
+        q.start().await;
+        q.dispatch(&Panics).await.unwrap();
+        q.dispatch(&AfterPanic).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(AFTER_PANIC.load(Ordering::SeqCst), 1, "worker still runs");
+        let dead = dead.lock().await;
+        assert!(dead[0].error.contains("job panicked: boom"), "{dead:?}");
+        assert_eq!(q.pending_count().await, 0);
         q.shutdown().await;
     }
 
