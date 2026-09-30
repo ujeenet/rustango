@@ -112,6 +112,42 @@ impl Job for Slow {
     }
 }
 
+/// Fails fatally on its first run (after `first_ms`), succeeds after.
+#[derive(Serialize, Deserialize)]
+struct FailFirst {
+    token: String,
+    first_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl Job for FailFirst {
+    const NAME: &'static str = "tri1843:fail_first";
+    async fn run(&self) -> Result<(), JobError> {
+        let n = start(&self.token);
+        if n == 1 {
+            tokio::time::sleep(Duration::from_millis(self.first_ms)).await;
+        }
+        finish(&self.token);
+        if n == 1 {
+            Err(JobError::Fatal("first run".into()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Never registered: no worker here can run it.
+#[derive(Serialize, Deserialize)]
+struct Orphan;
+
+#[async_trait::async_trait]
+impl Job for Orphan {
+    const NAME: &'static str = "tri1843:orphan";
+    async fn run(&self) -> Result<(), JobError> {
+        Ok(())
+    }
+}
+
 async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     let q = PgJobQueue::with_workers_pool(pool.clone(), workers)
         .poll_interval(Duration::from_millis(20))
@@ -119,7 +155,31 @@ async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     q.register::<Boom>().await;
     q.register::<Tick>().await;
     q.register::<Slow>().await;
+    q.register::<FailFirst>().await;
     q
+}
+
+/// `(attempt, locked)` of the only row.
+async fn the_row(pool: &Pool) -> (i32, bool) {
+    let rows: Vec<(i32, i64)> = rustango::sql::raw_query_pool(
+        "SELECT attempt, COUNT(locked_by) FROM rustango_jobs GROUP BY attempt",
+        Vec::new(),
+        pool,
+    )
+    .await
+    .expect("row");
+    (rows[0].0, rows[0].1 == 1)
+}
+
+async fn wait_locked(pool: &Pool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !the_row(pool).await.1 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the pickup"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 async fn dead_letters(q: &PgJobQueue) -> Arc<Mutex<Vec<JobDeadLetter>>> {
@@ -269,6 +329,66 @@ async fn a_lost_lease_does_not_finish_the_new_holders_row(pool: &Pool) {
     q.shutdown().await;
 }
 
+async fn a_job_without_a_handler_spends_no_attempts(pool: &Pool) {
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.dispatch(&Orphan).await.unwrap();
+    q.start().await;
+    for _ in 0..2 {
+        wait_locked(pool).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(the_row(pool).await, (0, true), "picked, not charged");
+        PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::ZERO)
+            .await
+            .expect("reclaim");
+    }
+    q.shutdown().await;
+}
+
+async fn a_lost_lease_fires_no_dead_letter(pool: &Pool) {
+    let tok = token(pool, "lost_dl");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let dead = dead_letters(&q).await;
+    q.dispatch(&FailFirst {
+        token: tok.clone(),
+        first_ms: 600,
+    })
+    .await
+    .unwrap();
+    q.start().await;
+    wait_for("the first run", || counts(&tok).0 == 1).await;
+    PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::ZERO)
+        .await
+        .expect("reclaim");
+    wait_for("the rerun to finish", || counts(&tok).1 == 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    q.shutdown().await;
+    assert!(
+        dead.lock().unwrap().is_empty(),
+        "the lost run is not dead-lettered"
+    );
+    assert_eq!(job_rows(pool).await, 0, "the rerun finished it");
+}
+
+async fn shutdown_releases_an_aborted_job(pool: &Pool) {
+    let tok = token(pool, "abort");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.dispatch(&Slow {
+        token: tok.clone(),
+        first_ms: 30_000,
+        later_ms: 0,
+    })
+    .await
+    .unwrap();
+    q.start().await;
+    wait_for("the run to start", || counts(&tok).0 == 1).await;
+    q.shutdown().await;
+    assert_eq!(
+        the_row(pool).await,
+        (1, false),
+        "unlocked for the next worker"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -278,5 +398,8 @@ tri_dialect_test! {
         a_row_out_of_attempts_is_dead_lettered_not_run,
         a_heartbeat_keeps_a_long_job_leased,
         a_lost_lease_does_not_finish_the_new_holders_row,
+        a_job_without_a_handler_spends_no_attempts,
+        a_lost_lease_fires_no_dead_letter,
+        shutdown_releases_an_aborted_job,
     ],
 }

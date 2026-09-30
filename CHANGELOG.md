@@ -9,7 +9,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
 is logged. **Breaking:** `PgJobQueue` counts `attempt` at pickup and dead-letters a row
 reclaimed with no attempts left. Running jobs refresh `locked_at` (`heartbeat_interval`,
-default 10 s), finishing writes need the worker's own lock, and `shutdown` aborts after 5 s.
+default 10 s, min 1 ms), finishing writes need the worker's own lock, and `shutdown` aborts
+after 5 s and unlocks the aborted row. A lost lease drops the run's result and dead letter;
+a job with no handler keeps its attempt.
 
 ### Security — ViewSet writes stay inside `fields()` and the owner (#1845)
 

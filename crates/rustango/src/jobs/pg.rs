@@ -212,12 +212,18 @@ impl PgJobQueue {
     }
 
     /// How often a running job refreshes its `locked_at`. Default: 10
-    /// seconds. Reclaim only rows locked well longer than this, or a
-    /// long job runs twice.
+    /// seconds, at least 1 ms. Reclaim only rows locked well longer than
+    /// this, or a long job runs twice.
     #[must_use]
     pub fn heartbeat_interval(mut self, d: Duration) -> Self {
-        self.heartbeat_interval = d;
+        // `tokio::time::interval` panics on zero.
+        self.heartbeat_interval = d.max(Duration::from_millis(1));
         self
+    }
+
+    /// The `locked_by` of worker `n`.
+    fn worker_id(&self, n: usize) -> String {
+        format!("{}:w{n}", self.worker_id_prefix)
     }
 
     /// Set a callback invoked for jobs that exhaust retries or return
@@ -362,7 +368,7 @@ impl JobQueue for PgJobQueue {
             let notify = self.notify.clone();
             let poll = self.poll_interval;
             let worker = Worker {
-                id: format!("{}:w{}", self.worker_id_prefix, n),
+                id: self.worker_id(n),
                 heartbeat: self.heartbeat_interval,
             };
             let h = tokio::spawn(async move {
@@ -377,13 +383,16 @@ impl JobQueue for PgJobQueue {
         // Wake every worker so they all observe the shutdown flag and exit.
         self.notify.notify_waiters();
         let mut workers = self.workers.lock().await;
-        for mut h in workers.drain(..) {
+        for (n, mut h) in workers.drain(..).enumerate() {
             // Give in-flight jobs ~5 seconds to finish, then abort.
             if tokio::time::timeout(Duration::from_secs(5), &mut h)
                 .await
                 .is_err()
             {
                 h.abort();
+                let _ = h.await;
+                // Hand the aborted job back now rather than at the next reclaim.
+                release_worker_rows(&self.pool, &self.worker_id(n)).await;
             }
         }
     }
@@ -581,7 +590,9 @@ async fn run_one(
 ) {
     let handler = registry.lock().await.lookup_owned(&job.name);
     let Some((handler, static_name)) = handler else {
+        // This process cannot run it; the pickup must not spend an attempt.
         tracing::warn!(job = %job.name, id = job.id, "no handler registered — leaving locked");
+        give_back_attempt(pool, worker, job.id).await;
         return;
     };
 
@@ -593,7 +604,13 @@ async fn run_one(
         return;
     }
 
-    let result = run_with_heartbeat(pool, worker, job.id, handler(job.payload.clone())).await;
+    let (result, held) =
+        run_with_heartbeat(pool, worker, job.id, handler(job.payload.clone())).await;
+    if !held {
+        // Another worker may own the row now; its outcome is not ours to write.
+        tracing::warn!(id = job.id, worker = %worker.id, "job lease lost; result dropped");
+        return;
+    }
 
     match result {
         Ok(()) => {
@@ -618,8 +635,9 @@ async fn run_one(
 }
 
 /// Drive `run`, refreshing the row's `locked_at` every heartbeat so a
-/// reclaim sweep does not hand a live job to a second worker.
-async fn run_with_heartbeat<F>(pool: &Pool, worker: &Worker, id: i64, run: F) -> F::Output
+/// reclaim sweep does not hand a live job to a second worker. The flag
+/// is `false` once a heartbeat found the lease gone.
+async fn run_with_heartbeat<F>(pool: &Pool, worker: &Worker, id: i64, run: F) -> (F::Output, bool)
 where
     F: std::future::Future,
 {
@@ -627,15 +645,18 @@ where
     let mut beat = tokio::time::interval(worker.heartbeat);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     beat.tick().await; // the first tick is immediate
+    let mut held = true;
     loop {
         tokio::select! {
-            out = &mut run => return out,
-            _ = beat.tick() => heartbeat(pool, worker, id).await,
+            out = &mut run => return (out, held),
+            _ = beat.tick(), if held => held = heartbeat(pool, worker, id).await,
         }
     }
 }
 
-async fn heartbeat(pool: &Pool, worker: &Worker, id: i64) {
+/// Refresh the lease. `false` only when the row is no longer this
+/// worker's; a failed write is logged and treated as still held.
+async fn heartbeat(pool: &Pool, worker: &Worker, id: i64) -> bool {
     use crate::core::SqlValue;
     let d = pool.dialect();
     let sql = format!(
@@ -650,9 +671,46 @@ async fn heartbeat(pool: &Pool, worker: &Worker, id: i64) {
         SqlValue::String(worker.id.clone()),
     ];
     match crate::sql::raw_execute_pool(pool, &sql, binds).await {
-        Ok(0) => tracing::warn!(id, worker = %worker.id, "job lease lost while running"),
-        Ok(_) => {}
-        Err(e) => tracing::error!(id, error = %e, "job heartbeat failed"),
+        Ok(0) => {
+            tracing::warn!(id, worker = %worker.id, "job lease lost while running");
+            false
+        }
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!(id, error = %e, "job heartbeat failed");
+            true
+        }
+    }
+}
+
+/// Undo the pickup's `attempt + 1`, keeping the lock.
+async fn give_back_attempt(pool: &Pool, worker: &Worker, id: i64) {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let sql = format!(
+        "UPDATE rustango_jobs SET attempt = attempt - 1 WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+    );
+    let binds = vec![SqlValue::I64(id), SqlValue::String(worker.id.clone())];
+    log_finish(
+        "attempt give-back",
+        id,
+        worker,
+        crate::sql::raw_execute_pool(pool, &sql, binds).await,
+    );
+}
+
+/// Unlock every row `worker_id` still holds.
+async fn release_worker_rows(pool: &Pool, worker_id: &str) {
+    use crate::core::SqlValue;
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL WHERE locked_by = {}",
+        pool.dialect().placeholder(1),
+    );
+    let binds = vec![SqlValue::String(worker_id.to_owned())];
+    if let Err(e) = crate::sql::raw_execute_pool(pool, &sql, binds).await {
+        tracing::error!(worker = worker_id, error = %e, "releasing an aborted job failed");
     }
 }
 
@@ -723,6 +781,11 @@ async fn handle_dead_letter(
     static_name: &'static str,
     error: &str,
 ) {
+    // Confirm the lease first: the callback must not fire for a row
+    // another worker now owns.
+    if !heartbeat(pool, worker, job.id).await {
+        return;
+    }
     let cb = dead_letter.lock().await.clone();
     if let Some(cb) = cb {
         let dl = JobDeadLetter {
@@ -811,6 +874,13 @@ mod tests {
         let q = PgJobQueue::with_workers_pool(dummy_pool(), 0)
             .poll_interval(Duration::from_millis(250));
         assert_eq!(q.poll_interval, Duration::from_millis(250));
+    }
+
+    /// A zero interval would panic in `tokio::time::interval`.
+    #[tokio::test]
+    async fn heartbeat_interval_is_at_least_a_millisecond() {
+        let q = PgJobQueue::with_workers_pool(dummy_pool(), 0).heartbeat_interval(Duration::ZERO);
+        assert_eq!(q.heartbeat_interval, Duration::from_millis(1));
     }
 
     #[tokio::test]
