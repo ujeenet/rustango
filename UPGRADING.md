@@ -163,7 +163,7 @@ code they generated for them did not compile.
 ### `dumpdata` / `loaddata` fail instead of losing rows (breaking)
 
 `dumpdata` now errors on a model with an Array, Range, HStore, Vector or Geometry column;
-leave it out with `--model`. `loaddata` exits non-zero if any row was skipped.
+leave it out with the new `--exclude app.Model`. `loaddata` exits non-zero if any row was skipped.
 
 ### Tenancy user and permission verbs refuse unknown flags (breaking)
 

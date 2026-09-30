@@ -27,7 +27,8 @@ become a Rust keyword or `std` / `core` / `crate` / `self` / `super`.
 loads parents before children, and resets Postgres id sequences, so the next insert
 doesn't collide. **Breaking:** `dumpdata` refuses Array, Range, HStore, Vector and Geometry
 columns (they were dumped as `null`), and `loaddata` exits non-zero when it skipped a row.
-New `Dialect::reset_sequence_sql`.
+New `Dialect::reset_sequence_sql` and `dumpdata --exclude`. Self-FK rows load parents first,
+and `--fail-fast` still resets sequences.
 
 ### Fixed — `flush --yes` works on MySQL (#1912)
 
@@ -39,7 +40,8 @@ syntax error (1064) on MySQL for every table.
 `create-user acme --superuser` no longer makes a user named `--superuser`; a failed
 first-user check is an error, not a superuser; prompted passwords keep their spaces;
 `set-host-enabled --enabled false` reads `false` as the value. **Breaking:** `grant-perm`,
-`revoke-perm` and the host verbs refuse unknown flags (`--rol` granted to a user).
+`revoke-perm` and the host verbs refuse unknown flags (`--rol` granted to a user), and a
+valued flag refuses a following `--flag` as its value.
 
 ### Security — `JwtBackend` checks the tenant binding (#1848)
 

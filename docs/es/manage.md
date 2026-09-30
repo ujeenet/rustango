@@ -1529,8 +1529,8 @@ alcanzan mediante `Cli::tenancy()`.
 | Verbo | Qué hace |
 |---|---|
 | `dumpdata` | Exporta filas como fixtures JSON |
-| `loaddata <fixture.json> [--fail-fast]` | Vuelve a cargar fixtures JSON |
-| `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto |
+| `loaddata <fixture.json> [--fail-fast]` | Vuelve a cargar fixtures JSON. Una carga fallida o parcial no se revierte |
+| `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto. Postgres usa `TRUNCATE … RESTART IDENTITY CASCADE`, que también vacía tablas que las referencian fuera del filtro; MySQL / SQLite borran las filas y conservan los contadores de id |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Borrado masivo en streaming; `--pretend` informa sin borrar |
 | `db:dump` / `db:restore` / `db:info` | Dump / restauración / inspección nativos |
 | `dbshell` | Ejecuta el cliente nativo (`psql` / `mysql` / `sqlite3`). Solo necesita `DATABASE_URL`, no un pool funcional — se gestiona antes de construir el pool, así que funciona cuando sqlx no puede conectar |

@@ -391,7 +391,10 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      rows with a warning; --fail-fast aborts on the first failure.\n"
     )?;
-    writeln!(w, "  dumpdata [--model <name>] [--indent <N>]")?;
+    writeln!(
+        w,
+        "  dumpdata [--model <name>] [--exclude <name>] [--indent <N>]"
+    )?;
     writeln!(w, "      Export every registered model's rows as a JSON")?;
     writeln!(
         w,
@@ -3209,6 +3212,8 @@ fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 struct DumpdataArgs {
     /// Limit to these `app.Model` or `Model` names. Empty = every model.
     model_filters: Vec<String>,
+    /// `--exclude`: models left out, same name forms as `--model`.
+    excludes: Vec<String>,
     /// JSON indent. `0` = compact single-line; otherwise pretty (2-space).
     indent: usize,
     /// `true` when the user passed `--help`; cmd short-circuits to help.
@@ -3232,6 +3237,12 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
                     .next()
                     .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
                 out.model_filters.push(v.clone());
+            }
+            "--exclude" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--exclude expects a value".into()))?;
+                out.excludes.push(v.clone());
             }
             "--indent" => {
                 let v = iter
@@ -3261,7 +3272,10 @@ async fn dumpdata_cmd<W: Write>(
 ) -> Result<(), MigrateError> {
     let parsed = parse_dumpdata_args(args)?;
     if parsed.help {
-        writeln!(w, "dumpdata [--model app.Name] [--indent N]")?;
+        writeln!(
+            w,
+            "dumpdata [--model app.Name] [--exclude app.Name] [--indent N]"
+        )?;
         writeln!(w)?;
         writeln!(
             w,
@@ -3288,6 +3302,10 @@ async fn dumpdata_cmd<W: Write>(
             w,
             "  --indent <N>     JSON indent (default 2; 0 emits compact single-line)."
         )?;
+        writeln!(
+            w,
+            "  --exclude <name> Leave a model out (repeatable; same forms as --model)."
+        )?;
         return Ok(());
     }
     let model_filters = &parsed.model_filters;
@@ -3313,12 +3331,19 @@ async fn dumpdata_cmd<W: Write>(
         {
             continue;
         }
+        if parsed
+            .excludes
+            .iter()
+            .any(|f| f == &dotted_name || f == schema.name)
+        {
+            continue;
+        }
 
         // These decode as `null`, so a reload would wipe them (#1911).
         if let Some(f) = schema.scalar_fields().find(|f| !dumpable(f.ty)) {
             return Err(MigrateError::Validation(format!(
                 "dumpdata: `{dotted_name}.{}` is a {:?} column, which dumpdata cannot \
-                 export yet — leave `{dotted_name}` out with --model",
+                 export yet — leave it out with `--exclude {dotted_name}`",
                 f.name, f.ty
             )));
         }
@@ -3463,6 +3488,10 @@ async fn loaddata_cmd<W: Write>(
             w,
             "  --fail-fast   Abort on the first error instead of skipping the row."
         )?;
+        writeln!(
+            w,
+            "  A failed or partial load is not rolled back: rows already inserted stay."
+        )?;
         return Ok(());
     }
 
@@ -3491,6 +3520,9 @@ async fn loaddata_cmd<W: Write>(
     let mut loaded = 0_usize;
     let mut skipped = 0_usize;
     let mut touched: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    // `--fail-fast` stops here, but the rows already in still need their
+    // sequences moved, so the error is raised after the reset.
+    let mut abort: Option<String> = None;
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -3502,7 +3534,8 @@ async fn loaddata_cmd<W: Write>(
                     schemas.len() / 2, // dotted + bare keys
                 );
                 if parsed.fail_fast {
-                    return Err(MigrateError::Validation(msg));
+                    abort = Some(msg);
+                    break;
                 }
                 tracing::warn!("{msg}");
                 skipped += 1;
@@ -3545,7 +3578,8 @@ async fn loaddata_cmd<W: Write>(
         if let Some(e) = row_err {
             let msg = format!("loaddata: entry #{line} (`{model_name}`): {e}");
             if parsed.fail_fast {
-                return Err(MigrateError::Validation(msg));
+                abort = Some(msg);
+                break;
             }
             tracing::warn!("{msg}");
             skipped += 1;
@@ -3569,7 +3603,8 @@ async fn loaddata_cmd<W: Write>(
             Err(e) => {
                 let msg = format!("loaddata: entry #{line} (`{model_name}`) insert: {e}");
                 if parsed.fail_fast {
-                    return Err(MigrateError::Validation(msg));
+                    abort = Some(msg);
+                    break;
                 }
                 tracing::warn!("{msg}");
                 skipped += 1;
@@ -3578,6 +3613,9 @@ async fn loaddata_cmd<W: Write>(
     }
 
     reset_sequences(pool, &touched).await?;
+    if let Some(msg) = abort {
+        return Err(MigrateError::Validation(msg));
+    }
 
     writeln!(w, "loaddata: {loaded} loaded, {skipped} skipped")?;
     if skipped > 0 {
@@ -3598,8 +3636,9 @@ fn dumpable(ty: crate::core::FieldType) -> bool {
     )
 }
 
-/// Stable-sort fixture entries so each model's FK targets load before it.
-/// A cycle keeps its members' fixture order.
+/// Stable-sort fixture entries so each model's FK targets load before it,
+/// and a self-FK parent before its child. Best effort: rows in a cycle keep
+/// their fixture order.
 fn in_fk_order(
     entries: Vec<serde_json::Value>,
     schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
@@ -3650,7 +3689,85 @@ fn in_fk_order(
         })
         .collect();
     keyed.sort_by_key(|(rank, _)| *rank);
-    keyed.into_iter().map(|(_, e)| e).collect()
+    let mut out = Vec::with_capacity(keyed.len());
+    let mut group: Vec<serde_json::Value> = Vec::new();
+    let mut current = None;
+    for (rank, e) in keyed {
+        if current != Some(rank) {
+            out.extend(self_parents_first(std::mem::take(&mut group), schemas));
+            current = Some(rank);
+        }
+        group.push(e);
+    }
+    out.extend(self_parents_first(group, schemas));
+    out
+}
+
+/// Within one FK depth: a row whose self-FK names a row not yet emitted
+/// waits for it (tree tables). Rows left in a cycle keep their order.
+fn self_parents_first(
+    entries: Vec<serde_json::Value>,
+    schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+) -> Vec<serde_json::Value> {
+    struct Pending {
+        entry: serde_json::Value,
+        key: Option<(&'static str, String)>,
+        parents: Vec<(&'static str, String)>,
+    }
+    let mut pending: Vec<Pending> = entries
+        .into_iter()
+        .map(|entry| {
+            let schema = entry
+                .get("model")
+                .and_then(|v| v.as_str())
+                .and_then(|m| schemas.get(m));
+            let Some(schema) = schema else {
+                return Pending {
+                    entry,
+                    key: None,
+                    parents: Vec::new(),
+                };
+            };
+            let key = entry
+                .get("pk")
+                .filter(|v| !v.is_null())
+                .map(|pk| (schema.table, pk.to_string()));
+            let parents = schema
+                .scalar_fields()
+                .filter(|f| {
+                    matches!(
+                        f.relation,
+                        Some(crate::core::Relation::Fk { to, .. }
+                            | crate::core::Relation::O2O { to, .. }) if to == schema.table
+                    )
+                })
+                .filter_map(|f| entry.get("fields")?.get(f.name))
+                .filter(|v| !v.is_null())
+                .map(|v| (schema.table, v.to_string()))
+                .filter(|p| Some(p) != key.as_ref())
+                .collect();
+            Pending {
+                entry,
+                key,
+                parents,
+            }
+        })
+        .collect();
+    let mut out = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let waiting: std::collections::HashSet<(&'static str, String)> =
+            pending.iter().filter_map(|p| p.key.clone()).collect();
+        let (ready, rest): (Vec<Pending>, Vec<Pending>) = pending
+            .into_iter()
+            .partition(|p| p.parents.iter().all(|k| !waiting.contains(k)));
+        if ready.is_empty() {
+            out.extend(rest.into_iter().map(|p| p.entry));
+            break;
+        }
+        out.extend(ready.into_iter().map(|p| p.entry));
+        pending = rest;
+    }
+    out
 }
 
 /// Move each loaded model's serial counter past the ids the fixture wrote,
@@ -4182,6 +4299,19 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         writeln!(w, "                     and exits without touching the DB.")?;
         writeln!(w, "  --app <label>      Limit to one app (repeatable).")?;
         writeln!(w, "  --model <name>     Limit to one model (repeatable).")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Postgres runs TRUNCATE … RESTART IDENTITY CASCADE: ids restart, and tables"
+        )?;
+        writeln!(
+            w,
+            "  that reference the targets are cleared too, even outside the filter."
+        )?;
+        writeln!(
+            w,
+            "  MySQL / SQLite delete the rows and keep their id counters."
+        )?;
         return Ok(());
     }
 

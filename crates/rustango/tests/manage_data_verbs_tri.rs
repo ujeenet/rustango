@@ -34,6 +34,15 @@ pub struct Child {
     pub n: i64,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli1911_node", app = "cli1911")]
+pub struct Node {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "cli1911_node", on = "id")]
+    pub parent_id: Option<i64>,
+}
+
 /// Never created: dumpdata must refuse it before it reads a row.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "cli1911_tagged", app = "cli1911")]
@@ -51,7 +60,66 @@ async fn fresh_parent_child(pool: &Pool) {
 
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Row>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Node>(pool).await;
     fresh_parent_child(pool).await;
+}
+
+/// `--fail-fast` stops on a bad row but still moves the id sequence past
+/// the rows it already wrote, so the next insert does not collide.
+async fn fail_fast_still_resets_sequences(pool: &Pool) {
+    let fixture = serde_json::json!([
+        {"model": "cli1911.Parent", "pk": 1, "fields": {"name": "a"}},
+        {"model": "nope.Unknown", "pk": 1, "fields": {}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad.json");
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let res = manage(pool, &["loaddata", path.to_str().unwrap(), "--fail-fast"]).await;
+    assert!(res.is_err(), "the unknown model must fail: {res:?}");
+    let mut next = Parent {
+        id: Auto::default(),
+        name: "next".into(),
+    };
+    next.insert_pool(pool)
+        .await
+        .expect("an insert after a --fail-fast load reused a loaded id");
+}
+
+/// A self-FK child listed before its parent still loads (tree tables).
+async fn self_fk_child_before_parent_loads(pool: &Pool) {
+    let mut root = Node {
+        id: Auto::default(),
+        parent_id: None,
+    };
+    root.insert_pool(pool).await.expect("root");
+    let mut leaf = Node {
+        id: Auto::default(),
+        parent_id: Some(root.id.get().copied().expect("pk")),
+    };
+    leaf.insert_pool(pool).await.expect("leaf");
+
+    let dumped = manage(
+        pool,
+        &["dumpdata", "--model", "cli1911.Node", "--indent", "0"],
+    )
+    .await
+    .expect("dumpdata");
+    let before: serde_json::Value = serde_json::from_str(dumped.trim()).unwrap();
+    let mut rows = before.as_array().expect("array").clone();
+    rows.sort_by_key(|e| e["fields"]["parent_id"].is_null());
+    assert!(
+        !rows[0]["fields"]["parent_id"].is_null(),
+        "child first: {rows:?}"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("nodes.json");
+    std::fs::write(&fixture, serde_json::to_string(&rows).unwrap()).unwrap();
+
+    rustango::testkit::matrix::fresh_table::<Node>(pool).await;
+    let out = manage(pool, &["loaddata", fixture.to_str().unwrap()]).await;
+    assert!(out.is_ok(), "loaddata: {out:?}");
+    let n: Vec<Node> = Node::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(n.len(), 2);
 }
 
 async fn manage(pool: &Pool, args: &[&str]) -> Result<String, String> {
@@ -148,6 +216,19 @@ async fn dumpdata_refuses_columns_it_cannot_read(pool: &Pool) {
         .await
         .expect_err("an Array column dumped as null");
     assert!(err.contains("tags") && err.contains("cannot"), "{err}");
+    let out = manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli1911.Tagged",
+            "--exclude",
+            "cli1911.Tagged",
+        ],
+    )
+    .await
+    .expect("--exclude leaves it out");
+    assert_eq!(out.trim(), "[]");
 }
 
 tri_dialect_test! {
@@ -156,5 +237,7 @@ tri_dialect_test! {
         flush_yes_clears_the_table,
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
+        self_fk_child_before_parent_loads,
+        fail_fast_still_resets_sequences,
     ],
 }

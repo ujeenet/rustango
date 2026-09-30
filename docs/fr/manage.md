@@ -1597,8 +1597,8 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | Verbe | Ce qu'il fait |
 |---|---|
 | `dumpdata` | Exporte des lignes en fixtures JSON |
-| `loaddata <fixture.json> [--fail-fast]` | Recharge des fixtures JSON |
-| `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble |
+| `loaddata <fixture.json> [--fail-fast]` | Recharge des fixtures JSON. Un chargement échoué ou partiel n'est pas annulé |
+| `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble. Postgres utilise `TRUNCATE … RESTART IDENTITY CASCADE`, qui vide aussi les tables qui les référencent hors du filtre ; MySQL / SQLite suppriment les lignes et gardent les compteurs d'id |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Suppression en masse en flux ; `--pretend` signale sans supprimer |
 | `db:dump` / `db:restore` / `db:info` | Dump / restauration / inspection natifs |
 | `dbshell` | Exécute le client natif (`psql` / `mysql` / `sqlite3`). N'a besoin que de `DATABASE_URL`, pas d'un pool fonctionnel — traité avant la construction du pool, il marche donc quand sqlx n'arrive pas à se connecter |
