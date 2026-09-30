@@ -155,6 +155,10 @@ untouched.
 `qs.limit(10).count()` now returns at most 10. `CountQuery` and `AggregateQuery` gain a
 public `source` field; build them with `new`, `CountQuery::from_select` or `AggregateQuery::over_select`.
 
+### `QueryError::JoinAliasLimit`
+
+New variant: returned once a process has seen 4096 distinct multi-hop relation paths.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

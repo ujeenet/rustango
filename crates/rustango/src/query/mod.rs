@@ -2611,21 +2611,14 @@ fn lower_select_related(
             // hop is just `field.name`; a chain accumulates `author`,
             // `author__profile`, `author__profile__country`.
             //
-            // The writer needs `&'static str`. Single-hop already has
-            // one from the schema. For a chain we leak the composite
-            // alias on purpose: depth is small and bounded by the
-            // user's schema, so it is a tiny one-time cost.
-            let alias: &'static str = if hops.len() == 1 {
+            // The writer needs `&'static str`: the first hop has the
+            // schema's field name, deeper ones are interned.
+            let alias: &'static str = if depth == 0 {
+                prev_alias_owned.push_str(hop);
                 field.name
             } else {
-                // Build the cumulative alias.
-                let owned = if depth == 0 {
-                    (*hop).to_owned()
-                } else {
-                    format!("{prev_alias_owned}__{hop}")
-                };
-                prev_alias_owned = owned.clone();
-                Box::leak(owned.into_boxed_str())
+                prev_alias_owned = format!("{prev_alias_owned}__{hop}");
+                intern_join_alias(&prev_alias_owned)?
             };
             let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
             out.push(Join {
@@ -3305,6 +3298,40 @@ fn resolve_span(
     Ok((joins, predicate))
 }
 
+/// Cap on distinct interned join aliases. Aliases are validated FK
+/// paths, so a real schema needs a few dozen; self-FK chains are unbounded.
+const MAX_JOIN_ALIASES: usize = 4096;
+
+/// A `&'static` join alias for a multi-hop path (`author__profile`),
+/// leaked once per distinct path rather than once per `compile()`.
+fn intern_join_alias(path: &str) -> Result<&'static str, QueryError> {
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static ALIASES: OnceLock<Mutex<std::collections::HashSet<&'static str>>> = OnceLock::new();
+    let mut set = ALIASES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    intern_in(&mut set, MAX_JOIN_ALIASES, path)
+}
+
+fn intern_in(
+    set: &mut std::collections::HashSet<&'static str>,
+    cap: usize,
+    path: &str,
+) -> Result<&'static str, QueryError> {
+    if let Some(alias) = set.get(path) {
+        return Ok(alias);
+    }
+    if set.len() >= cap {
+        return Err(QueryError::JoinAliasLimit {
+            path: path.to_owned(),
+        });
+    }
+    let alias: &'static str = Box::leak(path.into());
+    set.insert(alias);
+    Ok(alias)
+}
+
 /// Walk a relation-span path's FK / O2O hops into LEFT JOINs. Shared
 /// by [`resolve_span`] (the `filter()` path) and [`lower_order_items`]
 /// (the `order_by()` path), so the two cannot drift.
@@ -3354,17 +3381,16 @@ fn resolve_span_chain(
                         model: current.name,
                         field: format!("{seg} (target table `{to}` not registered)"),
                     })?;
-                alias_path = if alias_path.is_empty() {
-                    (*seg).to_owned()
+                // The first hop's alias is the schema's field name; deeper
+                // ones are interned. Same scheme as `lower_select_related`,
+                // so a span and a `select_related` over one path dedupe.
+                let alias: &'static str = if alias_path.is_empty() {
+                    alias_path.push_str(seg);
+                    field.name
                 } else {
-                    format!("{alias_path}__{seg}")
+                    alias_path = format!("{alias_path}__{seg}");
+                    intern_join_alias(&alias_path)?
                 };
-                // Leak the dotted alias: depth is bounded by the
-                // schema and the cost is paid once at compile() time.
-                // It matches `lower_select_related`'s scheme, so a
-                // span and a `select_related` over the same path
-                // dedupe against each other.
-                let alias: &'static str = Box::leak(alias_path.clone().into_boxed_str());
                 let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
                 joins.push(Join {
                     target,
@@ -4512,4 +4538,22 @@ fn compile_values_select<T: Model>(
     let mut q = qs.compile()?;
     q.projection = Some(cols);
     Ok(q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_aliases_are_interned_up_to_the_cap() {
+        let mut set = std::collections::HashSet::new();
+        let a = intern_in(&mut set, 2, "a__b").unwrap();
+        assert!(std::ptr::eq(a, intern_in(&mut set, 2, "a__b").unwrap()));
+        intern_in(&mut set, 2, "a__c").unwrap();
+        assert!(matches!(
+            intern_in(&mut set, 2, "a__d"),
+            Err(QueryError::JoinAliasLimit { .. })
+        ));
+        assert_eq!(set.len(), 2, "a refused path is not kept");
+    }
 }

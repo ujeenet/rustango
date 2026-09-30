@@ -185,6 +185,11 @@ pub enum QueryError {
         distinct_on: Vec<String>,
         order_by: Vec<String>,
     },
+
+    /// A multi-hop join alias past the process-wide cap; each distinct
+    /// relation path is kept in memory for the life of the process.
+    #[error("relation path `{path}` exceeds the limit of distinct join aliases")]
+    JoinAliasLimit { path: String },
 }
 
 /// Why a bounded `update()`/`delete()` was refused.

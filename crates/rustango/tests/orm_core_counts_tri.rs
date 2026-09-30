@@ -1,5 +1,5 @@
 //! `count` / `exists` / `sum` honour every queryset clause (#1885), on
-//! every backend.
+//! every backend; join aliases are not leaked per `compile()` (#1889).
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -85,6 +85,57 @@ async fn count_honours_relation_span(pool: &Pool) {
     assert!(ada().exists(pool).await.unwrap());
     let s: Option<i64> = ada().sum("pages", pool).await.unwrap();
     assert_eq!(s, Some(300));
+}
+
+/// Compile-only chain for the multi-hop alias test; never gets a table.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "occ_region")]
+#[allow(dead_code)]
+pub struct Region {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 40)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "occ_store")]
+#[allow(dead_code)]
+pub struct Store {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub region: ForeignKey<Region>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "occ_sale")]
+#[allow(dead_code)]
+pub struct Sale {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub store: ForeignKey<Store>,
+}
+
+/// `compile()` reuses one alias string per path instead of leaking a new one (#1889).
+#[test]
+fn span_alias_is_not_reallocated_per_compile() {
+    let aliases = || -> Vec<&'static str> {
+        let one = Book::objects().filter("author__name", "Ada").compile();
+        let span = Sale::objects().filter("store__region__name", "x").compile();
+        let related = Sale::objects().select_related("store__region").compile();
+        [one, span, related]
+            .into_iter()
+            .flat_map(|q| q.unwrap().joins.into_iter().map(|j| j.alias))
+            .collect()
+    };
+    let (a, b) = (aliases(), aliases());
+    assert_eq!(
+        a,
+        ["author", "store", "store__region", "store", "store__region"]
+    );
+    for (x, y) in a.iter().zip(&b) {
+        assert!(std::ptr::eq(*x, *y), "`{x}` was allocated again");
+    }
 }
 
 tri_dialect_test! {
