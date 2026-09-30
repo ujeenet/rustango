@@ -202,6 +202,14 @@ where
         .map_err(crate::sql::ExecError::from)?;
     crate::sql::delete_pool(registry, &hosts).await?;
     super::invalidate_host_cache();
+    // Runs keep their history but forget the Org, so a later Org that
+    // reuses the id cannot look like the one they left half-made.
+    super::provision_store::ProvisioningRun::objects()
+        .where_(super::provision_store::ProvisioningRun::org_id.eq(Some(id)))
+        .update()
+        .set("org_id", None::<i64>)
+        .execute_pool(registry)
+        .await?;
     let deleted = org.clone().delete_pool(registry).await?;
     if deleted == 0 {
         return Err(TenancyError::Validation(format!(

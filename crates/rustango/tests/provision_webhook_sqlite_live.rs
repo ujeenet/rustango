@@ -568,7 +568,13 @@ async fn a_retry_during_a_live_run_is_still_a_duplicate() {
 }
 
 /// Insert the inactive Org a run left behind, then fail that run.
-async fn half_made(b: &Booted, holder: &tempfile::TempDir, slug: &str, key: &str, own: bool) {
+async fn half_made(
+    b: &Booted,
+    holder: &tempfile::TempDir,
+    slug: &str,
+    key: &str,
+    own: bool,
+) -> i64 {
     let registry = b.pools.registry_pool();
     let run = store::open_run(&registry, slug, "database", "sqlite", None, None, Some(key))
         .await
@@ -594,6 +600,7 @@ async fn half_made(b: &Booted, holder: &tempfile::TempDir, slug: &str, key: &str
     store::finish_run(&registry, run_id, store::RunState::Failed, Some("pod died"))
         .await
         .unwrap();
+    org.id.get().copied().unwrap()
 }
 
 /// A retry picks up the tenant its failed run left inactive, instead of
@@ -603,7 +610,7 @@ async fn a_retry_resumes_the_tenant_a_failed_run_left_behind() {
     let holder = tempfile::tempdir().expect("tenants dir");
     let b = boot(&holder).await;
     let slug = unique("resume");
-    half_made(&b, &holder, &slug, "evt-resume", true).await;
+    let _ = half_made(&b, &holder, &slug, "evt-resume", true).await;
 
     let body = body_for(&slug, "evt-resume", chrono::Utc::now().timestamp());
     let sig = signed(&body);
@@ -631,7 +638,7 @@ async fn a_retry_does_not_resume_a_tenant_it_did_not_make() {
     let holder = tempfile::tempdir().expect("tenants dir");
     let b = boot(&holder).await;
     let slug = unique("foreign");
-    half_made(&b, &holder, &slug, "evt-foreign", false).await;
+    let _ = half_made(&b, &holder, &slug, "evt-foreign", false).await;
 
     let body = body_for(&slug, "evt-foreign", chrono::Utc::now().timestamp());
     let sig = signed(&body);
@@ -644,4 +651,48 @@ async fn a_retry_does_not_resume_a_tenant_it_did_not_make() {
         .await
         .unwrap();
     assert!(!orgs[0].active);
+}
+
+/// Purge forgets which run made the Org, so a new tenant that reuses the
+/// id (SQLite does) is not taken for the old half-made one.
+#[tokio::test]
+async fn a_purged_tenant_is_not_resumed_through_a_reused_id() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("reused");
+    let old_id = half_made(&b, &holder, &slug, "evt-reused-1", true).await;
+    rustango::tenancy::decommission::decommission(
+        b.pools.as_ref(),
+        &slug,
+        rustango::tenancy::decommission::Action::Purge {
+            purge_database: true,
+        },
+    )
+    .await
+    .expect("purge");
+
+    let registry = b.pools.registry_pool();
+    // Reused on purpose: a table without AUTOINCREMENT would do it itself.
+    let mut org = Org {
+        id: rustango::sql::Auto::Set(old_id),
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!(
+            "sqlite://{}/t_{slug}.db?mode=rwc",
+            holder.path().display()
+        )),
+        active: false,
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&registry).await.unwrap();
+
+    let body = body_for(&slug, "evt-reused-2", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
+    let run = await_run(&b, run_id).await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a purged tenant's run resumed a new one");
 }
