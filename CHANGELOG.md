@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.9] — 2026-09-30
+
 ### Fixed — `DatabaseCache::incr` is atomic (#1871)
 
 One upsert per dialect, so parallel failed logins all count toward the lockout.

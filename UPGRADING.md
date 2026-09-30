@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.9
+
 ### `DatabaseCache::incr` keeps the first TTL
 
 **Breaking:** `incr` no longer moves the TTL on each call, and an `i64` overflow is an error.
