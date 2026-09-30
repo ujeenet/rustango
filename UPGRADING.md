@@ -164,8 +164,10 @@ scopes by owner should also implement `write_pins`.
 
 ### `?ordering=` with a serializer
 
-Without `ordering_fields`, only the fields the serializer renders are sortable. A
-hand-written `ModelSerializer` has none until it overrides `readable_source_fields`.
+Without `ordering_fields`, only the fields the serializer renders are sortable.
+`readable_source_fields()` defaults to empty, so a ViewSet on a hand-written
+`ModelSerializer` ignores `?ordering=` until the impl overrides it or the ViewSet
+sets `ordering_fields`.
 
 ## 0.59.6
 

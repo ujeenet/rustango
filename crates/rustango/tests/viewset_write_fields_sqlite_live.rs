@@ -244,3 +244,58 @@ async fn ordering_falls_back_to_the_serializer_fields() {
         "rendered fields still sort"
     );
 }
+
+#[tokio::test]
+async fn owned_by_refuses_an_unauthenticated_update() {
+    let sq = pool().await;
+    let app = owned(&sq);
+    let (status, _) = send(
+        &app,
+        req(Method::PATCH, "/docs/1", r#"{"title":"x"}"#, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(row(&sq, 1).await, Some((1, "a".into(), 30)));
+}
+
+/// A second backend that pins `owner_id` to a fixed value.
+struct PinOwner(i64);
+
+impl rustango::viewset::ViewSetFilter for PinOwner {
+    fn filter(
+        &self,
+        _p: &std::collections::HashMap<String, String>,
+        _s: &'static rustango::core::ModelSchema,
+    ) -> Vec<rustango::core::WhereExpr> {
+        Vec::new()
+    }
+
+    fn write_pins(
+        &self,
+        _parts: &axum::http::request::Parts,
+        _s: &'static rustango::core::ModelSchema,
+    ) -> Vec<rustango::viewset::WritePin> {
+        vec![rustango::viewset::WritePin::field("owner_id", self.0)]
+    }
+}
+
+#[tokio::test]
+async fn two_pins_on_one_field_write_it_once_or_deny() {
+    let sq = pool().await;
+    let agree = ViewSet::for_model(Doc::SCHEMA)
+        .filter_backend(OwnedBy::column("owner_id"))
+        .filter_backend(PinOwner(1))
+        .router_pool("/docs", Pool::Sqlite(sq.clone()));
+    let body = r#"{"title":"t","salary":1}"#;
+    let (status, created) = send(&agree, req(Method::POST, "/docs", body, Some(1))).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["owner_id"], 1);
+
+    let disagree = ViewSet::for_model(Doc::SCHEMA)
+        .filter_backend(OwnedBy::column("owner_id"))
+        .filter_backend(PinOwner(2))
+        .router_pool("/docs", Pool::Sqlite(sq.clone()));
+    let (status, _) = send(&disagree, req(Method::POST, "/docs", body, Some(1))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(count(&sq).await, 4, "only the agreeing create wrote");
+}

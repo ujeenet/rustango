@@ -1507,12 +1507,24 @@ impl WriteSet {
         parts: &axum::http::request::Parts,
     ) -> Result<Self, Response> {
         let schema = state.vs.schema;
-        let mut pinned = Vec::new();
+        let mut pinned: Vec<(&'static crate::core::FieldSchema, SqlValue)> = Vec::new();
         for backend in &state.vs.filter_backends {
             for pin in backend.write_pins(parts, schema) {
                 match pin {
                     WritePin::Field { field, value } => match schema.field(field) {
-                        Some(f) => pinned.push((f, value)),
+                        // One pin per field; two backends that disagree deny.
+                        Some(f) => match pinned.iter().find(|(p, _)| p.name == f.name) {
+                            None => pinned.push((f, value)),
+                            Some((_, v)) if *v == value => {}
+                            Some(_) => {
+                                tracing::error!(
+                                    model = schema.table,
+                                    field,
+                                    "two write pins disagree on one field — denying"
+                                );
+                                return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
+                            }
+                        },
                         None => {
                             tracing::error!(
                                 model = schema.table,
@@ -1563,6 +1575,8 @@ impl WriteSet {
             .map(|f| f.name)
             .collect();
         let mut out = collect_insert_values(self.schema, form, &skip)?;
+        // A pin replaces a stamped `auto` value rather than doubling the column.
+        out.retain(|(c, _)| !self.pinned.iter().any(|(f, _)| f.column == *c));
         out.extend(self.pinned.iter().map(|(f, v)| (f.column, v.clone())));
         Ok(out)
     }
