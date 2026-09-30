@@ -152,8 +152,9 @@ untouched.
 
 ### `upsert` targets the PK over a field `index(unique)` (#1935)
 
-A model whose only unique index is a field `index(unique)` or a `unique_when` now upserts on
-the PK. To target a column, declare `unique_together = "col"`.
+**Breaking:** a model whose only unique index is a field `index(unique)` or a `unique_when`
+now upserts on the PK, so a new row with a taken value fails with a unique violation instead of
+updating the existing row. To target the column, declare `unique_together = "col"`.
 
 ### `values()` returns `SqlValue::Uuid` for a Uuid column on MySQL (#1901)
 

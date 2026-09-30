@@ -8,6 +8,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Only a container-level `unique_together` (or `index(…, unique)`) without a `WHERE` is the
 target; otherwise the PK. An upsert on a set PK no longer fails on a field `index(unique)`.
+**Breaking:** an upsert of a new row whose field `index(unique)` value is taken now fails with
+a unique violation instead of updating that row; declare `unique_together` to keep the old target.
 
 ### Fixed — `values()` reads Uuid and bytes columns on every backend (#1901)
 
@@ -27,8 +29,9 @@ Each NULL in the VALUES list is cast to its column type, so it no longer fails a
 ### Fixed — MySQL do-nothing inserts use the PK and report skips (#1887)
 
 `insert_or_ignore` and friends no longer need an `id` column, and `insert_or_ignore` returns
-`false` for a skipped row. An upsert on an auto PK reads back the updated row's id.
-New `rustango::sql::insert_or_ignore`.
+`false` for a skipped row. An upsert on an auto PK reads back the updated row's id, and
+`insert_returning_*` read it from the INSERT itself, not the session. New `rustango::sql::insert_or_ignore`.
+**Breaking:** `Dialect::write_conflict_clause` takes a `model: &ModelSchema` argument.
 
 ### Security — `JwtBackend` checks the tenant binding (#1848)
 
