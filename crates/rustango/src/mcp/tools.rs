@@ -209,7 +209,7 @@ pub(crate) async fn call_tool_with(
 
     // Catch a panic here. A buggy handler must not unwind into the
     // transport, which would drop the connection.
-    let outcome = catch_unwind((tool.handler)(ctx, args.clone())).await;
+    let outcome = crate::panic_guard::catch_unwind((tool.handler)(ctx, args.clone())).await;
 
     // Audit every call that ran, whether it worked or not, with the
     // arguments redacted.
@@ -231,22 +231,6 @@ pub(crate) async fn call_tool_with(
             ))
         }
     }
-}
-
-/// Drive `fut` to completion, turning a panic in any single `poll`
-/// into an `Err`. This is `catch_unwind` for a future, written here
-/// so the crate need not depend on `futures` for it alone.
-async fn catch_unwind<F: Future>(fut: F) -> std::thread::Result<F::Output> {
-    use std::task::Poll;
-    let mut fut = Box::pin(fut);
-    std::future::poll_fn(move |cx| {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
-            Ok(Poll::Pending) => Poll::Pending,
-            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
-            Err(panic) => Poll::Ready(Err(panic)),
-        }
-    })
-    .await
 }
 
 /// Wrap a handler's JSON in a `CallToolResult`. The value appears

@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a panicking job no longer kills its worker (#1843)
+
+A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
+is logged. **Breaking:** `PgJobQueue` counts `attempt` at pickup and dead-letters a row
+reclaimed with no attempts left. Running jobs refresh `locked_at` (`heartbeat_interval`,
+default 10 s), finishing writes need the worker's own lock, and `shutdown` aborts after 5 s.
+
 ### Security — ViewSet writes stay inside `fields()` and the owner (#1845)
 
 **Breaking:** create and update now write only the `fields()` columns (and the serializer's

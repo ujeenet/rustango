@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `PgJobQueue` counts attempts at pickup
+
+`rustango_jobs.attempt` now includes the running attempt. Keep the
+`reclaim_stuck_jobs_pool` threshold well above `heartbeat_interval` (10 s by default).
+
 ### ViewSet `fields()` limits writes (breaking)
 
 A body key outside `fields()` is now ignored on create and update, so a required column
