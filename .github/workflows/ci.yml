@@ -1028,6 +1028,9 @@ jobs:
             --test json_path_tri \
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
+            --test m2m_non_int_pk_tri \
+            --test update_validation_tri \
+            --test uuid_v7_pk_writes_tri \
             --test media_sqlite_live \
             --test migrate_registry_pool_sqlite_live \
             --test model_shortcut_scopes_tri \
@@ -1045,6 +1048,7 @@ jobs:
             --test unique_when_sqlite_live \
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
+            --test inserted_pk_readback_tri \
             --test admin_totp_2fa_sqlite_live \
             --test admin_totp_2fa_e2e \
             --test admin_totp_replay_tri \
@@ -1056,7 +1060,7 @@ jobs:
             --test orm_json_dates \
             --test orm_writes \
             --test orm_delta
-      - run: cargo test -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri
+      - run: cargo test -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri --test template_views_typed_binds_tri
       - run: >-
           cargo test -p rustango --no-default-features
           --features sqlite,tenancy,admin-sso,testkit
@@ -1283,13 +1287,18 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
+      - run: cargo test -p rustango --features mysql,template_views,testkit --test template_views_typed_binds_tri
       - run: cargo test -p rustango --features mysql,testkit --test row_to_json_nulls_tri
       - run: cargo test -p rustango --features mysql,testkit --test column_types_tri
+      - run: cargo test -p rustango --features mysql,testkit --test m2m_non_int_pk_tri
+      - run: cargo test -p rustango --features mysql,forms,testkit --test update_validation_tri
+      - run: cargo test -p rustango --features mysql,testkit --test uuid_v7_pk_writes_tri
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.

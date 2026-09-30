@@ -3427,7 +3427,7 @@ mod created_pk_tests {
             vec![pk.column],
             vec![SqlValue::String("rust".into())],
         );
-        let got = crate::sql::inserted_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk)
+        let got = crate::sql::inserted_pk(&q, &crate::sql::InsertReturningPool::MySqlAutoId(0), pk)
             .expect("submitted pk");
         assert!(
             matches!(got, SqlValue::String(ref s) if s == "rust"),

@@ -1160,6 +1160,7 @@ pub async fn save_one_with_audit(
     query: &crate::core::UpdateQuery,
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
+    query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
@@ -1536,7 +1537,7 @@ pub(crate) async fn insert(
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
     if audited_create(query).is_none() {
         let returning = crate::sql::insert_returning_pool(pool, query).await?;
-        return crate::sql::inserted_pk(query, returning, pk_field);
+        return crate::sql::inserted_pk(query, &returning, pk_field);
     }
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let pk = insert_tx(&mut tx, query, pk_field).await?;
@@ -1555,7 +1556,7 @@ pub(crate) async fn insert_tx(
     pk_field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
     let returning = crate::sql::insert_returning_tx(tx, query).await?;
-    let pk = crate::sql::inserted_pk(query, returning, pk_field)?;
+    let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
     if let Some(record) = audited_create(query) {
         record(tx, pk.clone())
             .await
@@ -1749,6 +1750,7 @@ where
 {
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
     let _ = (select_cols_pg, select_cols_my, select_cols_sqlite);
+    update_query.validate()?;
     let stmt = pool.dialect().compile_update(update_query)?;
     // Only the pre-update SELECT differs per backend: each row type is a
     // different concrete type, so each arm calls its own

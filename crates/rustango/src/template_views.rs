@@ -1634,8 +1634,9 @@ fn substitute_pk(template: &str, pk: &str) -> String {
 fn interpolate_success_url(
     template: &str,
     row: &crate::sql::InsertReturningPool,
-    schema: &'static crate::core::ModelSchema,
+    query: &crate::core::InsertQuery,
 ) -> Result<String, String> {
+    let schema = query.model;
     let placeholders = parse_success_url_placeholders(template);
     if placeholders.is_empty() {
         return Ok(template.to_owned());
@@ -1658,7 +1659,15 @@ fn interpolate_success_url(
                 )
             })?
         };
-        let v = column_value_as_string_returning(row, column).map_err(|e| {
+        // The PK as written, not MySQL's `LAST_INSERT_ID()` for a client-set one (#1894).
+        let read = if column.primary_key {
+            crate::sql::inserted_pk(query, row, column)
+                .map(|v| v.to_display_string())
+                .map_err(|e| e.to_string())
+        } else {
+            column_value_as_string_returning(row, column)
+        };
+        let v = read.map_err(|e| {
             format!(
                 "success_url interpolation failed reading `{}`: {e}",
                 column.column
@@ -1680,19 +1689,12 @@ fn column_value_as_string_returning(
             column_value_as_string(pg_row, column).map_err(|e| e.to_string())
         }
         #[cfg(feature = "mysql")]
-        crate::sql::InsertReturningPool::MySqlAutoId(id) => {
-            // MySQL only carries the auto-generated PK; placeholders
-            // for other columns are unresolvable on this path.
-            if column.primary_key {
-                Ok(id.to_string())
-            } else {
-                Err(format!(
-                    "success_url placeholder `{}` cannot be resolved on MySQL (no RETURNING — \
-                     only the auto-generated primary key is available)",
-                    column.column,
-                ))
-            }
-        }
+        // MySQL only carries the auto-generated PK, which `inserted_pk` reads.
+        crate::sql::InsertReturningPool::MySqlAutoId(_) => Err(format!(
+            "success_url placeholder `{}` cannot be resolved on MySQL (no RETURNING — \
+             only the auto-generated primary key is available)",
+            column.column,
+        )),
         #[cfg(feature = "sqlite")]
         crate::sql::InsertReturningPool::SqliteRow(sq_row) => {
             use crate::core::FieldType;
@@ -1820,7 +1822,7 @@ fn column_value_as_string(
 }
 
 /// Coerce a URL-path PK string to the field's declared SQL type.
-/// Tighter than [`coerce_value`] — never returns `Null`, never
+/// Never returns `Null`, never
 /// allows empty strings (a `/{pk}` segment is always present).
 /// Used by DetailView / UpdateView / DeleteView to bind the
 /// `WHERE pk = $1` parameter without relying on Postgres'
@@ -1850,50 +1852,6 @@ fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> SqlValue {
         // serve as a PK. Pass the raw string through and let
         // Postgres' implicit cast handle it.
         _ => SqlValue::String(raw.to_owned()),
-    }
-}
-
-/// Coerce a form-encoded string into a `SqlValue` based on the
-/// field's declared type. Empty strings on nullable fields produce
-/// `SqlValue::Null`. Coercion failures surface as a per-field error
-/// so the form can re-render with the user's input intact.
-fn coerce_value(field: &crate::core::FieldSchema, raw: &str) -> Result<SqlValue, String> {
-    use crate::core::FieldType as T;
-    if raw.is_empty() && field.nullable {
-        return Ok(SqlValue::Null);
-    }
-    match field.ty {
-        T::String => Ok(SqlValue::String(raw.to_owned())),
-        T::I16 => raw
-            .parse::<i16>()
-            .map(|n| SqlValue::I64(i64::from(n)))
-            .map_err(|e| format!("expected an integer, got `{raw}` ({e})")),
-        T::I32 => raw
-            .parse::<i32>()
-            .map(|n| SqlValue::I64(i64::from(n)))
-            .map_err(|e| format!("expected an integer, got `{raw}` ({e})")),
-        T::I64 => raw
-            .parse::<i64>()
-            .map(SqlValue::I64)
-            .map_err(|e| format!("expected an integer, got `{raw}` ({e})")),
-        T::F32 => raw
-            .parse::<f32>()
-            .map(|n| SqlValue::F64(f64::from(n)))
-            .map_err(|e| format!("expected a number, got `{raw}` ({e})")),
-        T::F64 => raw
-            .parse::<f64>()
-            .map(SqlValue::F64)
-            .map_err(|e| format!("expected a number, got `{raw}` ({e})")),
-        T::Bool => match raw {
-            "1" | "true" | "on" | "yes" => Ok(SqlValue::Bool(true)),
-            "0" | "false" | "off" | "no" | "" => Ok(SqlValue::Bool(false)),
-            _ => Err(format!("expected boolean, got `{raw}`")),
-        },
-        // The rest fall through to String — DB-level casts handle
-        // most projects' shapes (datetime / date / uuid all parse
-        // cleanly from ISO 8601 / canonical text). Projects that
-        // need stricter parsing override via ModelForm.
-        _ => Ok(SqlValue::String(raw.to_owned())),
     }
 }
 
@@ -1946,7 +1904,7 @@ async fn handle_create_post(
     };
     let target_url = if need_returning {
         match crate::sql::insert_returning_pool(&state.pool, &insert_q).await {
-            Ok(row) => match interpolate_success_url(&state.success_url, &row, state.schema) {
+            Ok(row) => match interpolate_success_url(&state.success_url, &row, &insert_q) {
                 Ok(url) => url,
                 Err(e) => return template_error(&e),
             },
@@ -2086,7 +2044,7 @@ fn parse_form(
             errors.insert(f.name.to_owned(), "this field is required".to_owned());
             continue;
         }
-        match coerce_value(f, &raw) {
+        match crate::forms::parse_form_value(f, Some(&raw)).map_err(|e| e.to_string()) {
             Ok(v) => {
                 // Bounds validation — `max_length` / `min` / `max`
                 // declared on the schema. Surface as a per-field
@@ -2367,10 +2325,13 @@ fn build_list_where(
         let Some(field) = schema.field(key) else {
             continue;
         };
+        let Some(value) = filter_value(field, val) else {
+            continue;
+        };
         predicates.push(WhereExpr::Predicate(Filter {
             column: field.column,
             op: Op::Eq,
-            value: SqlValue::String(val.clone()),
+            value,
         }));
     }
 
@@ -2403,6 +2364,30 @@ fn build_list_where(
         predicates.remove(0)
     } else {
         WhereExpr::And(predicates)
+    }
+}
+
+/// A `?field=value` filter typed as its field (#1915). `None` ignores the
+/// filter: an empty value, an unknown bool word, or anything unparsable.
+fn filter_value(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
+    use crate::core::FieldType as T;
+    if raw.is_empty() {
+        return None;
+    }
+    match field.ty {
+        T::Bool => match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" => Some(SqlValue::Bool(true)),
+            "false" | "0" | "off" => Some(SqlValue::Bool(false)),
+            _ => None,
+        },
+        T::DateTime => crate::forms::parse_form_value(field, Some(raw))
+            .ok()
+            .or_else(|| {
+                chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+                    .ok()
+                    .map(|d| SqlValue::DateTime(d.and_utc()))
+            }),
+        _ => crate::forms::parse_form_value(field, Some(raw)).ok(),
     }
 }
 
@@ -2616,41 +2601,8 @@ fn coerce_selected_pks(
     raws: &[String],
 ) -> Result<Vec<SqlValue>, String> {
     raws.iter()
-        .map(|s| coerce_pk_typed(pk_field, s))
+        .map(|s| crate::forms::parse_pk_string(pk_field, s).map_err(|e| e.to_string()))
         .collect::<Result<Vec<_>, _>>()
-}
-
-/// Like `coerce_pk` but returns a typed error rather than falling
-/// back to `SqlValue::String`. The fallback is fine for URL-segment
-/// lookups (the SQL layer's implicit casts paper over the
-/// difference) but bulk-action PKs are bound as a list, where a
-/// type mismatch would crash the whole batch — fail fast.
-fn coerce_pk_typed(
-    pk_field: &'static crate::core::FieldSchema,
-    raw: &str,
-) -> Result<SqlValue, String> {
-    use crate::core::FieldType;
-    match pk_field.ty {
-        FieldType::I64 => raw
-            .parse::<i64>()
-            .map(SqlValue::I64)
-            .map_err(|e| format!("invalid i64 PK `{raw}`: {e}")),
-        FieldType::I32 => raw
-            .parse::<i32>()
-            .map(SqlValue::I32)
-            .map_err(|e| format!("invalid i32 PK `{raw}`: {e}")),
-        FieldType::I16 => raw
-            .parse::<i16>()
-            .map(SqlValue::I16)
-            .map_err(|e| format!("invalid i16 PK `{raw}`: {e}")),
-        FieldType::Uuid => uuid::Uuid::parse_str(raw)
-            .map(SqlValue::Uuid)
-            .map_err(|e| format!("invalid uuid PK `{raw}`: {e}")),
-        FieldType::String => Ok(SqlValue::String(raw.to_owned())),
-        other => Err(format!(
-            "PK type {other:?} is not supported for bulk actions"
-        )),
-    }
 }
 
 /// Resolve `_display` sibling fields for every FK column on the
@@ -2701,10 +2653,8 @@ struct FkLookup {
     target_pk_column: &'static str,
     target_display_column: &'static str,
     target_display_field_name: &'static str,
-    /// Distinct stringified source values from the page (NULL
-    /// values are filtered out so the SQL doesn't bind a NULL
-    /// into the `ANY($1)` array).
-    distinct_values: Vec<Value>,
+    /// Distinct non-null source values, typed as the target column (#1915).
+    distinct_values: Vec<SqlValue>,
 }
 
 fn collect_fk_target_lookups(schema: &'static ModelSchema, object_list: &[Value]) -> Vec<FkLookup> {
@@ -2721,19 +2671,22 @@ fn collect_fk_target_lookups(schema: &'static ModelSchema, object_list: &[Value]
         let Some(display_field) = target.display_field() else {
             continue;
         };
+        let Some(target_field) = target.field_by_column(on) else {
+            continue;
+        };
         // The target's PK column is what we filter on; `on` from
         // the Relation IR is the remote column the local FK
         // references (usually the PK).
-        let mut distinct: Vec<Value> = Vec::new();
+        let mut distinct: Vec<SqlValue> = Vec::new();
         for row in object_list {
-            let Some(val) = row.get(field.name) else {
+            let Some(key) = row.get(field.name).and_then(json_value_as_lookup_key) else {
                 continue;
             };
-            if val.is_null() {
+            let Ok(val) = crate::forms::parse_form_value(target_field, Some(&key)) else {
                 continue;
-            }
-            if !distinct.iter().any(|v| v == val) {
-                distinct.push(val.clone());
+            };
+            if !distinct.contains(&val) {
+                distinct.push(val);
             }
         }
         if distinct.is_empty() {
@@ -2789,44 +2742,8 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
         .expect("target table existed when collecting lookups");
     // #810 — IN-list lookup via the `by_pk_in` constructor; a target
     // row its own global scopes hide gets no `_display`.
-    SelectQuery::by_pk_in(
-        target,
-        fk.target_pk_column,
-        fk.distinct_values
-            .iter()
-            .map(json_value_to_sql_for_fk_pk)
-            .collect(),
-    )
-    .with_global_scopes()
-}
-
-/// Convert a JSON-shaped value (read out of an object_list row)
-/// back into a `SqlValue` for re-binding into the FK lookup's
-/// `IN ($1)` clause. The JSON shape comes from `row_to_json`
-/// which serializes per FieldType, so we round-trip on the same
-/// type table.
-fn json_value_to_sql_for_fk_pk(v: &Value) -> SqlValue {
-    match v {
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                SqlValue::I64(i)
-            } else if let Some(u) = n.as_u64() {
-                SqlValue::I64(u as i64)
-            } else {
-                // Float PKs are unusual; bind as string and let PG cast.
-                SqlValue::String(n.to_string())
-            }
-        }
-        Value::String(s) => {
-            // Could be a UUID or a string PK. Try UUID first.
-            if let Ok(u) = uuid::Uuid::parse_str(s) {
-                SqlValue::Uuid(u)
-            } else {
-                SqlValue::String(s.clone())
-            }
-        }
-        _ => SqlValue::Null,
-    }
+    SelectQuery::by_pk_in(target, fk.target_pk_column, fk.distinct_values.clone())
+        .with_global_scopes()
 }
 
 /// v0.38 — operates on JSON rows from `select_rows_as_json`
@@ -2977,7 +2894,7 @@ async fn visible_pks_pool(
         .filter_map(|r| r.get(pk_field.name))
         .filter_map(|v| {
             let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
-            coerce_pk_typed(pk_field, &raw).ok()
+            crate::forms::parse_pk_string(pk_field, &raw).ok()
         })
         .collect();
     Ok(pks
@@ -3791,7 +3708,7 @@ mod tenant {
         let target_url = if need_returning {
             match crate::sql::insert_returning_pool(t.pool(), &insert_q).await {
                 Ok(row) => {
-                    match super::interpolate_success_url(&state.success_url, &row, state.schema) {
+                    match super::interpolate_success_url(&state.success_url, &row, &insert_q) {
                         Ok(url) => url,
                         Err(e) => return template_error(&e),
                     }
@@ -4867,10 +4784,9 @@ mod tests {
         }
     }
 
-    /// `coerce_pk` for a String PK passes through verbatim.
-    #[test]
-    fn coerce_pk_string_field() {
-        let str_schema: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
+    /// A model whose PK is a client-set `String`.
+    fn slug_schema() -> &'static ModelSchema {
+        Box::leak(Box::new(ModelSchema {
             name: "Slug",
             table: "slugs",
             fields: Box::leak(Box::new([crate::core::FieldSchema {
@@ -4927,7 +4843,13 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
-        }));
+        }))
+    }
+
+    /// `coerce_pk` for a String PK passes through verbatim.
+    #[test]
+    fn coerce_pk_string_field() {
+        let str_schema = slug_schema();
         let pk = str_schema.primary_key().unwrap();
         match coerce_pk(pk, "hello-world") {
             SqlValue::String(s) => assert_eq!(s, "hello-world"),
@@ -4935,27 +4857,20 @@ mod tests {
         }
     }
 
-    /// `coerce_value` rejects garbage integers with a clear error.
+    /// MySQL's `LAST_INSERT_ID()` is 0 for a client-set PK; `{pk}` takes the written one (#1894).
+    #[cfg(feature = "mysql")]
     #[test]
-    fn coerce_value_int_error_surfaces() {
-        let s = schema_two_fields();
-        // The `id` field is i64.
-        let id = &s.fields[0];
-        let err = coerce_value(id, "not-a-number").unwrap_err();
-        assert!(err.contains("integer"), "got: {err}");
-    }
-
-    /// Empty raw value on a NOT NULL non-bool field is reported as
-    /// required-missing by `parse_form` (not by `coerce_value`).
-    /// `coerce_value` itself returns Ok(SqlValue::String("")) for
-    /// strings with the empty value — which is fine; required-ness
-    /// is checked in the parse layer.
-    #[test]
-    fn coerce_value_empty_string_passes_through() {
-        let s = schema_two_fields();
-        let title = &s.fields[1];
-        let v = coerce_value(title, "").unwrap();
-        assert!(matches!(v, SqlValue::String(ref s) if s.is_empty()));
+    fn success_url_pk_is_the_submitted_one_on_mysql() {
+        let q = crate::core::InsertQuery::new(
+            slug_schema(),
+            vec!["slug"],
+            vec![SqlValue::String("rust".into())],
+        );
+        let row = crate::sql::InsertReturningPool::MySqlAutoId(0);
+        let url = interpolate_success_url("/tags/{pk}", &row, &q).expect("url");
+        assert_eq!(url, "/tags/rust");
+        let unsent = crate::core::InsertQuery::new(slug_schema(), vec![], vec![]);
+        assert!(interpolate_success_url("/tags/{pk}", &row, &unsent).is_err());
     }
 
     /// `parse_form` collects required-missing errors for non-nullable
@@ -5412,56 +5327,6 @@ mod tests {
         assert_eq!(pks, vec!["1", "2", "3"]);
     }
 
-    /// `coerce_pk_typed` converts to the right `SqlValue` per
-    /// `FieldType` and surfaces parse errors instead of falling
-    /// back to a string (which would corrupt the SQL `IN (...)`
-    /// bind).
-    #[test]
-    fn coerce_pk_typed_returns_correct_sqlvalue_per_type() {
-        use crate::core::FieldType;
-        let f = |ty: FieldType| {
-            Box::leak(Box::new(crate::core::FieldSchema {
-                name: "id",
-                column: "id",
-                ty,
-                nullable: false,
-                primary_key: true,
-                relation: None,
-                max_length: None,
-                min: None,
-                max: None,
-                default: None,
-                auto: false,
-                auto_now: false,
-                unique: false,
-                generated_as: None,
-                help_text: None,
-                choices: None,
-                db_comment: None,
-                verbose_name: None,
-                editable: true,
-                blank: false,
-                case_insensitive: false,
-                fk_on_delete: None,
-                validators: &[],
-            })) as &'static crate::core::FieldSchema
-        };
-        assert!(matches!(
-            coerce_pk_typed(f(FieldType::I64), "42"),
-            Ok(SqlValue::I64(42))
-        ));
-        assert!(matches!(
-            coerce_pk_typed(f(FieldType::I32), "42"),
-            Ok(SqlValue::I32(42))
-        ));
-        assert!(matches!(
-            coerce_pk_typed(f(FieldType::I16), "42"),
-            Ok(SqlValue::I16(42))
-        ));
-        assert!(coerce_pk_typed(f(FieldType::I64), "not-a-number").is_err());
-        assert!(coerce_pk_typed(f(FieldType::Uuid), "not-a-uuid").is_err());
-    }
-
     /// `bulk_actions` Tera context entry leads with `delete_selected`,
     /// then user-registered actions in order.
     #[test]
@@ -5551,28 +5416,6 @@ mod tests {
             "NULL FK has no lookup key"
         );
         assert_eq!(json_value_as_lookup_key(&serde_json::json!(true)), None);
-    }
-
-    /// `json_value_to_sql_for_fk_pk` round-trips integer JSON →
-    /// SqlValue::I64 (the common FK shape) and string-shaped UUIDs
-    /// → SqlValue::Uuid (auto-detected via parse). Other strings
-    /// pass through as SqlValue::String.
-    #[test]
-    fn json_value_to_sql_for_fk_pk_round_trips_common_pk_types() {
-        match json_value_to_sql_for_fk_pk(&serde_json::json!(42)) {
-            SqlValue::I64(42) => {}
-            other => panic!("expected I64(42), got {other:?}"),
-        }
-        match json_value_to_sql_for_fk_pk(&serde_json::json!(
-            "550e8400-e29b-41d4-a716-446655440000"
-        )) {
-            SqlValue::Uuid(u) => assert_eq!(u.to_string(), "550e8400-e29b-41d4-a716-446655440000"),
-            other => panic!("expected Uuid, got {other:?}"),
-        }
-        match json_value_to_sql_for_fk_pk(&serde_json::json!("not-a-uuid")) {
-            SqlValue::String(s) => assert_eq!(s, "not-a-uuid"),
-            other => panic!("expected String, got {other:?}"),
-        }
     }
 
     /// `stamp_display_into_rows` walks a `Vec<Value>`, looks up

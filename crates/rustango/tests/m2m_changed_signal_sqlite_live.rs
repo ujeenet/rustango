@@ -70,7 +70,7 @@ async fn add_fires_with_add_action_and_single_dst_pk() {
     assert_eq!(got[0].through, "post_tags");
     assert_eq!(got[0].src_col, "post_id");
     assert_eq!(got[0].dst_col, "tag_id");
-    assert_eq!(got[0].src_pk, 1);
+    assert_eq!(got[0].src_pk, SqlValue::I64(1));
     assert_eq!(got[0].dst_pks, vec![7]);
 }
 
