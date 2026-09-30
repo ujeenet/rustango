@@ -179,6 +179,11 @@ use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
 Updates now fail with `QueryError::MaxLengthExceeded`, `OutOfRange`, `InvalidChoice` or
 `ValidatorFailed` where they used to write. `ModelForm` returns these as field errors.
 
+### Template views: typed form and filter values
+
+Form errors for bad input now use the `FormError` text. A `ListView` filter value that
+does not parse as its field type is ignored instead of matching nothing.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

@@ -35,6 +35,13 @@ source with `ExecError::M2mUnsavedSource`. `M2MManager::contains` also decodes o
 `max`, `choices` and validators before writing, and `ModelForm::validate` reports them
 per field. **Breaking:** an update that broke these rules used to be stored; it now errors.
 
+### Fixed — template views bind values by field type (#1915)
+
+`CreateView` / `UpdateView` forms, `ListView` `filter_fields` and FK `_display` lookups
+now parse values like the admin (`forms::parse_form_value`) instead of binding text, so
+dates, UUIDs, decimals and JSON save on PostgreSQL and bool / int filters match on SQLite.
+**Breaking:** an unparsable `ListView` filter value is ignored, as in `ViewSet`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
