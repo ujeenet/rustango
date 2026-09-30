@@ -133,7 +133,7 @@ cargo rustango new myblog --backend mysql
 Running it natively instead of in the container takes a database and a user:
 
 ```sql
-CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs;
 CREATE USER 'rustango'@'localhost' IDENTIFIED BY 'rustango';
 GRANT ALL PRIVILEGES ON myblog_dev.* TO 'rustango'@'localhost';
 ```
@@ -145,6 +145,13 @@ DATABASE_URL=mysql://rustango:rustango@localhost:3306/myblog_dev
 `utf8mb4` is worth setting deliberately: MySQL's older `utf8` is three bytes and
 cannot store an emoji, which surfaces much later as a write that fails on one
 row. MariaDB works through the same driver and the same URL scheme.
+
+The collation matters too. Columns inherit the database default, and MySQL's own
+(`utf8mb4_0900_ai_ci`) ignores case and accents, so `.eq("/About")` matches
+`/about` and a `unique` column refuses `Hero` next to `hero`, unlike PostgreSQL
+and SQLite. `utf8mb4_0900_as_cs` compares like they do. Avoid a `_bin` collation:
+the driver cannot read its text columns as `String`. `manage check --deploy` warns
+about both.
 
 ---
 

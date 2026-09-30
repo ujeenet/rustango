@@ -1149,6 +1149,8 @@ mod tests {
         let my = templates::docker_compose(name, Backend::Mysql);
         assert!(my.contains("image: mysql:8"), "{my}");
         assert!(my.contains("MYSQL_DATABASE: app_dev"), "{my}");
+        // #1742: the stock `_ai_ci` default ignores case.
+        assert!(my.contains("--collation-server=utf8mb4_0900_as_cs"), "{my}");
         assert!(my.contains("depends_on:"), "{my}");
     }
 

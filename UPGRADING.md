@@ -167,6 +167,25 @@ link on a `NullCache`. A custom cache should override `add` atomically.
 `..Config::default()`. Every refresh token issued before the upgrade gets one 401, so all
 users log in again once. `pwf`, `sat`, `fam` are router claims; a hook returning `kind` fails login.
 
+### MySQL: `Uuid` is hyphenated text
+
+The ORM now writes and reads a `Uuid` as the 36-character text its `CHAR(36)` column
+holds. A hand-made `BINARY(16)` UUID column no longer works; make it `CHAR(36)`.
+On MySQL, `ForeignKey<T, K>` and `Auto<T>` now decode through `FlatScalar`, so `K` / `T`
+must be one of its types.
+
+### MySQL: unbounded `String` is `LONGTEXT`
+
+New tables get `LONGTEXT`; migrations do not change existing `TEXT` columns. To lift
+the 64 KiB cap there, run `ALTER TABLE t MODIFY col LONGTEXT NOT NULL` for each
+`DATA_TYPE = 'text'` column in `information_schema.COLUMNS`. `MODIFY` resets what it
+omits: repeat the column's nullability, default and any `COLLATE`.
+
+### MySQL: `check --deploy` warns on a `_ci` or `_bin` database collation
+
+No schema change. A stock MySQL database (`utf8mb4_0900_ai_ci`) now gets a warning;
+use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`
