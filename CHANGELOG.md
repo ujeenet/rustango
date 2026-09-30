@@ -22,6 +22,13 @@ content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
 MySQL's default `_ai_ci` collation makes `=` and `unique` ignore case, unlike PostgreSQL
 and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900_as_cs`.
 
+### Fixed — M2M on String / Uuid primary keys (#1926)
+
+The M2M managers bound every non-integer source PK as `0`, so all sources shared rows
+(MySQL matched any letter-first key). They now bind the real key and refuse an unsaved
+source with `ExecError::M2mUnsavedSource`. `M2MManager::contains` also decodes on PostgreSQL.
+**Breaking:** `M2mChangedContext::src_pk` is a `SqlValue`, not an `i64`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

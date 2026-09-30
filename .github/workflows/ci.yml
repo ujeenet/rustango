@@ -1021,6 +1021,7 @@ jobs:
             --test json_path_tri \
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
+            --test m2m_non_int_pk_tri \
             --test media_sqlite_live \
             --test migrate_registry_pool_sqlite_live \
             --test model_shortcut_scopes_tri \
@@ -1279,6 +1280,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
       - run: cargo test -p rustango --features mysql,testkit --test row_to_json_nulls_tri
       - run: cargo test -p rustango --features mysql,testkit --test column_types_tri
+      - run: cargo test -p rustango --features mysql,testkit --test m2m_non_int_pk_tri
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.
