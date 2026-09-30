@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.8] — 2026-09-30
+
 ### Security — admin audit log needs `audit.view` / `audit.delete` (#1858)
 
 **Breaking:** a non-superuser gets 403 on the audit feed without `audit.view`, and

@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.8
+
 ### Admin audit log is permission-gated
 
 **Breaking:** grant `audit.view` (read) or `audit.delete` (cleanup) to non-superusers
