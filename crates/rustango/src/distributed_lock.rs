@@ -473,7 +473,6 @@ mod tests {
     /// `scoped` names its own keyspace, apart from unscoped and other scopes.
     #[tokio::test]
     async fn scoped_locks_use_their_namespace() {
-        use crate::cache::Cache as _;
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
         let ttl = Duration::from_secs(30);
         let ns = DistributedLock::new(cache.clone()).scoped("reports");

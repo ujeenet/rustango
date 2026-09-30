@@ -521,12 +521,14 @@ mod tests {
         let mut f = fld("name", FieldType::String, false, Some(""));
         f.max_length = Some(64);
         // Postgres is always built; the others are feature-gated.
-        let mut dialects: Vec<&dyn Dialect> = vec![&crate::sql::Postgres];
-        #[cfg(feature = "mysql")]
-        dialects.push(&crate::sql::MySql);
-        #[cfg(feature = "sqlite")]
-        dialects.push(&crate::sql::Sqlite);
-        for dialect in dialects {
+        let dialects: &[&dyn Dialect] = &[
+            &crate::sql::Postgres,
+            #[cfg(feature = "mysql")]
+            &crate::sql::MySql,
+            #[cfg(feature = "sqlite")]
+            &crate::sql::Sqlite,
+        ];
+        for &dialect in dialects {
             let mut s = String::new();
             write_column_def(&mut s, dialect, &f);
             assert!(
