@@ -178,6 +178,14 @@ use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
 **Breaking:** five wrong current passwords on a change-password form lock the account
 like failed logins; the form and the login page answer 429 until the lock ends.
 
+### Uploads: active types refused, `max_files`, `with_uploads`
+
+**Breaking:** with no `allowed_extensions`, `save_uploads` refuses HTML, SVG, XML and JS
+(`uploads::ACTIVE_EXTENSIONS`); list one to accept it. More than 20 files per request is
+`UploadError::TooManyFiles` (raise with `.max_files(n)`). `UploadConfig` and `UploadError`
+are `#[non_exhaustive]`: build configs with `UploadConfig::new(..)`, add a `_` match arm.
+Mount upload directories with `with_uploads` instead of `with_static`.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

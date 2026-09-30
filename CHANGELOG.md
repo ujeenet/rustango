@@ -37,6 +37,12 @@ counts toward the account lock, so a stolen session cannot guess it at hash spee
 `//evil.com` and `/\evil.com` redirected off-site; the target's leading slashes and
 backslashes now collapse to one `/`, for both `Append` and `Strip`.
 
+### Fixed — uploaded HTML/SVG no longer runs on the app origin (#1849)
+
+New `with_uploads` (on `Cli` and `server::Builder`) and `StaticFiles::user_content` serve
+HTML, SVG and XML as `attachment` with `nosniff`. An empty `allowed_extensions` now refuses
+`ACTIVE_EXTENSIONS`, and `UploadConfig::max_files` (default 20) caps files per request.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
