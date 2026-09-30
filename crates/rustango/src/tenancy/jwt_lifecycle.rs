@@ -453,9 +453,39 @@ impl JwtLifecycle {
             .filter(|c| c.typ == REFRESH_TYP)
     }
 
-    /// Mark a refresh-token family dead until `exp` (#1854).
+    /// Mark a refresh-token family dead until `exp` (#1854). Only as
+    /// strong as the JTI store: a process-local one forgets on restart.
     pub(crate) async fn revoke_family(&self, fam: &str, exp: i64) {
-        let _ = self.jti_store.mark_used(&family_key(fam), exp).await;
+        let key = family_key(fam);
+        // `false` is "already there"; a store that also can't read it back failed.
+        if !self.jti_store.mark_used(&key, exp).await && !self.jti_store.is_used(&key).await {
+            tracing::warn!(
+                target: "rustango::tenancy",
+                "JTI store did not record a refresh-family revocation; the replayed chain stays live"
+            );
+        }
+    }
+
+    /// Record a refresh attempt on a token not yet redeemed, in a
+    /// `grace`-second time bucket (#1854).
+    pub(crate) async fn note_refresh_attempt(&self, jti: &str, grace: i64) {
+        if grace <= 0 || self.jti_store.is_used(jti).await {
+            return;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let key = grace_key(jti, now / grace);
+        let _ = self.jti_store.mark_used(&key, now + 2 * grace).await;
+    }
+
+    /// `true` when a refresh of `jti` began while it was still unredeemed,
+    /// within the last `grace` to `2 × grace` seconds: a retry, not a theft.
+    pub(crate) async fn recently_attempted(&self, jti: &str, grace: i64) -> bool {
+        if grace <= 0 {
+            return false;
+        }
+        let bucket = chrono::Utc::now().timestamp() / grace;
+        self.jti_store.is_used(&grace_key(jti, bucket)).await
+            || self.jti_store.is_used(&grace_key(jti, bucket - 1)).await
     }
 
     pub(crate) async fn family_revoked(&self, fam: &str) -> bool {
@@ -573,6 +603,11 @@ impl JwtLifecycle {
 /// `:` never occurs in a base64url JTI, so the two key spaces cannot meet.
 fn family_key(fam: &str) -> String {
     format!("fam:{fam}")
+}
+
+/// Bucketed, so the window holds even where `is_used` ignores expiry.
+fn grace_key(jti: &str, bucket: i64) -> String {
+    format!("grace:{jti}:{bucket}")
 }
 
 pub(crate) fn random_jti() -> String {

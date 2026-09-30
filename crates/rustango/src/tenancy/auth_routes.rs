@@ -66,6 +66,10 @@ pub struct Config {
     pub refresh_ttl_secs: i64,
     /// Longest a login lasts across refreshes, in seconds. Default 30 days (#1854).
     pub refresh_absolute_ttl_secs: i64,
+    /// A rotated refresh token sent again within about this many seconds
+    /// (up to twice it) is a client retry: 401 without revoking the chain.
+    /// Default 10; `0` treats every reuse as theft (#1854).
+    pub refresh_reuse_grace_secs: i64,
     /// HMAC signing key. `None` (default) reads from the
     /// `RUSTANGO_SESSION_SECRET` env var so the framework's own
     /// session secret is reused. Set explicitly for projects that
@@ -81,8 +85,8 @@ pub struct Config {
     /// `tenant` claim the router always sets (#1190).
     ///
     /// Returning a reserved name (`sub`, `exp`, `jti`, `typ`) fails the
-    /// login with a 500 rather than silently dropping it; `tenant`,
-    /// `pwf`, `sat` and `fam` are the router's own and not overridable.
+    /// login with a 500 rather than silently dropping it, and so does
+    /// `kind`; `tenant`, `pwf`, `sat` and `fam` are the router's own.
     pub extra_claims: Option<ClaimsHook>,
 }
 
@@ -111,6 +115,7 @@ impl std::fmt::Debug for Config {
             .field("access_ttl_secs", &self.access_ttl_secs)
             .field("refresh_ttl_secs", &self.refresh_ttl_secs)
             .field("refresh_absolute_ttl_secs", &self.refresh_absolute_ttl_secs)
+            .field("refresh_reuse_grace_secs", &self.refresh_reuse_grace_secs)
             // Never the key itself — only whether one was set.
             .field("session_secret", &self.session_secret.is_some())
             .field("jti_store", &self.jti_store.is_some())
@@ -126,6 +131,7 @@ impl Default for Config {
             access_ttl_secs: 900,
             refresh_ttl_secs: 7 * 86400,
             refresh_absolute_ttl_secs: 30 * 86400,
+            refresh_reuse_grace_secs: 10,
             session_secret: None,
             jti_store: None,
             extra_claims: None,
@@ -251,6 +257,7 @@ struct AuthState {
     /// Same key as `jwt`; fingerprints the password hash into `pwf`.
     pwf_secret: crate::session::SessionSecret,
     session_cap_secs: i64,
+    reuse_grace_secs: i64,
     extra_claims: Option<ClaimsHook>,
     prefix: String,
 }
@@ -260,6 +267,14 @@ impl JwtAuth {
     /// misconfigured deployment refuses to start.
     #[must_use]
     pub fn new(cfg: Config) -> Self {
+        assert!(
+            cfg.refresh_absolute_ttl_secs > 0,
+            "auth_routes::Config::refresh_absolute_ttl_secs must be > 0; every refresh would fail",
+        );
+        assert!(
+            cfg.refresh_reuse_grace_secs >= 0,
+            "auth_routes::Config::refresh_reuse_grace_secs must be >= 0",
+        );
         let key = cfg.signing_key();
         let pwf_secret = crate::session::SessionSecret::from_bytes(key.clone());
         let jwt = cfg.build_jwt_with(key);
@@ -278,6 +293,7 @@ impl JwtAuth {
             jwt,
             pwf_secret,
             session_cap_secs: cfg.refresh_absolute_ttl_secs,
+            reuse_grace_secs: cfg.refresh_reuse_grace_secs,
             extra_claims: cfg.extra_claims,
             prefix: cfg.prefix,
         }))
@@ -415,6 +431,13 @@ fn issue_login_pair(
             tenant_slug: slug,
         },
     );
+    // A `kind` claim marks a non-user token, which every bearer check refuses.
+    let kind = crate::tenancy::jwt_lifecycle::CLAIM_KIND;
+    if custom.contains_key(kind) {
+        return Err(crate::tenancy::jwt_lifecycle::JwtIssueError::ReservedClaim(
+            kind.to_owned(),
+        ));
+    }
     RefreshSession::start(auth, &user.password_hash).write(&mut custom);
     auth.lifecycle().issue_pair_with(user_id, custom)
 }
@@ -649,10 +672,15 @@ async fn refresh_in(
             return Err(refused());
         }
     }
+    let grace = auth.0.reuse_grace_secs;
+    jwt.note_refresh_attempt(&claims.jti, grace).await;
     let Some(pair) = jwt.refresh(&body.refresh).await else {
-        // Signed and unexpired but already redeemed: a replay. End the chain.
-        jwt.revoke_family(&session.fam, session.ends_at(&auth))
-            .await;
+        // Already redeemed. A retry just after rotation only gets the 401;
+        // a later reuse is a stolen token, so end the chain.
+        if !jwt.recently_attempted(&claims.jti, grace).await {
+            jwt.revoke_family(&session.fam, session.ends_at(&auth))
+                .await;
+        }
         return Err(refused());
     };
     Ok(Json(RefreshOutput {
@@ -1090,6 +1118,14 @@ mod tests {
     /// A tenant pool with one user, and a `JwtAuth` capped at `cap` seconds.
     #[cfg(feature = "sqlite")]
     async fn refresh_env(cap: i64) -> (JwtAuth, crate::sql::Pool, crate::tenancy::auth::User) {
+        refresh_env_with(cap, 0).await
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn refresh_env_with(
+        cap: i64,
+        grace: i64,
+    ) -> (JwtAuth, crate::sql::Pool, crate::tenancy::auth::User) {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         crate::testkit::create_tables_for::<crate::tenancy::auth::User>(&pool)
             .await
@@ -1102,6 +1138,7 @@ mod tests {
         let auth = JwtAuth::new(Config {
             session_secret: Some(vec![7; 32]),
             refresh_absolute_ttl_secs: cap,
+            refresh_reuse_grace_secs: grace,
             ..Config::default()
         });
         (auth, pool, user)
@@ -1171,6 +1208,73 @@ mod tests {
             rotate(&auth, &pool, &other).await.is_some(),
             "other logins live"
         );
+    }
+
+    /// Review of #1854 — a retry of a just-rotated token keeps the chain alive.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_retry_inside_the_grace_window_keeps_the_family() {
+        let (auth, pool, user) = refresh_env_with(3600, 10).await;
+        let first = login(&auth, &user);
+        let second = rotate(&auth, &pool, &first).await.expect("rotates");
+
+        assert_eq!(rotate(&auth, &pool, &first).await, None, "retry still 401s");
+        assert!(rotate(&auth, &pool, &second).await.is_some(), "chain alive");
+    }
+
+    /// Past the window a reuse is theft again.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_replay_after_the_grace_window_revokes_the_family() {
+        let (auth, pool, user) = refresh_env_with(3600, 1).await;
+        let first = login(&auth, &user);
+        let second = rotate(&auth, &pool, &first).await.expect("rotates");
+
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        assert_eq!(rotate(&auth, &pool, &first).await, None);
+        assert_eq!(rotate(&auth, &pool, &second).await, None, "chain revoked");
+    }
+
+    /// Two concurrent refreshes of one token: one wins, the chain survives.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn concurrent_refreshes_keep_the_family() {
+        let (auth, pool, user) = refresh_env_with(3600, 10).await;
+        let first = login(&auth, &user);
+        let (a, b) = tokio::join!(rotate(&auth, &pool, &first), rotate(&auth, &pool, &first));
+        let winner = a.or(b).expect("one wins");
+        assert!(rotate(&auth, &pool, &winner).await.is_some(), "chain alive");
+    }
+
+    /// A hook's `kind` claim would make every token refused, so login fails.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_kind_claim_from_the_hook_fails_the_login() {
+        let hook: ClaimsHook = Arc::new(|_: &ClaimsContext<'_>| {
+            let mut m = serde_json::Map::new();
+            m.insert("kind".into(), "agent".into());
+            m
+        });
+        let auth = JwtAuth::new(Config {
+            session_secret: Some(vec![7; 32]),
+            extra_claims: Some(hook),
+            ..Config::default()
+        });
+        let user = crate::tenancy::auth::User {
+            id: crate::sql::Auto::Set(1),
+            ..crate::testkit::user()
+        };
+        assert!(issue_login_pair(&auth, &user, 1, "acme").is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "refresh_absolute_ttl_secs must be > 0")]
+    fn a_zero_session_cap_is_refused() {
+        let _ = JwtAuth::new(Config {
+            session_secret: Some(vec![7; 32]),
+            refresh_absolute_ttl_secs: 0,
+            ..Config::default()
+        });
     }
 
     #[test]

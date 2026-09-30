@@ -19,7 +19,8 @@ A failing cache or a `NullCache` now refuses the link instead of letting it be r
 
 **Breaking:** `/api/auth/refresh` refuses a chain after a password change, past
 `Config::refresh_absolute_ttl_secs` (default 30 days) from login, and once a rotated
-token is replayed. Refresh tokens issued before this release are refused.
+token is replayed. A retry within `refresh_reuse_grace_secs` (10 s) only gets a 401.
+Refresh tokens issued before this release are refused.
 
 ## [0.59.6] — 2026-09-29
 

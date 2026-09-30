@@ -162,9 +162,10 @@ link on a `NullCache`. A custom cache should override `add` atomically.
 
 ### JWT refresh: new `Config` field, old refresh tokens refused (#1854)
 
-**Breaking:** `auth_routes::Config` gains `refresh_absolute_ttl_secs`; exhaustive literals
-need it or `..Config::default()`. Refresh tokens minted before upgrading lack the new
-claims and get a 401, so clients log in again once. `pwf`, `sat`, `fam` are router claims.
+**Breaking:** `auth_routes::Config` gains `refresh_absolute_ttl_secs` (must be > 0, else
+`JwtAuth::new` panics) and `refresh_reuse_grace_secs`; exhaustive literals need them or
+`..Config::default()`. Every refresh token issued before the upgrade gets one 401, so all
+users log in again once. `pwf`, `sat`, `fam` are router claims; a hook returning `kind` fails login.
 
 ## 0.59.6
 
