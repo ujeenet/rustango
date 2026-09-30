@@ -1,7 +1,7 @@
 //! Bare admin change-password: wrong current passwords lock the account
 //! like failed logins, so a stolen session cannot guess it (#1873).
 
-#![cfg(all(feature = "sqlite", feature = "admin"))]
+#![cfg(all(feature = "sqlite", feature = "admin", feature = "testkit"))]
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -41,6 +41,11 @@ async fn change_password_misses_lock_the_account() {
         .unwrap();
     let pool: Pool = p.into();
     rustango::testkit::create_tables_for::<AdminUser>(&pool)
+        .await
+        .unwrap();
+    // With `totp` on, login reads the device table.
+    #[cfg(feature = "totp")]
+    rustango::admin::totp_store::ensure_table(&pool)
         .await
         .unwrap();
     let name = format!("cpw{}", std::process::id());
