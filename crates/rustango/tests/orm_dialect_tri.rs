@@ -123,9 +123,44 @@ async fn insert_or_ignore_reports_a_skip_on_an_auto_pk(pool: &Pool) {
     )
     .returning(vec!["id"])
     .on_conflict(ConflictClause::DoNothing);
-    assert!(rustango::sql::insert_returning_pool(pool, &q)
+    let got = rustango::sql::insert_returning_pool(pool, &q).await;
+    assert!(is_row_not_found(&got), "{got:?}");
+}
+
+fn is_row_not_found<T>(r: &Result<T, rustango::sql::ExecError>) -> bool {
+    matches!(
+        r,
+        Err(rustango::sql::ExecError::Driver(
+            rustango::sql::sqlx::Error::RowNotFound
+        ))
+    )
+}
+
+/// A skip in a transaction is RowNotFound, and the skip's MySQL session
+/// id must not leak into the next insert's reported PK.
+async fn skip_in_a_tx_leaves_no_stale_id(pool: &Pool) {
+    post("x", None).insert_pool(pool).await.expect("seed");
+    let skip = InsertQuery::new(
+        Post::SCHEMA,
+        vec!["slug", "title"],
+        vec![SqlValue::from("x"), SqlValue::from("again")],
+    )
+    .returning(vec!["id"])
+    .on_conflict(ConflictClause::DoNothing);
+    let explicit = InsertQuery::new(
+        Post::SCHEMA,
+        vec!["id", "slug", "title"],
+        vec![SqlValue::I64(50), SqlValue::from("y"), SqlValue::from("y")],
+    )
+    .returning(vec!["id"]);
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
+    let got = rustango::sql::insert_returning_tx(&mut tx, &skip).await;
+    assert!(is_row_not_found(&got), "{got:?}");
+    let r = rustango::sql::insert_returning_tx(&mut tx, &explicit)
         .await
-        .is_err());
+        .expect("explicit pk");
+    assert_eq!(reported_id(r), 50, "the explicit PK, not a stale id");
+    tx.commit().await.expect("commit");
 }
 
 /// #1887: MySQL's LAST_INSERT_ID() named a stale row after an update.
@@ -313,6 +348,7 @@ tri_dialect_test! {
     scenarios: [
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
+        skip_in_a_tx_leaves_no_stale_id,
         upsert_reports_the_updated_row,
         bulk_update_sets_null_in_every_row,
         union_keeps_the_first_branch_join,
