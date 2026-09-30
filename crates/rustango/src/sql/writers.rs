@@ -3272,6 +3272,12 @@ pub(super) fn write_bulk_update_pg(
         b.write_ident(col);
     }
     b.sql.push_str(" FROM (VALUES ");
+    // A NULL takes its column's cast: an all-NULL column in VALUES
+    // is otherwise typed text.
+    let casts: Vec<Option<&'static str>> = std::iter::once(pk_field.column)
+        .chain(query.update_columns.iter().copied())
+        .map(|c| null_cast_for(b.d, query.model, c))
+        .collect();
     let mut first_row = true;
     for row in &query.rows {
         if !first_row {
@@ -3279,18 +3285,11 @@ pub(super) fn write_bulk_update_pg(
         }
         first_row = false;
         b.sql.push('(');
-        // A NULL takes its column's cast: an all-NULL column in VALUES
-        // is otherwise typed text.
         for (i, val) in row.iter().enumerate() {
             if i > 0 {
                 b.sql.push_str(", ");
             }
-            let col = match i {
-                0 => Some(pk_field.column),
-                _ => query.update_columns.get(i - 1).copied(),
-            };
-            let cast = col.and_then(|c| null_cast_for(b.d, query.model, c));
-            b.push_param_typed(val.clone(), cast);
+            b.push_param_typed(val.clone(), casts.get(i).copied().flatten());
         }
         b.sql.push(')');
     }
