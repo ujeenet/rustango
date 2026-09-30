@@ -3980,7 +3980,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
     }
 
     // Collect target tables in inventory order.
-    let mut targets: Vec<&'static str> = Vec::new();
+    let mut targets: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
         let app = entry.resolved_app_label().unwrap_or("");
@@ -4000,7 +4000,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         {
             continue;
         }
-        targets.push(schema.table);
+        targets.push(schema);
     }
     if targets.is_empty() {
         writeln!(w, "flush: no tables match the filter (nothing to do)")?;
@@ -4014,7 +4014,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             targets.len()
         )?;
         for t in &targets {
-            writeln!(w, "  - {t}")?;
+            writeln!(w, "  - {}", t.table)?;
         }
         return Ok(());
     }
@@ -4027,7 +4027,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         // One big TRUNCATE — atomic, FK-aware, sequence-resetting.
         let quoted: Vec<String> = targets
             .iter()
-            .map(|t| format!(r#""{}""#, t.replace('"', r#""""#)))
+            .map(|t| pool.dialect().quote_ident(t.table))
             .collect();
         let sql = format!(
             "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
@@ -4038,14 +4038,18 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
         }
     } else {
-        // MySQL / SQLite: per-table DELETE in registration order.
-        // FK constraints from referencing tables may error; caller
-        // can scope with --app / --model.
-        for table in &targets {
-            let sql = format!(r#"DELETE FROM "{}""#, table.replace('"', r#""""#));
-            match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
+        // MySQL / SQLite: per-table DELETE in registration order, through
+        // the dialect's writer — hand-quoted `"t"` is a syntax error on
+        // MySQL (#1912). FK constraints from referencing tables may error;
+        // caller can scope with --app / --model.
+        for schema in &targets {
+            let all = crate::core::DeleteQuery {
+                model: schema,
+                where_clause: crate::core::WhereExpr::And(Vec::new()),
+            };
+            match crate::sql::delete_pool(pool, &all).await {
                 Ok(_) => cleared += 1,
-                Err(e) => failures.push(((*table).to_owned(), e.to_string())),
+                Err(e) => failures.push((schema.table.to_owned(), e.to_string())),
             }
         }
     }

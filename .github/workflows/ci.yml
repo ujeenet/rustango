@@ -1002,6 +1002,7 @@ jobs:
             --test audit_bulk_writes_tri \
             --test atomic_savepoints_tri \
             --test orm_bounded_dml_tri \
+            --test manage_data_verbs_tri \
             --test bulk_update_api_sqlite_live \
             --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
@@ -1282,6 +1283,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
       - run: cargo test -p rustango --features mysql,testkit --test row_to_json_nulls_tri
       - run: cargo test -p rustango --features mysql,testkit --test column_types_tri
+      # #1911 / #1912 — flush / dumpdata / loaddata; MySQL rejected `"t"`.
+      - run: cargo test -p rustango --features mysql,testkit --test manage_data_verbs_tri
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.

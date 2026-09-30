@@ -10,6 +10,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 `migrate --dry-run` see registry-scoped migrations only. **Breaking:** `migrate-registry`
 and `migrate-tenants` refuse flags they don't take, and a tenant-scoped `<target>` is refused.
 
+### Fixed — `flush --yes` works on MySQL (#1912)
+
+Rows are deleted through the dialect's own `DELETE`; the hand-quoted `"table"` was a
+syntax error (1064) on MySQL for every table.
+
 ### Fixed — tenancy user, permission and host verbs parse flags (#1910)
 
 `create-user acme --superuser` no longer makes a user named `--superuser`; a failed
