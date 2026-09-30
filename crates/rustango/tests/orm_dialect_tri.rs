@@ -5,7 +5,7 @@
 
 use rustango::core::joins::aliased;
 use rustango::core::{
-    ConflictClause, InsertQuery, Model as _, Op, SearchClause, SqlValue, WhereExpr,
+    AggregateExpr, ConflictClause, InsertQuery, Model as _, Op, SearchClause, SqlValue, WhereExpr,
 };
 use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, InsertReturningPool, Pool};
 use rustango::testkit::matrix::fresh_table;
@@ -270,6 +270,50 @@ async fn paginated_union_counts_every_branch(pool: &Pool) {
     assert_eq!(slugs(&page.rows), ["a"]);
 }
 
+/// #1890: a union's page with an offset still counts every branch.
+async fn paginated_union_with_an_offset(pool: &Pool) {
+    seed(pool, &[("a", "a"), ("b", "b"), ("c", "c")]).await;
+    let union = || {
+        Post::objects()
+            .filter("slug", "a")
+            .union(Post::objects().filter("slug", "b"))
+            .union(Post::objects().filter("slug", "c"))
+            .order_by(&[("id", false)])
+    };
+    let page = rustango::sql::fetch_paginated_pool(union().offset(1).limit(1), pool)
+        .await
+        .expect("offset + limit");
+    assert_eq!(page.total, 3);
+    assert_eq!(slugs(&page.rows), ["b"]);
+    // SQLite needs a LIMIT before OFFSET.
+    let page = rustango::sql::fetch_paginated_pool(union().offset(1), pool)
+        .await
+        .expect("offset only");
+    assert_eq!(page.total, 3);
+    assert_eq!(slugs(&page.rows), ["b", "c"]);
+}
+
+/// #1890: a union's first branch dropped its DISTINCT.
+async fn union_all_keeps_the_first_branch_distinct(pool: &Pool) {
+    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana")]).await;
+    let mut titles = Post::objects()
+        .filter("title", "apple")
+        .distinct()
+        .union_all(Post::objects().filter("slug", "c"))
+        .values_list(&["title"])
+        .fetch(pool)
+        .await
+        .expect("union all");
+    titles.sort_by_key(|r| format!("{r:?}"));
+    assert_eq!(
+        titles,
+        [
+            vec![SqlValue::from("apple")],
+            vec![SqlValue::from("banana")]
+        ]
+    );
+}
+
 /// #1890: the MySQL / SQLite `distinct_on` fallback dropped search and
 /// derived-table joins.
 async fn distinct_on_keeps_search_and_derived_joins(pool: &Pool) {
@@ -341,6 +385,14 @@ async fn values_decode_uuid_and_bytes(pool: &Pool) {
         .expect("values_dict");
     assert_eq!(dict[0]["token"], want[0]);
     assert_eq!(dict[0]["data"], want[1]);
+
+    let agg = Blob::objects()
+        .values(&["token"])
+        .annotate("n", AggregateExpr::Count(None))
+        .fetch(pool)
+        .await
+        .expect("aggregate");
+    assert_eq!(agg[0]["token"], want[0]);
 }
 
 tri_dialect_test! {
@@ -354,6 +406,8 @@ tri_dialect_test! {
         union_keeps_the_first_branch_join,
         union_values_list_flat_in_a_subquery,
         paginated_union_counts_every_branch,
+        paginated_union_with_an_offset,
+        union_all_keeps_the_first_branch_distinct,
         distinct_on_keeps_search_and_derived_joins,
         paginate_orders_by_pk,
         values_decode_uuid_and_bytes,
