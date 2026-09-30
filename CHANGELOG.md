@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `upsert` conflict target ignores field and partial unique indexes (#1935)
+
+Only a container-level `unique_together` (or `index(…, unique)`) without a `WHERE` is the
+target; otherwise the PK. An upsert on a set PK no longer fails on a field `index(unique)`.
+
 ### Fixed — `values()` reads Uuid and bytes columns on every backend (#1901)
 
 `values_dict` / `values_list` return `SqlValue::Uuid` and `SqlValue::Binary` instead of

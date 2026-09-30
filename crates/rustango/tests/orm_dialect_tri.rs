@@ -323,3 +323,78 @@ tri_dialect_test! {
         values_decode_uuid_and_bytes,
     ],
 }
+
+/// #1935: `upsert` took a field `index(unique)` or a partial unique index
+/// as its conflict target. `upsert` is PostgreSQL-only.
+#[cfg(feature = "postgres")]
+mod upsert_target_pg {
+    use super::*;
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "orm_dialect_tri_tagged")]
+    #[rustango(app = "orm_dialect_tri")]
+    pub struct Tagged {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 64, index(unique))]
+        pub slug: String,
+    }
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "orm_dialect_tri_partial")]
+    #[rustango(app = "orm_dialect_tri")]
+    #[rustango(unique_when(columns = "slug", condition = "slug <> ''"))]
+    pub struct Partial {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 64)]
+        pub slug: String,
+    }
+
+    async fn pg_pool() -> Option<Pool> {
+        let pool = rustango::testkit::matrix::Backend::Postgres.pool().await;
+        if pool.is_none() {
+            eprintln!("DATABASE_URL not set — skipping");
+        }
+        pool
+    }
+
+    /// An upsert on a set PK must update that row, not insert a second.
+    #[tokio::test]
+    async fn upsert_ignores_a_field_unique_index() {
+        let _guard = rustango::testkit::matrix::live_lock().lock().await;
+        let Some(pool) = pg_pool().await else { return };
+        fresh_table::<Tagged>(&pool).await;
+        let mut t = Tagged {
+            id: Auto::default(),
+            slug: "a".into(),
+        };
+        t.insert_pool(&pool).await.expect("seed");
+        t.slug = "b".into();
+        t.upsert(pool.as_postgres().expect("pg"))
+            .await
+            .expect("upsert");
+        let rows: Vec<Tagged> = Tagged::objects().fetch(&pool).await.expect("fetch");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slug, "b");
+    }
+
+    #[tokio::test]
+    async fn upsert_ignores_a_partial_unique_index() {
+        let _guard = rustango::testkit::matrix::live_lock().lock().await;
+        let Some(pool) = pg_pool().await else { return };
+        fresh_table::<Partial>(&pool).await;
+        let mut p = Partial {
+            id: Auto::default(),
+            slug: "a".into(),
+        };
+        p.insert_pool(&pool).await.expect("seed");
+        p.slug = "b".into();
+        p.upsert(pool.as_postgres().expect("pg"))
+            .await
+            .expect("upsert");
+        let rows: Vec<Partial> = Partial::objects().fetch(&pool).await.expect("fetch");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slug, "b");
+    }
+}

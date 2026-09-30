@@ -840,6 +840,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .unwrap_or_default()
     });
 
+    // The upsert conflict target: a container-level composite unique,
+    // never a field `index(unique)` or a partial index PG can't target.
+    let upsert_unique: Option<Vec<String>> = container
+        .indexes
+        .iter()
+        .find(|i| i.unique && i.where_clause.is_none() && !i.columns.is_empty())
+        .map(|i| i.columns.clone());
+
     // Merge field-level indexes into the container's index list.
     let mut all_indexes: Vec<IndexAttr> = container.indexes;
     for field in &named.named {
@@ -929,7 +937,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         collected.primary_key.as_ref(),
         &column_consts,
         audited_fields.as_deref(),
-        &all_indexes,
+        upsert_unique.as_deref(),
         &container.manager_fns,
     );
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
@@ -2926,7 +2934,7 @@ fn inherent_impl_tokens(
     primary_key: Option<&(syn::Ident, String)>,
     column_consts: &TokenStream2,
     audited_fields: Option<&[&ColumnEntry]>,
-    indexes: &[IndexAttr],
+    upsert_unique: Option<&[String]>,
     manager_fns: &[syn::Ident],
 ) -> TokenStream2 {
     let root = rustango_root();
@@ -6660,11 +6668,8 @@ fn inherent_impl_tokens(
         // `RolePermission` / `UserRole` / `UserPermission` in the
         // tenancy permission engine. When no `unique_together` is
         // declared we keep the PK target (the original behaviour).
-        let upsert_target_columns: Vec<String> = indexes
-            .iter()
-            .find(|i| i.unique && !i.columns.is_empty())
-            .map(|i| i.columns.clone())
-            .unwrap_or_else(|| vec![pk_column.clone()]);
+        let upsert_target_columns: Vec<String> =
+            upsert_unique.map_or_else(|| vec![pk_column.clone()], <[String]>::to_vec);
         let upsert_target_lits = upsert_target_columns
             .iter()
             .map(String::as_str)

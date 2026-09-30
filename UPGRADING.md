@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `upsert` targets the PK over a field `index(unique)` (#1935)
+
+A model whose only unique index is a field `index(unique)` or a `unique_when` now upserts on
+the PK. To target a column, declare `unique_together = "col"`.
+
 ### `values()` returns `SqlValue::Uuid` for a Uuid column on MySQL (#1901)
 
 **Breaking:** MySQL gave `SqlValue::String`; match on `SqlValue::Uuid` as on the other backends.
