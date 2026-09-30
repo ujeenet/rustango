@@ -585,3 +585,39 @@ async fn the_queryset_hook_scopes_inline_children() {
         .collect();
     assert!(titles.contains(&"their-kid".to_owned()), "{titles:?}");
 }
+
+/// The detail page's audit panel needs `audit.view` too.
+#[tokio::test]
+async fn the_detail_audit_panel_needs_audit_view() {
+    let env = boot().await;
+    let mut note = SecNote {
+        id: rustango::Auto::default(),
+        title: "n".into(),
+        owner_id: 1,
+    };
+    note.insert_pool(&env.tenant).await.expect("seed note");
+    let pk = note.id.get().copied().unwrap();
+    env.audit("sec_note", &pk.to_string()).await;
+    let marker = format!("sec_note-{pk}");
+    let uri = format!("/__admin/sec_note/{pk}");
+
+    let cookie = env.login(false, &["sec_note.view"]).await;
+    let (status, body) = env.get(&uri, &cookie).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains(&marker), "{body}");
+
+    let cookie = env.login(false, &["sec_note.view", "audit.view"]).await;
+    assert!(env.get(&uri, &cookie).await.1.contains(&marker));
+}
+
+/// The cleanup form renders only for users who may run it.
+#[tokio::test]
+async fn the_cleanup_form_needs_audit_delete() {
+    let env = boot().await;
+    let reader = env.login(false, &["audit.view"]).await;
+    let (_, body) = env.get("/__admin/__audit", &reader).await;
+    assert!(!body.contains("__audit/cleanup"), "{body}");
+    let cleaner = env.login(false, &["audit.view", "audit.delete"]).await;
+    let (_, body) = env.get("/__admin/__audit", &cleaner).await;
+    assert!(body.contains("__audit/cleanup"), "{body}");
+}

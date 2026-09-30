@@ -698,6 +698,7 @@ pub async fn emit_one_pool(
 pub const VIEW_CODENAME: &str = "audit.view";
 
 /// Codename a non-superuser needs to run the admin audit cleanup.
+/// Cleanup spans every table, whatever `{table}.view` the user holds.
 pub const DELETE_CODENAME: &str = "audit.delete";
 
 /// Filter for the admin's audit-log activity feed. Every field is

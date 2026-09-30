@@ -54,6 +54,15 @@ impl AuditReader<'_> {
         crate::audit::count_in(self.pool, filter, self.tables.as_deref()).await
     }
 
+    /// One row's history. The caller already checked `{table}.view`.
+    pub(crate) async fn for_entity(
+        &self,
+        table: &str,
+        pk: &str,
+    ) -> Result<Vec<crate::audit::AuditEntry>, sqlx::Error> {
+        crate::audit::fetch_for_entity_pool(self.pool, table, pk).await
+    }
+
     pub(crate) async fn facet_counts(
         &self,
         column: &str,
@@ -85,7 +94,8 @@ impl AppState {
         })
     }
 
-    /// `true` for a superuser or a holder of `audit.delete`.
+    /// `true` for a superuser or a holder of `audit.delete`. Cleanup
+    /// is not table-scoped: it trims every table's rows.
     pub(crate) fn can_clean_audit(&self) -> bool {
         self.config
             .user_perms
@@ -294,6 +304,7 @@ pub(crate) async fn audit_log_view(
         "page": page,
         "last_page": last_page,
         "pager_extras": pager_extras,
+        "can_clean_audit": state.can_clean_audit(),
     });
     Ok(Html(render_with_chrome(
         "audit_log.html",

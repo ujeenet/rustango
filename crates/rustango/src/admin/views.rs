@@ -1684,29 +1684,30 @@ pub(crate) async fn detail_view(
         .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
         .collect();
 
-    // Audit-trail panel for this row. Best-effort: if the audit
-    // table is missing, because the project never called
-    // `audit::ensure_table` for this tenant, render an empty
-    // section instead of failing the page.
-    let audit_entries_ctx: Vec<serde_json::Value> =
-        match crate::audit::fetch_for_entity_pool(&state.pool, model.table, &pk_raw).await {
-            Ok(entries) => entries
-                .into_iter()
-                .map(|e| {
-                    let (action_name, cleaned) = super::audit::split_action_marker(&e.changes);
-                    serde_json::json!({
-                        "id": e.id,
-                        "operation": e.operation,
-                        "action_name": action_name,
-                        "source": e.source,
-                        "occurred_at": e.occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                        "changes": serde_json::to_string_pretty(&cleaned)
-                            .unwrap_or_default(),
-                    })
+    // Audit-trail panel for this row, only for users who may read the
+    // log. Best-effort: a missing audit table renders no panel.
+    let audit_entries = match state.audit_reader() {
+        Some(reader) => reader.for_entity(model.table, &pk_raw).await,
+        None => Ok(Vec::new()),
+    };
+    let audit_entries_ctx: Vec<serde_json::Value> = match audit_entries {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|e| {
+                let (action_name, cleaned) = super::audit::split_action_marker(&e.changes);
+                serde_json::json!({
+                    "id": e.id,
+                    "operation": e.operation,
+                    "action_name": action_name,
+                    "source": e.source,
+                    "occurred_at": e.occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                    "changes": serde_json::to_string_pretty(&cleaned)
+                        .unwrap_or_default(),
                 })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
 
     // Side panel with the user's roles and effective permissions,
     // for `rustango_users` only. Best-effort, like the audit panel:

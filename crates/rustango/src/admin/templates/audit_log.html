@@ -17,6 +17,7 @@
 </p>
 {% endif %}
 
+{% if can_clean_audit %}
 <form method="post" action="{{ admin_prefix }}{{ audit_url }}/cleanup" class="audit-cleanup" onsubmit="return confirm('Apply audit cleanup? This is irreversible.');">
   {{ csrf_input | safe }}
   <label>
@@ -34,6 +35,7 @@
   <button type="submit" class="btn btn-secondary">Apply cleanup</button>
   <small class="muted">Per-tenant. The cleanup itself is recorded as an audit entry.</small>
 </form>
+{% endif %}
 
 <div class="list-shell">
 <div class="list-main">
