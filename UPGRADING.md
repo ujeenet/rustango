@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Audit feed codenames are `rustango_audit_log.view` / `.delete` (#1979)
+
+Grant these instead of `audit.view` / `audit.delete`. The old names are ignored once a model uses table `audit`.
+
 ### `InlineFormPanel` gains `more_rows_filter` (#1977)
 
 A struct literal needs the new field. Panels past the formset cap show only the first rows.

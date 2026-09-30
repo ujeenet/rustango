@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a model on table `audit` no longer grants the audit feed (#1979)
+
+The feed now needs `rustango_audit_log.view` / `.delete`. The old `audit.*` names still work
+while no model uses table `audit`.
+
 ### Fixed — a parent with 1000+ inline children can be saved again (#1977)
 
 The edit form renders at most `MAX_FORMS` inline slots and links the child list for the rest.

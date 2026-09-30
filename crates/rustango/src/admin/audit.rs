@@ -19,6 +19,7 @@ use super::helpers::chrome_context;
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::AppState;
+use crate::audit::AuditPerm;
 
 /// Page size for the `/__audit` activity feed. Matches the per-table
 /// admin list views (50 by default).
@@ -72,15 +73,14 @@ impl AuditReader<'_> {
 }
 
 impl AppState {
-    /// `None` unless the user is a superuser or holds `audit.view`; then
-    /// rows are limited to tables they hold `{table}.view` on.
+    /// `None` unless the user is a superuser or holds [`AuditPerm::View`];
+    /// then rows are limited to tables they hold `{table}.view` on.
     pub(crate) fn audit_reader(&self) -> Option<AuditReader<'_>> {
         let tables = match &self.config.user_perms {
             None => None,
-            Some(perms) if perms.contains(crate::audit::VIEW_CODENAME) => Some(
+            Some(perms) if AuditPerm::View.granted_by(perms) => Some(
                 perms
                     .iter()
-                    .filter(|c| c.as_str() != crate::audit::VIEW_CODENAME)
                     .filter_map(|c| c.strip_suffix(".view"))
                     .filter(|t| self.is_visible(t))
                     .map(str::to_owned)
@@ -94,13 +94,13 @@ impl AppState {
         })
     }
 
-    /// `true` for a superuser or a holder of `audit.delete`. Cleanup
-    /// is not table-scoped: it trims every table's rows.
+    /// `true` for a superuser or a holder of [`AuditPerm::Delete`].
+    /// Cleanup is not table-scoped: it trims every table's rows.
     pub(crate) fn can_clean_audit(&self) -> bool {
         self.config
             .user_perms
             .as_ref()
-            .is_none_or(|p| p.contains(crate::audit::DELETE_CODENAME))
+            .is_none_or(|p| AuditPerm::Delete.granted_by(p))
     }
 }
 
