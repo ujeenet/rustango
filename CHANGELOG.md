@@ -21,6 +21,7 @@ and tables child first; SQLite and MySQL refused the old order.
 ### Fixed — `AddColumn` keeps the field's FK and UNIQUE (#1877)
 
 As `CREATE TABLE` does; SQLite gets inline `REFERENCES` and a unique index.
+On SQLite a column with a default skips the FK and warns: SQLite refuses it on a table with rows.
 
 ### Fixed — removing `unique` works for long table and column names (#1880)
 

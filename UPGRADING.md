@@ -169,6 +169,7 @@ or a parent table before its child, still fails on SQLite and MySQL: regenerate 
 
 **Breaking:** a migration that adds a `ForeignKey` or `unique` column now creates the constraint,
 so it fails on rows that break it. Columns added by earlier migrations still lack it.
+SQLite leaves out the FK of a column with a default (it refuses one on a table with rows) and warns.
 
 ### UNIQUE constraints are named (#1880)
 

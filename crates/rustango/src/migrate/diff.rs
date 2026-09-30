@@ -852,6 +852,16 @@ fn render_changes_split_inner(
                     ));
                 }
                 out.immediate.push(add_column_sql(table, f, dialect));
+                if f.fk.is_some()
+                    && dialect.inline_fks_in_create_table()
+                    && inline_fk_on_add_column(f, dialect).is_none()
+                {
+                    out.warnings.push(format!(
+                        "`{table}.{column}` is added without its FOREIGN KEY: SQLite refuses \
+                         REFERENCES with a non-NULL default on a table with rows. Rebuild \
+                         the table by hand to add it (#559)."
+                    ));
+                }
                 // CREATE TABLE's UNIQUE and FK, which a bare ADD COLUMN lacks (#1877).
                 if f.unique && !f.primary_key {
                     let name = super::ddl::unique_constraint_name(table, column);
@@ -1584,12 +1594,20 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         sql.push(')');
     }
     // SQLite cannot `ADD CONSTRAINT`; its FK rides on the column (#1877).
-    if dialect.inline_fks_in_create_table() {
-        if let Some(rel) = &f.fk {
-            sql.push_str(&inline_references(rel, dialect));
-        }
+    if let Some(rel) = inline_fk_on_add_column(f, dialect) {
+        sql.push_str(&inline_references(rel, dialect));
     }
     sql
+}
+
+/// SQLite's inline FK for `ADD COLUMN`. With `foreign_keys=ON` SQLite
+/// refuses `REFERENCES` beside a non-NULL default once the table has rows.
+fn inline_fk_on_add_column<'a>(
+    f: &'a FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<&'a RelationSnapshot> {
+    f.fk.as_ref()
+        .filter(|_| dialect.inline_fks_in_create_table() && f.default.is_none())
 }
 
 #[cfg(test)]

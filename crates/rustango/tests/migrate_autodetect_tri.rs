@@ -238,6 +238,40 @@ async fn add_column_keeps_fk_and_unique(pool: &Pool) {
     apply_ops(pool, &undo.value).await.expect(undo.why);
 }
 
+/// A NOT NULL FK column with a default, added to a table with rows.
+/// SQLite refuses inline `REFERENCES` beside a non-NULL default there.
+async fn add_fk_column_with_default_to_filled_table(pool: &Pool) {
+    let (a, b) = ("mad_ad_author", "mad_ad_book");
+    let chain = Chain::new(pool, "ad", &[b, a]).await;
+    let with = |fields: Vec<Value>| json!({"tables": [table(a, vec![id()]), table(b, fields)]});
+    chain.step(pool, with(vec![id()])).await.expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[b, "id"])
+        .await
+        .unwrap();
+    let mut author = fk(a);
+    author["nullable"] = json!(false);
+    author["default"] = json!("1");
+    chain
+        .step(pool, with(vec![id(), col("author_id", "i64", author)]))
+        .await
+        .expect("AddColumn applies on a table with rows");
+    let enforced = by_dialect! { pool,
+        postgres => true, because "the FK is added by ALTER TABLE",
+        mysql => true, because "the FK is added by ALTER TABLE",
+        sqlite => false, because "the FK is left out and a warning says so (#559)",
+    };
+    let bad = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (2, 99)",
+        &[b, "id", "author_id"],
+    )
+    .await;
+    assert_eq!(bad.is_err(), enforced.value, "{}", enforced.why);
+}
+
 // ---------------------------------------------------------------- #1879
 
 /// Dropping a column drops its index and CHECK first. SQLite refused
@@ -646,6 +680,7 @@ tri_dialect_test!(
     scenarios: [
         unique_drops_on_long_names,
         add_column_keeps_fk_and_unique,
+        add_fk_column_with_default_to_filled_table,
         column_drops_after_its_index_and_check,
         tables_drop_child_first,
         m2m_drops_before_its_tables,
