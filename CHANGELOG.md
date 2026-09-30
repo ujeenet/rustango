@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `DistributedLock` docs on `DatabaseCache` (#1837)
+
+`DatabaseCache::add` is atomic, so a DB-backed lock is safe across replicas; the page said it was not.
+
 ### Fixed — test suites build with `postgres,sqlite,tenancy` (#1835)
 
 `urlencoding` is a dev-dependency, and the S3 and job-queue suites are gated on their features.
