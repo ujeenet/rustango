@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Tenant moves reach every server
+
+After `edit-tenant --database-url` or `migrate-tenant-storage`, running servers switch within
+30 s without a restart. The CLI no longer claims it evicted their pools.
+
 ### Tenant purge deletes extra hosts
 
 `purge-tenant` now deletes the tenant's `rustango_org_hosts` rows and sets `active = false`

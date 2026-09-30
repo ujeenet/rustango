@@ -202,7 +202,7 @@ async fn activate_and_deactivate_flip_the_column() {
     assert!(b.org("acme").await.active);
 }
 
-/// Rotating the URL says the pool was evicted; changing a display name
+/// Rotating the URL says when servers switch; changing a display name
 /// must not, or every edit would throw away warm connections.
 #[tokio::test]
 async fn only_a_real_url_change_evicts_the_pool() {
@@ -213,7 +213,7 @@ async fn only_a_real_url_change_evicts_the_pool() {
         .run(&["edit-tenant", "acme", "--display-name", "Acme Inc"])
         .await
         .expect("rename");
-    assert!(!out.contains("evicted"), "{out}");
+    assert!(!out.contains("servers switch"), "{out}");
 
     let fresh = b._tmp.path().join("acme2.db");
     let out = b
@@ -225,7 +225,7 @@ async fn only_a_real_url_change_evicts_the_pool() {
         ])
         .await
         .expect("rotate");
-    assert!(out.contains("evicted"), "{out}");
+    assert!(out.contains("servers switch"), "{out}");
 
     // Re-supplying the same URL is not a rotation.
     let same = b.org("acme").await.database_url.expect("a url");
@@ -234,7 +234,7 @@ async fn only_a_real_url_change_evicts_the_pool() {
         .await
         .expect("no-op rotate");
     assert!(
-        !out.contains("evicted"),
+        !out.contains("servers switch"),
         "unchanged is not a rotation: {out}"
     );
 }

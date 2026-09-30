@@ -183,7 +183,7 @@ static HOST_CACHE: HostTtlCache<Org> = HostTtlCache::new(CACHE_TTL, CACHE_MAX);
 
 /// One TTL and one cap for both caches, so they cannot drift apart the
 /// way the two hand-written copies did.
-const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const CACHE_MAX: usize = 1024;
 
 // ---------------- ORG_CACHE (base host → Org) ----------------

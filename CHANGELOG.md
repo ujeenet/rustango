@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenant pools follow `database_url` / schema edits from other processes (#1882)
+
+A cached tenant pool is keyed by the source it was built from, so a moved tenant is served
+from its new location once the Org cache refreshes (30 s), on every replica. New
+`TenantPools::cached_scoped_pool_count`.
+
 ### Fixed — purging a tenant with an extra host (#1930)
 
 Purge now deactivates the tenant and evicts its pools first, drops the storage, then

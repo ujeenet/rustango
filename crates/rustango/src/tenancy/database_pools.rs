@@ -247,9 +247,10 @@ impl<DB: Database> DatabasePools<DB> {
         }
 
         // Fast path — cache hit.
+        let source = super::pools::PoolSource::database(org);
         {
             let cache = self.cache.read().await;
-            if let Some(entry) = cache.get(&org.slug) {
+            if let Some(entry) = super::pools::CachedPool::lookup(&cache, &org.slug, &source) {
                 entry.touch(self.next_tick());
                 return Ok(DatabasePool {
                     pool: entry.pool.clone(),
@@ -291,12 +292,13 @@ impl<DB: Database> DatabasePools<DB> {
         // concurrent builds racing.
         let mut cache = self.cache.write().await;
         // Re-check under write lock (race-loser case).
-        if let Some(existing) = cache.get(&org.slug) {
+        if let Some(existing) = super::pools::CachedPool::lookup(&cache, &org.slug, &source) {
             existing.touch(self.next_tick());
             return Ok(DatabasePool {
                 pool: existing.pool.clone(),
             });
         }
+        cache.remove(&org.slug);
         // Evict the most idle tenant rather than refuse. Same policy
         // as `TenantPools`, and the same type, so the two cannot drift
         // apart again (#1527).
@@ -314,7 +316,7 @@ impl<DB: Database> DatabasePools<DB> {
         }
         cache.insert(
             org.slug.clone(),
-            super::pools::CachedPool::new(pool_arc.clone(), self.next_tick()),
+            super::pools::CachedPool::new(pool_arc.clone(), source, self.next_tick()),
         );
         Ok(DatabasePool { pool: pool_arc })
     }
