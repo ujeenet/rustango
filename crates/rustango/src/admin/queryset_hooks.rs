@@ -1,9 +1,9 @@
-//! Request-aware scoping for the admin list view: a hook that reads
-//! the request and narrows the rows the list may show.
+//! Request-aware row scoping for the admin: a hook that reads the
+//! request and narrows the rows the admin may show or touch.
 //!
 //! An inventory registry of `(table, fn(&Parts) -> Vec<Filter>)`
-//! entries. The list view walks it per request and adds the filters to
-//! its WHERE clause. Use it to hide soft-deleted rows, show only rows
+//! entries. The list, by-pk pages, actions, autocomplete and facets
+//! all add the filters to their WHERE clause (see `RowScope`). Use it to hide soft-deleted rows, show only rows
 //! the current user owns, or scope by tenant.
 //!
 //! `manager_fn` and the `show_only` / `read_only` allowlists are the
@@ -38,7 +38,7 @@
 
 use axum::http::request::Parts;
 
-use crate::core::Filter;
+use crate::core::{Filter, ModelSchema, SelectQuery, SqlValue, WhereExpr};
 
 /// An admin queryset hook. Takes the request [`Parts`], which hold
 /// everything but the body, and returns extra [`Filter`]s for the list
@@ -69,6 +69,63 @@ pub fn for_table(table: &str) -> Vec<&'static AdminQuerySetHook> {
         .into_iter()
         .filter(|h| h.table == table)
         .collect()
+}
+
+/// The rows of one table a request may reach: every hook's filters,
+/// ANDed. The list, by-pk reads, actions, autocomplete and facets all
+/// read through one, so a row the list hides is a 404 everywhere.
+pub(crate) struct RowScope(Vec<Filter>);
+
+impl RowScope {
+    pub(crate) fn of(table: &str, parts: &Parts) -> Self {
+        Self(
+            for_table(table)
+                .iter()
+                .flat_map(|h| (h.hook)(parts))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn filters(&self) -> &[Filter] {
+        &self.0
+    }
+
+    /// AND the scope into `where_clause`.
+    pub(crate) fn constrain(&self, mut where_clause: WhereExpr) -> WhereExpr {
+        for f in &self.0 {
+            where_clause.push_and(WhereExpr::Predicate(f.clone()));
+        }
+        where_clause
+    }
+
+    /// `WHERE pk = ?` inside the scope, with no `LIMIT`.
+    pub(crate) fn by_pk(
+        &self,
+        model: &'static ModelSchema,
+        pk_column: &'static str,
+        pk: SqlValue,
+    ) -> SelectQuery {
+        let q = SelectQuery::by_pk(model, pk_column, pk);
+        SelectQuery {
+            where_clause: self.constrain(q.where_clause),
+            limit: None,
+            ..q
+        }
+    }
+
+    /// `WHERE pk IN (…)` inside the scope.
+    pub(crate) fn by_pk_in(
+        &self,
+        model: &'static ModelSchema,
+        pk_column: &'static str,
+        pks: Vec<SqlValue>,
+    ) -> SelectQuery {
+        let q = SelectQuery::by_pk_in(model, pk_column, pks);
+        SelectQuery {
+            where_clause: self.constrain(q.where_clause),
+            ..q
+        }
+    }
 }
 
 /// Register an admin queryset hook for one model.

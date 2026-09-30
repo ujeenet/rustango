@@ -150,6 +150,28 @@ untouched.
 
 ## Unreleased
 
+### Admin audit log is permission-gated
+
+**Breaking:** grant `audit.view` (read) or `audit.delete` (cleanup) to non-superusers
+who used the feed; `auto_create_permissions_pool` seeds both codenames.
+
+### Tenant admin requests carry `AdminSession`
+
+**Breaking:** tenant-admin non-superusers get 403 on translation edits. Custom views
+reading `Extension<AdminSession>` now see the tenant user instead of nothing.
+
+### Queryset hooks apply beyond the list
+
+**Breaking:** a `register_admin_queryset!` hook now also limits by-pk pages, actions,
+autocomplete, facets and inline child rows; rows it filters out are 404 there, and
+skipped by actions.
+
+### Hidden admin fields are not written
+
+**Breaking:** an admin create now omits `editable = false` fields and fields outside
+`fieldsets`, so a NOT NULL one needs a `default`, as `readonly_fields` already did.
+A natural (non-auto) primary key left out of `fieldsets` can no longer be set on create.
+
 ### `count()` respects `limit`, `offset`, `distinct` and `union`
 
 `qs.limit(10).count()` now returns at most 10. `CountQuery` and `AggregateQuery` gain a

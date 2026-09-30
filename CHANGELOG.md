@@ -4,6 +4,29 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — admin audit log needs `audit.view` / `audit.delete` (#1858)
+
+**Breaking:** a non-superuser gets 403 on the audit feed without `audit.view`, and
+sees only rows of tables they hold `{table}.view` on; cleanup needs `audit.delete`.
+The feed's record link no longer renders a raw `entity_pk` into `href`. The detail
+page's audit panel also needs `audit.view`; the cleanup form shows only with `audit.delete`.
+
+### Security — tenant admin puts `AdminSession` in request extensions (#1863)
+
+The translations editor now refuses non-superuser writes in the tenant admin too.
+New `admin::session::from_extensions` reads the extension, else the task-local.
+
+### Security — `register_admin_queryset!` scopes every admin route (#1859)
+
+Detail, edit, update, delete, bulk actions, autocomplete and facet counts now apply
+the hooks too, so a row the list hides is a 404. A delete of a missing row is a 404.
+Inline child rows follow the child table's hooks: hidden ones are neither shown nor editable.
+
+### Security — admin forms write only the fields they render (#1860)
+
+`editable = false` fields and fields outside `fieldsets` are no longer read from a
+create or edit POST, and an edit leaves them unchanged instead of NULL / `false`.
+
 ### Fixed — `count()` / `exists()` / `sum()` honour the whole queryset (#1885)
 
 `.none()` now counts 0 without a query. Limit, offset, DISTINCT, joins, relation-span

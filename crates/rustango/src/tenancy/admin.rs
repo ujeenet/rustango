@@ -630,6 +630,17 @@ where
         }
     }
 
+    // Same two places the bare admin's `require_session` puts it:
+    // request extensions (handlers, custom views) and the task-local
+    // (chrome).
+    let admin_session = session_user_id.map(|uid| crate::admin::session::AdminSession {
+        user_id: uid,
+        username: session_username.clone().unwrap_or_default(),
+        is_superuser: session_is_superuser,
+    });
+    if let Some(sess) = &admin_session {
+        parts.extensions.insert(sess.clone());
+    }
     let inner_req = Request::from_parts(parts, body);
     // Dispatch inside an `audit::with_source` scope so audited writes
     // pick up the signed-in user. With no session the source stays
@@ -653,18 +664,8 @@ where
             dispatch.await
         }
     };
-    // Install the request's session into the admin task-local the inner
-    // chrome reads (`admin::session::current()`), so the tenant admin
-    // sidebar renders "Signed in as <username>" + the Logout button —
-    // the bare admin gets this from its own `require_session` middleware,
-    // which the tenant admin path bypasses.
-    let response = match session_user_id {
-        Some(uid) => {
-            let sess = crate::admin::session::AdminSession {
-                user_id: uid,
-                username: session_username.clone().unwrap_or_default(),
-                is_superuser: session_is_superuser,
-            };
+    let response = match admin_session {
+        Some(sess) => {
             crate::admin::session::CURRENT_SESSION
                 .scope(sess, audited)
                 .await
