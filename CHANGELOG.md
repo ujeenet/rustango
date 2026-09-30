@@ -7,6 +7,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)
 
 Same-name edits migrate as Drop + Add, and `Option<T>` → `T` with a default fills NULLs before `SET NOT NULL`.
+A junction, CHECK, EXCLUDE or index name shared by two models now resolves in a fixed order, not `inventory` order.
 
 ### Fixed — a `max_length` change no longer undoes a type change (#1878)
 
