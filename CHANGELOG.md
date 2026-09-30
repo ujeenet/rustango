@@ -10,6 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `annotate_sum` over an M2M or generic relation no longer truncates a float column.
 `values(..).annotate(..)` now honours `distinct()`, `union()`, derived joins, `limit` and `offset`.
+There `.join()` joins run inside the grouped rows; grouping by a joined column of a `union()` is refused.
 
 ### Fixed — `upsert` conflict target ignores field and partial unique indexes (#1935)
 

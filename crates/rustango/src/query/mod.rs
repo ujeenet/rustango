@@ -4047,28 +4047,27 @@ impl<T: Model> AggregateBuilder<T> {
         if let Some(e) = self.deferred_error {
             return Err(e);
         }
-        // Carry the QuerySet's ad-hoc JOINs over so the aggregate can
-        // group by a related column, as in `group_by("author.name")`.
-        // Empty for a plain single-table aggregate.
-        let joins = std::mem::take(&mut self.qs.ad_hoc_joins);
         let model = T::SCHEMA;
         let is_none = self.qs.is_none;
         // DISTINCT, a set operation, a derived join or a limit shape the
-        // rows, so group the compiled queryset as a derived table.
-        let (where_clause, source) = if self.qs.distinct.is_some()
+        // rows, so group the compiled queryset (joins included) as a derived table.
+        let (where_clause, mut source, joins) = if self.qs.distinct.is_some()
             || !self.qs.compound.is_empty()
             || !self.qs.subquery_joins.is_empty()
             || self.qs.limit.is_some()
             || self.qs.offset.is_some()
         {
             let select = self.qs.compile()?;
-            (WhereExpr::And(Vec::new()), Some(select.into_derived()))
+            (WhereExpr::And(Vec::new()), Some(select), Vec::new())
         } else {
             // Fold global scopes into the WHERE so aggregates honour them
             // too: `.count()` on a `published_only` model counts published
             // rows, not the whole table.
             self.qs.apply_global_scopes();
-            (resolve_pending(model, self.qs.pending)?, None)
+            // Carry the ad-hoc JOINs over so the aggregate can group by a
+            // related column, as in `group_by("author.name")`.
+            let joins = std::mem::take(&mut self.qs.ad_hoc_joins);
+            (resolve_pending(model, self.qs.pending)?, None, joins)
         };
         // Check each AggregateExpr for column typos. This covers the
         // partition_by, order_by and args of a window aggregate. The
@@ -4158,6 +4157,9 @@ impl<T: Model> AggregateBuilder<T> {
         } else {
             (where_clause, self.limit)
         };
+        if let Some(select) = source.as_mut() {
+            project_group_cols(model, select, &group_by)?;
+        }
 
         Ok(AggregateQuery {
             model,
@@ -4170,9 +4172,40 @@ impl<T: Model> AggregateBuilder<T> {
             order_by,
             limit,
             offset: self.offset,
-            source,
+            source: source.map(SelectQuery::into_derived),
         })
     }
+}
+
+/// Project each dotted `alias.col` group column out of the derived
+/// `select`, where the outer aggregate reads it back as `alias__col`.
+fn project_group_cols(
+    model: &'static ModelSchema,
+    select: &mut SelectQuery,
+    group_by: &[&'static str],
+) -> Result<(), QueryError> {
+    for col in group_by {
+        let Some((alias, c)) = col.split_once('.').filter(|(a, _)| *a != model.table) else {
+            continue;
+        };
+        let join = select.joins.iter_mut().find(|j| j.alias == alias);
+        // Every UNION branch must project the same columns, so only a
+        // plain derived select can grow one.
+        match join {
+            Some(j) if select.compound.is_empty() => {
+                if !j.project.contains(&c) {
+                    j.project.push(c);
+                }
+            }
+            _ => {
+                return Err(QueryError::GroupByJoinUnreachable {
+                    model: model.name,
+                    column: (*col).to_owned(),
+                })
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Walk an [`AggregateExpr`] for column references that must resolve

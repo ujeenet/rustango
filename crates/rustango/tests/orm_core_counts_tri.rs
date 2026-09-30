@@ -5,12 +5,14 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::joins::aliased;
+use rustango::core::joins::{aliased, col_filter};
 use rustango::core::{
-    AggregateExpr, BulkInsertQuery, CountQuery, Model as _, Op, SqlValue, WhereExpr,
+    AggregateExpr, BulkInsertQuery, CountQuery, Join, JoinKind, Model as _, Op, QueryError,
+    SqlValue, WhereExpr,
 };
 use rustango::sql::{
-    atomic, bulk_insert_pool, CounterPool as _, ExecError, ExistsPool as _, ForeignKey, Pool,
+    atomic, bulk_insert_pool, CounterPool as _, ExecError, ExistsPool as _, FetcherPool as _,
+    ForeignKey, Pool,
 };
 use rustango::{tri_dialect_test, Model};
 
@@ -263,6 +265,117 @@ async fn grouped_aggregate_honours_distinct(pool: &Pool) {
     );
 }
 
+/// `INNER JOIN occ_book AS <alias>` on the same author.
+fn same_author(alias: &'static str) -> Join {
+    Join {
+        target: Book::SCHEMA,
+        alias,
+        kind: JoinKind::Inner,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased(alias, "author"),
+            op: Op::Eq,
+            rhs: aliased("occ_book", "author"),
+        },
+        project: vec![],
+    }
+}
+
+/// `INNER JOIN occ_author AS a` on the book's author.
+fn author_join() -> Join {
+    Join {
+        target: Author::SCHEMA,
+        alias: "a",
+        kind: JoinKind::Inner,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("a", "id"),
+            op: Op::Eq,
+            rhs: aliased("occ_book", "author"),
+        },
+        project: vec![],
+    }
+}
+
+/// A `.join()` sits inside the DISTINCT, so each book counts once.
+async fn grouped_aggregate_join_distinct(pool: &Pool) {
+    let qs = Book::objects().join(same_author("b2")).distinct();
+    let one = SqlValue::I64(1);
+    assert_eq!(
+        pages_counts(qs, pool).await,
+        [
+            (SqlValue::I64(100), one.clone()),
+            (SqlValue::I64(200), one.clone()),
+            (SqlValue::I64(300), one)
+        ]
+    );
+}
+
+/// The limit applies after the join's filter, as in `fetch()`.
+async fn grouped_aggregate_join_limit(pool: &Pool) {
+    let bobs = || {
+        let mut j = author_join();
+        j.on = WhereExpr::And(vec![j.on, col_filter("a", "name", Op::Eq, "Bob")]);
+        Book::objects().join(j).order_by(&[("id", false)]).limit(2)
+    };
+    let fetched = bobs().fetch(pool).await.unwrap();
+    assert_eq!(fetched.len(), 1, "fetch keeps Bob's one book");
+    assert_eq!(
+        pages_counts(bobs(), pool).await,
+        [(SqlValue::I64(300), SqlValue::I64(1))]
+    );
+}
+
+/// A filter on the join alias next to DISTINCT still has its JOIN.
+async fn grouped_aggregate_join_alias_filter(pool: &Pool) {
+    let qs = Book::objects()
+        .join(author_join())
+        .where_raw(col_filter("a", "name", Op::Eq, "Ada"))
+        .distinct();
+    let one = SqlValue::I64(1);
+    assert_eq!(
+        pages_counts(qs, pool).await,
+        [(SqlValue::I64(100), one.clone()), (SqlValue::I64(200), one)]
+    );
+}
+
+/// A joined group column is projected out of the derived table.
+async fn grouped_aggregate_join_column_distinct(pool: &Pool) {
+    let mut rows: Vec<(SqlValue, SqlValue)> = Book::objects()
+        .join(author_join())
+        .distinct()
+        .values(&["a.name"])
+        .annotate("n", AggregateExpr::Count(None))
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r["a__name"].clone(), r["n"].clone()))
+        .collect();
+    rows.sort_by_key(|(n, _)| format!("{n:?}"));
+    assert_eq!(
+        rows,
+        [
+            (SqlValue::String("Ada".into()), SqlValue::I64(2)),
+            (SqlValue::String("Bob".into()), SqlValue::I64(1))
+        ]
+    );
+}
+
+/// A union's branches cannot grow a joined column, so that is refused.
+#[test]
+fn union_group_by_join_column_is_refused() {
+    let err = Book::objects()
+        .join(author_join())
+        .union(Book::objects().join(author_join()))
+        .values(&["a.name"])
+        .annotate("n", AggregateExpr::Count(None))
+        .compile()
+        .unwrap_err();
+    assert!(
+        matches!(err, QueryError::GroupByJoinUnreachable { .. }),
+        "{err:?}"
+    );
+}
+
 fn wide_rows(ids: impl Iterator<Item = i64>) -> Vec<Vec<SqlValue>> {
     ids.map(|id| (0..10).map(|_| SqlValue::I64(id)).collect())
         .collect()
@@ -425,6 +538,10 @@ tri_dialect_test! {
         relation_sum_keeps_float,
         grouped_aggregate_honours_compound,
         grouped_aggregate_honours_distinct,
+        grouped_aggregate_join_distinct,
+        grouped_aggregate_join_limit,
+        grouped_aggregate_join_alias_filter,
+        grouped_aggregate_join_column_distinct,
         bulk_insert_rolls_back_every_batch,
         bulk_insert_joins_outer_atomic,
     ],

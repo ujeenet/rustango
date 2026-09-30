@@ -751,15 +751,24 @@ fn write_agg_group_col(
     col: &str,
     model_table: &str,
     has_joins: bool,
+    derived: bool,
     project: bool,
 ) {
     if let Some((alias, c)) = col.split_once('.') {
-        b.write_ident(alias);
-        b.sql.push('.');
-        b.write_ident(c);
+        let flat = format!("{alias}__{c}");
+        // A derived source already projects the joined column as `alias__col`.
+        if derived && alias != model_table {
+            b.write_ident(model_table);
+            b.sql.push('.');
+            b.write_ident(&flat);
+        } else {
+            b.write_ident(alias);
+            b.sql.push('.');
+            b.write_ident(c);
+        }
         if project {
             b.sql.push_str(" AS ");
-            b.write_ident(&format!("{alias}__{c}"));
+            b.write_ident(&flat);
         }
     } else if has_joins {
         b.write_ident(model_table);
@@ -777,12 +786,14 @@ fn write_agg_group_col(
 fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
     b.sql.push_str("SELECT ");
     let has_joins = !query.joins.is_empty();
+    let derived = query.source.is_some();
 
     for (i, col) in query.group_by.iter().enumerate() {
         if i > 0 {
             b.sql.push_str(", ");
         }
-        write_agg_group_col(b, col, query.model.table, has_joins, /*project=*/ true);
+        let table = query.model.table;
+        write_agg_group_col(b, col, table, has_joins, derived, /*project=*/ true);
     }
     for (i, (alias, expr)) in query.aggregates.iter().enumerate() {
         if !query.group_by.is_empty() || i > 0 {
@@ -808,6 +819,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
                 col,
                 query.model.table,
                 has_joins,
+                derived,
                 /*project=*/ false,
             );
         }

@@ -155,6 +155,7 @@ untouched.
 ### Relation `SUM` decodes by column type (#1944)
 
 `annotate_sum` over a relation's float column now reads back as `f64`, not `i64`.
+Grouping a `union()` by a `.join()` column now fails with `QueryError::GroupByJoinUnreachable`.
 
 ### `upsert` targets the PK over a field `index(unique)` (#1935)
 

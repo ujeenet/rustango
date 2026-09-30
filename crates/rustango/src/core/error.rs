@@ -190,6 +190,13 @@ pub enum QueryError {
     /// Each distinct path's alias lives for the process, so depth is capped.
     #[error("relation path `{path}` is deeper than {max} hops")]
     RelationPathTooDeep { path: String, max: usize },
+
+    /// A grouped aggregate over a derived table (distinct, union, limit, ...)
+    /// named a joined column the derived rows cannot carry.
+    #[error(
+        "`{model}`: cannot group by `{column}`: no such join, or the queryset has a set operation"
+    )]
+    GroupByJoinUnreachable { model: &'static str, column: String },
 }
 
 /// Why a bounded `update()`/`delete()` was refused.
