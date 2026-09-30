@@ -143,7 +143,11 @@ to substitute a fresh payload while still blacklisting the old refresh JTI.
 
 `POST /api/auth/refresh` adds three checks: a password change since login ends the
 chain, no chain outlives `Config::refresh_absolute_ttl_secs` (30 days) from login, and
-replaying an already-rotated token revokes the whole chain.
+replaying an already-rotated token revokes the whole chain. A retry within about
+`Config::refresh_reuse_grace_secs` (10–20 s) of the rotation only gets a 401, so an
+honest client that sent two refreshes stays logged in; the cost is that a thief who
+replays inside that window does not trigger the revoke. Revocation is only as strong
+as the JTI store (an in-memory one forgets on restart).
 
 ---
 
