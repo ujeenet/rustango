@@ -842,14 +842,16 @@ impl FormLayout {
     }
 
     /// Scalar fields the form does not render; submit handlers skip them.
+    /// Auto fields stay with the writers, which assign them server-side.
     pub(crate) fn unrendered(&self, model: &'static ModelSchema) -> Vec<&'static str> {
         model
             .scalar_fields()
             .filter(|f| {
-                !self
-                    .groups
-                    .iter()
-                    .any(|(_, g)| g.iter().any(|r| r.name == f.name))
+                !f.auto
+                    && !self
+                        .groups
+                        .iter()
+                        .any(|(_, g)| g.iter().any(|r| r.name == f.name))
             })
             .map(|f| f.name)
             .collect()
