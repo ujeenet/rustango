@@ -731,49 +731,14 @@ fn render_form_with_inlines_and_pickers(
         })
     };
 
-    let visible = |f: &&'static FieldSchema| -> bool {
-        // Auto fields (Auto<T> PK, auto_now_add, auto_uuid, default=…
-        // server-assigned columns) are hidden on create — Postgres'
-        // DEFAULT fills them. On edit they are shown readonly so the
-        // operator can see the value.
-        if f.auto && !pk_locked {
-            // Hide auto fields entirely on the create form.
-            return false;
-        }
-        // `editable = false` removes the field from the generated
-        // change form entirely. The value is still visible on list /
-        // detail views (those don't route through this filter).
-        if !f.editable {
-            return false;
-        }
-        true
-    };
-
-    // Optionally group fields into fieldsets (slice 10.5). Empty
-    // fieldsets means "one unnamed group with every visible field".
-    let fieldsets_ctx: Vec<serde_json::Value> = if admin_cfg.fieldsets.is_empty() {
-        let rows: Vec<serde_json::Value> = model
-            .scalar_fields()
-            .filter(visible)
-            .map(row_for_field)
-            .collect();
-        vec![serde_json::json!({ "title": "", "rows": rows })]
-    } else {
-        admin_cfg
-            .fieldsets
-            .iter()
-            .map(|set| {
-                let rows: Vec<serde_json::Value> = set
-                    .fields
-                    .iter()
-                    .filter_map(|name| model.field(name))
-                    .filter(visible)
-                    .map(row_for_field)
-                    .collect();
-                serde_json::json!({ "title": set.title, "rows": rows })
-            })
-            .collect()
-    };
+    let fieldsets_ctx: Vec<serde_json::Value> = FormLayout::of(model, &admin_cfg, pk_locked)
+        .groups
+        .into_iter()
+        .map(|(title, fields)| {
+            let rows: Vec<serde_json::Value> = fields.into_iter().map(row_for_field).collect();
+            serde_json::json!({ "title": title, "rows": rows })
+        })
+        .collect();
 
     let inline_form_panels_ctx: Vec<serde_json::Value> = inline_panels
         .into_iter()
@@ -837,6 +802,58 @@ fn render_form_with_inlines_and_pickers(
         &mut ctx,
         chrome_context(state, Some(model.table)),
     )
+}
+
+/// The fields the admin form renders, grouped by fieldset. The renderer
+/// and both submit handlers read it, so a POST can only write what the
+/// form shows.
+pub(crate) struct FormLayout {
+    /// `(fieldset title, fields)`; one untitled group without `fieldsets`.
+    pub(crate) groups: Vec<(&'static str, Vec<&'static FieldSchema>)>,
+}
+
+impl FormLayout {
+    /// `pk_locked` is the edit form, which shows auto fields read-only.
+    pub(crate) fn of(
+        model: &'static ModelSchema,
+        admin_cfg: &crate::core::AdminConfig,
+        pk_locked: bool,
+    ) -> Self {
+        // `editable = false` fields never render; auto fields only on edit.
+        let visible = |f: &&'static FieldSchema| f.editable && (pk_locked || !f.auto);
+        let groups = if admin_cfg.fieldsets.is_empty() {
+            vec![("", model.scalar_fields().filter(visible).collect())]
+        } else {
+            admin_cfg
+                .fieldsets
+                .iter()
+                .map(|set| {
+                    let fields = set
+                        .fields
+                        .iter()
+                        .filter_map(|name| model.field(name))
+                        .filter(visible)
+                        .collect();
+                    (set.title, fields)
+                })
+                .collect()
+        };
+        Self { groups }
+    }
+
+    /// Scalar fields the form does not render; submit handlers skip them.
+    pub(crate) fn unrendered(&self, model: &'static ModelSchema) -> Vec<&'static str> {
+        model
+            .scalar_fields()
+            .filter(|f| {
+                !self
+                    .groups
+                    .iter()
+                    .any(|(_, g)| g.iter().any(|r| r.name == f.name))
+            })
+            .map(|f| f.name)
+            .collect()
+    }
 }
 
 /// As [`render_form`] but threads a list of `InlineFormPanel` and a

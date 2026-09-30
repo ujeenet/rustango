@@ -20,6 +20,11 @@ New `admin::session::from_extensions` reads the extension, else the task-local.
 Detail, edit, update, delete, bulk actions, autocomplete and facet counts now apply
 the hooks too, so a row the list hides is a 404. A delete of a missing row is a 404.
 
+### Security — admin forms write only the fields they render (#1860)
+
+`editable = false` fields and fields outside `fieldsets` are no longer read from a
+create or edit POST, and an edit leaves them unchanged instead of NULL / `false`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

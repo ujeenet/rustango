@@ -1,5 +1,5 @@
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "admin"))]
-//! Tenant admin permission gaps (#1858, #1859, #1863). SQLite, no service.
+//! Tenant admin permission gaps (#1858, #1859, #1860, #1863). SQLite, no service.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -61,6 +61,27 @@ fn own_rows(parts: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("owner_id", Op::Eq, SqlValue::I64(uid))]
 }
 rustango::register_admin_queryset!("sec_owned", own_rows);
+
+/// Two hidden fields (`editable = false`) and one left out of `fieldsets`.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "sec_form",
+    display = "title",
+    admin(list_display = "title", fieldsets = "Main: title")
+)]
+#[allow(dead_code)]
+pub struct SecForm {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+    #[rustango(editable = false, default = "0")]
+    pub owner_id: i64,
+    #[rustango(editable = false, default = "false")]
+    pub is_verified: bool,
+    #[rustango(max_length = 200)]
+    pub note: Option<String>,
+}
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
@@ -129,6 +150,9 @@ async fn boot() -> Env {
     rustango::testkit::create_tables_for::<SecOwned>(&tenant)
         .await
         .expect("sec_owned table");
+    rustango::testkit::create_tables_for::<SecForm>(&tenant)
+        .await
+        .expect("sec_form table");
     rustango::i18n::db::ensure_table_pool(&tenant)
         .await
         .expect("translations table");
@@ -409,4 +433,61 @@ async fn the_queryset_hook_scopes_facets() {
         !body.contains(&format!("owner_id={their_owner}")),
         "facet: {body}"
     );
+}
+
+async fn sec_forms(env: &Env) -> Vec<SecForm> {
+    SecForm::objects()
+        .order_by(&[("id", false)])
+        .fetch(&env.tenant)
+        .await
+        .expect("fetch sec_form")
+}
+
+/// #1860: an edit POST cannot write, or clear, fields the form hides.
+#[tokio::test]
+async fn an_edit_writes_only_rendered_fields() {
+    let env = boot().await;
+    let cookie = env.login(true, &[]).await;
+    let mut row = SecForm {
+        id: rustango::Auto::default(),
+        title: "old".into(),
+        owner_id: 5,
+        is_verified: true,
+        note: Some("keep".into()),
+    };
+    row.insert_pool(&env.tenant).await.expect("seed sec_form");
+    let pk = row.id.get().copied().unwrap();
+    let (status, body) = env
+        .post(
+            &format!("/__admin/sec_form/{pk}"),
+            &cookie,
+            "title=new&owner_id=99&note=pwned",
+        )
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    let got = &sec_forms(&env).await[0];
+    assert_eq!(got.title, "new");
+    assert_eq!(got.owner_id, 5, "editable = false must not be written");
+    assert!(got.is_verified, "a hidden bool must not reset to false");
+    assert_eq!(got.note.as_deref(), Some("keep"), "outside fieldsets");
+}
+
+/// #1860: a create POST cannot set fields the form hides.
+#[tokio::test]
+async fn a_create_writes_only_rendered_fields() {
+    let env = boot().await;
+    let cookie = env.login(true, &[]).await;
+    let (status, body) = env
+        .post(
+            "/__admin/sec_form",
+            &cookie,
+            "title=c&owner_id=99&is_verified=on&note=pwned",
+        )
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    let got = &sec_forms(&env).await[0];
+    assert_eq!(got.title, "c");
+    assert_eq!(got.owner_id, 0);
+    assert!(!got.is_verified);
+    assert_eq!(got.note, None);
 }

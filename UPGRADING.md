@@ -165,6 +165,11 @@ reading `Extension<AdminSession>` now see the tenant user instead of nothing.
 **Breaking:** a `register_admin_queryset!` hook now also limits by-pk pages, actions,
 autocomplete and facets; rows it filters out are 404 there, and skipped by actions.
 
+### Hidden admin fields are not written
+
+**Breaking:** an admin create now omits `editable = false` fields and fields outside
+`fieldsets`, so a NOT NULL one needs a `default`, as `readonly_fields` already did.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

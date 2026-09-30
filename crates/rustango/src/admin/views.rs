@@ -18,7 +18,7 @@ use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
     is_secret_field, lookup_model, pager_suffix, primary_key_or_internal, render_cell_json,
-    render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
+    render_form, render_secret_cell, resolve_model, resolve_model_and_pk, FormLayout,
 };
 use super::queryset_hooks::RowScope;
 use super::render;
@@ -1852,6 +1852,7 @@ pub(crate) async fn create_submit(
     if pk_field.auto {
         skip.push(pk_field.name);
     }
+    skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
@@ -2128,6 +2129,8 @@ pub(crate) async fn update_submit(
     let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&'static str> = vec![pk_field.name];
     skip.extend(admin_cfg.readonly_fields.iter().copied());
+    // Fields the edit form hides are left as they are.
+    skip.extend(FormLayout::of(model, &admin_cfg, true).unrendered(model));
     // An empty secret keeps the stored one.
     skip.extend(
         model
