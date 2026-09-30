@@ -48,6 +48,12 @@ Audited `insert_pool` / `save_pool` no longer fail with `EmptyReturning`, and My
 longer overwrites the id with `LAST_INSERT_ID()`. `bulk_insert`, `bulk_upsert_pool` and
 `bulk_insert_or_ignore_pool` now fill `Uuid::now_v7()` per row instead of binding NULL.
 
+### Fixed — ModelForm, admin and CreateView report the PK they wrote (#1894)
+
+A client-set PK no longer comes back as MySQL's `LAST_INSERT_ID()` (`0`, so the admin
+redirected to `/0`), a Uuid PK no longer comes back as `NULL`, and a failed read is an
+error instead of `0` / `""`. All three now use the ORM's one PK read-back.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

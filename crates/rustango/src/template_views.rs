@@ -1634,8 +1634,9 @@ fn substitute_pk(template: &str, pk: &str) -> String {
 fn interpolate_success_url(
     template: &str,
     row: &crate::sql::InsertReturningPool,
-    schema: &'static crate::core::ModelSchema,
+    query: &crate::core::InsertQuery,
 ) -> Result<String, String> {
+    let schema = query.model;
     let placeholders = parse_success_url_placeholders(template);
     if placeholders.is_empty() {
         return Ok(template.to_owned());
@@ -1658,7 +1659,15 @@ fn interpolate_success_url(
                 )
             })?
         };
-        let v = column_value_as_string_returning(row, column).map_err(|e| {
+        // The PK as written, not MySQL's `LAST_INSERT_ID()` for a client-set one (#1894).
+        let read = if column.primary_key {
+            crate::sql::inserted_pk(query, row, column)
+                .map(|v| v.to_display_string())
+                .map_err(|e| e.to_string())
+        } else {
+            column_value_as_string_returning(row, column)
+        };
+        let v = read.map_err(|e| {
             format!(
                 "success_url interpolation failed reading `{}`: {e}",
                 column.column
@@ -1680,19 +1689,12 @@ fn column_value_as_string_returning(
             column_value_as_string(pg_row, column).map_err(|e| e.to_string())
         }
         #[cfg(feature = "mysql")]
-        crate::sql::InsertReturningPool::MySqlAutoId(id) => {
-            // MySQL only carries the auto-generated PK; placeholders
-            // for other columns are unresolvable on this path.
-            if column.primary_key {
-                Ok(id.to_string())
-            } else {
-                Err(format!(
-                    "success_url placeholder `{}` cannot be resolved on MySQL (no RETURNING — \
-                     only the auto-generated primary key is available)",
-                    column.column,
-                ))
-            }
-        }
+        // MySQL only carries the auto-generated PK, which `inserted_pk` reads.
+        crate::sql::InsertReturningPool::MySqlAutoId(_) => Err(format!(
+            "success_url placeholder `{}` cannot be resolved on MySQL (no RETURNING — \
+             only the auto-generated primary key is available)",
+            column.column,
+        )),
         #[cfg(feature = "sqlite")]
         crate::sql::InsertReturningPool::SqliteRow(sq_row) => {
             use crate::core::FieldType;
@@ -1902,7 +1904,7 @@ async fn handle_create_post(
     };
     let target_url = if need_returning {
         match crate::sql::insert_returning_pool(&state.pool, &insert_q).await {
-            Ok(row) => match interpolate_success_url(&state.success_url, &row, state.schema) {
+            Ok(row) => match interpolate_success_url(&state.success_url, &row, &insert_q) {
                 Ok(url) => url,
                 Err(e) => return template_error(&e),
             },
@@ -3683,7 +3685,7 @@ mod tenant {
         let target_url = if need_returning {
             match crate::sql::insert_returning_pool(t.pool(), &insert_q).await {
                 Ok(row) => {
-                    match super::interpolate_success_url(&state.success_url, &row, state.schema) {
+                    match super::interpolate_success_url(&state.success_url, &row, &insert_q) {
                         Ok(url) => url,
                         Err(e) => return template_error(&e),
                     }
@@ -4759,10 +4761,9 @@ mod tests {
         }
     }
 
-    /// `coerce_pk` for a String PK passes through verbatim.
-    #[test]
-    fn coerce_pk_string_field() {
-        let str_schema: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
+    /// A model whose PK is a client-set `String`.
+    fn slug_schema() -> &'static ModelSchema {
+        Box::leak(Box::new(ModelSchema {
             name: "Slug",
             table: "slugs",
             fields: Box::leak(Box::new([crate::core::FieldSchema {
@@ -4819,12 +4820,34 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
-        }));
+        }))
+    }
+
+    /// `coerce_pk` for a String PK passes through verbatim.
+    #[test]
+    fn coerce_pk_string_field() {
+        let str_schema = slug_schema();
         let pk = str_schema.primary_key().unwrap();
         match coerce_pk(pk, "hello-world") {
             SqlValue::String(s) => assert_eq!(s, "hello-world"),
             other => panic!("expected String, got {other:?}"),
         }
+    }
+
+    /// MySQL's `LAST_INSERT_ID()` is 0 for a client-set PK; `{pk}` takes the written one (#1894).
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn success_url_pk_is_the_submitted_one_on_mysql() {
+        let q = crate::core::InsertQuery::new(
+            slug_schema(),
+            vec!["slug"],
+            vec![SqlValue::String("rust".into())],
+        );
+        let row = crate::sql::InsertReturningPool::MySqlAutoId(0);
+        let url = interpolate_success_url("/tags/{pk}", &row, &q).expect("url");
+        assert_eq!(url, "/tags/rust");
+        let unsent = crate::core::InsertQuery::new(slug_schema(), vec![], vec![]);
+        assert!(interpolate_success_url("/tags/{pk}", &row, &unsent).is_err());
     }
 
     /// `parse_form` collects required-missing errors for non-nullable

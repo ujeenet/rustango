@@ -1098,7 +1098,7 @@ impl ::core::fmt::Debug for InsertReturningPool {
 /// column is in the INSERT, else the database-generated one.
 pub(crate) fn inserted_pk(
     q: &InsertQuery,
-    returning: crate::sql::InsertReturningPool,
+    returning: &crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
 ) -> Result<SqlValue, ExecError> {
     match q.columns.iter().position(|c| *c == pk_field.column) {
@@ -1110,7 +1110,7 @@ pub(crate) fn inserted_pk(
 /// Read a generated PK out of an INSERT's RETURNING, or MySQL's
 /// `LAST_INSERT_ID()`. A PK it can't read is an error, never a stand-in.
 fn generated_pk(
-    returning: crate::sql::InsertReturningPool,
+    returning: &crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
     table: &'static str,
 ) -> Result<SqlValue, ExecError> {
@@ -1137,9 +1137,9 @@ fn generated_pk(
             }
             #[cfg(feature = "mysql")]
             crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
-                T::I64 => Ok(SqlValue::I64(id)),
-                T::I32 => Ok(SqlValue::I32(id as i32)),
-                T::I16 => Ok(SqlValue::I16(id as i16)),
+                T::I64 => Ok(SqlValue::I64(*id)),
+                T::I32 => Ok(SqlValue::I32(*id as i32)),
+                T::I16 => Ok(SqlValue::I16(*id as i16)),
                 _ => Err(unreadable()),
             },
             #[cfg(feature = "sqlite")]

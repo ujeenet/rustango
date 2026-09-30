@@ -893,42 +893,7 @@ impl PreparedSave {
             on_conflict: None,
         };
         let returning = crate::sql::insert_returning_pool(pool, &query).await?;
-        let pk_val: SqlValue = match returning {
-            #[cfg(feature = "postgres")]
-            crate::sql::InsertReturningPool::PgRow(row) => {
-                use crate::sql::sqlx::Row as _;
-                match self.pk_field.ty {
-                    FieldType::I64 => SqlValue::I64(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::I32 => SqlValue::I32(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::I16 => SqlValue::I16(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::String => {
-                        SqlValue::String(row.try_get(self.pk_field.column).unwrap_or_default())
-                    }
-                    _ => SqlValue::Null,
-                }
-            }
-            #[cfg(feature = "mysql")]
-            crate::sql::InsertReturningPool::MySqlAutoId(id) => match self.pk_field.ty {
-                FieldType::I64 => SqlValue::I64(id),
-                FieldType::I32 => SqlValue::I32(id as i32),
-                FieldType::I16 => SqlValue::I16(id as i16),
-                _ => SqlValue::I64(id),
-            },
-            #[cfg(feature = "sqlite")]
-            crate::sql::InsertReturningPool::SqliteRow(row) => {
-                use crate::sql::sqlx::Row as _;
-                match self.pk_field.ty {
-                    FieldType::I64 => SqlValue::I64(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::I32 => SqlValue::I32(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::I16 => SqlValue::I16(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::String => {
-                        SqlValue::String(row.try_get(self.pk_field.column).unwrap_or_default())
-                    }
-                    _ => SqlValue::Null,
-                }
-            }
-        };
-        Ok(pk_val)
+        Ok(crate::sql::inserted_pk(&query, &returning, self.pk_field)?)
     }
 }
 

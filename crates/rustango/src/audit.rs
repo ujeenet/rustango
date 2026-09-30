@@ -1453,7 +1453,7 @@ pub(crate) async fn insert(
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
     if audited_create(query).is_none() {
         let returning = crate::sql::insert_returning_pool(pool, query).await?;
-        return crate::sql::inserted_pk(query, returning, pk_field);
+        return crate::sql::inserted_pk(query, &returning, pk_field);
     }
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let pk = insert_tx(&mut tx, query, pk_field).await?;
@@ -1472,7 +1472,7 @@ pub(crate) async fn insert_tx(
     pk_field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
     let returning = crate::sql::insert_returning_tx(tx, query).await?;
-    let pk = crate::sql::inserted_pk(query, returning, pk_field)?;
+    let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
     if let Some(record) = audited_create(query) {
         record(tx, pk.clone())
             .await

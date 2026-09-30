@@ -6,8 +6,6 @@
 use std::fmt::Write as _;
 
 use crate::core::{FieldSchema, FieldType};
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::{postgres::PgRow, Row};
 
 /// Escape for HTML body or attribute context: the crate's one escaper (#1663).
 pub(crate) use crate::text::html_escape as escape;
@@ -450,18 +448,9 @@ fn render_named_widget(
 
 // ============================================================== FK helpers
 
-/// Read a column value as a string, for use as a hash-map key or URL
-/// fragment. Returns `None` for `NULL` and for value types we don't
-/// support as PKs/FKs.
-#[cfg(feature = "postgres")]
-pub(crate) fn read_value_as_string(row: &PgRow, field: &FieldSchema) -> Option<String> {
-    read_value_as_string_at(row, field, field.column)
-}
-
 // ============================================================ v0.36 — tri-dialect JSON companions
 //
 // The `_json` family below mirrors the PG-typed `render_value` /
-// `read_value_as_string` / `read_value_as_string_at` /
 // `read_joined_value_as_html` / `read_value_as_json` API surface,
 // but takes a `&serde_json::Value` (the row object produced by
 // `crate::sql::row_to_json` / `row_to_json_my` / `row_to_json_sqlite`)
@@ -555,7 +544,7 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
     }
 }
 
-/// Tri-dialect counterpart of [`read_value_as_string`]. JSON-shape
+/// Read a value as a string (map key or URL fragment). JSON-shape
 /// version: read the value at `field.name` and return its string
 /// form, or `None` for `NULL` / missing / unsupported types.
 pub(crate) fn read_value_as_string_json(
@@ -663,45 +652,6 @@ pub(crate) fn read_value_as_json_from_json(
         FieldType::F32 | FieldType::F64 => v.as_f64().map(Value::from).unwrap_or(v),
         FieldType::Bool => v.as_bool().map(Value::from).unwrap_or(v),
         _ => v,
-    }
-}
-
-/// Variant of [`read_value_as_string`] that reads from an arbitrary
-/// column alias (e.g. `"facet_value"` after a `SELECT col AS facet_value`).
-/// Used by the facet-filter machinery (slice 10.4) which renames the
-/// column to keep its query independent of the source table's schema.
-#[cfg(feature = "postgres")]
-pub(crate) fn read_value_as_string_at(
-    row: &PgRow,
-    field: &FieldSchema,
-    column_alias: &str,
-) -> Option<String> {
-    match field.ty {
-        FieldType::I16 => row
-            .try_get::<Option<i16>, _>(column_alias)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        FieldType::I32 => row
-            .try_get::<Option<i32>, _>(column_alias)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        FieldType::I64 => row
-            .try_get::<Option<i64>, _>(column_alias)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        FieldType::String => row
-            .try_get::<Option<String>, _>(column_alias)
-            .ok()
-            .flatten(),
-        FieldType::Uuid => row
-            .try_get::<Option<uuid::Uuid>, _>(column_alias)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        _ => None,
     }
 }
 
