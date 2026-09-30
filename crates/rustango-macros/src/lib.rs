@@ -3199,8 +3199,8 @@ fn inherent_impl_tokens(
             /// or silently skip on unique-constraint violation. Maps
             /// to per-dialect "INSERT ... DO NOTHING on conflict":
             /// PG `INSERT … ON CONFLICT DO NOTHING`, SQLite
-            /// `INSERT … ON CONFLICT DO NOTHING` (3.24+), MySQL
-            /// `ON DUPLICATE KEY UPDATE <pk> = <pk>`.
+            /// `INSERT … ON CONFLICT DO NOTHING` (3.24+), MySQL an
+            /// `ON DUPLICATE KEY UPDATE` that leaves the row as is.
             ///
             /// Returns `Ok(true)` when a row was inserted,
             /// `Ok(false)` when a conflict caused the INSERT to

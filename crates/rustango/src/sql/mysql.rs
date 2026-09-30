@@ -499,8 +499,8 @@ impl Dialect for MySql {
     }
 
     /// MySQL's `ON DUPLICATE KEY UPDATE` takes no target column
-    /// list; it fires on any unique violation. So a `DoUpdate` with
-    /// no target translates cleanly:
+    /// list; it fires on any unique violation, so a `DoUpdate` target
+    /// is ignored:
     ///
     /// ```sql
     /// INSERT INTO `t` (a, b) VALUES (?, ?)

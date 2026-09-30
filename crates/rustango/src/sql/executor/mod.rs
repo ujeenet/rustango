@@ -991,7 +991,8 @@ pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecErr
 }
 
 /// `INSERT` that skips a duplicate: `Ok(true)` when the row went in,
-/// `Ok(false)` when a unique key already held it.
+/// `Ok(false)` when a unique key already held it. `query.on_conflict` is
+/// replaced with `DoNothing`.
 ///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.

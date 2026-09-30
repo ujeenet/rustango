@@ -662,15 +662,13 @@ pub trait Dialect: Send + Sync {
         write_pg_array_keys(sql, qualified_col, placeholders, " ?& ARRAY[");
     }
 
-    /// Append this dialect's `ON CONFLICT` clause. Postgres takes the
-    /// full [`ConflictClause`]; MySQL handles `DoNothing` and a
-    /// `DoUpdate` with no target columns.
+    /// Append this dialect's `ON CONFLICT` clause. `model` is the insert's
+    /// table: MySQL names its PK in the clause. MySQL ignores a `DoUpdate`
+    /// target, since `ON DUPLICATE KEY UPDATE` fires on any unique key.
     ///
     /// # Errors
     /// [`SqlError::ConflictNotSupportedInDialect`] when the dialect
-    /// cannot express the requested shape. MySQL's
-    /// `ON DUPLICATE KEY UPDATE`, for one, has no target-column
-    /// syntax.
+    /// cannot express the requested shape.
     fn write_conflict_clause(
         &self,
         sql: &mut String,
