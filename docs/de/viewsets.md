@@ -558,7 +558,7 @@ Jede Methode auf `ViewSet::for_model(SCHEMA)` (jede gibt `Self` zurück):
 | Methode | Zweck |
 |---|---|
 | `serializer::<S>()` | Einen Serializer für typisierte Ausgabe + Eingabe verdrahten (tri-dialektfähig). |
-| `fields(&["…"])` | Standardprojektion + Whitelist schreibbarer Felder (wenn kein Serializer). |
+| `fields(&["…"])` | Standardprojektion + Whitelist schreibbarer Felder. |
 | `filter_fields(&["…"])` | `?field=value`-Filterung aktivieren. |
 | `search_fields(&["…"])` | `?search=` aktivieren. |
 | `ordering(&[("field", desc)])` | Standardsortierreihenfolge. |
@@ -600,8 +600,8 @@ Unterstützte Lookups: `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contains
 
 **Suche** — `?search=term` durchsucht `search_fields` mit einem Groß-/Kleinschreibung-unabhängigen ODER.
 
-**Sortierung** — `?ordering=field,-other` (`-` = DESC). Jedes Feld ist sortierbar,
-sofern du es nicht mit `.ordering_fields([...])` einschränkst. Ohne Parameter gilt der
+**Sortierung** — `?ordering=field,-other` (`-` = DESC). Jedes Feld, das die Antwort
+zeigt (mit Serializer: die Felder, die er rendert), ist sortierbar, sofern du es nicht mit `.ordering_fields([...])` einschränkst. Ohne Parameter gilt der
 `ordering`-Standard. Alle lassen sich kombinieren.
 
 ---
@@ -757,6 +757,14 @@ es engt also das Basis-Queryset für alle Routen ein. Eine vom Backend ausgeschl
 Die Identität muss aus der Credential kommen, niemals aus dem Query-String. Ein
 `?owner_id=`-Filter ist kein Scope — er ist ein Parameter, den der Aufrufer wählt.
 
+Ein Scope schränkt nur das Lesen ein. Ein Backend, dem eine Spalte gehört, implementiert
+auch `write_pins`: Create speichert den Besitzer, Update kann ihn nicht ändern, und
+`WritePin::Deny` lehnt den Schreibzugriff mit 403 ab.
+
+Auch die statischen globalen Scopes eines Modells begrenzen, was gelesen wird, nicht was
+geschrieben wird: Create oder Update darf den Scope verlassen (201 ohne Body oder 204).
+Für eine Sicherheitsgrenze nimm ein Filter-Backend mit `write_pins`.
+
 #### `OwnedBy` — das mitgelieferte Backend
 
 Die meisten besitzgebundenen Ressourcen brauchen genau eine Regel: *Zeilen, deren Besitzspalte der
@@ -778,6 +786,9 @@ den Namen entgegennimmt, statt eine Konvention anzunehmen. Es scheitert geschlos
 Arten, wie es falsch sein kann: Eine unauthentifizierte Anfrage und eine Spalte, die das Model nicht
 hat, treffen beide auf **nichts**, sodass ein Tippfehler beim Einbinden nicht zu „keine
 Prädikate, gib die Tabelle zurück" werden kann.
+
+`OwnedBy` pinnt seine Spalte beim Schreiben: Create speichert den Aufrufer, egal was im
+Body steht, Update verschiebt die Zeile nie, und ein Schreibzugriff ohne Principal ist 403.
 
 Superuser sind standardmäßig nicht besonders; `.superuser_sees_all()` schaltet das frei, denn
 „Admins sehen alles" ist eine Produktentscheidung, keine des Frameworks.

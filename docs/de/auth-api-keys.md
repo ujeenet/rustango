@@ -95,6 +95,9 @@ ergibt — und beide verifizieren sich. `verify_key` liefert `Ok(false)` bei ein
 Nichtübereinstimmung und `Err(ApiKeyError)` nur dann, wenn die gespeicherte
 Zeichenkette kein gültiger Hash ist.
 
+Aus async-Code rufen Sie `generate_key_async`, `hash_secret_async` und
+`verify_key_async` auf; sie rechnen argon2 außerhalb der Runtime.
+
 ---
 
 ## Das speichernde Backend

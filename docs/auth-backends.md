@@ -81,6 +81,10 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+On a tenant route the token's `tenant` claim must match the resolved tenant, and
+MCP agent tokens (`kind` claim) are refused. Mint with `JwtAuth` login or
+`JwtBackend::issue_for_tenant`; plain `issue` tokens work only where no tenant is resolved.
+
 `JwtBackend` accepts the access tokens `JwtLifecycle` issues, and refuses its
 refresh tokens — the two are wire-identical apart from `typ`, so a refresh
 token presented as a bearer would otherwise be an access credential with days

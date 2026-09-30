@@ -141,7 +141,7 @@ Ejecutarlo de forma nativa en lugar de en el contenedor requiere una base de
 datos y un usuario:
 
 ```sql
-CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs;
 CREATE USER 'rustango'@'localhost' IDENTIFIED BY 'rustango';
 GRANT ALL PRIVILEGES ON myblog_dev.* TO 'rustango'@'localhost';
 ```
@@ -154,6 +154,13 @@ Merece la pena poner `utf8mb4` a propósito: el `utf8` antiguo de MySQL es de
 tres bytes y no puede almacenar un emoji, algo que aparece mucho más tarde como
 una escritura que falla en una sola fila. MariaDB funciona con el mismo driver y
 el mismo esquema de URL.
+
+La collation también importa. Las columnas heredan la de la base de datos, y la de
+MySQL (`utf8mb4_0900_ai_ci`) ignora mayúsculas y acentos: `.eq("/About")` encuentra
+`/about` y una columna `unique` rechaza `Hero` junto a `hero`, a diferencia de
+PostgreSQL y SQLite. `utf8mb4_0900_as_cs` compara como ellos. Evita una collation
+`_bin`: el driver no puede leer sus columnas de texto como `String`.
+`manage check --deploy` avisa de ambas cosas.
 
 ---
 
@@ -171,7 +178,7 @@ Esto añade el subcomando `cargo rustango ...` de forma global. Confirma que est
 cargo rustango --help
 ```
 
-La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.59.6`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
+La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.59.7`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
 
 ---
 

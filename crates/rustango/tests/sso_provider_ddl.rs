@@ -30,7 +30,7 @@ fn slug_is_indexable_varchar_on_mysql() {
     // Bounded VARCHAR so the UNIQUE(slug) is indexable — never TEXT (1170).
     assert!(ddl.contains("`slug` VARCHAR(64)"), "got: {ddl}");
     assert!(
-        !ddl.to_uppercase().contains("`SLUG` TEXT"),
+        !ddl.to_uppercase().contains("`SLUG` LONGTEXT"),
         "slug must not be TEXT on MySQL: {ddl}"
     );
     assert!(

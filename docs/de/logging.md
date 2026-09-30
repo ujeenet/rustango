@@ -125,6 +125,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::email` | Mail-Versand |
 | `rustango::email::smtp` | SMTP-Transport |
 | `rustango::error` | Die Ursache eines 5xx, die der Response-Body zurückhält |
+| `rustango::auth_flows` | Vom Cache abgewiesene Einmal-Auth-Links |
 | `rustango::hmac_auth` | Einrichtung der HMAC-Request-Authentifizierung |
 | `rustango::humanize` | Humanize-Filter |
 | `rustango::jobs` | Hintergrund-Job-Queues |

@@ -150,6 +150,74 @@ untouched.
 
 ## Unreleased
 
+## 0.59.7
+
+### `JwtBackend` tokens need a `tenant` claim (#1848)
+
+**Breaking:** under `require_auth` a token from `JwtBackend::issue` (no tenant) is refused.
+Mint with `issue_for_tenant(user_id, slug)` or the `JwtAuth` login instead.
+
+### Single-use auth links need a storing cache (#1853)
+
+**Breaking:** `verify_single_use` and `confirm_password_reset_single_use*` refuse every
+link on a `NullCache`. A custom cache should override `add` atomically.
+
+### JWT refresh: new `Config` field, old refresh tokens refused (#1854)
+
+**Breaking:** `auth_routes::Config` gains `refresh_absolute_ttl_secs` (must be > 0, else
+`JwtAuth::new` panics) and `refresh_reuse_grace_secs`; exhaustive literals need them or
+`..Config::default()`. Every refresh token issued before the upgrade gets one 401, so all
+users log in again once. `pwf`, `sat`, `fam` are router claims; a hook returning `kind` fails login.
+
+### `PgJobQueue` counts attempts at pickup
+
+`rustango_jobs.attempt` now includes the running attempt. Keep the
+`reclaim_stuck_jobs_pool` threshold well above `heartbeat_interval` (10 s by default).
+
+### ViewSet `fields()` limits writes (breaking)
+
+A body key outside `fields()` is now ignored on create and update, so a required column
+left out of `fields()` fails the insert. With `OwnedBy`, a client can no longer set the
+owner, and an unauthenticated create or update is `403`. A custom `ViewSetFilter` that
+scopes by owner should also implement `write_pins`.
+
+### `?ordering=` with a serializer
+
+Without `ordering_fields`, only the fields the serializer renders are sortable.
+`readable_source_fields()` defaults to empty, so a ViewSet on a hand-written
+`ModelSerializer` ignores `?ordering=` until the impl overrides it or the ViewSet
+sets `ordering_fields`.
+
+### `ApiKeyError` and `HasherError` gain `Busy`
+
+Both are now `#[non_exhaustive]`; add a `_` arm. From async code use
+`api_keys::{generate_key,hash_secret,verify_key}_async` and `PasswordHasherChain::{hash,verify}_async`.
+
+### HMAC signing takes the host
+
+`sign_request` and `sign_now` take a `host` argument after `method`, and every signature
+changes. Services sharing a key, or behind a proxy that rewrites `Host`, set
+`HmacAuthLayer::host`; it panics on an empty or invalid host.
+
+### MySQL: `Uuid` is hyphenated text
+
+The ORM now writes and reads a `Uuid` as the 36-character text its `CHAR(36)` column
+holds. A hand-made `BINARY(16)` UUID column no longer works; make it `CHAR(36)`.
+On MySQL, `ForeignKey<T, K>` and `Auto<T>` now decode through `FlatScalar`, so `K` / `T`
+must be one of its types.
+
+### MySQL: unbounded `String` is `LONGTEXT`
+
+New tables get `LONGTEXT`; migrations do not change existing `TEXT` columns. To lift
+the 64 KiB cap there, run `ALTER TABLE t MODIFY col LONGTEXT NOT NULL` for each
+`DATA_TYPE = 'text'` column in `information_schema.COLUMNS`. `MODIFY` resets what it
+omits: repeat the column's nullability, default and any `COLLATE`.
+
+### MySQL: `check --deploy` warns on a `_ci` or `_bin` database collation
+
+No schema change. A stock MySQL database (`utf8mb4_0900_ai_ci`) now gets a warning;
+use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

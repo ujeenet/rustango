@@ -240,32 +240,28 @@ where
     }
 }
 
-/// MySQL Decode mirror for the bi-dialect path.
+/// MySQL Decode mirror for the bi-dialect path. Goes through
+/// `FlatScalar`, which owns the MySQL cell rules (a `Uuid` key is
+/// `CHAR(36)` text there, #1733).
 #[cfg(feature = "mysql")]
-impl<'r, T, K> sqlx::Decode<'r, sqlx::MySql> for ForeignKey<T, K>
-where
-    K: sqlx::Decode<'r, sqlx::MySql>,
-{
+impl<'r, T, K: super::FlatScalar> sqlx::Decode<'r, sqlx::MySql> for ForeignKey<T, K> {
     fn decode(
         value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Ok(Self::Unloaded(<K as sqlx::Decode<sqlx::MySql>>::decode(
-            value,
-        )?))
+        Ok(Self::Unloaded(K::from_cell(<K::Cell as sqlx::Decode<
+            sqlx::MySql,
+        >>::decode(value)?)))
     }
 }
 
 #[cfg(feature = "mysql")]
-impl<T, K> sqlx::Type<sqlx::MySql> for ForeignKey<T, K>
-where
-    K: sqlx::Type<sqlx::MySql>,
-{
+impl<T, K: super::FlatScalar> sqlx::Type<sqlx::MySql> for ForeignKey<T, K> {
     fn type_info() -> sqlx::mysql::MySqlTypeInfo {
-        <K as sqlx::Type<sqlx::MySql>>::type_info()
+        <K::Cell as sqlx::Type<sqlx::MySql>>::type_info()
     }
 
     fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
-        <K as sqlx::Type<sqlx::MySql>>::compatible(ty)
+        <K::Cell as sqlx::Type<sqlx::MySql>>::compatible(ty)
     }
 }
 

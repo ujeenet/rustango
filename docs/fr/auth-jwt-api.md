@@ -148,6 +148,15 @@ permissions ont pu changer (rôle révoqué, portée réduite), utilisez
 `refresh_with(token, new_claims)` pour substituer un payload frais tout en
 mettant quand même en liste noire l'ancien JTI de rafraîchissement.
 
+`POST /api/auth/refresh` ajoute trois contrôles : un changement de mot de passe depuis le
+login termine la chaîne, aucune chaîne ne dépasse `Config::refresh_absolute_ttl_secs`
+(30 jours) depuis le login, et rejouer un token déjà renouvelé révoque toute la chaîne. Une
+nouvelle tentative dans environ `Config::refresh_reuse_grace_secs` (10–20 s) après la
+rotation reçoit seulement un 401 : un client honnête qui a envoyé deux rafraîchissements
+reste connecté ; le prix est qu'un voleur dans cette fenêtre ne déclenche pas la
+révocation. La révocation ne vaut que ce que vaut le magasin de JTI (un magasin en mémoire
+oublie au redémarrage).
+
 ---
 
 ## Révocation et le magasin de JTI

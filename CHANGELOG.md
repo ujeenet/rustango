@@ -4,6 +4,75 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.7] — 2026-09-30
+
+### Security — `JwtBackend` checks the tenant binding (#1848)
+
+**Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,
+so tenant A's user 1 no longer logs in as tenant B's user 1. MCP agent tokens are refused
+by `JwtBackend` and `JwtAuth::verify_for_tenant`. New `JwtBackend::issue_for_tenant`.
+
+### Security — single-use auth links are one atomic `add` (#1853)
+
+Two simultaneous redemptions of a reset, magic-link or verify link no longer both pass.
+A failing cache or a `NullCache` now refuses the link instead of letting it be reused.
+
+### Security — JWT refresh ends on password change, cap and replay (#1854)
+
+**Breaking:** `/api/auth/refresh` refuses a chain after a password change, past
+`Config::refresh_absolute_ttl_secs` (default 30 days) from login, and once a rotated
+token is replayed. A retry within `refresh_reuse_grace_secs` (10 s) only gets a 401.
+Refresh tokens issued before this release are refused.
+
+### Fixed — a panicking job no longer kills its worker (#1843)
+
+A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
+is logged. **Breaking:** `PgJobQueue` counts `attempt` at pickup and dead-letters a row
+reclaimed with no attempts left. Running jobs refresh `locked_at` (`heartbeat_interval`,
+default 10 s, min 1 ms), finishing writes need the worker's own lock, and `shutdown` aborts
+after 5 s and unlocks the aborted row. A lost lease drops the run's result and dead letter;
+a job with no handler keeps its attempt.
+
+### Security — ViewSet writes stay inside `fields()` and the owner (#1845)
+
+**Breaking:** create and update now write only the `fields()` columns (and the serializer's
+writable ones); other body keys are ignored. `OwnedBy` pins its column: create stores the
+caller, update never changes it, and a write with no principal is `403`.
+`?ordering=` with a serializer falls back to the fields it renders. New
+`ViewSetFilter::write_pins`, `WritePin` and `ModelSerializer::readable_source_fields`.
+
+### Security — expired API keys are verified before they are refused (#1729)
+
+`ApiKeyBackend` no longer answers an expired key faster than an unknown one.
+`api_keys` hashes through `passwords` and gains `*_async` variants; so does `PasswordHasherChain`.
+
+### Security — HMAC signatures cover the host (#1836)
+
+Signatures cover the host. A service sharing a key with another must pin its own with
+`HmacAuthLayer::host`; unpinned, the request's own `Host` is trusted.
+
+### Changed — SSO reuses OIDC discovery (#1833)
+
+An `oidc` provider fetches its discovery document once per issuer per hour, not on every login.
+
+### Fixed — MySQL `Uuid` fields save and load (#1733)
+
+A `Uuid` now binds as hyphenated text into its `CHAR(36)` column instead of 16 raw
+bytes (error 1366). Every read decodes that text: typed fetch, `Auto<Uuid>`,
+`ForeignKey<_, Uuid>`, `select_related`, `pluck` / `pks` / `values_list`, JSON rows
+and the audit diff. **Breaking:** a hand-made `BINARY(16)` column now fails writes
+with error 1406 (`Data too long`) and reads with sqlx "mismatched types"; use `CHAR(36)`.
+
+### Fixed — MySQL unbounded `String` columns hold more than 64 KiB (#1708)
+
+A `String` without `max_length` is now `LONGTEXT` on MySQL, not `TEXT`, so long
+content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
+
+### Added — `check --deploy` flags a case-insensitive MySQL database (#1742)
+
+MySQL's default `_ai_ci` collation makes `=` and `unique` ignore case, unlike PostgreSQL
+and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900_as_cs`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

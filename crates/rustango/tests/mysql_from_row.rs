@@ -125,7 +125,7 @@ fn insert_pool_and_save_pool_methods_emitted() {
 #[test]
 fn ddl_create_table_emits_mysql_shape() {
     // batch 10 — DDL writer dispatches through Dialect.
-    // Verify MySQL emits backticks, TINYINT(1) for bool, TEXT for
+    // Verify MySQL emits backticks, TINYINT(1) for bool, LONGTEXT for
     // unbounded string, BIGINT for i64.
     use rustango::core::Model;
     use rustango::migrate::ddl::create_table_sql_with_dialect;
@@ -136,8 +136,8 @@ fn ddl_create_table_emits_mysql_shape() {
     assert!(sql.starts_with("CREATE TABLE `mysql_from_row_users` ("));
     // BIGINT for i64 PK (no Auto<T> on this test model — plain BIGINT)
     assert!(sql.contains("`id` BIGINT"));
-    // TEXT for unbounded String
-    assert!(sql.contains("`name` TEXT"));
+    // LONGTEXT for unbounded String (#1708)
+    assert!(sql.contains("`name` LONGTEXT"));
     // No PG-isms
     assert!(!sql.contains("\""));
     assert!(!sql.contains("BIGSERIAL"));

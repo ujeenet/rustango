@@ -933,7 +933,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.manager_fns,
     );
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
-    let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
+    let from_row_impl = from_row_impl_tokens(
+        struct_name,
+        &collected.from_row_inits,
+        &collected.from_row_inits_my,
+    );
     let reverse_helpers = reverse_helper_tokens(
         struct_name,
         &collected.fk_relations,
@@ -1979,6 +1983,8 @@ struct ColumnEntry {
     column: String,
     /// `#root::core::FieldType::I64` etc.
     field_type_tokens: TokenStream2,
+    /// A bare or optional `Uuid` field; MySQL decodes it from text.
+    uuid_column: bool,
 }
 
 struct CollectedFields {
@@ -1988,6 +1994,9 @@ struct CollectedFields {
     /// `format!("{prefix}__{col}")` aliases so a Model can be
     /// decoded from a JOINed row's projected target columns.
     from_aliased_row_inits: Vec<TokenStream2>,
+    /// MySQL twins of `from_row_inits` / `from_aliased_row_inits`.
+    from_row_inits_my: Vec<TokenStream2>,
+    from_aliased_row_inits_my: Vec<TokenStream2>,
     /// Static column-name list — used by the simple insert path
     /// (no `Auto<T>` fields). Aligned with `insert_values`.
     insert_columns: Vec<TokenStream2>,
@@ -2103,6 +2112,8 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         field_schemas: Vec::with_capacity(cap),
         from_row_inits: Vec::with_capacity(cap),
         from_aliased_row_inits: Vec::with_capacity(cap),
+        from_row_inits_my: Vec::with_capacity(cap),
+        from_aliased_row_inits_my: Vec::with_capacity(cap),
         insert_columns: Vec::with_capacity(cap),
         insert_values: Vec::with_capacity(cap),
         insert_pushes: Vec::with_capacity(cap),
@@ -2135,6 +2146,9 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         out.field_schemas.push(info.schema);
         out.from_row_inits.push(info.from_row_init);
         out.from_aliased_row_inits.push(info.from_aliased_row_init);
+        out.from_row_inits_my.push(info.from_row_init_my);
+        out.from_aliased_row_inits_my
+            .push(info.from_aliased_row_init_my);
         if let Some(parent_ty) = info.fk_inner.clone() {
             out.fk_relations.push(FkRelation {
                 parent_type: parent_ty,
@@ -2171,6 +2185,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 name: ident.to_string(),
                 column: info.column.clone(),
                 field_type_tokens: info.field_type_tokens,
+                uuid_column: info.uuid_column,
             });
             // #1028 — refresh the DB-computed value after insert on
             // RETURNING-capable backends. The column joins `returning_cols`
@@ -2386,6 +2401,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             name: ident.to_string(),
             column: info.column.clone(),
             field_type_tokens: info.field_type_tokens,
+            uuid_column: info.uuid_column,
         });
     }
     Ok(out)
@@ -3902,10 +3918,11 @@ fn inherent_impl_tokens(
             // The Row alias resolves to PgRow / MySqlRow per call site,
             // so the same template generates both the PG and MySQL bodies.
             let mk_before_pairs =
-                |getter: proc_macro2::TokenStream| -> Vec<proc_macro2::TokenStream> {
+                |getter: &dyn Fn(&ColumnEntry) -> TokenStream2| -> Vec<TokenStream2> {
                     tracked
                         .iter()
                         .map(|c| {
+                            let getter = getter(c);
                             let column_lit = c.column.as_str();
                             let value_ty = &c.value_ty;
                             quote! {
@@ -3925,12 +3942,16 @@ fn inherent_impl_tokens(
                         })
                         .collect()
                 };
-            let before_pairs_pg: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(#root::sql::try_get_returning));
-            let before_pairs_my: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(#root::sql::try_get_returning_my));
-            let before_pairs_sqlite: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(#root::sql::try_get_returning_sqlite));
+            let before_pairs_pg = mk_before_pairs(&|_| quote!(#root::sql::try_get_returning));
+            let before_pairs_my = mk_before_pairs(&|c| {
+                if c.uuid_column {
+                    quote!(#root::sql::try_get_flat_my)
+                } else {
+                    quote!(#root::sql::try_get_returning_my)
+                }
+            });
+            let before_pairs_sqlite =
+                mk_before_pairs(&|_| quote!(#root::sql::try_get_returning_sqlite));
             let pg_select_cols: String = tracked
                 .iter()
                 .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
@@ -7924,9 +7945,10 @@ fn inherent_impl_tokens(
     };
     // v0.23.0-batch8 — MySQL counterpart, gated through the
     // cfg-aware macro_rules so PG-only builds expand to nothing.
+    let from_aliased_row_inits_my = &fields.from_aliased_row_inits_my;
     let aliased_row_helper_my = quote! {
         #root::__impl_my_aliased_row_decoder!(#struct_name, |row, prefix| {
-            #( #from_aliased_row_inits ),*
+            #( #from_aliased_row_inits_my ),*
         });
     };
 
@@ -8117,7 +8139,11 @@ fn column_module_ident(struct_name: &syn::Ident) -> syn::Ident {
     )
 }
 
-fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2]) -> TokenStream2 {
+fn from_row_impl_tokens(
+    struct_name: &syn::Ident,
+    from_row_inits: &[TokenStream2],
+    from_row_inits_my: &[TokenStream2],
+) -> TokenStream2 {
     let root = rustango_root();
     // The Postgres impl is always emitted — every rustango build pulls in
     // sqlx-postgres via the default `postgres` feature. The MySQL impl is
@@ -8144,7 +8170,7 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
         }
 
         #root::__impl_my_from_row!(#struct_name, |row| {
-            #( #from_row_inits ),*
+            #( #from_row_inits_my ),*
         });
 
         #root::__impl_sqlite_from_row!(#struct_name, |row| {
@@ -11024,6 +11050,12 @@ struct FieldInfo<'a> {
     /// `Self::__rustango_from_aliased_row(row, prefix)` per-Model
     /// helper that `select_related` calls when stitching loaded FKs.
     from_aliased_row_init: TokenStream2,
+    /// MySQL twins of the two inits above. They differ only for a UUID
+    /// column, which MySQL keeps as `CHAR(36)` text (#1733).
+    from_row_init_my: TokenStream2,
+    from_aliased_row_init_my: TokenStream2,
+    /// A bare or optional `Uuid` field.
+    uuid_column: bool,
     /// Inner type from a `ForeignKey<T, K>` field, if any. The reverse-
     /// relation helper emit (`Author::<child>_set`) needs to know `T`
     /// to point the generated method at the right child model.
@@ -11374,6 +11406,22 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             ::std::format!("{}__{}", prefix, #column_lit).as_str(),
         )?
     };
+    // `Auto<Uuid>` and `ForeignKey<_, Uuid>` decode through their own
+    // MySQL impls; a bare or optional `Uuid` needs `FlatScalar`'s cell.
+    let uuid_column = kind == DetectedKind::Uuid && !detected_auto && fk_inner.is_none();
+    let (from_row_init_my, from_aliased_row_init_my) = if uuid_column {
+        (
+            quote! { #ident: #root::sql::try_get_flat_my(row, #column_lit)? },
+            quote! {
+                #ident: #root::sql::try_get_flat_my(
+                    row,
+                    ::std::format!("{}__{}", prefix, #column_lit).as_str(),
+                )?
+            },
+        )
+    } else {
+        (from_row_init.clone(), from_aliased_row_init.clone())
+    };
 
     Ok(FieldInfo {
         ident,
@@ -11385,6 +11433,9 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         schema,
         from_row_init,
         from_aliased_row_init,
+        from_row_init_my,
+        from_aliased_row_init_my,
+        uuid_column,
         fk_inner: fk_inner.cloned(),
         fk_pk_kind: kind,
         nullable,
@@ -13372,6 +13423,27 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         })
         .collect();
 
+    // `readable_source_fields`: model columns the JSON output copies
+    // straight from the model, so `?ordering=` cannot sort on a column
+    // the API never shows (#1845).
+    let readable_source_lits: Vec<String> = fields_info
+        .iter()
+        .filter(|fi| {
+            !fi.attrs.write_only
+                && !fi.attrs.skip
+                && fi.attrs.method.is_none()
+                && !fi.attrs.nested
+                && fi.attrs.many.is_none()
+                && fi.attrs.slug.is_none()
+        })
+        .map(|fi| {
+            fi.attrs
+                .source
+                .clone()
+                .unwrap_or_else(|| fi.ident.to_string())
+        })
+        .collect();
+
     // `from_writable_json`: build a partial instance for input
     // validation. Writable fields are parsed from the JSON body (keyed
     // by serializer field name); every other field defaults. Per-field
@@ -13467,6 +13539,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
             fn writable_source_fields() -> &'static [&'static str] {
                 &[ #( #writable_source_lits ),* ]
+            }
+
+            fn readable_source_fields() -> &'static [&'static str] {
+                &[ #( #readable_source_lits ),* ]
             }
 
             fn from_writable_json(

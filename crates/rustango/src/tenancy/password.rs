@@ -1,7 +1,7 @@
 //! Argon2id password hashing — used by the registry-scoped
 //! [`super::Operator`] and the per-tenant [`super::User`] models.
 //!
-//! Both identity domains share the same crypto: hashes are stored as
+//! Both identity domains share [`crate::passwords`]: hashes are stored as
 //! the standard PHC string (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`)
 //! so verification is self-describing — the parameters travel with the
 //! hash. Default parameters come from `argon2::Argon2::default()` —
@@ -16,10 +16,9 @@
 #![allow(clippy::disallowed_methods)]
 
 use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::SaltString;
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 
 use super::error::TenancyError;
+use crate::passwords::PasswordError;
 
 /// Hash a plaintext password with default Argon2id parameters.
 ///
@@ -36,12 +35,10 @@ pub fn hash(plaintext: &str) -> Result<String, TenancyError> {
             "password must not be empty".into(),
         ));
     }
-    let salt = SaltString::generate(&mut OsRng);
-    let hasher = Argon2::default();
-    let phc = hasher
-        .hash_password(plaintext.as_bytes(), &salt)
-        .map_err(|e| TenancyError::Validation(format!("argon2 hash failed: {e}")))?;
-    Ok(phc.to_string())
+    crate::passwords::hash(plaintext).map_err(|e| match e {
+        PasswordError::Hash(m) => TenancyError::Validation(format!("argon2 hash failed: {m}")),
+        other => TenancyError::Validation(other.to_string()),
+    })
 }
 
 /// Generate a random password of the requested length.
@@ -96,11 +93,12 @@ pub fn generate(length: usize) -> String {
 /// Returns [`TenancyError::Validation`] when `phc_hash` is malformed
 /// (not a valid PHC string).
 pub fn verify(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
-    let parsed = PasswordHash::new(phc_hash)
-        .map_err(|e| TenancyError::Validation(format!("malformed password hash: {e}")))?;
-    Ok(Argon2::default()
-        .verify_password(plaintext.as_bytes(), &parsed)
-        .is_ok())
+    crate::passwords::verify(plaintext, phc_hash).map_err(|e| match e {
+        PasswordError::Verify(m) => {
+            TenancyError::Validation(format!("malformed password hash: {m}"))
+        }
+        other => TenancyError::Validation(other.to_string()),
+    })
 }
 
 /// Spend a verification's worth of work against a fixed dummy hash and

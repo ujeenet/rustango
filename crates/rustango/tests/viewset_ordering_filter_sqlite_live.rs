@@ -242,7 +242,12 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
 /// Rows are seeded so that sorting by `secret_score` gives a *different*
 /// order from the default — if the unexposed sort were honoured, the ids
 /// would come back in secret order, which is exactly the leak.
-async fn seed_divergent(app: &axum::Router) {
+///
+/// Seeds through an unrestricted ViewSet: a `fields()` one cannot write
+/// `secret_score` (#1845).
+async fn seed_divergent(pool: &Pool) {
+    let app =
+        rustango::viewset::ViewSet::for_model(Post::SCHEMA).router_pool("/posts", pool.clone());
     for (title, rating, secret) in [("a", 1, "zzz"), ("b", 2, "mmm"), ("c", 3, "aaa")] {
         let payload = serde_json::json!({
             "title": title, "rating": rating, "secret_score": secret
@@ -271,9 +276,9 @@ async fn ordering_on_an_unexposed_field_is_dropped_by_default() {
         .page_size(50)
         .fields(&["id", "title", "rating"]) // secret_score NOT exposed
         .ordering(&[("id", false)])
-        .router_pool("/posts", pool);
+        .router_pool("/posts", pool.clone());
 
-    seed_divergent(&app).await;
+    seed_divergent(&pool).await;
 
     // secret_score ASC would be c(aaa), b(mmm), a(zzz) => [3, 2, 1].
     // It must be ignored, leaving the default id ASC => [1, 2, 3].
@@ -299,9 +304,9 @@ async fn ordering_on_an_exposed_field_still_works() {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
         .page_size(50)
         .fields(&["id", "title", "rating"])
-        .router_pool("/posts", pool);
+        .router_pool("/posts", pool.clone());
 
-    seed_divergent(&app).await;
+    seed_divergent(&pool).await;
 
     let resp = app
         .clone()
@@ -319,9 +324,9 @@ async fn ordering_stays_open_when_no_fields_restriction_is_set() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
         .page_size(50)
-        .router_pool("/posts", pool);
+        .router_pool("/posts", pool.clone());
 
-    seed_divergent(&app).await;
+    seed_divergent(&pool).await;
 
     let resp = app
         .clone()

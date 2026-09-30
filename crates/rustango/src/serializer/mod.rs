@@ -192,6 +192,13 @@ pub trait ModelSerializer: serde::Serialize + Sized {
         Self::writable_fields()
     }
 
+    /// The **model** fields the JSON output renders straight from the
+    /// model, `source` resolved. `?ordering=` falls back to these, so a
+    /// hidden column is not a sort key. The default is empty (fail closed).
+    fn readable_source_fields() -> &'static [&'static str] {
+        &[]
+    }
+
     /// Parse a JSON request body for validation. Writable fields are
     /// read by their serializer name; read-only and computed fields
     /// get their default. A type error lands in
