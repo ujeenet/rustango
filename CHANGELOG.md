@@ -4,6 +4,23 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a panicking job no longer kills its worker (#1843)
+
+A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
+is logged. **Breaking:** `PgJobQueue` counts `attempt` at pickup and dead-letters a row
+reclaimed with no attempts left. Running jobs refresh `locked_at` (`heartbeat_interval`,
+default 10 s, min 1 ms), finishing writes need the worker's own lock, and `shutdown` aborts
+after 5 s and unlocks the aborted row. A lost lease drops the run's result and dead letter;
+a job with no handler keeps its attempt.
+
+### Security — ViewSet writes stay inside `fields()` and the owner (#1845)
+
+**Breaking:** create and update now write only the `fields()` columns (and the serializer's
+writable ones); other body keys are ignored. `OwnedBy` pins its column: create stores the
+caller, update never changes it, and a write with no principal is `403`.
+`?ordering=` with a serializer falls back to the fields it renders. New
+`ViewSetFilter::write_pins`, `WritePin` and `ModelSerializer::readable_source_fields`.
+
 ### Security — expired API keys are verified before they are refused (#1729)
 
 `ApiKeyBackend` no longer answers an expired key faster than an unknown one.

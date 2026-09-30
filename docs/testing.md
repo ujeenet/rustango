@@ -173,9 +173,9 @@ you read a green result as coverage.
 
 | Variable | Suites | What they need |
 |---|---:|---|
-| *(none)* | 220 | Nothing — an in-memory or temp-file SQLite. Always run. |
-| `DATABASE_URL` | 111 | A reachable PostgreSQL server. |
-| `MYSQL_TEST_URL` | 43 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| *(none)* | 221 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 112 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 44 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | A reachable Redis. |
 
 A suite reading two variables is counted under both, so the column does not sum
