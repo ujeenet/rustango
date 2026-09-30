@@ -1497,6 +1497,8 @@ fn write_expr(
                 BO::Add => "+",
                 BO::Sub => "-",
                 BO::Mul => "*",
+                // MySQL's `/` returns a decimal even for two integers.
+                BO::Div if b.d.name() == "mysql" && is_int_expr(b, expr) => "DIV",
                 BO::Div => "/",
                 BO::Mod => "%",
                 BO::BitAnd => "&",
@@ -1651,6 +1653,42 @@ fn write_expr(
             as_text,
         } => write_json_path(b, source, path, *as_text),
     }
+}
+
+/// The type of `expr` when the writer can tell: a literal, a column of
+/// the current model, or integer arithmetic over those.
+fn expr_type(b: &Sql<'_>, expr: &crate::core::Expr) -> Option<crate::core::FieldType> {
+    use crate::core::{BinOp as BO, Expr, FieldType};
+    match expr {
+        Expr::Literal(v) => v.field_type(),
+        Expr::Column(c) if b.current_qualify_alias.is_none() => {
+            b.scope_stack.last()?.field_by_column(c).map(|f| f.ty)
+        }
+        Expr::BinOp {
+            op: BO::Add | BO::Sub | BO::Mul | BO::Div | BO::Mod,
+            ..
+        } if is_int_expr(b, expr) => Some(FieldType::I64),
+        _ => None,
+    }
+}
+
+/// True for arithmetic whose operands are both known integers.
+fn is_int_expr(b: &Sql<'_>, expr: &crate::core::Expr) -> bool {
+    use crate::core::{Expr, FieldType as T};
+    let int = |e: &Expr| matches!(expr_type(b, e), Some(T::I16 | T::I32 | T::I64));
+    matches!(expr, Expr::BinOp { left, right, .. } if int(left) && int(right))
+}
+
+/// Write a PG datetime argument, a timestamptz shifted to UTC so the
+/// result ignores the session TimeZone, as MySQL and SQLite do.
+fn write_pg_utc_arg(b: &mut Sql<'_>, arg: &crate::core::Expr) -> Result<(), SqlError> {
+    if expr_type(b, arg) != Some(crate::core::FieldType::DateTime) {
+        return write_expr(b, arg, None);
+    }
+    b.sql.push('(');
+    write_expr(b, arg, None)?;
+    b.sql.push_str(" AT TIME ZONE 'UTC')");
+    Ok(())
 }
 
 /// Emit a JSON-path traversal.
@@ -2175,7 +2213,11 @@ fn write_function(
             }
             // Every dialect spells this `DATE(x)`.
             b.sql.push_str("DATE(");
-            write_expr(b, &args[0], None)?;
+            if b.d.name() == "postgres" {
+                write_pg_utc_arg(b, &args[0])?;
+            } else {
+                write_expr(b, &args[0], None)?;
+            }
             b.sql.push(')');
             Ok(())
         }
@@ -3066,12 +3108,22 @@ fn write_extract_int(
     let dialect = b.d.name();
     if dialect == "postgres" {
         // EXTRACT returns NUMERIC; cast to INTEGER for return-type
-        // parity with MySQL's per-field functions.
-        b.sql.push_str("CAST(EXTRACT(");
+        // parity with MySQL's per-field functions. SECOND has a
+        // fraction the cast would round (59.7 to 60), so FLOOR it.
+        let floor = field == "SECOND";
+        b.sql.push_str(if floor {
+            "CAST(FLOOR(EXTRACT("
+        } else {
+            "CAST(EXTRACT("
+        });
         b.sql.push_str(field);
         b.sql.push_str(" FROM ");
-        write_expr(b, &args[0], None)?;
-        b.sql.push_str(") AS INTEGER)");
+        write_pg_utc_arg(b, &args[0])?;
+        b.sql.push_str(if floor {
+            ")) AS INTEGER)"
+        } else {
+            ") AS INTEGER)"
+        });
     } else if dialect == "mysql" {
         b.sql.push_str(field);
         b.sql.push('(');
@@ -3111,7 +3163,7 @@ fn write_extract_weekday(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<
     let dialect = b.d.name();
     if dialect == "postgres" {
         b.sql.push_str("CAST(EXTRACT(DOW FROM ");
-        write_expr(b, &args[0], None)?;
+        write_pg_utc_arg(b, &args[0])?;
         b.sql.push_str(") AS INTEGER)");
     } else if dialect == "mysql" {
         b.sql.push_str("(DAYOFWEEK(");
@@ -3159,6 +3211,10 @@ fn write_trunc(
         b.sql.push_str(pg_unit);
         b.sql.push_str("', ");
         write_expr(b, &args[0], None)?;
+        // Truncate a timestamptz in UTC, not the session TimeZone.
+        if expr_type(b, &args[0]) == Some(crate::core::FieldType::DateTime) {
+            b.sql.push_str(", 'UTC'");
+        }
         b.sql.push(')');
     } else if dialect == "mysql" {
         if matches!(kind, F::TruncDay) {

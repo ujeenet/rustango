@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Integer division and PostgreSQL date lookups (#1900)
+
+On MySQL, `F("n") / 2` over integers now truncates (7 / 2 = 3), as on PostgreSQL and SQLite.
+On PostgreSQL, `__date`/`__hour`/… and `trunc_*` on a `DateTime` column use UTC even after `SET TIME ZONE`.
+
 ### MySQL `Decimal` columns are `DECIMAL(65, 28)` (#1899)
 
 New tables get the wider type; existing `DECIMAL(38, 10)` columns keep rounding past 10 places.

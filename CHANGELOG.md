@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — integer division, `__second` and date lookups agree across backends (#1900)
+
+MySQL divides two integer expressions with `DIV`; PostgreSQL floors `__second` (59.7 is 59).
+PostgreSQL date lookups and `trunc_*` on a `DateTime` column read it in UTC, not the session TimeZone.
+
 ### Fixed — `Decimal` keeps its digits on MySQL; whole decimals show on SQLite (#1899)
 
 MySQL `Decimal` columns are now `DECIMAL(65, 28)`, wide enough for every `rust_decimal` value.
