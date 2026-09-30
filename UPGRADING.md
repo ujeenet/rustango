@@ -184,6 +184,11 @@ Updates now fail with `QueryError::MaxLengthExceeded`, `OutOfRange`, `InvalidCho
 Form errors for bad input now use the `FormError` text. A `ListView` filter value that
 does not parse as its field type is ignored instead of matching nothing.
 
+### Formsets: at most 1000 rows
+
+`total_forms` / `parse_formset` return `FormSetError::TooManyForms` above
+`formset::MAX_FORMS`. `FormSetError` is `#[non_exhaustive]`: add a `_ =>` arm to matches.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

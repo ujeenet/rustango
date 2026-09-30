@@ -2135,6 +2135,10 @@ pub(crate) async fn update_submit(
             let html = render_form(&state, model, Some(&form), true, Some(&msg));
             return Ok(Html(html).into_response());
         }
+        Err(super::inlines::InlinePlanError::BadFormset(e)) => {
+            let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
+            return Ok(Html(html).into_response());
+        }
     };
 
     let query = UpdateQuery {

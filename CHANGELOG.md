@@ -54,6 +54,13 @@ A client-set PK no longer comes back as MySQL's `LAST_INSERT_ID()` (`0`, so the 
 redirected to `/0`), a Uuid PK no longer comes back as `NULL`, and a failed read is an
 error instead of `0` / `""`. All three now use the ORM's one PK read-back.
 
+### Fixed — formsets cap `TOTAL_FORMS` at 1000 (#1892)
+
+A huge client `TOTAL_FORMS` aborted the process (`Vec::with_capacity`) or pinned a worker
+in the admin inline loop. `total_forms` now refuses more than `formset::MAX_FORMS` (1000)
+with `FormSetError::TooManyForms`, and the admin re-renders the form with that error.
+**Breaking:** `FormSetError` gained a variant and is now `#[non_exhaustive]`.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
