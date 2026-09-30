@@ -1348,6 +1348,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_delete_prefix_live
       # VARCHAR(255) truncated long keys only on MySQL (#1674).
       - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_long_keys_tri
+      # `incr` was get-then-set, so parallel failed logins were lost (#1871).
+      - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_incr_tri
       - run: cargo test -p rustango --features mysql --test like_escape_live
       - run: cargo test -p rustango --features mysql --test migrate_progress_live
       - run: cargo test -p rustango --features mysql,tenancy --test preflight_live

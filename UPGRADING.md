@@ -169,6 +169,10 @@ omits: repeat the column's nullability, default and any `COLLATE`.
 No schema change. A stock MySQL database (`utf8mb4_0900_ai_ci`) now gets a warning;
 use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
 
+### `DatabaseCache::incr` keeps the first TTL
+
+**Breaking:** `incr` no longer moves the TTL on each call, and an `i64` overflow is an error.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

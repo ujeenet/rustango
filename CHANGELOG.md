@@ -22,6 +22,11 @@ content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
 MySQL's default `_ai_ci` collation makes `=` and `unique` ignore case, unlike PostgreSQL
 and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900_as_cs`.
 
+### Fixed — `DatabaseCache::incr` is atomic (#1871)
+
+One upsert per dialect, so parallel failed logins all count toward the lockout.
+The TTL is set when the counter is created, not on every call.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

@@ -117,8 +117,8 @@ pub trait Cache: Send + Sync + 'static {
     /// value. A value that is not an integer counts as 0.
     ///
     /// The default is a get-parse-set, which is not atomic. Backends
-    /// with a native counter override it: `RedisCache` uses `INCRBY`,
-    /// so counters stay correct across replicas.
+    /// with a native counter override it: `RedisCache` uses `INCRBY` and
+    /// `DatabaseCache` one upsert, so counters stay correct across replicas.
     ///
     /// Treat `ttl` as a hint. The default applies it on every call;
     /// native counters usually set it only when the key is created.
