@@ -2023,9 +2023,9 @@ struct CollectedFields {
     /// back into the struct after insert (MySQL has no RETURNING → the
     /// field stays at its placeholder until the next read).
     generated_field_idents: Vec<(syn::Ident, String)>,
-    /// Inner `T` of the first `Auto<T>` field, for the MySQL
-    /// `LAST_INSERT_ID()` assignment in `AssignAutoPkPool`.
-    first_auto_value_ty: Option<Type>,
+    /// First `Auto<T>` field the database fills, with its inner `T`: the
+    /// MySQL `LAST_INSERT_ID()` target. Rust-filled ones never are (#1934).
+    first_db_auto: Option<(syn::Ident, Type)>,
     /// Bulk-insert per-row pushes for **non-Auto fields only**. Used
     /// by the all-Auto-Unset bulk path (Auto cols dropped from
     /// `columns`).
@@ -2040,6 +2040,9 @@ struct CollectedFields {
     /// Column-name literals for every field including Auto (paired
     /// with `bulk_pushes_all`).
     bulk_columns_all: Vec<TokenStream2>,
+    /// Fills each `default_uuid_v7` field of `_row` in place, so a
+    /// mutable bulk insert hands the PKs back (#1934).
+    bulk_fill_in_place: Vec<TokenStream2>,
     /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
     /// + the loop that asserts every row matches. One pair per Auto
     /// field. Empty when `has_auto == false`.
@@ -2121,11 +2124,12 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         auto_assigns: Vec::new(),
         auto_field_idents: Vec::new(),
         generated_field_idents: Vec::new(),
-        first_auto_value_ty: None,
+        first_db_auto: None,
         bulk_pushes_no_auto: Vec::with_capacity(cap),
         bulk_pushes_all: Vec::with_capacity(cap),
         bulk_columns_no_auto: Vec::with_capacity(cap),
         bulk_columns_all: Vec::with_capacity(cap),
+        bulk_fill_in_place: Vec::new(),
         bulk_auto_uniformity: Vec::new(),
         first_auto_ident: None,
         has_auto: false,
@@ -2208,7 +2212,6 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.has_auto = true;
             if out.first_auto_ident.is_none() {
                 out.first_auto_ident = Some(ident.clone());
-                out.first_auto_value_ty = auto_inner_type(info.value_ty).cloned();
             }
             // `default_uuid_v7` (issue #823) generates the PK Rust-side
             // before binding, so the value is already in
@@ -2223,6 +2226,11 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // bound, so the value is already in `self` and RETURNING
             // would be a redundant column on every dialect.
             if !info.default_uuid_v7 && !info.auto_now_add && !info.auto_now {
+                if out.first_db_auto.is_none() {
+                    out.first_db_auto = auto_inner_type(info.value_ty)
+                        .cloned()
+                        .map(|ty| (ident.clone(), ty));
+                }
                 out.returning_cols.push(quote!(#column));
                 out.auto_field_idents
                     .push((ident.clone(), info.column.clone()));
@@ -2313,15 +2321,30 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // at push time rather than writing back into the struct. An
             // explicitly-Set value is still honoured; only `Unset`
             // takes the clock.
-            if info.auto_now_add || info.auto_now {
+            // `default_uuid_v7` likewise: its column has no DB default (#1934).
+            let rust_fill = if info.default_uuid_v7 {
+                Some(quote!(#root::__uuid::Uuid::now_v7()))
+            } else if info.auto_now_add || info.auto_now {
+                Some(quote!(#root::__chrono::Utc::now()))
+            } else {
+                None
+            };
+            if let Some(fill) = rust_fill {
                 out.bulk_columns_no_auto.push(quote!(#column));
                 out.bulk_pushes_no_auto.push(quote! {
                     _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
                         match &_row.#ident {
                             #root::sql::Auto::Set(_v) => ::core::clone::Clone::clone(_v),
-                            #root::sql::Auto::Unset => #root::__chrono::Utc::now(),
+                            #root::sql::Auto::Unset => #fill,
                         }
                     ));
+                });
+            }
+            if info.default_uuid_v7 {
+                out.bulk_fill_in_place.push(quote! {
+                    if matches!(&_row.#ident, #root::sql::Auto::Unset) {
+                        _row.#ident = #root::sql::Auto::Set(#root::__uuid::Uuid::now_v7());
+                    }
                 });
             }
             // Uniformity check: every row's Auto state must match the
@@ -3831,7 +3854,9 @@ fn inherent_impl_tokens(
                     })
                     .collect()
             };
-            let returning_cols: Vec<proc_macro2::TokenStream> = if fields.has_auto {
+            // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
+            let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty()
+            {
                 fields.returning_cols.clone()
             } else {
                 // Non-Auto-PK: still need RETURNING something for the
@@ -7368,6 +7393,27 @@ fn inherent_impl_tokens(
         let returning_cols = &fields.returning_cols;
         let auto_assigns_for_row = bulk_auto_assigns_for_row(fields);
         let uniformity = &fields.bulk_auto_uniformity;
+        let fill_in_place = &fields.bulk_fill_in_place;
+        // Nothing to read back when every Auto field is filled Rust-side (#1934).
+        let read_back = if fields.returning_cols.is_empty() {
+            quote!()
+        } else {
+            quote! {
+                if _returned.len() != rows.len() {
+                    return ::core::result::Result::Err(
+                        #root::sql::ExecError::Sql(
+                            #root::sql::SqlError::BulkInsertReturningMismatch {
+                                expected: rows.len(),
+                                actual: _returned.len(),
+                            }
+                        )
+                    );
+                }
+                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
+                    #auto_assigns_for_row
+                }
+            }
+        };
         let first_auto_ident = fields
             .first_auto_ident
             .as_ref()
@@ -7414,6 +7460,9 @@ fn inherent_impl_tokens(
                     #root::sql::Auto::Unset
                 );
                 #( #uniformity )*
+                for _row in rows.iter_mut() {
+                    #( #fill_in_place )*
+                }
 
                 let mut _all_rows: ::std::vec::Vec<
                     ::std::vec::Vec<#root::core::SqlValue>,
@@ -7446,19 +7495,7 @@ fn inherent_impl_tokens(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
-                if _returned.len() != rows.len() {
-                    return ::core::result::Result::Err(
-                        #root::sql::ExecError::Sql(
-                            #root::sql::SqlError::BulkInsertReturningMismatch {
-                                expected: rows.len(),
-                                actual: _returned.len(),
-                            }
-                        )
-                    );
-                }
-                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
-                    #auto_assigns_for_row
-                }
+                #read_back
                 #audit_bulk_insert_emit
                 ::core::result::Result::Ok(())
             }
@@ -7863,7 +7900,7 @@ fn inherent_impl_tokens(
                 }
             })
             .collect();
-        let mysql_body = if let Some(first) = fields.first_auto_ident.as_ref() {
+        let mysql_body = if let Some((first, value_ty)) = fields.first_db_auto.as_ref() {
             // The MySQL `LAST_INSERT_ID()` is always i64. Route through
             // `MysqlAutoIdSet` so Auto<i32> narrows safely and
             // Auto<Uuid>/etc. fail to link against MySQL (intended —
@@ -7881,10 +7918,6 @@ fn inherent_impl_tokens(
             // need the DB-defaulted timestamp / UUID can re-fetch the
             // row by PK after `save_pool`. Fixes the cookbook chapter
             // 12 dialect divergence.
-            let value_ty = fields
-                .first_auto_value_ty
-                .as_ref()
-                .expect("first_auto_value_ty set whenever first_auto_ident is");
             quote! {
                 let _converted = <#value_ty as #root::sql::MysqlAutoIdSet>
                     ::rustango_from_mysql_auto_id(_id)?;

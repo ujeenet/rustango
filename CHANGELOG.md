@@ -42,6 +42,12 @@ now parse values like the admin (`forms::parse_form_value`) instead of binding t
 dates, UUIDs, decimals and JSON save on PostgreSQL and bool / int filters match on SQLite.
 **Breaking:** an unparsable `ListView` filter value is ignored, as in `ViewSet`.
 
+### Fixed — `default_uuid_v7` PKs on audited inserts and bulk writes (#1934)
+
+Audited `insert_pool` / `save_pool` no longer fail with `EmptyReturning`, and MySQL no
+longer overwrites the id with `LAST_INSERT_ID()`. `bulk_insert`, `bulk_upsert_pool` and
+`bulk_insert_or_ignore_pool` now fill `Uuid::now_v7()` per row instead of binding NULL.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.
