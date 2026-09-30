@@ -333,7 +333,11 @@ impl OAuth2Provider {
     }
 
     /// Fill the endpoints from `issuer`'s discovery document.
-    async fn discover(mut self, issuer: &str, policy: &TargetPolicy) -> Result<Self, OAuthError> {
+    pub(crate) async fn discover(
+        mut self,
+        issuer: &str,
+        policy: &TargetPolicy,
+    ) -> Result<Self, OAuthError> {
         let issuer = issuer.trim_end_matches('/');
         let url = format!("{issuer}/.well-known/openid-configuration");
         let resp = self

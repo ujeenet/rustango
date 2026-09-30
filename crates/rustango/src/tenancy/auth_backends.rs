@@ -349,18 +349,17 @@ impl AuthBackend for ApiKeyBackend {
             return Ok(None);
         };
 
-        if let Some(exp) = key.expires_at {
-            if chrono::Utc::now() > exp {
-                return Err(AuthError::InvalidToken);
-            }
-        }
-
+        // Verify before judging expiry, so an expired prefix costs the
+        // same as an unknown one (#1729).
         let ok = password::verify_async_in(HashLane::Credential, secret, &key.key_hash)
             .await
             .map_err(AuthError::from_hash)?;
         if !ok {
             attempt.failed().await;
             return Ok(None);
+        }
+        if key.expires_at.is_some_and(|exp| chrono::Utc::now() > exp) {
+            return Err(AuthError::InvalidToken);
         }
         attempt.succeeded().await;
 

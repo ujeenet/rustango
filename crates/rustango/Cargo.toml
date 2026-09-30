@@ -344,8 +344,8 @@ webhook = ["_signing"]
 webhook-delivery = ["webhook", "jobs", "dep:reqwest"]
 
 # API keys (`rustango::api_keys`) — standalone generate/hash/verify
-# helpers for `{prefix}.{secret}` keys with argon2id hashing.
-api_keys = ["dep:argon2", "dep:password-hash", "_rand"]
+# helpers for `{prefix}.{secret}` keys; hashing is `passwords`' (#1729).
+api_keys = ["passwords", "_rand"]
 
 # Generic password helpers (`rustango::passwords`) — argon2id hash/verify
 # + minimal strength check. Standalone alternative to tenancy::password.

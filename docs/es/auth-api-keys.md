@@ -92,6 +92,9 @@ modo que hashear el mismo secreto dos veces produce cadenas distintas — y amba
 se verifican. `verify_key` devuelve `Ok(false)` en caso de discrepancia y
 `Err(ApiKeyError)` solo cuando la cadena almacenada no es un hash válido.
 
+Desde código async llame a `generate_key_async`, `hash_secret_async` y
+`verify_key_async`; calculan argon2 fuera del runtime.
+
 ---
 
 ## El backend con almacenamiento
