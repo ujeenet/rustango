@@ -31,6 +31,46 @@ A ViewSet whose create/update/destroy need no codename logs a `rustango::viewset
 `.allow_anonymous()` (or `#[viewset(allow_anonymous)]`) says it is intended. `make:viewset`
 now scaffolds `.permissions_for_model()` (tenant) or `read_only` (pool).
 
+### Fixed — M2M on String / Uuid primary keys (#1926)
+
+The M2M managers bound every non-integer source PK as `0`, so all sources shared rows
+(MySQL matched any letter-first key). They now bind the real key and refuse an unsaved
+source with `ExecError::M2mUnsavedSource`. `M2MManager::contains` also decodes on PostgreSQL.
+**Breaking:** `M2mChangedContext::src_pk` is a `SqlValue`, not an `i64`.
+
+### Fixed — UPDATE checks field rules like INSERT (#1893)
+
+`update_pool`, `update_tx` and the audited `save_pool` now run `max_length`, `min` /
+`max`, `choices` and validators before writing, and `ModelForm::validate` reports them
+per field. **Breaking:** an update that broke these rules used to be stored; it now errors.
+
+### Fixed — template views bind values by field type (#1915)
+
+`CreateView` / `UpdateView` forms, `ListView` `filter_fields` and FK `_display` lookups
+now parse values like the admin (`forms::parse_form_value`) instead of binding text, so
+dates, UUIDs, decimals and JSON save on PostgreSQL and bool / int filters match on SQLite.
+**Breaking:** an empty or unparsable `ListView` filter value (bools take only
+`true`/`false`/`1`/`0`/`on`/`off`) is ignored. Filters accept `YYYY-MM-DD HH:MM:SS` datetimes.
+
+### Fixed — `default_uuid_v7` PKs on audited inserts and bulk writes (#1934)
+
+Audited `insert_pool` / `save_pool` no longer fail with `EmptyReturning`, and MySQL no
+longer overwrites the id with `LAST_INSERT_ID()`. `bulk_insert`, `bulk_upsert_pool` and
+`bulk_insert_or_ignore_pool` now fill `Uuid::now_v7()` per row instead of binding NULL.
+
+### Fixed — ModelForm, admin and CreateView report the PK they wrote (#1894)
+
+A client-set PK no longer comes back as MySQL's `LAST_INSERT_ID()` (`0`, so the admin
+redirected to `/0`), a Uuid PK no longer comes back as `NULL`, and a failed read is an
+error instead of `0` / `""`. All three now use the ORM's one PK read-back.
+
+### Fixed — formsets cap `TOTAL_FORMS` at 1000 (#1892)
+
+A huge client `TOTAL_FORMS` aborted the process (`Vec::with_capacity`) or pinned a worker
+in the admin inline loop. `total_forms` now refuses more than `formset::MAX_FORMS` (1000)
+with `FormSetError::TooManyForms`, and the admin re-renders the form with that error.
+**Breaking:** `FormSetError` gained a variant and is now `#[non_exhaustive]`.
+
 ## [0.59.8] — 2026-09-30
 
 ### Security — admin audit log needs `audit.view` / `audit.delete` (#1858)
@@ -166,46 +206,6 @@ content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
 
 MySQL's default `_ai_ci` collation makes `=` and `unique` ignore case, unlike PostgreSQL
 and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900_as_cs`.
-
-### Fixed — M2M on String / Uuid primary keys (#1926)
-
-The M2M managers bound every non-integer source PK as `0`, so all sources shared rows
-(MySQL matched any letter-first key). They now bind the real key and refuse an unsaved
-source with `ExecError::M2mUnsavedSource`. `M2MManager::contains` also decodes on PostgreSQL.
-**Breaking:** `M2mChangedContext::src_pk` is a `SqlValue`, not an `i64`.
-
-### Fixed — UPDATE checks field rules like INSERT (#1893)
-
-`update_pool`, `update_tx` and the audited `save_pool` now run `max_length`, `min` /
-`max`, `choices` and validators before writing, and `ModelForm::validate` reports them
-per field. **Breaking:** an update that broke these rules used to be stored; it now errors.
-
-### Fixed — template views bind values by field type (#1915)
-
-`CreateView` / `UpdateView` forms, `ListView` `filter_fields` and FK `_display` lookups
-now parse values like the admin (`forms::parse_form_value`) instead of binding text, so
-dates, UUIDs, decimals and JSON save on PostgreSQL and bool / int filters match on SQLite.
-**Breaking:** an empty or unparsable `ListView` filter value (bools take only
-`true`/`false`/`1`/`0`/`on`/`off`) is ignored. Filters accept `YYYY-MM-DD HH:MM:SS` datetimes.
-
-### Fixed — `default_uuid_v7` PKs on audited inserts and bulk writes (#1934)
-
-Audited `insert_pool` / `save_pool` no longer fail with `EmptyReturning`, and MySQL no
-longer overwrites the id with `LAST_INSERT_ID()`. `bulk_insert`, `bulk_upsert_pool` and
-`bulk_insert_or_ignore_pool` now fill `Uuid::now_v7()` per row instead of binding NULL.
-
-### Fixed — ModelForm, admin and CreateView report the PK they wrote (#1894)
-
-A client-set PK no longer comes back as MySQL's `LAST_INSERT_ID()` (`0`, so the admin
-redirected to `/0`), a Uuid PK no longer comes back as `NULL`, and a failed read is an
-error instead of `0` / `""`. All three now use the ORM's one PK read-back.
-
-### Fixed — formsets cap `TOTAL_FORMS` at 1000 (#1892)
-
-A huge client `TOTAL_FORMS` aborted the process (`Vec::with_capacity`) or pinned a worker
-in the admin inline loop. `total_forms` now refuses more than `formset::MAX_FORMS` (1000)
-with `FormSetError::TooManyForms`, and the admin re-renders the form with that error.
-**Breaking:** `FormSetError` gained a variant and is now `#[non_exhaustive]`.
 
 ## [0.59.6] — 2026-09-29
 

@@ -172,6 +172,26 @@ Mount upload directories with `with_uploads` instead of `with_static`.
 No behaviour change: a ViewSet whose write actions have no codenames still serves them, but
 logs a warning at mount. Add permissions, `.read_only()`, or `.allow_anonymous()` to silence it.
 
+### `m2m_changed`: `src_pk` is a `SqlValue`
+
+`M2mChangedContext::src_pk` changed from `i64` to `SqlValue`. Compare with
+`SqlValue::I64(n)`, and log it with `?ctx.src_pk`.
+
+### UPDATE validates field rules
+
+Updates now fail with `QueryError::MaxLengthExceeded`, `OutOfRange`, `InvalidChoice` or
+`ValidatorFailed` where they used to write. `ModelForm` returns these as field errors.
+
+### Template views: typed form and filter values
+
+Form errors for bad input now use the `FormError` text. A `ListView` filter value that
+is empty or does not parse as its field type is ignored instead of matching nothing.
+
+### Formsets: at most 1000 rows
+
+`total_forms` / `parse_formset` return `FormSetError::TooManyForms` above
+`formset::MAX_FORMS`. `FormSetError` is `#[non_exhaustive]`: add a `_ =>` arm to matches.
+
 ## 0.59.8
 
 ### Admin audit log is permission-gated
@@ -281,26 +301,6 @@ omits: repeat the column's nullability, default and any `COLLATE`.
 
 No schema change. A stock MySQL database (`utf8mb4_0900_ai_ci`) now gets a warning;
 use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
-
-### `m2m_changed`: `src_pk` is a `SqlValue`
-
-`M2mChangedContext::src_pk` changed from `i64` to `SqlValue`. Compare with
-`SqlValue::I64(n)`, and log it with `?ctx.src_pk`.
-
-### UPDATE validates field rules
-
-Updates now fail with `QueryError::MaxLengthExceeded`, `OutOfRange`, `InvalidChoice` or
-`ValidatorFailed` where they used to write. `ModelForm` returns these as field errors.
-
-### Template views: typed form and filter values
-
-Form errors for bad input now use the `FormError` text. A `ListView` filter value that
-is empty or does not parse as its field type is ignored instead of matching nothing.
-
-### Formsets: at most 1000 rows
-
-`total_forms` / `parse_formset` return `FormSetError::TooManyForms` above
-`formset::MAX_FORMS`. `FormSetError` is `#[non_exhaustive]`: add a `_ =>` arm to matches.
 
 ## 0.59.6
 
