@@ -41,6 +41,24 @@ first-user check is an error, not a superuser; prompted passwords keep their spa
 `set-host-enabled --enabled false` reads `false` as the value. **Breaking:** `grant-perm`,
 `revoke-perm` and the host verbs refuse unknown flags (`--rol` granted to a user).
 
+### Security — `JwtBackend` checks the tenant binding (#1848)
+
+**Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,
+so tenant A's user 1 no longer logs in as tenant B's user 1. MCP agent tokens are refused
+by `JwtBackend` and `JwtAuth::verify_for_tenant`. New `JwtBackend::issue_for_tenant`.
+
+### Security — single-use auth links are one atomic `add` (#1853)
+
+Two simultaneous redemptions of a reset, magic-link or verify link no longer both pass.
+A failing cache or a `NullCache` now refuses the link instead of letting it be reused.
+
+### Security — JWT refresh ends on password change, cap and replay (#1854)
+
+**Breaking:** `/api/auth/refresh` refuses a chain after a password change, past
+`Config::refresh_absolute_ttl_secs` (default 30 days) from login, and once a rotated
+token is replayed. A retry within `refresh_reuse_grace_secs` (10 s) only gets a 401.
+Refresh tokens issued before this release are refused.
+
 ### Fixed — a panicking job no longer kills its worker (#1843)
 
 A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
@@ -1859,7 +1877,6 @@ exploitable?" answered honestly — including where the answer is no.
   emits a form MySQL rejects with error 1235 when the inner select has
   one, and `WhereExpr::RelExists` has no public builder. With those
   closed this function is about eight lines of ORM.
-
 
 - **Three write-path regressions this release introduced**, found by a
   crew review of the assembled branch. 0.57.6 had none of them.
@@ -4003,7 +4020,6 @@ neither did. Those releases are yanked; upgrade to this one.
   keep working.
 
 ### Added
-
 
 - **Squash reconciliation — `Migration.replaces`** (#1167) — a squash collapses
   a run of historical migrations into one file that recreates the same end

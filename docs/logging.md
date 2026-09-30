@@ -122,6 +122,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::email` | Mail dispatch |
 | `rustango::email::smtp` | SMTP transport |
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
+| `rustango::auth_flows` | Single-use auth links refused by the cache |
 | `rustango::hmac_auth` | HMAC request auth setup |
 | `rustango::humanize` | Humanize filters |
 | `rustango::jobs` | Background job queues |

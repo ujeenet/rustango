@@ -127,6 +127,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::email` | Envoi de courrier |
 | `rustango::email::smtp` | Transport SMTP |
 | `rustango::error` | La cause d'une 5xx, que le corps de la réponse ne divulgue pas |
+| `rustango::auth_flows` | Liens d'authentification à usage unique refusés par le cache |
 | `rustango::hmac_auth` | Configuration de l'authentification HMAC des requêtes |
 | `rustango::humanize` | Filtres humanize |
 | `rustango::jobs` | Files de tâches de fond |

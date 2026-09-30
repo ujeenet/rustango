@@ -88,6 +88,51 @@ impl JwtClaims {
     pub fn custom_value(&self, key: &str) -> Option<&serde_json::Value> {
         self.custom.get(key)
     }
+
+    /// The user id, if this token may act as a user in `scope` (#1848).
+    ///
+    /// # Errors
+    /// The reason it may not; see [`UserTokenScope`].
+    pub fn user_id_in(&self, scope: UserTokenScope<'_>) -> Result<i64, &'static str> {
+        scope.admits(&self.custom).map(|()| self.sub)
+    }
+}
+
+/// Claim that marks a non-user principal, e.g. an MCP agent (`"agent"`).
+pub const CLAIM_KIND: &str = "kind";
+/// Claim pinning a token to one tenant slug.
+pub const CLAIM_TENANT: &str = "tenant";
+
+/// Where a user access token is presented. The one check that decides
+/// whether its `sub` names a user there (#1848).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UserTokenScope<'a> {
+    /// A resolved tenant: the `tenant` claim must equal this slug.
+    Tenant(&'a str),
+    /// No tenant resolved: only a token with no `tenant` claim.
+    Unscoped,
+}
+
+impl UserTokenScope<'_> {
+    /// Refuses a `kind` token (its `sub` is not a user id) and a tenant
+    /// binding that does not match this scope.
+    pub(crate) fn admits(
+        self,
+        claims: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), &'static str> {
+        if claims.contains_key(CLAIM_KIND) {
+            return Err("token is not a user token");
+        }
+        let bound = claims.get(CLAIM_TENANT);
+        match (self, bound) {
+            (Self::Tenant(slug), Some(v)) if v.as_str() == Some(slug) => Ok(()),
+            (Self::Tenant(_), Some(_)) => Err("token issued for different tenant"),
+            (Self::Tenant(_), None) => Err("token missing tenant binding"),
+            (Self::Unscoped, None) => Ok(()),
+            (Self::Unscoped, Some(_)) => Err("tenant token presented without a tenant"),
+        }
+    }
 }
 
 /// Reserved claim names — caller-supplied custom payloads cannot use
@@ -401,6 +446,52 @@ impl JwtLifecycle {
             .then_some(claims)
     }
 
+    /// A refresh token's claims by signature, expiry and `typ`, ignoring
+    /// revocation, so a replayed token can be told from a forged one (#1854).
+    pub(crate) fn decode_refresh(&self, token: &str) -> Option<JwtClaims> {
+        self.decode_unexpired(token)
+            .filter(|c| c.typ == REFRESH_TYP)
+    }
+
+    /// Mark a refresh-token family dead until `exp` (#1854). Only as
+    /// strong as the JTI store: a process-local one forgets on restart.
+    pub(crate) async fn revoke_family(&self, fam: &str, exp: i64) {
+        let key = family_key(fam);
+        // `false` is "already there"; a store that also can't read it back failed.
+        if !self.jti_store.mark_used(&key, exp).await && !self.jti_store.is_used(&key).await {
+            tracing::warn!(
+                target: "rustango::tenancy",
+                "JTI store did not record a refresh-family revocation; the replayed chain stays live"
+            );
+        }
+    }
+
+    /// Record a refresh attempt on a token not yet redeemed, in a
+    /// `grace`-second time bucket (#1854).
+    pub(crate) async fn note_refresh_attempt(&self, jti: &str, grace: i64) {
+        if grace <= 0 || self.jti_store.is_used(jti).await {
+            return;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let key = grace_key(jti, now / grace);
+        let _ = self.jti_store.mark_used(&key, now + 2 * grace).await;
+    }
+
+    /// `true` when a refresh of `jti` began while it was still unredeemed,
+    /// within the last `grace` to `2 × grace` seconds: a retry, not a theft.
+    pub(crate) async fn recently_attempted(&self, jti: &str, grace: i64) -> bool {
+        if grace <= 0 {
+            return false;
+        }
+        let bucket = chrono::Utc::now().timestamp() / grace;
+        self.jti_store.is_used(&grace_key(jti, bucket)).await
+            || self.jti_store.is_used(&grace_key(jti, bucket - 1)).await
+    }
+
+    pub(crate) async fn family_revoked(&self, fam: &str) -> bool {
+        self.jti_store.is_used(&family_key(fam)).await
+    }
+
     /// Signature and expiry, no store lookup. Expiry comes first, so an
     /// expired token never costs a round trip to a durable backend.
     fn decode_unexpired(&self, token: &str) -> Option<JwtClaims> {
@@ -509,7 +600,17 @@ impl JwtLifecycle {
     }
 }
 
-fn random_jti() -> String {
+/// `:` never occurs in a base64url JTI, so the two key spaces cannot meet.
+fn family_key(fam: &str) -> String {
+    format!("fam:{fam}")
+}
+
+/// Bucketed, so the window holds even where `is_used` ignores expiry.
+fn grace_key(jti: &str, bucket: i64) -> String {
+    format!("grace:{jti}:{bucket}")
+}
+
+pub(crate) fn random_jti() -> String {
     // v0.42 — OsRng (OS CSPRNG) for JWT identifier material. A
     // predictable JTI lets an attacker pre-mint blacklist entries
     // and bypass token revocation.
