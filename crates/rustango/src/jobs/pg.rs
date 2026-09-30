@@ -642,15 +642,21 @@ where
     F: std::future::Future,
 {
     let mut run = std::pin::pin!(run);
-    let mut beat = tokio::time::interval(worker.heartbeat);
-    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    beat.tick().await; // the first tick is immediate
-    let mut held = true;
-    loop {
-        tokio::select! {
-            out = &mut run => return (out, held),
-            _ = beat.tick(), if held => held = heartbeat(pool, worker, id).await,
+    // Its own future, so a heartbeat waiting on a connection never stops `run` (#1961).
+    let lease = std::pin::pin!(async {
+        let mut beat = tokio::time::interval(worker.heartbeat);
+        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        beat.tick().await; // the first tick is immediate
+        loop {
+            beat.tick().await;
+            if !heartbeat(pool, worker, id).await {
+                return;
+            }
         }
+    });
+    tokio::select! {
+        out = &mut run => (out, true),
+        () = lease => (run.await, false),
     }
 }
 
@@ -911,6 +917,36 @@ mod tests {
         assert!(r.is_some());
         let (_, name) = r.unwrap();
         assert_eq!(name, "demo:job");
+    }
+
+    /// #1961: a job holding the only connection must not stall its heartbeat.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn heartbeat_waits_beside_a_job_holding_the_connection() {
+        let sqlite = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        let pool = Pool::Sqlite(sqlite.clone());
+        PgJobQueue::ensure_table_pool(&pool).await.expect("table");
+        let worker = Worker {
+            id: "w".into(),
+            heartbeat: Duration::from_millis(20),
+        };
+        let job = async {
+            let _conn = sqlite.acquire().await.expect("conn");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        let started = std::time::Instant::now();
+        let ((), held) = run_with_heartbeat(&pool, &worker, 1, job).await;
+        assert!(held);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stalled for {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

@@ -43,6 +43,11 @@ A cookie reader that always returns `None` now fails a test at each call site.
 
 `urlencoding` is a dev-dependency, and the S3 and job-queue suites are gated on their features.
 
+### Fixed — a job heartbeat no longer freezes the job (#1961)
+
+The `PgJobQueue` heartbeat now runs beside the job, so a job holding the last pool
+connection (or SQLite's writer) no longer stalls until `acquire_timeout`.
+
 ## [0.59.7] — 2026-09-30
 
 ### Security — `JwtBackend` checks the tenant binding (#1848)
