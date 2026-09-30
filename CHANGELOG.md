@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.6] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
 ### Added — egress proxy for checked outbound calls (#1792)
 
 Set `RUSTANGO_OUTBOUND_PROXY` to send SSO, Slack and webhook calls through a proxy;
