@@ -2696,38 +2696,40 @@ fn model_impl_tokens(
     quote! {
         impl #root::core::Model for #struct_name {
             const SCHEMA: &'static #root::core::ModelSchema = &{
-                let mut s = #root::core::ModelSchema::new(#model_name, #table);
-                s.fields = #fields_slice;
-                s.display = #display_tokens;
-                s.app_label = #app_label_tokens;
-                s.admin = #admin_tokens;
-                s.soft_delete_column = #soft_delete_tokens;
-                s.permissions = #permissions;
-                s.audit_track = #audit_track_tokens;
-                s.m2m = #m2m_slice;
-                s.indexes = #indexes_slice;
-                s.check_constraints = #checks_slice;
-                s.exclusion_constraints = #excludes_slice;
-                s.composite_relations = #composite_fk_slice;
-                s.generic_relations = #generic_fk_slice;
-                s.scope = #scope_tokens;
-                s.default_order = &[ #(#default_order_tokens),* ];
-                s.is_view = #is_view;
-                s.verbose_name = #verbose_name_tokens;
-                s.verbose_name_plural = #verbose_name_plural_tokens;
-                s.managed = #managed;
-                s.base_manager_name = #base_manager_name_tokens;
-                s.order_with_respect_to = #order_with_respect_to_tokens;
-                s.proxy = #proxy;
-                s.required_db_features = &[ #(#required_db_features_lits),* ];
-                s.required_db_vendor = #required_db_vendor_tokens;
-                s.default_related_name = #default_related_name_tokens;
-                s.db_table_comment = #db_table_comment_tokens;
-                s.get_latest_by = #get_latest_by_tokens;
-                s.extra_permissions = &[ #(#extra_permission_tokens),* ];
-                s.default_permissions = &[ #(#default_permission_tokens),* ];
-                s.global_scopes = #global_scope_slice;
-                s
+                #root::core::ModelSchema::from_parts(#root::core::ModelSchemaParts {
+                    name: #model_name,
+                    table: #table,
+                    fields: #fields_slice,
+                    display: #display_tokens,
+                    app_label: #app_label_tokens,
+                    admin: #admin_tokens,
+                    soft_delete_column: #soft_delete_tokens,
+                    permissions: #permissions,
+                    audit_track: #audit_track_tokens,
+                    m2m: #m2m_slice,
+                    indexes: #indexes_slice,
+                    check_constraints: #checks_slice,
+                    exclusion_constraints: #excludes_slice,
+                    composite_relations: #composite_fk_slice,
+                    generic_relations: #generic_fk_slice,
+                    scope: #scope_tokens,
+                    default_order: &[ #(#default_order_tokens),* ],
+                    is_view: #is_view,
+                    verbose_name: #verbose_name_tokens,
+                    verbose_name_plural: #verbose_name_plural_tokens,
+                    managed: #managed,
+                    base_manager_name: #base_manager_name_tokens,
+                    order_with_respect_to: #order_with_respect_to_tokens,
+                    proxy: #proxy,
+                    required_db_features: &[ #(#required_db_features_lits),* ],
+                    required_db_vendor: #required_db_vendor_tokens,
+                    default_related_name: #default_related_name_tokens,
+                    db_table_comment: #db_table_comment_tokens,
+                    get_latest_by: #get_latest_by_tokens,
+                    extra_permissions: &[ #(#extra_permission_tokens),* ],
+                    default_permissions: &[ #(#default_permission_tokens),* ],
+                    global_scopes: #global_scope_slice,
+                })
             };
 
             #reverse_relations_override
@@ -2878,26 +2880,26 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     quote! {
         ::core::option::Option::Some({
             const ADMIN: &#root::core::AdminConfig = &{
-                let mut a = #root::core::AdminConfig::DEFAULT;
-                a.list_display = &[ #( #list_display_lits ),* ];
-                a.search_fields = &[ #( #search_fields_lits ),* ];
-                a.list_per_page = #list_per_page;
-                a.ordering = &[ #( #ordering_tokens ),* ];
-                a.readonly_fields = &[ #( #readonly_fields_lits ),* ];
-                a.list_filter = &[ #( #list_filter_lits ),* ];
-                a.actions = &[ #( #actions_lits ),* ];
-                a.fieldsets = #fieldset_tokens;
-                a.list_display_links = &[ #( #list_display_links_lits ),* ];
-                a.search_help_text = #search_help_text;
-                a.actions_on_top = #actions_on_top;
-                a.actions_on_bottom = #actions_on_bottom;
-                a.date_hierarchy = #date_hierarchy;
-                a.prepopulated_fields = #prepopulated_tokens;
-                a.raw_id_fields = &[ #( #raw_id_fields_lits ),* ];
-                a.autocomplete_fields = &[ #( #autocomplete_fields_lits ),* ];
-                a.list_select_related = #list_select_related_tokens;
-                a.formfield_overrides = &[ #( #formfield_tokens ),* ];
-                a
+                #root::core::AdminConfig::from_parts(#root::core::AdminConfigParts {
+                    list_display: &[ #( #list_display_lits ),* ],
+                    search_fields: &[ #( #search_fields_lits ),* ],
+                    list_per_page: #list_per_page,
+                    ordering: &[ #( #ordering_tokens ),* ],
+                    readonly_fields: &[ #( #readonly_fields_lits ),* ],
+                    list_filter: &[ #( #list_filter_lits ),* ],
+                    actions: &[ #( #actions_lits ),* ],
+                    fieldsets: #fieldset_tokens,
+                    list_display_links: &[ #( #list_display_links_lits ),* ],
+                    search_help_text: #search_help_text,
+                    actions_on_top: #actions_on_top,
+                    actions_on_bottom: #actions_on_bottom,
+                    date_hierarchy: #date_hierarchy,
+                    prepopulated_fields: #prepopulated_tokens,
+                    raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
+                    autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
+                    list_select_related: #list_select_related_tokens,
+                    formfield_overrides: &[ #( #formfield_tokens ),* ],
+                })
             };
             ADMIN
         })
@@ -11341,28 +11343,31 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     };
     let auto_now_flag = attrs.auto_now;
     let schema = quote! {{
-        let mut f = #root::core::FieldSchema::new(#name, #column_lit, #field_type_tokens);
-        f.nullable = #nullable;
-        f.primary_key = #primary_key;
-        f.relation = #relation;
-        f.max_length = #max_length;
-        f.min = #min;
-        f.max = #max;
-        f.default = #default;
-        f.auto = #auto;
-        f.auto_now = #auto_now_flag;
-        f.unique = #unique;
-        f.generated_as = #generated_as;
-        f.help_text = #help_text;
-        f.choices = #choices;
-        f.db_comment = #db_comment;
-        f.verbose_name = #verbose_name;
-        f.editable = #editable;
-        f.blank = #blank;
-        f.case_insensitive = #case_insensitive;
-        f.fk_on_delete = #fk_on_delete;
-        f.validators = &[ #(#validators_lits),* ];
-        f
+        #root::core::FieldSchema::from_parts(#root::core::FieldSchemaParts {
+            name: #name,
+            column: #column_lit,
+            ty: #field_type_tokens,
+            nullable: #nullable,
+            primary_key: #primary_key,
+            relation: #relation,
+            max_length: #max_length,
+            min: #min,
+            max: #max,
+            default: #default,
+            auto: #auto,
+            auto_now: #auto_now_flag,
+            unique: #unique,
+            generated_as: #generated_as,
+            help_text: #help_text,
+            choices: #choices,
+            db_comment: #db_comment,
+            verbose_name: #verbose_name,
+            editable: #editable,
+            blank: #blank,
+            case_insensitive: #case_insensitive,
+            fk_on_delete: #fk_on_delete,
+            validators: &[ #(#validators_lits),* ],
+        })
     }};
 
     let from_row_init = quote! {

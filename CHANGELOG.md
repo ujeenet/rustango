@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `derive(Model)` builds schemas as full literals (#1720)
+
+A new `FieldSchema`, `ModelSchema` or `AdminConfig` field is a compile error in the derive again, not a silent `new()` default.
+
 ### Tests — every session and flow cookie read has a happy-path test (#1694)
 
 A cookie reader that always returns `None` now fails a test at each call site.
