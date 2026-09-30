@@ -150,6 +150,17 @@ untouched.
 
 ## Unreleased
 
+### `ApiKeyError` and `HasherError` gain `Busy`
+
+Both are now `#[non_exhaustive]`; add a `_` arm. From async code use
+`api_keys::{generate_key,hash_secret,verify_key}_async` and `PasswordHasherChain::{hash,verify}_async`.
+
+### HMAC signing takes the host
+
+`sign_request` and `sign_now` take a `host` argument after `method`, and every signature
+changes. Services sharing a key, or behind a proxy that rewrites `Host`, set
+`HmacAuthLayer::host`; it panics on an empty or invalid host.
+
 ### MySQL: `Uuid` is hyphenated text
 
 The ORM now writes and reads a `Uuid` as the 36-character text its `CHAR(36)` column

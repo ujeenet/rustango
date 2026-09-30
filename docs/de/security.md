@@ -468,10 +468,10 @@ Die standardmäßige In-Memory-Blacklist (`InMemoryJtiStore`) räumt abgelaufene
 API-Keys erlauben Skripten und Services die Authentifizierung ohne Benutzername, Passwort oder Session — praktisch für Machine-to-Machine-Zugriff. Du generierst einen Key, zeigst ihn dem Benutzer einmal und speicherst nur seinen Präfix und Hash.
 
 ```rust
-use rustango::api_keys::{generate_key, verify_key, split_token};
+use rustango::api_keys::{generate_key_async, verify_key_async, split_token};
 
 // Issuance
-let (full_token, prefix, hash) = generate_key()?;
+let (full_token, prefix, hash) = generate_key_async().await?;
 // Format: {8-char hex prefix}.{32-char hex secret}
 // Show full_token to the user once. Store prefix + hash in your DB.
 
@@ -479,7 +479,7 @@ let (full_token, prefix, hash) = generate_key()?;
 let (prefix, secret) = split_token(&inbound_header)
     .ok_or(StatusCode::UNAUTHORIZED)?;
 let row = lookup_by_prefix(prefix).await?;
-if !verify_key(secret, &row.hash)? {
+if !verify_key_async(secret, &row.hash).await? {
     return Err(StatusCode::UNAUTHORIZED);
 }
 ```
