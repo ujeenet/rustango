@@ -4,10 +4,10 @@
 //! and junction tables, plus column type, nullability, default,
 //! length and uniqueness changes.
 //!
-//! **Statement order is a contract.** `CREATE TABLE` comes before
-//! `ADD COLUMN`, so a new column can reference a new table. `DROP
-//! COLUMN` comes before `DROP TABLE` for the same reason. FK
-//! constraints for new tables come last.
+//! **Statement order is a contract.** Indexes, constraints and junction
+//! tables drop before the columns and tables they hang off. `CREATE
+//! TABLE` comes before `ADD COLUMN`, so a new column can reference a new
+//! table. Tables drop child first. FK constraints for new tables come last.
 //!
 //! `ADD COLUMN ... NOT NULL` only works when the field has a
 //! `default`, which backfills the existing rows. Without one it is
@@ -213,8 +213,11 @@ pub enum SchemaChange {
 
 /// Compute the ordered list of changes from `prev` to `current`.
 ///
-/// **The order is a contract:** create tables, add columns, alter
-/// columns, drop columns, drop tables.
+/// **The order is a contract:** drop what hangs off a table or column
+/// (indexes, checks, excludes, composite FKs, then M2M junctions), create
+/// tables, add columns, alter columns, drop columns, drop tables child
+/// first, then create the dependents. MySQL commits each DDL statement, so
+/// a drop that fails after its column or table went cannot roll back (#1879).
 ///
 /// Renames are **never** emitted: a snapshot diff cannot tell a
 /// rename from a drop plus an add. Write those by hand with
@@ -224,6 +227,77 @@ pub enum SchemaChange {
 #[must_use]
 pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<SchemaChange> {
     let mut changes = Vec::new();
+    // Created after the tables and columns; the drop halves of changed
+    // objects go in the first phase with the other drops.
+    let mut creates = Vec::new();
+
+    // Dropped composite FKs on tables that stay, before the unique index
+    // they reference; a dropped table takes its own.
+    for pt in &prev.tables {
+        let Some(ct) = current.table(&pt.name) else {
+            continue;
+        };
+        for pf in &pt.composite_fks {
+            if !ct.composite_fks.iter().any(|c| c.name == pf.name) {
+                changes.push(SchemaChange::DropCompositeFk {
+                    table: pt.name.clone(),
+                    name: pf.name.clone(),
+                });
+            }
+        }
+    }
+    // Dropped and changed indexes. A changed one (same name, new shape)
+    // lowers to a Drop + Create pair, or the database keeps the old one.
+    for idx in &prev.indexes {
+        let changed = current.index(&idx.name).map(|c| {
+            (c.columns != idx.columns
+                || c.unique != idx.unique
+                || c.table != idx.table
+                || c.method != idx.method
+                || c.where_clause != idx.where_clause
+                || c.include != idx.include)
+                .then_some(c)
+        });
+        if matches!(changed, None | Some(Some(_))) {
+            // `idx.table`: an index that moved tables is dropped where it is now.
+            changes.push(SchemaChange::DropIndex {
+                name: idx.name.clone(),
+                table: idx.table.clone(),
+            });
+        }
+        if let Some(Some(c)) = changed {
+            creates.push(create_index(c));
+        }
+    }
+    // Dropped CHECK constraints.
+    for c in &prev.checks {
+        if current.check(&c.name).is_none() {
+            changes.push(SchemaChange::DropCheckConstraint {
+                name: c.name.clone(),
+                table: c.table.clone(),
+            });
+        }
+    }
+    // Dropped PG EXCLUDE constraints, by name: `SchemaSnapshot` has no
+    // accessor for excludes.
+    let current_exclude_names: std::collections::HashSet<&str> =
+        current.excludes.iter().map(|x| x.name.as_str()).collect();
+    for x in &prev.excludes {
+        if !current_exclude_names.contains(x.name.as_str()) {
+            changes.push(SchemaChange::DropExclusionConstraint {
+                name: x.name.clone(),
+                table: x.table.clone(),
+            });
+        }
+    }
+    // Dropped M2M junctions, before the tables they reference.
+    for mt in &prev.m2m_tables {
+        if current.m2m_table(&mt.through).is_none() {
+            changes.push(SchemaChange::DropM2MTable {
+                through: mt.through.clone(),
+            });
+        }
+    }
 
     // New tables.
     for t in &current.tables {
@@ -272,141 +346,18 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
-    // Objects that hang off a table must be dropped **before** the
-    // table itself.
-    //
-    // Order, never suppression. `DropTable` first then `DropIndex`
-    // fails on MySQL: the table drop commits at once, the index drop
-    // then errors, and the ledger row is never written, so the
-    // re-run cannot recover.
-    //
-    // Dropping the index only from the op list is worse. `invert`
-    // would then produce a bare `CreateTable`, which renders no
-    // index DDL, so a rollback would quietly restore the table
-    // without its indexes, UNIQUE ones included.
-    //
-    // Dropping the dependent first works on every dialect, because
-    // the table is still there. `invert` walks the list backwards,
-    // so `[DropIndex, DropTable]` inverts to
-    // `[CreateTable, CreateIndex]`: the right order, for free.
-    //
-    // Dropped indexes: in prev, not in current.
-    for idx in &prev.indexes {
-        if current.index(&idx.name).is_none() {
-            changes.push(SchemaChange::DropIndex {
-                name: idx.name.clone(),
-                table: idx.table.clone(),
-            });
-        }
+    // Dropped tables, each before the tables it references.
+    for name in dropped_tables_child_first(prev, current) {
+        changes.push(SchemaChange::DropTable(name.to_owned()));
     }
-    // Dropped CHECK constraints, before the table, for the same
-    // reason as indexes.
-    for c in &prev.checks {
-        if current.check(&c.name).is_none() {
-            changes.push(SchemaChange::DropCheckConstraint {
-                name: c.name.clone(),
-                table: c.table.clone(),
-            });
-        }
-    }
-    // Dropped PG EXCLUDE constraints. Compared by name, because
-    // `SchemaSnapshot` has no accessor for excludes.
-    let current_exclude_names: std::collections::HashSet<&str> =
-        current.excludes.iter().map(|x| x.name.as_str()).collect();
-    for x in &prev.excludes {
-        if !current_exclude_names.contains(x.name.as_str()) {
-            changes.push(SchemaChange::DropExclusionConstraint {
-                name: x.name.clone(),
-                table: x.table.clone(),
-            });
-        }
-    }
-    // Dropped tables — after everything that hangs off them.
-    for pt in &prev.tables {
-        if current.table(&pt.name).is_none() {
-            changes.push(SchemaChange::DropTable(pt.name.clone()));
-        }
-    }
-    // New indexes — present in current, absent from prev.
+
+    // New indexes, then the recreated halves of changed ones.
     for idx in &current.indexes {
         if prev.index(&idx.name).is_none() {
-            changes.push(SchemaChange::CreateIndex {
-                name: idx.name.clone(),
-                table: idx.table.clone(),
-                columns: idx.columns.clone(),
-                unique: idx.unique,
-                method: idx.method.clone(),
-                where_clause: idx.where_clause.clone(),
-                include: idx.include.clone(),
-            });
+            changes.push(create_index(idx));
         }
     }
-    // Changed indexes — same name in both, but columns / table /
-    // unique flag differ. Without this branch, a model edit that
-    // tweaks an index in place (without renaming it) would land a
-    // silently-stale index in the database. The diff lowers each
-    // such change to a Drop + Create pair so the new shape is
-    // applied atomically.
-    for idx in &current.indexes {
-        if let Some(prev_idx) = prev.index(&idx.name) {
-            if prev_idx.columns != idx.columns
-                || prev_idx.unique != idx.unique
-                || prev_idx.table != idx.table
-                || prev_idx.method != idx.method
-                || prev_idx.where_clause != idx.where_clause
-            {
-                changes.push(SchemaChange::DropIndex {
-                    // `prev_idx.table`, not `idx.table`: one of the
-                    // conditions above is `prev_idx.table != idx.table`,
-                    // so this branch covers an index that **moved
-                    // tables**. The DROP has to name the table it is
-                    // still on; the CreateIndex below names the new one.
-                    name: idx.name.clone(),
-                    table: prev_idx.table.clone(),
-                });
-                changes.push(SchemaChange::CreateIndex {
-                    name: idx.name.clone(),
-                    table: idx.table.clone(),
-                    columns: idx.columns.clone(),
-                    unique: idx.unique,
-                    method: idx.method.clone(),
-                    where_clause: idx.where_clause.clone(),
-                    include: idx.include.clone(),
-                });
-            }
-        }
-    }
-    // Also detect include-only changes so a fresh covering set
-    // re-emits as Drop + Create.
-    for idx in &current.indexes {
-        if let Some(prev_idx) = prev.index(&idx.name) {
-            if prev_idx.columns == idx.columns
-                && prev_idx.unique == idx.unique
-                && prev_idx.table == idx.table
-                && prev_idx.method == idx.method
-                && prev_idx.where_clause == idx.where_clause
-                && prev_idx.include != idx.include
-            {
-                changes.push(SchemaChange::DropIndex {
-                    name: idx.name.clone(),
-                    // Equal to `idx.table` here — the condition above
-                    // requires it — but read from `prev_idx` so both
-                    // drop-and-recreate branches say the same thing:
-                    // a DROP names the table the index is on *now*.
-                    table: prev_idx.table.clone(),
-                });
-                changes.push(SchemaChange::CreateIndex {
-                    name: idx.name.clone(),
-                    table: idx.table.clone(),
-                    columns: idx.columns.clone(),
-                    unique: idx.unique,
-                    method: idx.method.clone(),
-                    where_clause: idx.where_clause.clone(),
-                    include: idx.include.clone(),
-                });
-            }
-        }
-    }
+    changes.append(&mut creates);
     // New CHECK constraints.
     for c in &current.checks {
         if prev.check(&c.name).is_none() {
@@ -417,12 +368,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             });
         }
     }
-    // New PG EXCLUDE constraints (issue #319). Dropped EXCLUDEs surface
-    // only when the constraint name disappears from the model — the
-    // migration writer emits a `DropExclusionConstraint`. Same posture
-    // as CHECK: we never rewrite an existing constraint, only add and
-    // drop. To change one, operator drops + re-adds via the next
-    // makemigrations cycle.
+    // New PG EXCLUDE constraints (issue #319).
     let prev_exclude_names: std::collections::HashSet<&str> =
         prev.excludes.iter().map(|x| x.name.as_str()).collect();
     for x in &current.excludes {
@@ -448,14 +394,6 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             });
         }
     }
-    // Dropped M2M junction tables.
-    for mt in &prev.m2m_tables {
-        if current.m2m_table(&mt.through).is_none() {
-            changes.push(SchemaChange::DropM2MTable {
-                through: mt.through.clone(),
-            });
-        }
-    }
     // New composite FK constraints (added on existing tables, or on
     // brand-new tables — we emit them either way and let `render`
     // route through `deferred_fks` so referenced tables exist first).
@@ -476,22 +414,49 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
-    // Dropped composite FK constraints (still-present tables only —
-    // a `DropTable` already cascades the constraint).
-    for pt in &prev.tables {
-        let Some(ct) = current.table(&pt.name) else {
-            continue;
-        };
-        for pf in &pt.composite_fks {
-            if !ct.composite_fks.iter().any(|c| c.name == pf.name) {
-                changes.push(SchemaChange::DropCompositeFk {
-                    table: pt.name.clone(),
-                    name: pf.name.clone(),
-                });
-            }
-        }
-    }
     changes
+}
+
+fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
+    SchemaChange::CreateIndex {
+        name: idx.name.clone(),
+        table: idx.table.clone(),
+        columns: idx.columns.clone(),
+        unique: idx.unique,
+        method: idx.method.clone(),
+        where_clause: idx.where_clause.clone(),
+        include: idx.include.clone(),
+    }
+}
+
+/// Tables in `prev` but not `current`, each before any it references.
+/// A cycle falls back to name order.
+fn dropped_tables_child_first<'a>(
+    prev: &'a SchemaSnapshot,
+    current: &SchemaSnapshot,
+) -> Vec<&'a str> {
+    let references = |t: &TableSnapshot, target: &str| {
+        t.name != target
+            && (t
+                .fields
+                .iter()
+                .any(|f| f.fk.as_ref().is_some_and(|r| r.to == target))
+                || t.composite_fks.iter().any(|c| c.to == target))
+    };
+    let mut left: Vec<&TableSnapshot> = prev
+        .tables
+        .iter()
+        .filter(|t| current.table(&t.name).is_none())
+        .collect();
+    let mut out = Vec::with_capacity(left.len());
+    while !left.is_empty() {
+        let i = left
+            .iter()
+            .position(|t| !left.iter().any(|o| references(o, &t.name)))
+            .unwrap_or(0);
+        out.push(left.remove(i).name.as_str());
+    }
+    out
 }
 
 fn push_alter_changes(

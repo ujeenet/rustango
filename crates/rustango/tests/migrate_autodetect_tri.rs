@@ -238,7 +238,159 @@ async fn add_column_keeps_fk_and_unique(pool: &Pool) {
     apply_ops(pool, &undo.value).await.expect(undo.why);
 }
 
+// ---------------------------------------------------------------- #1879
+
+/// Dropping a column drops its index and CHECK first. SQLite refused
+/// the column; MySQL took the index with it and then failed the drop.
+async fn column_drops_after_its_index_and_check(pool: &Pool) {
+    let t = "mad_dc_item";
+    let chain = Chain::new(pool, "dc", &[t]).await;
+    let checks = by_dialect! { pool,
+        postgres => true, because "ALTER TABLE ADD CONSTRAINT CHECK is native",
+        mysql => true, because "MySQL 8.0.16+ has CHECK; DROP COLUMN takes it along",
+        sqlite => false, because "SQLite cannot add a CHECK to a table (#559)",
+    };
+    let checks_json = if checks.value {
+        json!([{"name": "mad_dc_ck", "table": t, "expr": "p >= 0"}])
+    } else {
+        json!([])
+    };
+    chain
+        .step(
+            pool,
+            json!({
+                "tables": [table(t, vec![id(), col("a", "i64", json!({})), col("p", "i64", json!({}))])],
+                "indexes": [{"name": "mad_dc_a_idx", "table": t, "columns": ["a"], "unique": false}],
+                "checks": checks_json,
+            }),
+        )
+        .await
+        .expect("initial");
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id()])]}))
+        .await
+        .expect("the index and check drop before their columns");
+}
+
+/// Tables drop child first. Name order dropped `author` before `book`,
+/// which MySQL refuses (3730).
+async fn tables_drop_child_first(pool: &Pool) {
+    let (author, book) = ("mad_dt_author", "mad_dt_book");
+    let chain = Chain::new(pool, "dt", &[book, author]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [
+                table(author, vec![id()]),
+                table(book, vec![id(), col("author_id", "i64", fk(author))]),
+            ]}),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[author, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[book, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    chain
+        .step(pool, json!({"tables": []}))
+        .await
+        .expect("book drops before author");
+}
+
+/// An M2M junction drops before the tables it joins.
+async fn m2m_drops_before_its_tables(pool: &Pool) {
+    let (post, tag, through) = ("mad_dm_post", "mad_dm_tag", "mad_dm_post_tags");
+    let chain = Chain::new(pool, "dm", &[through, post, tag]).await;
+    chain
+        .step(
+            pool,
+            json!({
+                "tables": [table(post, vec![id()]), table(tag, vec![id()])],
+                "m2m_tables": [{"through": through, "src_table": post, "src_col": "post_id",
+                                "dst_table": tag, "dst_col": "tag_id"}],
+            }),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[post, "id"])
+        .await
+        .unwrap();
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[tag, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[through, "post_id", "tag_id"],
+    )
+    .await
+    .unwrap();
+    chain
+        .step(pool, json!({"tables": []}))
+        .await
+        .expect("the junction drops first");
+}
+
+/// A composite FK drops before the table it references and before that
+/// table's unique index.
+async fn composite_fk_drops_before_its_parent(pool: &Pool) {
+    let (parent, child) = ("mad_dx_parent", "mad_dx_child");
+    let chain = Chain::new(pool, "dx", &[child, parent]).await;
+    let runs = by_dialect! { pool,
+        postgres => true, because "composite FKs are added by ALTER TABLE",
+        mysql => true, because "composite FKs are added by ALTER TABLE; 1553/3730 if misordered",
+        sqlite => false, because "SQLite cannot add a composite FK to a table (#559)",
+    };
+    if !runs.value {
+        return;
+    }
+    let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
+    let kid = |with_fk: bool| {
+        let mut t = table(child, ab());
+        if with_fk {
+            t["composite_fks"] =
+                json!([{"name": "mad_dx_fk", "to": parent, "from": ["a", "b"], "on": ["a", "b"]}]);
+        }
+        t
+    };
+    let uq = json!([{"name": "mad_dx_ab_uq", "table": parent, "columns": ["a", "b"],
+                     "unique": true}]);
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(parent, ab()), kid(false)], "indexes": uq}),
+        )
+        .await
+        .expect("initial");
+    // A composite FK on a new table is emitted twice (a separate bug), so
+    // it is added to the existing one.
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(parent, ab()), kid(true)], "indexes": uq}),
+        )
+        .await
+        .expect("composite FK");
+    chain
+        .step(pool, json!({"tables": [kid(false)]}))
+        .await
+        .expect("the FK drops before its index and table");
+}
+
 tri_dialect_test!(
     setup: no_setup,
-    scenarios: [unique_drops_on_long_names, add_column_keeps_fk_and_unique]
+    scenarios: [
+        unique_drops_on_long_names,
+        add_column_keeps_fk_and_unique,
+        column_drops_after_its_index_and_check,
+        tables_drop_child_first,
+        m2m_drops_before_its_tables,
+        composite_fk_drops_before_its_parent,
+    ]
 );

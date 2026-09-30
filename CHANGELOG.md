@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — migrations drop dependents first (#1879)
+
+Indexes, checks, composite FKs and M2M junctions drop before their columns and tables,
+and tables child first; SQLite and MySQL refused the old order.
+
 ### Fixed — `AddColumn` keeps the field's FK and UNIQUE (#1877)
 
 As `CREATE TABLE` does; SQLite gets inline `REFERENCES` and a unique index.

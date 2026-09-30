@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Drop order in new migrations (#1879)
+
+Only newly written files use it. An unapplied file that drops a column before its index,
+or a parent table before its child, still fails on SQLite and MySQL: regenerate it.
+
 ### `AddColumn` adds the FK and UNIQUE (#1877)
 
 **Breaking:** a migration that adds a `ForeignKey` or `unique` column now creates the constraint,
