@@ -234,7 +234,8 @@ entorno por proveedor.
 
 Presets integrados: `google`, `microsoft` (Azure AD), `github`, `gitlab`,
 `discord`. Para cualquier otra cosa, usa `kind = "oidc"` con un `issuer_url` —
-rustango ejecuta el descubrimiento de OpenID Connect para encontrar los endpoints.
+rustango ejecuta el descubrimiento de OpenID Connect para encontrar los endpoints (una vez por
+emisor y hora).
 (Sign in with Apple no es un preset; necesita verificación de id_token/JWKS.)
 
 ## Notas de seguridad

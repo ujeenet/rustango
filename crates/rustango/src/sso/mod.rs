@@ -33,6 +33,10 @@ pub use link::{LinkSource, ProviderKey, SsoLink};
 pub use provider::{list_enabled, resolve_by_slug, ResolvedProvider, SsoProvider};
 
 use crate::oauth2::{providers, OAuth2Provider, OAuthError};
+use crate::outbound::TargetPolicy;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 pub use crate::oauth2::{open_flow, seal_flow, NormalizedUser, OAuth2Flow};
 
@@ -111,13 +115,20 @@ impl std::error::Error for SsoError {}
 
 /// Build an [`OAuth2Provider`] from a resolved config. Known keys use the
 /// built-in presets; `"oidc"` runs OpenID Connect discovery against
-/// `issuer_url`.
+/// `issuer_url`, reusing the result for an hour.
 ///
 /// # Errors
 /// [`SsoError::UnknownProvider`] for an unrecognized key,
 /// [`SsoError::MissingIssuer`] for `oidc` without an issuer, or a
 /// wrapped [`OAuthError`] if discovery fails.
 pub async fn build_provider(cfg: &ResolvedSso) -> Result<OAuth2Provider, SsoError> {
+    build_provider_with(cfg, &TargetPolicy::from_env()).await
+}
+
+async fn build_provider_with(
+    cfg: &ResolvedSso,
+    policy: &TargetPolicy,
+) -> Result<OAuth2Provider, SsoError> {
     if cfg.client_id.trim().is_empty() {
         return Err(SsoError::Config("client_id is empty".into()));
     }
@@ -134,7 +145,7 @@ pub async fn build_provider(cfg: &ResolvedSso) -> Result<OAuth2Provider, SsoErro
         "discord" => providers::discord(id, secret, redirect),
         "oidc" => {
             let issuer = cfg.issuer_url.as_deref().ok_or(SsoError::MissingIssuer)?;
-            OAuth2Provider::from_discovery("oidc", issuer, id, secret, redirect).await?
+            discovered(issuer, id, secret, redirect, policy).await?
         }
         other => return Err(SsoError::UnknownProvider(other.to_owned())),
     };
@@ -144,6 +155,78 @@ pub async fn build_provider(cfg: &ResolvedSso) -> Result<OAuth2Provider, SsoErro
         _ => provider,
     };
     Ok(provider)
+}
+
+/// How long discovered endpoints are reused before the next login refetches them.
+const DISCOVERY_TTL: Duration = Duration::from_secs(3600);
+/// Most issuers cached at once; past it, the oldest is dropped.
+const DISCOVERY_MAX: usize = 1024;
+
+/// The public endpoints of one issuer. Keyed by issuer URL and holding no
+/// credentials, so sharing them across tenants leaks nothing.
+#[derive(Clone)]
+struct Endpoints {
+    auth_url: String,
+    token_url: String,
+    userinfo_url: Option<String>,
+}
+
+static DISCOVERED: LazyLock<Mutex<HashMap<String, (Instant, Endpoints)>>> =
+    LazyLock::new(Mutex::default);
+
+/// An OIDC provider for `issuer`, running discovery at most once per [`DISCOVERY_TTL`].
+async fn discovered(
+    issuer: &str,
+    id: String,
+    secret: String,
+    redirect: String,
+    policy: &TargetPolicy,
+) -> Result<OAuth2Provider, OAuthError> {
+    let key = issuer.trim_end_matches('/').to_owned();
+    let hit = {
+        let map = DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner);
+        map.get(&key)
+            .filter(|(at, _)| at.elapsed() < DISCOVERY_TTL)
+            .map(|(_, e)| e.clone())
+    };
+    if let Some(e) = hit {
+        let p = OAuth2Provider::new("oidc", id, secret, redirect, e.auth_url, e.token_url);
+        return Ok(match e.userinfo_url {
+            Some(u) => p.with_userinfo_url(u),
+            None => p,
+        });
+    }
+    let p = OAuth2Provider::new("oidc", id, secret, redirect, "", "")
+        .discover(&key, policy)
+        .await?;
+    let e = Endpoints {
+        auth_url: p.auth_url.clone(),
+        token_url: p.token_url.clone(),
+        userinfo_url: p.userinfo_url.clone(),
+    };
+    let mut map = DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner);
+    remember(&mut map, key, e, DISCOVERY_MAX);
+    Ok(p)
+}
+
+/// Insert `e`, dropping expired entries and then the oldest when `max` is reached.
+fn remember(
+    map: &mut HashMap<String, (Instant, Endpoints)>,
+    key: String,
+    e: Endpoints,
+    max: usize,
+) {
+    map.retain(|_, (at, _)| at.elapsed() < DISCOVERY_TTL);
+    if map.len() >= max && !map.contains_key(&key) {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(k, _)| k.clone());
+        if let Some(k) = oldest {
+            map.remove(&k);
+        }
+    }
+    map.insert(key, (Instant::now(), e));
 }
 
 /// One SSO button for a login page — the template loops over these.
@@ -200,6 +283,8 @@ pub fn verified_email(user: &NormalizedUser) -> Result<&str, SsoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn cfg(provider: &str) -> ResolvedSso {
         ResolvedSso {
@@ -257,6 +342,86 @@ mod tests {
         assert!(resolve_secret_ref_env("env://PATH").is_ok());
         // An unset var errors.
         assert!(resolve_secret_ref_env("env://RUSTANGO_TEST_UNSET_VAR_QQQ").is_err());
+    }
+
+    /// A discovery server that counts hits and fails the first `fail_first`.
+    async fn issuer(fail_first: usize) -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = axum::Router::new().route(
+            "/.well-known/openid-configuration",
+            axum::routing::get(move || async move {
+                if h.fetch_add(1, Ordering::SeqCst) < fail_first {
+                    return Err(axum::http::StatusCode::BAD_GATEWAY);
+                }
+                Ok(axum::Json(serde_json::json!({
+                    "authorization_endpoint": "https://idp.test/auth",
+                    "token_endpoint": "https://idp.test/token",
+                })))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, hits)
+    }
+
+    fn oidc(issuer: &str, client_id: &str) -> ResolvedSso {
+        let mut c = cfg("oidc");
+        c.issuer_url = Some(issuer.to_owned());
+        c.client_id = client_id.into();
+        c
+    }
+
+    fn loopback() -> TargetPolicy {
+        TargetPolicy::Public(crate::outbound::Allowlist::parse("127.0.0.1"))
+    }
+
+    /// #1833 — discovery runs once per issuer, not once per login.
+    #[tokio::test]
+    async fn discovery_is_cached_per_issuer() {
+        let (base, hits) = issuer(0).await;
+        let a = build_provider_with(&oidc(&base, "a"), &loopback())
+            .await
+            .unwrap();
+        let b = build_provider_with(&oidc(&format!("{base}/"), "b"), &loopback())
+            .await
+            .unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!((a.client_id.as_str(), b.client_id.as_str()), ("a", "b"));
+        assert_eq!(b.token_url, "https://idp.test/token");
+        assert_eq!(b.userinfo_url, None);
+    }
+
+    /// At the cap the oldest issuer is dropped, so a new one is still cached.
+    #[test]
+    fn a_full_cache_drops_its_oldest_issuer() {
+        let e = || Endpoints {
+            auth_url: "a".into(),
+            token_url: "t".into(),
+            userinfo_url: None,
+        };
+        let mut map = HashMap::new();
+        for k in ["one", "two", "three"] {
+            remember(&mut map, k.into(), e(), 2);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let mut keys: Vec<_> = map.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["three", "two"]);
+    }
+
+    /// A failed discovery is not cached; the next login retries.
+    #[tokio::test]
+    async fn failed_discovery_is_retried() {
+        let (base, hits) = issuer(1).await;
+        assert!(build_provider_with(&oidc(&base, "a"), &loopback())
+            .await
+            .is_err());
+        assert!(build_provider_with(&oidc(&base, "a"), &loopback())
+            .await
+            .is_ok());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

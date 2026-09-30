@@ -303,6 +303,9 @@ trait SerializerBridge: Send + Sync {
     /// [`Self::writable_model_fields`]; the two differ only where a
     /// field declares `#[serializer(source = "…")]`.
     fn writable_field_names(&self) -> &'static [&'static str];
+
+    /// The model fields the serializer renders; the `?ordering=` fallback.
+    fn readable_model_fields(&self) -> &'static [&'static str];
 }
 
 /// Zero-sized carrier that pins a concrete serializer type `S`, so
@@ -360,6 +363,10 @@ where
 
     fn writable_field_names(&self) -> &'static [&'static str] {
         S::writable_fields()
+    }
+
+    fn readable_model_fields(&self) -> &'static [&'static str] {
+        S::readable_source_fields()
     }
 }
 
@@ -422,6 +429,46 @@ pub trait ViewSetFilter: Send + Sync + 'static {
     ) -> Vec<WhereExpr> {
         self.filter(params, schema)
     }
+
+    /// What every create and update must write, whatever the body says.
+    ///
+    /// A scope only narrows reads; without a pin a client could write a
+    /// row outside it, e.g. into another user's account. Default: none.
+    fn write_pins(
+        &self,
+        _parts: &axum::http::request::Parts,
+        _schema: &'static ModelSchema,
+    ) -> Vec<WritePin> {
+        Vec::new()
+    }
+}
+
+/// A value a [`ViewSetFilter`] forces on writes. See
+/// [`ViewSetFilter::write_pins`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum WritePin {
+    /// Create writes `value` into `field`; update never changes it.
+    /// A field the model does not have denies the write.
+    Field {
+        /// The model field name.
+        field: &'static str,
+        /// The value to write.
+        value: SqlValue,
+    },
+    /// Refuse the write with `403`, e.g. there is no principal to own it.
+    Deny,
+}
+
+impl WritePin {
+    /// Pin `field` to `value`.
+    #[must_use]
+    pub fn field(field: &'static str, value: impl Into<SqlValue>) -> Self {
+        Self::Field {
+            field,
+            value: value.into(),
+        }
+    }
 }
 
 /// Scope every row to the principal that owns it.
@@ -447,6 +494,9 @@ pub trait ViewSetFilter: Send + Sync + 'static {
 /// populates, so one backend covers a cookie session, a Bearer token
 /// and an agent token. It is **never** read from the query string: a
 /// client that could name its own `owner_id` is not authorized.
+///
+/// It also pins the column on writes: create stores the principal's id
+/// whatever the body says, and update never changes the owner.
 ///
 /// Fails closed. With no principal it matches nothing, so an
 /// unauthenticated request sees an empty list rather than the whole
@@ -525,6 +575,21 @@ impl ViewSetFilter for OwnedBy {
             op: Op::Eq,
             value: SqlValue::from(principal.user_id),
         })]
+    }
+
+    fn write_pins(
+        &self,
+        parts: &axum::http::request::Parts,
+        _schema: &'static ModelSchema,
+    ) -> Vec<WritePin> {
+        // Same decision as `filter_with`: no principal means no write.
+        let Some(principal) = crate::tenancy::Principal::from_parts(parts) else {
+            return vec![WritePin::Deny];
+        };
+        if self.superuser_sees_all && principal.is_superuser {
+            return Vec::new();
+        }
+        vec![WritePin::field(self.column, principal.user_id)]
     }
 }
 
@@ -811,7 +876,8 @@ impl ViewSet {
     }
 
     /// Restrict which fields appear in list/retrieve responses and are
-    /// accepted on create/update. Default: all scalar fields.
+    /// accepted on create/update. Default: all scalar fields. A natural
+    /// primary key stays writable on create.
     pub fn fields(mut self, fields: &[&str]) -> Self {
         self.fields = Some(fields.iter().map(|&s| s.to_owned()).collect());
         // Order-independent: the projection can be narrowed after the
@@ -1226,6 +1292,17 @@ impl ViewSetState {
         }
     }
 
+    /// The fields a response shows: `fields()`, narrowed to what the
+    /// serializer renders when one is set.
+    fn rendered_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
+        let mut fields = self.effective_fields();
+        if let Some(bridge) = &self.vs.serializer {
+            let readable = bridge.readable_model_fields();
+            fields.retain(|f| readable.contains(&f.name));
+        }
+        fields
+    }
+
     /// Get a per-request pool handle. A cheap clone in static-pool
     /// mode; in tenant mode it runs the resolver chain and takes a
     /// connection from the right tenant pool. Errors come back as a
@@ -1443,28 +1520,130 @@ fn public_form_error(state: &ViewSetState, e: FormError) -> FormError {
     }
 }
 
-fn serializer_write_prep(
-    state: &ViewSetState,
-    json: Option<&Value>,
-) -> Result<Vec<&'static str>, Response> {
-    match &state.vs.serializer {
-        Some(bridge) => {
-            if let Some(body) = json {
-                if let Err(errs) = bridge.validate_body(body) {
-                    return Err(json_form_errors(&errs));
+/// Run the serializer's input validation on a JSON body, when one is set.
+fn serializer_validate(state: &ViewSetState, json: Option<&Value>) -> Result<(), Response> {
+    if let (Some(bridge), Some(body)) = (&state.vs.serializer, json) {
+        bridge
+            .validate_body(body)
+            .map_err(|errs| json_form_errors(&errs))?;
+    }
+    Ok(())
+}
+
+/// The fields one write request may set, decided once (#1845).
+///
+/// Create and update read the body only through this, so `fields()`,
+/// the serializer and the filter backends' pins cannot disagree.
+struct WriteSet {
+    schema: &'static ModelSchema,
+    /// `fields()` ∩ the serializer's writable fields, minus the pinned.
+    writable: Vec<&'static crate::core::FieldSchema>,
+    /// Forced by a filter backend; never read from the body.
+    pinned: Vec<(&'static crate::core::FieldSchema, SqlValue)>,
+}
+
+impl WriteSet {
+    /// `Err` is a `403` when a backend denies the write.
+    fn for_request(
+        state: &ViewSetState,
+        parts: &axum::http::request::Parts,
+    ) -> Result<Self, Response> {
+        let schema = state.vs.schema;
+        let mut pinned: Vec<(&'static crate::core::FieldSchema, SqlValue)> = Vec::new();
+        for backend in &state.vs.filter_backends {
+            for pin in backend.write_pins(parts, schema) {
+                match pin {
+                    WritePin::Field { field, value } => match schema.field(field) {
+                        // One pin per field; two backends that disagree deny.
+                        Some(f) => match pinned.iter().find(|(p, _)| p.name == f.name) {
+                            None => pinned.push((f, value)),
+                            Some((_, v)) if *v == value => {}
+                            Some(_) => {
+                                tracing::error!(
+                                    model = schema.table,
+                                    field,
+                                    "two write pins disagree on one field — denying"
+                                );
+                                return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
+                            }
+                        },
+                        None => {
+                            tracing::error!(
+                                model = schema.table,
+                                field,
+                                "write pin names a field this model does not have — denying"
+                            );
+                            return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
+                        }
+                    },
+                    WritePin::Deny => return Err(json_error(StatusCode::FORBIDDEN, "forbidden")),
                 }
             }
-            let writable = bridge.writable_model_fields();
-            let extra_skip = state
-                .vs
-                .schema
-                .scalar_fields()
-                .map(|f| f.name)
-                .filter(|n| !writable.contains(n))
-                .collect();
-            Ok(extra_skip)
         }
-        None => Ok(Vec::new()),
+        let exposed = state.effective_fields();
+        let serializer = state
+            .vs
+            .serializer
+            .as_ref()
+            .map(|b| b.writable_model_fields());
+        let writable = schema
+            .scalar_fields()
+            .filter(|f| f.primary_key || exposed.iter().any(|e| e.name == f.name))
+            .filter(|f| serializer.map_or(true, |w| w.contains(&f.name)))
+            .filter(|f| !pinned.iter().any(|(p, _)| p.name == f.name))
+            .collect();
+        Ok(Self {
+            schema,
+            writable,
+            pinned,
+        })
+    }
+
+    fn is_writable(&self, name: &str) -> bool {
+        self.writable.iter().any(|f| f.name == name)
+    }
+
+    /// The INSERT's `(column, value)` list: writable fields from `form`,
+    /// the server-stamped timestamps, then the pins.
+    fn insert_values(
+        &self,
+        form: &HashMap<String, String>,
+    ) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
+        // `auto` fields stay out of `skip` so their timestamps are stamped.
+        let skip: Vec<&str> = self
+            .schema
+            .scalar_fields()
+            .filter(|f| !f.auto && !self.is_writable(f.name))
+            .map(|f| f.name)
+            .collect();
+        let mut out = collect_insert_values(self.schema, form, &skip)?;
+        // A pin replaces a stamped `auto` value rather than doubling the column.
+        out.retain(|(c, _)| !self.pinned.iter().any(|(f, _)| f.column == *c));
+        out.extend(self.pinned.iter().map(|(f, v)| (f.column, v.clone())));
+        Ok(out)
+    }
+
+    /// The UPDATE's `SET` list. Pinned fields are never in it.
+    fn update_assignments(
+        &self,
+        form: &HashMap<String, String>,
+        partial: bool,
+    ) -> Result<Vec<Assignment>, FormError> {
+        let mut out = Vec::new();
+        for field in &self.writable {
+            if field.primary_key || field.auto || (partial && !form.contains_key(field.name)) {
+                continue;
+            }
+            match parse_form_value(field, form.get(field.name).map(String::as_str)) {
+                Ok(v) => out.push(Assignment {
+                    column: field.column,
+                    value: v.into(),
+                }),
+                Err(FormError::Missing { .. }) if partial => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1828,13 +2007,14 @@ async fn run_list(
     // this ViewSet actually *exposes*, not every column on the model
     // — otherwise `fields = "id, title"` would still allow a sort
     // oracle over a column the API never returns. When `fields` is
-    // unset, `effective_fields` is every scalar column anyway.
+    // unset, `effective_fields` is every scalar column anyway. A
+    // serializer narrows it to what it renders (#1845).
     //
     // `list_params::parse_ordering` is the single source of truth,
     // shared with `template_views::ListView`.
     let ordering_allowlist: Vec<String> = if state.vs.ordering_fields.is_empty() {
         state
-            .effective_fields()
+            .rendered_fields()
             .iter()
             .map(|f| f.name.to_owned())
             .collect()
@@ -2397,6 +2577,10 @@ async fn handle_create(
 
     // The read-back is scoped: a row created outside it is not echoed.
     let scope = scope_filters(&state, &parts, &HashMap::new());
+    let write_set = match WriteSet::for_request(&state, &parts) {
+        Ok(w) => w,
+        Err(resp) => return resp,
+    };
     // A JSON array body means a bulk create.
     let create_body = match extract_create_body(parts, body).await {
         Ok(b) => b,
@@ -2410,9 +2594,12 @@ async fn handle_create(
 
     match create_body {
         CreateBody::Single(form, json) => {
-            create_one(&state, &mut acq, &form, json.as_ref(), pk_field, &scope).await
+            let body = (&form, json.as_ref());
+            create_one(&state, &mut acq, &write_set, body, pk_field, &scope).await
         }
-        CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, pk_field, &scope).await,
+        CreateBody::Bulk(rows) => {
+            create_many(&state, &mut acq, &write_set, &rows, pk_field, &scope).await
+        }
     }
 }
 
@@ -2474,23 +2661,19 @@ fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, Strin
 async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    form: &HashMap<String, String>,
-    json: Option<&Value>,
+    write_set: &WriteSet,
+    (form, json): (&HashMap<String, String>, Option<&Value>),
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
 ) -> Response {
-    // When a serializer is registered: run its input validation and
-    // skip every model column it doesn't accept (read_only / computed).
-    // `Auto` columns are skipped by `collect_values`; a natural PK is written.
-    let skip = match serializer_write_prep(state, json) {
-        Ok(s) => s,
-        Err(resp) => return resp,
-    };
+    if let Err(resp) = serializer_validate(state, json) {
+        return resp;
+    }
     // Translate `source`-renamed writable keys (serializer field name →
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
-    let collected = match collect_insert_values(state.vs.schema, form, &skip) {
+    let collected = match write_set.insert_values(form) {
         Ok(v) => v,
         Err(e) => {
             return json_error(
@@ -2520,6 +2703,7 @@ async fn create_one(
 async fn create_many(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
+    write_set: &WriteSet,
     rows: &[(HashMap<String, String>, Option<Value>)],
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
@@ -2533,14 +2717,12 @@ async fn create_many(
     // INSERTs committed: validate the whole list before any save.
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
-        // Serializer validation + non-writable skip, per entry.
-        let skip = match serializer_write_prep(state, json.as_ref()) {
-            Ok(s) => s,
-            Err(resp) => return resp,
-        };
+        if let Err(resp) = serializer_validate(state, json.as_ref()) {
+            return resp;
+        }
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
-        let collected = match collect_insert_values(state.vs.schema, row, &skip) {
+        let collected = match write_set.insert_values(row) {
             Ok(v) => v,
             Err(e) => {
                 let e = public_form_error(state, e);
@@ -2657,6 +2839,10 @@ async fn update_inner(
     };
     // Scope first: an update must not reach a row this principal cannot see.
     let scope = scope_filters(&state, &parts, &HashMap::new());
+    let write_set = match WriteSet::for_request(&state, &parts) {
+        Ok(w) => w,
+        Err(resp) => return resp,
+    };
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
@@ -2672,44 +2858,24 @@ async fn update_inner(
         Err(e) => return e.into_response(),
     };
 
-    // Serializer (when set): validate the body + the set of model
-    // columns it doesn't accept (read_only / computed), which we skip.
-    let non_writable = match serializer_write_prep(&state, json.as_ref()) {
-        Ok(s) => s,
-        Err(resp) => return resp,
-    };
+    if let Err(resp) = serializer_validate(&state, json.as_ref()) {
+        return resp;
+    }
 
     // Translate `source`-renamed writable keys (serializer field name →
     // model column) before the per-column update loop reads the form.
     let renamed = serializer_input_renamed_form(&state, &form);
     let form = renamed.as_ref().unwrap_or(&form);
 
-    let mut assignments: Vec<Assignment> = Vec::new();
-    for field in state.vs.schema.scalar_fields() {
-        if field.primary_key || field.auto {
-            continue;
+    let assignments = match write_set.update_assignments(form, partial) {
+        Ok(a) => a,
+        Err(e) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                &public_form_error(&state, e).to_string(),
+            )
         }
-        if non_writable.contains(&field.name) {
-            continue;
-        }
-        if partial && !form.contains_key(field.name) {
-            continue;
-        }
-        let raw = form.get(field.name).map(String::as_str);
-        match parse_form_value(field, raw) {
-            Ok(v) => assignments.push(Assignment {
-                column: field.column,
-                value: v.into(),
-            }),
-            Err(FormError::Missing { .. }) if partial => continue,
-            Err(e) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    &public_form_error(&state, e).to_string(),
-                )
-            }
-        }
-    }
+    };
 
     if assignments.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "no fields to update");

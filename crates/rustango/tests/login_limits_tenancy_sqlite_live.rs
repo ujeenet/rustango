@@ -632,6 +632,34 @@ async fn api_key_failures_are_limited_per_ip() {
     assert!(is_429(&env.api_key(&ip, &good).await));
 }
 
+/// #1729 — an expired key is verified before it is refused, so a full
+/// hash queue answers it 503, the same as an unknown prefix.
+#[cfg(feature = "testkit")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_expired_api_key_costs_a_verify_like_an_unknown_one() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let uid = env.user(&unique("exp")).await;
+    let past = chrono::Utc::now() - chrono::Duration::hours(1);
+    let expired =
+        rustango::tenancy::auth_backends::create_api_key(uid, "t", Some(past), &env.tenant)
+            .await
+            .unwrap();
+    let r = env.api_key(&next_ip(), &expired).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    let held = rustango::passwords::hold_all_hash_slots().await;
+    let unknown = env.api_key(&next_ip(), "abcdef12.0000000000000000").await;
+    let exp = env.api_key(&next_ip(), &expired).await;
+    drop(held);
+    assert!(is_503(&unknown), "unknown prefix: {}", unknown.status());
+    assert!(
+        is_503(&exp),
+        "expired key skipped the verify: {}",
+        exp.status()
+    );
+}
+
 /// A backend called without a tenant refuses instead of sharing one
 /// lock scope across tenants.
 #[tokio::test]

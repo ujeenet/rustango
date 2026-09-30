@@ -256,7 +256,7 @@ variable d'environnement par provider.
 Préréglages intégrés : `google`, `microsoft` (Azure AD), `github`,
 `gitlab`, `discord`. Pour tout le reste, utilisez `kind = "oidc"` avec
 une `issuer_url` — rustango exécute la découverte OpenID Connect pour
-trouver les points de terminaison. (Sign in with Apple n'est pas un
+trouver les points de terminaison (une fois par émetteur et par heure). (Sign in with Apple n'est pas un
 préréglage ; il nécessite une vérification id_token/JWKS.)
 
 ## Notes de sécurité
