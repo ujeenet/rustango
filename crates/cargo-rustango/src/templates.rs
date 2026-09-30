@@ -220,6 +220,8 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
         Backend::Mysql => format!(
             r#"  mysql:
     image: mysql:8
+    # Case-sensitive like PostgreSQL/SQLite; the stock `_ai_ci` ignores case.
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_as_cs
     environment:
       MYSQL_ROOT_PASSWORD: rustango
       MYSQL_DATABASE: {name}_dev

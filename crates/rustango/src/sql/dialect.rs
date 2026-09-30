@@ -138,7 +138,7 @@ pub trait Dialect: Send + Sync {
     /// `now()` into a `strftime` call and drops `::type` casts.
     ///
     /// `max_length` matters only to MySQL, which needs it to tell an
-    /// unbounded `String` (a `TEXT` column, which allows no literal
+    /// unbounded `String` (a `LONGTEXT` column, which allows no literal
     /// default) from a bounded one (a `VARCHAR(n)`, which does).
     fn translate_default_expr(&self, expr: &str, _ty: &str, _max_length: Option<u32>) -> String {
         expr.to_owned()
@@ -453,6 +453,12 @@ pub trait Dialect: Send + Sync {
     /// such as `CREATE EXTENSION IF NOT EXISTS citext` on Postgres.
     /// `None` when nothing is needed.
     fn ci_text_extension_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// A one-row, one-column query for the database's default collation,
+    /// which `check --deploy` reads. `None` where text compares byte-wise.
+    fn default_collation_sql(&self) -> Option<&'static str> {
         None
     }
 

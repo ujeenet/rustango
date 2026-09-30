@@ -63,11 +63,12 @@ pub use executor::{
     insert_returning_tx, insert_tx, on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx,
     raw_query_pool, raw_query_tx, run_ddl_idempotent, select_one_row_as_json, select_one_row_pool,
     select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
-    select_rows_tx_with_related, transaction_pool, update_or_create, update_pool, update_tx,
-    AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool, FetcherTx,
-    FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow,
-    MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar, MaybeSqliteFromRow,
-    MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolTx, TxGuard, UpdaterPool,
+    select_rows_tx_with_related, transaction_pool, try_get_flat_my, update_or_create, update_pool,
+    update_tx, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
+    FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, LoadRelated,
+    MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
+    MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolTx, TxGuard,
+    UpdaterPool,
 };
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
