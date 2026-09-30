@@ -175,6 +175,7 @@ SQLite leaves out the FK of a column with a default (it refuses one on a table w
 
 `CREATE TABLE` writes `CONSTRAINT <table>_<column>_key UNIQUE (<column>)`; PG names do not change.
 **Breaking** on MySQL: new tables name the unique index `<table>_<column>_key`, not after the column.
+Two UNIQUE columns that map to one name (`a_b.c`, `a.b_c`) now fail to render: rename one.
 
 ## 0.59.11
 

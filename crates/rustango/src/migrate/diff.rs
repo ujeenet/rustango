@@ -791,6 +791,61 @@ fn guard_alter_column_dialect(
     ))
 }
 
+/// Who holds each UNIQUE name in `current`. Two columns that shorten to
+/// one name are refused: PG would reject the second, and SQLite's
+/// `DROP INDEX` for one would drop the other's.
+struct UniqueNames {
+    holders: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl UniqueNames {
+    fn new(current: &SchemaSnapshot) -> Self {
+        let mut holders: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for t in &current.tables {
+            for f in t
+                .fields
+                .iter()
+                .filter(|f| f.unique && !f.primary_key && f.generated_as.is_none())
+            {
+                holders
+                    .entry(super::ddl::unique_constraint_name(&t.name, &f.column))
+                    .or_default()
+                    .push(format!("`{}.{}`", t.name, f.column));
+            }
+        }
+        for idx in &current.indexes {
+            holders
+                .entry(idx.name.clone())
+                .or_default()
+                .push(format!("index `{}`", idx.name));
+        }
+        Self { holders }
+    }
+
+    /// The UNIQUE name for `table.column`, unless something else holds it.
+    fn get(&self, table: &str, column: &str) -> Result<String, String> {
+        let name = super::ddl::unique_constraint_name(table, column);
+        let me = format!("`{table}.{column}`");
+        let others: Vec<&str> = self
+            .holders
+            .get(&name)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|h| *h != me)
+            .collect();
+        if others.is_empty() {
+            return Ok(name);
+        }
+        Err(format!(
+            "the UNIQUE on {me} is named `{name}`, which {} also uses; \
+             rename a table or column, or declare one as a named unique index",
+            others.join(", ")
+        ))
+    }
+}
+
 fn render_changes_split_inner(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
@@ -798,12 +853,20 @@ fn render_changes_split_inner(
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
+    let unique_names = UniqueNames::new(current);
     for change in changes {
         match change {
             SchemaChange::CreateTable(name) => {
                 let table = current.table(name).ok_or_else(|| {
                     format!("CreateTable for `{name}` but no snapshot entry for it")
                 })?;
+                for f in table
+                    .fields
+                    .iter()
+                    .filter(|f| f.unique && !f.primary_key && f.generated_as.is_none())
+                {
+                    unique_names.get(name, &f.column)?;
+                }
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
                 if !dialect.inline_fks_in_create_table() {
@@ -814,10 +877,15 @@ fn render_changes_split_inner(
             SchemaChange::DropColumn { table, column } => {
                 // SQLite refuses to drop an indexed column; AddColumn's
                 // unique index is the one this renderer creates (#1877).
-                if dialect.name() == "sqlite" {
+                // Skipped when another column now holds the name.
+                if let Some(name) = unique_names
+                    .get(table, column)
+                    .ok()
+                    .filter(|_| dialect.name() == "sqlite")
+                {
                     out.immediate.push(format!(
                         "DROP INDEX IF EXISTS {}",
-                        dialect.quote_ident(&super::ddl::unique_constraint_name(table, column)),
+                        dialect.quote_ident(&name)
                     ));
                 }
                 out.immediate.push(format!(
@@ -864,7 +932,7 @@ fn render_changes_split_inner(
                 }
                 // CREATE TABLE's UNIQUE and FK, which a bare ADD COLUMN lacks (#1877).
                 if f.unique && !f.primary_key {
-                    let name = super::ddl::unique_constraint_name(table, column);
+                    let name = unique_names.get(table, column)?;
                     out.immediate
                         .push(dialect.add_unique_constraint_sql(table, &name, column));
                 }
@@ -983,7 +1051,7 @@ fn render_changes_split_inner(
                 unique,
             } => {
                 guard_alter_column_dialect(dialect, "AlterColumnUnique", table, column)?;
-                let name = super::ddl::unique_constraint_name(table, column);
+                let name = unique_names.get(table, column)?;
                 if *unique {
                     out.immediate
                         .push(dialect.add_unique_constraint_sql(table, &name, column));
@@ -1778,6 +1846,60 @@ mod sql_type_tests {
                 vec!["ALTER TABLE `t` DROP COLUMN `c`".to_string()]
             );
         }
+    }
+
+    /// `a_b.c` and `a.b_c` both shorten to `a_b_c_key`.
+    fn clashing_uniques() -> SchemaSnapshot {
+        let uniq = |t: &str, c: &str| TableSnapshot {
+            name: t.into(),
+            model: t.into(),
+            fields: vec![FieldSnapshot {
+                name: c.into(),
+                column: c.into(),
+                unique: true,
+                nullable: true,
+                ..fs("i64", false)
+            }],
+            composite_fks: vec![],
+        };
+        SchemaSnapshot {
+            tables: vec![uniq("a_b", "c"), uniq("a", "b_c")],
+            ..SchemaSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn clashing_unique_names_are_refused() {
+        use crate::migrate::SchemaChange;
+        let snap = clashing_uniques();
+        let err = render_changes_split_with_dialect(
+            &[SchemaChange::CreateTable("a_b".into())],
+            &snap,
+            &crate::sql::Postgres,
+        )
+        .expect_err("two UNIQUEs named a_b_c_key");
+        assert!(
+            err.contains("`a_b_c_key`") && err.contains("`a.b_c`"),
+            "{err}"
+        );
+    }
+
+    /// A dropped `a_b.c` must not drop `a.b_c`'s index.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_drop_column_keeps_another_tables_unique_index() {
+        use crate::migrate::SchemaChange;
+        let mut snap = clashing_uniques();
+        snap.tables.remove(0);
+        let drop = [SchemaChange::DropColumn {
+            table: "a_b".into(),
+            column: "c".into(),
+        }];
+        let out = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
+        assert_eq!(out.immediate, vec![r#"ALTER TABLE "a_b" DROP COLUMN "c""#]);
+        let out =
+            render_changes_split_with_dialect(&drop, &empty_snap(), &crate::sql::Sqlite).unwrap();
+        assert_eq!(out.immediate[0], r#"DROP INDEX IF EXISTS "a_b_c_key""#);
     }
 
     // -------- guard_alter_column_dialect (#559 protection) --------
