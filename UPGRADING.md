@@ -158,7 +158,8 @@ Both are now `#[non_exhaustive]`; add a `_` arm. From async code use
 ### HMAC signing takes the host
 
 `sign_request` and `sign_now` take a `host` argument after `method`, and every signature
-changes. Behind a proxy that rewrites `Host`, set `HmacAuthLayer::host`.
+changes. Services sharing a key, or behind a proxy that rewrites `Host`, set
+`HmacAuthLayer::host`; it panics on an empty or invalid host.
 
 ## 0.59.6
 

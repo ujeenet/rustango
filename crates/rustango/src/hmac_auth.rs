@@ -151,9 +151,14 @@ impl HmacAuthLayer {
 
     /// Verify against this host instead of the request's `Host`. Needed when
     /// services share a key, or behind a proxy that rewrites `Host`.
+    ///
+    /// # Panics
+    /// If `host` is empty or not a valid host name.
     #[must_use]
     pub fn host(mut self, host: &str) -> Self {
-        Arc::make_mut(&mut self.inner).host = Some(SignedHost::new(host));
+        let pinned = SignedHost::parse(host)
+            .unwrap_or_else(|| panic!("HmacAuthLayer::host: invalid host {host:?}"));
+        Arc::make_mut(&mut self.inner).host = Some(pinned);
         self
     }
 
@@ -254,7 +259,14 @@ async fn verify_request(
     };
     let body_hash = sha256_hex(&bytes);
 
-    let canonical = canonical_request(method.as_str(), &host, &path, &query, &date, &body_hash);
+    let canonical = canonical_request(
+        method.as_str(),
+        Some(&host),
+        &path,
+        &query,
+        &date,
+        &body_hash,
+    );
     let expected_sig = hmac_sha256(&secret, canonical.as_bytes());
 
     if expected_sig.ct_eq(&parsed.signature).unwrap_u8() == 0 {
@@ -332,19 +344,31 @@ fn parse_auth(value: &str) -> Option<ParsedAuth> {
     })
 }
 
-/// The host a signature covers: lowercase, no port. Only built here, so
-/// signer and verifier cannot fold it differently.
+/// The host a signature covers: lowercase, no port, no trailing dot, IPv6
+/// bracketed. Only built here, so signer and verifier cannot fold it differently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SignedHost(String);
 
 impl SignedHost {
-    fn new(raw: &str) -> Self {
+    /// `None` for an empty or malformed host, or one with userinfo.
+    fn parse(raw: &str) -> Option<Self> {
         let raw = raw.trim();
-        let host = match raw.parse::<axum::http::uri::Authority>() {
-            Ok(a) => a.host().to_ascii_lowercase(),
-            Err(_) => raw.to_ascii_lowercase(),
-        };
-        Self(host)
+        if let Ok(ip) = raw.parse::<std::net::Ipv6Addr>() {
+            return Some(Self(format!("[{ip}]")));
+        }
+        let authority = raw.parse::<axum::http::uri::Authority>().ok()?;
+        if authority.as_str().contains('@') {
+            return None;
+        }
+        let host = authority.host();
+        if let Some(ip) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            return ip
+                .parse::<std::net::Ipv6Addr>()
+                .ok()
+                .map(|ip| Self(format!("[{ip}]")));
+        }
+        let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+        (!host.is_empty()).then_some(Self(host))
     }
 }
 
@@ -352,17 +376,16 @@ impl SignedHost {
 /// Both present and naming different hosts is refused.
 fn request_host(req: &Request<Body>) -> Result<SignedHost, &'static str> {
     let header = match req.headers().get(axum::http::header::HOST) {
-        Some(v) => match v
-            .to_str()
-            .ok()
-            .and_then(|s| s.parse::<axum::http::uri::Authority>().ok())
-        {
-            Some(a) => Some(SignedHost::new(a.as_str())),
+        Some(v) => match v.to_str().ok().and_then(SignedHost::parse) {
+            Some(h) => Some(h),
             None => return Err("malformed Host"),
         },
         None => None,
     };
-    let target = req.uri().authority().map(|a| SignedHost::new(a.as_str()));
+    let target = match req.uri().authority() {
+        Some(a) => Some(SignedHost::parse(a.as_str()).ok_or("malformed request target")?),
+        None => None,
+    };
     match (header, target) {
         (Some(h), Some(t)) if h != t => Err("Host does not match the request target"),
         (Some(h), _) | (None, Some(h)) => Ok(h),
@@ -372,7 +395,7 @@ fn request_host(req: &Request<Body>) -> Result<SignedHost, &'static str> {
 
 fn canonical_request(
     method: &str,
-    host: &SignedHost,
+    host: Option<&SignedHost>,
     path: &str,
     query: &str,
     date: &str,
@@ -382,7 +405,7 @@ fn canonical_request(
     format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         method.to_ascii_uppercase(),
-        host.0,
+        host.map_or("", |h| h.0.as_str()),
         path,
         sorted_query,
         date,
@@ -421,7 +444,8 @@ fn date_within_tolerance(date_str: &str, tolerance_secs: u64) -> bool {
 /// Build the `Authorization` header value for a request signed with
 /// `secret` under `key_id`. You must also set `X-Date` to the same
 /// RFC 3339 timestamp. `host` is the server's host name (a port is
-/// ignored). `body` may be empty for GET or DELETE.
+/// ignored; an invalid one signs nothing a server accepts). `body` may be
+/// empty for GET or DELETE.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn sign_request(
@@ -437,7 +461,7 @@ pub fn sign_request(
     let body_hash = sha256_hex(body);
     let canonical = canonical_request(
         method,
-        &SignedHost::new(host),
+        SignedHost::parse(host).as_ref(),
         path,
         query,
         date_rfc3339,
@@ -637,6 +661,44 @@ mod tests {
         assert_eq!(
             status_for(layer(), "backend", "/r", Some("backend:8080")).await,
             401
+        );
+    }
+
+    /// One spelling per host: IPv6 bracketed, trailing dot dropped, junk refused.
+    #[test]
+    fn signed_host_has_one_spelling() {
+        let p = |s: &str| SignedHost::parse(s).map(|h| h.0);
+        assert_eq!(p("[::1]:8080").as_deref(), Some("[::1]"));
+        assert_eq!(p("::1").as_deref(), Some("[::1]"));
+        assert_eq!(p("[0:0::1]").as_deref(), Some("[::1]"));
+        assert_eq!(p("A.test.").as_deref(), Some("a.test"));
+        assert_eq!(p("a.test.:443").as_deref(), Some("a.test"));
+        for bad in ["", " ", ".", "a b", "u@a.test", "[zz]"] {
+            assert_eq!(p(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid host")]
+    fn an_empty_pin_is_refused() {
+        let _ = HmacAuthLayer::new(resolver_for("k1", b"secret")).host("");
+    }
+
+    /// The signer and the verifier fold IPv6 and a trailing dot the same way.
+    #[tokio::test]
+    async fn ipv6_and_trailing_dot_hosts_verify() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret"));
+        assert_eq!(
+            status_for(layer(), "::1", "/r", Some("[::1]:8080")).await,
+            200
+        );
+        assert_eq!(
+            status_for(layer(), "a.test.", "/r", Some("a.test")).await,
+            200
+        );
+        assert_eq!(
+            status_for(layer(), "a.test", "/r", Some("a.test.")).await,
+            200
         );
     }
 
@@ -933,9 +995,23 @@ mod tests {
 
     #[test]
     fn canonical_request_is_deterministic() {
-        let h = SignedHost::new("API.test:443");
-        let a = canonical_request("POST", &h, "/r", "x=1&y=2", "2026-05-02T12:00:00Z", "abc");
-        let b = canonical_request("post", &h, "/r", "y=2&x=1", "2026-05-02T12:00:00Z", "abc");
+        let h = SignedHost::parse("API.test:443");
+        let a = canonical_request(
+            "POST",
+            h.as_ref(),
+            "/r",
+            "x=1&y=2",
+            "2026-05-02T12:00:00Z",
+            "abc",
+        );
+        let b = canonical_request(
+            "post",
+            h.as_ref(),
+            "/r",
+            "y=2&x=1",
+            "2026-05-02T12:00:00Z",
+            "abc",
+        );
         // Method case + query order shouldn't change the canonical form.
         assert_eq!(a, b);
     }
