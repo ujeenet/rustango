@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `InlineFormPanel` gains `more_rows_filter` (#1977)
+
+A struct literal needs the new field. Panels past the formset cap show only the first rows.
+
 ### MySQL refuses an INSERT whose DB-default PK is not an integer (#1978)
 
 `insert_returning_pool` returns `GeneratedPkUnreadable` before writing; it used to insert, then fail.

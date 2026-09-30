@@ -466,3 +466,50 @@ async fn too_many_forms_is_refused_before_any_write() {
     assert_eq!(parent_name(&pool, 1).await, "p1");
     assert_eq!(children(&pool).await.len(), 2);
 }
+
+/// A parent with more children than a formset takes stays editable: the
+/// page renders a TOTAL_FORMS the POST accepts, and links the rest (#1977).
+#[tokio::test]
+async fn parent_with_over_max_forms_children_still_saves() {
+    let pool = fresh_pool().await;
+    raw(
+        &pool,
+        r#"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+           INSERT INTO "ips_child" ("parent_id", "title") SELECT 1, 'bulk' FROM n"#,
+    )
+    .await;
+    let res = app(pool.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/ips_parent/1/edit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let page = String::from_utf8(body.to_vec()).unwrap();
+    let marker = r#"name="ips_child-TOTAL_FORMS" value=""#;
+    let at = page.find(marker).expect("management form") + marker.len();
+    let total = &page[at..at + page[at..].find('"').unwrap()];
+
+    let form = [
+        ("name", "p1 renamed"),
+        ("ips_child-TOTAL_FORMS", total),
+        ("ips_child-0-id", "1"),
+        ("ips_child-0-parent_id", "1"),
+        ("ips_child-0-title", "c1 edited"),
+    ];
+    let status = post(app(pool.clone()), "/ips_parent/1", &form).await;
+    assert!(is_redirect(status), "TOTAL_FORMS={total}: got {status}");
+    assert_eq!(parent_name(&pool, 1).await, "p1 renamed");
+    let kids = children(&pool).await;
+    assert_eq!(kids.len(), 1002, "rows past the cap are untouched");
+    assert_eq!(kids[0], (1, 1, "c1 edited".into()));
+    assert!(
+        page.contains(r#"href="/ips_child?parent_id=1""#),
+        "rows past the cap are linked"
+    );
+}

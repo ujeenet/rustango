@@ -698,6 +698,29 @@ pub struct InlineFormPanel {
     /// `{ label, input_html }` cells, plus `pk` (empty for new rows)
     /// and `delete_input_html` (empty for new rows).
     pub rows: Vec<serde_json::Value>,
+    /// Child-list query string for the rows past the formset cap;
+    /// `None` when every row is shown (#1977).
+    pub more_rows_filter: Option<String>,
+}
+
+/// Existing rows one panel renders: the formset cap less its blank
+/// rows, so the TOTAL_FORMS it renders passes the POST check (#1977).
+fn row_window(extra: usize) -> (usize, usize) {
+    let extra = extra.min(crate::forms::formset::MAX_FORMS);
+    (crate::forms::formset::MAX_FORMS - extra, extra)
+}
+
+/// Keep the first `cap` rows; the filter links the child list when more exist.
+fn cut_rows(
+    rows: &mut Vec<serde_json::Value>,
+    cap: usize,
+    filter: &[(&str, String)],
+) -> Option<String> {
+    if rows.len() <= cap {
+        return None;
+    }
+    rows.truncate(cap);
+    serde_urlencoded::to_string(filter).ok()
 }
 
 /// As [`render_for_parent`] but produces an editable [`InlineFormPanel`]
@@ -757,14 +780,14 @@ pub(crate) async fn render_form_for_parent_in(
             .into_iter()
             .collect();
 
-        // #562 — by_pk constructor + struct-update for order_by and
-        // limit=None.
-        let rows = select_rows_as_json(
+        // One row past the window tells whether any are left out.
+        let (cap, extra) = row_window(inline.extra);
+        let mut rows = select_rows_as_json(
             pool,
             &child_rows(
                 SelectQuery {
                     order_by: order_pk,
-                    limit: None,
+                    limit: Some(cap as i64 + 1),
                     ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
                 },
                 parts,
@@ -772,10 +795,15 @@ pub(crate) async fn render_form_for_parent_in(
             &select_fields,
         )
         .await?;
+        let fk_name = child_model
+            .field_by_column(inline.fk_column)
+            .map_or(inline.fk_column, |f| f.name);
+        let more_rows_filter =
+            cut_rows(&mut rows, cap, &[(fk_name, parent_pk.to_display_string())]);
 
         let prefix = child_model.table.to_owned();
         let initial_forms = rows.len();
-        let total_forms = initial_forms + inline.extra;
+        let total_forms = initial_forms + extra;
         let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
 
         let mut field_labels: Vec<String> =
@@ -866,6 +894,7 @@ pub(crate) async fn render_form_for_parent_in(
             max_num: inline.max_num,
             field_labels,
             rows: rendered_rows,
+            more_rows_filter,
         });
     }
     Ok(panels)
@@ -1390,7 +1419,8 @@ pub(crate) async fn render_form_generic_for_parent_in(
             .collect();
 
         // #562 — composite AND (ct + pk); struct-update over ::new.
-        let rows = select_rows_as_json(
+        let (cap, extra) = row_window(inline.extra);
+        let mut rows = select_rows_as_json(
             pool,
             &child_rows(
                 SelectQuery {
@@ -1407,6 +1437,7 @@ pub(crate) async fn render_form_generic_for_parent_in(
                         }),
                     ]),
                     order_by: order_pk,
+                    limit: Some(cap as i64 + 1),
                     ..SelectQuery::new(child_model)
                 },
                 parts,
@@ -1414,10 +1445,23 @@ pub(crate) async fn render_form_generic_for_parent_in(
             &select_fields,
         )
         .await?;
+        let name_of = |column: &'static str| {
+            child_model
+                .field_by_column(column)
+                .map_or(column, |f| f.name)
+        };
+        let more_rows_filter = cut_rows(
+            &mut rows,
+            cap,
+            &[
+                (name_of(inline.ct_column), ct_id.to_string()),
+                (name_of(inline.pk_column), parent_pk_i64.to_string()),
+            ],
+        );
 
         let prefix = child_model.table.to_owned();
         let initial_forms = rows.len();
-        let total_forms = initial_forms + inline.extra;
+        let total_forms = initial_forms + extra;
         let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
 
         let mut field_labels: Vec<String> =
@@ -1503,6 +1547,7 @@ pub(crate) async fn render_form_generic_for_parent_in(
             max_num: inline.max_num,
             field_labels,
             rows: rendered_rows,
+            more_rows_filter,
         });
     }
     Ok(panels)
@@ -1514,6 +1559,22 @@ use crate::text::html_escape;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_rows_links_the_rest_only_past_the_cap() {
+        let mut rows = vec![serde_json::json!({}); 3];
+        let filter = [
+            ("content_type", "4".to_owned()),
+            ("object_id", "7".to_owned()),
+        ];
+        assert_eq!(cut_rows(&mut rows, 3, &filter), None);
+        assert_eq!(
+            cut_rows(&mut rows, 2, &filter).as_deref(),
+            Some("content_type=4&object_id=7")
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(row_window(5000), (0, crate::forms::formset::MAX_FORMS));
+    }
 
     #[test]
     fn html_escape_quotes_and_brackets() {

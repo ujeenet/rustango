@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a parent with 1000+ inline children can be saved again (#1977)
+
+The edit form renders at most `MAX_FORMS` inline slots and links the child list for the rest.
+Rows it leaves out are not touched by the save.
+
 ### Fixed — an INSERT whose generated PK can't be read back writes no row (#1978, #1969)
 
 On MySQL a non-integer DB-default PK is refused before the INSERT, so a re-submit can't duplicate it.
