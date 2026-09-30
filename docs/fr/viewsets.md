@@ -559,7 +559,7 @@ Chaque méthode sur `ViewSet::for_model(SCHEMA)` (chacune renvoie `Self`) :
 | Méthode | But |
 |---|---|
 | `serializer::<S>()` | Brancher un sérialiseur pour une sortie + entrée typées (tri-dialecte). |
-| `fields(&["…"])` | Liste blanche de la projection par défaut + des champs modifiables (sans sérialiseur). |
+| `fields(&["…"])` | Liste blanche de la projection par défaut + des champs modifiables. |
 | `filter_fields(&["…"])` | Activer le filtrage `?field=value`. |
 | `search_fields(&["…"])` | Activer `?search=`. |
 | `ordering(&[("field", desc)])` | Ordre de tri par défaut. |
@@ -601,8 +601,8 @@ Lookups pris en charge : `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contai
 
 **Recherche** — `?search=term` fait correspondre `search_fields` avec un OU insensible à la casse.
 
-**Tri** — `?ordering=field,-other` (`-` = DESC). N'importe quel champ est triable
-sauf si vous définissez `.ordering_fields([...])` pour le restreindre. Sans paramètre, le
+**Tri** — `?ordering=field,-other` (`-` = DESC). Tout champ que la réponse montre
+(avec un sérialiseur, les champs qu'il rend) est triable sauf si vous définissez `.ordering_fields([...])` pour le restreindre. Sans paramètre, le
 tri par défaut `ordering` s'applique. Ils se composent tous.
 
 ---
@@ -758,6 +758,14 @@ il restreint donc le queryset de base sur toutes les routes. Une ligne que le ba
 L'identité doit provenir de la credential, jamais de la chaîne de requête. Un
 filtre `?owner_id=` n'est pas une portée — c'est un paramètre que l'appelant choisit.
 
+Une portée ne restreint que la lecture. Un backend qui possède une colonne implémente
+aussi `write_pins` : la création enregistre le propriétaire, la mise à jour ne peut pas le
+changer, et `WritePin::Deny` refuse l'écriture avec un 403.
+
+Les portées globales statiques d'un modèle limitent aussi ce qui est lu, pas ce qui est
+écrit : une création ou une mise à jour peut sortir de la portée (201 sans corps, ou 204).
+Pour une frontière de sécurité, utilisez un backend de filtre avec `write_pins`.
+
 #### `OwnedBy` — le backend fourni
 
 La plupart des ressources possédées ont besoin d'exactement une règle : *les lignes dont la colonne de propriété est
@@ -779,6 +787,9 @@ prend le nom plutôt que de supposer une convention. Il échoue de manière ferm
 façons dont il peut être erroné : une requête non authentifiée et une colonne que le modèle ne
 possède pas correspondent toutes deux à **rien**, de sorte qu'une faute de frappe au moment du montage ne peut pas se transformer en
 « aucun prédicat, renvoyer la table ».
+
+`OwnedBy` épingle sa colonne à l'écriture : la création enregistre l'appelant quoi que dise
+le corps, la mise à jour ne déplace jamais la ligne, et une écriture sans principal est un 403.
 
 Les superusers ne sont pas spéciaux par défaut ; `.superuser_sees_all()` active l'option, parce que
 « les admins voient tout » est une décision produit, pas une décision du framework.

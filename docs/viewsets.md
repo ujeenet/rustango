@@ -763,6 +763,10 @@ A scope narrows reads only. A backend that owns a column also implements
 `write_pins`, so create stores the owner and update cannot change it; returning
 `WritePin::Deny` refuses the write with a 403.
 
+A model's static global scopes also limit what is read, not what is written: a
+create or update may leave the scope (201 with no body, or 204). For a security
+boundary, use a filter backend with `write_pins`.
+
 #### `OwnedBy` — the shipped backend
 
 Most owned resources need exactly one rule: *rows whose ownership column is the
