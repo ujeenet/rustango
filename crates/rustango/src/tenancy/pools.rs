@@ -767,6 +767,11 @@ impl<DB: Database> TenantPools<DB> {
         self.cache.read().await.len()
     }
 
+    /// Number of schema-mode scoped pools currently cached.
+    pub async fn cached_scoped_pool_count(&self) -> usize {
+        self.scoped_cache.read().await.len()
+    }
+
     async fn pool_for_database_mode(&self, org: &Org) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
         // Fast path: cache hit. Recording the hit needs only `&`, so
         // the LRU stamp costs no write lock here.

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Tenant purge deletes extra hosts
+
+`purge-tenant` now deletes the tenant's `rustango_org_hosts` rows and sets `active = false`
+before it drops anything, so a failed purge leaves an inactive tenant you can purge again.
+
 ### `PgJobQueue` counts attempts at pickup
 
 `rustango_jobs.attempt` now includes the running attempt. Keep the

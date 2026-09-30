@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — purging a tenant with an extra host (#1930)
+
+Purge now deactivates the tenant and evicts its pools first, drops the storage, then
+deletes its `rustango_org_hosts` rows and the Org. A failed purge can be retried.
+
 ### Fixed — a panicking job no longer kills its worker (#1843)
 
 A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
