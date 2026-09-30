@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.11
+
 ### Relation `SUM` decodes by column type (#1944)
 
 `annotate_sum` over a relation's float column now reads back as `f64`, not `i64`.

@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.11] — 2026-09-30
+
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)
 
 `annotate_sum` over an M2M or generic relation no longer truncates a float column.
