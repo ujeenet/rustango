@@ -155,6 +155,12 @@ untouched.
 `migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;
 now an unknown flag is an error. Use `migrate-tenants` for a tenant-scoped target.
 
+### Tenancy user and permission verbs refuse unknown flags (breaking)
+
+`grant-perm`, `revoke-perm`, `create-user` and the host verbs now fail on a flag they don't
+take. A password typed at the prompt is no longer trimmed: one set with a leading or
+trailing space before now logs in without it.
+
 ### `PgJobQueue` counts attempts at pickup
 
 `rustango_jobs.attempt` now includes the running attempt. Keep the

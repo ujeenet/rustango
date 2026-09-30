@@ -135,3 +135,76 @@ async fn migrate_target_and_dry_run_stay_registry_scoped() {
         .expect("registry target");
     assert!(b.has_table("reg_t").await);
 }
+
+impl Booted {
+    /// A migrated database-mode tenant, so user and permission verbs run.
+    async fn tenant(&self, slug: &str) {
+        self.run(&["migrate-registry"]).await.expect("registry");
+        let db = self._tmp.path().join(format!("{slug}.db"));
+        self.run(&[
+            "create-tenant",
+            slug,
+            "--mode",
+            "database",
+            "--backend",
+            "sqlite",
+            "--database-url",
+            &format!("sqlite://{}?mode=rwc", db.display()),
+        ])
+        .await
+        .expect("create the tenant");
+    }
+}
+
+#[tokio::test]
+async fn create_user_never_takes_a_flag_as_the_username() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    let res = b
+        .run(&["create-user", "acme", "--superuser", "--password", "pw"])
+        .await;
+    assert!(res.is_err(), "no username given, but: {res:?}");
+
+    // Flags before and after the positionals mean the same thing.
+    let out = b
+        .run(&["create-superuser", "--password", "pw", "acme", "bob"])
+        .await
+        .expect("create-superuser");
+    assert!(
+        out.contains("`bob`") && out.contains("superuser=true"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
+async fn grant_perm_refuses_a_misspelt_role_flag() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    for verb in ["grant-perm", "revoke-perm"] {
+        let res = b.run(&[verb, "acme", "bob", "post.change", "--rol"]).await;
+        assert!(res.is_err(), "{verb} ignored `--rol`: {res:?}");
+    }
+}
+
+#[tokio::test]
+async fn set_host_enabled_reads_the_enabled_value_as_a_value() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["add-host", "acme", "shop.example.com"])
+        .await
+        .expect("add");
+    let out = b
+        .run(&[
+            "set-host-enabled",
+            "--enabled",
+            "false",
+            "acme",
+            "shop.example.com",
+        ])
+        .await
+        .expect("--enabled false");
+    assert!(out.contains("parked"), "{out}");
+}

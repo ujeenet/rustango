@@ -84,11 +84,23 @@ pub fn ask_password(prompt: &str) -> io::Result<Option<String>> {
     if !io::stdin().is_terminal() {
         return Ok(None);
     }
-    let pw = rpassword::prompt_password(prompt)?;
-    let trimmed = pw.trim().to_owned();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(trimmed))
+    Ok(password_answer(rpassword::prompt_password(prompt)?))
+}
+
+/// Kept byte for byte: spaces are part of a password, and `--password`
+/// never trimmed, so a trimmed prompt stored a different secret (#1910).
+fn password_answer(pw: String) -> Option<String> {
+    (!pw.is_empty()).then_some(pw)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_prompted_password_keeps_its_spaces() {
+        assert_eq!(
+            super::password_answer(" pw ".to_owned()).as_deref(),
+            Some(" pw ")
+        );
+        assert_eq!(super::password_answer(String::new()), None);
     }
 }

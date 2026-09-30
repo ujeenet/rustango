@@ -10,6 +10,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 `migrate --dry-run` see registry-scoped migrations only. **Breaking:** `migrate-registry`
 and `migrate-tenants` refuse flags they don't take, and a tenant-scoped `<target>` is refused.
 
+### Fixed — tenancy user, permission and host verbs parse flags (#1910)
+
+`create-user acme --superuser` no longer makes a user named `--superuser`; a failed
+first-user check is an error, not a superuser; prompted passwords keep their spaces;
+`set-host-enabled --enabled false` reads `false` as the value. **Breaking:** `grant-perm`,
+`revoke-perm` and the host verbs refuse unknown flags (`--rol` granted to a user).
+
 ### Fixed — a panicking job no longer kills its worker (#1843)
 
 A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
