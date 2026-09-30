@@ -9,6 +9,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 `.none()` now counts 0 without a query. Limit, offset, DISTINCT, joins, relation-span
 filters and `union()` are counted and aggregated through a derived table instead of dropped.
 
+### Fixed — `Sum` of a float column is no longer cast to an integer (#1886)
+
+`SUM` casts from the column type: float columns to double, decimals stay exact.
+
 ### Fixed — relation-span filters no longer leak memory per query (#1889)
 
 Multi-hop join aliases are interned once per path instead of leaked on every `compile()`.

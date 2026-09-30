@@ -155,6 +155,10 @@ untouched.
 `qs.limit(10).count()` now returns at most 10. `CountQuery` and `AggregateQuery` gain a
 public `source` field; build them with `new`, `CountQuery::from_select` or `AggregateQuery::over_select`.
 
+### `Sum` over float and decimal columns
+
+It now decodes as `f64` (float) or `Decimal` (decimal), not `i64`; `sum::<i64>` on such a column fails.
+
 ### `QueryError::JoinAliasLimit`
 
 New variant: returned once a process has seen 4096 distinct multi-hop relation paths.

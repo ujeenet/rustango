@@ -1,5 +1,6 @@
-//! `count` / `exists` / `sum` honour every queryset clause (#1885), on
-//! every backend; join aliases are not leaked per `compile()` (#1889).
+//! `count` / `exists` / `sum` honour every queryset clause (#1885) and
+//! `Sum` keeps the column's type (#1886), on every backend; join aliases
+//! are not leaked per `compile()` (#1889).
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -87,6 +88,17 @@ async fn count_honours_relation_span(pool: &Pool) {
     assert_eq!(s, Some(300));
 }
 
+async fn sum_keeps_float(pool: &Pool) {
+    let s: Option<f64> = Book::objects().sum("price", pool).await.unwrap();
+    assert_eq!(
+        s,
+        Some(14.25),
+        "10.75 + 0.5 + 3.0 must not be cast to an integer"
+    );
+    let i: Option<i64> = Book::objects().sum("pages", pool).await.unwrap();
+    assert_eq!(i, Some(600));
+}
+
 /// Compile-only chain for the multi-hop alias test; never gets a table.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "occ_region")]
@@ -145,5 +157,6 @@ tri_dialect_test! {
         count_honours_limit_and_offset,
         count_honours_compound,
         count_honours_relation_span,
+        sum_keeps_float,
     ],
 }

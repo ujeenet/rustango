@@ -781,10 +781,23 @@ enum AggCast {
 
 /// The cast a flat aggregate needs, or `None` when the decoder
 /// already handles its type. Count, Max and Min return i64
-/// everywhere.
-fn aggregate_cast_kind(expr: &AggregateExpr) -> Option<AggCast> {
+/// everywhere. `SUM` follows its column, read from the current scope.
+fn aggregate_cast_kind(b: &Sql<'_>, expr: &AggregateExpr) -> Option<AggCast> {
+    use crate::core::FieldType;
     match expr {
-        AggregateExpr::Sum(_) => Some(AggCast::Int),
+        AggregateExpr::Sum(col) => {
+            let ty = b
+                .scope_stack
+                .last()
+                .and_then(|m| m.field_by_column(col))
+                .map(|f| f.ty);
+            match ty {
+                Some(FieldType::F32 | FieldType::F64) => Some(AggCast::Float),
+                // Exact NUMERIC / DECIMAL, which the decoders read as-is.
+                Some(FieldType::Decimal) => None,
+                _ => Some(AggCast::Int),
+            }
+        }
         AggregateExpr::Avg(_)
         | AggregateExpr::StdDev(_)
         | AggregateExpr::StdDevPop(_)
@@ -947,7 +960,7 @@ fn write_aggregate_expr(
             b.sql.push_str(" FILTER (WHERE ");
             write_where_expr(b, filter, None, Some(model))?;
             b.sql.push(')');
-            if let Some(kind) = aggregate_cast_kind(inner) {
+            if let Some(kind) = aggregate_cast_kind(b, inner) {
                 let emitted = b.sql[prior..].to_string();
                 b.sql.truncate(prior);
                 let wrapped = apply_agg_cast(b.d, kind, &format!("({emitted})"));
@@ -1070,7 +1083,7 @@ fn write_aggregate_expr(
 /// the decoder needs, if any.
 fn write_aggregate_kind(b: &mut Sql<'_>, expr: &AggregateExpr) -> Result<(), SqlError> {
     let bare = format_bare_aggregate(b, expr)?;
-    let out = match aggregate_cast_kind(expr) {
+    let out = match aggregate_cast_kind(b, expr) {
         Some(kind) => apply_agg_cast(b.d, kind, &bare),
         None => bare,
     };
@@ -1135,7 +1148,7 @@ fn write_aggregate_as_case_when(
         None => b.sql.push('1'),
     }
     b.sql.push_str(" END)");
-    if let Some(kind) = aggregate_cast_kind(inner) {
+    if let Some(kind) = aggregate_cast_kind(b, inner) {
         let emitted = b.sql[prior..].to_string();
         b.sql.truncate(prior);
         let wrapped = apply_agg_cast(b.d, kind, &emitted);
