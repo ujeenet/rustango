@@ -174,6 +174,8 @@ A queryset with no `order_by` now pages in PK order instead of the database's sc
 `insert_or_ignore` now returns `false` on a skip, and a skipped `DoNothing` through
 `insert_returning_pool` is `RowNotFound`, as on PostgreSQL.
 
+## 0.59.10
+
 ### Tenancy `migrate` verbs refuse unknown flags (breaking)
 
 `migrate-registry` / `migrate-tenants` used to drop every flag and run the real apply;

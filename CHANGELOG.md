@@ -38,6 +38,8 @@ Each NULL in the VALUES list is cast to its column type, so it no longer fails a
 `insert_returning_*` read it from the INSERT itself, not the session. New `rustango::sql::insert_or_ignore`.
 **Breaking:** `Dialect::write_conflict_clause` takes a `model: &ModelSchema` argument.
 
+## [0.59.10] — 2026-09-30
+
 ### Fixed — tenancy `migrate` verbs honour their flags and scope (#1909)
 
 `migrate-registry --dry-run` previews instead of migrating; `migrate <target>` and
