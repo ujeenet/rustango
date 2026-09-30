@@ -136,7 +136,7 @@ fn is_row_not_found<T>(r: &Result<T, rustango::sql::ExecError>) -> bool {
     )
 }
 
-/// A skip in a transaction is RowNotFound, and the skip's MySQL session
+/// A skip in a transaction is `RowNotFound`, and the skip's MySQL session
 /// id must not leak into the next insert's reported PK.
 async fn skip_in_a_tx_leaves_no_stale_id(pool: &Pool) {
     post("x", None).insert_pool(pool).await.expect("seed");

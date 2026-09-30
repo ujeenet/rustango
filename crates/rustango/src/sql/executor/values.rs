@@ -57,7 +57,7 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
     }
 }
 
-/// Per result column, whether `model` declares it a Uuid. MySQL and SQLite
+/// Per result column, whether `model` declares it a `Uuid`. MySQL and SQLite
 /// store a UUID as text or bytes, so only the model tells it apart.
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
 fn uuid_columns<R: sqlx::Row>(rows: &[R], model: &crate::core::ModelSchema) -> Vec<bool> {
