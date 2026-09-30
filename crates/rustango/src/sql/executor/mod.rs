@@ -1190,7 +1190,8 @@ pub async fn count_rows_pool(pool: &Pool, query: &CountQuery) -> Result<i64, Exe
 ///
 /// Large batches are split to fit the backend's bind-parameter limit
 /// and run in one transaction, so a failing batch rolls back the rest.
-/// Do not hold an [`AtomicTx`] guard across this call.
+/// Inside an [`atomic`] block on the same pool, any size joins it as a
+/// savepoint; do not hold its [`AtomicTx`] guard across this call.
 ///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
@@ -1210,7 +1211,9 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
     let columns = query.columns.len().max(1);
     let max_rows = (pool.dialect().max_bind_params() / columns).max(1);
 
-    if query.rows.len() <= max_rows {
+    // One statement is atomic alone, but inside an outer `atomic` it must
+    // join that transaction like a multi-batch insert does.
+    if query.rows.len() <= max_rows && !atomic::in_block(pool) {
         let stmt = pool.dialect().compile_bulk_insert(query)?;
         execute_pool(pool, &stmt.sql, stmt.params).await?;
         return Ok(());

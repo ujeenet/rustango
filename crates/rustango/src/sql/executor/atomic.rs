@@ -341,6 +341,17 @@ impl Drop for OpenSavepoint {
     }
 }
 
+/// Whether the running task is inside an [`atomic`] block on `pool`.
+pub(crate) fn in_block(pool: &Pool) -> bool {
+    let id = PoolId(pool.clone());
+    BLOCK
+        .try_with(|b| {
+            std::iter::successors(Some(Arc::clone(b)), |b| b.enclosing.clone())
+                .any(|b| b.pool.same(&id))
+        })
+        .unwrap_or(false)
+}
+
 /// Closure-scoped transaction with after-commit hooks.
 /// Auto-commits when `f` returns `Ok`,
 /// auto-rolls-back when `f` returns `Err`. Callbacks queued via

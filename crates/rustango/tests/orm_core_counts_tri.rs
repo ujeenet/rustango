@@ -188,7 +188,13 @@ async fn bulk_insert_rolls_back_every_batch(pool: &Pool) {
 }
 
 async fn bulk_insert_joins_outer_atomic(pool: &Pool) {
-    let n = two_batches(pool);
+    for n in [3, two_batches(pool)] {
+        bulk_insert_rolled_back_with_outer(pool, n).await;
+    }
+}
+
+/// `n` rows inside an `atomic()` that then fails: one batch or several.
+async fn bulk_insert_rolled_back_with_outer(pool: &Pool, n: i64) {
     let (p, q) = (pool.clone(), wide_query(wide_rows(1..=n)));
     let r: Result<(), ExecError> = atomic(pool, move |_tx| {
         Box::pin(async move {
@@ -201,7 +207,7 @@ async fn bulk_insert_joins_outer_atomic(pool: &Pool) {
     assert_eq!(
         Wide::objects().count(pool).await.unwrap(),
         0,
-        "the outer rollback must undo the bulk insert"
+        "the outer rollback must undo a {n}-row bulk insert"
     );
 }
 

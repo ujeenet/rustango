@@ -17,7 +17,8 @@ SQLite has no decimal type; a NUMERIC `SUM` there reads as `f64` / `i64`.
 
 ### Fixed — a multi-batch `bulk_insert_pool` is all-or-nothing (#1891)
 
-Batches split by the bind limit share one transaction, or a savepoint inside `atomic()`.
+Batches split by the bind limit share one transaction. Inside `atomic()` on the same pool,
+any size runs in a savepoint of it, so the outer rollback undoes it.
 
 ### Fixed — relation-span filters no longer leak memory per query (#1889)
 
