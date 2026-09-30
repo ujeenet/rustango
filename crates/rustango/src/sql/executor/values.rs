@@ -460,7 +460,6 @@ flat_scalar!(
     bool,
     String,
     Vec<u8>,
-    uuid::Uuid,
     serde_json::Value,
     chrono::DateTime<chrono::Utc>,
     chrono::NaiveDateTime,
@@ -473,6 +472,78 @@ flat_scalar!(rust_decimal::Decimal);
 // sqlx-postgres has no unsigned decode (MySQL reads them from UNSIGNED columns).
 #[cfg(not(feature = "postgres"))]
 flat_scalar!(u8, u16, u32, u64);
+
+/// The one place a UUID cell is decoded. MySQL keeps it as `CHAR(36)` text,
+/// and sqlx's `Uuid` there wants 16 raw bytes (#1733).
+#[doc(hidden)]
+pub struct UuidCell(uuid::Uuid);
+
+#[cfg(feature = "postgres")]
+impl sqlx::Type<sqlx::Postgres> for UuidCell {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <uuid::Uuid as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <uuid::Uuid as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+#[cfg(feature = "postgres")]
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for UuidCell {
+    fn decode(v: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        <uuid::Uuid as sqlx::Decode<sqlx::Postgres>>::decode(v).map(Self)
+    }
+}
+#[cfg(feature = "mysql")]
+impl sqlx::Type<sqlx::MySql> for UuidCell {
+    fn type_info() -> sqlx::mysql::MySqlTypeInfo {
+        <uuid::fmt::Hyphenated as sqlx::Type<sqlx::MySql>>::type_info()
+    }
+    fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
+        <uuid::fmt::Hyphenated as sqlx::Type<sqlx::MySql>>::compatible(ty)
+    }
+}
+#[cfg(feature = "mysql")]
+impl<'r> sqlx::Decode<'r, sqlx::MySql> for UuidCell {
+    fn decode(v: sqlx::mysql::MySqlValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        <uuid::fmt::Hyphenated as sqlx::Decode<sqlx::MySql>>::decode(v).map(|h| Self(h.into_uuid()))
+    }
+}
+#[cfg(feature = "sqlite")]
+impl sqlx::Type<sqlx::Sqlite> for UuidCell {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <uuid::Uuid as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+    fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+        <uuid::Uuid as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+    }
+}
+#[cfg(feature = "sqlite")]
+impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for UuidCell {
+    fn decode(v: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        <uuid::Uuid as sqlx::Decode<sqlx::Sqlite>>::decode(v).map(Self)
+    }
+}
+
+impl flat_sealed::Sealed for uuid::Uuid {}
+impl flat_sealed::Sealed for Option<uuid::Uuid> {}
+impl FlatScalar for uuid::Uuid {
+    type Cell = UuidCell;
+    fn from_cell(cell: UuidCell) -> Self {
+        cell.0
+    }
+    fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+        Err(unexpected_null(column))
+    }
+}
+impl FlatScalar for Option<uuid::Uuid> {
+    type Cell = UuidCell;
+    fn from_cell(cell: UuidCell) -> Self {
+        Some(cell.0)
+    }
+    fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+        Ok(None)
+    }
+}
 
 impl<T> flat_sealed::Sealed for sqlx::types::Json<T> {}
 impl<T> flat_sealed::Sealed for Option<sqlx::types::Json<T>> {}
@@ -559,6 +630,31 @@ where
         return U::from_null(name.as_deref().unwrap_or("?"));
     }
     row.try_get::<U::Cell, _>(index).map(U::from_cell)
+}
+
+/// Decode the named column of a MySQL row through [`FlatScalar`], for
+/// macro-emitted code; a missing column is an error, not NULL.
+///
+/// # Errors
+/// The driver's decode error, or NULL for a bare `U`.
+#[cfg(feature = "mysql")]
+#[doc(hidden)]
+pub fn try_get_flat_my<U: FlatScalar>(
+    row: &crate::sql::MyReturningRow,
+    name: &str,
+) -> Result<U, sqlx::Error> {
+    use sqlx::{Row as _, ValueRef as _};
+    if row.try_get_raw(name)?.is_null() {
+        return U::from_null(name);
+    }
+    row.try_get::<U::Cell, _>(name).map(U::from_cell)
+}
+
+#[cfg(not(feature = "mysql"))]
+#[doc(hidden)]
+#[allow(clippy::missing_errors_doc)]
+pub fn try_get_flat_my<U>(row: &crate::sql::MyReturningRow, _name: &str) -> Result<U, sqlx::Error> {
+    match *row {}
 }
 
 /// Decode a `(K, V)` row, each cell NULL-checked (#1808).

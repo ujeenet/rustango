@@ -27,6 +27,7 @@
 //! `MySQL`-shape (overrides via [`crate::sql::Dialect::column_type`]):
 //! * `bool`    → `TINYINT(1)` / `DateTime<Utc>` → `DATETIME(6)`
 //! * `Uuid`    → `CHAR(36)` / `serde_json::Value` → `JSON`
+//! * `String` without `max_length` → `LONGTEXT`
 //! * `f32`/`f64` → `FLOAT`/`DOUBLE`
 //!
 //! ## Bound mapping

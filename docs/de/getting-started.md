@@ -141,7 +141,7 @@ Willst du es nativ statt im Container betreiben, brauchst du eine Datenbank und
 einen Benutzer:
 
 ```sql
-CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs;
 CREATE USER 'rustango'@'localhost' IDENTIFIED BY 'rustango';
 GRANT ALL PRIVILEGES ON myblog_dev.* TO 'rustango'@'localhost';
 ```
@@ -154,6 +154,13 @@ DATABASE_URL=mysql://rustango:rustango@localhost:3306/myblog_dev
 breit und kann kein Emoji speichern, was viel später als Schreibvorgang auftaucht,
 der an einer einzigen Zeile scheitert. MariaDB läuft über denselben Treiber und
 dasselbe URL-Schema.
+
+Auch die Kollation zählt. Spalten erben den Standard der Datenbank, und der von
+MySQL (`utf8mb4_0900_ai_ci`) ignoriert Groß-/Kleinschreibung und Akzente:
+`.eq("/About")` trifft `/about`, und eine `unique`-Spalte lehnt `Hero` neben `hero`
+ab, anders als PostgreSQL und SQLite. `utf8mb4_0900_as_cs` vergleicht wie diese.
+Meide eine `_bin`-Kollation: Der Treiber kann ihre Textspalten nicht als `String`
+lesen. `manage check --deploy` warnt vor beidem.
 
 ---
 
