@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `JtiStore` docs no longer suggest `rows_affected` after `DO NOTHING` (#1968)
+
+A MySQL skip reports one row too, so a replay passed. The example uses `sql::insert_or_ignore`.
+
 ## [0.59.11] — 2026-09-30
 
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)
