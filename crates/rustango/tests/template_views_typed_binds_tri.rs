@@ -1,0 +1,207 @@
+//! Template views bind form, filter and FK-display values by field type, not as text (#1915).
+
+#![cfg(all(
+    any(feature = "postgres", feature = "mysql", feature = "sqlite"),
+    feature = "template_views"
+))]
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{header, Method, Request, StatusCode};
+use rustango::core::Model as _;
+use rustango::sql::{Auto, FetcherPool as _, ForeignKey, Pool};
+use rustango::template_views::{CreateView, ListView, UpdateView};
+use rustango::{tri_dialect_test, Model};
+use tera::Tera;
+use tower::ServiceExt as _;
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv1915_event", app = "tv1915")]
+pub struct Event {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub day: chrono::NaiveDate,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub token: uuid::Uuid,
+    pub meta: serde_json::Value,
+    pub done: bool,
+    pub author_id: i64,
+    #[rustango(max_length = 32)]
+    pub note: Option<String>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv1915_tag", app = "tv1915", display = "name")]
+pub struct Tag {
+    #[rustango(primary_key, max_length = 64)]
+    pub code: String,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv1915_pin", app = "tv1915")]
+pub struct Pin {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64, on = "code")]
+    pub tag: ForeignKey<Tag, String>,
+}
+
+const CSRF: &str = "tv1915-csrf-token-tv1915-csrf-token-tv1915x";
+const UUID_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const FORM: &str = "application/x-www-form-urlencoded";
+
+async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, Pin::SCHEMA.table).await;
+    rustango::testkit::matrix::fresh_table::<Event>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Pin>(pool).await;
+}
+
+fn app(pool: &Pool) -> axum::Router {
+    let mut t = Tera::default();
+    t.add_raw_templates(vec![
+        ("form.html", "form {{ errors | json_encode() }}"),
+        ("list.html", "rows={{ object_list | length }}"),
+        (
+            "pins.html",
+            r#"{% for r in object_list %}{{ r.tag_display | default(value="-") }};{% endfor %}"#,
+        ),
+    ])
+    .unwrap();
+    let t = Arc::new(t);
+    CreateView::for_model(Event::SCHEMA)
+        .template("form.html")
+        .success_url("/events")
+        .router("/events", t.clone(), pool.clone())
+        .merge(
+            UpdateView::for_model(Event::SCHEMA)
+                .template("form.html")
+                .success_url("/events")
+                .router("/events", t.clone(), pool.clone()),
+        )
+        .merge(
+            ListView::for_model(Event::SCHEMA)
+                .template("list.html")
+                .filter_fields(&["author_id", "done", "token", "day", "note", "at"])
+                .router("/events", t.clone(), pool.clone()),
+        )
+        .merge(
+            ListView::for_model(Pin::SCHEMA)
+                .template("pins.html")
+                .with_fk_display(true)
+                .router("/pins", t, pool.clone()),
+        )
+}
+
+async fn send(pool: &Pool, method: Method, uri: &str, body: &str) -> (StatusCode, String) {
+    let resp = app(pool)
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, FORM)
+                .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+                .body(Body::from(format!("_csrf={CSRF}&{body}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn form(day: &str, author: i64, done: bool) -> String {
+    format!(
+        "day={day}&at=2026-09-29T10%3A30%3A00Z&token={UUID_A}\
+         &meta=%7B%22k%22%3A1%7D&done={done}&author_id={author}"
+    )
+}
+
+async fn events(pool: &Pool) -> Vec<Event> {
+    Event::objects().fetch(pool).await.expect("fetch")
+}
+
+async fn create_and_update_bind_typed_values(pool: &Pool) {
+    let (status, body) = send(
+        pool,
+        Method::POST,
+        "/events/new",
+        &form("2026-09-29", 7, true),
+    )
+    .await;
+    assert!(status.is_redirection(), "create: {status} {body}");
+    let rows = events(pool).await;
+    assert_eq!(rows.len(), 1);
+    let e = &rows[0];
+    assert_eq!(e.day.to_string(), "2026-09-29");
+    assert_eq!(e.at.to_rfc3339(), "2026-09-29T10:30:00+00:00");
+    assert_eq!(e.token.to_string(), UUID_A);
+    assert_eq!(e.meta, serde_json::json!({"k": 1}));
+    assert!(e.done);
+
+    let pk = *e.id.get().expect("pk");
+    let uri = format!("/events/{pk}/edit");
+    let (status, body) = send(pool, Method::POST, &uri, &form("2026-10-01", 8, false)).await;
+    assert!(status.is_redirection(), "update: {status} {body}");
+    let e = &events(pool).await[0];
+    assert_eq!(e.day.to_string(), "2026-10-01");
+    assert_eq!(e.author_id, 8);
+    assert!(!e.done);
+}
+
+async fn list_filters_bind_typed_values(pool: &Pool) {
+    for (day, author, done) in [("2026-09-29", 7, true), ("2026-09-30", 9, false)] {
+        let (status, body) =
+            send(pool, Method::POST, "/events/new", &form(day, author, done)).await;
+        assert!(status.is_redirection(), "seed: {status} {body}");
+    }
+    for (uri, want) in [
+        ("/events?author_id=7", "rows=1"),
+        ("/events?done=true", "rows=1"),
+        ("/events?done=false", "rows=1"),
+        ("/events?day=2026-09-30", "rows=1"),
+        (&*format!("/events?token={UUID_A}"), "rows=2"),
+        // Empty and unparsable values are ignored, not `= NULL` / `true`.
+        ("/events?note=", "rows=2"),
+        ("/events?done=banana", "rows=2"),
+        ("/events?done=on", "rows=1"),
+        ("/events?at=2020-01-01%2000%3A00%3A00", "rows=0"),
+        ("/events?at=2026-09-29%2010%3A30%3A00", "rows=2"),
+    ] {
+        let (status, body) = send(pool, Method::GET, uri, "").await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert_eq!(body, want, "{uri}");
+    }
+}
+
+/// A string PK that looks like a UUID must bind as text, not uuid.
+async fn fk_display_binds_the_target_pk_type(pool: &Pool) {
+    let tag = Tag {
+        code: UUID_A.into(),
+        name: "Rust".into(),
+    };
+    tag.insert_pool(pool).await.expect("tag");
+    let mut pin = Pin {
+        id: Auto::Unset,
+        tag: ForeignKey::unloaded(UUID_A.to_owned()),
+    };
+    pin.insert_pool(pool).await.expect("pin");
+    let (status, body) = send(pool, Method::GET, "/pins", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "Rust;");
+}
+
+tri_dialect_test! {
+    setup: setup,
+    scenarios: [
+        create_and_update_bind_typed_values,
+        list_filters_bind_typed_values,
+        fk_display_binds_the_target_pk_type,
+    ],
+}

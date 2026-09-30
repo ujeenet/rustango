@@ -150,6 +150,50 @@ untouched.
 
 ## Unreleased
 
+## 0.59.9
+
+### `DatabaseCache::incr` keeps the first TTL
+
+**Breaking:** `incr` no longer moves the TTL on each call, and an `i64` overflow is an error.
+
+### Change-password misses lock the account
+
+**Breaking:** five wrong current passwords on a change-password form lock the account
+like failed logins; the form and the login page answer 429 until the lock ends.
+
+### Uploads: active types refused, `max_files`, `with_uploads`
+
+**Breaking:** with no `allowed_extensions`, `save_uploads` refuses HTML, SVG, XML and JS
+(`uploads::ACTIVE_EXTENSIONS`); list one to accept it. More than 20 files per request is
+`UploadError::TooManyFiles` (raise with `.max_files(n)`). `UploadConfig` and `UploadError`
+are `#[non_exhaustive]`: build configs with `UploadConfig::new(..)`, add a `_` match arm.
+Mount upload directories with `with_uploads` instead of `with_static`.
+
+### ViewSets with open write actions warn
+
+No behaviour change: a ViewSet whose write actions have no codenames still serves them, but
+logs a warning at mount. Add permissions, `.read_only()`, or `.allow_anonymous()` to silence it.
+
+### `m2m_changed`: `src_pk` is a `SqlValue`
+
+`M2mChangedContext::src_pk` changed from `i64` to `SqlValue`. Compare with
+`SqlValue::I64(n)`, and log it with `?ctx.src_pk`.
+
+### UPDATE validates field rules
+
+Updates now fail with `QueryError::MaxLengthExceeded`, `OutOfRange`, `InvalidChoice` or
+`ValidatorFailed` where they used to write. `ModelForm` returns these as field errors.
+
+### Template views: typed form and filter values
+
+Form errors for bad input now use the `FormError` text. A `ListView` filter value that
+is empty or does not parse as its field type is ignored instead of matching nothing.
+
+### Formsets: at most 1000 rows
+
+`total_forms` / `parse_formset` return `FormSetError::TooManyForms` above
+`formset::MAX_FORMS`. `FormSetError` is `#[non_exhaustive]`: add a `_ =>` arm to matches.
+
 ## 0.59.8
 
 ### Admin audit log is permission-gated

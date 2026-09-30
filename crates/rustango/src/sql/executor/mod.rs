@@ -1096,7 +1096,7 @@ impl ::core::fmt::Debug for InsertReturningPool {
 /// column is in the INSERT, else the database-generated one.
 pub(crate) fn inserted_pk(
     q: &InsertQuery,
-    returning: crate::sql::InsertReturningPool,
+    returning: &crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
 ) -> Result<SqlValue, ExecError> {
     match q.columns.iter().position(|c| *c == pk_field.column) {
@@ -1108,7 +1108,7 @@ pub(crate) fn inserted_pk(
 /// Read a generated PK out of an INSERT's RETURNING, or MySQL's
 /// `LAST_INSERT_ID()`. A PK it can't read is an error, never a stand-in.
 fn generated_pk(
-    returning: crate::sql::InsertReturningPool,
+    returning: &crate::sql::InsertReturningPool,
     pk_field: &crate::core::FieldSchema,
     table: &'static str,
 ) -> Result<SqlValue, ExecError> {
@@ -1135,9 +1135,9 @@ fn generated_pk(
             }
             #[cfg(feature = "mysql")]
             crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
-                T::I64 => Ok(SqlValue::I64(id)),
-                T::I32 => Ok(SqlValue::I32(id as i32)),
-                T::I16 => Ok(SqlValue::I16(id as i16)),
+                T::I64 => Ok(SqlValue::I64(*id)),
+                T::I32 => Ok(SqlValue::I32(*id as i32)),
+                T::I16 => Ok(SqlValue::I16(*id as i16)),
                 _ => Err(unreadable()),
             },
             #[cfg(feature = "sqlite")]
@@ -1162,6 +1162,7 @@ fn generated_pk(
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecError> {
+    query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
     execute_pool(pool, &stmt.sql, stmt.params).await
 }
@@ -1536,6 +1537,7 @@ pub async fn insert_returning_tx(
 /// # Errors
 /// As [`update_pool`].
 pub async fn update_tx(tx: &mut PoolTx<'_>, query: &UpdateQuery) -> Result<u64, ExecError> {
+    query.validate()?;
     let stmt = tx.dialect().compile_update(query)?;
     execute_tx(tx, &stmt.sql, stmt.params).await
 }

@@ -1044,6 +1044,8 @@ pub(crate) enum InlinePlanError {
     /// An edited child row was deleted after the page loaded. The form
     /// re-renders with this message.
     Gone(String),
+    /// A malformed or oversized management form (#1892). The form re-renders.
+    BadFormset(crate::forms::formset::FormSetError),
 }
 
 impl From<AdminError> for InlinePlanError {
@@ -1176,8 +1178,10 @@ async fn plan_target(
 ) -> Result<(), InlinePlanError> {
     let table = target.child.table;
     // No management form: the panel was not rendered, nothing to do.
-    let Ok(total_forms) = crate::forms::formset::total_forms(form, table) else {
-        return Ok(());
+    let total_forms = match crate::forms::formset::total_forms(form, table) {
+        Ok(n) => n,
+        Err(crate::forms::formset::FormSetError::MissingTotalForms(_)) => return Ok(()),
+        Err(e) => return Err(InlinePlanError::BadFormset(e)),
     };
     let refused = |action: &'static str| AdminError::Forbidden {
         table: table.to_owned(),

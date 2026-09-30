@@ -313,6 +313,10 @@ pub enum ExecError {
     #[error("no content type registered for model `{table}` — seed `rustango_content_types` (run migrate)")]
     ContentTypeNotRegistered { table: &'static str },
 
+    /// An M2M manager was used on a source with no primary key yet (#1926).
+    #[error("m2m on `{through}` needs a saved source row; its primary key is unset")]
+    M2mUnsavedSource { through: &'static str },
+
     /// `get_or_create` / `update_or_create` (v0.45) was called with a
     /// filter that matches more than one row, so there is no single
     /// object to return. Tighten the filter or use

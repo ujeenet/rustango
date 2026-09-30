@@ -55,12 +55,11 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// operator console cannot create tenants — see that method for
     /// why this is opt-in rather than on by default.
     provisioning_dir: Option<std::path::PathBuf>,
-    /// `(prefix, root_dir)` pairs registered via [`Builder::with_static`].
-    /// Mounted at `serve` time as
-    /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`
+    /// Mounts registered via [`Builder::with_static_files`].
+    /// Nested at `serve` time as `Router::nest(prefix, static_router(files))`
     /// before the admin fallback so they take precedence over the
     /// admin's catch-all.
-    static_dirs: Vec<(String, std::path::PathBuf)>,
+    static_dirs: Vec<(String, crate::static_files::StaticFiles)>,
     /// Whether to mount request observability at all, set by
     /// [`Builder::observability`].
     ///
@@ -298,11 +297,37 @@ impl<DB: Database> Builder<DB> {
     /// [`crate::manage::Cli::with_static`] when tenancy mode is on.
     #[must_use]
     pub fn with_static(
-        mut self,
+        self,
         prefix: impl Into<String>,
         root_dir: impl Into<std::path::PathBuf>,
     ) -> Self {
-        self.static_dirs.push((prefix.into(), root_dir.into()));
+        let prefix = prefix.into();
+        crate::static_files::warn_if_uploads_prefix(&prefix);
+        let files = crate::static_files::StaticFiles::new(root_dir);
+        self.with_static_files(prefix, files)
+    }
+
+    /// [`Self::with_static`] for files users uploaded: HTML, SVG and XML
+    /// download instead of running on the tenant host
+    /// ([`crate::static_files::StaticFiles::user_content`]).
+    #[must_use]
+    pub fn with_uploads(
+        self,
+        prefix: impl Into<String>,
+        root_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let files = crate::static_files::StaticFiles::new(root_dir).user_content();
+        self.with_static_files(prefix, files)
+    }
+
+    /// Mount a configured [`crate::static_files::StaticFiles`] at `prefix`.
+    #[must_use]
+    pub fn with_static_files(
+        mut self,
+        prefix: impl Into<String>,
+        files: crate::static_files::StaticFiles,
+    ) -> Self {
+        self.static_dirs.push((prefix.into(), files));
         self
     }
 
@@ -666,13 +691,8 @@ impl<DB: Database> Builder<DB> {
         let had_api = self.api.is_some();
         let api = if had_api || self.health_endpoints || !self.static_dirs.is_empty() {
             let mut r = self.api.unwrap_or_default();
-            for (prefix, root) in &self.static_dirs {
-                r = r.nest(
-                    prefix,
-                    crate::static_files::static_router(crate::static_files::StaticFiles::new(
-                        root.clone(),
-                    )),
-                );
+            for (prefix, files) in &self.static_dirs {
+                r = r.nest(prefix, crate::static_files::static_router(files.clone()));
             }
             if self.health_endpoints {
                 r = r.merge(crate::health::health_router(self.registry.clone()));

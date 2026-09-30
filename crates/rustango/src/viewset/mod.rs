@@ -662,6 +662,8 @@ pub struct ViewSet {
     default_ordering: Vec<(String, bool)>,
     perms: ViewSetPerms,
     read_only: bool,
+    /// Write actions with no codenames are intended; see [`ViewSet::allow_anonymous`].
+    allow_anonymous: bool,
     /// Describe the mounted `QUERY` route in the generated OpenAPI
     /// document. Off by default — see [`ViewSet::openapi_query`].
     openapi_query: bool,
@@ -696,6 +698,7 @@ impl ViewSet {
             default_ordering: Vec::new(),
             perms: ViewSetPerms::default(),
             read_only: false,
+            allow_anonymous: false,
             openapi_query: false,
             pagination: PaginationStyle::PageNumber,
             filter_backends: Vec::new(),
@@ -943,7 +946,9 @@ impl ViewSet {
         self
     }
 
-    /// Permission codenames required per action. Empty vec = allow all.
+    /// Permission codenames required per action. Empty vec = allow all;
+    /// an open write action logs a warning at mount unless
+    /// [`Self::allow_anonymous`] is set.
     pub fn permissions(mut self, perms: ViewSetPerms) -> Self {
         self.perms = perms;
         self
@@ -1005,6 +1010,31 @@ impl ViewSet {
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
         self
+    }
+
+    /// Say that write actions without codenames are meant to be open to
+    /// any caller that reaches this router. Silences the mount warning.
+    #[must_use]
+    pub fn allow_anonymous(mut self) -> Self {
+        self.allow_anonymous = true;
+        self
+    }
+
+    /// Write actions any caller may run, unless acknowledged (#1857).
+    fn open_write_actions(&self) -> Vec<&'static str> {
+        if self.read_only || self.allow_anonymous {
+            return Vec::new();
+        }
+        let p = &self.perms;
+        [
+            ("create", &p.create),
+            ("update", &p.update),
+            ("destroy", &p.destroy),
+        ]
+        .into_iter()
+        .filter(|(_, codenames)| codenames.is_empty())
+        .map(|(action, _)| action)
+        .collect()
     }
 
     /// Describe the mounted RFC 10008 `QUERY` route in the generated
@@ -1084,6 +1114,18 @@ impl ViewSet {
     }
 
     fn router_with_source(self, prefix: &str, pool_source: PoolSource) -> Router {
+        let open = self.open_write_actions();
+        if !open.is_empty() {
+            tracing::warn!(
+                target: "rustango::viewset",
+                model = self.schema.table,
+                prefix,
+                actions = ?open,
+                "ViewSet write actions need no permission, so any caller that reaches this \
+                 router can run them; set .permissions_for_model(), .read_only(), or \
+                 .allow_anonymous() if this is intended"
+            );
+        }
         let state = Arc::new(ViewSetState {
             pool_source,
             vs: self.clone(),
@@ -3385,7 +3427,7 @@ mod created_pk_tests {
             vec![pk.column],
             vec![SqlValue::String("rust".into())],
         );
-        let got = crate::sql::inserted_pk(&q, crate::sql::InsertReturningPool::MySqlAutoId(0), pk)
+        let got = crate::sql::inserted_pk(&q, &crate::sql::InsertReturningPool::MySqlAutoId(0), pk)
             .expect("submitted pk");
         assert!(
             matches!(got, SqlValue::String(ref s) if s == "rust"),

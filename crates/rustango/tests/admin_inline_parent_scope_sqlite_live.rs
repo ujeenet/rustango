@@ -448,3 +448,21 @@ async fn editing_an_already_gone_row_explains_and_writes_nothing() {
     );
     assert_eq!(parent_name(&pool, 1).await, "p1");
 }
+
+/// A `TOTAL_FORMS` above the cap re-renders the form and writes nothing (#1892).
+#[tokio::test]
+async fn too_many_forms_is_refused_before_any_write() {
+    let pool = fresh_pool().await;
+    let form = [
+        ("name", "p1 renamed"),
+        ("ips_child-TOTAL_FORMS", "1001"),
+        ("ips_child-INITIAL_FORMS", "0"),
+        ("ips_child-0-parent_id", "1"),
+        ("ips_child-0-title", "new"),
+    ];
+    let status = post(app(pool.clone()), "/ips_parent/1", &form).await;
+
+    assert_eq!(status, StatusCode::OK, "form re-rendered");
+    assert_eq!(parent_name(&pool, 1).await, "p1");
+    assert_eq!(children(&pool).await.len(), 2);
+}

@@ -2595,7 +2595,7 @@ Same builder shape as `with_health()`:
 rustango::manage::Cli::new()
     .api(urls::api())
     .with_static("/static", "./assets")        // CSS, JS, images
-    .with_static("/uploads", "./var/uploads")  // user-uploaded media
+    .with_uploads("/uploads", "./var/uploads") // user uploads: HTML/SVG download
     .run().await
 ```
 

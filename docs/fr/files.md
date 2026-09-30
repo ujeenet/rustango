@@ -226,7 +226,7 @@ Pour des fichiers sur disque local plutôt que dans un bucket, le handler de
 fichiers statiques fait déjà cela, sans aucune ligne média :
 
 ```rust
-Cli::new(pool).with_static("/uploads", "./var/uploads")
+Cli::new(pool).with_uploads("/uploads", "./var/uploads")
 ```
 
 **Si vous alliez écrire un authorizer `AllowAll` pour faire marcher une page
@@ -319,7 +319,7 @@ jamais créées.
 **Trait `Storage` :** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`.
 
-**`UploadConfig` :** `new(prefix)` · `.max_bytes(n)` · `.allowed_extensions(&[..])`
+**`UploadConfig` :** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (insensible à la casse) · `.randomize_filename(bool)`. Utilisé par
 `save_uploads(multipart, &cfg, &storage)`.
 

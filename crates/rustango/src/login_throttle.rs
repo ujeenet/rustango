@@ -261,6 +261,36 @@ impl LoginThrottle {
             keys,
         })
     }
+
+    /// Run a signed-in user's current-password check through the gate, so a
+    /// stolen session cannot guess it at hash speed (#1873). A miss counts
+    /// toward the same account lock as the login form.
+    ///
+    /// # Errors
+    /// [`LoginRefused`] when throttled, or when `verify` returns one.
+    pub async fn verify_current_password(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+        verify: impl std::future::Future<Output = Result<bool, LoginRefused>>,
+    ) -> Result<bool, LoginRefused> {
+        let attempt = self.begin(scope, ip, username).await?;
+        let ok = match verify.await {
+            Ok(ok) => ok,
+            // A full hash queue says nothing about the password: give the tokens back.
+            Err(refused) => {
+                attempt.prompted().await;
+                return Err(refused);
+            }
+        };
+        if ok {
+            attempt.succeeded().await;
+        } else {
+            attempt.failed().await;
+        }
+        Ok(ok)
+    }
 }
 
 async fn check_lock(key: &str) -> Result<(), LoginRefused> {
@@ -436,6 +466,24 @@ mod tests {
         let r = t.begin(&s, &ip("10.9.0.1"), "u9").await;
         assert!(matches!(r, Err(LoginRefused::Throttled { .. })));
         assert!(t.begin(&s, &ip("10.9.0.2"), "u9").await.is_ok());
+    }
+
+    /// A busy verify spends no limit token.
+    #[tokio::test]
+    async fn busy_current_password_check_gives_tokens_back() {
+        let t = LoginThrottle::new(LoginLimits {
+            global_limit: 1,
+            ..LoginLimits::default()
+        });
+        let s = tenant("t-busy");
+        for _ in 0..2 {
+            let r = t
+                .verify_current_password(&s, &ClientIp::default(), "u", async {
+                    Err(LoginRefused::Busy)
+                })
+                .await;
+            assert_eq!(r, Err(LoginRefused::Busy));
+        }
     }
 
     #[tokio::test]

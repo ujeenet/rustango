@@ -153,8 +153,7 @@ impl Lockout {
         // loses updates under concurrent failed logins: several
         // attempts read the same value and write back the same `+1`,
         // so parallel guesses can out-run the threshold. `incr` is
-        // atomic on `RedisCache` and `InMemoryCache`; `DatabaseCache`
-        // still does get+set, which is fine for a single process.
+        // atomic on `RedisCache`, `InMemoryCache` and `DatabaseCache`.
         //
         // A cache failure means this attempt is NOT counted and
         // lockout quietly stops engaging, so log it loudly. Failing

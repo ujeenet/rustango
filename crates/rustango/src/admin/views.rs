@@ -1880,24 +1880,12 @@ pub(crate) async fn create_submit(
         returning: vec![pk_field.column],
         on_conflict: None,
     };
-    // Insert, then read back the PK. PG and SQLite use RETURNING.
-    // MySQL has no RETURNING, so the helper returns
-    // `LAST_INSERT_ID()`.
-    let pk_value = match crate::sql::insert_returning_pool(&state.pool, &query).await {
-        #[cfg(feature = "postgres")]
-        Ok(crate::sql::InsertReturningPool::PgRow(row)) => {
-            render::read_value_as_string(&row, pk_field).unwrap_or_default()
-        }
-        #[cfg(feature = "mysql")]
-        Ok(crate::sql::InsertReturningPool::MySqlAutoId(id)) => id.to_string(),
-        #[cfg(feature = "sqlite")]
-        Ok(crate::sql::InsertReturningPool::SqliteRow(row)) => {
-            // SQLite returns a typed row. Convert it to JSON once so
-            // the read path matches the rest of the admin.
-            let row_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-            let json = crate::sql::row_to_json_sqlite(&row, &row_fields);
-            render::read_value_as_string_json(&json, pk_field).unwrap_or_default()
-        }
+    let written = match crate::sql::insert_returning_pool(&state.pool, &query).await {
+        Ok(returning) => crate::sql::inserted_pk(&query, &returning, pk_field),
+        Err(e) => Err(e),
+    };
+    let pk_value = match written {
+        Ok(pk) => pk.to_display_string(),
         Err(e) => {
             let html = render_form(&state, model, Some(&form), false, Some(&e.to_string()));
             return Ok(Html(html).into_response());
@@ -2190,6 +2178,10 @@ pub(crate) async fn update_submit(
         Err(super::inlines::InlinePlanError::Admin(e)) => return Err(e),
         Err(super::inlines::InlinePlanError::Gone(msg)) => {
             let html = render_form(&state, model, Some(&form), true, Some(&msg));
+            return Ok(Html(html).into_response());
+        }
+        Err(super::inlines::InlinePlanError::BadFormset(e)) => {
+            let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
             return Ok(Html(html).into_response());
         }
     };

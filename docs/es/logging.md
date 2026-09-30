@@ -143,6 +143,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::sql` | Ejecución de consultas |
 | `rustango::sql::lock` | Cláusulas de bloqueo de fila |
 | `rustango::sso` | Enlace de cuentas SSO |
+| `rustango::static_files` | Montajes de archivos estáticos |
 | `rustango::template_views` | Vistas basadas en plantillas |
 | `rustango::tenancy` | Multi-tenancy, general |
 | `rustango::tenancy::admin` | Admin de inquilino |
@@ -154,6 +155,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::tenancy::resolver` | Resolución de inquilino |
 | `rustango::tenancy::sso` | SSO de inquilino |
 | `rustango::tenancy::sweep` | Barridos de retención |
+| `rustango::viewset` | ViewSets montados con escrituras abiertas |
 
 Esos son los targets que el framework nombra explícitamente. Los eventos que no
 nombran ninguno heredan su ruta de módulo, lo que da la misma forma:
