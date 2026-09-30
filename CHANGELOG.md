@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.7] — 2026-09-30
+
 ### Security — `JwtBackend` checks the tenant binding (#1848)
 
 **Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,
