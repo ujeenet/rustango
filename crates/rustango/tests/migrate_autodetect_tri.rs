@@ -505,18 +505,59 @@ async fn shrinking_max_length_refuses_to_truncate(pool: &Pool) {
     .unwrap();
     let shrink = chain.step(pool, c(3)).await;
     let refuses = by_dialect! { pool,
-        postgres => true, because "without USING, PG refuses a value too long for the new type",
-        mysql => true, because "AlterColumnMaxLength is refused at render until #559",
-        sqlite => false, because "SQLite never enforces VARCHAR length, so the change is a no-op",
+        postgres => Some("too long"),
+            because "without USING, PG refuses a value too long for the new type",
+        mysql => Some("AlterColumnMaxLength"),
+            because "AlterColumnMaxLength is refused at render until #559",
+        sqlite => None, because "SQLite never enforces VARCHAR length, so the change is a no-op",
     };
-    if !refuses.value {
+    let Some(expected) = refuses.value else {
         shrink.expect(refuses.why);
         return;
-    }
+    };
     let err = shrink.expect_err(refuses.why);
+    assert!(err.contains(expected), "{}: {err}", refuses.why);
+}
+
+/// `i32` → `String(max_length = 5)` ends as VARCHAR(5), not TEXT.
+async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
+    let t = "mad_ts_item";
+    let chain = Chain::new(pool, "ts", &[t]).await;
+    let c = |ty: &str, extra: Value| json!({"tables": [table(t, vec![id(), col("c", ty, extra)])]});
+    chain
+        .step(pool, c("i32", json!({})))
+        .await
+        .expect("initial");
+    let alter = chain
+        .step(pool, c("string", json!({"max_length": 5})))
+        .await;
+    let runs = by_dialect! { pool,
+        postgres => true, because "AlterColumnType renders on Postgres",
+        mysql => false, because "AlterColumn* is refused at render until #559",
+        sqlite => false, because "AlterColumn* is refused at render until #559",
+    };
+    if !runs.value {
+        let err = alter.expect_err(runs.why);
+        assert!(err.contains("is not yet supported on dialect"), "{err}");
+        return;
+    }
+    alter.expect("the type change applies");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'abcde')",
+        &[t, "id", "c"],
+    )
+    .await
+    .expect("five characters fit");
     assert!(
-        err.contains("too long") || err.contains("AlterColumnMaxLength"),
-        "{err}"
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, 'abcdef')",
+            &[t, "id", "c"]
+        )
+        .await
+        .is_err(),
+        "the column is VARCHAR(5)"
     );
 }
 
@@ -605,6 +646,23 @@ async fn edited_composite_fk_is_replaced(pool: &Pool) {
     )
     .await
     .expect("the FK now points at parent2");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 5, 5)",
+        &[p1, "id", "a", "b"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (2, 5, 5)",
+            &[child, "id", "a", "b"],
+        )
+        .await
+        .is_err(),
+        "the new FK exists and refuses a row only parent1 has"
+    );
 }
 
 /// An M2M junction whose target changes under the same name is rebuilt.
@@ -674,6 +732,23 @@ async fn edited_exclude_is_replaced(pool: &Pool) {
         .await
         .expect("the new predicate leaves low ids unconstrained");
     }
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (101, '[2026-01-01,2026-01-02)')",
+        &[t, "id", "during"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (102, '[2026-01-01,2026-01-02)')",
+            &[t, "id", "during"],
+        )
+        .await
+        .is_err(),
+        "the new EXCLUDE exists and refuses an overlap among high ids"
+    );
 }
 
 /// `Option<T>` → `T` with a default fills the NULLs before SET NOT NULL.
@@ -724,6 +799,7 @@ tri_dialect_test!(
         composite_fk_drops_before_its_parent,
         type_change_is_not_undone_by_max_length,
         shrinking_max_length_refuses_to_truncate,
+        type_change_into_a_string_keeps_its_length,
         edited_check_is_replaced,
         edited_composite_fk_is_replaced,
         edited_m2m_is_replaced,
