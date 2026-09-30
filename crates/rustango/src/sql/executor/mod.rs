@@ -496,12 +496,10 @@ impl<T: Model + Send> QuerySet<T> {
     where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     {
-        let select = self.compile()?;
-        let stmt = Postgres.compile_count(&CountQuery {
-            model: select.model,
-            where_clause: select.where_clause,
-            search: select.search,
-        })?;
+        let Some(select) = self.compile_unless_none()? else {
+            return Ok(0);
+        };
+        let stmt = Postgres.compile_count(&CountQuery::from_select(select))?;
         let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
         for value in stmt.params {
             q = bind_query(q, value);
@@ -2070,16 +2068,10 @@ pub trait CounterPool<T: Model + Send> {
 
 impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
     async fn count(self, pool: &Pool) -> Result<i64, ExecError> {
-        let select = self.compile()?;
-        count_rows_pool(
-            pool,
-            &CountQuery {
-                model: select.model,
-                where_clause: select.where_clause,
-                search: select.search,
-            },
-        )
-        .await
+        let Some(select) = self.compile_unless_none()? else {
+            return Ok(0);
+        };
+        count_rows_pool(pool, &CountQuery::from_select(select)).await
     }
 }
 

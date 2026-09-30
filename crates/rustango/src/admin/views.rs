@@ -364,6 +364,7 @@ pub(crate) async fn table_view(
                 // Same search the SELECT uses, so the pager total
                 // matches the visible rows.
                 search: search.clone(),
+                source: None,
             },
         )
         .await?

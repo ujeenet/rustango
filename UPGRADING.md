@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `count()` respects `limit`, `offset`, `distinct` and `union`
+
+`qs.limit(10).count()` now returns at most 10. `CountQuery` and `AggregateQuery` gain a
+public `source` field; build them with `new`, `CountQuery::from_select` or `AggregateQuery::over_select`.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`

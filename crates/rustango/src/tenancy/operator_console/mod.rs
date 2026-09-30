@@ -851,11 +851,7 @@ pub(super) async fn count_where(
     model: &'static crate::core::ModelSchema,
     where_clause: crate::core::WhereExpr,
 ) -> Result<i64, crate::sql::ExecError> {
-    let count = crate::core::CountQuery {
-        model,
-        where_clause,
-        search: None,
-    };
+    let count = crate::core::CountQuery::new(model, where_clause);
     crate::sql::count_rows_pool(pool, &count).await
 }
 

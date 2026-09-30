@@ -206,6 +206,7 @@ pub fn reverse_has_aggregate(rel: &ReverseRelation, agg: AggregateExpr) -> Expr 
         order_by: Vec::new(),
         limit: None,
         offset: None,
+        source: None,
     };
     Expr::AggregateSubquery(Box::new(inner))
 }

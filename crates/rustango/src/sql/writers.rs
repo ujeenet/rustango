@@ -579,8 +579,8 @@ fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
 pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), SqlError> {
     b.scope_stack.push(query.model);
     let r = (|| {
-        b.sql.push_str("SELECT COUNT(*) FROM ");
-        b.write_ident(query.model.table);
+        b.sql.push_str("SELECT COUNT(*)");
+        write_from_source(b, query.model, query.source.as_deref())?;
         write_where_with_search(
             b,
             &query.where_clause,
@@ -592,6 +592,23 @@ pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), Sql
     })();
     b.scope_stack.pop();
     r
+}
+
+/// ` FROM "<table>"`, or ` FROM (<source>) AS "<table>"` so the outer
+/// clauses resolve against the derived rows unchanged.
+fn write_from_source(
+    b: &mut Sql<'_>,
+    model: &'static ModelSchema,
+    source: Option<&SelectQuery>,
+) -> Result<(), SqlError> {
+    b.sql.push_str(" FROM ");
+    if let Some(sub) = source {
+        b.sql.push('(');
+        write_select(b, sub)?;
+        b.sql.push_str(") AS ");
+    }
+    b.write_ident(model.table);
+    Ok(())
 }
 
 // ---- AGGREGATE ----
@@ -710,8 +727,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
         b.write_ident(alias.as_ref());
     }
 
-    b.sql.push_str(" FROM ");
-    b.write_ident(query.model.table);
+    write_from_source(b, query.model, query.source.as_deref())?;
     write_model_joins(b, &query.joins)?;
     write_where(b, &query.where_clause, Some(query.model))?;
 

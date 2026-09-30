@@ -1927,6 +1927,14 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// [`Self::compile`], or `None` after [`Self::none`], so counts and
+    /// aggregates answer without a round trip.
+    pub(crate) fn compile_unless_none(self) -> Result<Option<SelectQuery>, QueryError> {
+        let none = self.is_none;
+        let select = self.compile()?;
+        Ok((!none).then_some(select))
+    }
+
     /// Validate the accumulated filters against `T::SCHEMA` and lower to
     /// the dialect-neutral `SelectQuery` IR.
     ///
@@ -2037,9 +2045,8 @@ impl<T: Model> QuerySet<T> {
                 }
             }
         }
-        // `.none()` forces an empty result with `LIMIT 0`. It is cheap
-        // on every dialect, and count / exists / first read the same
-        // SelectQuery, so they need no special case. The `LIMIT 0` goes
+        // `.none()` forces an empty result with `LIMIT 0`; counts and
+        // aggregates skip the query via `compile_unless_none`. The `LIMIT 0` goes
         // on the outermost slot: the combined result when a compound is
         // present, otherwise the single query.
         let (limit, compound_limit) = if self.is_none {
@@ -4117,6 +4124,7 @@ impl<T: Model> AggregateBuilder<T> {
             order_by,
             limit,
             offset: self.offset,
+            source: None,
         })
     }
 }

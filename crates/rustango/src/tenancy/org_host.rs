@@ -355,6 +355,7 @@ pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
         order_by: Vec::new(),
         limit: None,
         offset: None,
+        source: None,
     };
     // `MAX` and `SUM` are NULL on an empty table, so decode as `Option`
     // and fold to 0. An empty registry gets a stable fingerprint.

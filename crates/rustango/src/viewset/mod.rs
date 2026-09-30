@@ -1843,6 +1843,7 @@ async fn run_list(
                 model: state.vs.schema,
                 where_clause,
                 search: search_clause.clone(),
+                source: None,
             };
 
             // The SELECT and COUNT run one after the other: tenant
@@ -1909,6 +1910,7 @@ async fn run_list(
                 model: state.vs.schema,
                 where_clause,
                 search: search_clause,
+                source: None,
             };
             let results = or_500!(render_list(&state, &mut acq, &select_q, &fields).await);
             let count = or_500!(acq.count_rows(&count_q).await);

@@ -1535,9 +1535,51 @@ pub struct CountQuery {
     /// paginated list shows the right total while `?search=...` is
     /// active.
     pub search: Option<SearchClause>,
+    /// Count this SELECT's rows instead of the whole table. It is
+    /// aliased as the model table, so `where_clause` still applies.
+    pub source: Option<Box<SelectQuery>>,
+}
+
+impl SelectQuery {
+    /// Only WHERE and search shape the row set, so `COUNT(*)` or an
+    /// aggregate can read the table directly instead of a derived table.
+    fn is_plain_filter(&self) -> bool {
+        self.joins.is_empty()
+            && self.subquery_joins.is_empty()
+            && self.limit.is_none()
+            && self.offset.is_none()
+            && self.distinct.is_none()
+            && self.compound.is_empty()
+    }
+
+    /// This query as a derived table. A row lock has no meaning there.
+    fn into_derived(mut self) -> Box<Self> {
+        self.lock_mode = None;
+        Box::new(self)
+    }
 }
 
 impl CountQuery {
+    /// Count the rows `select` returns, honouring its joins, limit,
+    /// offset, DISTINCT and set operations.
+    #[must_use]
+    pub fn from_select(select: SelectQuery) -> Self {
+        if select.is_plain_filter() {
+            Self {
+                model: select.model,
+                where_clause: select.where_clause,
+                search: select.search,
+                source: None,
+            }
+        } else {
+            let model = select.model;
+            Self {
+                source: Some(select.into_derived()),
+                ..Self::new(model, WhereExpr::And(Vec::new()))
+            }
+        }
+    }
+
     /// This query narrowed by the model's global scopes.
     #[must_use]
     pub fn with_global_scopes(mut self) -> Self {
@@ -1552,6 +1594,7 @@ impl CountQuery {
             model,
             where_clause,
             search: None,
+            source: None,
         }
     }
 }
@@ -1882,6 +1925,9 @@ pub struct AggregateQuery {
     pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Aggregate this SELECT's rows instead of the whole table, as
+    /// [`CountQuery::source`] does.
+    pub source: Option<Box<SelectQuery>>,
 }
 
 impl AggregateQuery {
@@ -1902,6 +1948,28 @@ impl AggregateQuery {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            source: None,
+        }
+    }
+
+    /// An ungrouped aggregate over the rows `select` returns, honouring
+    /// its joins, limit, offset, DISTINCT and set operations.
+    #[must_use]
+    pub fn over_select(
+        select: SelectQuery,
+        aggregates: Vec<(Cow<'static, str>, AggregateExpr)>,
+    ) -> Self {
+        let model = select.model;
+        // The aggregate writer has no search slot, so a search needs the derived table too.
+        let (where_clause, source) = if select.search.is_none() && select.is_plain_filter() {
+            (select.where_clause, None)
+        } else {
+            (WhereExpr::And(Vec::new()), Some(select.into_derived()))
+        };
+        Self {
+            where_clause,
+            source,
+            ..Self::new(model, aggregates)
         }
     }
 }
@@ -1923,6 +1991,7 @@ impl PartialEq for AggregateQuery {
             && self.order_by == other.order_by
             && self.limit == other.limit
             && self.offset == other.offset
+            && self.source == other.source
     }
 }
 

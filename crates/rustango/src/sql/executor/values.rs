@@ -1027,24 +1027,14 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             + Unpin,
     {
         let col_static = crate::sql::model_shortcuts::resolve_col::<T>(col)?;
-        // Compile the queryset to get its WHERE clause, then build
-        // the AggregateQuery by hand so its projection is exactly
-        // one aggregate column and the tuple decode lines up.
-        let select_q = self.compile()?;
-        let aggregate_q = crate::core::AggregateQuery {
-            model: <T as crate::core::Model>::SCHEMA,
-            // Keep the queryset's joins so an aggregate over a
-            // joined column still resolves.
-            joins: select_q.joins,
-            where_clause: select_q.where_clause,
-            group_by: Vec::new(),
-            aggregates: vec![("v".into(), build(col_static))],
-            aliases: Vec::new(),
-            having: None,
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
+        let Some(select_q) = self.compile_unless_none()? else {
+            return Ok(None);
         };
+        // One aggregate column, so the tuple decode lines up.
+        let aggregate_q = crate::core::AggregateQuery::over_select(
+            select_q,
+            vec![("v".into(), build(col_static))],
+        );
         let rows: Vec<(Option<U>,)> = crate::sql::fetch_aggregate_pool(pool, &aggregate_q).await?;
         Ok(rows.into_iter().next().and_then(|t| t.0))
     }
