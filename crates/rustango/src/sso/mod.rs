@@ -159,7 +159,7 @@ async fn build_provider_with(
 
 /// How long discovered endpoints are reused before the next login refetches them.
 const DISCOVERY_TTL: Duration = Duration::from_secs(3600);
-/// Most issuers cached at once; past it, logins discover uncached.
+/// Most issuers cached at once; past it, the oldest is dropped.
 const DISCOVERY_MAX: usize = 1024;
 
 /// The public endpoints of one issuer. Keyed by issuer URL and holding no
@@ -199,17 +199,34 @@ async fn discovered(
     let p = OAuth2Provider::new("oidc", id, secret, redirect, "", "")
         .discover(&key, policy)
         .await?;
+    let e = Endpoints {
+        auth_url: p.auth_url.clone(),
+        token_url: p.token_url.clone(),
+        userinfo_url: p.userinfo_url.clone(),
+    };
     let mut map = DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner);
-    map.retain(|_, (at, _)| at.elapsed() < DISCOVERY_TTL);
-    if map.len() < DISCOVERY_MAX {
-        let e = Endpoints {
-            auth_url: p.auth_url.clone(),
-            token_url: p.token_url.clone(),
-            userinfo_url: p.userinfo_url.clone(),
-        };
-        map.insert(key, (Instant::now(), e));
-    }
+    remember(&mut map, key, e, DISCOVERY_MAX);
     Ok(p)
+}
+
+/// Insert `e`, dropping expired entries and then the oldest when `max` is reached.
+fn remember(
+    map: &mut HashMap<String, (Instant, Endpoints)>,
+    key: String,
+    e: Endpoints,
+    max: usize,
+) {
+    map.retain(|_, (at, _)| at.elapsed() < DISCOVERY_TTL);
+    if map.len() >= max && !map.contains_key(&key) {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(k, _)| k.clone());
+        if let Some(k) = oldest {
+            map.remove(&k);
+        }
+    }
+    map.insert(key, (Instant::now(), e));
 }
 
 /// One SSO button for a login page — the template loops over these.
@@ -374,6 +391,24 @@ mod tests {
         assert_eq!((a.client_id.as_str(), b.client_id.as_str()), ("a", "b"));
         assert_eq!(b.token_url, "https://idp.test/token");
         assert_eq!(b.userinfo_url, None);
+    }
+
+    /// At the cap the oldest issuer is dropped, so a new one is still cached.
+    #[test]
+    fn a_full_cache_drops_its_oldest_issuer() {
+        let e = || Endpoints {
+            auth_url: "a".into(),
+            token_url: "t".into(),
+            userinfo_url: None,
+        };
+        let mut map = HashMap::new();
+        for k in ["one", "two", "three"] {
+            remember(&mut map, k.into(), e(), 2);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let mut keys: Vec<_> = map.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["three", "two"]);
     }
 
     /// A failed discovery is not cached; the next login retries.
