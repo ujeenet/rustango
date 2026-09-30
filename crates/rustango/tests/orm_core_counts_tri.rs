@@ -582,8 +582,21 @@ mod decimal {
         );
     }
 
+    /// #1899: MySQL's `DECIMAL(38, 10)` rounded 15 fractional digits away.
+    async fn decimal_keeps_its_fraction(pool: &Pool) {
+        let v: Decimal = "0.123456789012345".parse().unwrap();
+        Ledger { id: 1, amount: v }
+            .insert_pool(pool)
+            .await
+            .expect("seed ledger");
+        let n = Ledger::objects().filter("amount", v).count(pool).await;
+        assert_eq!(n.unwrap(), 1, "a stored decimal must equal itself");
+        let back = Ledger::objects().fetch(pool).await.unwrap();
+        assert_eq!(back[0].amount, v);
+    }
+
     tri_dialect_test! {
         model: Ledger,
-        scenarios: [sum_keeps_decimal_exact],
+        scenarios: [sum_keeps_decimal_exact, decimal_keeps_its_fraction],
     }
 }

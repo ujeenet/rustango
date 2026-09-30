@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### MySQL `Decimal` columns are `DECIMAL(65, 28)` (#1899)
+
+New tables get the wider type; existing `DECIMAL(38, 10)` columns keep rounding past 10 places.
+Widen them with `ALTER TABLE t MODIFY c DECIMAL(65, 28)`. SQLite still keeps ~15 significant digits.
+
 ### JSON comparisons match across backends (#1898)
 
 SQLite `as_text` JSON paths now yield text: compare them to `'1'` / `'true'`, not to `1`.

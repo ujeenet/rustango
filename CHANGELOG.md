@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `Decimal` keeps its digits on MySQL; whole decimals show on SQLite (#1899)
+
+MySQL `Decimal` columns are now `DECIMAL(65, 28)`, wide enough for every `rust_decimal` value.
+The SQLite row decoder no longer shows a whole-number decimal as null.
+
 ### Fixed — JSON equality on MySQL; `as_text` JSON paths on SQLite (#1898)
 
 MySQL now binds a JSON value as `CAST(? AS JSON)`, so `filter("data", json)` matches.

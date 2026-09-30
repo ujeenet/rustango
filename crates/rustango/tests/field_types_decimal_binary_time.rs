@@ -77,7 +77,7 @@ fn postgres_column_type_decimal_binary_time() {
 #[test]
 fn mysql_column_type_decimal_binary_time() {
     let d = MySql;
-    assert_eq!(d.column_type(FieldType::Decimal, None), "DECIMAL(38, 10)");
+    assert_eq!(d.column_type(FieldType::Decimal, None), "DECIMAL(65, 28)");
     assert_eq!(d.column_type(FieldType::Binary, None), "LONGBLOB");
     assert_eq!(d.column_type(FieldType::Time, None), "TIME(6)");
 }

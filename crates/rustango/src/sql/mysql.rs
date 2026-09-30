@@ -114,7 +114,7 @@ impl Dialect for MySql {
             FieldType::DateTime => "DATETIME",
             FieldType::Date => "DATE",
             FieldType::Time => "TIME",
-            FieldType::Decimal => "DECIMAL(38, 10)",
+            FieldType::Decimal => "DECIMAL(65, 28)",
             FieldType::Binary => "BINARY",
             FieldType::Json => "JSON",
             // UUID has no target, and the array, range and other
@@ -156,8 +156,9 @@ impl Dialect for MySql {
             FieldType::Uuid => "CHAR(36)".into(),
             FieldType::Json => "JSON".into(),
             // A bare `DECIMAL` is `(10, 0)`, which has no fraction.
-            // `(38, 10)` is the widest that fits `rust_decimal`.
-            FieldType::Decimal => "DECIMAL(38, 10)".into(),
+            // `rust_decimal` holds 29 integer and 28 fractional digits;
+            // `(65, 28)` stores all of them.
+            FieldType::Decimal => "DECIMAL(65, 28)".into(),
             // `BLOB` caps at 64 KiB, too small here; `LONGBLOB` at
             // 4 GiB.
             FieldType::Binary => "LONGBLOB".into(),

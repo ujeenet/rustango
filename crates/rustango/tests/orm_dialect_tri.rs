@@ -488,3 +488,22 @@ mod upsert_target_pg {
         assert_eq!(rows[0].slug, "b");
     }
 }
+
+/// #1899: NUMERIC affinity stores a whole decimal as INTEGER, which the
+/// SQLite row decoder (admin, API) showed as null.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_whole_decimal_is_not_null() {
+    let pool = rustango::sql::sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite");
+    let row = rustango::sql::sqlx::query("SELECT CAST('7' AS NUMERIC) AS n")
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+    let mut f = *Code::SCHEMA.field("n").expect("field");
+    f.ty = rustango::core::FieldType::Decimal;
+    let f: &'static _ = Box::leak(Box::new(f));
+    let json = rustango::sql::row_to_json_sqlite(&row, &[f]);
+    assert_eq!(json["n"], "7");
+}
