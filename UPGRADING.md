@@ -150,6 +150,28 @@ untouched.
 
 ## Unreleased
 
+### `DatabaseCache::incr` keeps the first TTL
+
+**Breaking:** `incr` no longer moves the TTL on each call, and an `i64` overflow is an error.
+
+### Change-password misses lock the account
+
+**Breaking:** five wrong current passwords on a change-password form lock the account
+like failed logins; the form and the login page answer 429 until the lock ends.
+
+### Uploads: active types refused, `max_files`, `with_uploads`
+
+**Breaking:** with no `allowed_extensions`, `save_uploads` refuses HTML, SVG, XML and JS
+(`uploads::ACTIVE_EXTENSIONS`); list one to accept it. More than 20 files per request is
+`UploadError::TooManyFiles` (raise with `.max_files(n)`). `UploadConfig` and `UploadError`
+are `#[non_exhaustive]`: build configs with `UploadConfig::new(..)`, add a `_` match arm.
+Mount upload directories with `with_uploads` instead of `with_static`.
+
+### ViewSets with open write actions warn
+
+No behaviour change: a ViewSet whose write actions have no codenames still serves them, but
+logs a warning at mount. Add permissions, `.read_only()`, or `.allow_anonymous()` to silence it.
+
 ## 0.59.8
 
 ### Admin audit log is permission-gated
@@ -259,28 +281,6 @@ omits: repeat the column's nullability, default and any `COLLATE`.
 
 No schema change. A stock MySQL database (`utf8mb4_0900_ai_ci`) now gets a warning;
 use `utf8mb4_0900_as_cs` to compare text like PostgreSQL and SQLite.
-
-### `DatabaseCache::incr` keeps the first TTL
-
-**Breaking:** `incr` no longer moves the TTL on each call, and an `i64` overflow is an error.
-
-### Change-password misses lock the account
-
-**Breaking:** five wrong current passwords on a change-password form lock the account
-like failed logins; the form and the login page answer 429 until the lock ends.
-
-### Uploads: active types refused, `max_files`, `with_uploads`
-
-**Breaking:** with no `allowed_extensions`, `save_uploads` refuses HTML, SVG, XML and JS
-(`uploads::ACTIVE_EXTENSIONS`); list one to accept it. More than 20 files per request is
-`UploadError::TooManyFiles` (raise with `.max_files(n)`). `UploadConfig` and `UploadError`
-are `#[non_exhaustive]`: build configs with `UploadConfig::new(..)`, add a `_` match arm.
-Mount upload directories with `with_uploads` instead of `with_static`.
-
-### ViewSets with open write actions warn
-
-No behaviour change: a ViewSet whose write actions have no codenames still serves them, but
-logs a warning at mount. Add permissions, `.read_only()`, or `.allow_anonymous()` to silence it.
 
 ## 0.59.6
 

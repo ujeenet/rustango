@@ -4,6 +4,33 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `DatabaseCache::incr` is atomic (#1871)
+
+One upsert per dialect, so parallel failed logins all count toward the lockout.
+The TTL is set when the counter is created, not on every call.
+
+### Fixed — change-password checks go through the login gate (#1873)
+
+A wrong current password on the admin, tenant admin and operator console forms now
+counts toward the account lock, so a stolen session cannot guess it at hash speed.
+
+### Fixed — `TrailingSlashLayer` open redirect (#1869)
+
+`//evil.com` and `/\evil.com` redirected off-site; the target's leading slashes and
+backslashes now collapse to one `/`, for both `Append` and `Strip`.
+
+### Fixed — uploaded HTML/SVG no longer runs on the app origin (#1849)
+
+New `with_uploads` (on `Cli` and `server::Builder`) and `StaticFiles::user_content` serve
+HTML, SVG and XML as `attachment` with `nosniff`. An empty `allowed_extensions` now refuses
+`ACTIVE_EXTENSIONS`, and `UploadConfig::max_files` (default 20) caps files per request.
+
+### Fixed — open ViewSets warn at mount, `make:viewset` guards writes (#1857)
+
+A ViewSet whose create/update/destroy need no codename logs a `rustango::viewset` warning;
+`.allow_anonymous()` (or `#[viewset(allow_anonymous)]`) says it is intended. `make:viewset`
+now scaffolds `.permissions_for_model()` (tenant) or `read_only` (pool).
+
 ## [0.59.8] — 2026-09-30
 
 ### Security — admin audit log needs `audit.view` / `audit.delete` (#1858)
@@ -139,33 +166,6 @@ content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
 
 MySQL's default `_ai_ci` collation makes `=` and `unique` ignore case, unlike PostgreSQL
 and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900_as_cs`.
-
-### Fixed — `DatabaseCache::incr` is atomic (#1871)
-
-One upsert per dialect, so parallel failed logins all count toward the lockout.
-The TTL is set when the counter is created, not on every call.
-
-### Fixed — change-password checks go through the login gate (#1873)
-
-A wrong current password on the admin, tenant admin and operator console forms now
-counts toward the account lock, so a stolen session cannot guess it at hash speed.
-
-### Fixed — `TrailingSlashLayer` open redirect (#1869)
-
-`//evil.com` and `/\evil.com` redirected off-site; the target's leading slashes and
-backslashes now collapse to one `/`, for both `Append` and `Strip`.
-
-### Fixed — uploaded HTML/SVG no longer runs on the app origin (#1849)
-
-New `with_uploads` (on `Cli` and `server::Builder`) and `StaticFiles::user_content` serve
-HTML, SVG and XML as `attachment` with `nosniff`. An empty `allowed_extensions` now refuses
-`ACTIVE_EXTENSIONS`, and `UploadConfig::max_files` (default 20) caps files per request.
-
-### Fixed — open ViewSets warn at mount, `make:viewset` guards writes (#1857)
-
-A ViewSet whose create/update/destroy need no codename logs a `rustango::viewset` warning;
-`.allow_anonymous()` (or `#[viewset(allow_anonymous)]`) says it is intended. `make:viewset`
-now scaffolds `.permissions_for_model()` (tenant) or `read_only` (pool).
 
 ## [0.59.6] — 2026-09-29
 
