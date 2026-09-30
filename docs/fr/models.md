@@ -91,7 +91,7 @@ type par dialecte, si bien que le même modèle fonctionne sur PostgreSQL, MySQL
 | `f32` | `REAL` | `FLOAT` | `REAL` |
 | `f64` | `DOUBLE PRECISION` | `DOUBLE` | `REAL` |
 | `bool` | `BOOLEAN` | `TINYINT(1)` | `INTEGER` (0/1) |
-| `String` | `TEXT` | `TEXT` | `TEXT` |
+| `String` | `TEXT` | `LONGTEXT` | `TEXT` |
 | `String` + `max_length = N` | `VARCHAR(N)` | `VARCHAR(N)` | `TEXT` |
 | `chrono::DateTime<Utc>` | `TIMESTAMPTZ` | `DATETIME(6)` | `TEXT` (ISO-8601) |
 | `chrono::NaiveDate` | `DATE` | `DATE` | `TEXT` |

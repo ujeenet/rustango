@@ -200,7 +200,9 @@ segundo uso:
 
 Respáldalo con un caché **compartido** (Redis) en producción para que un token no pueda
 reproducirse contra una réplica distinta. La comprobación falla en modo cerrado (un error de caché
-rechaza en lugar de arriesgar una reproducción).
+o un `NullCache` rechaza en lugar de arriesgar una reproducción). La comprobación es un
+`Cache::add` atómico; un `Cache` propio debe implementar `add` de forma atómica, como hacen
+todos los backends incluidos.
 
 ---
 

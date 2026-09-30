@@ -143,7 +143,7 @@ L'exécuter nativement plutôt que dans le conteneur demande une base et un
 utilisateur :
 
 ```sql
-CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs;
 CREATE USER 'rustango'@'localhost' IDENTIFIED BY 'rustango';
 GRANT ALL PRIVILEGES ON myblog_dev.* TO 'rustango'@'localhost';
 ```
@@ -156,6 +156,13 @@ DATABASE_URL=mysql://rustango:rustango@localhost:3306/myblog_dev
 trois octets et ne peut pas stocker un emoji, ce qui ressurgit bien plus tard
 sous la forme d'une écriture qui échoue sur une seule ligne. MariaDB fonctionne
 avec le même pilote et le même schéma d'URL.
+
+La collation compte aussi. Les colonnes héritent de celle de la base, et celle de
+MySQL (`utf8mb4_0900_ai_ci`) ignore la casse et les accents : `.eq("/About")` trouve
+`/about` et une colonne `unique` refuse `Hero` à côté de `hero`, contrairement à
+PostgreSQL et SQLite. `utf8mb4_0900_as_cs` compare comme eux. Évitez une collation
+`_bin` : le pilote ne peut pas lire ses colonnes texte en `String`.
+`manage check --deploy` signale les deux.
 
 ---
 
@@ -173,7 +180,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.59.6`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.59.7`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 

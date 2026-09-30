@@ -191,6 +191,11 @@ impl TenantScope {
     pub(crate) fn pool(&self) -> &crate::sql::Pool {
         &self.pool
     }
+
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn for_test(org: Org, pool: crate::sql::Pool) -> Self {
+        Self { org, pool }
+    }
 }
 
 impl<DB: Database> From<Tenant<DB>> for TenantScope {

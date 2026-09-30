@@ -58,7 +58,10 @@
 //!
 //! [`PgJobQueue::reclaim_stuck_jobs_pool`] clears `locked_at` on rows
 //! locked longer than a threshold. Run it on a schedule so jobs from a
-//! crashed worker get picked up again.
+//! crashed worker get picked up again. A running job refreshes its lock
+//! every [`PgJobQueue::heartbeat_interval`], so keep the threshold well
+//! above that. `attempt` counts at pickup: a job that crashes its
+//! process still spends an attempt.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -91,6 +94,7 @@ pub struct PgJobQueue {
     /// new jobs run with sub-second latency under low load.
     notify: Arc<Notify>,
     worker_id_prefix: String,
+    heartbeat_interval: Duration,
 }
 
 const CREATE_JOBS_TABLE_SQL_PG: &str = "\
@@ -155,10 +159,13 @@ impl PgJobQueue {
     /// worker tasks. Call [`Self::start`] to spawn them.
     #[must_use]
     pub fn with_workers_pool(pool: impl Into<Pool>, worker_count: usize) -> Self {
+        // `q<n>` keeps two queues in one process from sharing a lease owner.
+        static QUEUE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id_prefix = format!(
-            "host:{}:pid:{}",
+            "host:{}:pid:{}:q{}",
             hostname().unwrap_or_else(|| "unknown".into()),
-            std::process::id()
+            std::process::id(),
+            QUEUE_SEQ.fetch_add(1, Ordering::Relaxed)
         );
         Self {
             pool: pool.into(),
@@ -170,6 +177,7 @@ impl PgJobQueue {
             shutdown: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
             worker_id_prefix: id_prefix,
+            heartbeat_interval: Duration::from_secs(10),
         }
     }
 
@@ -201,6 +209,21 @@ impl PgJobQueue {
     pub fn poll_interval(mut self, d: Duration) -> Self {
         self.poll_interval = d;
         self
+    }
+
+    /// How often a running job refreshes its `locked_at`. Default: 10
+    /// seconds, at least 1 ms. Reclaim only rows locked well longer than
+    /// this, or a long job runs twice.
+    #[must_use]
+    pub fn heartbeat_interval(mut self, d: Duration) -> Self {
+        // `tokio::time::interval` panics on zero.
+        self.heartbeat_interval = d.max(Duration::from_millis(1));
+        self
+    }
+
+    /// The `locked_by` of worker `n`.
+    fn worker_id(&self, n: usize) -> String {
+        format!("{}:w{n}", self.worker_id_prefix)
     }
 
     /// Set a callback invoked for jobs that exhaust retries or return
@@ -344,18 +367,12 @@ impl JobQueue for PgJobQueue {
             let shutdown = self.shutdown.clone();
             let notify = self.notify.clone();
             let poll = self.poll_interval;
-            let worker_id = format!("{}:w{}", self.worker_id_prefix, n);
+            let worker = Worker {
+                id: self.worker_id(n),
+                heartbeat: self.heartbeat_interval,
+            };
             let h = tokio::spawn(async move {
-                worker_loop(
-                    pool,
-                    registry,
-                    dead_letter,
-                    shutdown,
-                    notify,
-                    poll,
-                    worker_id,
-                )
-                .await;
+                worker_loop(pool, registry, dead_letter, shutdown, notify, poll, worker).await;
             });
             workers.push(h);
         }
@@ -366,9 +383,17 @@ impl JobQueue for PgJobQueue {
         // Wake every worker so they all observe the shutdown flag and exit.
         self.notify.notify_waiters();
         let mut workers = self.workers.lock().await;
-        for h in workers.drain(..) {
-            // Give in-flight jobs ~5 seconds to finish before aborting.
-            let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+        for (n, mut h) in workers.drain(..).enumerate() {
+            // Give in-flight jobs ~5 seconds to finish, then abort.
+            if tokio::time::timeout(Duration::from_secs(5), &mut h)
+                .await
+                .is_err()
+            {
+                h.abort();
+                let _ = h.await;
+                // Hand the aborted job back now rather than at the next reclaim.
+                release_worker_rows(&self.pool, &self.worker_id(n)).await;
+            }
         }
     }
 
@@ -384,7 +409,12 @@ impl JobQueue for PgJobQueue {
 
 // --------------------------------------------------------------------- worker loop
 
-#[allow(clippy::too_many_arguments)]
+/// One worker's identity: the `locked_by` it writes and checks.
+struct Worker {
+    id: String,
+    heartbeat: Duration,
+}
+
 async fn worker_loop(
     pool: Pool,
     registry: Arc<Mutex<HandlerRegistry>>,
@@ -392,12 +422,12 @@ async fn worker_loop(
     shutdown: Arc<AtomicBool>,
     notify: Arc<Notify>,
     poll_interval: Duration,
-    worker_id: String,
+    worker: Worker,
 ) {
     while !shutdown.load(Ordering::SeqCst) {
-        match pick_one(&pool, &worker_id).await {
+        match pick_one(&pool, &worker.id).await {
             Ok(Some(row)) => {
-                run_one(&pool, &registry, &dead_letter, row).await;
+                run_one(&pool, &registry, &dead_letter, &worker, row).await;
                 // Loop again immediately — there might be more.
             }
             Ok(None) => {
@@ -439,7 +469,7 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
                       LIMIT 1
                  )
                  UPDATE rustango_jobs
-                    SET locked_at = $3, locked_by = $1
+                    SET locked_at = $3, locked_by = $1, attempt = attempt + 1
                   WHERE id IN (SELECT id FROM next)
                  RETURNING id, name, payload, attempt, max_attempts",
             )
@@ -481,12 +511,15 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
                 tx.commit().await?;
                 return Ok(None);
             };
-            sqlx::query("UPDATE `rustango_jobs` SET locked_at = ?, locked_by = ? WHERE id = ?")
-                .bind(now)
-                .bind(worker_id)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE `rustango_jobs` \
+                    SET locked_at = ?, locked_by = ?, attempt = attempt + 1 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(worker_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
             let row = sqlx::query(
                 "SELECT id, name, payload, attempt, max_attempts \
                  FROM `rustango_jobs` WHERE id = ?",
@@ -519,7 +552,7 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
             let now_str = crate::sql::encode_datetime(now);
             let row = sqlx::query(
                 "UPDATE rustango_jobs
-                    SET locked_at = ?, locked_by = ?
+                    SET locked_at = ?, locked_by = ?, attempt = attempt + 1
                   WHERE id = (
                       SELECT id FROM rustango_jobs
                        WHERE locked_at IS NULL AND run_at <= ?
@@ -552,49 +585,166 @@ async fn run_one(
     pool: &Pool,
     registry: &Arc<Mutex<HandlerRegistry>>,
     dead_letter: &Arc<Mutex<Option<DeadLetterFn>>>,
+    worker: &Worker,
     job: PickedJob,
 ) {
     let handler = registry.lock().await.lookup_owned(&job.name);
     let Some((handler, static_name)) = handler else {
+        // This process cannot run it; the pickup must not spend an attempt.
         tracing::warn!(job = %job.name, id = job.id, "no handler registered — leaving locked");
+        give_back_attempt(pool, worker, job.id).await;
         return;
     };
 
-    let result = handler(job.payload.clone()).await;
+    // `attempt` already counts this run. Past the cap means earlier runs
+    // died with their worker; running it again could crash the next one.
+    if job.attempt > job.max_attempts {
+        let msg = "no attempts left: an earlier run stopped without finishing";
+        handle_dead_letter(pool, dead_letter, worker, &job, static_name, msg).await;
+        return;
+    }
+
+    let (result, held) =
+        run_with_heartbeat(pool, worker, job.id, handler(job.payload.clone())).await;
+    if !held {
+        // Another worker may own the row now; its outcome is not ours to write.
+        tracing::warn!(id = job.id, worker = %worker.id, "job lease lost; result dropped");
+        return;
+    }
 
     match result {
         Ok(()) => {
-            delete_job(pool, job.id).await;
+            finish_job(pool, worker, job.id).await;
         }
         Err(JobError::Retryable(msg)) => {
-            let next_attempt = job.attempt + 1;
-            if next_attempt >= job.max_attempts {
-                handle_dead_letter(pool, dead_letter, &job, static_name, &msg).await;
+            if job.attempt >= job.max_attempts {
+                handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
             } else {
-                let backoff_ms = super::retry_backoff_ms(u32::try_from(job.attempt).unwrap_or(0));
+                let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
+                let backoff_ms = super::retry_backoff_ms(failed);
                 let next_run: DateTime<Utc> = Utc::now()
                     + chrono::Duration::milliseconds(i64::try_from(backoff_ms).unwrap_or(i64::MAX));
-                schedule_retry(pool, job.id, next_attempt, next_run, &msg).await;
+                schedule_retry(pool, worker, job.id, next_run, &msg).await;
             }
         }
         Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
             let msg = e.to_string();
-            handle_dead_letter(pool, dead_letter, &job, static_name, &msg).await;
+            handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
         }
     }
 }
 
-async fn delete_job(pool: &Pool, id: i64) {
+/// Drive `run`, refreshing the row's `locked_at` every heartbeat so a
+/// reclaim sweep does not hand a live job to a second worker. The flag
+/// is `false` once a heartbeat found the lease gone.
+async fn run_with_heartbeat<F>(pool: &Pool, worker: &Worker, id: i64, run: F) -> (F::Output, bool)
+where
+    F: std::future::Future,
+{
+    let mut run = std::pin::pin!(run);
+    let mut beat = tokio::time::interval(worker.heartbeat);
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    beat.tick().await; // the first tick is immediate
+    let mut held = true;
+    loop {
+        tokio::select! {
+            out = &mut run => return (out, held),
+            _ = beat.tick(), if held => held = heartbeat(pool, worker, id).await,
+        }
+    }
+}
+
+/// Refresh the lease. `false` only when the row is no longer this
+/// worker's; a failed write is logged and treated as still held.
+async fn heartbeat(pool: &Pool, worker: &Worker, id: i64) -> bool {
     use crate::core::SqlValue;
-    let p = pool.dialect().placeholder(1);
-    let sql = format!("DELETE FROM rustango_jobs WHERE id = {p}");
-    let _ = crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::I64(id)]).await;
+    let d = pool.dialect();
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = {} WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+        d.placeholder(3),
+    );
+    let binds = vec![
+        SqlValue::DateTime(Utc::now()),
+        SqlValue::I64(id),
+        SqlValue::String(worker.id.clone()),
+    ];
+    match crate::sql::raw_execute_pool(pool, &sql, binds).await {
+        Ok(0) => {
+            tracing::warn!(id, worker = %worker.id, "job lease lost while running");
+            false
+        }
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!(id, error = %e, "job heartbeat failed");
+            true
+        }
+    }
+}
+
+/// Undo the pickup's `attempt + 1`, keeping the lock.
+async fn give_back_attempt(pool: &Pool, worker: &Worker, id: i64) {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let sql = format!(
+        "UPDATE rustango_jobs SET attempt = attempt - 1 WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+    );
+    let binds = vec![SqlValue::I64(id), SqlValue::String(worker.id.clone())];
+    log_finish(
+        "attempt give-back",
+        id,
+        worker,
+        crate::sql::raw_execute_pool(pool, &sql, binds).await,
+    );
+}
+
+/// Unlock every row `worker_id` still holds.
+async fn release_worker_rows(pool: &Pool, worker_id: &str) {
+    use crate::core::SqlValue;
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL WHERE locked_by = {}",
+        pool.dialect().placeholder(1),
+    );
+    let binds = vec![SqlValue::String(worker_id.to_owned())];
+    if let Err(e) = crate::sql::raw_execute_pool(pool, &sql, binds).await {
+        tracing::error!(worker = worker_id, error = %e, "releasing an aborted job failed");
+    }
+}
+
+/// Log a finishing write that failed or found the lease gone.
+fn log_finish(what: &str, id: i64, worker: &Worker, res: Result<u64, crate::sql::ExecError>) {
+    match res {
+        Ok(0) => tracing::warn!(id, worker = %worker.id, "job lease lost; {what} skipped"),
+        Ok(_) => {}
+        Err(e) => tracing::error!(id, error = %e, "job {what} failed"),
+    }
+}
+
+/// Delete a finished job — only while this worker still holds it.
+async fn finish_job(pool: &Pool, worker: &Worker, id: i64) {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let sql = format!(
+        "DELETE FROM rustango_jobs WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+    );
+    let binds = vec![SqlValue::I64(id), SqlValue::String(worker.id.clone())];
+    log_finish(
+        "delete",
+        id,
+        worker,
+        crate::sql::raw_execute_pool(pool, &sql, binds).await,
+    );
 }
 
 async fn schedule_retry(
     pool: &Pool,
+    worker: &Worker,
     id: i64,
-    next_attempt: i32,
     next_run: DateTime<Utc>,
     last_error: &str,
 ) {
@@ -602,53 +752,58 @@ async fn schedule_retry(
     let d = pool.dialect();
     let sql = format!(
         "UPDATE rustango_jobs \
-            SET attempt = {p1}, run_at = {p2}, \
-                locked_at = NULL, locked_by = NULL, \
-                last_error = {p3} \
-          WHERE id = {p4}",
+            SET run_at = {p1}, locked_at = NULL, locked_by = NULL, last_error = {p2} \
+          WHERE id = {p3} AND locked_by = {p4}",
         p1 = d.placeholder(1),
         p2 = d.placeholder(2),
         p3 = d.placeholder(3),
         p4 = d.placeholder(4),
     );
-    let _ = crate::sql::raw_execute_pool(
-        pool,
-        &sql,
-        vec![
-            SqlValue::I32(next_attempt),
-            SqlValue::DateTime(next_run),
-            SqlValue::String(last_error.to_owned()),
-            SqlValue::I64(id),
-        ],
-    )
-    .await;
+    let binds = vec![
+        SqlValue::DateTime(next_run),
+        SqlValue::String(last_error.to_owned()),
+        SqlValue::I64(id),
+        SqlValue::String(worker.id.clone()),
+    ];
+    log_finish(
+        "retry",
+        id,
+        worker,
+        crate::sql::raw_execute_pool(pool, &sql, binds).await,
+    );
 }
 
 async fn handle_dead_letter(
     pool: &Pool,
     dead_letter: &Arc<Mutex<Option<DeadLetterFn>>>,
+    worker: &Worker,
     job: &PickedJob,
     static_name: &'static str,
     error: &str,
 ) {
+    // Confirm the lease first: the callback must not fire for a row
+    // another worker now owns.
+    if !heartbeat(pool, worker, job.id).await {
+        return;
+    }
     let cb = dead_letter.lock().await.clone();
     if let Some(cb) = cb {
-        cb(JobDeadLetter {
+        let dl = JobDeadLetter {
             name: static_name,
             payload: job.payload.clone(),
-            attempts: u32::try_from(job.attempt + 1).unwrap_or(0),
+            attempts: u32::try_from(job.attempt).unwrap_or(0),
             error: error.to_owned(),
-        })
-        .await;
+        };
+        super::deliver_dead_letter(cb, dl).await;
     } else {
         tracing::error!(
             job = static_name,
-            attempts = job.attempt + 1,
+            attempts = job.attempt,
             error,
             "job queue dead-letter (no callback configured)"
         );
     }
-    delete_job(pool, job.id).await;
+    finish_job(pool, worker, job.id).await;
 }
 
 // --------------------------------------------------------------------- helpers
@@ -719,6 +874,13 @@ mod tests {
         let q = PgJobQueue::with_workers_pool(dummy_pool(), 0)
             .poll_interval(Duration::from_millis(250));
         assert_eq!(q.poll_interval, Duration::from_millis(250));
+    }
+
+    /// A zero interval would panic in `tokio::time::interval`.
+    #[tokio::test]
+    async fn heartbeat_interval_is_at_least_a_millisecond() {
+        let q = PgJobQueue::with_workers_pool(dummy_pool(), 0).heartbeat_interval(Duration::ZERO);
+        assert_eq!(q.heartbeat_interval, Duration::from_millis(1));
     }
 
     #[tokio::test]

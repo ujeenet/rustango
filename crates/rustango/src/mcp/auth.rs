@@ -30,11 +30,11 @@ use super::router::AuthedMcpState;
 use super::transport::handle_message;
 
 /// Claim naming what kind of principal this is; see [`KIND_AGENT`].
-pub const CLAIM_KIND: &str = "kind";
+pub const CLAIM_KIND: &str = crate::tenancy::jwt_lifecycle::CLAIM_KIND;
 /// The [`CLAIM_KIND`] value an agent token carries.
 pub const KIND_AGENT: &str = "agent";
 /// Claim pinning the token to one tenant slug.
-pub const CLAIM_TENANT: &str = "tenant";
+pub const CLAIM_TENANT: &str = crate::tenancy::jwt_lifecycle::CLAIM_TENANT;
 /// Claim listing the agent's granted skill codenames.
 pub const CLAIM_SKILLS: &str = "skills";
 /// Claim listing the tools those skills add up to.

@@ -144,6 +144,14 @@ permisos pueden haber cambiado (rol revocado, alcance degradado), usa
 `refresh_with(token, new_claims)` para sustituir un payload nuevo mientras se
 sigue poniendo en lista negra el JTI de refresco antiguo.
 
+`POST /api/auth/refresh` añade tres comprobaciones: un cambio de contraseña desde el login
+termina la cadena, ninguna cadena dura más que `Config::refresh_absolute_ttl_secs` (30 días)
+desde el login, y reenviar un token ya rotado revoca toda la cadena. Un reintento dentro de
+unos `Config::refresh_reuse_grace_secs` (10–20 s) tras la rotación solo recibe un 401, así
+un cliente honesto que envió dos refrescos sigue conectado; el coste es que un ladrón en esa
+ventana no provoca la revocación. La revocación es tan fuerte como el almacén de JTI (uno en
+memoria olvida al reiniciar).
+
 ---
 
 ## Revocación y el almacén de JTI
