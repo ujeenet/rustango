@@ -47,6 +47,17 @@ pub struct Coupon {
     pub name: String,
 }
 
+/// Integer PK beside a generated `f64`, which joins RETURNING.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pk1978_line", app = "pk1894")]
+pub struct Line {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    pub price: f64,
+    #[rustango(generated_as = "price * 2")]
+    pub doubled: f64,
+}
+
 const UUID_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const UUID_DEFAULT: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
@@ -54,6 +65,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
     rustango::testkit::matrix::fresh_table::<Token>(pool).await;
     rustango::testkit::matrix::fresh_table::<Coupon>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Line>(pool).await;
 }
 
 async fn model_form_returns_the_written_pk(pool: &Pool) {
@@ -157,11 +169,35 @@ async fn db_default_pk_is_read_or_refused_before_the_insert(pool: &Pool) {
     }
 }
 
+/// Only the PK decides the refusal: non-PK RETURNING columns still insert.
+async fn integer_pk_inserts_beside_non_integer_returning_columns(pool: &Pool) {
+    let mut line = Line {
+        id: rustango::sql::Auto::Unset,
+        price: 1.5,
+        doubled: 0.0,
+    };
+    line.insert_pool(pool).await.expect("insert");
+    assert!(
+        matches!(line.id, rustango::sql::Auto::Set(_)),
+        "{:?}",
+        line.id
+    );
+    assert_eq!(Line::objects().count(pool).await.expect("count"), 1);
+    // MySQL has no RETURNING, so the placeholder stays until a re-read.
+    let want = if pool.dialect().name() == "mysql" {
+        0.0
+    } else {
+        3.0
+    };
+    assert_eq!(line.doubled, want);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         model_form_returns_the_written_pk,
         admin_create_redirects_to_the_new_pk,
         db_default_pk_is_read_or_refused_before_the_insert,
+        integer_pk_inserts_beside_non_integer_returning_columns,
     ],
 }

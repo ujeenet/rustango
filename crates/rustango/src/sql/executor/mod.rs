@@ -1106,22 +1106,21 @@ where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
     // The OK packet only carries an AUTO_INCREMENT id: refuse before the
-    // write, or the row lands and its PK is lost (#1978).
-    let unreadable = query.returning.iter().find(|c| {
-        !query.columns.contains(c)
-            && query.model.field_by_column(c).is_some_and(|f| {
-                !matches!(
-                    f.ty,
-                    crate::core::FieldType::I16
-                        | crate::core::FieldType::I32
-                        | crate::core::FieldType::I64
-                )
-            })
-    });
-    if let Some(column) = unreadable {
+    // write, or the row lands and its PK is lost (#1978). Only the PK:
+    // other RETURNING columns (e.g. `generated_as`) stay unread here.
+    if let Some(pk) = query.model.primary_key().filter(|pk| {
+        query.returning.contains(&pk.column)
+            && !query.columns.contains(&pk.column)
+            && !matches!(
+                pk.ty,
+                crate::core::FieldType::I16
+                    | crate::core::FieldType::I32
+                    | crate::core::FieldType::I64
+            )
+    }) {
         return Err(ExecError::GeneratedPkUnreadable {
             table: query.model.table,
-            column: *column,
+            column: pk.column,
         });
     }
     let plain = InsertQuery {
