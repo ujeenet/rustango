@@ -893,6 +893,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_filepath_field
       # Audit retention now sweeps the registry's own log, not just tenants.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test audit_cleanup_sqlite_live
+      # Tenant admin permission gaps (#1858 #1859 #1860 #1863).
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test tenant_admin_security_sqlite_live
       # #1344 — the hostname verbs, and that they write the table the
       # operator console writes rather than a parallel one.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_hosts_sqlite_live
@@ -1268,6 +1270,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test audit_pool_writes_tri
       - run: cargo test -p rustango --features mysql,testkit --test audit_bulk_writes_tri
       - run: cargo test -p rustango --features mysql,testkit,tenancy --test audit_view_writes_tri
+      - run: cargo test -p rustango --features mysql,testkit --test admin_audit_scope_tri
+      - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
       - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri

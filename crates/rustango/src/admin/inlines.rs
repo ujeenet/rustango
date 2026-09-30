@@ -53,6 +53,7 @@ use std::collections::HashMap;
 
 use super::errors::AdminError;
 use super::helpers::lookup_model;
+use super::queryset_hooks::RowScope;
 use super::urls::AppState;
 use axum::http::request::Parts;
 
@@ -301,6 +302,16 @@ pub async fn render_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlinePanel>, ExecError> {
+    render_for_parent_in(pool, parent_model, parent_pk, None).await
+}
+
+/// [`render_for_parent`] limited to child rows the request's queryset hooks allow.
+pub(crate) async fn render_for_parent_in(
+    pool: &Pool,
+    parent_model: &'static ModelSchema,
+    parent_pk: SqlValue,
+    parts: Option<&Parts>,
+) -> Result<Vec<InlinePanel>, ExecError> {
     let registrations = for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -344,11 +355,14 @@ pub async fn render_for_parent(
         // limit=None.
         let rows = select_rows_as_json(
             pool,
-            &SelectQuery {
-                order_by: order_pk,
-                limit: None,
-                ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
-            },
+            &child_rows(
+                SelectQuery {
+                    order_by: order_pk,
+                    limit: None,
+                    ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
+                },
+                parts,
+            ),
             &select_fields,
         )
         .await?;
@@ -418,6 +432,16 @@ pub async fn render_generic_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlinePanel>, ExecError> {
+    render_generic_for_parent_in(pool, parent_model, parent_pk, None).await
+}
+
+/// [`render_generic_for_parent`] limited to child rows the request's queryset hooks allow.
+pub(crate) async fn render_generic_for_parent_in(
+    pool: &Pool,
+    parent_model: &'static ModelSchema,
+    parent_pk: SqlValue,
+    parts: Option<&Parts>,
+) -> Result<Vec<InlinePanel>, ExecError> {
     let registrations = generic_for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -475,22 +499,25 @@ pub async fn render_generic_for_parent(
         // #562 — composite AND (ct + pk); struct-update over ::new.
         let rows = select_rows_as_json(
             pool,
-            &SelectQuery {
-                where_clause: WhereExpr::And(vec![
-                    WhereExpr::Predicate(Filter {
-                        column: inline.ct_column,
-                        op: Op::Eq,
-                        value: SqlValue::I64(ct_id),
-                    }),
-                    WhereExpr::Predicate(Filter {
-                        column: inline.pk_column,
-                        op: Op::Eq,
-                        value: SqlValue::I64(parent_pk_i64),
-                    }),
-                ]),
-                order_by: order_pk,
-                ..SelectQuery::new(child_model)
-            },
+            &child_rows(
+                SelectQuery {
+                    where_clause: WhereExpr::And(vec![
+                        WhereExpr::Predicate(Filter {
+                            column: inline.ct_column,
+                            op: Op::Eq,
+                            value: SqlValue::I64(ct_id),
+                        }),
+                        WhereExpr::Predicate(Filter {
+                            column: inline.pk_column,
+                            op: Op::Eq,
+                            value: SqlValue::I64(parent_pk_i64),
+                        }),
+                    ]),
+                    order_by: order_pk,
+                    ..SelectQuery::new(child_model)
+                },
+                parts,
+            ),
             &select_fields,
         )
         .await?;
@@ -686,6 +713,16 @@ pub async fn render_form_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlineFormPanel>, ExecError> {
+    render_form_for_parent_in(pool, parent_model, parent_pk, None).await
+}
+
+/// [`render_form_for_parent`] limited to child rows the request's queryset hooks allow.
+pub(crate) async fn render_form_for_parent_in(
+    pool: &Pool,
+    parent_model: &'static ModelSchema,
+    parent_pk: SqlValue,
+    parts: Option<&Parts>,
+) -> Result<Vec<InlineFormPanel>, ExecError> {
     let registrations = for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -724,11 +761,14 @@ pub async fn render_form_for_parent(
         // limit=None.
         let rows = select_rows_as_json(
             pool,
-            &SelectQuery {
-                order_by: order_pk,
-                limit: None,
-                ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
-            },
+            &child_rows(
+                SelectQuery {
+                    order_by: order_pk,
+                    limit: None,
+                    ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
+                },
+                parts,
+            ),
             &select_fields,
         )
         .await?;
@@ -868,6 +908,18 @@ pub struct InlineApplyOutcome {
     pub failed: usize,
 }
 
+/// `query` narrowed by the child table's queryset hooks. `None` parts
+/// (the public no-request helpers) leaves it unscoped.
+fn child_rows(query: SelectQuery, parts: Option<&Parts>) -> SelectQuery {
+    match parts {
+        Some(parts) => SelectQuery {
+            where_clause: RowScope::of(query.model.table, parts).constrain(query.where_clause),
+            ..query
+        },
+        None => query,
+    }
+}
+
 /// The columns that tie a child row to its parent, with this parent's values.
 struct ParentScope(Vec<(&'static str, SqlValue)>);
 
@@ -895,6 +947,8 @@ struct InlineTarget {
     /// Fields a row may write: not the PK, a pin, or a read-only field.
     writable: Vec<&'static FieldSchema>,
     scope: ParentScope,
+    /// The child table's queryset-hook scope for this request.
+    rows: RowScope,
 }
 
 impl InlineTarget {
@@ -903,6 +957,7 @@ impl InlineTarget {
         display: &[&'static FieldSchema],
         inline_readonly: &[&str],
         scope: ParentScope,
+        parts: &Parts,
     ) -> Option<Self> {
         let pk = child.primary_key()?;
         let admin_readonly = crate::admin::helpers::admin_config_or_default(child).readonly_fields;
@@ -921,7 +976,14 @@ impl InlineTarget {
             pk,
             writable,
             scope,
+            rows: RowScope::of(child.table, parts),
         })
+    }
+
+    /// `pk = <pk>` under this parent and inside the hook scope.
+    fn row_where(&self, pk: SqlValue) -> WhereExpr {
+        self.rows
+            .constrain(self.scope.row_where(self.pk.column, pk))
     }
 
     fn values(
@@ -949,7 +1011,7 @@ impl InlineTarget {
     ) -> Result<Option<serde_json::Value>, AdminError> {
         let fields: Vec<&'static FieldSchema> = self.child.scalar_fields().collect();
         let query = SelectQuery {
-            where_clause: self.scope.row_where(self.pk.column, pk.clone()),
+            where_clause: self.row_where(pk.clone()),
             ..SelectQuery::new(self.child)
         };
         if let Some(row) = crate::sql::select_one_row_as_json(pool, &query, &fields).await? {
@@ -1035,7 +1097,7 @@ pub(crate) async fn plan_post(
         writes: Vec::new(),
         failed: 0,
     };
-    for target in inline_targets(state, parent_model, parent_pk).await? {
+    for target in inline_targets(state, parts, parent_model, parent_pk).await? {
         plan_target(state, parts, &target, form, &mut plan).await?;
     }
     Ok(plan)
@@ -1044,6 +1106,7 @@ pub(crate) async fn plan_post(
 /// Every inline on `parent_model` whose child table this admin shows.
 async fn inline_targets(
     state: &AppState,
+    parts: &Parts,
     parent_model: &'static ModelSchema,
     parent_pk: &SqlValue,
 ) -> Result<Vec<InlineTarget>, ExecError> {
@@ -1062,6 +1125,7 @@ async fn inline_targets(
             &display,
             inline.readonly_fields,
             scope,
+            parts,
         ));
     }
 
@@ -1097,6 +1161,7 @@ async fn inline_targets(
             &display,
             inline.readonly_fields,
             scope,
+            parts,
         ));
     }
     Ok(out)
@@ -1184,7 +1249,7 @@ async fn plan_target(
             plan.writes
                 .push(InlineWrite::Delete(crate::core::DeleteQuery::new(
                     target.child,
-                    target.scope.row_where(target.pk.column, pk),
+                    target.row_where(pk),
                 )));
             continue;
         }
@@ -1218,7 +1283,7 @@ async fn plan_target(
             .push(InlineWrite::Update(crate::core::UpdateQuery::new(
                 target.child,
                 set,
-                target.scope.row_where(target.pk.column, pk),
+                target.row_where(pk),
             )));
     }
     Ok(())
@@ -1264,6 +1329,16 @@ pub async fn render_form_generic_for_parent(
     pool: &Pool,
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
+) -> Result<Vec<InlineFormPanel>, ExecError> {
+    render_form_generic_for_parent_in(pool, parent_model, parent_pk, None).await
+}
+
+/// [`render_form_generic_for_parent`] limited to child rows the request's queryset hooks allow.
+pub(crate) async fn render_form_generic_for_parent_in(
+    pool: &Pool,
+    parent_model: &'static ModelSchema,
+    parent_pk: SqlValue,
+    parts: Option<&Parts>,
 ) -> Result<Vec<InlineFormPanel>, ExecError> {
     let registrations = generic_for_parent_table(parent_model.table);
     if registrations.is_empty() {
@@ -1313,22 +1388,25 @@ pub async fn render_form_generic_for_parent(
         // #562 — composite AND (ct + pk); struct-update over ::new.
         let rows = select_rows_as_json(
             pool,
-            &SelectQuery {
-                where_clause: WhereExpr::And(vec![
-                    WhereExpr::Predicate(Filter {
-                        column: inline.ct_column,
-                        op: Op::Eq,
-                        value: SqlValue::I64(ct_id),
-                    }),
-                    WhereExpr::Predicate(Filter {
-                        column: inline.pk_column,
-                        op: Op::Eq,
-                        value: SqlValue::I64(parent_pk_i64),
-                    }),
-                ]),
-                order_by: order_pk,
-                ..SelectQuery::new(child_model)
-            },
+            &child_rows(
+                SelectQuery {
+                    where_clause: WhereExpr::And(vec![
+                        WhereExpr::Predicate(Filter {
+                            column: inline.ct_column,
+                            op: Op::Eq,
+                            value: SqlValue::I64(ct_id),
+                        }),
+                        WhereExpr::Predicate(Filter {
+                            column: inline.pk_column,
+                            op: Op::Eq,
+                            value: SqlValue::I64(parent_pk_i64),
+                        }),
+                    ]),
+                    order_by: order_pk,
+                    ..SelectQuery::new(child_model)
+                },
+                parts,
+            ),
             &select_fields,
         )
         .await?;

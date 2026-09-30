@@ -320,15 +320,11 @@ async fn editor_post(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Redirect};
-    // When session auth is configured (the default), writes require a
-    // superuser: the admin login gate inserts the live `AdminSession` into
-    // request extensions (see `admin::login_view`) — read it before
-    // consuming the body, 403 non-superusers, and attribute the edit to
-    // the operator. When the admin is mounted WITHOUT session auth (an
-    // open / externally-proxied admin), there's no superuser to check, so
-    // writes stay open — consistent with the rest of that admin's surface.
-    let updated_by = match req.extensions().get::<crate::admin::AdminSession>() {
-        Some(session) if session.is_superuser => session.username.clone(),
+    // With session auth on, writes need a superuser. Both admins put the
+    // session in extensions; the task-local is the fallback. No session
+    // at all means an admin mounted without auth, so writes stay open.
+    let updated_by = match crate::admin::session::from_extensions(req.extensions()) {
+        Some(session) if session.is_superuser => session.username,
         Some(_) => {
             return (
                 StatusCode::FORBIDDEN,
