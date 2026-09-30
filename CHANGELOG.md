@@ -43,6 +43,27 @@ A cookie reader that always returns `None` now fails a test at each call site.
 
 `urlencoding` is a dev-dependency, and the S3 and job-queue suites are gated on their features.
 
+### Fixed — `count()` / `exists()` / `sum()` honour the whole queryset (#1885)
+
+`.none()` now counts 0 without a query. Limit, offset, DISTINCT, joins, relation-span
+filters and `union()` are counted and aggregated through a derived table instead of dropped.
+`exists()` / `is_empty()` read at most one row, and unused ORDER BYs are dropped.
+
+### Fixed — `Sum` of a float column is no longer cast to an integer (#1886)
+
+`SUM` casts from the column type: float columns to double, decimals stay exact.
+SQLite has no decimal type; a NUMERIC `SUM` there reads as `f64` / `i64`.
+
+### Fixed — a multi-batch `bulk_insert_pool` is all-or-nothing (#1891)
+
+Batches split by the bind limit share one transaction. Inside `atomic()` on the same pool,
+any size runs in a savepoint of it, so the outer rollback undoes it.
+
+### Fixed — relation-span filters no longer leak memory per query (#1889)
+
+Multi-hop join aliases are interned once per path instead of leaked on every `compile()`.
+Paths deeper than 6 hops are refused, which keeps that set bounded by the schema.
+
 ### Fixed — a job heartbeat no longer freezes the job (#1961)
 
 The `PgJobQueue` heartbeat now runs beside the job, so a job holding the last pool

@@ -496,12 +496,10 @@ impl<T: Model + Send> QuerySet<T> {
     where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     {
-        let select = self.compile()?;
-        let stmt = Postgres.compile_count(&CountQuery {
-            model: select.model,
-            where_clause: select.where_clause,
-            search: select.search,
-        })?;
+        let Some(select) = self.compile_unless_none()? else {
+            return Ok(0);
+        };
+        let stmt = Postgres.compile_count(&CountQuery::from_select(select))?;
         let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
         for value in stmt.params {
             q = bind_query(q, value);
@@ -1190,9 +1188,10 @@ pub async fn count_rows_pool(pool: &Pool, query: &CountQuery) -> Result<i64, Exe
 /// PKs the way [`bulk_insert_on`] does on Postgres, so the rows you
 /// passed in keep their unset PKs.
 ///
-/// Large batches are split to fit the backend's bind-parameter limit,
-/// so they run as several statements. Wrap the call in a transaction
-/// if you need all-or-nothing.
+/// Large batches are split to fit the backend's bind-parameter limit
+/// and run in one transaction, so a failing batch rolls back the rest.
+/// Inside an [`atomic`] block on the same pool, any size joins it as a
+/// savepoint; do not hold its [`AtomicTx`] guard across this call.
 ///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
@@ -1212,21 +1211,38 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
     let columns = query.columns.len().max(1);
     let max_rows = (pool.dialect().max_bind_params() / columns).max(1);
 
-    if query.rows.len() <= max_rows {
+    // One statement is atomic alone, but inside an outer `atomic` it must
+    // join that transaction like a multi-batch insert does.
+    if query.rows.len() <= max_rows && !atomic::in_block(pool) {
         let stmt = pool.dialect().compile_bulk_insert(query)?;
         execute_pool(pool, &stmt.sql, stmt.params).await?;
         return Ok(());
     }
 
-    for chunk in query.rows.chunks(max_rows) {
-        let batch = BulkInsertQuery {
-            rows: chunk.to_vec(),
-            ..query.clone()
-        };
-        let stmt = pool.dialect().compile_bulk_insert(&batch)?;
-        execute_pool(pool, &stmt.sql, stmt.params).await?;
-    }
-    Ok(())
+    let stmts = query
+        .rows
+        .chunks(max_rows)
+        .map(|chunk| {
+            pool.dialect().compile_bulk_insert(&BulkInsertQuery {
+                model: query.model,
+                columns: query.columns.clone(),
+                rows: chunk.to_vec(),
+                returning: query.returning.clone(),
+                on_conflict: query.on_conflict.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // All batches or none; inside an outer `atomic` on this pool this is a savepoint.
+    atomic(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            for stmt in stmts {
+                execute_tx(&mut guard, &stmt.sql, stmt.params).await?;
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 /// `UPDATE … FROM (VALUES …)` (Postgres) / `UPDATE … INNER JOIN
@@ -2071,24 +2087,18 @@ pub trait CounterPool<T: Model + Send> {
 
 impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
     async fn count(self, pool: &Pool) -> Result<i64, ExecError> {
-        let select = self.compile()?;
-        count_rows_pool(
-            pool,
-            &CountQuery {
-                model: select.model,
-                where_clause: select.where_clause,
-                search: select.search,
-            },
-        )
-        .await
+        let Some(select) = self.compile_unless_none()? else {
+            return Ok(0);
+        };
+        count_rows_pool(pool, &CountQuery::from_select(select)).await
     }
 }
 
 /// Boolean predicates on a `QuerySet`: `exists`,
 /// `is_empty`, `doesnt_exist` and `contains_pk`.
 ///
-/// All of them run the same `COUNT(*)` as [`CounterPool::count`] and
-/// compare it to zero, so they scan every matching row.
+/// All of them count at most one row (`LIMIT 1` in a derived table), so
+/// they stop at the first match.
 ///
 /// Import with `use rustango::sql::ExistsPool;`.
 pub trait ExistsPool<T: Model + Send> {
@@ -2137,13 +2147,14 @@ pub trait ExistsPool<T: Model + Send> {
 
 impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
     async fn exists(self, pool: &Pool) -> Result<bool, ExecError> {
-        let count = self.count(pool).await?;
-        Ok(count > 0)
+        let Some(select) = self.compile_unless_none()? else {
+            return Ok(false);
+        };
+        Ok(count_rows_pool(pool, &CountQuery::exists(select)).await? > 0)
     }
 
     async fn is_empty(self, pool: &Pool) -> Result<bool, ExecError> {
-        let count = self.count(pool).await?;
-        Ok(count == 0)
+        Ok(!self.exists(pool).await?)
     }
 
     async fn doesnt_exist(self, pool: &Pool) -> Result<bool, ExecError> {

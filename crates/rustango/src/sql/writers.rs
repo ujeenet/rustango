@@ -579,8 +579,8 @@ fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
 pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), SqlError> {
     b.scope_stack.push(query.model);
     let r = (|| {
-        b.sql.push_str("SELECT COUNT(*) FROM ");
-        b.write_ident(query.model.table);
+        b.sql.push_str("SELECT COUNT(*)");
+        write_from_source(b, query.model, query.source.as_deref())?;
         write_where_with_search(
             b,
             &query.where_clause,
@@ -592,6 +592,23 @@ pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), Sql
     })();
     b.scope_stack.pop();
     r
+}
+
+/// ` FROM "<table>"`, or ` FROM (<source>) AS "<table>"` so the outer
+/// clauses resolve against the derived rows unchanged.
+fn write_from_source(
+    b: &mut Sql<'_>,
+    model: &'static ModelSchema,
+    source: Option<&SelectQuery>,
+) -> Result<(), SqlError> {
+    b.sql.push_str(" FROM ");
+    if let Some(sub) = source {
+        b.sql.push('(');
+        write_select(b, sub)?;
+        b.sql.push_str(") AS ");
+    }
+    b.write_ident(model.table);
+    Ok(())
 }
 
 // ---- AGGREGATE ----
@@ -710,8 +727,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
         b.write_ident(alias.as_ref());
     }
 
-    b.sql.push_str(" FROM ");
-    b.write_ident(query.model.table);
+    write_from_source(b, query.model, query.source.as_deref())?;
     write_model_joins(b, &query.joins)?;
     write_where(b, &query.where_clause, Some(query.model))?;
 
@@ -754,9 +770,8 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
 }
 
 /// The cast an aggregate needs so the decoder can read it. Databases
-/// widen `SUM` and `AVG` results to NUMERIC or DECIMAL, but the
-/// `SqlValue` decoder only tries `i64` and `f64`, so the writer casts
-/// the call back to one of those.
+/// widen `SUM` and `AVG` to NUMERIC or DECIMAL; the writer casts them
+/// back to `i64` or `f64`, except a decimal column's `SUM`, which stays exact.
 #[derive(Debug, Clone, Copy)]
 enum AggCast {
     Int,
@@ -765,10 +780,23 @@ enum AggCast {
 
 /// The cast a flat aggregate needs, or `None` when the decoder
 /// already handles its type. Count, Max and Min return i64
-/// everywhere.
-fn aggregate_cast_kind(expr: &AggregateExpr) -> Option<AggCast> {
+/// everywhere. `SUM` follows its column, read from the current scope.
+fn aggregate_cast_kind(b: &Sql<'_>, expr: &AggregateExpr) -> Option<AggCast> {
+    use crate::core::FieldType;
     match expr {
-        AggregateExpr::Sum(_) => Some(AggCast::Int),
+        AggregateExpr::Sum(col) => {
+            let ty = b
+                .scope_stack
+                .last()
+                .and_then(|m| m.field_by_column(col))
+                .map(|f| f.ty);
+            match ty {
+                Some(FieldType::F32 | FieldType::F64) => Some(AggCast::Float),
+                // Exact NUMERIC / DECIMAL, which the decoders read as-is.
+                Some(FieldType::Decimal) => None,
+                _ => Some(AggCast::Int),
+            }
+        }
         AggregateExpr::Avg(_)
         | AggregateExpr::StdDev(_)
         | AggregateExpr::StdDevPop(_)
@@ -931,7 +959,7 @@ fn write_aggregate_expr(
             b.sql.push_str(" FILTER (WHERE ");
             write_where_expr(b, filter, None, Some(model))?;
             b.sql.push(')');
-            if let Some(kind) = aggregate_cast_kind(inner) {
+            if let Some(kind) = aggregate_cast_kind(b, inner) {
                 let emitted = b.sql[prior..].to_string();
                 b.sql.truncate(prior);
                 let wrapped = apply_agg_cast(b.d, kind, &format!("({emitted})"));
@@ -1054,7 +1082,7 @@ fn write_aggregate_expr(
 /// the decoder needs, if any.
 fn write_aggregate_kind(b: &mut Sql<'_>, expr: &AggregateExpr) -> Result<(), SqlError> {
     let bare = format_bare_aggregate(b, expr)?;
-    let out = match aggregate_cast_kind(expr) {
+    let out = match aggregate_cast_kind(b, expr) {
         Some(kind) => apply_agg_cast(b.d, kind, &bare),
         None => bare,
     };
@@ -1119,7 +1147,7 @@ fn write_aggregate_as_case_when(
         None => b.sql.push('1'),
     }
     b.sql.push_str(" END)");
-    if let Some(kind) = aggregate_cast_kind(inner) {
+    if let Some(kind) = aggregate_cast_kind(b, inner) {
         let emitted = b.sql[prior..].to_string();
         b.sql.truncate(prior);
         let wrapped = apply_agg_cast(b.d, kind, &emitted);

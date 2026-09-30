@@ -185,6 +185,11 @@ pub enum QueryError {
         distinct_on: Vec<String>,
         order_by: Vec<String>,
     },
+
+    /// A relation span or `select_related` path longer than `max` hops.
+    /// Each distinct path's alias lives for the process, so depth is capped.
+    #[error("relation path `{path}` is deeper than {max} hops")]
+    RelationPathTooDeep { path: String, max: usize },
 }
 
 /// Why a bounded `update()`/`delete()` was refused.

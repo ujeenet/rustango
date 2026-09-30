@@ -172,6 +172,24 @@ skipped by actions.
 `fieldsets`, so a NOT NULL one needs a `default`, as `readonly_fields` already did.
 A natural (non-auto) primary key left out of `fieldsets` can no longer be set on create.
 
+### `count()` respects `limit`, `offset`, `distinct` and `union`
+
+`qs.limit(10).count()` now returns at most 10. `CountQuery` and `AggregateQuery` gain a
+public `source` field; build them with `new`, `CountQuery::from_select` or `AggregateQuery::over_select`.
+
+### `Sum` over float and decimal columns
+
+It now decodes as `f64` (float) or `Decimal` (decimal), not `i64`; `sum::<i64>` on such a column fails.
+
+### `bulk_insert_pool` joins an outer `atomic()`
+
+Inside `atomic()` on the same pool it now runs in that transaction, whatever its size.
+Calling it while holding the block's `AtomicTx` guard returns `NestedAtomic`; drop the guard first.
+
+### `QueryError::RelationPathTooDeep`
+
+New variant: a relation span or `select_related` path longer than 6 hops is refused.
+
 ## 0.59.7
 
 ### `JwtBackend` tokens need a `tenant` claim (#1848)
