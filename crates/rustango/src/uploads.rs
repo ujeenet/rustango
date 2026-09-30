@@ -152,7 +152,7 @@ pub async fn save_uploads(
     cfg: &UploadConfig,
     storage: &BoxedStorage,
 ) -> Result<Vec<SavedUpload>, UploadError> {
-    let mut out = Vec::new();
+    let mut out: Vec<SavedUpload> = Vec::new();
     let mut skipped = 0;
     while let Some(mut field) = mp.next_field().await? {
         let Some(filename) = field.file_name().map(str::to_owned) else {
