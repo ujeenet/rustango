@@ -189,29 +189,27 @@ where
 // `Auto<i64>: Decode<MySql> + Type<MySql>`). MySQL's
 // `BIGINT AUTO_INCREMENT` resolves to `BIGINT`, same as PG.
 
+// Decoded through `FlatScalar`, which owns the MySQL cell rules
+// (a `Uuid` is `CHAR(36)` text there, #1733).
 #[cfg(feature = "mysql")]
-impl<'r, T> sqlx::Decode<'r, sqlx::MySql> for Auto<T>
-where
-    T: sqlx::Decode<'r, sqlx::MySql>,
-{
+impl<'r, T: super::FlatScalar> sqlx::Decode<'r, sqlx::MySql> for Auto<T> {
     fn decode(
         value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Ok(Self::Set(T::decode(value)?))
+        Ok(Self::Set(T::from_cell(<T::Cell as sqlx::Decode<
+            sqlx::MySql,
+        >>::decode(value)?)))
     }
 }
 
 #[cfg(feature = "mysql")]
-impl<T> sqlx::Type<sqlx::MySql> for Auto<T>
-where
-    T: sqlx::Type<sqlx::MySql>,
-{
+impl<T: super::FlatScalar> sqlx::Type<sqlx::MySql> for Auto<T> {
     fn type_info() -> sqlx::mysql::MySqlTypeInfo {
-        T::type_info()
+        <T::Cell as sqlx::Type<sqlx::MySql>>::type_info()
     }
 
     fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
-        T::compatible(ty)
+        <T::Cell as sqlx::Type<sqlx::MySql>>::compatible(ty)
     }
 }
 

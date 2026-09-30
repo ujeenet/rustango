@@ -617,7 +617,7 @@ pub struct Author {
 
 ### 2.17 `#[rustango(max_length = N)]`
 
-**What**: String columns become `VARCHAR(N)` instead of `TEXT`. Without it, plain `String` is `TEXT`.
+**What**: String columns become `VARCHAR(N)` instead of `TEXT`. Without it, plain `String` is `TEXT` (`LONGTEXT` on MySQL).
 
 **Recipe**: `#[rustango(max_length = 80)] pub name: String`.
 
@@ -1157,7 +1157,7 @@ let oldest = Post::objects().earliest_default(&pool).await?;
 **Render shape**:
 - Postgres: column type becomes `CITEXT` (the dialect auto-emits `CREATE EXTENSION IF NOT EXISTS citext;` prelude)
 - SQLite: `TEXT COLLATE NOCASE`
-- MySQL: `VARCHAR(N)/TEXT COLLATE utf8mb4_general_ci`
+- MySQL: `VARCHAR(N)/LONGTEXT COLLATE utf8mb4_general_ci`
 
 ```rust
 #[rustango(max_length = 200, citext)] pub email: String,
