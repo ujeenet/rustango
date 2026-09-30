@@ -82,6 +82,10 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+Auf einer Tenant-Route muss der `tenant`-Claim des Tokens zum aufgelösten Tenant passen,
+und MCP-Agent-Token (`kind`-Claim) werden abgewiesen. Prägen Sie mit dem `JwtAuth`-Login
+oder `JwtBackend::issue_for_tenant`; `issue`-Token gelten nur ohne aufgelösten Tenant.
+
 `JwtBackend` akzeptiert die Access-Token, die `JwtLifecycle` ausstellt, und
 weist dessen Refresh-Token zurück — beide sind bis auf `typ` auf der Leitung
 identisch, ein als Bearer vorgelegter Refresh-Token wäre also ein
