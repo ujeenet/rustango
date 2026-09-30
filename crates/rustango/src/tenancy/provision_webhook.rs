@@ -276,12 +276,18 @@ async fn handle(
         .await
         .map_err(|e| Refusal::Internal(e.to_string()))?
     {
-        return Ok(Accepted {
-            run_id: existing.id.get().copied().unwrap_or_default(),
-            slug: existing.slug,
-            state: existing.state,
-            duplicate: true,
-        });
+        // A failed or interrupted run starts over under the same key (#1883).
+        let retry = store::release_for_retry(&registry, &existing)
+            .await
+            .map_err(|e| Refusal::Internal(e.to_string()))?;
+        if !retry {
+            return Ok(Accepted {
+                run_id: existing.id.get().copied().unwrap_or_default(),
+                slug: existing.slug,
+                state: existing.state,
+                duplicate: true,
+            });
+        }
     }
 
     // ---- 5. Build the request under the URL policy ----

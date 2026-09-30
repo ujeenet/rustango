@@ -482,3 +482,87 @@ async fn the_run_is_visible_exactly_like_a_console_run() {
     assert_eq!(run.requested_by.as_deref(), Some("webhook"));
     let _ = &b.tmp;
 }
+
+/// Backdate a run so it looks like its pod died two hours ago.
+async fn age_run(b: &Booted, run_id: i64) {
+    use rustango::core::Column as _;
+    use rustango::sql::UpdaterPool as _;
+    store::ProvisioningRun::objects()
+        .where_(store::ProvisioningRun::id.eq(run_id))
+        .update()
+        .set(
+            "started_at",
+            chrono::Utc::now() - chrono::Duration::hours(2),
+        )
+        .execute_pool(&b.pools.registry_pool())
+        .await
+        .unwrap();
+}
+
+/// A run left `running` by a dead pod no longer answers every retry with
+/// `duplicate: running` forever; the retry runs again (#1883).
+#[tokio::test]
+async fn a_retry_after_an_interrupted_run_provisions_again() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("stuck");
+    let registry = b.pools.registry_pool();
+    let stuck = store::open_run(
+        &registry,
+        &slug,
+        "database",
+        "sqlite",
+        None,
+        Some("webhook"),
+        Some("evt-stuck"),
+    )
+    .await
+    .unwrap();
+    let stuck_id = stuck.id.get().copied().unwrap();
+    age_run(&b, stuck_id).await;
+
+    let body = body_for(&slug, "evt-stuck", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let json = json_of(resp).await;
+    assert_eq!(json["duplicate"], serde_json::json!(false));
+    let run_id = json["run_id"].as_i64().unwrap();
+    assert_ne!(run_id, stuck_id);
+    assert_eq!(
+        store::RunState::parse(&await_run(&b, run_id).await.state),
+        store::RunState::Succeeded
+    );
+    let old = store::run_by_id(&registry, stuck_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(store::RunState::parse(&old.state), store::RunState::Failed);
+}
+
+/// A run still making progress is not taken over by a retry.
+#[tokio::test]
+async fn a_retry_during_a_live_run_is_still_a_duplicate() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("live");
+    let registry = b.pools.registry_pool();
+    let live = store::open_run(
+        &registry,
+        &slug,
+        "database",
+        "sqlite",
+        None,
+        Some("webhook"),
+        Some("evt-live"),
+    )
+    .await
+    .unwrap();
+    let body = body_for(&slug, "evt-live", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = json_of(resp).await;
+    assert_eq!(json["duplicate"], serde_json::json!(true));
+    assert_eq!(json["run_id"].as_i64(), live.id.get().copied());
+}

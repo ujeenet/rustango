@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Shutdown drains for 20 s, then closes
+
+`runserver` no longer waits forever for open connections after SIGTERM. Set
+`[server] shutdown_timeout_secs` to change it, under your orchestrator's grace period.
+`ServerSettings` gained that field, so a struct literal needs `..Default::default()`.
+A webhook delivery whose earlier run failed now provisions again instead of returning
+`duplicate: true`.
+
 ### `email::from_settings` returns `Result` (breaking)
 
 Add `?`. A `backend = "smtp"` that cannot be built used to fall back to `ConsoleMailer`;

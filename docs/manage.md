@@ -903,6 +903,12 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+On SIGTERM it stops accepting and gives open connections
+`[server] shutdown_timeout_secs` (default 20) to finish, then closes the rest.
+SSE and long-poll never finish by themselves. Provisioning and migration runs
+left `running` by a stopped process for over an hour are marked failed at the
+next boot, and a webhook retry with the same `event_id` runs again.
+
 ### `create-tenant <slug> [options]`
 
 Sets up a new tenant (customer/org) and applies the tenant migrations to

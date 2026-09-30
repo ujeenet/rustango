@@ -55,6 +55,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// operator console cannot create tenants — see that method for
     /// why this is opt-in rather than on by default.
     provisioning_dir: Option<std::path::PathBuf>,
+    /// How long `serve` lets open connections finish after SIGTERM.
+    drain_timeout: std::time::Duration,
     /// `(prefix, root_dir)` pairs registered via [`Builder::with_static`].
     /// Mounted at `serve` time as
     /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`
@@ -161,6 +163,7 @@ impl<DB: Database> Builder<DB> {
             routes: crate::tenancy::RouteConfig::default(),
             health_endpoints: false,
             provisioning_dir: None,
+            drain_timeout: crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
             static_dirs: Vec::new(),
             observability: false,
             access_log: None,
@@ -725,6 +728,24 @@ impl<DB: Database> Builder<DB> {
         // #1322 — only when the deployment asked for it. See
         // `with_tenant_provisioning` for why creating tenants is not
         // on by default.
+        // Runs are detached tasks; close the ones a stopped process left `running` (#1883).
+        if self.provisioning_dir.is_some() {
+            let registry: crate::sql::Pool = self.registry.clone().into();
+            let after = crate::tenancy::provision_store::STALE_RUN_AFTER;
+            match crate::tenancy::provision_store::reap_stale_runs(&registry, after).await {
+                Ok(0) => {}
+                Ok(n) => tracing::warn!(
+                    target: "rustango::tenancy::provision",
+                    closed = n,
+                    "closed provisioning/migration runs left running by a stopped process",
+                ),
+                Err(e) => tracing::warn!(
+                    target: "rustango::tenancy::provision",
+                    error = %e,
+                    "could not check for interrupted provisioning runs",
+                ),
+            }
+        }
         let provisioner = self.provisioning_dir.map(|dir| {
             crate::tenancy::provision::Provisioner::new(
                 self.pools.clone(),
@@ -847,6 +868,14 @@ impl<DB: Database> Builder<DB> {
         Ok(app)
     }
 
+    /// How long [`Self::serve`] lets open connections finish after the
+    /// stop signal. Default [`crate::shutdown::DEFAULT_DRAIN_TIMEOUT`].
+    #[must_use]
+    pub fn drain_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
     /// Assemble everything and bind.
     ///
     /// # Errors
@@ -855,17 +884,23 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        let drain = self.drain_timeout;
         let app = self.into_router().await?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         // v0.30.16 — `into_make_service_with_connect_info` is what
         // populates `ConnectInfo<SocketAddr>` in request extensions.
         // Without it, `access_log` (and any other middleware that
         // reads the peer address) sees "-".
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        crate::shutdown::serve_until_drained(
+            |stop| {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(stop)
+            },
+            drain,
         )
-        .with_graceful_shutdown(crate::shutdown::shutdown_signal())
         .await?;
         Ok(())
     }

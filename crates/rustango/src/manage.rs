@@ -942,6 +942,15 @@ impl Cli {
     /// Generic over the pool type because the Postgres path extends a
     /// `PgPool` (handlers taking `Extension<PgPool>` predate the `Pool`
     /// enum) while the other two extend `crate::sql::Pool`.
+    /// `server.shutdown_timeout_secs`, or the default (#1883).
+    fn drain_timeout(&self) -> std::time::Duration {
+        #[cfg(feature = "config")]
+        if let Some(s) = &self.settings_for_layers {
+            return s.server.drain_timeout();
+        }
+        crate::shutdown::DEFAULT_DRAIN_TIMEOUT
+    }
+
     fn assemble_app<P>(&mut self, pool: P) -> Router
     where
         P: Clone + Send + Sync + 'static,
@@ -1154,14 +1163,20 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
+            let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            crate::shutdown::serve_until_drained(
+                |stop| {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(stop)
+                },
+                drain,
             )
-            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
             run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
@@ -1193,14 +1208,20 @@ impl Cli {
                         .await
                         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 }
+                let drain = self.drain_timeout();
                 let app = self.assemble_app(pool);
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                crate::shutdown::serve_until_drained(
+                    |stop| {
+                        axum::serve(
+                            listener,
+                            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                        )
+                        .with_graceful_shutdown(stop)
+                    },
+                    drain,
                 )
-                .with_graceful_shutdown(crate::shutdown::shutdown_signal())
                 .await?;
                 run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
@@ -1212,6 +1233,7 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
+            let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
@@ -1219,11 +1241,16 @@ impl Cli {
             // populates `ConnectInfo<SocketAddr>` in request extensions.
             // Without it, `access_log` (and any other middleware that
             // reads the peer address) sees "-".
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            crate::shutdown::serve_until_drained(
+                |stop| {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(stop)
+                },
+                drain,
             )
-            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
             run_shutdown_hook(self.on_shutdown).await;
             Ok(())
@@ -1268,7 +1295,10 @@ impl Cli {
         // merged with the tenant admin and dispatched beside the
         // operator console, and layers applied now would reach neither.
         // The builder applies them to the outermost router instead.
-        let mut builder = crate::server::Builder::from_env().await?.api(api);
+        let mut builder = crate::server::Builder::from_env()
+            .await?
+            .api(api)
+            .drain_timeout(self.drain_timeout());
         builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();

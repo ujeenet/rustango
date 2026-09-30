@@ -796,6 +796,13 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+Con SIGTERM deja de aceptar conexiones y da a las abiertas
+`[server] shutdown_timeout_secs` (20 por defecto) para terminar; luego cierra el
+resto. SSE y long-poll nunca terminan solos. Las ejecuciones de aprovisionamiento
+y migración que un proceso detenido dejó en `running` más de una hora se marcan
+como fallidas en el siguiente arranque, y un reintento del webhook con el mismo
+`event_id` se ejecuta de nuevo.
+
 ### `create-tenant <slug> [options]`
 
 Configura un nuevo tenant (cliente/org) y le aplica las migraciones de tenant. El

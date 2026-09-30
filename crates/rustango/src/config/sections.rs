@@ -500,6 +500,21 @@ pub struct ServerSettings {
     /// Largest body accepted on POST, PUT and PATCH. `None` means
     /// 2 MiB. Raise it for upload routes.
     pub max_body_bytes: Option<u64>,
+    /// Seconds open connections get to finish after SIGTERM before they
+    /// are closed. `None` means 20. Keep it under the orchestrator's
+    /// grace period (30 s on Kubernetes).
+    pub shutdown_timeout_secs: Option<u64>,
+}
+
+impl ServerSettings {
+    /// The drain deadline `runserver` uses.
+    #[must_use]
+    pub fn drain_timeout(&self) -> std::time::Duration {
+        self.shutdown_timeout_secs.map_or(
+            crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+            std::time::Duration::from_secs,
+        )
+    }
 }
 
 /// Authentication: JWT lifetimes, password hashing cost and account

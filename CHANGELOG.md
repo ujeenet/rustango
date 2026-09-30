@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — shutdown has a drain deadline; interrupted runs are closed (#1883)
+
+After SIGTERM open connections get `[server] shutdown_timeout_secs` (default 20) to finish,
+then close; new `shutdown::serve_until_drained` and `server::Builder::drain_timeout`.
+Provisioning/migration runs left `running` for an hour are marked failed at boot, and a
+webhook retry of a failed run provisions again under the same `event_id`.
+
 ### Fixed — a broken SMTP config fails instead of mailing to stdout (#1923)
 
 **Breaking:** `email::from_settings` returns `Result`; `backend = "smtp"` with no host, a bad

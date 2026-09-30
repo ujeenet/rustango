@@ -16,6 +16,7 @@
 # bind                  = "127.0.0.1:8080"
 # request_timeout_secs  = 30
 # max_body_bytes        = 2097152      # 2 MiB
+# shutdown_timeout_secs = 20           # drain after SIGTERM
 
 # [auth]
 # argon2_memory_kib  = 19456    # OWASP 2024 floor
