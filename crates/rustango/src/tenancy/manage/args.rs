@@ -103,7 +103,12 @@ pub(super) fn parse(args: &[String], spec: &Spec<'_>) -> Result<Parsed, TenancyE
         if spec.switches.contains(&a) {
             out.switches.push(a.to_owned());
         } else if spec.valued.contains(&a) {
-            out.values.push((a.to_owned(), next_value(&mut iter, a)?));
+            // `--password --superuser` is a missing value, not a password.
+            let v = next_value(&mut iter, a)?;
+            if v.starts_with("--") {
+                return Err(TenancyError::Validation(format!("`{a}` needs a value")));
+            }
+            out.values.push((a.to_owned(), v));
         } else if a.starts_with('-') {
             return Err(TenancyError::Validation(format!(
                 "{}: unknown flag `{a}` — usage: {}",

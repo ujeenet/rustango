@@ -176,6 +176,20 @@ async fn create_user_never_takes_a_flag_as_the_username() {
     );
 }
 
+/// A trailing `--password` once took the injected `--superuser` as the password.
+#[tokio::test]
+async fn a_valued_flag_never_takes_the_next_flag_as_its_value() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    let err = b
+        .run(&["create-superuser", "acme", "bob", "--password"])
+        .await
+        .expect_err("no password given");
+    assert!(err.contains("needs a value"), "{err}");
+    let gone = b.run(&["set-superuser", "acme", "bob", "--off"]).await;
+    assert!(gone.is_err(), "a user was created anyway: {gone:?}");
+}
+
 #[tokio::test]
 async fn grant_perm_refuses_a_misspelt_role_flag() {
     let b = boot().await;
