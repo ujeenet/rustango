@@ -1,5 +1,5 @@
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "admin"))]
-//! Tenant admin permission gaps (#1858, #1863). SQLite, no service.
+//! Tenant admin permission gaps (#1858, #1859, #1863). SQLite, no service.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -8,7 +8,8 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use rustango::audit::{AuditOp, AuditSource, PendingEntry};
-use rustango::sql::sqlx;
+use rustango::core::{Filter, Op, SqlValue};
+use rustango::sql::{sqlx, FetcherPool as _};
 use rustango::tenancy::permissions::set_user_perm_pool;
 use rustango::tenancy::tenant_console::{
     encode, PasswordFingerprint, SessionSecret, TenantSessionPayload, COOKIE_NAME,
@@ -30,6 +31,36 @@ pub struct SecNote {
     pub title: String,
     pub owner_id: i64,
 }
+
+/// A table scoped by `register_admin_queryset!` to the signed-in user's rows.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "sec_owned",
+    display = "title",
+    admin(
+        list_display = "title",
+        list_filter = "owner_id",
+        search_fields = "title",
+        actions = "delete_selected"
+    )
+)]
+#[allow(dead_code)]
+pub struct SecOwned {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+    pub owner_id: i64,
+}
+
+fn own_rows(parts: &axum::http::request::Parts) -> Vec<Filter> {
+    let uid = parts
+        .extensions
+        .get::<rustango::admin::AdminSession>()
+        .map_or(-1, |s| s.user_id);
+    vec![Filter::new("owner_id", Op::Eq, SqlValue::I64(uid))]
+}
+rustango::register_admin_queryset!("sec_owned", own_rows);
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
@@ -95,6 +126,9 @@ async fn boot() -> Env {
     rustango::testkit::create_tables_for::<SecNote>(&tenant)
         .await
         .expect("sec_note table");
+    rustango::testkit::create_tables_for::<SecOwned>(&tenant)
+        .await
+        .expect("sec_owned table");
     rustango::i18n::db::ensure_table_pool(&tenant)
         .await
         .expect("translations table");
@@ -122,6 +156,11 @@ async fn boot() -> Env {
 impl Env {
     /// A signed-in tenant user holding exactly `perms`. Returns the cookie.
     async fn login(&self, is_superuser: bool, perms: &[&str]) -> String {
+        self.login_as(is_superuser, perms).await.0
+    }
+
+    /// As [`Self::login`], plus the user's id.
+    async fn login_as(&self, is_superuser: bool, perms: &[&str]) -> (String, i64) {
         let mut user = User {
             username: unique("u"),
             is_superuser,
@@ -141,10 +180,33 @@ impl Env {
             3600,
             PasswordFingerprint::of(&self.secret, &user.password_hash),
         );
-        format!(
+        let cookie = format!(
             "{COOKIE_NAME}={}; rustango_csrf=t",
             encode(&self.secret, &login)
-        )
+        );
+        (cookie, uid)
+    }
+
+    async fn owned(&self, title: &str, owner_id: i64) -> i64 {
+        let mut row = SecOwned {
+            id: rustango::Auto::default(),
+            title: title.to_owned(),
+            owner_id,
+        };
+        row.insert_pool(&self.tenant).await.expect("seed sec_owned");
+        row.id.get().copied().unwrap()
+    }
+
+    async fn owned_titles(&self) -> Vec<String> {
+        let mut t: Vec<String> = SecOwned::objects()
+            .fetch(&self.tenant)
+            .await
+            .expect("fetch sec_owned")
+            .into_iter()
+            .map(|r| r.title)
+            .collect();
+        t.sort();
+        t
     }
 
     async fn send(&self, req: Request<Body>) -> (StatusCode, String) {
@@ -275,4 +337,76 @@ async fn translation_edits_need_a_superuser_in_the_tenant_admin() {
     assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
     let rows = rustango::i18n::db::all_pool(&env.tenant).await.unwrap();
     assert_eq!(rows.len(), 1, "a superuser still saves");
+}
+
+/// A user holding `sec_owned` perms: `(env, cookie, own pk, other pk, other owner)`.
+async fn owned_env() -> (Env, String, i64, i64, i64) {
+    let env = boot().await;
+    let perms = ["sec_owned.view", "sec_owned.change", "sec_owned.delete"];
+    let (cookie, uid) = env.login_as(false, &perms).await;
+    let mine = env.owned("mine-note", uid).await;
+    let theirs = env.owned("their-secret", uid + 1000).await;
+    (env, cookie, mine, theirs, uid + 1000)
+}
+
+/// #1859: a row the queryset hook hides is a 404 on every by-pk route.
+#[tokio::test]
+async fn the_queryset_hook_scopes_by_pk_routes() {
+    let (env, cookie, mine, theirs, _) = owned_env().await;
+    let base = "/__admin/sec_owned";
+    assert_eq!(
+        env.get(&format!("{base}/{mine}"), &cookie).await.0,
+        StatusCode::OK
+    );
+    for uri in [format!("{base}/{theirs}"), format!("{base}/{theirs}/edit")] {
+        let (status, body) = env.get(&uri, &cookie).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+        assert!(!body.contains("their-secret"), "{uri}: {body}");
+    }
+    let (status, _) = env
+        .post(
+            &format!("{base}/{theirs}"),
+            &cookie,
+            "title=hacked&owner_id=1",
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "update");
+    let (status, _) = env
+        .post(&format!("{base}/{theirs}/delete"), &cookie, "")
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "delete");
+    assert_eq!(env.owned_titles().await, ["mine-note", "their-secret"]);
+}
+
+/// #1859: bulk actions skip rows outside the hook's scope.
+#[tokio::test]
+async fn the_queryset_hook_scopes_actions() {
+    let (env, cookie, mine, theirs, _) = owned_env().await;
+    let form = format!("action=delete_selected&_selected={mine}&_selected={theirs}");
+    env.post("/__admin/sec_owned/__action", &cookie, &form)
+        .await;
+    assert_eq!(env.owned_titles().await, ["their-secret"]);
+}
+
+/// #1859: autocomplete sees only scoped rows.
+#[tokio::test]
+async fn the_queryset_hook_scopes_autocomplete() {
+    let (env, cookie, _, _, _) = owned_env().await;
+    let (_, body) = env
+        .get("/__admin/sec_owned/__autocomplete?q=", &cookie)
+        .await;
+    assert!(body.contains("mine-note"), "{body}");
+    assert!(!body.contains("their-secret"), "autocomplete: {body}");
+}
+
+/// #1859: facet counts see only scoped rows.
+#[tokio::test]
+async fn the_queryset_hook_scopes_facets() {
+    let (env, cookie, _, _, their_owner) = owned_env().await;
+    let (status, body) = env.get("/__admin/sec_owned", &cookie).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains(&format!("owner_id={their_owner}")),
+        "facet: {body}"
+    );
 }

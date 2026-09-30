@@ -15,6 +15,11 @@ The feed's record link no longer renders a raw `entity_pk` into `href`.
 The translations editor now refuses non-superuser writes in the tenant admin too.
 New `admin::session::from_extensions` reads the extension, else the task-local.
 
+### Security — `register_admin_queryset!` scopes every admin route (#1859)
+
+Detail, edit, update, delete, bulk actions, autocomplete and facet counts now apply
+the hooks too, so a row the list hides is a 404. A delete of a missing row is a 404.
+
 ## [0.59.6] — 2026-09-29
 
 Tagged only; not published to crates.io.

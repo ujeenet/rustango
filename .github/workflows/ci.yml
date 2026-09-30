@@ -1270,6 +1270,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test audit_bulk_writes_tri
       - run: cargo test -p rustango --features mysql,testkit,tenancy --test audit_view_writes_tri
       - run: cargo test -p rustango --features mysql,testkit --test admin_audit_scope_tri
+      - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
       - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri

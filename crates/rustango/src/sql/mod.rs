@@ -174,6 +174,8 @@ pub(crate) use sqlite::SQLITE_CANONICAL_GLOB;
 /// builds its `SQLite` branch through `Dialect`, and that renderer
 /// compiles in every build whether or not the driver is linked.
 pub(crate) use sqlite::SQLITE_DATETIME_FORMAT;
+/// WHERE tail on any dialect, for callers that write their own head.
+pub(crate) use writers::compile_where_order_tail;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without
 /// requiring downstream crates to add their own dependency on it.

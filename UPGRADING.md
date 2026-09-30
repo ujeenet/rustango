@@ -160,6 +160,11 @@ who used the feed; `auto_create_permissions_pool` seeds both codenames.
 **Breaking:** tenant-admin non-superusers get 403 on translation edits. Custom views
 reading `Extension<AdminSession>` now see the tenant user instead of nothing.
 
+### Queryset hooks apply beyond the list
+
+**Breaking:** a `register_admin_queryset!` hook now also limits by-pk pages, actions,
+autocomplete and facets; rows it filters out are 404 there, and skipped by actions.
+
 ## 0.59.6
 
 ### Outbound calls ignore `HTTPS_PROXY`
