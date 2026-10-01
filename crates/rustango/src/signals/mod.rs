@@ -323,7 +323,7 @@ tokio::task_local! {
 
 /// `true` when the current task is inside a [`without_signals`],
 /// [`save_quietly`] or [`delete_quietly`] scope.
-fn signals_suppressed() -> bool {
+pub(crate) fn signals_suppressed() -> bool {
     SUPPRESS_SIGNALS.try_with(|v| *v).unwrap_or(false)
 }
 

@@ -950,7 +950,7 @@ pub struct Session {
 
 ### 2.30 `#[rustango(soft_delete)]` — tombstone deletes
 
-**What**: Mark an `Option<DateTime<Utc>>` field as the soft-delete tombstone. Currently captured in the model's `SCHEMA.soft_delete_column` so the ORM can layer the alive-when-NULL filter and override `delete()` to UPDATE the tombstone instead of `DELETE FROM`.
+**What**: Mark an `Option<DateTime<Utc>>` field as the soft-delete tombstone. `soft_delete(&pool)` stamps it (once; a second call changes nothing), `restore(&pool)` clears it, and `QuerySet::active()` filters on it. `delete()` still runs a real `DELETE FROM`.
 
 **Recipe**:
 

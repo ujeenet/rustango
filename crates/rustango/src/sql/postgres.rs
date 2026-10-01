@@ -71,6 +71,14 @@ impl Dialect for Postgres {
         ))
     }
 
+    fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
+        let quoted: Vec<String> = tables.iter().map(|t| self.quote_ident(t)).collect();
+        vec![format!(
+            "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
+            quoted.join(", ")
+        )]
+    }
+
     fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",

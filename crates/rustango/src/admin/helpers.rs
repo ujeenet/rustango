@@ -308,10 +308,35 @@ pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) 
         .any(|(f, w)| *f == name && *w == "password")
 }
 
+/// `true` when the list may filter on `field` from the URL: a
+/// `list_filter`, displayed or FK column, or an inline's parent pin.
+/// Never a secret, so a URL cannot probe its value (#2031).
+/// Every FK column is allowed on purpose: inline and facet links filter on it.
+#[must_use]
+pub(crate) fn url_filterable(
+    model: &'static ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    field: &FieldSchema,
+) -> bool {
+    if is_secret_field(admin_cfg, field.name) {
+        return false;
+    }
+    let named = |names: &[&str]| names.contains(&field.name);
+    named(admin_cfg.list_filter)
+        || named(admin_cfg.list_display)
+        || admin_cfg.list_display.is_empty()
+        || field.relation.is_some()
+        || super::inlines::is_parent_pin(model.table, field.column)
+}
+
 /// A secret column's list/detail cell: whether it is set, never the value.
 pub(crate) fn render_secret_cell(row: &serde_json::Value, field: &FieldSchema) -> String {
-    let set = row
-        .get(field.name)
+    render_secret_value(row.get(field.name))
+}
+
+/// [`render_secret_cell`] for an already-read value.
+pub(crate) fn render_secret_value(value: Option<&serde_json::Value>) -> String {
+    let set = value
         .and_then(serde_json::Value::as_str)
         .is_some_and(|v| !v.is_empty());
     if set {

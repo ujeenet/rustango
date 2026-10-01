@@ -411,12 +411,13 @@ pub(crate) async fn emit_admin_audit_diff(
             (f.name, v)
         })
         .collect();
-    let entry = crate::audit::PendingEntry {
-        entity_table: model.table,
-        entity_pk: pk_str.to_owned(),
-        operation: crate::audit::AuditOp::Update,
-        source: crate::audit::current_source(),
-        changes: crate::audit::diff_changes(&before_pairs, &after_pairs),
+    let Some(entry) = crate::audit::PendingEntry::update_diff(
+        model.table,
+        pk_str.to_owned(),
+        &before_pairs,
+        &after_pairs,
+    ) else {
+        return;
     };
     if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
         tracing::warn!(

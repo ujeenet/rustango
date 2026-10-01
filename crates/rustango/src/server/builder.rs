@@ -836,6 +836,8 @@ impl<DB: Database> Builder<DB> {
             }
         }));
 
+        // Inside the security headers, so a panic's 500 carries them (#1541).
+        let app = crate::panic_guard::catch_panics(app);
         #[cfg(feature = "admin")]
         let app = match self.security_headers {
             Some(layer) => {

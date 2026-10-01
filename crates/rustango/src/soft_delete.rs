@@ -93,6 +93,40 @@ pub enum SoftDeleteError {
     Exec(#[from] ExecError),
 }
 
+/// Set `column` to `deleted_at` on one row, only if that changes it:
+/// a second delete keeps the first stamp and writes no audit row (#1929).
+#[doc(hidden)]
+#[must_use]
+pub fn __mark_query(
+    model: &'static ModelSchema,
+    column: &'static str,
+    pk_column: &'static str,
+    pk_value: SqlValue,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> UpdateQuery {
+    let currently_live = deleted_at.is_some();
+    let value = deleted_at.map_or(SqlValue::Null, SqlValue::from);
+    UpdateQuery {
+        model,
+        set: vec![Assignment {
+            column,
+            value: value.into(),
+        }],
+        where_clause: WhereExpr::And(vec![
+            WhereExpr::Predicate(Filter {
+                column: pk_column,
+                op: Op::Eq,
+                value: pk_value,
+            }),
+            WhereExpr::Predicate(Filter {
+                column,
+                op: Op::IsNull,
+                value: SqlValue::Bool(currently_live),
+            }),
+        ]),
+    }
+}
+
 /// Mark one row deleted by setting the soft-delete column to now.
 /// Returns how many rows changed.
 ///
@@ -111,18 +145,7 @@ pub async fn soft_delete(
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
     let n = crate::audit::update_as(
         pool,
-        &UpdateQuery {
-            model,
-            set: vec![Assignment {
-                column: col,
-                value: SqlValue::from(chrono::Utc::now()).into(),
-            }],
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_column,
-                op: Op::Eq,
-                value: pk_value,
-            }),
-        },
+        &__mark_query(model, col, pk_column, pk_value, Some(chrono::Utc::now())),
         crate::audit::AuditOp::SoftDelete,
     )
     .await?;
@@ -147,26 +170,7 @@ pub async fn restore(
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
     let n = crate::audit::update_as(
         pool,
-        &UpdateQuery {
-            model,
-            set: vec![Assignment {
-                column: col,
-                value: SqlValue::Null.into(),
-            }],
-            // Only a deleted row, so restoring an active one writes no audit row.
-            where_clause: WhereExpr::And(vec![
-                WhereExpr::Predicate(Filter {
-                    column: pk_column,
-                    op: Op::Eq,
-                    value: pk_value,
-                }),
-                WhereExpr::Predicate(Filter {
-                    column: col,
-                    op: Op::IsNull,
-                    value: SqlValue::Bool(false),
-                }),
-            ]),
-        },
+        &__mark_query(model, col, pk_column, pk_value, None),
         crate::audit::AuditOp::Restore,
     )
     .await?;

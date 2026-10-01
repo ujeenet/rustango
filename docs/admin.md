@@ -153,7 +153,9 @@ the publish/archive action picker.
 **Filtering.** Click any value in a `list_filter` facet card to scope the list;
 the active filter shows as a chip with a **clear** link, and the row count and
 facet counts update. Filters, search, sorting and the date hierarchy all
-compose in the query string and can be combined.
+compose in the query string and can be combined. `?<field>=` works only on a
+`list_filter`, displayed, FK or inline-parent column, never a secret one, and
+`?<field>__isnull=1` lists the NULL rows.
 
 [![The posts list filtered by status=published: an active filter chip, the matching facet highlighted, search box, and the bulk-action picker](img/admin-list-filtered.png)](img/admin-list-filtered.png)
 
@@ -248,7 +250,9 @@ On the parent's **detail** page the children render as a read-only table; on the
 **edit** page they become an editable FormSet (add / change / delete rows in
 place). Options: `kind` (`Tabular` — one table row per child, or `Stacked` — a
 fieldset per child), `label`, `fields` (default: every scalar except the FK),
-`extra` (blank rows offered for adding), `max_num`, and `readonly_fields`.
+`extra` (blank rows offered for adding), `max_num` (a save that adds rows past
+it is refused), and `readonly_fields`. Inline rows pass the child's `view` hook,
+secret fields are never shown, and an extra row with a typed natural PK inserts.
 
 [![A post's detail page: read-only fields, the Comments inline table, and the audit-trail card showing the create entry as a JSON diff](img/admin-detail.png)](img/admin-detail.png)
 
@@ -362,7 +366,8 @@ Three more registration macros hook into a model's admin pages:
   mounts an extra page/action at `/<prefix>/posts/duplicate`. The handler is an
   async `fn(Pool, Request) -> Response`. (Reserved suffixes like `new`,
   `__action`, `__autocomplete`, `{pk}`, `{pk}/edit`, `{pk}/delete` are skipped
-  with a warning.)
+  with a warning.) Under `with_user_perms` a GET needs `{table}.view` and a
+  POST/PUT/PATCH/DELETE `{table}.change`; add `perm = "publish"` to require `{table}.publish`.
 - **Queryset scoping** —
   `register_admin_queryset!("posts", hook)` where `hook: fn(&Parts) -> Vec<Filter>`
   narrows what a request can see (e.g. only the current user's rows). Multiple

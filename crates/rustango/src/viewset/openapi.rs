@@ -247,15 +247,15 @@ impl ViewSet {
         // `ordering_fields` whitelist is set (#439). The description
         // enumerates the allowed fields when a whitelist is in play
         // so clients can discover the API surface without reading code.
-        if !self.default_ordering.is_empty() || !self.ordering_fields.is_empty() {
-            let description = if self.ordering_fields.is_empty() {
-                "Comma-separated field names; prefix `-` for DESC".to_owned()
-            } else {
-                format!(
+        let allowed = self.ordering_fields.as_deref().filter(|f| !f.is_empty());
+        if !self.default_ordering.is_empty() || allowed.is_some() {
+            let description = match allowed {
+                None => "Comma-separated field names; prefix `-` for DESC".to_owned(),
+                Some(allowed) => format!(
                     "Comma-separated field names from: {}. Prefix `-` for DESC. \
                      Unknown / off-whitelist names are silently dropped.",
-                    self.ordering_fields.join(", "),
-                )
+                    allowed.join(", "),
+                ),
             };
             out.push(Parameter::query("ordering", Schema::string()).description(description));
         }

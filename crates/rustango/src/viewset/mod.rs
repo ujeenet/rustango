@@ -165,7 +165,7 @@ impl ThrottleRule {
 /// throttle in front.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ViewSetThrottle {
-    /// Throttle for `GET /` (list).
+    /// Throttle for `GET /` and `QUERY /` (list), one shared budget.
     pub list: Option<ThrottleRule>,
     /// Throttle for `GET /{pk}` (retrieve).
     pub retrieve: Option<ThrottleRule>,
@@ -686,10 +686,9 @@ pub struct ViewSet {
     fields: Option<Vec<String>>,
     filter_fields: Vec<String>,
     search_fields: Vec<String>,
-    /// Allow-list for `?ordering=`. When non-empty, only these fields
-    /// are honored and unknown names are dropped. Empty (the default)
-    /// means any field on the schema is sortable.
-    ordering_fields: Vec<String>,
+    /// Allow-list for `?ordering=`. `None` (the default) means the
+    /// fields the response renders; `Some(empty)` means none.
+    ordering_fields: Option<Vec<String>>,
     default_page_size: usize,
     default_ordering: Vec<(String, bool)>,
     perms: ViewSetPerms,
@@ -715,6 +714,8 @@ pub struct ViewSet {
     /// Name of the path capture for the detail routes — `pk` by default,
     /// giving `/{pk}`. See [`ViewSet::pk_param`].
     pk_param: String,
+    /// Most rows one bulk create may carry. See [`ViewSet::max_bulk_create`].
+    max_bulk_create: usize,
 }
 
 impl ViewSet {
@@ -725,7 +726,7 @@ impl ViewSet {
             fields: None,
             filter_fields: Vec::new(),
             search_fields: Vec::new(),
-            ordering_fields: Vec::new(),
+            ordering_fields: None,
             default_page_size: 20,
             default_ordering: Vec::new(),
             perms: ViewSetPerms::default(),
@@ -738,6 +739,7 @@ impl ViewSet {
             serializer: None,
             max_page_size: 100,
             pk_param: "pk".to_owned(),
+            max_bulk_create: 1000,
         }
     }
 
@@ -934,10 +936,11 @@ impl ViewSet {
 
     /// Allow-list for `?ordering=`. When set, only these names are
     /// honored; unknown ones are dropped, so a client cannot sort on
-    /// a sensitive column. Unset (the default) means any schema field
-    /// is sortable.
+    /// a sensitive column. Unset (the default) means the fields the
+    /// response renders; none when it renders none (#1996). An empty
+    /// slice makes nothing sortable.
     pub fn ordering_fields(mut self, fields: &[&str]) -> Self {
-        self.ordering_fields = fields.iter().map(|&s| s.to_owned()).collect();
+        self.ordering_fields = Some(fields.iter().map(|&s| s.to_owned()).collect());
         self
     }
 
@@ -972,7 +975,16 @@ impl ViewSet {
         self
     }
 
+    /// Most rows a bulk create (JSON array body) may carry; more is a
+    /// `413`. Default 1000; each row also spends one `create` throttle unit.
+    #[must_use]
+    pub fn max_bulk_create(mut self, n: usize) -> Self {
+        self.max_bulk_create = n.max(1);
+        self
+    }
+
     /// Default ordering for list responses. `(field, true)` = descending.
+    /// Unset, the model's `default_order` applies; the PK always breaks ties.
     pub fn ordering(mut self, ordering: &[(&str, bool)]) -> Self {
         self.default_ordering = ordering.iter().map(|&(f, d)| (f.to_owned(), d)).collect();
         self
@@ -1161,7 +1173,7 @@ impl ViewSet {
         let state = Arc::new(ViewSetState {
             pool_source,
             vs: self.clone(),
-            throttle_store: Arc::new(Mutex::new(HashMap::new())),
+            throttle_store: Arc::new(ThrottleStore::new(MAX_THROTTLE_KEYS)),
         });
         let prefix = prefix.trim_end_matches('/').to_owned();
         let collection = prefix.clone();
@@ -1223,7 +1235,97 @@ struct ViewSetState {
     vs: ViewSet,
     /// Process-local fixed-window throttle counters, keyed by
     /// `{table}:{action}:{client}` and shared across requests.
-    throttle_store: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
+    throttle_store: Arc<ThrottleStore>,
+}
+
+/// Distinct throttle keys kept before the store sweeps (#1999).
+const MAX_THROTTLE_KEYS: usize = 100_000;
+
+/// One client's fixed window for one action.
+#[derive(Clone, Copy, Debug)]
+struct ThrottleWindow {
+    count: u32,
+    /// The rule's `max`, so eviction compares spend across actions.
+    max: u32,
+    start: Instant,
+    window: std::time::Duration,
+}
+
+impl ThrottleWindow {
+    fn ended(&self, now: Instant) -> bool {
+        now.duration_since(self.start) >= self.window
+    }
+
+    /// The spent share of `max`, as a fixed-point fraction.
+    fn spent(&self) -> u64 {
+        (u64::from(self.count) << 32) / u64::from(self.max.max(1))
+    }
+}
+
+/// Fixed-window counters with a bounded key count.
+struct ThrottleStore {
+    cap: usize,
+    windows: Mutex<HashMap<String, ThrottleWindow>>,
+}
+
+impl ThrottleStore {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Spend `cost` from `key`'s window: `Err(retry_after_secs)` when over
+    /// `rule.max`. A rejected spend charges nothing, so it cannot lock a client out.
+    fn spend(&self, key: String, rule: ThrottleRule, cost: u32, now: Instant) -> Result<(), u64> {
+        // A poisoned mutex means an earlier panic mid-update. Fail open
+        // rather than reject every request from here on.
+        let Ok(mut windows) = self.windows.lock() else {
+            return Ok(());
+        };
+        if !windows.contains_key(&key) {
+            self.make_room(&mut windows, now);
+        }
+        let fresh = ThrottleWindow {
+            count: 0,
+            max: rule.max,
+            start: now,
+            window: std::time::Duration::from_secs(rule.window_secs),
+        };
+        let w = windows.entry(key).or_insert(fresh);
+        if w.ended(now) {
+            *w = fresh;
+        }
+        let count = w.count.saturating_add(cost);
+        if count > rule.max {
+            let left = w.window.saturating_sub(now.duration_since(w.start));
+            return Err(left.as_secs().max(1));
+        }
+        w.count = count;
+        Ok(())
+    }
+
+    /// Drop ended windows, which act like absent ones; if every window is
+    /// still live, drop the eighth with the least spent share of `max`,
+    /// the cheapest to lose (#1999).
+    fn make_room(&self, windows: &mut HashMap<String, ThrottleWindow>, now: Instant) {
+        if windows.len() < self.cap {
+            return;
+        }
+        windows.retain(|_, w| !w.ended(now));
+        if windows.len() < self.cap {
+            return;
+        }
+        let mut by_spent: Vec<(u64, String)> = windows
+            .iter()
+            .map(|(k, w)| (w.spent(), k.clone()))
+            .collect();
+        by_spent.sort_unstable_by_key(|(n, _)| *n);
+        for (_, k) in by_spent.into_iter().take((self.cap / 8).max(1)) {
+            windows.remove(&k);
+        }
+    }
 }
 
 /// A per-request connection handle covering both static-pool and
@@ -1305,6 +1407,10 @@ impl AcquiredConn {
 
     async fn delete(&mut self, q: &DeleteQuery) -> Result<u64, crate::sql::ExecError> {
         crate::audit::delete(&self.pool, q).await
+    }
+
+    async fn soft_delete(&mut self, q: &UpdateQuery) -> Result<u64, crate::sql::ExecError> {
+        crate::audit::update_as(&self.pool, q, crate::audit::AuditOp::SoftDelete).await
     }
 
     #[cfg(feature = "tenancy")]
@@ -1794,14 +1900,16 @@ macro_rules! or_500 {
     };
 }
 
-/// The model's global scopes plus every filter backend's predicates for
-/// this request, to be ANDed into whatever query the action runs.
+/// The model's global scopes, its soft-delete liveness and every filter
+/// backend's predicates, to be ANDed into whatever query the action runs.
 fn scope_filters(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
     let mut all = state.vs.schema.global_scope_exprs(&[]);
+    // A soft-deleted row reads as gone to every action (#1998).
+    all.extend(crate::soft_delete::active_filter(state.vs.schema));
     all.extend(
         state
             .vs
@@ -1888,30 +1996,19 @@ fn check_throttle(
     action: &str,
     parts: &axum::http::request::Parts,
 ) -> Option<Response> {
-    let rule = state.vs.throttle.for_action(action)?;
-    let client = client_key(parts);
-    let key = format!("{}:{}:{}", state.vs.schema.table, action, client);
-    let now = Instant::now();
-    let window = std::time::Duration::from_secs(rule.window_secs);
+    state.vs.throttle.for_action(action)?;
+    spend_throttle(state, action, &client_key(parts), 1)
+}
 
-    // A poisoned mutex means an earlier panic mid-update. Fail open
-    // rather than reject every request from here on.
-    let mut store = match state.throttle_store.lock() {
-        Ok(g) => g,
-        Err(_) => return None,
-    };
-    let entry = store.entry(key).or_insert((0, now));
-    if now.duration_since(entry.1) >= window {
-        *entry = (0, now); // window elapsed → reset
-    }
-    entry.0 += 1;
-    if entry.0 > rule.max {
-        let retry = window
-            .checked_sub(now.duration_since(entry.1))
-            .map_or(1, |d| d.as_secs().max(1));
-        return Some(throttled_response(retry));
-    }
-    None
+/// Spend `cost` requests of `action`'s throttle for `client`.
+fn spend_throttle(state: &ViewSetState, action: &str, client: &str, cost: u32) -> Option<Response> {
+    let rule = state.vs.throttle.for_action(action)?;
+    let key = format!("{}:{}:{}", state.vs.schema.table, action, client);
+    state
+        .throttle_store
+        .spend(key, rule, cost, Instant::now())
+        .err()
+        .map(throttled_response)
 }
 
 /// The throttle key: the trusted client IP (IPv6 by /64), else one
@@ -2158,33 +2255,21 @@ async fn run_list(
     //
     // `list_params::parse_ordering` is the single source of truth,
     // shared with `template_views::ListView`.
-    let ordering_allowlist: Vec<String> = if state.vs.ordering_fields.is_empty() {
-        state
+    let ordering_allowlist: Vec<String> = match &state.vs.ordering_fields {
+        Some(allowed) => allowed.clone(),
+        None => state
             .rendered_fields()
             .iter()
             .map(|f| f.name.to_owned())
-            .collect()
-    } else {
-        state.vs.ordering_fields.clone()
+            .collect(),
     };
     let order_by: Vec<crate::core::OrderItem> = params
         .get("ordering")
         .map(|raw| crate::list_params::parse_ordering(raw, &ordering_allowlist, state.vs.schema))
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| {
-            state
-                .vs
-                .default_ordering
-                .iter()
-                .filter_map(|(name, desc)| {
-                    state
-                        .vs
-                        .schema
-                        .field(name)
-                        .map(|f| crate::core::OrderItem::column(f.column, *desc))
-                })
-                .collect()
-        });
+        .unwrap_or_else(|| default_order_by(&state.vs));
+    // The PK breaks ties so rows cannot repeat or vanish across pages (#2047).
+    let order_by = state.vs.schema.with_pk_tiebreak(order_by);
 
     let fields = state.effective_fields();
 
@@ -2288,6 +2373,29 @@ async fn run_list(
     }
 }
 
+/// `.ordering(..)`, else the model's `default_order`, as ListView and the admin do (#2047).
+fn default_order_by(vs: &ViewSet) -> Vec<crate::core::OrderItem> {
+    let schema = vs.schema;
+    let builder: Vec<(&str, bool)> = vs
+        .default_ordering
+        .iter()
+        .map(|(n, d)| (n.as_str(), *d))
+        .collect();
+    let spec = if builder.is_empty() {
+        schema.default_order
+    } else {
+        &builder[..]
+    };
+    spec.iter()
+        .filter_map(|(name, desc)| {
+            schema
+                .field(name)
+                .or_else(|| schema.field_by_column(name))
+                .map(|f| crate::core::OrderItem::column(f.column, *desc))
+        })
+        .collect()
+}
+
 /// RFC 10008 QUERY on the collection: the same filtered, paginated
 /// `list`, with the criteria in the request body. `QUERY /things`
 /// with body `status=draft&ordering=-created` returns what
@@ -2299,8 +2407,9 @@ async fn handle_query(
     req: axum::extract::Request,
 ) -> Response {
     // `enter` reads only `parts`, so the body is still unconsumed
-    // and the params can be parsed from it here.
-    let (parts, body, acq) = match enter(&state, req, &state.vs.perms.list, "query").await {
+    // and the params can be parsed from it here. QUERY spends the list
+    // throttle: it returns the same rows as GET (#1997).
+    let (parts, body, acq) = match enter(&state, req, &state.vs.perms.list, "list").await {
         Ok(x) => x,
         Err(resp) => return resp,
     };
@@ -2725,6 +2834,8 @@ async fn handle_create(
         Ok(w) => w,
         Err(resp) => return resp,
     };
+    // A bulk create spends one throttle unit per row (#1999).
+    let client = state.vs.throttle.create.map(|_| client_key(&parts));
     // A JSON array body means a bulk create.
     let create_body = match extract_create_body(parts, body).await {
         Ok(b) => b,
@@ -2750,6 +2861,31 @@ async fn handle_create(
             .await
         }
         CreateBody::Bulk(rows) => {
+            if rows.len() > state.vs.max_bulk_create {
+                let msg = format!(
+                    "bulk create accepts at most {} rows",
+                    state.vs.max_bulk_create
+                );
+                return json_error(StatusCode::PAYLOAD_TOO_LARGE, &msg);
+            }
+            // More rows than a whole window allows can never pass: say so.
+            if let Some(rule) = state.vs.throttle.create {
+                if rows.len() > rule.max as usize {
+                    let msg = format!(
+                        "bulk create of {} rows exceeds the create throttle of {} per window",
+                        rows.len(),
+                        rule.max
+                    );
+                    return json_error(StatusCode::PAYLOAD_TOO_LARGE, &msg);
+                }
+            }
+            let extra = u32::try_from(rows.len().saturating_sub(1)).unwrap_or(u32::MAX);
+            if let Some(resp) = client
+                .as_deref()
+                .and_then(|c| spend_throttle(&state, "create", c, extra))
+            {
+                return resp;
+            }
             let rows: Vec<_> = rows
                 .into_iter()
                 .map(|(form, json)| {
@@ -3108,19 +3244,32 @@ async fn handle_destroy(
         Err(resp) => return resp,
     };
 
-    let query = DeleteQuery {
-        model: state.vs.schema,
-        where_clause: narrow(
-            WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: pk_val,
-            }),
-            scope,
-        ),
+    // A soft-delete model stamps its column, as the admin does (#1998).
+    let deleted = if let Some(col) = state.vs.schema.soft_delete_column {
+        let mut query = crate::soft_delete::__mark_query(
+            state.vs.schema,
+            col,
+            pk_field.column,
+            pk_val,
+            Some(chrono::Utc::now()),
+        );
+        query.where_clause = narrow(query.where_clause, scope);
+        acq.soft_delete(&query).await
+    } else {
+        let query = DeleteQuery {
+            model: state.vs.schema,
+            where_clause: narrow(
+                WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::Eq,
+                    value: pk_val,
+                }),
+                scope,
+            ),
+        };
+        acq.delete(&query).await
     };
-
-    match acq.delete(&query).await {
+    match deleted {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => no_content(),
         Err(e) => json_server_error("viewset::destroy", &e),
@@ -3376,6 +3525,89 @@ mod body_tests {
             panic!("malformed JSON was accepted");
         };
         assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod throttle_store_tests {
+    use super::{ThrottleRule, ThrottleStore};
+    use std::time::{Duration, Instant};
+
+    fn len(store: &ThrottleStore) -> usize {
+        store.windows.lock().unwrap().len()
+    }
+
+    /// Ended windows are swept once the store is full, so it stays bounded (#1999).
+    #[test]
+    fn a_full_store_drops_ended_windows() {
+        let store = ThrottleStore::new(4);
+        let rule = ThrottleRule::new(5, 1);
+        let then = Instant::now();
+        for n in 0..4 {
+            store.spend(format!("k{n}"), rule, 1, then).unwrap();
+        }
+        let later = then + Duration::from_secs(2);
+        store.spend("fresh".into(), rule, 1, later).unwrap();
+        assert_eq!(len(&store), 1, "every ended window swept");
+    }
+
+    /// With every window live, the sweep keeps the spent ones and still bounds the map.
+    #[test]
+    fn a_full_live_store_keeps_spent_windows() {
+        let store = ThrottleStore::new(4);
+        let rule = ThrottleRule::new(2, 60);
+        let now = Instant::now();
+        store.spend("spent".into(), rule, 2, now).unwrap();
+        for n in 0..3 {
+            store.spend(format!("k{n}"), rule, 1, now).unwrap();
+        }
+        store.spend("new".into(), rule, 1, now).unwrap();
+        assert!(len(&store) <= 4);
+        assert!(
+            store.spend("spent".into(), rule, 1, now).is_err(),
+            "no reset"
+        );
+    }
+
+    /// Eviction ranks by the spent share of each rule's `max`, not raw counts.
+    #[test]
+    fn a_full_store_evicts_the_least_spent_share() {
+        let store = ThrottleStore::new(4);
+        let now = Instant::now();
+        store
+            .spend("big".into(), ThrottleRule::new(100, 60), 10, now)
+            .unwrap();
+        for n in 0..3 {
+            let rule = ThrottleRule::new(2, 60);
+            store.spend(format!("s{n}"), rule, 1, now).unwrap();
+        }
+        store
+            .spend("new".into(), ThrottleRule::new(2, 60), 1, now)
+            .unwrap();
+        let windows = store.windows.lock().unwrap();
+        assert!(!windows.contains_key("big"), "10% spent is the cheapest");
+        assert!((0..3).all(|n| windows.contains_key(&format!("s{n}"))));
+    }
+
+    /// A rejected spend charges nothing (#1999 review).
+    #[test]
+    fn a_rejected_spend_is_free() {
+        let store = ThrottleStore::new(4);
+        let rule = ThrottleRule::new(3, 60);
+        let now = Instant::now();
+        assert!(store.spend("k".into(), rule, 50, now).is_err());
+        assert!(store.spend("k".into(), rule, 2, now).is_ok());
+        assert!(store.spend("k".into(), rule, 2, now).is_err());
+        assert!(store.spend("k".into(), rule, 1, now).is_ok());
+    }
+
+    #[test]
+    fn cost_spends_several_units() {
+        let store = ThrottleStore::new(4);
+        let rule = ThrottleRule::new(3, 60);
+        let now = Instant::now();
+        assert!(store.spend("k".into(), rule, 3, now).is_ok());
+        assert!(store.spend("k".into(), rule, 1, now).is_err());
     }
 }
 
@@ -3852,5 +4084,33 @@ mod typed_perms_tests {
         assert_eq!(vs.perms.create, vec!["vs_typed_perm_post.add"]);
         assert_eq!(vs.perms.update, vec!["vs_typed_perm_post.change"]);
         assert_eq!(vs.perms.destroy, vec!["vs_typed_perm_post.delete"]);
+    }
+}
+
+#[cfg(test)]
+mod default_order_tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+    use crate::sql::Dialect as _;
+
+    static FIELDS: &[FieldSchema] = &[
+        FieldSchema {
+            primary_key: true,
+            ..FieldSchema::new("id", "id", FieldType::I64)
+        },
+        FieldSchema::new("title", "title", FieldType::String),
+    ];
+
+    /// No `.ordering(..)`: `default_order`, then the PK as a tiebreak (#2047).
+    #[test]
+    fn the_list_orders_by_default_order_then_the_pk() {
+        let mut schema = ModelSchema::new("vs_do", "vs_do");
+        schema.fields = FIELDS;
+        schema.default_order = &[("title", true)];
+        let schema: &'static ModelSchema = Box::leak(Box::new(schema));
+        let mut q = SelectQuery::new(schema);
+        q.order_by = schema.with_pk_tiebreak(default_order_by(&ViewSet::for_model(schema)));
+        let sql = crate::sql::Sqlite.compile_select(&q).unwrap().sql;
+        assert!(sql.ends_with(r#"ORDER BY "title" DESC, "id""#), "{sql}");
     }
 }

@@ -825,7 +825,6 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn fresh_table_creates_a_writable_table_from_the_schema() {
-        use crate::core::Model as _;
         use crate::sql::FetcherPool as _;
 
         let pool = Backend::Sqlite.pool().await.expect("sqlite");

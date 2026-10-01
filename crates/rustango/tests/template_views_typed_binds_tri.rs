@@ -84,7 +84,7 @@ async fn setup(pool: &Pool) {
 fn app(pool: &Pool) -> axum::Router {
     let mut t = Tera::default();
     t.add_raw_templates(vec![
-        ("form.html", "form {{ errors | json_encode() }}"),
+        ("form.html", "form {{ form.errors | json_encode() | safe }}"),
         ("list.html", "rows={{ object_list | length }}"),
         ("detail.html", "event"),
         (
@@ -126,6 +126,12 @@ fn app(pool: &Pool) -> axum::Router {
                 .template("form.html")
                 .success_url("/labels")
                 .router("/labels", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Label::SCHEMA)
+                .template("form.html")
+                .success_url("/labels/{id}")
+                .router("/rlabels", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Tag::SCHEMA)
@@ -293,13 +299,34 @@ async fn huge_page_is_an_empty_page(pool: &Pool) {
         .is_empty());
 }
 
-/// A failed INSERT answers an opaque 500, not the driver text (#1955).
-async fn a_duplicate_create_withholds_the_driver_error(pool: &Pool) {
+/// A duplicate unique value re-renders the form with a field error (#2033),
+/// without the driver text (#1955).
+async fn a_duplicate_create_is_a_form_error(pool: &Pool) {
     let (status, body) = send(pool, Method::POST, "/labels/new", "code=rs").await;
     assert!(status.is_redirection(), "first create: {status} {body}");
     let (status, body) = send(pool, Method::POST, "/labels/new", "code=rs").await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert_eq!(body, "internal server error");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body, r#"form {"code":"a row with this value already exists"}"#,
+        "{body}"
+    );
+    let (status, body) = send(pool, Method::POST, "/tags/new", "code=go&name=Go").await;
+    assert!(status.is_redirection(), "first tag: {status} {body}");
+    let (status, body) = send(pool, Method::POST, "/tags/new", "code=go&name=G2").await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "natural pk: {body}"
+    );
+    assert!(body.contains(r#""code":"a row with this value"#), "{body}");
+    // The RETURNING path (`{id}` in `success_url`) maps it the same way.
+    let (status, body) = send(pool, Method::POST, "/rlabels/new", "code=rs").await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "returning: {body}"
+    );
+    assert!(body.contains(r#""code":"a row with this value"#), "{body}");
 }
 
 /// CreateView inserts a natural PK from the form and fills a v7 one (#1725).
@@ -321,7 +348,7 @@ async fn create_view_writes_natural_and_v7_pks(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
-        a_duplicate_create_withholds_the_driver_error,
+        a_duplicate_create_is_a_form_error,
         create_and_update_bind_typed_values,
         list_filters_bind_typed_values,
         fk_display_binds_the_target_pk_type,

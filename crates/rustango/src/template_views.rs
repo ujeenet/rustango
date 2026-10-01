@@ -1613,7 +1613,8 @@ fn substitute_pk(template: &str, pk: &str) -> String {
     if !template.contains("{pk}") {
         return template.to_owned();
     }
-    template.replace("{pk}", pk)
+    // Encoded as a path segment: a raw CR/LF panics `Redirect::to`.
+    template.replace("{pk}", &crate::url_codec::url_encode(pk))
 }
 
 /// Substitute every `{column}` placeholder in a `success_url`
@@ -1683,7 +1684,7 @@ fn interpolate_success_url(
                 column.column
             )
         })?;
-        out = out.replace(&format!("{{{name}}}"), &v);
+        out = out.replace(&format!("{{{name}}}"), &crate::url_codec::url_encode(&v));
     }
     Ok(out)
 }
@@ -1879,38 +1880,107 @@ async fn handle_create_post(
     }
     // Schema-driven INSERT: nothing else supplies these (#1464).
     crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
-    // When `success_url` carries `{column}` placeholders, request
-    // those columns back via RETURNING so we can substitute
-    // before the redirect. Otherwise plain INSERT — saves the
-    // round-trip.
-    let returning = match success_url_returning_columns(&state.success_url, state.schema) {
-        Ok(cols) => cols,
-        Err(e) => return template_error(&e),
-    };
-    let need_returning = !returning.is_empty();
+    match create_insert(
+        &state.pool,
+        state.schema,
+        &state.success_url,
+        columns,
+        values,
+    )
+    .await
+    {
+        Ok(url) => axum::response::Redirect::to(&url).into_response(),
+        Err(InsertFailed::Duplicate(errors)) => {
+            rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers)
+        }
+        Err(InsertFailed::Error(resp)) => resp,
+    }
+}
+
+/// Why a CreateView INSERT did not redirect.
+enum InsertFailed {
+    /// A unique value is taken: field errors for the form (#2033).
+    Duplicate(HashMap<String, String>),
+    /// Anything else: an opaque 500.
+    Error(Response),
+}
+
+/// The CreateView INSERT shared by the static and tenant routers; returns
+/// the redirect target.
+async fn create_insert(
+    pool: &Pool,
+    schema: &'static ModelSchema,
+    success_url: &str,
+    columns: Vec<&'static str>,
+    values: Vec<SqlValue>,
+) -> Result<String, InsertFailed> {
+    // `{column}` placeholders in `success_url` come back via RETURNING;
+    // otherwise a plain INSERT saves the round-trip.
+    let returning = success_url_returning_columns(success_url, schema)
+        .map_err(|e| InsertFailed::Error(template_error(&e)))?;
     let insert_q = crate::core::InsertQuery {
-        model: state.schema,
+        model: schema,
         columns,
         values,
         returning,
         on_conflict: None,
     };
-    let target_url = if need_returning {
-        match crate::sql::insert_returning_pool(&state.pool, &insert_q).await {
-            Ok(row) => match interpolate_success_url(&state.success_url, &row, &insert_q) {
-                Ok(url) => url,
-                Err(e) => return template_error(&e),
-            },
-            Err(e) => return template_error(&format!("insert row: {e}")),
-        }
+    let result = if insert_q.returning.is_empty() {
+        crate::sql::insert_pool(pool, &insert_q)
+            .await
+            .map(|()| Ok(success_url.to_owned()))
     } else {
-        if let Err(e) = crate::sql::insert_pool(&state.pool, &insert_q).await {
-            return template_error(&format!("insert row: {e}"));
-        }
-        state.success_url.clone()
+        crate::sql::insert_returning_pool(pool, &insert_q)
+            .await
+            .map(|row| interpolate_success_url(success_url, &row, &insert_q))
     };
-    axum::response::Redirect::to(&target_url).into_response()
+    match result {
+        Ok(Ok(url)) => Ok(url),
+        Ok(Err(e)) => Err(InsertFailed::Error(template_error(&e))),
+        Err(e) if e.is_unique_violation() => Err(InsertFailed::Duplicate(
+            duplicate_errors(pool, &insert_q).await,
+        )),
+        Err(e) => Err(InsertFailed::Error(template_error(&format!(
+            "insert row: {e}"
+        )))),
+    }
 }
+
+/// Blames each submitted unique field whose value is already taken.
+async fn duplicate_errors(
+    pool: &Pool,
+    insert_q: &crate::core::InsertQuery,
+) -> HashMap<String, String> {
+    let schema = insert_q.model;
+    let mut errors = HashMap::new();
+    let unique = insert_q
+        .columns
+        .iter()
+        .zip(&insert_q.values)
+        .filter_map(|(col, v)| Some((schema.field_by_column(col)?, v)))
+        .filter(|(f, _)| f.unique || f.primary_key);
+    for (field, value) in unique {
+        let taken = crate::core::CountQuery::new(
+            schema,
+            WhereExpr::Predicate(Filter::new(field.column, Op::Eq, value.clone())),
+        );
+        if count_rows_pool(pool, &taken).await.unwrap_or(0) > 0 {
+            errors.insert(field.name.to_owned(), DUPLICATE_VALUE.to_owned());
+        }
+    }
+    // A composite UNIQUE, or a row gone since: no single field to blame.
+    if errors.is_empty() {
+        tracing::warn!(
+            target: "rustango::template_views",
+            table = schema.table,
+            "unique violation blames no submitted field; shown as a form-wide error"
+        );
+        errors.insert("__all__".to_owned(), DUPLICATE_VALUE.to_owned());
+    }
+    errors
+}
+
+const DUPLICATE_VALUE: &str = "a row with this value already exists";
 
 async fn handle_update_get(
     State(state): State<Arc<FormViewState>>,
@@ -3699,36 +3769,15 @@ mod tenant {
         }
         // Schema-driven INSERT: nothing else supplies these (#1464).
         crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
-        let returning = match super::success_url_returning_columns(&state.success_url, state.schema)
-        {
-            Ok(cols) => cols,
-            Err(e) => return template_error(&e),
-        };
-        let need_returning = !returning.is_empty();
-        let insert_q = crate::core::InsertQuery {
-            model: state.schema,
-            columns,
-            values,
-            returning,
-            on_conflict: None,
-        };
-        let target_url = if need_returning {
-            match crate::sql::insert_returning_pool(t.pool(), &insert_q).await {
-                Ok(row) => {
-                    match super::interpolate_success_url(&state.success_url, &row, &insert_q) {
-                        Ok(url) => url,
-                        Err(e) => return template_error(&e),
-                    }
-                }
-                Err(e) => return template_error(&format!("insert row: {e}")),
+        let insert =
+            super::create_insert(t.pool(), state.schema, &state.success_url, columns, values);
+        match insert.await {
+            Ok(url) => axum::response::Redirect::to(&url).into_response(),
+            Err(super::InsertFailed::Duplicate(errors)) => {
+                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &headers)
             }
-        } else {
-            if let Err(e) = crate::sql::insert_pool(t.pool(), &insert_q).await {
-                return template_error(&format!("insert row: {e}"));
-            }
-            state.success_url.clone()
-        };
-        axum::response::Redirect::to(&target_url).into_response()
+            Err(super::InsertFailed::Error(resp)) => resp,
+        }
     }
 
     pub(super) async fn handle_update_get_tenant(
@@ -4668,6 +4717,13 @@ mod tests {
             substitute_pk("/posts/{pk}/edit", "abc-123"),
             "/posts/abc-123/edit"
         );
+    }
+
+    #[test]
+    fn substitute_pk_percent_encodes_the_segment() {
+        // A raw CR/LF would panic `Redirect::to`.
+        assert_eq!(substitute_pk("/p/{pk}", "a\r\nb/c"), "/p/a%0D%0Ab%2Fc");
+        let _ = axum::response::Redirect::to(&substitute_pk("/p/{pk}", "a\nb"));
     }
 
     #[test]

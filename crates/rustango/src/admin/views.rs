@@ -18,7 +18,7 @@ use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
     is_secret_field, lookup_model, primary_key_or_internal, render_cell_json, render_form,
-    render_secret_cell, resolve_model, resolve_model_and_pk, FormLayout, ListQuery,
+    render_secret_cell, resolve_model, resolve_model_and_pk, url_filterable, FormLayout, ListQuery,
 };
 use super::queryset_hooks::RowScope;
 use super::render;
@@ -231,6 +231,21 @@ const RESERVED_PARAMS: &[&str] = &[
     "trashed",
 ];
 
+/// Most keys one `IN` list binds: under every dialect's bind cap (#2049).
+const MAX_IN_KEYS: usize = 10_000;
+
+/// `?<field>__isnull=1` lists the rows where `field` is NULL (#2006).
+const ISNULL_SUFFIX: &str = "__isnull";
+
+/// The URL pair that selects one facet value: NULL needs `__isnull`.
+fn facet_param(field: &str, key: &SqlValue, raw: &str) -> (String, String) {
+    if matches!(key, SqlValue::Null) {
+        (format!("{field}{ISNULL_SUFFIX}"), "1".to_owned())
+    } else {
+        (field.to_owned(), raw.to_owned())
+    }
+}
+
 /// Default cap on how many values one facet shows. Keeps the right
 /// rail compact on columns with many distinct values. The rest
 /// collapse into a "+N more" link (`?facet_show_all=<field>`).
@@ -265,7 +280,8 @@ pub(crate) async fn table_view(
     // Field filters stay apart so a facet can count without its own (#2004).
     let mut field_filters: Vec<(&'static str, Filter)> = Vec::new();
     let mut filters: Vec<Filter> = Vec::new();
-    let mut active_field_filters: Vec<(&'static str, String)> = Vec::new();
+    // The URL pairs of the field filters in force.
+    let mut active_field_filters: Vec<(String, String)> = Vec::new();
     // Names claimed by custom list filters, so `?status=draft` is not
     // also read as a field filter on a column of the same name.
     let custom_filter_names: Vec<&'static str> = crate::admin::list_filters::for_table(model.table)
@@ -281,21 +297,37 @@ pub(crate) async fn table_view(
         if value.is_empty() {
             continue;
         }
-        let Some(field) = model.field(key) else {
+        let (name, is_null) = match key.strip_suffix(ISNULL_SUFFIX) {
+            Some(base) => (base, true),
+            None => (key.as_str(), false),
+        };
+        // Only fields the list shows or filters on (#2031).
+        let Some(field) = model
+            .field(name)
+            .filter(|f| url_filterable(model, &admin_cfg, f))
+        else {
             continue;
         };
-        let Ok(v) = forms::parse_form_value(field, Some(value)) else {
-            continue;
+        let (op, v) = if is_null {
+            if value != "1" {
+                continue;
+            }
+            (Op::IsNull, SqlValue::Bool(true))
+        } else {
+            let Ok(v) = forms::parse_form_value(field, Some(value)) else {
+                continue;
+            };
+            (Op::Eq, v)
         };
         field_filters.push((
             field.name,
             Filter {
                 column: field.column,
-                op: Op::Eq,
+                op,
                 value: v,
             },
         ));
-        active_field_filters.push((field.name, value.clone()));
+        active_field_filters.push((key.clone(), value.clone()));
     }
     active_field_filters.sort();
 
@@ -599,11 +631,12 @@ pub(crate) async fn table_view(
             // A detail URL needs a pk. Rows without one keep plain
             // cell content.
             // A trashed row has no detail page.
-            let detail_href = pk.as_deref().filter(|_| !trashed).map(|pk_str| {
+            let detail_href = (!pk_raw.is_empty() && !trashed).then(|| {
                 format!(
-                    "{prefix}/{table}/{pk_str}",
+                    "{prefix}/{table}/{pk}",
                     prefix = state.config.admin_prefix,
                     table = model.table,
+                    pk = crate::url_codec::url_encode(&pk_raw),
                 )
             });
             let cells: Vec<String> = display_items
@@ -661,7 +694,10 @@ pub(crate) async fn table_view(
     if let Some(qv) = q.as_deref() {
         list_query.push("q", qv);
     }
-    for (k, v) in active_field_filters.iter().chain(&active_custom_filters) {
+    for (k, v) in &active_field_filters {
+        list_query.push(k.clone(), v.clone());
+    }
+    for (k, v) in &active_custom_filters {
         list_query.push(*k, v.clone());
     }
     if !admin_cfg.date_hierarchy.is_empty() {
@@ -690,6 +726,7 @@ pub(crate) async fn table_view(
     let show_all_facet = params.get("facet_show_all").map(String::as_str);
     let facets_ctx: Vec<serde_json::Value> = compute_facets(
         &state,
+        &parts,
         model,
         &field_filters,
         &filters,
@@ -830,12 +867,13 @@ pub(crate) async fn table_view(
 #[allow(clippy::too_many_arguments)]
 async fn compute_facets(
     state: &AppState,
+    parts: &axum::http::request::Parts,
     model: &'static crate::core::ModelSchema,
     field_filters: &[(&'static str, Filter)],
     other_filters: &[Filter],
     search: Option<&SearchClause>,
     admin_cfg: &crate::core::AdminConfig,
-    active_field_filters: &[(&'static str, String)],
+    active_field_filters: &[(String, String)],
     list_query: &ListQuery,
     show_all_facet: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, AdminError> {
@@ -847,11 +885,7 @@ async fn compute_facets(
         let Some(field) = model.field(filter_name) else {
             continue;
         };
-        let active_value: Option<&str> = active_field_filters
-            .iter()
-            .find(|(k, _)| k == &field.name)
-            .map(|(_, v)| v.as_str());
-
+        let isnull_key = format!("{}{ISNULL_SUFFIX}", field.name);
         let facet_filters: Vec<Filter> = field_filters
             .iter()
             .filter(|(name, _)| *name != field.name)
@@ -879,7 +913,8 @@ async fn compute_facets(
                 .map(|r| r.key.clone())
                 .filter(|v| !matches!(v, SqlValue::Null))
                 .collect();
-            let names = fk_display_names(state, target, on_field, display_field, keys).await?;
+            let names =
+                fk_display_names(state, parts, target, on_field, display_field, keys).await?;
             for r in &mut facet_rows {
                 r.display = names.get(&r.raw).cloned();
             }
@@ -892,10 +927,10 @@ async fn compute_facets(
         }
         let mut values = Vec::with_capacity(facet_rows.len());
         for FacetRow {
+            key,
             raw,
             display: display_text,
             count,
-            ..
         } in &facet_rows
         {
             let raw = raw.clone();
@@ -909,12 +944,13 @@ async fn compute_facets(
                 render::escape(&raw)
             };
             let count: i64 = *count;
-            let is_active = active_value.map(|v| v == raw).unwrap_or(false);
+            let param = facet_param(field.name, key, &raw);
+            let is_active = active_field_filters.contains(&param);
             // Toggle URL: drop this filter when it is active, else
             // set it. The rest of the filter state is kept.
-            let mut toggle = list_query.without(&[field.name]);
+            let mut toggle = list_query.without(&[field.name, &isnull_key]);
             if !is_active {
-                toggle = toggle.with(field.name, raw.clone());
+                toggle = toggle.with(param.0, param.1);
             }
             let toggle_url = toggle.url();
 
@@ -965,7 +1001,7 @@ async fn compute_facets(
         // FK facets render as a `<select>`; this is the "All" option,
         // which removes the filter.
         let clear_url = if is_fk {
-            Some(list_query.without(&[field.name]).url())
+            Some(list_query.without(&[field.name, &isnull_key]).url())
         } else {
             None
         };
@@ -1021,32 +1057,33 @@ async fn fetch_facet_counts(
         .collect())
 }
 
-/// `on value -> display value` for an FK facet's keys.
+/// `on value -> display value` for an FK facet's keys, inside the
+/// target's queryset hooks (#2029) and in bind-capped chunks (#2049).
 async fn fk_display_names(
     state: &AppState,
+    parts: &axum::http::request::Parts,
     target: &'static crate::core::ModelSchema,
     on_field: &'static FieldSchema,
     display_field: &'static FieldSchema,
     keys: Vec<SqlValue>,
 ) -> Result<HashMap<String, String>, AdminError> {
-    if keys.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let rows = crate::sql::select_rows_as_json(
-        &state.pool,
-        &SelectQuery::by_pk_in(target, on_field.column, keys),
-        &[on_field, display_field],
-    )
-    .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
+    let scope = RowScope::of(target, parts);
+    let mut names = HashMap::new();
+    for chunk in keys.chunks(MAX_IN_KEYS) {
+        let rows = crate::sql::select_rows_as_json(
+            &state.pool,
+            &scope.by_pk_in(target, on_field.column, chunk.to_vec()),
+            &[on_field, display_field],
+        )
+        .await?;
+        names.extend(rows.iter().filter_map(|row| {
             Some((
                 render::read_value_as_string_json(row, on_field)?,
                 render::read_value_as_string_json(row, display_field)?,
             ))
-        })
-        .collect())
+        }));
+    }
+    Ok(names)
 }
 
 /// The URL form of a facet key, the shape `parse_form_value` reads back.
@@ -1358,7 +1395,9 @@ pub(crate) fn post_save_redirect(
     form: &HashMap<String, String>,
 ) -> String {
     if form.contains_key("_continue") {
-        format!("{admin_prefix}/{table}/{pk_value}")
+        // Encoded: a raw CR/LF in a string PK panics `Redirect::to`.
+        let pk = crate::url_codec::url_encode(pk_value);
+        format!("{admin_prefix}/{table}/{pk}")
     } else if form.contains_key("_addanother") {
         // `/new`, not `/add` — that is the route `urls.rs` mounts.
         format!("{admin_prefix}/{table}/{CREATE_SEGMENT}")
@@ -2081,7 +2120,7 @@ pub(crate) async fn update_submit(
     {
         Ok(plan) => plan,
         Err(super::inlines::InlinePlanError::Admin(e)) => return Err(e),
-        Err(super::inlines::InlinePlanError::Gone(msg)) => {
+        Err(super::inlines::InlinePlanError::Rejected(msg)) => {
             let html = render_form(&state, model, Some(&form), true, Some(&msg));
             return Ok(Html(html).into_response());
         }
@@ -2187,23 +2226,11 @@ pub(crate) async fn delete_submit(
         pk: pk_raw.clone(),
     })
     .await;
-    if let Some(col) = model.soft_delete_column {
-        crate::sql::update_pool(
-            &state.pool,
-            &UpdateQuery {
-                model,
-                set: vec![Assignment {
-                    column: col,
-                    value: SqlValue::from(chrono::Utc::now()).into(),
-                }],
-                where_clause: WhereExpr::Predicate(Filter {
-                    column: pk_field.column,
-                    op: Op::Eq,
-                    value: pk_value,
-                }),
-            },
-        )
-        .await?;
+    let list_url = format!("{}/{}", state.config.admin_prefix, model.table);
+    let affected = if let Some(col) = model.soft_delete_column {
+        let now = Some(chrono::Utc::now());
+        let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
+        crate::sql::update_pool(&state.pool, &stamp).await?
     } else {
         crate::sql::delete_pool(
             &state.pool,
@@ -2216,7 +2243,11 @@ pub(crate) async fn delete_submit(
                 }),
             },
         )
-        .await?;
+        .await?
+    };
+    // Deleted by someone else since the read: keep their stamp and audit row (#1929).
+    if affected == 0 {
+        return Ok(Redirect::to(&list_url).into_response());
     }
 
     let delete_cfg = admin_config_or_default(model);
@@ -2253,7 +2284,7 @@ pub(crate) async fn delete_submit(
         pk: pk_raw.clone(),
     })
     .await;
-    Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
+    Ok(Redirect::to(&list_url).into_response())
 }
 
 // ============================================================== ACTIONS
@@ -2297,6 +2328,14 @@ pub(crate) async fn action_submit(
         } else if k == "trashed" {
             trashed = v == "1";
         }
+    }
+    if selected_raw.len() > MAX_IN_KEYS {
+        return Err(AdminError::Form(forms::FormError::Parse {
+            field: "_selected".to_owned(),
+            ty: "selection",
+            value: selected_raw.len().to_string(),
+            detail: format!("an action takes at most {MAX_IN_KEYS} rows"),
+        }));
     }
     // Back to the list the action was run from (#1918).
     let list_url = if trashed && model.soft_delete_column.is_some() {
@@ -2387,41 +2426,45 @@ pub(crate) async fn action_submit(
         .collect();
     send_row_signals(model.table, &row_pks, is_delete, true).await;
 
-    let in_pks = || {
-        WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::In,
-            value: SqlValue::List(pk_values.clone()),
-        })
+    let mark = |col, deleted_at| {
+        mark_each(
+            &state.pool,
+            model,
+            col,
+            pk_field.column,
+            &pk_values,
+            deleted_at,
+        )
     };
-    let set_column = |column, value: SqlValue| UpdateQuery {
-        model,
-        set: vec![Assignment {
-            column,
-            value: value.into(),
-        }],
-        where_clause: in_pks(),
-    };
-    match write {
+    let changed = match write {
         BulkWrite::Delete => match model.soft_delete_column {
             // Soft delete: stamp the column instead of a DELETE.
-            Some(col) => {
-                let stamp = set_column(col, SqlValue::from(chrono::Utc::now()));
-                crate::sql::update_pool(&state.pool, &stamp).await?;
-            }
+            Some(col) => Some(mark(col, Some(chrono::Utc::now())).await?),
             None => {
                 let query = DeleteQuery::by_pk_in(model, pk_field.column, pk_values.clone());
                 crate::sql::delete_pool(&state.pool, &query).await?;
+                None
             }
         },
         // Built-in restore: clear the soft-delete column, where NULL means live.
-        BulkWrite::Restore(col) => {
-            crate::sql::update_pool(&state.pool, &set_column(col, SqlValue::Null)).await?;
-        }
+        BulkWrite::Restore(col) => Some(mark(col, None).await?),
         // Handlers get the `Pool` enum, so a user action can match
         // on the backend if it needs to.
-        BulkWrite::Custom(handler) => handler(&state.pool, &pk_values).await?,
-    }
+        BulkWrite::Custom(handler) => {
+            handler(&state.pool, &pk_values).await?;
+            None
+        }
+    };
+    // A row someone else marked since the read keeps their stamp and audit row (#1929).
+    let (before_rows, row_pks) = match changed {
+        Some(changed) => before_rows
+            .into_iter()
+            .zip(row_pks)
+            .zip(changed)
+            .filter_map(|(pair, changed)| changed.then_some(pair))
+            .unzip(),
+        None => (before_rows, row_pks),
+    };
 
     // One audit entry per row, emitted in a single batched INSERT.
     // For `delete_selected` the changes JSON is what was deleted.
@@ -2543,6 +2586,23 @@ fn row_perms(action: &str) -> (&'static str, Option<&str>) {
         "restore_selected" => ("change", None),
         custom => ("change", Some(custom)),
     }
+}
+
+/// Soft delete or restore each row on its own; `true` where the row changed.
+async fn mark_each(
+    pool: &crate::sql::Pool,
+    model: &'static crate::core::ModelSchema,
+    col: &'static str,
+    pk_column: &'static str,
+    pks: &[SqlValue],
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Vec<bool>, crate::sql::ExecError> {
+    let mut changed = Vec::with_capacity(pks.len());
+    for pk in pks {
+        let q = crate::soft_delete::__mark_query(model, col, pk_column, pk.clone(), deleted_at);
+        changed.push(crate::sql::update_pool(pool, &q).await? > 0);
+    }
+    Ok(changed)
 }
 
 /// Keep the rows whose PK round-trips and return those PKs, so the rows

@@ -132,7 +132,9 @@ async fn viewset_update_and_delete_are_audited(pool: &Pool) {
     assert_eq!(ops(pool, "update").await, 1);
     let status = send(app(), Method::DELETE, &uri, String::new(), false).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(ops(pool, "delete").await, 1);
+    // `Doc` is soft-delete, so the ViewSet stamps it (#1998).
+    assert_eq!(ops(pool, "soft_delete").await, 1);
+    assert_eq!(ops(pool, "delete").await, 0);
 }
 
 /// Single and bulk create each write one `create` row (#1816).
@@ -372,5 +374,186 @@ mod bulk {
                 pk_set_is_capped_under_the_bind_limit,
             ],
         }
+    }
+}
+
+/// Admin edit and delete views: a no-op edit and a row someone else
+/// marked since the read write no audit row (#1907, #1929).
+mod admin_views {
+    use super::*;
+    use rustango::signals::admin as sig;
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(
+        table = "audit1929_admin_doc",
+        app = "audit1794",
+        audit(track = "title, deleted_at"),
+        admin(actions = "delete_selected, restore_selected")
+    )]
+    #[allow(dead_code)]
+    pub struct AdminDoc {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 64)]
+        pub title: String,
+        #[rustango(soft_delete)]
+        pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    const TABLE: &str = "audit1929_admin_doc";
+
+    /// Admin signals are process-global.
+    static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// The stamp the racing receiver wrote.
+    static RACED: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>> =
+        std::sync::Mutex::new(None);
+
+    async fn setup(pool: &Pool) {
+        rustango::testkit::matrix::fresh_table::<AdminDoc>(pool).await;
+        audit::ensure_table_pool(pool).await.expect("audit table");
+        AuditLog::delete_where("entity_table", TABLE, pool)
+            .await
+            .expect("clear audit rows");
+    }
+
+    async fn count(pool: &Pool, operation: &str) -> i64 {
+        AuditLog::objects()
+            .filter("entity_table", TABLE)
+            .filter("operation", operation)
+            .count(pool)
+            .await
+            .expect("count audit rows")
+    }
+
+    async fn seed(pool: &Pool) -> Vec<i64> {
+        let mut pks = Vec::new();
+        for title in ["a", "b"] {
+            let mut doc = AdminDoc {
+                id: Auto::default(),
+                title: title.into(),
+                deleted_at: None,
+            };
+            doc.insert_pool(pool).await.expect("insert");
+            pks.push(*doc.id.get().expect("pk"));
+        }
+        pks
+    }
+
+    async fn post(pool: &Pool, uri: &str, form: String) -> StatusCode {
+        let app = rustango::admin::Builder::new(pool.clone())
+            .admin_prefix("")
+            .build();
+        send(app, Method::POST, uri, form, true).await
+    }
+
+    async fn stamp(pool: &Pool, pk: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+        AdminDoc::objects()
+            .filter("id", pk)
+            .fetch(pool)
+            .await
+            .expect("fetch")
+            .remove(0)
+            .deleted_at
+    }
+
+    /// Soft-delete (or restore) `pk` from the admin pre-signal, after the
+    /// view's read and before its write: the forced interleave.
+    fn race(pool: &Pool, pk: i64, restore: bool) -> (sig::ReceiverId, sig::ReceiverId) {
+        let target = pk.to_string();
+        let run = move |pool: Pool, ctx_pk: String| {
+            let target = target.clone();
+            async move {
+                if ctx_pk != target {
+                    return;
+                }
+                let id: i64 = ctx_pk.parse().unwrap();
+                let pk = SqlValue::I64(id);
+                let n = if restore {
+                    rustango::soft_delete::restore(&pool, AdminDoc::SCHEMA, "id", pk).await
+                } else {
+                    rustango::soft_delete::soft_delete(&pool, AdminDoc::SCHEMA, "id", pk).await
+                };
+                assert_eq!(n.unwrap(), 1);
+                let raced = stamp(&pool, id).await;
+                *RACED.lock().unwrap() = raced;
+            }
+        };
+        let (p1, r1) = (pool.clone(), run.clone());
+        let del = sig::connect_admin_pre_delete(move |c| r1(p1.clone(), c.pk));
+        let (p2, r2) = (pool.clone(), run);
+        let save = sig::connect_admin_pre_save(move |c| r2(p2.clone(), c.pk));
+        (del, save)
+    }
+
+    fn unrace((del, save): (sig::ReceiverId, sig::ReceiverId)) {
+        sig::disconnect_admin_pre_delete(del);
+        sig::disconnect_admin_pre_save(save);
+    }
+
+    async fn noop_admin_edit_writes_no_update_row(pool: &Pool) {
+        let pks = seed(pool).await;
+        let uri = format!("/{TABLE}/{}", pks[0]);
+        let status = post(pool, &uri, "title=a".into()).await;
+        assert!(status.is_redirection(), "{status}");
+        assert_eq!(count(pool, "update").await, 0, "a no-op edit was audited");
+        post(pool, &uri, "title=z".into()).await;
+        assert_eq!(count(pool, "update").await, 1);
+    }
+
+    async fn delete_view_keeps_a_concurrent_stamp(pool: &Pool) {
+        let _g = SIGNALS.lock().await;
+        let pks = seed(pool).await;
+        let ids = race(pool, pks[0], false);
+        let status = post(pool, &format!("/{TABLE}/{}/delete", pks[0]), String::new()).await;
+        unrace(ids);
+        assert!(status.is_redirection(), "{status}");
+        let raced = *RACED.lock().unwrap();
+        assert!(raced.is_some());
+        assert_eq!(stamp(pool, pks[0]).await, raced, "re-stamped");
+        assert_eq!(count(pool, "soft_delete").await, 1, "double audit");
+    }
+
+    async fn bulk_actions_skip_rows_marked_since_the_read(pool: &Pool) {
+        let _g = SIGNALS.lock().await;
+        let pks = seed(pool).await;
+        let form =
+            |action: &str| format!("action={action}&_selected={}&_selected={}", pks[0], pks[1]);
+        let ids = race(pool, pks[0], false);
+        let status = post(pool, &format!("/{TABLE}/__action"), form("delete_selected")).await;
+        unrace(ids);
+        assert!(status.is_redirection(), "{status}");
+        assert_eq!(count(pool, "soft_delete").await, 2, "row 1 audited twice");
+        let raced = *RACED.lock().unwrap();
+        assert_eq!(stamp(pool, pks[0]).await, raced, "re-stamped");
+
+        let ids = race(pool, pks[0], true);
+        let status = post(
+            pool,
+            &format!("/{TABLE}/__action"),
+            form("restore_selected"),
+        )
+        .await;
+        unrace(ids);
+        assert!(status.is_redirection(), "{status}");
+        assert_eq!(
+            count(pool, "restore").await,
+            1,
+            "the racing restore is missing"
+        );
+        assert_eq!(
+            count(pool, "update").await,
+            1,
+            "the admin restore audited row 1"
+        );
+        assert!(stamp(pool, pks[0]).await.is_none());
+    }
+
+    tri_dialect_test! {
+        setup: setup,
+        scenarios: [
+            noop_admin_edit_writes_no_update_row,
+            delete_view_keeps_a_concurrent_stamp,
+            bulk_actions_skip_rows_marked_since_the_read,
+        ],
     }
 }
