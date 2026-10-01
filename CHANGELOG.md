@@ -8,11 +8,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The jar keeps `Path` and honours `Max-Age`/`Expires`; requests send `Host: testserver`, a same-origin `Origin` and a `127.0.0.1` peer; 307/308 keep the method; `logout()` reaches the server with the session and CSRF token.
 `LiveServer` serves with `ConnectInfo`; `TestResponse::header_all` returns repeated headers.
+301/302 rewrite only `POST`, `?query` and `../` locations resolve; `X-Forwarded-Proto: https` gives an `https://` Origin.
 
 ### Fixed — test DB helpers work on MySQL and after a panic; fixtures load typed and atomic (#1959)
 
 `truncate_tables` runs in one transaction in any FK order on all three backends; `with_truncate_after` clears even when the body panics.
 A `Fixture` load types values from the table's model, rolls back on error and resets the PG sequence; `create_tables` is re-runnable.
+A custom user model sharing `rustango_users` with the built-in `User` is picked by its fields, not link order.
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
 
