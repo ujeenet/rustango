@@ -209,6 +209,9 @@ impl AccessLogLayer {
 ///       handler
 /// ```
 ///
+/// `catch_panics` is not mounted here: it goes inside CORS and the
+/// security headers, so each caller mounts it under those (#1541).
+///
 /// `access_log: None` means `[logging] access_log = false`: the log
 /// line goes away, but **the span and request id stay**. That setting
 /// names the log only, and a service logging at the edge still wants
@@ -430,9 +433,14 @@ pub(crate) fn default_redact_params() -> Vec<String> {
 /// fields, so a raw span value would put the secrets back on the line
 /// this function just cleaned.
 pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+    // Decode the key: `pass%77ord=` is `password=` to the handler (#1957).
+    let hidden = |k: &str| {
+        let key = crate::url_codec::url_decode(k);
+        redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
+    };
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
-            Some((k, _)) if redact_keys.iter().any(|r| r.eq_ignore_ascii_case(k)) => {
+            Some((k, _)) if hidden(k) => {
                 format!("{k}=[redacted]")
             }
             _ => pair.to_owned(),
@@ -562,6 +570,12 @@ mod tests {
     fn redact_query_is_case_insensitive_on_keys() {
         let r = redact_query("PASSWORD=x", &["password".to_owned()]);
         assert_eq!(r, "PASSWORD=[redacted]");
+    }
+
+    #[test]
+    fn redact_query_matches_percent_encoded_keys() {
+        let r = redact_query("pass%77ord=hunter2&x=1", &["password".to_owned()]);
+        assert_eq!(r, "pass%77ord=[redacted]&x=1");
     }
 
     #[test]
@@ -742,6 +756,53 @@ mod observability_mount_tests {
             "`access_log = false` stripped the request span: a handler event rendered \
              with no span context, so it carries no method, path, tenant or request \
              id. That setting names the log, not the trace context.\n{out}"
+        );
+    }
+
+    /// A panicking handler answers an opaque 500 carrying the request
+    /// id, and the panic is logged with that id (#1541).
+    #[tokio::test]
+    async fn a_panicking_handler_is_a_logged_500() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let app = mount_observability(
+            crate::panic_guard::catch_panics(Router::new().route(
+                "/",
+                get(|| async {
+                    if std::hint::black_box(true) {
+                        panic!("boom-1541");
+                    }
+                    "unreachable"
+                }),
+            )),
+            Some(AccessLogLayer::default()),
+            default_redact_params(),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-request-id", "rid-1541")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.headers()["x-request-id"], "rid-1541");
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], crate::error::OPAQUE_SERVER_ERROR.as_bytes());
+        let out = buf.contents();
+        assert!(
+            out.contains("handler panicked")
+                && out.contains("boom-1541")
+                && out.contains("rid-1541"),
+            "the panic was not logged with its request id:\n{out}"
         );
     }
 

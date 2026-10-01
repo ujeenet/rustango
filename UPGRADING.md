@@ -150,6 +150,29 @@ untouched.
 
 ## Unreleased
 
+### Handler panics are caught (#1541)
+
+`Cli` and `server::Builder` turn a panic into a `text/plain` 500 with body `internal server error`, carrying CORS and the security headers; a panic hook you rely on still runs. A panic inside a streaming response body is not caught.
+
+### `EtagLayer::default()` caps at 4 MiB; streams are not tagged (#1866)
+
+The derived default had no cap. A body with no size hint (stream, SSE) or over the cap now passes through without an `ETag`.
+`MethodOverrideLayer` answers `413` to a form over `body_limit` instead of forwarding an empty POST.
+
+### CORS adds `Vary: Origin` more often (#1867)
+
+Refused origins and any-origin mode now send it, so shared caches key on `Origin`.
+A preflight that echoes the requested headers also varies on `Access-Control-Request-Headers` and `-Method`.
+
+### `negotiate` honours `q=0` and specificity; flash cookies are byte-capped (#1957)
+
+`negotiate` returns `None` for a type the client refused with `q=0`; a NaN or infinite q counts as the default. `messages::push` drops the oldest messages past `MAX_COOKIE_BYTES`, and truncates a newest message that alone is too long.
+Use `WsHub::upgrade(ws)` instead of `ws.on_upgrade(.. ws_handler ..)` so `max_message_bytes` applies before buffering.
+
+### Template fragment keys change (#1884)
+
+`make_template_fragment_key` hashes length-prefixed parts; cached fragments miss once after upgrade.
+
 ### `TestClient` acts like a browser (#1958)
 
 `logout(Some(path))` no longer clears the jar first; only the server's `Set-Cookie` removes cookies. Requests now carry `Host: testserver`, `Origin` on unsafe methods and a `127.0.0.1` `ConnectInfo`.

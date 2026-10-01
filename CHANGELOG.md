@@ -4,6 +4,27 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a panicking handler is a logged 500, not a dropped connection (#1541)
+
+`Cli` and `server::Builder` catch handler panics: an opaque `text/plain` 500 with the request id, CORS and security headers, logged under `rustango::error`. The oauth2 login no longer panics on a bad header value.
+
+### Fixed — `EtagLayer` no longer blanks large or streamed bodies; method override answers 413 (#1866)
+
+`EtagLayer::default()` caps at 4 MiB like `new()`; a body over the cap or of unknown size passes through untouched. An over-limit `_method` form gets `413`, not an empty body.
+
+### Fixed — CORS sends `Vary: Origin` on refused origins and in any-origin mode (#1867)
+
+Only the always-`*` policy (any origin with credentials) leaves it out.
+
+### Fixed — flash cookie size, `q=0`, WebSocket size cap, event panics, encoded redact keys (#1957)
+
+Flash messages drop the oldest past 4000 bytes; `negotiate` honours `q=0` and range specificity; `WsHub::upgrade` caps frames before buffering.
+A panicking event subscriber no longer skips the rest; `pass%77ord=` is redacted in logs.
+
+### Fixed — tenant pool span leak, fragment-key collisions, SSE lag example (#1884)
+
+The pool-init span no longer stays entered across `.await`; fragment keys are length-prefixed; the SSE example keeps lagged clients.
+
 ### Fixed — `TestClient` and `LiveServer` behave like a browser (#1958)
 
 The jar keeps `Path` and honours `Max-Age`/`Expires`; requests send `Host: testserver`, a same-origin `Origin` and a `127.0.0.1` peer; 307/308 keep the method; `logout()` reaches the server with the session and CSRF token.

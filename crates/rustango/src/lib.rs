@@ -574,9 +574,8 @@ pub mod notifications;
 #[cfg(feature = "jobs")]
 pub mod jobs;
 
-/// `catch_unwind` for futures: job handlers and MCP tools must not
-/// unwind into their worker or transport.
-#[cfg(any(feature = "jobs", feature = "mcp"))]
+/// `catch_unwind` for futures: job handlers, MCP tools, event
+/// subscribers and HTTP handlers must not unwind into their caller.
 pub(crate) mod panic_guard;
 
 /// Pre-built auth flows — password reset, email verification, magic-link login.

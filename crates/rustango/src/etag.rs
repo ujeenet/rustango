@@ -21,13 +21,13 @@
 //!    200 would have sent (RFC 7232 §4.1).
 //!
 //! Non-2xx and `206` responses pass through. A response that already
-//! has an `ETag` keeps it and is not buffered.
+//! has an `ETag` keeps it and is not buffered. So does a body whose
+//! size hint is unknown (a stream, SSE) or over `max_body_bytes`.
 //!
 //! ## When to use
 //!
 //! Good for read-heavy GET endpoints that return the same bytes again
-//! and again. Skip it for per-user responses, and for large or
-//! streaming ones, because the body is buffered.
+//! and again. Skip it for per-user responses.
 
 use std::sync::Arc;
 
@@ -35,15 +35,21 @@ use axum::body::{to_bytes, Body};
 use axum::http::header::{ETAG, IF_NONE_MATCH};
 use axum::http::{HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
+use axum::response::IntoResponse as _;
 use axum::Router;
 
 /// ETag middleware configuration.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EtagLayer {
     /// Biggest body to hash. A larger response passes through
-    /// unchanged. [`EtagLayer::new`] sets 4 MiB; the derived
-    /// `Default` leaves this `None`, which means no cap.
+    /// unchanged. Default 4 MiB; `None` means no cap.
     pub max_body_bytes: Option<usize>,
+}
+
+impl Default for EtagLayer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EtagLayer {
@@ -56,7 +62,7 @@ impl EtagLayer {
     }
 
     /// Set the maximum body size. `None` removes the cap; be careful,
-    /// the whole body is then buffered in memory.
+    /// every sized body is then buffered in memory.
     #[must_use]
     pub fn max_body_bytes(mut self, n: Option<usize>) -> Self {
         self.max_body_bytes = n;
@@ -105,14 +111,19 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
         return Response::from_parts(parts, body);
     }
 
+    // Decide from the size hint, before reading: a stream or an
+    // over-cap body passes through intact instead of being blanked.
     let limit = cfg.max_body_bytes.unwrap_or(usize::MAX);
-    let bytes = match to_bytes(body, limit).await {
-        Ok(b) => b,
-        Err(_) => {
-            // Too large, or the stream failed. The body is gone, so
-            // send the headers with an empty one.
-            return Response::from_parts(parts, Body::empty());
-        }
+    let fits = axum::body::HttpBody::size_hint(&body)
+        .upper()
+        .is_some_and(|n| n <= limit as u64);
+    if !fits {
+        return Response::from_parts(parts, body);
+    }
+    let Ok(bytes) = to_bytes(body, limit).await else {
+        // The stream failed mid-body; there is nothing honest to send.
+        tracing::error!(target: "rustango::error", "etag: response body failed");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
     if bytes.is_empty() {
@@ -300,6 +311,50 @@ mod tests {
         );
         assert_eq!(r.headers().get(header::VARY).unwrap(), "Accept-Encoding");
         assert!(r.headers().get(ETAG).is_some());
+    }
+
+    /// The default caps buffering, and a body over the cap or of
+    /// unknown length passes through whole instead of blanked (#1866).
+    #[tokio::test]
+    async fn large_and_streamed_bodies_pass_through_intact() {
+        let big = "x".repeat(64);
+        let big2 = big.clone();
+        let app = Router::new()
+            .route("/big", get(move || async move { big2 }))
+            .route(
+                "/stream",
+                get(|| async { Body::new(Unsized(Some(axum::body::Bytes::from("chunk")))) }),
+            )
+            .etag(EtagLayer::default().max_body_bytes(Some(16)));
+        assert_eq!(
+            EtagLayer::default().max_body_bytes,
+            EtagLayer::new().max_body_bytes
+        );
+        for (uri, want) in [("/big", big.as_str()), ("/stream", "chunk")] {
+            let r = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+            assert!(r.headers().get(ETAG).is_none(), "{uri} was hashed");
+            let body = to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(&body[..], want.as_bytes(), "{uri} body was blanked");
+        }
+    }
+
+    /// A one-chunk body with no size hint, like a stream or SSE.
+    struct Unsized(Option<axum::body::Bytes>);
+
+    impl axum::body::HttpBody for Unsized {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(self.0.take().map(|b| Ok(http_body::Frame::data(b))))
+        }
     }
 
     #[test]
