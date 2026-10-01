@@ -572,3 +572,26 @@ async fn purge_pending_deletes_unconfirmed_objects() {
     assert!(mgr.get(ready.media_id).await.unwrap().is_some());
     assert!(disk.has(&ready.storage_key), "a Ready object was purged");
 }
+
+/// A declared size over the cap is refused before anything is signed.
+#[tokio::test]
+async fn begin_upload_refuses_a_size_over_the_cap() {
+    use rustango::media::{UploadIntent, DEFAULT_MAX_UPLOAD_BYTES};
+    let (mgr, disk, _) = bucket_manager().await;
+    let over = i64::try_from(DEFAULT_MAX_UPLOAD_BYTES + 1).unwrap();
+    let big = UploadIntent::new("default", "image/png", "a.png", over);
+    assert!(
+        mgr.begin_upload(big).await.is_err(),
+        "default cap not applied"
+    );
+    let mgr = mgr.with_max_upload_bytes(10);
+    let ok = UploadIntent::new("default", "image/png", "a.png", 10);
+    mgr.begin_upload(ok).await.expect("at the cap");
+    let over = UploadIntent::new("default", "image/png", "a.png", 11);
+    assert!(mgr.begin_upload(over).await.is_err(), "over the cap signed");
+    assert_eq!(
+        disk.signed.lock().unwrap().len(),
+        1,
+        "an over-cap PUT was signed"
+    );
+}

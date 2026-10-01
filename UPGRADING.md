@@ -161,6 +161,8 @@ must also send `If-None-Match: *` (all of `UploadTicket.headers`); allow that he
 
 `purge_pending` now also deletes old `Failed` rows, and the storage object of every row it purges.
 
+`begin_upload` refuses a declared size over 100 MiB; raise it with `MediaManager::with_max_upload_bytes`.
+
 ### `save_uploads` keeps nothing on error
 
 Any error now deletes the files the request already saved, not only `TooManyFiles`. Random key prefixes are UUIDs, not nanos.

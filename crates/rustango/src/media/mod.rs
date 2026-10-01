@@ -108,6 +108,9 @@ const MAX_LIST_LIMIT: i64 = 1000;
 /// late beats one that blocks every other writer.
 const PURGE_PENDING_BATCH: i64 = 10_000;
 
+/// Default cap on a direct upload's declared size: 100 MiB.
+pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 << 20;
+
 /// Page size when a caller names none. Below [`MAX_LIST_LIMIT`] on
 /// purpose: an unpaged listing should return a reasonable page, not
 /// the largest one a caller could ask for.
@@ -322,6 +325,7 @@ pub struct UploadTicket {
 pub struct MediaManager {
     pool: crate::sql::Pool,
     registry: StorageRegistry,
+    max_upload_bytes: u64,
 }
 
 impl MediaManager {
@@ -338,7 +342,16 @@ impl MediaManager {
         Self {
             pool: pool.into(),
             registry,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         }
+    }
+
+    /// Refuse a [`Self::begin_upload`] that declares more than `bytes`.
+    /// Default [`DEFAULT_MAX_UPLOAD_BYTES`].
+    #[must_use]
+    pub fn with_max_upload_bytes(mut self, bytes: u64) -> Self {
+        self.max_upload_bytes = bytes;
+        self
     }
 
     #[must_use]
@@ -418,12 +431,18 @@ impl MediaManager {
     ///
     /// # Errors
     /// `UnknownDisk`, `Db`, or `Storage` if the backend cannot sign
-    /// URLs.
+    /// URLs. `Other` for a negative size or one over the upload limit.
     pub async fn begin_upload(&self, intent: UploadIntent) -> Result<UploadTicket, MediaError> {
         let storage = self.resolve_disk(&intent.disk)?;
         let size = u64::try_from(intent.size_bytes).map_err(|_| {
             MediaError::Other(format!("negative size_bytes: {}", intent.size_bytes))
         })?;
+        if size > self.max_upload_bytes {
+            return Err(MediaError::Other(format!(
+                "size_bytes {size} is over the {} byte upload limit",
+                self.max_upload_bytes
+            )));
+        }
         let key = build_key(&intent.key_prefix, &intent.original_filename);
         // Sign a safe type and the declared size: the bucket stores no
         // active MIME and refuses a bigger body (#2057, #1851).
