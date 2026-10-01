@@ -2,7 +2,7 @@
 //! the project's own chain in: `manage migrate`, the `Cli` auto-migrate and
 //! the tenancy runners all go through [`migrate_chains`].
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,8 @@ use super::diff::SchemaChange;
 use super::file::{self, Migration, MigrationScope, Operation};
 use super::make::SystemChain;
 use super::progress::MigrationObserver;
-use super::{ensure, runner, MigrateError};
+use super::runner::LockHeld;
+use super::{ensure, runner, MigrateError, SchemaSnapshot};
 use crate::sql::Pool;
 
 /// What each chain applied.
@@ -20,11 +21,12 @@ pub(crate) struct Applied {
 }
 
 /// Apply `chain`'s `scope` steps, then the project chain via `project`, then
-/// the system steps that waited for a table the project chain creates.
+/// the system steps that waited for it, all under one migrate lock.
 ///
 /// A project scaffolded before the system chain creates framework tables in
 /// its own migrations. Those tables stay the project's: the system chain
-/// never creates them, waits for them, and then adds the columns they lack.
+/// never creates them, and its steps on them wait until the project chain
+/// has run, after the columns each step expects are added.
 ///
 /// # Errors
 /// Either chain's error, a column convergence could not add, or a system
@@ -38,141 +40,278 @@ pub(crate) async fn migrate_chains<F, Fut>(
     project: F,
 ) -> Result<Applied, MigrateError>
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce(LockHeld) -> Fut,
     Fut: Future<Output = Result<Vec<Migration>, MigrateError>>,
 {
-    let owned = project_tables(project_dir);
-    // Boxed: inline, these futures overflow the stack of deep `manage` callers.
-    let first = Box::pin(system_pass(pool, chain, scope, &owned, observer)).await?;
-    let project = Box::pin(project()).await?;
-    let mut system = first.applied;
-    if first.again {
-        let second = Box::pin(system_pass(pool, chain, scope, &owned, observer)).await?;
+    runner::with_migrate_lock_held(pool, |held| async move {
+        let tables = ProjectTables::read(pool, project_dir).await?;
+        let run = Run {
+            held,
+            pool,
+            chain,
+            scope,
+            owned: &tables.owned,
+            observer,
+        };
+        // Boxed: inline, these futures overflow the stack of deep `manage` callers.
+        let first = Box::pin(run.system_pass(&tables.pending)).await?;
+        let project = Box::pin(project(held)).await?;
+        let second = Box::pin(run.system_pass(&BTreeSet::new())).await?;
         if let Some(table) = second.waiting {
             return Err(MigrateError::Validation(format!(
                 "a system migration needs `{table}`, which the project's migrations \
                  claim but did not create"
             )));
         }
+        Box::pin(run.finish(&tables.claimed)).await?;
+        let mut system = first.applied;
         system.extend(second.applied);
-    }
-    Ok(Applied { system, project })
+        Ok(Applied { system, project })
+    })
+    .await
 }
 
-/// Every table the project's migrations create, applied or not.
-fn project_tables(dir: &Path) -> HashSet<String> {
-    file::list_dir(dir)
-        .unwrap_or_default()
-        .iter()
-        .flat_map(created)
-        .collect()
+/// The framework-relevant shape of the project chain.
+struct ProjectTables {
+    /// Tables the chain ends with: its ops replayed in order.
+    owned: BTreeSet<String>,
+    /// Tables any of its migrations creates, dropped later or not.
+    claimed: BTreeSet<String>,
+    /// Tables its pending migrations write.
+    pending: BTreeSet<String>,
+}
+
+impl ProjectTables {
+    async fn read(pool: &Pool, dir: &Path) -> Result<Self, MigrateError> {
+        let migs = file::list_dir(dir)?;
+        let applied = runner::applied_set_pool_with_ledger(pool, runner::LEDGER_TABLE)
+            .await
+            .unwrap_or_default();
+        let mut out = Self {
+            owned: BTreeSet::new(),
+            claimed: BTreeSet::new(),
+            pending: BTreeSet::new(),
+        };
+        for m in &migs {
+            let is_pending = !applied.contains(&m.name);
+            for c in schema_ops(m) {
+                match c {
+                    SchemaChange::CreateTable(t)
+                    | SchemaChange::CreateM2MTable { through: t, .. } => {
+                        out.owned.insert(t.clone());
+                        out.claimed.insert(t.clone());
+                    }
+                    SchemaChange::DropTable(t) | SchemaChange::DropM2MTable { through: t } => {
+                        out.owned.remove(t);
+                    }
+                    SchemaChange::RenameTable { old_name, new_name } => {
+                        if out.owned.remove(old_name) {
+                            out.owned.insert(new_name.clone());
+                        }
+                        if is_pending {
+                            out.pending.insert(new_name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+                if is_pending {
+                    out.pending.insert(c.table().to_owned());
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn schema_ops(m: &Migration) -> impl Iterator<Item = &SchemaChange> {
+    m.forward.iter().filter_map(|op| match op {
+        Operation::Schema(c) => Some(c),
+        _ => None,
+    })
 }
 
 fn created(m: &Migration) -> impl Iterator<Item = String> + '_ {
-    m.forward.iter().filter_map(|op| match op {
-        Operation::Schema(
-            SchemaChange::CreateTable(t) | SchemaChange::CreateM2MTable { through: t, .. },
-        ) => Some(t.clone()),
+    schema_ops(m).filter_map(|c| match c {
+        SchemaChange::CreateTable(t) | SchemaChange::CreateM2MTable { through: t, .. } => {
+            Some(t.clone())
+        }
         _ => None,
+    })
+}
+
+fn touches(step: &Migration, table: &str) -> bool {
+    schema_ops(step).any(|c| c.touches(table, &step.snapshot))
+}
+
+fn writes(step: &Migration, table: &str) -> bool {
+    schema_ops(step).any(|c| {
+        c.table() == table
+            || matches!(c, SchemaChange::RenameTable { new_name, .. } if new_name == table)
     })
 }
 
 #[derive(Default)]
 struct Pass {
     applied: Vec<Migration>,
-    /// An owned table a pending step needs and the database lacks.
+    /// A table a pending step needs and that is not ready yet.
     waiting: Option<String>,
-    /// Some owned table was missing, so run again after the project chain.
-    again: bool,
 }
 
-async fn system_pass(
-    pool: &Pool,
-    chain: &SystemChain,
+/// One locked run of the system chain for one scope.
+struct Run<'a> {
+    held: LockHeld,
+    pool: &'a Pool,
+    chain: &'a SystemChain,
     scope: MigrationScope,
-    project_owned: &HashSet<String>,
-    observer: Option<&dyn MigrationObserver>,
-) -> Result<Pass, MigrateError> {
-    let mut pass = Pass::default();
-    let system_dir = chain.dir();
-    if !system_dir.is_dir() {
-        return Ok(pass);
-    }
-    let all = file::list_dir(system_dir)?;
-    let wanted: Vec<&Migration> = all.iter().filter(|m| m.scope == scope).collect();
-    if wanted.is_empty() {
-        return Ok(pass);
-    }
-    let declared: HashSet<String> = wanted.iter().flat_map(|m| created(m)).collect();
-    let (mut live, mut absent) = (Vec::new(), Vec::new());
-    for t in project_owned.intersection(&declared) {
-        if runner::table_exists_here(pool, t).await {
-            live.push(t.clone());
-        } else {
-            absent.push(t.clone());
-        }
-    }
-    pass.again = !absent.is_empty();
-    let owned: Vec<String> = live.iter().chain(&absent).cloned().collect();
+    owned: &'a BTreeSet<String>,
+    observer: Option<&'a dyn MigrationObserver>,
+}
 
-    let steps: Vec<Migration> = if owned.is_empty() {
-        wanted.iter().map(|m| (*m).clone()).collect()
-    } else {
-        let applied = runner::applied_set_pool_with_ledger(pool, runner::SYSTEM_LEDGER_TABLE)
+impl Run<'_> {
+    /// The scope's system steps and the chain's file count, if any.
+    fn wanted(&self) -> Result<Option<(Vec<Migration>, usize)>, MigrateError> {
+        let dir = self.chain.dir();
+        if !dir.is_dir() {
+            return Ok(None);
+        }
+        let all = file::list_dir(dir)?;
+        let total = all.len();
+        let wanted: Vec<Migration> = all.into_iter().filter(|m| m.scope == self.scope).collect();
+        Ok((!wanted.is_empty()).then_some((wanted, total)))
+    }
+
+    /// Apply pending steps in order, stopping at the first that needs a table
+    /// the project chain owns but lacks, or that `busy` pending project
+    /// migrations still write.
+    async fn system_pass(&self, busy: &BTreeSet<String>) -> Result<Pass, MigrateError> {
+        let mut pass = Pass::default();
+        let Some((wanted, total)) = self.wanted()? else {
+            return Ok(pass);
+        };
+        let declared: BTreeSet<String> = wanted.iter().flat_map(created).collect();
+        let (mut live, mut absent) = (BTreeSet::new(), BTreeSet::new());
+        for t in self.owned.intersection(&declared) {
+            if runner::table_exists_here(self.pool, t).await {
+                live.insert(t.clone());
+            } else {
+                absent.insert(t.clone());
+            }
+        }
+        if live.is_empty() && absent.is_empty() && busy.is_disjoint(&declared) {
+            pass.applied = if wanted.len() == total {
+                self.apply_dir(self.chain.dir()).await?
+            } else {
+                self.apply(&wanted).await?
+            };
+            return Ok(pass);
+        }
+
+        let owned: Vec<String> = live.iter().chain(&absent).cloned().collect();
+        // Missing tables block any reference; a live owned one only its writes.
+        let missing: Vec<&String> = absent
+            .iter()
+            .chain(busy.iter().filter(|t| !self.owned.contains(*t)))
+            .collect();
+        let in_use: Vec<&String> = live.iter().filter(|t| busy.contains(*t)).collect();
+        let ledger = runner::applied_set_pool_with_ledger(self.pool, runner::SYSTEM_LEDGER_TABLE)
             .await
             .unwrap_or_default();
-        let mut steps = Vec::new();
+        let mut steps: Vec<Migration> = Vec::new();
+        let mut before: Option<&SchemaSnapshot> = None;
         for m in &wanted {
-            let step = without_owned(m, &owned);
-            if !applied.contains(&m.name) {
-                let needs = |t: &&String| {
-                    step.forward.iter().any(
-                        |op| matches!(op, Operation::Schema(c) if c.touches(t, &step.snapshot)),
-                    )
-                };
-                if let Some(t) = absent.iter().find(needs) {
+            let mut step = runner::without_tables(m, &owned);
+            if !ledger.contains(&m.name) {
+                let waits = missing.iter().find(|t| touches(&step, t));
+                if let Some(t) = waits.or_else(|| in_use.iter().find(|t| writes(&step, t))) {
                     // Order matters: everything after it waits too.
-                    pass.waiting = Some(t.clone());
+                    pass.waiting = Some((*t).clone());
                     break;
                 }
+                // A table the project chain still writes converges in `finish`.
+                let on: Vec<String> = live
+                    .iter()
+                    .filter(|t| !busy.contains(*t) && touches(&step, t))
+                    .cloned()
+                    .collect();
+                if !on.is_empty() {
+                    // Run what precedes, then give `on` the columns this step expects.
+                    pass.applied.extend(self.apply(&steps).await?);
+                    if let Some(snap) = before {
+                        converge(
+                            self.pool,
+                            snap,
+                            missing_columns(self.pool, snap, &on).await?,
+                        )
+                        .await?;
+                    }
+                    for t in &on {
+                        let have = ensure::live_columns(self.pool, t).await?;
+                        step.forward.retain(|op| {
+                            !matches!(op, Operation::Schema(SchemaChange::AddColumn { table, column })
+                                if table == t && have.contains(column))
+                        });
+                    }
+                }
             }
+            before = Some(&m.snapshot);
             steps.push(step);
         }
-        steps
-    };
-
-    let scratch = if owned.is_empty() && wanted.len() == all.len() {
-        None
-    } else {
-        Some(Scratch::write(&steps)?)
-    };
-    let run_dir = scratch.as_ref().map_or(system_dir, |s| s.0.as_path());
-    pass.applied = runner::migrate_system_chain(pool, chain, run_dir, observer).await?;
-    drop(scratch);
-
-    // Every run, so a column that failed once is retried.
-    if let Some(last) = steps.last() {
-        converge_columns(pool, &last.snapshot, &live).await?;
+        pass.applied.extend(self.apply(&steps).await?);
+        Ok(pass)
     }
-    Ok(pass)
+
+    /// After both chains: owned tables get the columns they still lack, and
+    /// framework tables the project created and later dropped are recreated.
+    async fn finish(&self, claimed: &BTreeSet<String>) -> Result<(), MigrateError> {
+        let Some((wanted, _)) = self.wanted()? else {
+            return Ok(());
+        };
+        let Some(last) = wanted.last() else {
+            return Ok(());
+        };
+        let snap = &last.snapshot;
+        let declared: BTreeSet<String> = wanted.iter().flat_map(created).collect();
+        let mut live = Vec::new();
+        let mut groups = Vec::new();
+        for t in &declared {
+            let exists = runner::table_exists_here(self.pool, t).await;
+            if self.owned.contains(t) {
+                if exists {
+                    live.push(t.clone());
+                }
+            } else if claimed.contains(t) && !exists && snap.table(t).is_some() {
+                let indexes = snap.indexes.iter().filter(|i| &i.table == t);
+                groups.push(
+                    std::iter::once(SchemaChange::CreateTable(t.clone()))
+                        .chain(indexes.map(super::diff::create_index))
+                        .collect(),
+                );
+            }
+        }
+        groups.extend(missing_columns(self.pool, snap, &live).await?);
+        converge(self.pool, snap, groups).await
+    }
+
+    /// Run `steps` from a scratch dir; applied ones are skipped by the ledger.
+    async fn apply(&self, steps: &[Migration]) -> Result<Vec<Migration>, MigrateError> {
+        if steps.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scratch = Scratch::write(steps)?;
+        self.apply_dir(&scratch.0).await
+    }
+
+    async fn apply_dir(&self, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
+        runner::migrate_system_chain(self.held, self.pool, self.chain, dir, self.observer).await
+    }
 }
 
-/// `mig` without what creates or extends a project-owned table; columns come
-/// from [`converge_columns`] instead.
-fn without_owned(mig: &Migration, owned: &[String]) -> Migration {
-    let mut step = runner::without_tables(mig, owned);
-    step.forward.retain(|op| {
-        !matches!(op, Operation::Schema(SchemaChange::AddColumn { table, .. }) if owned.contains(table))
-    });
-    step
-}
-
-/// Add the columns `snapshot` gives `tables` and the database lacks.
-async fn converge_columns(
+/// An AddColumn for each column `snapshot` gives `tables` and the database lacks.
+async fn missing_columns(
     pool: &Pool,
-    snapshot: &super::SchemaSnapshot,
+    snapshot: &SchemaSnapshot,
     tables: &[String],
-) -> Result<(), MigrateError> {
+) -> Result<Vec<Vec<SchemaChange>>, MigrateError> {
     let mut groups = Vec::new();
     for t in tables {
         let Some(snap) = snapshot.table(t) else {
@@ -191,6 +330,15 @@ async fn converge_columns(
                 }),
         );
     }
+    Ok(groups)
+}
+
+/// Apply `groups` against `snapshot`, failing with all that could not be added.
+async fn converge(
+    pool: &Pool,
+    snapshot: &SchemaSnapshot,
+    groups: Vec<Vec<SchemaChange>>,
+) -> Result<(), MigrateError> {
     if groups.is_empty() {
         return Ok(());
     }

@@ -11,6 +11,11 @@ It ran only the project chain, so tables and columns like `sessions_revoked_at` 
 ### Fixed — system and project chains apply in one safe order everywhere (#2055, #2052)
 
 A system step that FKs a project-created framework table waits for it on PG/MySQL; such tables get the framework's newer columns, on the tenancy runners too.
+Steps on those tables run after the project chain, under one migrate lock; a table the project later drops is the framework's again.
+
+### Fixed — converging a NOT NULL column with no default on an empty table (#2066)
+
+`migrate` adds it instead of asking for it by hand; a table with rows still fails.
 
 ## [0.59.15] — 2026-10-01
 

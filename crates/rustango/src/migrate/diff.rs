@@ -456,7 +456,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
-fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
+pub(super) fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
     SchemaChange::CreateIndex {
         name: idx.name.clone(),
         table: idx.table.clone(),
@@ -785,7 +785,7 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, None)
+    render_changes_split_inner(changes, current, dialect, None, false)
 }
 
 /// As [`render_changes_split_with_dialect`], but every FK target is
@@ -797,7 +797,18 @@ pub(crate) fn render_changes_split_in_schema(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema)
+    render_changes_split_inner(changes, current, dialect, schema, false)
+}
+
+/// As [`render_changes_split_in_schema`] for tables with no rows, where a
+/// NOT NULL column needs no default (#2066).
+pub(crate) fn render_changes_split_for_empty(
+    changes: &[SchemaChange],
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<RenderedBatch, String> {
+    render_changes_split_inner(changes, current, dialect, schema, true)
 }
 
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
@@ -907,6 +918,7 @@ fn render_changes_split_inner(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
+    empty_tables: bool,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
@@ -957,7 +969,7 @@ fn render_changes_split_inner(
                 let f = t.field(column).ok_or_else(|| {
                     format!("AddColumn for `{table}.{column}` but field missing in snapshot")
                 })?;
-                if !f.nullable && f.default.is_none() {
+                if !f.nullable && f.default.is_none() && !empty_tables {
                     return Err(format!(
                         "AddColumn `{table}.{column}` is NOT NULL with no `default` — \
                          Postgres can't backfill existing rows. Pick one:\n  \

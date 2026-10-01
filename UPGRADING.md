@@ -156,7 +156,7 @@ untouched.
 
 ### Framework tables a project's own migrations create get new columns (#2052)
 
-`migrate` adds missing framework columns to them on every run; a NOT NULL column without a default on a table with rows fails until added by hand.
+`migrate` adds missing framework columns to them after the project chain; a NOT NULL column without a default on a table with rows fails until added by hand (an empty table is fine, #2066).
 
 ## 0.59.15
 

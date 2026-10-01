@@ -137,15 +137,206 @@ fn current_table(table: &str, drop_column: Option<&str>) -> Value {
 /// A project `0001_initial` that creates `table` with the given snapshot.
 fn project_initial(dir: &Path, table: Value) {
     let name = table["name"].clone();
+    write_step(
+        dir,
+        "0001_initial",
+        None,
+        json!({ "tables": [table] }),
+        vec![json!({ "CreateTable": name })],
+    );
+}
+
+/// Write migration `name` with schema ops `ops` to `dir`.
+fn write_step(dir: &Path, name: &str, prev: Option<&str>, snapshot: Value, ops: Vec<Value>) {
+    let forward: Vec<Value> = ops.into_iter().map(|op| json!({ "schema": op })).collect();
     let mig = json!({
-        "name": "0001_initial",
+        "name": name,
         "created_at": "2026-01-01T00:00:00Z",
-        "prev": null,
-        "snapshot": { "tables": [table] },
-        "forward": [{ "schema": { "CreateTable": name } }],
+        "prev": prev,
+        "snapshot": snapshot,
+        "forward": forward,
     });
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("0001_initial.json"), mig.to_string()).unwrap();
+    std::fs::write(dir.join(format!("{name}.json")), mig.to_string()).unwrap();
+}
+
+/// Both scopes of today's system chain under `root`.
+fn system_chain(root: &Path) {
+    for scope in [ModelScope::Registry, ModelScope::Tenant] {
+        rustango::migrate::make_migrations_system(root, scope, None).unwrap();
+    }
+}
+
+/// Finding 1 — a pending project AddColumn of a column the system snapshot
+/// also has runs before the framework converges the table.
+async fn pending_project_add_column(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "addcol").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, Some(column)));
+    // An older release applied the project chain alone.
+    rustango::migrate::migrate_pool(&pool, &dir).await.unwrap();
+    assert!(!has_column(&pool, table, column).await);
+    write_step(
+        &dir,
+        "0002_add",
+        Some("0001_initial"),
+        json!({ "tables": [current_table(table, None)] }),
+        vec![json!({ "AddColumn": { "table": table, "column": column } })],
+    );
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_column(&pool, table, column).await);
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+/// Finding 2 — system step N adds a column to a project-owned table and
+/// N+1 alters it; the alter must find the column.
+async fn alter_after_add_on_owned(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "alter").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let table = "rustango_admin_users";
+    let sys = root.join("system/migrations");
+    let first = read(&tenant_file(&sys));
+    let with_field = |field: Value| {
+        let mut snap = first["snapshot"].clone();
+        let t = snap["tables"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t["name"] == table)
+            .unwrap();
+        t["fields"].as_array_mut().unwrap().push(field);
+        snap
+    };
+    let nick = |column: &str, len: u32| {
+        json!({ "name": column, "column": column, "ty": "string",
+                "nullable": true, "primary_key": false, "max_length": len })
+    };
+    write_step(
+        &sys,
+        "9001_nick",
+        first["name"].as_str(),
+        with_field(nick("nick", 50)),
+        vec![json!({ "AddColumn": { "table": table, "column": "nick" } })],
+    );
+    // MySQL has no AlterColumnMaxLength yet, and SQLite renders it as nothing.
+    let (after, op) = match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => (
+            nick("nick", 100),
+            json!({ "AlterColumnMaxLength": { "table": table, "column": "nick", "from": 50, "to": 100 } }),
+        ),
+        #[allow(unreachable_patterns)]
+        _ => (
+            nick("nick2", 50),
+            json!({ "RenameColumn": { "table": table, "old_column": "nick", "new_column": "nick2" } }),
+        ),
+    };
+    write_step(
+        &sys,
+        "9002_nick",
+        Some("9001_nick"),
+        with_field(after),
+        vec![op],
+    );
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, None));
+    manage_migrate(&pool, &dir).await.expect("first run");
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+/// Finding 3 — a framework table the project created and later dropped is
+/// the system chain's again, on a fresh database and on one that has it.
+async fn owned_table_dropped_later(backend: Backend) {
+    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
+    for heal in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((pool, _)) = fresh(backend, tmp.path(), "drop").await else {
+            eprintln!("skipping — backend URL unset");
+            return;
+        };
+        let root = tmp.path().join("app");
+        system_chain(&root);
+        let dir = root.join("migrations");
+        project_initial(&dir, current_table(table, Some(column)));
+        if heal {
+            manage_migrate(&pool, &dir).await.expect("project owns it");
+        }
+        write_step(
+            &dir,
+            "0002_drop",
+            Some("0001_initial"),
+            json!({ "tables": [] }),
+            vec![json!({ "DropTable": table })],
+        );
+        manage_migrate(&pool, &dir).await.expect("first run");
+        assert!(has_column(&pool, table, column).await, "heal={heal}");
+        manage_migrate(&pool, &dir).await.expect("second run");
+    }
+}
+
+/// #2066 — an empty project table gets a NOT NULL column with no default.
+async fn not_null_column_on_empty_table(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "notnull").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let table = "rustango_admin_users";
+    let full = current_table(table, None);
+    let column = full["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["nullable"] == false && f["default"].is_null() && f["primary_key"] == false)
+        .expect("a NOT NULL column with no default")["column"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, Some(&column)));
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_column(&pool, table, &column).await, "{column}");
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+/// Finding 4 — two processes migrate one database at once.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn concurrent_migrates(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_, url)) = fresh(backend, tmp.path(), "race").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, Some(column)));
+    let (a, b) = (
+        Pool::connect(&url).await.unwrap(),
+        Pool::connect(&url).await.unwrap(),
+    );
+    let both = async { tokio::join!(manage_migrate(&a, &dir), manage_migrate(&b, &dir)) };
+    let (ra, rb) = tokio::time::timeout(std::time::Duration::from_secs(120), both)
+        .await
+        .expect("no deadlock");
+    ra.expect("first replica");
+    rb.expect("second replica");
+    assert!(has_column(&a, table, column).await);
 }
 
 /// #2055 — a later system step creates tables with an FK to the project's
@@ -317,6 +508,71 @@ async fn tenant_project_table_converges(backend: Backend) {
     assert!(has_column(&tenant, table, column).await, "{table}.{column}");
 }
 
+/// #2052 on a schema-mode tenant: its own `rustango_users` gets the column.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn schema_mode_tenant_converges() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((registry, registry_url)) = fresh(Backend::Postgres, tmp.path(), "schema").await
+    else {
+        eprintln!("skipping — DATABASE_URL unset");
+        return;
+    };
+    let boot = tmp.path().join("boot/migrations");
+    std::fs::create_dir_all(&boot).unwrap();
+    rustango::tenancy::migrate_registry_pool(&registry, &boot)
+        .await
+        .expect("registry tables");
+    let mut org = rustango::tenancy::Org {
+        slug: "t1".into(),
+        display_name: "t1".into(),
+        storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
+        backend_kind: "postgres".into(),
+        schema_name: Some("t1".into()),
+        database_url: None,
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&registry).await.unwrap();
+    let (table, column) = ("rustango_users", "password_changed_at");
+    let dir = tmp.path().join("app/migrations");
+    project_initial(&dir, current_table(table, Some(column)));
+    rustango::tenancy::migrate_registry_pool(&registry, &dir)
+        .await
+        .expect("registry");
+    let Pool::Postgres(pg) = &registry else {
+        unreachable!()
+    };
+    let pools = rustango::tenancy::TenantPools::new(pg.clone());
+    for run in 0..2 {
+        let report = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url)
+            .await
+            .expect("tenants");
+        assert!(report.all_ok(), "run {run}: {report:?}");
+    }
+    let n: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.columns \
+         WHERE table_schema = 't1' AND table_name = $1 AND column_name = $2",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(pg)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "t1.{table}.{column}");
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn concurrent_migrates_postgres() {
+    concurrent_migrates(Backend::Postgres).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn concurrent_migrates_mysql() {
+    concurrent_migrates(Backend::Mysql).await;
+}
+
 macro_rules! per_backend {
     ($($name:ident),* $(,)?) => {
         #[cfg(feature = "postgres")]
@@ -338,4 +594,8 @@ per_backend!(
     fk_to_project_table,
     single_step_chain_converges_project_table,
     tenant_project_table_converges,
+    pending_project_add_column,
+    alter_after_add_on_owned,
+    owned_table_dropped_later,
+    not_null_column_on_empty_table,
 );

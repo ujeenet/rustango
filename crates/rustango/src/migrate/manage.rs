@@ -857,7 +857,10 @@ async fn migrate<W: Write>(
         return Ok(());
     }
 
-    migrate_with_framework(pool, dir, w, || runner::migrate_pool(pool, dir)).await
+    migrate_with_framework(pool, dir, w, |held| {
+        runner::migrate_pool_locked(held, pool, dir, None)
+    })
+    .await
 }
 
 /// Everything a plain `migrate` does: the framework's system chain and the
@@ -878,7 +881,7 @@ pub(crate) async fn migrate_with_framework<W, F, Fut>(
 ) -> Result<(), MigrateError>
 where
     W: Write,
-    F: FnOnce() -> Fut,
+    F: FnOnce(super::LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<Migration>, MigrateError>>,
 {
     let chain = system_chain(dir)?;

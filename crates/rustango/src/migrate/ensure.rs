@@ -223,16 +223,31 @@ pub(crate) async fn converge_groups(
             }
             _ => continue,
         };
+        let mut no_rows = false;
         if let Some(SC::AddColumn { table, column }) = group.first() {
             let f = snapshot.table(table).and_then(|t| t.field(column));
             if f.is_some_and(|f| !f.nullable && f.default.is_none() && !f.primary_key) {
-                failed.push(format!(
-                    "{label}: NOT NULL with no default, so rows have no value"
-                ));
-                continue;
+                // An empty table has no rows to fill (#2066).
+                no_rows = is_empty(pool, table).await?;
+                if !no_rows {
+                    failed.push(format!(
+                        "{label}: NOT NULL with no default, so rows have no value"
+                    ));
+                    continue;
+                }
             }
         }
-        let batch = match render(group, snapshot) {
+        let rendered = if no_rows {
+            super::diff::render_changes_split_for_empty(
+                group,
+                snapshot,
+                pool.dialect(),
+                schema.as_deref(),
+            )
+        } else {
+            render(group, snapshot)
+        };
+        let batch = match rendered {
             Ok(b) => b,
             Err(e) => {
                 failed.push(format!("{label}: {e}"));
@@ -259,6 +274,21 @@ pub(crate) async fn converge_groups(
         }
     }
     Ok(failed)
+}
+
+/// Whether `table` has no rows.
+async fn is_empty(pool: &Pool, table: &str) -> Result<bool, sqlx::Error> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM (SELECT 1 AS one FROM {} LIMIT 1) AS probe",
+        pool.dialect().quote_ident(table)
+    );
+    let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .map_err(|e| match e {
+            crate::sql::ExecError::Driver(d) => d,
+            other => sqlx::Error::Protocol(other.to_string()),
+        })?;
+    Ok(rows.first().is_some_and(|(n,)| *n == 0))
 }
 
 /// SQLite's error for a non-constant DEFAULT added to a table with rows.

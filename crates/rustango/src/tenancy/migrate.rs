@@ -54,7 +54,6 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::core::Column as _;
-use crate::migrate;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::postgres::PgPoolOptions;
 #[cfg(feature = "postgres")]
@@ -209,7 +208,7 @@ async fn migrate_with_system<F, Fut>(
     project: F,
 ) -> Result<Vec<Migration>, TenancyError>
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce(crate::migrate::LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<Migration>, crate::migrate::MigrateError>>,
 {
     let applied =
@@ -279,7 +278,7 @@ pub async fn migrate_registry_pool(
         MigrationScope::Registry,
         project_dir,
         None,
-        || crate::migrate::migrate_pool(registry, project_dir),
+        |held| crate::migrate::migrate_pool_locked(held, registry, project_dir, None),
     )
     .await?;
     // (#89) Auto-seed the `rustango_content_types` registry-side
@@ -702,11 +701,11 @@ where
         system_progress
             .as_ref()
             .map(|o| o as &dyn crate::migrate::MigrationObserver),
-        || async {
-            match &project_progress {
-                Some(o) => migrate::migrate_pool_with_progress(&inner_pool, dir, o).await,
-                None => migrate::migrate_pool(&inner_pool, dir).await,
-            }
+        |held| {
+            let observer = project_progress
+                .as_ref()
+                .map(|o| o as &dyn crate::migrate::MigrationObserver);
+            crate::migrate::migrate_pool_locked(held, &inner_pool, dir, observer)
         },
     )
     .await?;
@@ -844,11 +843,11 @@ async fn run_for_one_tenant(
                 MigrationScope::Tenant,
                 dir,
                 system_progress,
-                || async {
-                    match &project_progress {
-                        Some(o) => migrate::migrate_with_progress(&pool, dir, o).await,
-                        None => migrate::migrate(&pool, dir).await,
-                    }
+                |held| {
+                    let observer = project_progress
+                        .as_ref()
+                        .map(|o| o as &dyn crate::migrate::MigrationObserver);
+                    crate::migrate::migrate_locked(held, &pool, dir, observer)
                 },
             )
             .await?;
@@ -880,11 +879,11 @@ async fn run_for_one_tenant(
                 MigrationScope::Tenant,
                 dir,
                 system_progress,
-                || async {
-                    match &project_progress {
-                        Some(o) => migrate::migrate_with_progress(tenant_pool.pool(), dir, o).await,
-                        None => migrate::migrate(tenant_pool.pool(), dir).await,
-                    }
+                |held| {
+                    let observer = project_progress
+                        .as_ref()
+                        .map(|o| o as &dyn crate::migrate::MigrationObserver);
+                    crate::migrate::migrate_locked(held, tenant_pool.pool(), dir, observer)
                 },
             )
             .await?;
