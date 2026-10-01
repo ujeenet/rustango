@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+### Page cache skips requests with no resolved tenant (#2045)
+
+Apex or marketing routes that resolve no tenant are no longer cached. Set `CachePageLayer::tenant_agnostic(true)` on routes that are the same for everyone.
+
+### `DynamicForm` enforces required checkboxes (#1895)
+
+A `boolean` field marked `"required": true` (or `required: true` in Rust) must now be ticked. Checkboxes without it stay optional.
+
+### `Settings.secret_key` removed; repeat soft delete returns 0 (#1929)
+
+The field was never read; sessions use `RUSTANGO_SESSION_SECRET`. A key left in TOML is ignored.
+`soft_delete` on a deleted row, and `restore` on a live one, now return `0`.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

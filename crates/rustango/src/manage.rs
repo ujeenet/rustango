@@ -1555,7 +1555,7 @@ fn apply_settings_layers_or_warn(
 /// The layer-driving settings that `s` configures, by dotted name.
 ///
 /// Only settings that would actually install a layer count — a configured
-/// `secret_key` is not evidence that anyone expected CORS. Pure, so the
+/// `database.url` is not evidence that anyone expected CORS. Pure, so the
 /// warning's precision is unit-testable.
 #[cfg(feature = "config")]
 fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
@@ -2096,7 +2096,7 @@ mod tests {
 
         // A setting that drives no layer must NOT trigger the warning.
         let mut s = Settings::default();
-        s.secret_key = Some("irrelevant".into());
+        s.database.url = Some("irrelevant".into());
         assert!(inert_layer_settings(&s).is_empty());
     }
 

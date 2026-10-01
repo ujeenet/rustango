@@ -7,7 +7,7 @@
 //! ```ignore
 //! use rustango::messages;
 //!
-//! const SECRET: &[u8] = b"app-wide secret — derive from Settings.secret_key";
+//! const SECRET: &[u8] = b"app-wide secret — load it from your secret store";
 //!
 //! async fn save_handler(headers: HeaderMap) -> Response {
 //!     // … do the save …

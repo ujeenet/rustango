@@ -4,6 +4,27 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — page cache never stores or serves a page for an unresolved tenant (#2045)
+
+`CachePageLayer` bypasses the cache when no tenant resolves, so a route varying on an input the resolver ignored cannot leak one tenant's page to another.
+
+### Fixed — tenancy lifecycle: PG permission seeding, port-routed impersonation, webhook race, stale brand files (#1933)
+
+PG tenants seed `auth.access_admin` and extra permissions; impersonation lands on a port-routed org's own port; a webhook delivery that loses the idempotency race gets the existing run (200), not a 500; re-upload and purge delete old brand files.
+A logo of another type is removed only after the new path is saved (new `branding::prune_brand_asset`); CLI `purge-tenant` reaches only the default brand store and says so.
+
+### Fixed — audit: a no-op save writes no `update` row; a failed pre-read fails the save (#1907)
+
+On MySQL/SQLite the UPDATE could commit with no audit row when the BEFORE read failed.
+
+### Fixed — `DynamicForm`: multi-select keeps every value; lengths count characters; NaN refused; required checkbox enforced (#1895)
+
+New `bind_pairs` takes repeated keys from `<select multiple>`; `NaN`/`inf` no longer pass float bounds. A checkbox stays optional unless its schema says `"required": true`.
+
+### Fixed — `without_signals` silences `m2m_changed`; a repeat soft delete keeps its stamp; unread `Settings.secret_key` removed (#1929)
+
+A second `soft_delete` matches no row, so the prune clock and audit log stay put; the admin delete view and bulk delete/restore skip a row someone else already marked. The cookbook no longer says `delete()` soft-deletes.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

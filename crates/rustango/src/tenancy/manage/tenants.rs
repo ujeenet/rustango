@@ -504,6 +504,17 @@ where
     if report.row_deleted {
         writeln!(w, "  removed Org row")?;
     }
+    // The CLI sees only the default local store, not one the app injected.
+    let root = super::super::branding::brand_storage_root();
+    let brand = super::super::branding::default_brand_storage();
+    match super::super::branding::delete_brand_assets(&slug, &brand).await {
+        Ok(()) => writeln!(
+            w,
+            "  removed brand files under `{}`; with a custom brand store, delete `{slug}/` there",
+            root.display()
+        )?,
+        Err(e) => writeln!(w, "  brand files left in place: {e}")?,
+    }
     Ok(())
 }
 
