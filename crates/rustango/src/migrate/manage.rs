@@ -1020,19 +1020,14 @@ async fn apply_system_chain<W: Write>(
     dir: &Path,
     w: &mut W,
 ) -> Result<usize, MigrateError> {
-    // `system/migrations/` is a sibling of the project's `migrations/`.
-    let project_root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
-        dir.parent().unwrap_or(dir)
-    } else {
-        dir
-    };
-    let (system_dir, origin) = crate::migrate::make::generate_system_chain(
-        project_root,
+    let chain = crate::migrate::make::SystemChain::for_migrations_dir(
+        dir,
         &[
             crate::core::ModelScope::Registry,
             crate::core::ModelScope::Tenant,
         ],
     );
+    let system_dir = chain.dir().to_path_buf();
     if !system_dir.is_dir() {
         return Ok(0);
     }
@@ -1096,7 +1091,7 @@ async fn apply_system_chain<W: Write>(
     };
     let run_dir = scratch.clone().unwrap_or_else(|| system_dir.clone());
 
-    let applied = runner::migrate_system_chain(pool, &run_dir, origin, None).await;
+    let applied = runner::migrate_system_chain(pool, &chain, &run_dir, None).await;
     if let Some(p) = &scratch {
         let _ = std::fs::remove_dir_all(p);
     }

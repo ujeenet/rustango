@@ -1603,18 +1603,20 @@ pub(crate) enum ChainOrigin {
     Regenerated,
 }
 
-/// Apply the framework's own chain in `dir` under the system ledger.
+/// Apply `chain`'s files in `run_dir` (its dir, or a filtered copy of it)
+/// under the system ledger.
 ///
 /// # Errors
 /// As [`migrate_pool_with_ledger_fake_initial`], plus catalog reads and
-/// DDL failures while converging a [`ChainOrigin::Regenerated`] chain.
+/// what a [`ChainOrigin::Regenerated`] chain could not converge.
 pub(crate) async fn migrate_system_chain(
     pool: &crate::sql::Pool,
-    dir: &Path,
-    origin: ChainOrigin,
+    chain: &super::make::SystemChain,
+    run_dir: &Path,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
-    migrate_pool_with_ledger_opts(pool, dir, SYSTEM_LEDGER_TABLE, true, origin, observer).await
+    let origin = chain.origin();
+    migrate_pool_with_ledger_opts(pool, run_dir, SYSTEM_LEDGER_TABLE, true, origin, observer).await
 }
 
 async fn migrate_pool_with_ledger_opts(
@@ -1631,11 +1633,23 @@ async fn migrate_pool_with_ledger_opts(
         let mut applied = applied_set_pool_with_ledger(pool, ledger).await?;
         if origin == ChainOrigin::Regenerated && !applied.is_empty() {
             // Match the live schema, not the names, then record the chain.
+            let mut unfixed = Vec::new();
             for mig in &all {
-                converge_regenerated(pool, mig).await?;
-                if applied.insert(mig.name.clone()) {
-                    fake_apply_pool(pool, mig, ledger).await?;
+                let failed = converge_regenerated(pool, mig).await?;
+                if failed.is_empty() {
+                    if applied.insert(mig.name.clone()) {
+                        fake_apply_pool(pool, mig, ledger).await?;
+                    }
+                } else {
+                    unfixed.extend(failed);
                 }
+            }
+            if !unfixed.is_empty() {
+                return Err(MigrateError::Validation(format!(
+                    "the framework schema is missing objects `migrate` cannot add; \
+                     add them by hand, then rerun `migrate`:\n  - {}",
+                    unfixed.join("\n  - ")
+                )));
             }
         }
         let pending = pending_migrations(all, &applied);
@@ -1981,14 +1995,14 @@ fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
 }
 
 /// Create what `mig` creates and the database lacks: missing tables with
-/// their indexes, and missing columns of tables already there.
+/// their indexes, and missing columns of tables already there. One object
+/// at a time, so one failure does not block the rest; returns the failures.
 async fn converge_regenerated(
     pool: &crate::sql::Pool,
     mig: &Migration,
-) -> Result<(), MigrateError> {
+) -> Result<Vec<String>, MigrateError> {
     use super::diff::SchemaChange as SC;
-    let mut missing: HashSet<&str> = HashSet::new();
-    let mut changes = Vec::new();
+    let mut groups: Vec<Vec<SC>> = Vec::new();
     for op in &mig.forward {
         let Operation::Schema(change) = op else {
             continue;
@@ -1999,35 +2013,32 @@ async fn converge_regenerated(
             _ => continue,
         };
         if !table_exists_here(pool, table).await {
-            missing.insert(table);
-            changes.push(change.clone());
+            let indexes = mig.forward.iter().filter_map(|op| match op {
+                Operation::Schema(c @ SC::CreateIndex { table: t, .. }) if t == table => {
+                    Some(c.clone())
+                }
+                _ => None,
+            });
+            groups.push(std::iter::once(change.clone()).chain(indexes).collect());
             continue;
         }
         let (SC::CreateTable(_), Some(snap)) = (change, mig.snapshot.table(table)) else {
             continue;
         };
         let live = super::ensure::live_columns(pool, table).await?;
-        changes.extend(
+        groups.extend(
             snap.fields
                 .iter()
                 .filter(|f| !live.contains(&f.column))
-                .map(|f| SC::AddColumn {
-                    table: table.clone(),
-                    column: f.column.clone(),
+                .map(|f| {
+                    vec![SC::AddColumn {
+                        table: table.clone(),
+                        column: f.column.clone(),
+                    }]
                 }),
         );
     }
-    for op in &mig.forward {
-        if let Operation::Schema(c @ SC::CreateIndex { table, .. }) = op {
-            if missing.contains(table.as_str()) {
-                changes.push(c.clone());
-            }
-        }
-    }
-    if !changes.is_empty() {
-        super::ensure::apply_changes_idempotent(pool, &mig.snapshot, &changes).await?;
-    }
-    Ok(())
+    Ok(super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?)
 }
 
 /// How many of `tables` already exist in `pool`. Probes with
