@@ -169,6 +169,11 @@ the newest 200 years. `values()`/`aggregate()` dicts on PG/MySQL return `SqlValu
 Receivers on `admin_pre_save` / `admin_pre_delete` now run. `delete_selected` sends delete signals per row;
 `restore_selected` and custom actions send `admin_pre_save`/`admin_post_save` with `change = true` per row.
 
+### Natural PKs are form input on create (#1725)
+
+`CreateView` and `ModelForm::new` now render, require and insert a non-`Auto` PK field. A form that relied on it
+being dropped must `.exclude` it. New: `core::WriteKind` and `FieldSchema::accepts_input` / `is_rust_side_uuid`.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

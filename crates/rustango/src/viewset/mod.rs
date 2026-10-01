@@ -1640,7 +1640,7 @@ impl WriteSet {
         self.writable
             .iter()
             .copied()
-            .filter(|f| !f.primary_key && !f.auto)
+            .filter(|f| f.accepts_input(crate::core::WriteKind::Update))
     }
 
     /// `body` cut to the keys the UPDATE writes, so PATCH validation

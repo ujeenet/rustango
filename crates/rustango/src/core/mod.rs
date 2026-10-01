@@ -40,6 +40,7 @@ pub use schema::{
     ExclusionConstraint, FieldSchema, Fieldset, GenericRelation, GenericReverseRelation,
     GlobalScope, IndexMethod, IndexSchema, ListSelectRelated, M2MRelation, Model, ModelEntry,
     ModelSchema, ModelScope, OnDeleteAction, PrepopulatedField, Relation, ReverseRelation,
+    WriteKind,
 };
 #[doc(hidden)]
 pub use schema::{AdminConfigParts, FieldSchemaParts, ModelSchemaParts};

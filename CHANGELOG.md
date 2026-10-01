@@ -24,6 +24,11 @@ Both now run through the ORM. Dict rows (`values()`, `aggregate()`) decode date 
 `admin_pre_save` / `admin_pre_delete` now run before the write, receivers run in registration order,
 and bulk actions send one signal per row: delete for `delete_selected`, save (`change = true`) for the rest.
 
+### Fixed — natural PKs in CreateView and ModelForm; ViewSet create fills v7 PKs (#1725)
+
+HTML `CreateView` and `ModelForm` inserts now take a client-supplied PK (never on update), via one
+`FieldSchema::accepts_input` rule. Schema-driven INSERTs fill `default_uuid_v7` keys and skip `generated_as` columns.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

@@ -1522,8 +1522,8 @@ struct FormField {
 }
 
 /// Walk the schema and produce the form-fields slice. Skips:
-/// - the primary key (CreateView lets the DB assign; UpdateView
-///   pins it from the URL)
+/// - the primary key on update (UpdateView pins it from the URL); a
+///   natural PK is input on create (#1725)
 /// - `Auto<T>` fields generally (server-assigned)
 /// - `generated_as` columns (DB-computed)
 /// - relations whose target is a foreign table (FK/M2M handling
@@ -1533,12 +1533,13 @@ fn form_fields(
     schema: &'static ModelSchema,
     explicit: Option<&[String]>,
     values: &HashMap<String, String>,
+    kind: crate::core::WriteKind,
 ) -> Vec<FormField> {
     schema
         .fields
         .iter()
         .filter(|f| {
-            if f.primary_key || f.auto || f.generated_as.is_some() {
+            if !f.accepts_input(kind) {
                 return false;
             }
             match explicit {
@@ -1860,7 +1861,12 @@ async fn handle_create_get(
     headers: axum::http::HeaderMap,
 ) -> Response {
     let mut ctx = Context::new();
-    let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
+    let fields = form_fields(
+        state.schema,
+        state.fields.as_deref(),
+        &HashMap::new(),
+        crate::core::WriteKind::Insert,
+    );
     ctx.insert(
         "form",
         &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
@@ -1878,8 +1884,12 @@ async fn handle_create_post(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
-    let (mut columns, mut values, mut errors) =
-        parse_form(state.schema, state.fields.as_deref(), &form);
+    let (mut columns, mut values, mut errors) = parse_form(
+        state.schema,
+        state.fields.as_deref(),
+        &form,
+        crate::core::WriteKind::Insert,
+    );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
@@ -1952,7 +1962,12 @@ async fn handle_update_get(
         };
         values.insert(k, s);
     }
-    let fields = form_fields(state.schema, state.fields.as_deref(), &values);
+    let fields = form_fields(
+        state.schema,
+        state.fields.as_deref(),
+        &values,
+        crate::core::WriteKind::Update,
+    );
     let mut ctx = Context::new();
     ctx.insert(
         "form",
@@ -1980,7 +1995,12 @@ async fn handle_update_post(
             state.schema.table
         ));
     };
-    let (columns, values, mut errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    let (columns, values, mut errors) = parse_form(
+        state.schema,
+        state.fields.as_deref(),
+        &form,
+        crate::core::WriteKind::Update,
+    );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers);
@@ -2019,12 +2039,13 @@ fn parse_form(
     schema: &'static ModelSchema,
     explicit: Option<&[String]>,
     submitted: &HashMap<String, String>,
+    kind: crate::core::WriteKind,
 ) -> (Vec<&'static str>, Vec<SqlValue>, HashMap<String, String>) {
     let mut columns: Vec<&'static str> = Vec::new();
     let mut values: Vec<SqlValue> = Vec::new();
     let mut errors: HashMap<String, String> = HashMap::new();
     for f in schema.fields {
-        if f.primary_key || f.auto || f.generated_as.is_some() {
+        if !f.accepts_input(kind) {
             continue;
         }
         if let Some(names) = explicit {
@@ -2134,6 +2155,14 @@ fn merge_validator_errors(
     }
 }
 
+fn write_kind(is_update: bool) -> crate::core::WriteKind {
+    if is_update {
+        crate::core::WriteKind::Update
+    } else {
+        crate::core::WriteKind::Insert
+    }
+}
+
 fn rerender_form(
     state: &FormViewState,
     submitted: &HashMap<String, String>,
@@ -2141,7 +2170,12 @@ fn rerender_form(
     is_update: bool,
     headers: &axum::http::HeaderMap,
 ) -> Response {
-    let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
+    let fields = form_fields(
+        state.schema,
+        state.fields.as_deref(),
+        submitted,
+        write_kind(is_update),
+    );
     let mut ctx = Context::new();
     ctx.insert(
         "form",
@@ -3638,7 +3672,12 @@ mod tenant {
         headers: axum::http::HeaderMap,
     ) -> Response {
         let mut ctx = Context::new();
-        let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
+        let fields = form_fields(
+            state.schema,
+            state.fields.as_deref(),
+            &HashMap::new(),
+            crate::core::WriteKind::Insert,
+        );
         ctx.insert(
             "form",
             &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
@@ -3657,8 +3696,12 @@ mod tenant {
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
-        let (mut columns, mut values, mut errors) =
-            parse_form(state.schema, state.fields.as_deref(), &form);
+        let (mut columns, mut values, mut errors) = parse_form(
+            state.schema,
+            state.fields.as_deref(),
+            &form,
+            crate::core::WriteKind::Insert,
+        );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
             return rerender_form_tenant(
@@ -3732,7 +3775,12 @@ mod tenant {
             };
             values.insert(k, s);
         }
-        let fields = form_fields(state.schema, state.fields.as_deref(), &values);
+        let fields = form_fields(
+            state.schema,
+            state.fields.as_deref(),
+            &values,
+            crate::core::WriteKind::Update,
+        );
         let mut ctx = Context::new();
         ctx.insert(
             "form",
@@ -3761,8 +3809,12 @@ mod tenant {
                 state.schema.table
             ));
         };
-        let (columns, values, mut errors) =
-            parse_form(state.schema, state.fields.as_deref(), &form);
+        let (columns, values, mut errors) = parse_form(
+            state.schema,
+            state.fields.as_deref(),
+            &form,
+            crate::core::WriteKind::Update,
+        );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
             return rerender_form_tenant(
@@ -3801,7 +3853,12 @@ mod tenant {
         is_update: bool,
         headers: &axum::http::HeaderMap,
     ) -> Response {
-        let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
+        let fields = form_fields(
+            state.schema,
+            state.fields.as_deref(),
+            submitted,
+            write_kind(is_update),
+        );
         let mut ctx = Context::new();
         ctx.insert(
             "form",
@@ -4483,9 +4540,41 @@ mod tests {
     fn form_fields_skips_pk_and_auto() {
         let s = schema_two_fields();
         let values = HashMap::new();
-        let ff = form_fields(s, None, &values);
+        let ff = form_fields(s, None, &values, crate::core::WriteKind::Insert);
         assert_eq!(ff.len(), 1);
         assert_eq!(ff[0].name, "title");
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "tv_tag")]
+    #[allow(dead_code)]
+    pub struct Tag {
+        #[rustango(primary_key, max_length = 32)]
+        pub slug: String,
+        #[rustango(max_length = 64)]
+        pub name: String,
+    }
+
+    /// CreateView renders and parses a natural PK; UpdateView does not (#1725).
+    #[test]
+    fn create_view_keeps_a_natural_pk() {
+        use crate::core::WriteKind;
+        let s = <Tag as crate::core::Model>::SCHEMA;
+        let names = |kind| -> Vec<&str> {
+            form_fields(s, None, &HashMap::new(), kind)
+                .iter()
+                .map(|f| f.name)
+                .collect()
+        };
+        assert_eq!(names(WriteKind::Insert), ["slug", "name"]);
+        assert_eq!(names(WriteKind::Update), ["name"]);
+        let submitted: HashMap<String, String> = [("slug", "go"), ("name", "Go")]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        let (cols, _, errors) = parse_form(s, None, &submitted, WriteKind::Insert);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cols, ["slug", "name"]);
     }
 
     /// `form_fields` populates `value` from the supplied row.
@@ -4494,7 +4583,7 @@ mod tests {
         let s = schema_two_fields();
         let mut values = HashMap::new();
         values.insert("title".to_owned(), "Hello".to_owned());
-        let ff = form_fields(s, None, &values);
+        let ff = form_fields(s, None, &values, crate::core::WriteKind::Insert);
         assert_eq!(ff[0].value, "Hello");
     }
 
@@ -4855,7 +4944,7 @@ mod tests {
     fn parse_form_flags_required_missing() {
         let s = schema_two_fields();
         let submitted = HashMap::new();
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
         assert!(cols.is_empty());
         assert!(vals.is_empty());
         assert_eq!(errors.len(), 1);
@@ -4869,7 +4958,7 @@ mod tests {
         let s = schema_two_fields();
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "Hello".to_owned());
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
         assert!(errors.is_empty());
         assert_eq!(cols, vec!["title"]);
         assert_eq!(vals.len(), 1);
@@ -4903,7 +4992,7 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "way too long".to_owned()); // 12 > 5
         submitted.insert("score".to_owned(), "50".to_owned());
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
         assert!(cols.is_empty() || !cols.contains(&"title"));
         assert!(
             vals.is_empty() || vals.len() == 1,
@@ -4925,7 +5014,7 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "ok".to_owned());
         submitted.insert("score".to_owned(), "150".to_owned()); // > 100
-        let (_, _, errors) = parse_form(s, None, &submitted);
+        let (_, _, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
         let score_err = errors.get("score").expect("score error present");
         assert!(
             score_err.contains("100") && score_err.contains("150"),

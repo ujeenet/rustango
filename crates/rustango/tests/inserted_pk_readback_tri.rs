@@ -70,7 +70,9 @@ async fn setup(pool: &Pool) {
 
 async fn model_form_returns_the_written_pk(pool: &Pool) {
     let data = HashMap::from([("name".to_owned(), "Rust".to_owned())]);
+    // A natural PK is form input since #1725; a server-set one is excluded.
     let mut prep = ModelForm::new(Tag::SCHEMA, data.clone())
+        .exclude(&["slug"])
         .prepare_save()
         .expect("valid");
     prep.set("slug", "rust");
@@ -79,6 +81,7 @@ async fn model_form_returns_the_written_pk(pool: &Pool) {
 
     let uuid = uuid::Uuid::parse_str(UUID_A).unwrap();
     let mut prep = ModelForm::new(Token::SCHEMA, data)
+        .exclude(&["id"])
         .prepare_save()
         .expect("valid");
     prep.set("id", uuid);
