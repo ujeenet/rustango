@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `Cli::with_welcome()` / `with_health()` work on manage-only builds (#2013)
+
+Both are gated on `_http_layers` instead of `admin`, so the `api` template's `/` and `/health` mount.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)

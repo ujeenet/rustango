@@ -997,15 +997,15 @@ impl Cli {
         for (path, build) in std::mem::take(&mut self.nested) {
             api = api.nest(&path, build(pool.clone().into()));
         }
-        #[cfg(feature = "admin")]
+        // `_http_layers`, not `admin`: the manage-only `api` template calls
+        // `.with_welcome()` / `.with_health()` too (#2013).
+        #[cfg(feature = "_http_layers")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
             api
         };
-        // `crate::health` is gated on `admin` rather than on a backend
-        // (#1208), so the merge is too — but it is now the only one.
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         let api = if self.health_endpoints {
             api.merge(crate::health::health_router(pool.clone()))
         } else {
@@ -1295,7 +1295,7 @@ impl Cli {
         // `take` rather than a move: `mount_observability` below needs
         // `&self`, and moving the field out would partially move `self`.
         let api = std::mem::take(&mut self.api);
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
@@ -1363,7 +1363,7 @@ impl Cli {
         // `take` rather than a move: `mount_observability` below needs
         // `&self`, and moving the field out would partially move `self`.
         let api = std::mem::take(&mut self.api);
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
@@ -1453,7 +1453,7 @@ impl Default for Cli {
 /// surfaces as a `tracing::warn!` instead of a process abort.
 /// `Router` implements `UnwindSafe` so the catch is sound; the
 /// fallback returns the original router unchanged.
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 fn try_mount_welcome(api: Router) -> Router {
     let api_for_probe = api.clone();
     // v0.37 (#5) — axum's `Router::merge` panics with "Overlapping
@@ -2665,6 +2665,28 @@ mod observability_without_admin_tests {
         let flagged = crate::admin::ungated_admin_built();
         crate::admin::reset_ungated_admin_built();
         assert!(flagged, "the nested admin was never built for the audit");
+    }
+
+    /// #2013 — `.with_welcome()` / `.with_health()` mount on a manage-only build.
+    #[tokio::test]
+    async fn welcome_and_health_mount_without_admin() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().with_welcome().with_health().assemble_app(pool);
+        for path in ["/", "/health"] {
+            let res = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .expect("request");
+            assert_eq!(
+                res.status(),
+                axum::http::StatusCode::OK,
+                "{path} not mounted"
+            );
+        }
     }
 
     /// `nest_with` builds its router from the serving pool, at assembly.
