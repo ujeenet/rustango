@@ -885,7 +885,8 @@ impl<DB: Database> Builder<DB> {
             // rules and why they live in one place.
             crate::access_log::mount_observability(app, access_log, redact)
         } else {
-            app
+            // A panic is a 500 with or without observability (#1541).
+            crate::panic_guard::catch_panics(app)
         };
         #[cfg(feature = "admin")]
         let app = match self.real_ip {

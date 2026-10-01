@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a panicking handler is a logged 500, not a dropped connection (#1541)
+
+`Cli` and `server::Builder` catch handler panics: an opaque 500 with the request id, logged under `rustango::error`. The oauth2 login no longer panics on a bad header value.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

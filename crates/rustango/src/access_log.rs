@@ -204,8 +204,8 @@ impl AccessLogLayer {
 /// ```text
 ///   TracingLayer   outermost — opens the span
 ///     access_log   inside it, so its line inherits the span
-///       request_id innermost — runs with the span current, so
-///                  `record` lands on it
+///       request_id runs with the span current, so `record` lands on it
+///         catch_panics innermost — a panic becomes a logged 500
 ///       handler
 /// ```
 ///
@@ -236,6 +236,8 @@ pub(crate) fn mount_observability(
     // access_log = false` silently narrowed an `[audit]` setting
     // and a configured param was logged in clear text (#1610).
     let span = crate::tracing_layer::TracingLayer::new().redact(redact);
+    // Innermost, so a panic is a 500 the request id and access log see.
+    let router = crate::panic_guard::catch_panics(router);
     let router = router.request_id(crate::request_id::RequestIdLayer::default());
     let router = match access_log {
         Some(l) => router.access_log(l),
@@ -742,6 +744,53 @@ mod observability_mount_tests {
             "`access_log = false` stripped the request span: a handler event rendered \
              with no span context, so it carries no method, path, tenant or request \
              id. That setting names the log, not the trace context.\n{out}"
+        );
+    }
+
+    /// A panicking handler answers an opaque 500 carrying the request
+    /// id, and the panic is logged with that id (#1541).
+    #[tokio::test]
+    async fn a_panicking_handler_is_a_logged_500() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let app = mount_observability(
+            Router::new().route(
+                "/",
+                get(|| async {
+                    if std::hint::black_box(true) {
+                        panic!("boom-1541");
+                    }
+                    "unreachable"
+                }),
+            ),
+            Some(AccessLogLayer::default()),
+            default_redact_params(),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-request-id", "rid-1541")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.headers()["x-request-id"], "rid-1541");
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], crate::error::OPAQUE_SERVER_ERROR.as_bytes());
+        let out = buf.contents();
+        assert!(
+            out.contains("handler panicked")
+                && out.contains("boom-1541")
+                && out.contains("rid-1541"),
+            "the panic was not logged with its request id:\n{out}"
         );
     }
 

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Handler panics are caught (#1541)
+
+`Cli` and `server::Builder` turn a panic into a 500 with body `internal server error`; a panic hook you rely on still runs.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
