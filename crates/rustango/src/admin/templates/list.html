@@ -21,6 +21,9 @@
 {% elif can_add %}
   &nbsp;&middot;&nbsp; <a href="{{ admin_prefix }}/{{ model.table }}/new">+ new {{ model.label | default(value=model.name) }}</a>
 {% endif %}
+{% if trash_toggle_url %}
+  &nbsp;&middot;&nbsp; <a class="trash-toggle" href="{{ trash_toggle_url | safe }}">{% if trashed %}Show live rows{% else %}Show deleted rows{% endif %}</a>
+{% endif %}
 </p>
 
 {% if date_hierarchy %}
@@ -98,7 +101,7 @@
         <td class="checkbox-col">{% if row.pk %}<input type="checkbox" name="_selected" value="{{ row.pk }}">{% endif %}</td>
         {% endif %}
         {% for cell in row.cells %}<td>{{ cell | safe }}</td>{% endfor %}
-        <td>{% if row.pk %}<a href="{{ admin_prefix }}/{{ model.table }}/{{ row.pk }}">View</a>{% endif %}</td>
+        <td>{% if row.pk and not trashed %}<a href="{{ admin_prefix }}/{{ model.table }}/{{ row.pk }}">View</a>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

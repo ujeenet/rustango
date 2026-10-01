@@ -154,6 +154,11 @@ untouched.
 
 A tenant user can no longer set a new password shorter than 8 characters (counted as characters, not bytes).
 
+### Admin hides soft-deleted rows (#1918)
+
+A `#[rustango(soft_delete)]` row no longer shows in the admin once deleted; its detail page is a 404.
+Use the list's "Show deleted rows" link (`?trashed=1`) to see and restore them. `trashed` is now a reserved list param.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

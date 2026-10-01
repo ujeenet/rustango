@@ -1,5 +1,6 @@
-//! Admin list paging order, filter-keeping links, the mounted prefix and
-//! bool checkboxes on every backend (#1917 #1916 #1765 #1730).
+//! Admin list paging order, filter-keeping links, the mounted prefix,
+//! bool checkboxes and soft-deleted rows on every backend
+//! (#1917 #1916 #1765 #1730 #1918).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -26,7 +27,7 @@ const PREFIX: &str = "/adm";
         list_per_page = 2,
         ordering = "rank",
         date_hierarchy = "made_on",
-        actions = "delete_selected"
+        actions = "delete_selected, restore_selected"
     )
 )]
 #[allow(dead_code)]
@@ -38,6 +39,8 @@ pub struct Item {
     pub flag: bool,
     pub rank: i64,
     pub made_on: chrono::NaiveDate,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn kind_filters(value: &str) -> Vec<Filter> {
@@ -55,21 +58,31 @@ rustango::register_admin_list_filter!(
 );
 
 async fn get(pool: &Pool, uri: &str) -> String {
+    let (status, body) = send(pool, Request::builder().uri(uri), Body::empty()).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    body
+}
+
+async fn post(pool: &Pool, uri: &str, form: &str) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/x-www-form-urlencoded");
+    send(pool, req, Body::from(form.to_owned())).await.0
+}
+
+async fn send(pool: &Pool, req: axum::http::request::Builder, body: Body) -> (StatusCode, String) {
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix(PREFIX)
         .build();
-    let res = app
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let res = app.oneshot(req.body(body).unwrap()).await.unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     // Tera escapes `/` in `{{ admin_prefix }}`; undo it to read hrefs.
     let body = String::from_utf8_lossy(&bytes)
         .replace("&#x2F;", "/")
         .replace("&amp;", "&");
-    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
-    body
+    (status, body)
 }
 
 async fn seed(pool: &Pool, title: &str, flag: bool) -> i64 {
@@ -83,6 +96,7 @@ async fn seed_item(pool: &Pool, title: &str, flag: bool) -> Item {
         flag,
         rank: 0,
         made_on: chrono::NaiveDate::from_ymd_opt(2024, 3, 9).unwrap(),
+        deleted_at: None,
     };
     item.insert_pool(pool).await.expect("insert");
     item
@@ -262,6 +276,50 @@ async fn bool_facet_reads_true_and_toggles_off(pool: &Pool) {
     assert!(!links.iter().any(|l| l.contains("flag=1")), "{links:?}");
 }
 
+/// A soft-deleted row leaves the list, its count and its detail page;
+/// `?trashed=1` lists it and `restore_selected` brings it back.
+async fn soft_deleted_rows_leave_the_list(pool: &Pool) {
+    seed(pool, "alive-row", true).await;
+    let gone = seed(pool, "gone-row", true).await;
+    let redirect = post(pool, &format!("/adminls_item/{gone}/delete"), "").await;
+    assert!(redirect.is_redirection(), "{redirect}");
+
+    let body = get(pool, "/adminls_item").await;
+    assert!(
+        body.contains("alive-row") && !body.contains("gone-row"),
+        "{body}"
+    );
+    assert!(
+        body.contains("1 row"),
+        "count includes the deleted row: {body}"
+    );
+    let detail = format!("/adminls_item/{gone}");
+    let (status, _) = send(pool, Request::builder().uri(&detail), Body::empty()).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "deleted row has a detail page"
+    );
+
+    let trash = get(pool, "/adminls_item?trashed=1").await;
+    assert!(
+        trash.contains("gone-row") && !trash.contains("alive-row"),
+        "{trash}"
+    );
+    let restored = post(
+        pool,
+        "/adminls_item/__action",
+        &format!("action=restore_selected&_selected={gone}"),
+    )
+    .await;
+    assert!(restored.is_redirection(), "{restored}");
+    let body = get(pool, "/adminls_item").await;
+    assert!(
+        body.contains("gone-row"),
+        "restore did not bring it back: {body}"
+    );
+}
+
 tri_dialect_test! {
     model: Item,
     scenarios: [
@@ -271,5 +329,6 @@ tri_dialect_test! {
         action_form_posts_under_the_prefix,
         edit_form_checks_a_true_bool,
         bool_facet_reads_true_and_toggles_off,
+        soft_deleted_rows_leave_the_list,
     ],
 }

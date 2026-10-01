@@ -9,6 +9,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 The bare admin counted bytes and the tenant admin had no minimum. Both, and the operator
 console, now call `password_validators::check_builtin_form_password`.
 
+### Fixed — admin hides soft-deleted rows (#1918)
+
+Lists, counts, facets, detail/edit/delete pages, actions and inlines skip rows with the soft-delete
+column set. `?trashed=1` lists them, and `restore_selected` acts only on them.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

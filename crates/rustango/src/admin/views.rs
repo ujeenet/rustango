@@ -227,6 +227,8 @@ const RESERVED_PARAMS: &[&str] = &[
     "year",
     "month",
     "day",
+    // `trashed=1` lists the soft-deleted rows (#1918).
+    "trashed",
 ];
 
 /// Default cap on how many values one facet shows. Keeps the right
@@ -312,7 +314,13 @@ pub(crate) async fn table_view(
 
     // Queryset hooks only add WHERE conjuncts, so they compose with
     // search, facets, the date hierarchy and pagination.
-    let scope = RowScope::of(model.table, &parts);
+    let trashed = model.soft_delete_column.is_some()
+        && params.get("trashed").map(String::as_str) == Some("1");
+    let scope = if trashed {
+        RowScope::trashed(model, &parts)
+    } else {
+        RowScope::of(model, &parts)
+    };
     filters.extend(scope.filters().iter().cloned());
 
     // Date hierarchy. With `admin(date_hierarchy = "field")` set and
@@ -583,7 +591,8 @@ pub(crate) async fn table_view(
             };
             // A detail URL needs a pk. Rows without one keep plain
             // cell content.
-            let detail_href = pk.as_deref().map(|pk_str| {
+            // A trashed row has no detail page.
+            let detail_href = pk.as_deref().filter(|_| !trashed).map(|pk_str| {
                 format!(
                     "{prefix}/{table}/{pk_str}",
                     prefix = state.config.admin_prefix,
@@ -655,6 +664,9 @@ pub(crate) async fn table_view(
         if let Some(v) = params.get(key).filter(|v| !v.is_empty()) {
             list_query.push(key, v.clone());
         }
+    }
+    if trashed {
+        list_query.push("trashed", "1");
     }
     let pager_suffix_str = list_query.suffix();
     let hidden_params: Vec<serde_json::Value> = list_query
@@ -776,6 +788,12 @@ pub(crate) async fn table_view(
         // guard simply renders no pager.
         "count_skipped": count_skipped,
         "has_next": has_next_skipped,
+        "trashed": trashed,
+        "trash_toggle_url": model.soft_delete_column.map(|_| if trashed {
+            list_query.without(&["trashed", "page"]).url()
+        } else {
+            list_query.without(&["page"]).with("trashed", "1").url()
+        }),
     });
     Ok(Html(render_with_chrome(
         "list.html",
@@ -1519,7 +1537,7 @@ pub(crate) async fn autocomplete_view(
     let rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
-            where_clause: RowScope::of(model.table, &parts).constrain(WhereExpr::And(Vec::new())),
+            where_clause: RowScope::of(model, &parts).constrain(WhereExpr::And(Vec::new())),
             search,
             order_by: vec![crate::core::OrderItem::column(display_field.column, false)],
             limit: Some(limit),
@@ -1566,7 +1584,7 @@ pub(crate) async fn detail_view(
         &state.pool,
         &SelectQuery {
             joins: build_fk_joins(&state, model),
-            ..RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone())
+            ..RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone())
         },
         &detail_fields,
     )
@@ -1986,7 +2004,7 @@ pub(crate) async fn edit_form(
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
+        &RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &edit_fields,
     )
     .await?
@@ -2072,7 +2090,7 @@ pub(crate) async fn update_submit(
     let pre_update_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let pre_update_row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
+        &RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &pre_update_fields,
     )
     .await?;
@@ -2213,7 +2231,7 @@ pub(crate) async fn delete_submit(
     let delete_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let before_row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
+        &RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &delete_fields,
     )
     .await?;
@@ -2387,7 +2405,13 @@ pub(crate) async fn action_submit(
     let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let mut before_rows = crate::sql::select_rows_as_json(
         &state.pool,
-        &RowScope::of(model.table, &parts).by_pk_in(model, pk_field.column, pk_values.clone()),
+        // Only `restore_selected` acts on soft-deleted rows.
+        &if action == "restore_selected" {
+            RowScope::trashed(model, &parts)
+        } else {
+            RowScope::of(model, &parts)
+        }
+        .by_pk_in(model, pk_field.column, pk_values.clone()),
         &action_fields,
     )
     .await?;
