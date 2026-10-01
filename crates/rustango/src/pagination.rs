@@ -900,9 +900,13 @@ impl<'a> Page<'a> {
         self.number * self.paginator.per_page
     }
 
-    /// SQL `LIMIT` value for this page. Equals `per_page`.
+    /// SQL `LIMIT` value for this page: `per_page`, or the rest of the
+    /// rows on the last page, which can be larger with `orphans`.
     #[must_use]
     pub fn limit(&self) -> usize {
+        if self.paginator.count > 0 && self.number == self.paginator.num_pages() {
+            return self.paginator.count - self.offset();
+        }
         self.paginator.per_page
     }
 
@@ -1336,6 +1340,18 @@ mod paginator_tests {
         let page = p.page(3).unwrap();
         assert_eq!(page.limit(), 20);
         assert_eq!(page.offset(), 40); // (3-1) * 20
+    }
+
+    /// The last page fetches the rows `orphans` rolled into it (#1917).
+    #[test]
+    fn limit_covers_orphans_on_the_last_page() {
+        let items: Vec<i32> = (1..=23).collect();
+        let p = Paginator::new(items.len(), 10).orphans(3);
+        assert_eq!(p.num_pages(), 2);
+        let last = p.page(2).unwrap();
+        assert_eq!((last.offset(), last.limit()), (10, 13));
+        assert_eq!(last.slice(&items), &items[10..]);
+        assert_eq!(p.page(1).unwrap().limit(), 10);
     }
 
     // ---------- Page::slice (in-memory paging) ----------

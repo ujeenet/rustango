@@ -4,6 +4,25 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)
+
+A bool facet showed `1`/`0`, linked `?flag=1` and never marked the active value on SQLite/MySQL.
+Edit-form and list cells now read a numeric bool as checked/unchecked, not empty.
+
+### Fixed — admin bulk actions post under the admin prefix (#1765)
+
+The list's action form no longer posts to `/{table}/__action`, which 404ed under a prefix.
+
+### Fixed — admin links keep the whole filter state and the admin prefix (#1916)
+
+Pager, facet, date and custom-filter links and the search form keep every active filter,
+the date drill and `count=skip`. Audit feed, FK cell, generic-FK and 403 sign-out links use the prefix.
+
+### Fixed — admin and `ListView` paging is stable; `orphans` keeps the last rows (#1917)
+
+Admin lists order by `admin.ordering`, else the model's `default_order`, and both they and
+`ListView` end on the PK. `Page::limit()` on an orphan-merged last page now covers every row.
+
 ## [0.59.12] — 2026-10-01
 
 ### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)

@@ -46,7 +46,7 @@
 <form method="get" action="{{ admin_prefix }}/{{ model.table }}" class="search">
   <input type="search" name="q" value="{{ q }}" placeholder="Search&hellip;">
   <button type="submit" class="btn btn-secondary">Go</button>
-  {% for f in active_filters %}
+  {% for f in hidden_params %}
     <input type="hidden" name="{{ f.key }}" value="{{ f.value }}">
   {% endfor %}
   {% if search_help_text %}<small class="search-help">{{ search_help_text }}</small>{% endif %}
@@ -57,14 +57,14 @@
 <p class="active-filters">filtered by:
   {% if q %}<code>q={{ q }}</code> {% endif %}
   {% for f in active_filters %}<code>{{ f.key }}={{ f.value }}</code> {% endfor %}
-  &middot; <a href="/{{ model.table }}">clear</a>
+  &middot; <a href="{{ admin_prefix }}/{{ model.table }}">clear</a>
 </p>
 {% endif %}
 
 {% if rows | length == 0 %}
 <p><em>No rows on this page.</em></p>
 {% else %}
-<form method="post" action="/{{ model.table }}/__action" class="list-form">
+<form method="post" action="{{ admin_prefix }}/{{ model.table }}/__action" class="list-form">
   {{ csrf_input | safe }}
   {% if actions and actions | length > 0 and not read_only and actions_on_top %}
   <div class="action-bar action-bar-top">

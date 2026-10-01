@@ -54,6 +54,12 @@ pub(crate) fn coerce_form_to_json(field: &FieldSchema, raw: &str) -> serde_json:
     }
 }
 
+/// A bool cell: JSON `true`/`false`, or the `1`/`0` SQLite and MySQL
+/// store when a row reaches JSON without the typed decode (#1730).
+fn json_bool(v: &serde_json::Value) -> Option<bool> {
+    v.as_bool().or_else(|| v.as_i64().map(|n| n != 0))
+}
+
 /// Backend-agnostic counterpart of [`render_value_for_input`]. Takes
 /// a `serde_json::Value` instead of a `PgRow` — call sites that fetch
 /// rows via the ORM (`Model::objects().fetch` then
@@ -75,8 +81,7 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
             .as_f64()
             .map(|n| n.to_string())
             .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
-        FieldType::Bool => v
-            .as_bool()
+        FieldType::Bool => json_bool(v)
             .map(|b| b.to_string())
             .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
         FieldType::String | FieldType::Uuid => v.as_str().unwrap_or("").to_owned(),
@@ -488,7 +493,7 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
     }
     let v = v.unwrap();
     match field.ty {
-        FieldType::Bool => match v.as_bool() {
+        FieldType::Bool => match json_bool(v) {
             Some(true) => r#"<span class="rcms-bool yes" aria-label="true">☑</span>"#.to_owned(),
             _ => r#"<span class="rcms-bool no" aria-label="false">☐</span>"#.to_owned(),
         },
@@ -596,7 +601,7 @@ pub(crate) fn read_joined_value_as_html_json(
     let text: Option<String> = match field.ty {
         FieldType::I16 | FieldType::I32 | FieldType::I64 => v.as_i64().map(|n| n.to_string()),
         FieldType::F32 | FieldType::F64 => v.as_f64().map(|n| n.to_string()),
-        FieldType::Bool => v.as_bool().map(|b| b.to_string()),
+        FieldType::Bool => json_bool(v).map(|b| b.to_string()),
         FieldType::String
         | FieldType::Uuid
         | FieldType::Date
@@ -650,7 +655,7 @@ pub(crate) fn read_value_as_json_from_json(
             v.as_i64().map(Value::from).unwrap_or(v)
         }
         FieldType::F32 | FieldType::F64 => v.as_f64().map(Value::from).unwrap_or(v),
-        FieldType::Bool => v.as_bool().map(Value::from).unwrap_or(v),
+        FieldType::Bool => json_bool(&v).map(Value::from).unwrap_or(v),
         _ => v,
     }
 }
@@ -748,6 +753,38 @@ mod tests {
             read_value_as_string_json(&row, &field("active", "active", FieldType::Bool)),
             None
         );
+    }
+
+    /// A `1`/`0` bool checks and unchecks the box like `true`/`false` (#1730).
+    #[test]
+    fn integer_bool_renders_as_a_checkbox_value() {
+        let f = field("flag", "flag", FieldType::Bool);
+        for (v, want) in [
+            (json!(1), "true"),
+            (json!(0), "false"),
+            (json!(true), "true"),
+        ] {
+            let row = json!({ "flag": v });
+            assert_eq!(render_value_for_input_json(&row, &f), want);
+        }
+        assert!(render_value_json(&json!({ "flag": 1 }), &f).contains("yes"));
+    }
+
+    /// Joined and JSON-read bool cells turn `1`/`0` into `true`/`false` (#1730).
+    #[test]
+    fn integer_bool_reads_as_a_bool_in_joined_and_json_cells() {
+        let f = field("flag", "flag", FieldType::Bool);
+        for (v, want) in [(json!(1), true), (json!(0), false), (json!(true), true)] {
+            let joined = json!({ "a__flag": v.clone() });
+            assert_eq!(
+                read_joined_value_as_html_json(&joined, "a", &f).as_deref(),
+                Some(if want { "true" } else { "false" })
+            );
+            assert_eq!(
+                read_value_as_json_from_json(&json!({ "flag": v }), &f),
+                json!(want)
+            );
+        }
     }
 
     #[test]

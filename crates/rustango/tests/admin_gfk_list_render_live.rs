@@ -185,7 +185,7 @@ async fn list_view_renders_gfk_pair_as_single_clickable_cell() {
         "GFK column header missing: {html}"
     );
     // Comment 1 → Post link.
-    let post_link = format!(r#"<a href="/gfklist_post/{post_pk}">"#);
+    let post_link = format!(r#"<a href="/__admin/gfklist_post/{post_pk}">"#);
     assert!(
         html.contains(&post_link),
         "Post link missing for comment 1: looked for `{post_link}` in: {html}"
@@ -195,7 +195,7 @@ async fn list_view_renders_gfk_pair_as_single_clickable_cell() {
         "Post label missing: {html}"
     );
     // Comment 2 → Article link.
-    let article_link = format!(r#"<a href="/gfklist_article/{article_pk}">"#);
+    let article_link = format!(r#"<a href="/__admin/gfklist_article/{article_pk}">"#);
     assert!(
         html.contains(&article_link),
         "Article link missing for comment 2: looked for `{article_link}` in: {html}"

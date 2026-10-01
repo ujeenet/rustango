@@ -1161,8 +1161,8 @@ pub struct AdminConfig {
     pub search_fields: &'static [&'static str],
     /// Page size on the list view. `0` uses the admin default of 50.
     pub list_per_page: usize,
-    /// List-view ordering, as `(field_name, desc)` pairs. An empty
-    /// slice sorts by primary key ascending.
+    /// List-view ordering, as `(field_name, desc)` pairs. An empty slice
+    /// uses the model's `default_order`; the PK always breaks ties.
     pub ordering: &'static [(&'static str, bool)],
     /// Field names the edit form renders as locked inputs. The admin
     /// also leaves them out of the values it writes back.
@@ -1348,6 +1348,21 @@ impl ModelSchema {
     #[must_use]
     pub fn primary_key(&self) -> Option<&'static FieldSchema> {
         self.fields.iter().find(|f| f.primary_key)
+    }
+
+    /// `order` plus each primary-key column it lacks, ascending, so rows
+    /// tied on the sort keys come back in the same order on every page.
+    #[must_use]
+    pub(crate) fn with_pk_tiebreak(
+        &self,
+        mut order: Vec<super::OrderItem>,
+    ) -> Vec<super::OrderItem> {
+        for pk in self.fields.iter().filter(|f| f.primary_key) {
+            if !order.iter().any(|o| o.column_name() == Some(pk.column)) {
+                order.push(super::OrderItem::column(pk.column, false));
+            }
+        }
+        order
     }
 
     /// Iterator over all scalar (column-backed) fields.
