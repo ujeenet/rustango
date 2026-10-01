@@ -1156,11 +1156,36 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
     if authority.is_empty() {
         return None;
     }
-    Some(match query {
-        Some(q) => format!("{scheme}://{authority}/{database}?{q}"),
-        None => format!("{scheme}://{authority}/{database}"),
+    // Only TLS keys carry over: sqlx lets `dbname`/`host`/`user` in the
+    // query override the URL, so keeping them could point at the registry.
+    let tls: Vec<&str> = query
+        .unwrap_or("")
+        .split('&')
+        .filter(|chunk| {
+            let key = chunk.split_once('=').map_or(*chunk, |(k, _)| k);
+            TLS_QUERY_KEYS.contains(&crate::url_codec::url_decode(key).as_str())
+        })
+        .collect();
+    Some(if tls.is_empty() {
+        format!("{scheme}://{authority}/{database}")
+    } else {
+        format!("{scheme}://{authority}/{database}?{}", tls.join("&"))
     })
 }
+
+/// The TLS query keys sqlx 0.8 reads for Postgres and MySQL.
+const TLS_QUERY_KEYS: &[&str] = &[
+    "sslmode",
+    "ssl-mode",
+    "sslrootcert",
+    "ssl-root-cert",
+    "sslca",
+    "ssl-ca",
+    "sslcert",
+    "ssl-cert",
+    "sslkey",
+    "ssl-key",
+];
 
 /// Scheme + host + port + database, lowercased, credentials and query
 /// dropped. Two URLs naming the same database compare equal even when
@@ -1173,13 +1198,26 @@ fn endpoint_identity(url: &str) -> String {
     // Drop userinfo (everything before the last `@` of the authority).
     let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
     // Drop the query string: `?mode=rwc` does not change which database
-    // this is.
-    let rest = rest.split_once('?').map_or(rest, |(before, _)| before);
-    format!(
-        "{}://{}",
-        scheme.to_ascii_lowercase(),
-        rest.to_ascii_lowercase()
-    )
+    // this is. A Postgres `dbname=` does, and sqlx lets it win over the path.
+    let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let scheme = scheme.to_ascii_lowercase();
+    let dbname = if matches!(scheme.as_str(), "postgres" | "postgresql") {
+        crate::urls::parse_query_pairs(query)
+            .into_iter()
+            .rev()
+            .find(|(k, _)| k == "dbname")
+            .map(|(_, v)| v)
+    } else {
+        None
+    };
+    let rest = match dbname {
+        Some(db) => {
+            let authority = rest.split_once('/').map_or(rest, |(a, _)| a);
+            format!("{authority}/{db}")
+        }
+        None => rest.to_owned(),
+    };
+    format!("{scheme}://{}", rest.to_ascii_lowercase())
 }
 
 /// The schema a schema-mode tenant lives in: whatever the request
@@ -1781,6 +1819,47 @@ mod validation_tests {
             );
         }
         assert!(tenant_url_on_registry_server("postgres://db?sslrootcert=/ca.pem", "t").is_none());
+    }
+
+    /// sqlx reads `dbname`/`password`/`host` from the query and lets it
+    /// win, so a kept non-TLS key would aim tenant migrations elsewhere.
+    #[test]
+    fn a_server_url_drops_every_non_tls_query_key() {
+        for (registry, want) in [
+            (
+                "postgres://app@db:5432/reg?dbname=reg",
+                "postgres://app@db:5432/tenant_acme",
+            ),
+            (
+                "postgres://app@db:5432/reg?password=s3cret&sslmode=require",
+                "postgres://app@db:5432/tenant_acme?sslmode=require",
+            ),
+            (
+                "mysql://app@db:3306/reg?ssl-ca=/ca.pem&socket=/tmp/x",
+                "mysql://app@db:3306/tenant_acme?ssl-ca=/ca.pem",
+            ),
+        ] {
+            let derived = tenant_url_on_registry_server(registry, "tenant_acme");
+            assert_eq!(derived.as_deref(), Some(want), "registry `{registry}`");
+            assert!(refuse_registry_url(&derived.unwrap(), registry).is_ok());
+        }
+    }
+
+    /// A tenant URL whose `dbname=` names the registry is the registry.
+    #[test]
+    fn a_dbname_query_naming_the_registry_is_refused() {
+        let registry = "postgres://app:pw@db:5432/reg";
+        for tenant in [
+            "postgres://other@db:5432/tenant_acme?dbname=reg",
+            "postgres://db:5432?dbname=reg",
+            "postgresql://db:5432/x?dbname=t&dbname=reg",
+        ] {
+            assert!(
+                refuse_registry_url(tenant, registry).is_err(),
+                "`{tenant}` names the registry"
+            );
+        }
+        assert!(refuse_registry_url("postgres://db:5432/reg?dbname=t", registry).is_ok());
     }
 
     /// sqlite has no server, so the sibling is a file in the registry
