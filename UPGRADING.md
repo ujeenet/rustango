@@ -159,6 +159,10 @@ untouched.
 `validate_email` no longer trims: `" a@b.com"` fails, so trim before saving. A missing nullable `Option<bool>` form or JSON key saves `NULL`, not `false`.
 `timesince(.., depth)` drops units after an empty one: a year and three days is `"1 year"`.
 
+### `plural_category` can return `"zero"` and `"two"` (#1921)
+
+Arabic, Hebrew and Slovenian now use those CLDR categories; add the forms to plural catalogs (a missing form falls back to `"other"`). `Locale::as_str` turns `_` into `-`.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
