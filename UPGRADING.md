@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Tenant admin change-password needs 8 characters (#1874)
+
+A tenant user can no longer set a new password shorter than 8 characters (counted as characters, not bytes).
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

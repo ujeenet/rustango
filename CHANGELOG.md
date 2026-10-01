@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — change-password forms share one 8-character rule (#1874)
+
+The bare admin counted bytes and the tenant admin had no minimum. Both, and the operator
+console, now call `password_validators::check_builtin_form_password`.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

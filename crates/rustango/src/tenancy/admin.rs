@@ -1390,6 +1390,9 @@ async fn change_password_submit(
     if form.new_password == form.current_password {
         return redir_err("New password must differ from the current password.");
     }
+    if let Err(e) = crate::password_validators::check_builtin_form_password(&form.new_password) {
+        return redir_err(&e.message);
+    }
     if user_id <= 0 {
         return redir_err("Session is missing a user id; please log in again.");
     }

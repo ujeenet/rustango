@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use rustango::sql::{sqlx, Auto};
+use rustango::sql::{sqlx, Auto, FetcherPool as _};
 use rustango::tenancy::tenant_console::{
     encode, PasswordFingerprint, SessionSecret, TenantSessionPayload, COOKIE_NAME,
 };
@@ -248,5 +248,58 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
         env.get("/__admin/", &imp_cookie).await.status(),
         StatusCode::SEE_OTHER,
         "the impersonation session must end with the operator's password"
+    );
+}
+
+/// The tenant change-password form applies the shared 8-character rule (#1874).
+#[tokio::test]
+async fn a_short_new_password_is_refused_by_the_tenant_admin() {
+    let env = boot().await;
+    let mut user = User {
+        is_superuser: true,
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&env.tenant).await.expect("seed user");
+    let uid = user.id.get().copied().unwrap();
+    let login = TenantSessionPayload::new(
+        uid,
+        &env.slug,
+        3600,
+        PasswordFingerprint::of(&env.secret, &user.password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&env.secret, &login));
+    let res = env
+        .admin
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/__change-password")
+                .header(header::HOST, &env.host)
+                .header(header::COOKIE, format!("rustango_csrf=t; {cookie}"))
+                .header("x-csrf-token", "t")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "current_password=first-password&new_password=abc&confirm_password=abc",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let location = res
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        location.contains("error=") && location.contains("8"),
+        "got {location}"
+    );
+    let stored: Vec<User> = User::objects().fetch(&env.tenant).await.unwrap();
+    assert!(
+        rustango::tenancy::password::verify("first-password", &stored[0].password_hash).unwrap(),
+        "the short password must not be stored"
     );
 }
