@@ -78,6 +78,12 @@ A refused or no-op action sends none.
 HTML `CreateView` and `ModelForm` inserts now take a client-supplied PK (never on update), via one
 `FieldSchema::accepts_input` rule. Schema-driven INSERTs, admin create included, fill `default_uuid_v7` keys and skip `generated_as` columns.
 
+### Security — logout revokes signed sessions server-side (#1855)
+
+Logout on the tenant admin, operator console and bare admin stamps a new `sessions_revoked_at` column, and every
+session check refuses cookies issued at or before it; `member_auth::logout` does the same for members.
+A logout that cannot read the user is a 500; an impersonation handoff from before the operator's logout is refused.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

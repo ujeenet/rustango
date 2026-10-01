@@ -230,6 +230,27 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
     let auth = authenticate_user(&mut conn, &user, "wrong").await.unwrap();
     assert!(auth.is_none());
 
+    // The session cut-offs come back, so a login's `iat` can land after them (#1855).
+    let at = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 60, 0).unwrap();
+    {
+        use rustango::sql::UpdaterPool as _;
+        let scoped = rustango::sql::Pool::Postgres(pools.scoped_pool(&org).await.unwrap());
+        rustango::tenancy::User::objects()
+            .filter("username", user.clone())
+            .update()
+            .set("sessions_revoked_at", at)
+            .set("password_changed_at", at)
+            .execute_pool(&scoped)
+            .await
+            .unwrap();
+    }
+    let u = authenticate_user(&mut conn, &user, "hunter2")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(u.sessions_revoked_at, Some(at));
+    assert_eq!(u.password_changed_at, Some(at));
+
     drop_schema(&pool, &slug).await;
     rmig::drop_all(&pool).await.unwrap();
 }

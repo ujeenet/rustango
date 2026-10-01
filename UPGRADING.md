@@ -218,6 +218,14 @@ A refused action, or `restore_selected` on a model without soft delete, sends no
 `CreateView` and `ModelForm::new` now render, require and insert a non-`Auto` PK field. A form that relied on it
 being dropped must `.exclude` it. New: `core::WriteKind` and `FieldSchema::accepts_input` / `is_rust_side_uuid`.
 
+### Logout ends a user's sessions on every device (#1855)
+
+`User`, `Operator` and `AdminUser` gain a nullable `sessions_revoked_at`; run `migrate` (struct literals need the field).
+Cookies are stateless, so logout ends all of that user's browser sessions, not only this one. Call
+`member_auth::logout(pool, &user)` instead of `clear_cookie()` alone. An impersonation logout leaves the operator signed in.
+`HandoffPayload` gains `iat` (struct literals need it). `authenticate_user` now reads through the ORM, so a tenant
+`rustango_users` missing a column errors instead of filling a default.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

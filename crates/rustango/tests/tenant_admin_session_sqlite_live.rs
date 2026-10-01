@@ -169,6 +169,7 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&env.registry).await.expect("seed operator");
 

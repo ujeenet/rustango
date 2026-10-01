@@ -407,7 +407,8 @@ one of two ways:
 When session auth is on, the sidebar footer shows a **"Signed in as _username_"**
 line and a **Logout** button (a `POST` form). Standalone admins post to
 `{admin_prefix}/logout` by default; a tenant admin sits behind the tenancy
-layer's own logout route, so point the button there with `Builder::logout_url`:
+layer's own logout route, so point the button there with `Builder::logout_url`.
+Logout stamps the user's `sessions_revoked_at`, so it ends their sessions on every device:
 
 ```rust
 let admin = admin::Builder::new(pool)

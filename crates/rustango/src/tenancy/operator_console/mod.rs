@@ -956,13 +956,14 @@ async fn require_session(
             let Some(op) = rows.into_iter().next().filter(|o| o.active) else {
                 return redirect_to_login(&safe_next).into_response();
             };
-            // Drop sessions issued before the last password change.
-            if !session::survives_password_change(
+            // Drop sessions issued before the last password change or logout.
+            if !session::session_survives(
                 &state.session_secret,
                 &payload.pwf,
                 payload.iat,
                 &op.password_hash,
                 op.password_changed_at,
+                op.sessions_revoked_at,
             ) {
                 return redirect_to_login(&safe_next).into_response();
             }
@@ -1193,11 +1194,12 @@ async fn login_submit(
     };
     let oid = principal.id.get().copied().unwrap_or_default();
     attempt.succeeded().await;
-    let payload = SessionPayload::new(
+    let mut payload = SessionPayload::new(
         oid,
         SESSION_TTL_SECS,
         session::PasswordFingerprint::of(&state.session_secret, &principal.password_hash),
     );
+    payload.iat = crate::session::issued_at(principal.sessions_revoked_at);
     let cookie_value = session::encode(&state.session_secret, &payload);
     let cookie = Cookie::build((COOKIE_NAME, cookie_value))
         .path("/")
@@ -1237,6 +1239,24 @@ async fn logout(
     // operator_id. Receivers tolerate `None`.
     let oid = decode_operator_session(&headers, &state.session_secret);
     let meta = meta_from_parts(&extensions, &headers, Some("/logout"));
+    // End the operator's sessions everywhere, impersonation ones included.
+    let revoked = match live_operator_session(&state, &headers).await {
+        Ok(Some((op, iat))) => crate::session::revoke_sessions::<auth::Operator>(
+            &state.registry,
+            op.id.get().copied().unwrap_or_default(),
+            op.sessions_revoked_at,
+            iat,
+        )
+        .await
+        .map(drop),
+        Ok(None) => Ok(()),
+        // Never report a logout that did not happen.
+        Err(e) => Err(e),
+    };
+    if let Err(e) = revoked {
+        tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "logout revoke");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
+    }
     let clear = Cookie::build((COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
@@ -1259,6 +1279,37 @@ async fn logout(
     })
     .await;
     resp
+}
+
+/// The operator and cookie `iat` behind a still-valid session cookie, so a
+/// stale cookie cannot end the newer sessions. `Err` when the lookup fails.
+async fn live_operator_session(
+    state: &ConsoleState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(auth::Operator, i64)>, crate::sql::ExecError> {
+    let Some(payload) = crate::cookies::cookie_from_headers(headers, COOKIE_NAME)
+        .and_then(|val| session::decode(&state.session_secret, val).ok())
+    else {
+        return Ok(None);
+    };
+    let op = auth::Operator::objects()
+        .where_(auth::Operator::id.eq(payload.oid))
+        .fetch(&state.registry)
+        .await?
+        .into_iter()
+        .next();
+    Ok(op
+        .filter(|op| {
+            session::session_survives(
+                &state.session_secret,
+                &payload.pwf,
+                payload.iat,
+                &op.password_hash,
+                op.password_changed_at,
+                op.sessions_revoked_at,
+            )
+        })
+        .map(|op| (op, payload.iat)))
 }
 
 /// Best-effort: decode the operator session cookie to recover the
@@ -2195,12 +2246,13 @@ async fn org_impersonate(
     // Mint the short-lived URL handoff token. Includes a random
     // single-use `jti` and the slug, both checked at redemption.
     use super::impersonation_handoff as handoff;
-    let payload = handoff::HandoffPayload::new(
+    let mut payload = handoff::HandoffPayload::new(
         operator_id,
         slug.clone(),
         handoff::HANDOFF_TTL_SECS,
         handoff::PasswordFingerprint::of(&tenant_secret, &op.password_hash),
     );
+    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
     let token = handoff::mint(&tenant_secret, &payload);
 
     // Audit row on the operator side. The tenant admin writes its own

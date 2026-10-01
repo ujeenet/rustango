@@ -215,6 +215,7 @@ async fn sso_callback(
             is_superuser: user.is_superuser,
         },
         &auth_hash,
+        user.sessions_revoked_at,
     );
     let session_cookie = format!(
         "{SESSION_COOKIE}={cookie_value}; Path=/; HttpOnly; SameSite=Lax{s}",

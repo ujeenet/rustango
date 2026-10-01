@@ -147,6 +147,7 @@ pub async fn create_admin_cmd<W: Write + Send>(
         is_superuser,
         active: true,
         created_at: chrono::Utc::now(),
+        sessions_revoked_at: None,
     };
     user.save_pool(pool)
         .await
