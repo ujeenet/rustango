@@ -965,7 +965,7 @@ enum PluralFamily {
     Arabic,
     /// Lithuanian: one / few / other.
     Lithuanian,
-    /// Romanian: one / few (0, …02–…19) / other.
+    /// Romanian: one (1) / few (0, or n % 100 in 1..=19 except 1) / other.
     Romanian,
     /// Hebrew: one / two / other.
     Hebrew,

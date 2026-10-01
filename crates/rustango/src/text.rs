@@ -10,8 +10,8 @@
 /// - Lowercases ASCII letters and folds accented Latin ones (`"Café"` → `"cafe"`)
 /// - Replaces non-alphanumeric runs with a single `-`
 /// - Strips leading and trailing `-`
-/// - Drops non-ASCII characters; when that leaves nothing, returns
-///   [`slugify_unicode`] instead, so `"Привет мир"` gives `"привет-мир"`
+/// - Drops other non-ASCII characters (`"Café 日本"` → `"cafe"`); when that
+///   leaves nothing, returns [`slugify_unicode`], so `"Привет мир"` gives `"привет-мир"`
 ///
 /// # Examples
 ///
@@ -2610,6 +2610,15 @@ mod tests {
     }
 
     #[test]
+    fn slugify_folds_accented_latin_letters() {
+        assert_eq!(slugify("Café"), "cafe");
+        assert_eq!(slugify("Crème Brûlée à Łódź"), "creme-brulee-a-lodz");
+        assert_eq!(slugify("Straße ÆØ"), "strasse-aeo");
+        // Non-Latin input still falls back to the Unicode slug.
+        assert_eq!(slugify("Привет мир"), "привет-мир");
+    }
+
+    #[test]
     fn slugify_drops_non_latin_letters_next_to_ascii() {
         assert_eq!(slugify("Café 日本"), "cafe");
     }
@@ -2650,7 +2659,6 @@ mod tests {
         assert_eq!(html_escape("hello world 123"), "hello world 123");
     }
 
-    /// Atom writes this into a double-quoted `href`, so every arm matters.
     #[test]
     fn xml_escape_into_drops_chars_xml_forbids() {
         let mut out = String::new();
@@ -2658,6 +2666,7 @@ mod tests {
         assert_eq!(out, "abc\td\ne");
     }
 
+    /// Atom writes this into a double-quoted `href`, so every arm matters.
     #[test]
     fn xml_escape_into_covers_all_five() {
         let mut out = String::new();
@@ -2697,15 +2706,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------- unique_slug
-
-    #[test]
-    fn slugify_folds_accented_latin_letters() {
-        assert_eq!(slugify("Café"), "cafe");
-        assert_eq!(slugify("Crème Brûlée à Łódź"), "creme-brulee-a-lodz");
-        assert_eq!(slugify("Straße ÆØ"), "strasse-aeo");
-        // Non-Latin input still falls back to the Unicode slug.
-        assert_eq!(slugify("Привет мир"), "привет-мир");
-    }
 
     #[test]
     fn unique_slug_never_builds_an_empty_slug() {
