@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.59.14"
+version = "0.59.15"
 dependencies = [
  "argon2",
  "async-trait",
@@ -2046,6 +2046,7 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
  "tokio",
+ "tokio-util",
  "toml",
  "tower",
  "tracing",
@@ -2057,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.59.14"
+version = "0.59.15"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

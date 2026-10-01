@@ -252,12 +252,8 @@ pub(crate) async fn table_view(
     } else {
         admin_cfg.list_per_page as i64
     };
-    let page = params
-        .get("page")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(1)
-        .max(1);
-    let offset = (page - 1) * page_size;
+    let page = crate::list_params::parse_page(&params);
+    let offset = crate::list_params::page_offset(page, page_size);
     let q = params
         .get("q")
         .map(String::as_str)

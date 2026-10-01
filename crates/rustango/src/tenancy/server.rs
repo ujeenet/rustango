@@ -33,7 +33,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{header, Request, Response};
+use axum::http::{Request, Response};
 use tower::ServiceExt as _;
 
 use super::error::TenancyError;
@@ -148,13 +148,8 @@ where
             let mut tenants = tenants.clone();
             let apex = apex.clone();
             async move {
-                let host = req
-                    .headers()
-                    .get(header::HOST)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.split(':').next().unwrap_or(s).to_owned())
-                    .unwrap_or_default();
-                let response: Response<Body> = if host == apex {
+                let on_apex = super::resolver::host_is_apex(req.headers(), req.uri(), &apex);
+                let response: Response<Body> = if on_apex {
                     operator.as_service().oneshot(req).await
                 } else {
                     tenants.as_service().oneshot(req).await

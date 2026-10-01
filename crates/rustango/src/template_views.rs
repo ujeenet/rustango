@@ -86,6 +86,16 @@ use crate::core::{FieldSchema, Filter, ModelSchema, Op, SelectQuery, SqlValue, W
 use crate::sql::Pool;
 use crate::sql::{count_rows_pool, select_one_row_as_json, select_rows_as_json};
 
+/// [`coerce_pk`], returning `404` from the handler when the value does not parse.
+macro_rules! pk_or_404 {
+    ($field:expr, $raw:expr) => {
+        match $crate::template_views::coerce_pk($field, $raw) {
+            Some(v) => v,
+            None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        }
+    };
+}
+
 // ============================================================== ListView
 
 // ============================================================== Bulk actions
@@ -720,13 +730,9 @@ async fn handle_list(
     extra: Option<axum::Extension<ExtraContext>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let page: i64 = params
-        .get("page")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(1)
-        .max(1);
+    let page = crate::list_params::parse_page(&params);
     let page_size = resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-    let offset = (page - 1) * page_size;
+    let offset = crate::list_params::page_offset(page, page_size);
 
     let (order_by, active_ordering) = match resolve_active_order(
         state.vs.schema,
@@ -1031,7 +1037,7 @@ async fn handle_detail(
     };
     // #562 — use the `SelectQuery::by_pk` constructor instead of
     // spelling out the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk))
+    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
         .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
@@ -1168,7 +1174,7 @@ async fn handle_delete_confirm(
         ));
     };
     // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
         .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
@@ -1194,9 +1200,12 @@ async fn handle_delete_submit(
             state.vs.schema.table
         ));
     };
-    let delete_q =
-        crate::core::DeleteQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
-            .with_global_scopes();
+    let delete_q = crate::core::DeleteQuery::by_pk(
+        state.vs.schema,
+        pk_field.column,
+        pk_or_404!(pk_field, &pk),
+    )
+    .with_global_scopes();
     match crate::audit::delete(&state.pool, &delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
@@ -1822,38 +1831,12 @@ fn column_value_as_string(
     }
 }
 
-/// Coerce a URL-path PK string to the field's declared SQL type.
-/// Never returns `Null`, never
-/// allows empty strings (a `/{pk}` segment is always present).
-/// Used by DetailView / UpdateView / DeleteView to bind the
-/// `WHERE pk = $1` parameter without relying on Postgres'
-/// implicit string-to-int casts.
-///
-/// Returns the original `SqlValue::String(raw)` as a permissive
-/// fallback when:
-/// - Field type is not one of the integer / UUID variants we
-///   know how to parse from a URL string
-/// - Parsing fails (e.g. `i64` with non-numeric segment) — the
-///   resulting query will produce no rows / 404, which is the
-///   same effect as a typed-mismatch error and avoids leaking
-///   parse errors to the user
-fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> SqlValue {
-    use crate::core::FieldType as T;
-    match field.ty {
-        T::I16 | T::I32 | T::I64 => raw
-            .parse::<i64>()
-            .map(SqlValue::I64)
-            .unwrap_or_else(|_| SqlValue::String(raw.to_owned())),
-        T::Uuid => raw
-            .parse::<uuid::Uuid>()
-            .map(SqlValue::Uuid)
-            .unwrap_or_else(|_| SqlValue::String(raw.to_owned())),
-        // Strings are the natural representation; everything else
-        // (Bool / Float / DateTime / Date / Json) doesn't normally
-        // serve as a PK. Pass the raw string through and let
-        // Postgres' implicit cast handle it.
-        _ => SqlValue::String(raw.to_owned()),
-    }
+/// A URL-path PK (or lookup) value bound as the field's type, or `None`
+/// when it does not parse, so the caller 404s instead of a PG cast 500 (#1950).
+fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
+    crate::forms::parse_pk_string(field, raw)
+        .or_else(|_| crate::forms::parse_form_value(field, Some(raw)))
+        .ok()
 }
 
 async fn handle_create_get(
@@ -1942,7 +1925,7 @@ async fn handle_update_get(
     };
     // #562 — `SelectQuery::by_pk` replaces the 11-field struct
     // literal.
-    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk))
+    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
         .with_global_scopes();
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
@@ -2016,7 +1999,7 @@ async fn handle_update_post(
     let pk_match = WhereExpr::Predicate(Filter {
         column: pk_field.column,
         op: Op::Eq,
-        value: coerce_pk(pk_field, &pk),
+        value: pk_or_404!(pk_field, &pk),
     });
     let update_q =
         crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
@@ -2208,6 +2191,15 @@ fn resolve_order_by(
     spec: &[(String, bool)],
 ) -> Result<Vec<crate::core::OrderItem>, String> {
     let mut out = Vec::with_capacity(spec.len());
+    // No builder order: the model's `default_order`, as the admin list does (#2005).
+    if spec.is_empty() {
+        out.extend(schema.default_order.iter().filter_map(|(name, desc)| {
+            schema
+                .field(name)
+                .or_else(|| schema.field_by_column(name))
+                .map(|f| crate::core::OrderItem::column(f.column, *desc))
+        }));
+    }
     for (name, desc) in spec {
         let field = schema
             .fields
@@ -3353,14 +3345,10 @@ mod tenant {
         Query(params): Query<HashMap<String, String>>,
         t: Tenant,
     ) -> Response {
-        let page: i64 = params
-            .get("page")
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(1)
-            .max(1);
+        let page = crate::list_params::parse_page(&params);
         let page_size =
             super::resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-        let offset = (page - 1) * page_size;
+        let offset = crate::list_params::page_offset(page, page_size);
 
         let (order_by, active_ordering) = match super::resolve_active_order(
             state.vs.schema,
@@ -3572,7 +3560,7 @@ mod tenant {
                 Err(e) => return template_error(&e),
             };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk))
+        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
             .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
@@ -3611,7 +3599,7 @@ mod tenant {
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
         let select_q =
-            SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+            SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
                 .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
@@ -3641,7 +3629,7 @@ mod tenant {
         let delete_q = crate::core::DeleteQuery::by_pk(
             state.vs.schema,
             pk_field.column,
-            coerce_pk(pk_field, &pk),
+            pk_or_404!(pk_field, &pk),
         )
         .with_global_scopes();
         match crate::audit::delete(t.pool(), &delete_q).await {
@@ -3756,7 +3744,7 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk))
+        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
             .with_global_scopes();
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
@@ -3833,7 +3821,7 @@ mod tenant {
         let pk_match = WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
+            value: pk_or_404!(pk_field, &pk),
         });
         let update_q =
             crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
@@ -4164,6 +4152,21 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].column_name(), Some("id"));
         assert!(!out[0].is_desc(), "PK fallback is ASC");
+    }
+
+    /// No builder order: the model's `default_order` applies, then the PK (#2005).
+    #[test]
+    fn resolve_order_by_empty_uses_model_default_order() {
+        let mut s = schema_two_fields().clone();
+        s.default_order = &[("title", true)];
+        let s: &'static ModelSchema = Box::leak(Box::new(s));
+        let out = resolve_order_by(s, &[]).unwrap();
+        let cols: Vec<_> = out.iter().map(|o| (o.column_name(), o.is_desc())).collect();
+        assert_eq!(cols, [(Some("title"), true), (Some("id"), false)]);
+        // An explicit builder order still wins.
+        let out = resolve_order_by(s, &[("id".into(), true)]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].column_name(), Some("id"));
     }
 
     /// `ListView` builder accepts filter_fields + search_fields.
@@ -4754,24 +4757,19 @@ mod tests {
     fn coerce_pk_integer_field() {
         let s = schema_two_fields();
         let pk = s.primary_key().unwrap();
-        match coerce_pk(pk, "42") {
+        match coerce_pk(pk, "42").unwrap() {
             SqlValue::I64(n) => assert_eq!(n, 42),
             other => panic!("expected I64, got {other:?}"),
         }
     }
 
-    /// `coerce_pk` falls back to `SqlValue::String` on parse
-    /// failure rather than panicking — the resulting query just
-    /// returns no rows / 404, same effect as a 400 but without
-    /// leaking parse errors.
+    /// A PK that does not parse is `None` (a 404), not a text bind
+    /// PostgreSQL rejects with a 500 (#1950).
     #[test]
-    fn coerce_pk_integer_field_fallback_on_garbage() {
+    fn coerce_pk_integer_field_rejects_garbage() {
         let s = schema_two_fields();
         let pk = s.primary_key().unwrap();
-        match coerce_pk(pk, "not-a-number") {
-            SqlValue::String(raw) => assert_eq!(raw, "not-a-number"),
-            other => panic!("expected fallback String, got {other:?}"),
-        }
+        assert!(coerce_pk(pk, "not-a-number").is_none());
     }
 
     /// `coerce_pk` for a UUID PK parses to `SqlValue::Uuid`.
@@ -4839,15 +4837,12 @@ mod tests {
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
-        match coerce_pk(pk, raw) {
+        match coerce_pk(pk, raw).unwrap() {
             SqlValue::Uuid(_) => {} // success — variant matches
             other => panic!("expected Uuid, got {other:?}"),
         }
-        // Garbage UUID falls back to String.
-        match coerce_pk(pk, "not-a-uuid") {
-            SqlValue::String(s) => assert_eq!(s, "not-a-uuid"),
-            other => panic!("expected fallback String, got {other:?}"),
-        }
+        // A garbage UUID is a 404, not a text bind (#1950).
+        assert!(coerce_pk(pk, "not-a-uuid").is_none());
     }
 
     /// A model whose PK is a client-set `String`.
@@ -4912,12 +4907,27 @@ mod tests {
         }))
     }
 
+    /// A lookup field `parse_pk_string` refuses (a date) goes through `parse_form_value`.
+    #[test]
+    fn coerce_pk_falls_back_to_the_form_parser() {
+        let day = crate::core::FieldSchema {
+            name: "day",
+            column: "day",
+            ty: FieldType::Date,
+            primary_key: false,
+            ..*schema_two_fields().primary_key().unwrap()
+        };
+        let want = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        assert_eq!(coerce_pk(&day, "2026-10-01"), Some(SqlValue::Date(want)));
+        assert!(coerce_pk(&day, "not-a-date").is_none());
+    }
+
     /// `coerce_pk` for a String PK passes through verbatim.
     #[test]
     fn coerce_pk_string_field() {
         let str_schema = slug_schema();
         let pk = str_schema.primary_key().unwrap();
-        match coerce_pk(pk, "hello-world") {
+        match coerce_pk(pk, "hello-world").unwrap() {
             SqlValue::String(s) => assert_eq!(s, "hello-world"),
             other => panic!("expected String, got {other:?}"),
         }

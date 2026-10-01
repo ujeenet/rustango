@@ -75,6 +75,17 @@ pub trait Storage: Send + Sync + 'static {
     /// Write `data` to `key`, replacing any file already there.
     async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError>;
 
+    /// [`Self::save`] with a MIME type, for backends that store one (S3).
+    /// The default ignores it.
+    async fn save_with_content_type(
+        &self,
+        key: &str,
+        data: &[u8],
+        _content_type: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.save(key, data).await
+    }
+
     /// Read the bytes at `key`, or [`StorageError::NotFound`].
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError>;
 

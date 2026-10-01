@@ -378,7 +378,9 @@ impl MediaManager {
         let storage = self.resolve_disk(&opts.disk)?;
         let key = build_key(&opts.key_prefix, &opts.original_filename);
         let size_bytes = opts.bytes.len() as i64;
-        storage.save(&key, &opts.bytes).await?;
+        storage
+            .save_with_content_type(&key, &opts.bytes, Some(stored_content_type(&opts.mime)))
+            .await?;
         self.insert_row(InsertRow {
             disk: opts.disk,
             storage_key: key,
@@ -1652,6 +1654,28 @@ fn decode_tag_with_count_sq(row: &sqlx::sqlite::SqliteRow) -> Result<(MediaTag, 
     let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
     let tag = MediaTag::from_row(row).map_err(MediaError::Db)?;
     Ok((tag, count))
+}
+
+/// The `Content-Type` stored with an upload. A client-declared type that
+/// a browser would render or sniff into script becomes `application/octet-stream`.
+fn stored_content_type(mime: &str) -> &str {
+    let main = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let well_formed = main.split_once('/').is_some_and(|(t, s)| {
+        !t.is_empty() && !s.is_empty() && !s.contains('/') && t != "*" && s != "unknown"
+    });
+    let active = ["html", "xml", "javascript", "ecmascript", "xsl"]
+        .iter()
+        .any(|t| main.contains(t));
+    if well_formed && !active {
+        mime
+    } else {
+        "application/octet-stream"
+    }
 }
 
 /// Build a storage key: `<prefix>/<uuid>-<sanitized filename>`.

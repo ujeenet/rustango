@@ -313,9 +313,14 @@ fn base_params(base: &str) -> BTreeMap<String, String> {
                 continue;
             }
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            // Decode here: `join_url` encodes once, so `a%20b` must not become `a%2520b` (#1919).
+            let (k, v) = (
+                crate::url_codec::url_decode(k),
+                crate::url_codec::url_decode(v),
+            );
             // Drop the params overridden below.
-            if !matches!(k, "page" | "page_size" | "cursor") {
-                out.insert(k.to_owned(), v.to_owned());
+            if !matches!(k.as_str(), "page" | "page_size" | "cursor") {
+                out.insert(k, v);
             }
         }
     }
@@ -333,8 +338,9 @@ fn join_url(path: &str, params: &BTreeMap<String, String>) -> String {
     let qs = params
         .iter()
         .map(|(k, v)| {
+            // Keys are decoded in `base_params`, so re-encode bare ones too.
             if v.is_empty() {
-                k.clone()
+                url_encode(k)
             } else {
                 format!("{}={}", url_encode(k), url_encode(v))
             }
@@ -548,6 +554,33 @@ mod tests {
         let l = cursor_links("/posts", None, Some("c1"), 20);
         assert!(l.current.is_none());
         assert_eq!(l.next.as_deref(), Some("/posts?cursor=c1&page_size=20"));
+    }
+
+    /// Params already encoded in `base` are encoded once, not twice (#1919).
+    #[test]
+    fn base_query_params_are_not_double_encoded() {
+        let l = page_number_links("/posts?q=a%20b&tag=c%2Bd", 1, 20, 100);
+        assert_eq!(
+            l.next.as_deref(),
+            Some("/posts?page=2&page_size=20&q=a%20b&tag=c%2Bd")
+        );
+        let c = cursor_links("/posts?q=a+b", None, Some("c1"), 20);
+        assert_eq!(
+            c.next.as_deref(),
+            Some("/posts?cursor=c1&page_size=20&q=a%20b")
+        );
+    }
+
+    #[test]
+    fn bare_keys_are_reencoded() {
+        let l = page_number_links("/api?x%26page%3D9&a%20b&%3Cq%22", 1, 10, 30);
+        let next = l.next.unwrap();
+        assert_eq!(next.matches("page=").count(), 1, "{next}");
+        assert!(next.contains("x%26page%3D9"), "{next}");
+        assert!(next.contains("a%20b"), "{next}");
+        assert!(!next.contains(['<', '"', ' ']), "{next}");
+        let c = cursor_links("/api?x%26cursor%3Dz", None, Some("n"), 10);
+        assert_eq!(c.next.unwrap().matches("cursor=").count(), 1);
     }
 
     #[test]

@@ -39,8 +39,8 @@
 //! lapsed when v0.35 shipped the tri-dialect Pool.
 
 use super::error::ExecError;
-use super::Pool;
-use crate::core::SqlValue;
+use super::{FlatScalar, Pool};
+use crate::core::{FieldType, QueryError, SqlValue};
 
 /// Manages the rows in a junction table for one source instance.
 ///
@@ -64,6 +64,14 @@ impl M2MManager {
     /// # Errors
     /// Driver failures.
     pub async fn all(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
+        self.all_as::<i64>(pool).await
+    }
+
+    /// [`Self::all`] decoded as `K`, for a `String` / `Uuid` target PK (#1950).
+    ///
+    /// # Errors
+    /// Driver failures, including a `dst` column that does not decode as `K`.
+    pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let sql = format!(
@@ -74,7 +82,7 @@ impl M2MManager {
             p1 = dialect.placeholder(1),
         );
         let binds = vec![src.clone()];
-        fetch_i64_col_pool(pool, &sql, binds, self.dst_col).await
+        fetch_col_pool::<K>(pool, &sql, binds).await
     }
 
     /// Add `dst_id` to the junction table. No-op if already present.
@@ -84,7 +92,8 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn add(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+    pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let (insert_kw, suffix) = match dialect.name() {
@@ -99,7 +108,7 @@ impl M2MManager {
             p1 = dialect.placeholder(1),
             p2 = dialect.placeholder(2),
         );
-        let binds = vec![src.clone(), SqlValue::I64(dst_id)];
+        let binds = vec![src.clone(), dst.clone()];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
         // #410 — fire m2m_changed after successful junction-row write.
         // `signals` is an optional feature, so every emission below is gated
@@ -111,7 +120,7 @@ impl M2MManager {
             src_col: self.src_col,
             dst_col: self.dst_col,
             src_pk: src,
-            dst_pks: vec![dst_id],
+            dst_pks: vec![dst],
         })
         .await;
         Ok(())
@@ -122,7 +131,8 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn remove(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+    pub async fn remove(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let sql = format!(
@@ -133,7 +143,7 @@ impl M2MManager {
             p1 = dialect.placeholder(1),
             p2 = dialect.placeholder(2),
         );
-        let binds = vec![src.clone(), SqlValue::I64(dst_id)];
+        let binds = vec![src.clone(), dst.clone()];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
         // #410 — fire m2m_changed after successful junction-row remove.
         #[cfg(feature = "signals")]
@@ -143,7 +153,7 @@ impl M2MManager {
             src_col: self.src_col,
             dst_col: self.dst_col,
             src_pk: src,
-            dst_pks: vec![dst_id],
+            dst_pks: vec![dst],
         })
         .await;
         Ok(())
@@ -156,7 +166,11 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn set(&self, ids: &[i64], pool: &Pool) -> Result<(), ExecError> {
+    pub async fn set<K: Clone + Into<SqlValue>>(
+        &self,
+        ids: &[K],
+        pool: &Pool,
+    ) -> Result<(), ExecError> {
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let del_sql = format!(
@@ -167,7 +181,11 @@ impl M2MManager {
         );
         // Build multi-row INSERT only when ids is non-empty (otherwise
         // we'd emit `VALUES ()` which every backend rejects).
-        let ins_sql_with_binds = if ids.is_empty() {
+        let dsts = ids
+            .iter()
+            .map(|k| dst_key(k.clone(), self.through, self.dst_col))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ins_sql_with_binds = if dsts.is_empty() {
             None
         } else {
             let mut sql = format!(
@@ -177,7 +195,7 @@ impl M2MManager {
                 dst = dialect.quote_ident(self.dst_col),
             );
             let mut binds = Vec::with_capacity(ids.len() * 2);
-            for (i, dst_id) in ids.iter().enumerate() {
+            for (i, dst) in dsts.iter().enumerate() {
                 if i > 0 {
                     sql.push_str(", ");
                 }
@@ -185,7 +203,7 @@ impl M2MManager {
                 let p_dst = dialect.placeholder(i * 2 + 2);
                 sql.push_str(&format!("({p_src}, {p_dst})"));
                 binds.push(src.clone());
-                binds.push(SqlValue::I64(*dst_id));
+                binds.push(dst.clone());
             }
             Some((sql, binds))
         };
@@ -210,7 +228,7 @@ impl M2MManager {
             src_col: self.src_col,
             dst_col: self.dst_col,
             src_pk: src,
-            dst_pks: ids.to_vec(),
+            dst_pks: dsts,
         })
         .await;
         Ok(())
@@ -251,21 +269,26 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn contains(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
+    pub async fn contains(
+        &self,
+        dst_id: impl Into<SqlValue>,
+        pool: &Pool,
+    ) -> Result<bool, ExecError> {
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
-        // The bigint `dst`, not `1`: PG types a bare `1` as int4, which the i64 decode rejects.
+        // COUNT(*) is a bigint on every backend, whatever the `dst` type (#1950).
         let sql = format!(
-            "SELECT {dst} FROM {through} WHERE {src} = {p1} AND {dst} = {p2} LIMIT 1",
+            "SELECT COUNT(*) FROM {through} WHERE {src} = {p1} AND {dst} = {p2}",
             through = dialect.quote_ident(self.through),
             src = dialect.quote_ident(self.src_col),
             dst = dialect.quote_ident(self.dst_col),
             p1 = dialect.placeholder(1),
             p2 = dialect.placeholder(2),
         );
-        let binds = vec![src.clone(), SqlValue::I64(dst_id)];
-        let rows = fetch_i64_col_pool(pool, &sql, binds, "hit").await?;
-        Ok(!rows.is_empty())
+        let binds = vec![src.clone(), dst.clone()];
+        let rows = fetch_col_pool::<i64>(pool, &sql, binds).await?;
+        Ok(rows.first().is_some_and(|n| *n > 0))
     }
 
     fn src_key(&self) -> Result<SqlValue, ExecError> {
@@ -279,6 +302,58 @@ fn src_key(pk: &SqlValue, through: &'static str) -> Result<SqlValue, ExecError> 
         SqlValue::Null => Err(ExecError::M2mUnsavedSource { through }),
         v => Ok(v.clone()),
     }
+}
+
+/// A destination key bound as the `dst` column's type (#1950): integers widen to
+/// `i64`, a parseable string converts, any other mismatch is an error, not a PG 500.
+fn dst_key(
+    v: impl Into<SqlValue>,
+    through: &'static str,
+    dst_col: &'static str,
+) -> Result<SqlValue, ExecError> {
+    let v = match v.into() {
+        SqlValue::I16(n) => SqlValue::I64(n.into()),
+        SqlValue::I32(n) => SqlValue::I64(n.into()),
+        v => v,
+    };
+    let Some(want) = dst_column_type(through, dst_col) else {
+        return Ok(v);
+    };
+    let Some(got) = v.field_type() else {
+        return Ok(v);
+    };
+    let is_int = |t: FieldType| matches!(t, FieldType::I16 | FieldType::I32 | FieldType::I64);
+    if got == want || (is_int(got) && is_int(want)) {
+        return Ok(v);
+    }
+    let converted = match &v {
+        SqlValue::String(s) if is_int(want) => s.parse::<i64>().ok().map(SqlValue::I64),
+        SqlValue::String(s) if want == FieldType::Uuid => {
+            uuid::Uuid::parse_str(s).ok().map(SqlValue::Uuid)
+        }
+        _ => None,
+    };
+    converted.ok_or_else(|| {
+        ExecError::Query(QueryError::TypeMismatch {
+            model: through,
+            field: dst_col.to_owned(),
+            expected: want,
+            actual: got,
+        })
+    })
+}
+
+/// The `dst` column's type: from the registered through model, else BIGINT for
+/// a junction the migration writer creates. `None` when neither is known.
+fn dst_column_type(through: &str, dst_col: &str) -> Option<FieldType> {
+    if let Some(entry) = crate::core::ModelEntry::for_table(through) {
+        return entry.schema.field_by_column(dst_col).map(|f| f.ty);
+    }
+    inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .flat_map(|e| e.schema.m2m)
+        .any(|r| r.auto_create && r.through == through && r.dst_col == dst_col)
+        .then_some(FieldType::I64)
 }
 
 // ============================================================ polymorphic (generic) M2M
@@ -335,7 +410,7 @@ impl GenericM2MManager {
     /// optional `signals` module, so the signature itself cannot exist without
     /// the feature.
     #[cfg(feature = "signals")]
-    async fn signal(&self, action: crate::signals::m2m::M2mAction, dst_pks: Vec<i64>) {
+    async fn signal(&self, action: crate::signals::m2m::M2mAction, dst_pks: Vec<SqlValue>) {
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
             action,
             through: self.through,
@@ -352,6 +427,14 @@ impl GenericM2MManager {
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn all(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
+        self.all_as::<i64>(pool).await
+    }
+
+    /// [`Self::all`] decoded as `K`, for a `String` / `Uuid` target PK (#1950).
+    ///
+    /// # Errors
+    /// Driver failures, including a `dst` column that does not decode as `K`.
+    pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
@@ -365,14 +448,15 @@ impl GenericM2MManager {
             p2 = dialect.placeholder(2),
         );
         let binds = vec![src.clone(), SqlValue::I64(ct)];
-        fetch_i64_col_pool(pool, &sql, binds, self.dst_col).await
+        fetch_col_pool::<K>(pool, &sql, binds).await
     }
 
     /// Link `dst_id` to this instance. No-op if already present.
     ///
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
-    pub async fn add(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+    pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
@@ -390,10 +474,10 @@ impl GenericM2MManager {
             p2 = dialect.placeholder(2),
             p3 = dialect.placeholder(3),
         );
-        let binds = vec![src.clone(), SqlValue::I64(ct), SqlValue::I64(dst_id)];
+        let binds = vec![src.clone(), SqlValue::I64(ct), dst.clone()];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
         #[cfg(feature = "signals")]
-        self.signal(crate::signals::m2m::M2mAction::Add, vec![dst_id])
+        self.signal(crate::signals::m2m::M2mAction::Add, vec![dst])
             .await;
         Ok(())
     }
@@ -402,7 +486,8 @@ impl GenericM2MManager {
     ///
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
-    pub async fn remove(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+    pub async fn remove(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
@@ -416,10 +501,10 @@ impl GenericM2MManager {
             p2 = dialect.placeholder(2),
             p3 = dialect.placeholder(3),
         );
-        let binds = vec![src.clone(), SqlValue::I64(ct), SqlValue::I64(dst_id)];
+        let binds = vec![src.clone(), SqlValue::I64(ct), dst.clone()];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
         #[cfg(feature = "signals")]
-        self.signal(crate::signals::m2m::M2mAction::Remove, vec![dst_id])
+        self.signal(crate::signals::m2m::M2mAction::Remove, vec![dst])
             .await;
         Ok(())
     }
@@ -429,7 +514,11 @@ impl GenericM2MManager {
     ///
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
-    pub async fn set(&self, ids: &[i64], pool: &Pool) -> Result<(), ExecError> {
+    pub async fn set<K: Clone + Into<SqlValue>>(
+        &self,
+        ids: &[K],
+        pool: &Pool,
+    ) -> Result<(), ExecError> {
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
@@ -441,7 +530,11 @@ impl GenericM2MManager {
             p1 = dialect.placeholder(1),
             p2 = dialect.placeholder(2),
         );
-        let ins = if ids.is_empty() {
+        let dsts = ids
+            .iter()
+            .map(|k| dst_key(k.clone(), self.through, self.dst_col))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ins = if dsts.is_empty() {
             None
         } else {
             let mut sql = format!(
@@ -452,7 +545,7 @@ impl GenericM2MManager {
                 dst = dialect.quote_ident(self.dst_col),
             );
             let mut binds = Vec::with_capacity(ids.len() * 3);
-            for (i, dst_id) in ids.iter().enumerate() {
+            for (i, dst) in dsts.iter().enumerate() {
                 if i > 0 {
                     sql.push_str(", ");
                 }
@@ -462,7 +555,7 @@ impl GenericM2MManager {
                 sql.push_str(&format!("({p1}, {p2}, {p3})"));
                 binds.push(src.clone());
                 binds.push(SqlValue::I64(ct));
-                binds.push(SqlValue::I64(*dst_id));
+                binds.push(dst.clone());
             }
             Some((sql, binds))
         };
@@ -473,8 +566,7 @@ impl GenericM2MManager {
         }
         tx.commit().await.map_err(ExecError::Driver)?;
         #[cfg(feature = "signals")]
-        self.signal(crate::signals::m2m::M2mAction::Set, ids.to_vec())
-            .await;
+        self.signal(crate::signals::m2m::M2mAction::Set, dsts).await;
         Ok(())
     }
 
@@ -506,15 +598,18 @@ impl GenericM2MManager {
     ///
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
-    pub async fn contains(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
+    pub async fn contains(
+        &self,
+        dst_id: impl Into<SqlValue>,
+        pool: &Pool,
+    ) -> Result<bool, ExecError> {
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
-        // Select the (bigint) `dst` column rather than a literal `1`:
-        // Postgres types a bare `SELECT 1` as `int4`, which the
-        // `i64`/`int8`-typed decoder in `fetch_i64_col_pool` rejects.
+        // COUNT(*) is a bigint on every backend, whatever the `dst` type (#1950).
         let sql = format!(
-            "SELECT {dst} FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2} AND {dst} = {p3} LIMIT 1",
+            "SELECT COUNT(*) FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2} AND {dst} = {p3}",
             through = dialect.quote_ident(self.through),
             pk = dialect.quote_ident(self.pk_col),
             ctc = dialect.quote_ident(self.ct_col),
@@ -523,9 +618,9 @@ impl GenericM2MManager {
             p2 = dialect.placeholder(2),
             p3 = dialect.placeholder(3),
         );
-        let binds = vec![src.clone(), SqlValue::I64(ct), SqlValue::I64(dst_id)];
-        let rows = fetch_i64_col_pool(pool, &sql, binds, "hit").await?;
-        Ok(!rows.is_empty())
+        let binds = vec![src.clone(), SqlValue::I64(ct), dst.clone()];
+        let rows = fetch_col_pool::<i64>(pool, &sql, binds).await?;
+        Ok(rows.first().is_some_and(|n| *n > 0))
     }
 }
 
@@ -569,23 +664,15 @@ impl M2MManager {
 
 // ============================================================ small per-backend helpers
 
-/// Run a SELECT that returns one `i64` column per row and collect the
-/// values. Used by `all_pool` + `contains_pool`. Routes through
-/// `raw_query_pool` (single-column tuple decode) — #561 collapsed
-/// what was a 3-arm `match pool` with byte-identical
-/// `try_get::<i64, _>(col_name)` loops.
-///
-/// The `col_name` argument is no longer consulted (the underlying
-/// SELECT must already be single-column, which both callers honor):
-/// `raw_query_pool::<(i64,)>` decodes positionally.
-async fn fetch_i64_col_pool(
+/// Run a single-column SELECT and decode each row's value as `K`. `FlatScalar`
+/// reads a UUID from MySQL's `CHAR(36)` and SQLite text or bytes (#1950).
+async fn fetch_col_pool<K: FlatScalar>(
     pool: &Pool,
     sql: &str,
     binds: Vec<SqlValue>,
-    _col_name: &str,
-) -> Result<Vec<i64>, ExecError> {
-    let rows: Vec<(i64,)> = crate::sql::raw_query_pool(sql, binds, pool).await?;
-    Ok(rows.into_iter().map(|(v,)| v).collect())
+) -> Result<Vec<K>, ExecError> {
+    crate::test_assertions::query_counter::bump();
+    super::executor::fetch_flat_raw(pool, sql, binds).await
 }
 
 // #561 — the three local `bind_pg`/`bind_my`/`bind_sqlite` helpers

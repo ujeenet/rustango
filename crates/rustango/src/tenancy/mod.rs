@@ -205,9 +205,10 @@ pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
+pub(crate) use resolver::host_is_apex;
 pub use resolver::{
-    invalidate_host_cache, invalidate_org_cache, ChainResolver, HeaderResolver, OrgResolver,
-    PathPrefixResolver, PortResolver, RegisteredHostResolver, SubdomainResolver,
+    invalidate_host_cache, invalidate_org_cache, ChainResolver, HeaderResolver, ListenerPort,
+    OrgResolver, PathPrefixResolver, PortResolver, RegisteredHostResolver, SubdomainResolver,
 };
 // The resolver's process-global test hooks are deliberately NOT public
 // API of `tenancy` — they live in `crate::testkit`, so the name says
