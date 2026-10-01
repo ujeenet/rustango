@@ -104,7 +104,35 @@ pub struct ShelfLabel {
     pub label_code: String,
 }
 
+/// A source whose M2M target has a Uuid PK.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "m2m1926_rack",
+    app = "m2m1926",
+    m2m(
+        name = "badges",
+        to = "m2m1926_badge",
+        through = "m2m1926_rack_badge",
+        src = "rack_id",
+        dst = "badge_id"
+    )
+)]
+pub struct Rack {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(app = "m2m1926", table = "m2m1926_rack_badge")]
+pub struct RackBadge {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub rack_id: i64,
+    pub badge_id: uuid::Uuid,
+}
+
 async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<RackBadge>(pool).await;
     rustango::testkit::matrix::fresh_table::<PostTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<DocTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<ShelfLabel>(pool).await;
@@ -199,6 +227,71 @@ async fn string_destination_keys_round_trip(pool: &Pool) {
     assert_eq!(ShelfLabel::objects().count(pool).await.expect("count"), 2);
 }
 
+/// Uuid destination keys read back on every backend: MySQL keeps CHAR(36) text,
+/// SQLite a 16-byte blob or, for a raw-SQL row, text (#1950).
+async fn uuid_destination_keys_round_trip(pool: &Pool) {
+    let rack = Rack { id: 1 };
+    let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    rack.badges_m2m().add(a, pool).await.expect("add");
+    assert!(rack.badges_m2m().contains(a, pool).await.expect("contains"));
+    let got: Vec<uuid::Uuid> = rack.badges_m2m().all_as(pool).await.expect("all_as");
+    assert_eq!(got, [a]);
+    rack.badges_m2m().set(&[a, b], pool).await.expect("set");
+    let mut got: Vec<uuid::Uuid> = rack.badges_m2m().all_as(pool).await.expect("all_as");
+    got.sort_unstable();
+    let mut want = vec![a, b];
+    want.sort_unstable();
+    assert_eq!(got, want);
+    #[cfg(feature = "sqlite")]
+    if let Pool::Sqlite(sq) = pool {
+        let c = uuid::Uuid::new_v4();
+        rustango::sql::sqlx::query(
+            "INSERT INTO m2m1926_rack_badge (rack_id, badge_id) VALUES (2, ?)",
+        )
+        .bind(c.to_string())
+        .execute(sq)
+        .await
+        .expect("text row");
+        let got: Vec<uuid::Uuid> = Rack { id: 2 }
+            .badges_m2m()
+            .all_as(pool)
+            .await
+            .expect("text");
+        assert_eq!(got, [c]);
+    }
+}
+
+/// A key that doesn't fit the `dst` column converts when it parses, else errors (#1950).
+async fn mistyped_destination_keys_are_checked(pool: &Pool) {
+    let p = post("abc-slug");
+    p.tags_m2m()
+        .add("7", pool)
+        .await
+        .expect("numeric text converts");
+    assert_eq!(p.tags_m2m().all(pool).await.expect("all"), vec![7]);
+    let err = p.tags_m2m().add("seven", pool).await.expect_err("text key");
+    assert!(
+        matches!(
+            err,
+            ExecError::Query(rustango::core::QueryError::TypeMismatch { .. })
+        ),
+        "{err:?}"
+    );
+    let err = Shelf { id: 1 }
+        .labels_m2m()
+        .contains(5, pool)
+        .await
+        .expect_err("int key on a text column");
+    assert!(matches!(err, ExecError::Query(_)), "{err:?}");
+    let err = Rack { id: 1 }
+        .badges_m2m()
+        .set(&["not-a-uuid"], pool)
+        .await
+        .expect_err("bad uuid");
+    assert!(matches!(err, ExecError::Query(_)), "{err:?}");
+    assert_eq!(PostTag::objects().count(pool).await.expect("count"), 1);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -206,5 +299,7 @@ tri_dialect_test! {
         uuid_pk_rows_stay_per_source,
         unsaved_source_is_refused,
         string_destination_keys_round_trip,
+        uuid_destination_keys_round_trip,
+        mistyped_destination_keys_are_checked,
     ],
 }

@@ -610,7 +610,13 @@ impl sqlx::Type<sqlx::Sqlite> for UuidCell {
 #[cfg(feature = "sqlite")]
 impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for UuidCell {
     fn decode(v: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-        <uuid::Uuid as sqlx::Decode<sqlx::Sqlite>>::decode(v).map(Self)
+        // sqlx binds 16 raw bytes, but a column default or raw SQL may store text.
+        let bytes = <&[u8] as sqlx::Decode<sqlx::Sqlite>>::decode(v)?;
+        let u = match std::str::from_utf8(bytes) {
+            Ok(text) if bytes.len() != 16 => uuid::Uuid::parse_str(text)?,
+            _ => uuid::Uuid::from_slice(bytes)?,
+        };
+        Ok(Self(u))
     }
 }
 
@@ -772,11 +778,23 @@ pub async fn fetch_values_flat<U: FlatScalar>(
     query: &SelectQuery,
 ) -> Result<Vec<U>, ExecError> {
     let stmt = pool.dialect().compile_select(query)?;
+    fetch_flat_raw(pool, &stmt.sql, stmt.params).await
+}
+
+/// [`fetch_values_flat`] for a one-column SQL string in the dialect's shape.
+///
+/// # Errors
+/// Driver failure, or a decode error as for [`fetch_values_flat`].
+pub(crate) async fn fetch_flat_raw<U: FlatScalar>(
+    pool: &Pool,
+    sql: &str,
+    params: Vec<SqlValue>,
+) -> Result<Vec<U>, ExecError> {
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+            for v in params {
                 q = bind_query(q, v);
             }
             let rows = q.fetch_all(pg).await?;
@@ -785,8 +803,8 @@ pub async fn fetch_values_flat<U: FlatScalar>(
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
             let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
+                sqlx::query(sql);
+            for v in params {
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
@@ -795,8 +813,8 @@ pub async fn fetch_values_flat<U: FlatScalar>(
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
             let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
+                sqlx::query(sql);
+            for v in params {
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;

@@ -39,8 +39,8 @@
 //! lapsed when v0.35 shipped the tri-dialect Pool.
 
 use super::error::ExecError;
-use super::{MaybeMyFromRow, MaybePgFromRow, MaybeSqliteFromRow, Pool};
-use crate::core::SqlValue;
+use super::{FlatScalar, Pool};
+use crate::core::{FieldType, QueryError, SqlValue};
 
 /// Manages the rows in a junction table for one source instance.
 ///
@@ -71,10 +71,7 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures, including a `dst` column that does not decode as `K`.
-    pub async fn all_as<K>(&self, pool: &Pool) -> Result<Vec<K>, ExecError>
-    where
-        (K,): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
-    {
+    pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let sql = format!(
@@ -96,7 +93,7 @@ impl M2MManager {
     /// # Errors
     /// Driver failures.
     pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
-        let dst = dst_key(dst_id);
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let (insert_kw, suffix) = match dialect.name() {
@@ -135,7 +132,7 @@ impl M2MManager {
     /// # Errors
     /// Driver failures.
     pub async fn remove(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
-        let dst = dst_key(dst_id);
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let sql = format!(
@@ -184,7 +181,11 @@ impl M2MManager {
         );
         // Build multi-row INSERT only when ids is non-empty (otherwise
         // we'd emit `VALUES ()` which every backend rejects).
-        let ins_sql_with_binds = if ids.is_empty() {
+        let dsts = ids
+            .iter()
+            .map(|k| dst_key(k.clone(), self.through, self.dst_col))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ins_sql_with_binds = if dsts.is_empty() {
             None
         } else {
             let mut sql = format!(
@@ -194,7 +195,7 @@ impl M2MManager {
                 dst = dialect.quote_ident(self.dst_col),
             );
             let mut binds = Vec::with_capacity(ids.len() * 2);
-            for (i, dst_id) in ids.iter().enumerate() {
+            for (i, dst) in dsts.iter().enumerate() {
                 if i > 0 {
                     sql.push_str(", ");
                 }
@@ -202,7 +203,7 @@ impl M2MManager {
                 let p_dst = dialect.placeholder(i * 2 + 2);
                 sql.push_str(&format!("({p_src}, {p_dst})"));
                 binds.push(src.clone());
-                binds.push(dst_key(dst_id.clone()));
+                binds.push(dst.clone());
             }
             Some((sql, binds))
         };
@@ -227,7 +228,7 @@ impl M2MManager {
             src_col: self.src_col,
             dst_col: self.dst_col,
             src_pk: src,
-            dst_pks: ids.iter().cloned().map(dst_key).collect(),
+            dst_pks: dsts,
         })
         .await;
         Ok(())
@@ -273,7 +274,7 @@ impl M2MManager {
         dst_id: impl Into<SqlValue>,
         pool: &Pool,
     ) -> Result<bool, ExecError> {
-        let dst = dst_key(dst_id);
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         // COUNT(*) is a bigint on every backend, whatever the `dst` type (#1950).
@@ -303,14 +304,56 @@ fn src_key(pk: &SqlValue, through: &'static str) -> Result<SqlValue, ExecError> 
     }
 }
 
-/// A destination key as bound. Integers widen to `i64` as before #1950, so
-/// `add(7)` binds and signals the same value as `add(7_i64)`.
-fn dst_key(v: impl Into<SqlValue>) -> SqlValue {
-    match v.into() {
+/// A destination key bound as the `dst` column's type (#1950): integers widen to
+/// `i64`, a parseable string converts, any other mismatch is an error, not a PG 500.
+fn dst_key(
+    v: impl Into<SqlValue>,
+    through: &'static str,
+    dst_col: &'static str,
+) -> Result<SqlValue, ExecError> {
+    let v = match v.into() {
         SqlValue::I16(n) => SqlValue::I64(n.into()),
         SqlValue::I32(n) => SqlValue::I64(n.into()),
         v => v,
+    };
+    let Some(want) = dst_column_type(through, dst_col) else {
+        return Ok(v);
+    };
+    let Some(got) = v.field_type() else {
+        return Ok(v);
+    };
+    let is_int = |t: FieldType| matches!(t, FieldType::I16 | FieldType::I32 | FieldType::I64);
+    if got == want || (is_int(got) && is_int(want)) {
+        return Ok(v);
     }
+    let converted = match &v {
+        SqlValue::String(s) if is_int(want) => s.parse::<i64>().ok().map(SqlValue::I64),
+        SqlValue::String(s) if want == FieldType::Uuid => {
+            uuid::Uuid::parse_str(s).ok().map(SqlValue::Uuid)
+        }
+        _ => None,
+    };
+    converted.ok_or_else(|| {
+        ExecError::Query(QueryError::TypeMismatch {
+            model: through,
+            field: dst_col.to_owned(),
+            expected: want,
+            actual: got,
+        })
+    })
+}
+
+/// The `dst` column's type: from the registered through model, else BIGINT for
+/// a junction the migration writer creates. `None` when neither is known.
+fn dst_column_type(through: &str, dst_col: &str) -> Option<FieldType> {
+    if let Some(entry) = crate::core::ModelEntry::for_table(through) {
+        return entry.schema.field_by_column(dst_col).map(|f| f.ty);
+    }
+    inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .flat_map(|e| e.schema.m2m)
+        .any(|r| r.auto_create && r.through == through && r.dst_col == dst_col)
+        .then_some(FieldType::I64)
 }
 
 // ============================================================ polymorphic (generic) M2M
@@ -391,10 +434,7 @@ impl GenericM2MManager {
     ///
     /// # Errors
     /// Driver failures, including a `dst` column that does not decode as `K`.
-    pub async fn all_as<K>(&self, pool: &Pool) -> Result<Vec<K>, ExecError>
-    where
-        (K,): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
-    {
+    pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
@@ -416,7 +456,7 @@ impl GenericM2MManager {
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
-        let dst = dst_key(dst_id);
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
@@ -447,7 +487,7 @@ impl GenericM2MManager {
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn remove(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
-        let dst = dst_key(dst_id);
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
@@ -490,7 +530,11 @@ impl GenericM2MManager {
             p1 = dialect.placeholder(1),
             p2 = dialect.placeholder(2),
         );
-        let ins = if ids.is_empty() {
+        let dsts = ids
+            .iter()
+            .map(|k| dst_key(k.clone(), self.through, self.dst_col))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ins = if dsts.is_empty() {
             None
         } else {
             let mut sql = format!(
@@ -501,7 +545,7 @@ impl GenericM2MManager {
                 dst = dialect.quote_ident(self.dst_col),
             );
             let mut binds = Vec::with_capacity(ids.len() * 3);
-            for (i, dst_id) in ids.iter().enumerate() {
+            for (i, dst) in dsts.iter().enumerate() {
                 if i > 0 {
                     sql.push_str(", ");
                 }
@@ -511,7 +555,7 @@ impl GenericM2MManager {
                 sql.push_str(&format!("({p1}, {p2}, {p3})"));
                 binds.push(src.clone());
                 binds.push(SqlValue::I64(ct));
-                binds.push(dst_key(dst_id.clone()));
+                binds.push(dst.clone());
             }
             Some((sql, binds))
         };
@@ -522,11 +566,7 @@ impl GenericM2MManager {
         }
         tx.commit().await.map_err(ExecError::Driver)?;
         #[cfg(feature = "signals")]
-        self.signal(
-            crate::signals::m2m::M2mAction::Set,
-            ids.iter().cloned().map(dst_key).collect(),
-        )
-        .await;
+        self.signal(crate::signals::m2m::M2mAction::Set, dsts).await;
         Ok(())
     }
 
@@ -563,7 +603,7 @@ impl GenericM2MManager {
         dst_id: impl Into<SqlValue>,
         pool: &Pool,
     ) -> Result<bool, ExecError> {
-        let dst = dst_key(dst_id);
+        let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
@@ -624,17 +664,15 @@ impl M2MManager {
 
 // ============================================================ small per-backend helpers
 
-/// Run a single-column SELECT and decode each row's value as `K`.
-async fn fetch_col_pool<K>(
+/// Run a single-column SELECT and decode each row's value as `K`. `FlatScalar`
+/// reads a UUID from MySQL's `CHAR(36)` and SQLite text or bytes (#1950).
+async fn fetch_col_pool<K: FlatScalar>(
     pool: &Pool,
     sql: &str,
     binds: Vec<SqlValue>,
-) -> Result<Vec<K>, ExecError>
-where
-    (K,): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
-{
-    let rows: Vec<(K,)> = crate::sql::raw_query_pool(sql, binds, pool).await?;
-    Ok(rows.into_iter().map(|(v,)| v).collect())
+) -> Result<Vec<K>, ExecError> {
+    crate::test_assertions::query_counter::bump();
+    super::executor::fetch_flat_raw(pool, sql, binds).await
 }
 
 // #561 — the three local `bind_pg`/`bind_my`/`bind_sqlite` helpers
