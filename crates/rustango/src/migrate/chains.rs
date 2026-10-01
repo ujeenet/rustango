@@ -182,6 +182,53 @@ fn touches(step: &Migration, table: &str) -> bool {
     schema_ops(step).any(|c| c.touches(table, &step.snapshot))
 }
 
+/// Columns of `table` that `step`'s FKs point at.
+fn fk_targets(step: &Migration, table: &str) -> BTreeSet<String> {
+    let snap = &step.snapshot;
+    let pk = || {
+        snap.table(table)
+            .into_iter()
+            .flat_map(|t| t.fields.iter().filter(|f| f.primary_key))
+            .map(|f| f.column.clone())
+            .collect::<Vec<_>>()
+    };
+    let field_fk = |f: &super::snapshot::FieldSnapshot| {
+        f.fk.as_ref()
+            .filter(|r| r.to == table)
+            .map(|r| r.on.clone())
+    };
+    let mut out = BTreeSet::new();
+    for c in schema_ops(step) {
+        match c {
+            SchemaChange::CreateTable(t) => {
+                if let Some(ts) = snap.table(t) {
+                    for f in &ts.fields {
+                        out.extend(field_fk(f));
+                    }
+                    for cf in ts.composite_fks.iter().filter(|cf| cf.to == table) {
+                        out.extend(cf.on.iter().cloned());
+                    }
+                }
+            }
+            SchemaChange::AddColumn { table: t, column } => {
+                if let Some(f) = snap.table(t).and_then(|ts| ts.field(column)) {
+                    out.extend(field_fk(f));
+                }
+            }
+            SchemaChange::AddCompositeFk { to, on, .. } if to == table => {
+                out.extend(on.iter().cloned());
+            }
+            SchemaChange::CreateM2MTable {
+                src_table,
+                dst_table,
+                ..
+            } if src_table == table || dst_table == table => out.extend(pk()),
+            _ => {}
+        }
+    }
+    out
+}
+
 fn writes(step: &Migration, table: &str) -> bool {
     schema_ops(step).any(|c| {
         c.table() == table
@@ -276,12 +323,15 @@ impl Run<'_> {
                     // Run what precedes, then give `on` the columns this step expects.
                     pass.applied.extend(self.apply(&steps).await?);
                     if let Some(snap) = before {
-                        converge(
-                            self.pool,
-                            snap,
-                            missing_columns(self.pool, snap, &on).await?,
-                        )
-                        .await?;
+                        let mut groups = missing_columns(self.pool, snap, &on).await?;
+                        // A table the step only references needs just the FK targets.
+                        groups.retain(|g| match g.first() {
+                            Some(SchemaChange::AddColumn { table, column }) => {
+                                writes(&step, table) || fk_targets(&step, table).contains(column)
+                            }
+                            _ => true,
+                        });
+                        converge(self.pool, snap, groups).await?;
                     }
                     for t in &on {
                         let have = ensure::live_columns(self.pool, t).await?;

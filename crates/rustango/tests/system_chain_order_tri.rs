@@ -359,6 +359,71 @@ async fn later_index_on_owned(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
+/// A system step that only FK-references an owned table runs without first
+/// adding that table's unrelated columns; `finish` reports what it can't add.
+async fn fk_only_step_adds_only_targets(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "fkonly").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let table = "rustango_users";
+    let full = current_table(table, None);
+    let column = full["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["nullable"] == false && f["default"].is_null() && f["primary_key"] == false)
+        .expect("a NOT NULL column with no default")["column"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let first = read(&tenant_file(&root.join("system/migrations")));
+    let refs: Vec<String> = first["snapshot"]["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            t["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["fk"]["to"] == table)
+        })
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(!refs.is_empty(), "some system table FKs {table}");
+    age_tenant_chain(&root, &refs, None);
+
+    let dir = root.join("migrations");
+    let mut older = current_table(table, Some(&column));
+    for f in older["fields"].as_array_mut().unwrap() {
+        if f["primary_key"] == false {
+            f["nullable"] = json!(true);
+        }
+    }
+    project_initial(&dir, older);
+    rustango::migrate::migrate_pool(&pool, &dir).await.unwrap();
+    let insert = match backend {
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => format!("INSERT INTO {table} () VALUES ()"),
+        #[allow(unreachable_patterns)]
+        _ => format!("INSERT INTO {table} DEFAULT VALUES"),
+    };
+    rustango::sql::raw_execute_pool(&pool, &insert, Vec::new())
+        .await
+        .unwrap();
+    let err = manage_migrate(&pool, &dir)
+        .await
+        .expect_err("a NOT NULL column can't fill rows");
+    assert!(err.to_string().contains(&column), "{err}");
+    for t in &refs {
+        assert!(has_table(&pool, t).await, "{t} waited on {column}");
+    }
+}
+
 /// A callback that migrates again while the outer migrate holds the lock.
 fn nested_migrate(pool: Pool) -> rustango::migrate::callbacks::MigrationCallbackFut {
     Box::pin(async move {
@@ -843,5 +908,6 @@ per_backend!(
     owned_table_dropped_later,
     not_null_column_on_empty_table,
     later_index_on_owned,
+    fk_only_step_adds_only_targets,
     nested_lock_is_an_error,
 );

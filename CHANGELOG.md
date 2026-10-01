@@ -13,6 +13,7 @@ It ran only the project chain, so tables and columns like `sessions_revoked_at` 
 A system step that FKs a project-created framework table waits for it on PG/MySQL; such tables get the framework's newer columns, on the tenancy runners too.
 Steps on those tables run after the project chain, under one migrate lock; a table the project later drops is the framework's again.
 A later system step's index on such a table is created.
+A system step that only FKs such a table first adds just the FK target columns.
 `pre_migrate`/`post_migrate` fire outside that lock, and a migrate started while the task holds it fails instead of hanging.
 A cancelled migrate closes its lock connection, so the pool does not keep the lock.
 
