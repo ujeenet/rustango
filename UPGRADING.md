@@ -154,6 +154,12 @@ untouched.
 
 An app that builds `admin::router(pool)` or a `Builder` without `with_session_auth`
 now gets an `[admin]` warning. Add the login, or ignore it if you gate the route yourself.
+`tenant_mode()` alone no longer silences it.
+
+### `admin::Builder::new` cookies follow the secure-cookie policy
+
+They are `Secure` on the prod tier or when `[security].secure_cookies` is on. For plain HTTP,
+set it to `false` or call `.secure_cookies(false)`.
 
 ### Commit and ship `system/migrations/` (#1988)
 

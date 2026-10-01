@@ -6606,15 +6606,32 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
-    /// The flag the audit reads is set by building the admin itself.
+    /// The flag the audit reads is set by building an ungated admin, and
+    /// only by that: a gated or tenancy-gated one leaves it clear.
     #[cfg(all(feature = "admin", feature = "sqlite"))]
     #[tokio::test]
-    async fn building_an_ungated_admin_reaches_the_deploy_audit() {
+    async fn only_an_ungated_admin_reaches_the_deploy_audit() {
+        let _g = crate::admin::ungated_flag_lock().lock().await;
+        crate::admin::reset_ungated_admin_built();
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");
-        let _admin = crate::admin::router(pool);
-        assert!(deploy_audit_env().ungated_admin);
+        let secret = crate::session::SessionSecret::from_bytes(vec![7; 32]);
+        let _gated = crate::admin::Builder::new(pool.clone())
+            .with_session_auth(secret)
+            .build();
+        // The public `tenant_mode` hides models; it gates nothing.
+        let gated_clear = !deploy_audit_env().ungated_admin;
+        let _open = crate::admin::Builder::new(pool.clone())
+            .tenant_mode()
+            .build();
+        let flagged = deploy_audit_env().ungated_admin;
+        crate::admin::reset_ungated_admin_built();
+        assert!(gated_clear, "a gated admin set the ungated flag");
+        assert!(
+            flagged,
+            "a `tenant_mode` admin without auth was not flagged"
+        );
     }
 
     fn run(env: &DeployAuditEnv) -> DeployAuditFindings {

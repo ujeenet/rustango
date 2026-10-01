@@ -460,7 +460,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `register_action(table, name, handler)` | Register a bulk-action handler. |
 | `with_session_auth(secret)` | Require cookie login (`/login` + `/logout`). |
 | `logout_url(u)` | POST target for the sidebar Logout button. Default `{admin_prefix}/logout`; tenant admins set it to their tenancy logout route. |
-| `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. |
+| `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. `new` follows `[security].secure_cookies`, else secure on the prod tier. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo above the title. |
 | `brand_name(s)` / `brand_tagline(s)` | Per-tenant brand overrides. |
