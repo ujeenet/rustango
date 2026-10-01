@@ -124,7 +124,6 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::cache` | Backends de cache |
 | `rustango::cache_page` | Middleware de cache de page |
 | `rustango::cors` | Décisions de politique CORS |
-| `rustango::email` | Envoi de courrier |
 | `rustango::email::smtp` | Transport SMTP |
 | `rustango::error` | La cause d'une 5xx, que le corps de la réponse ne divulgue pas |
 | `rustango::auth_flows` | Liens d'authentification à usage unique refusés par le cache |
