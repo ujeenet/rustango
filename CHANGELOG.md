@@ -38,6 +38,10 @@ A second finalize no longer deletes a `Ready` row's object or flips `Failed` bac
 
 Each row is deleted on its read status with its tag links, and its object inside the same transaction.
 
+### Fixed — a cancelled `LocalStorage::save` leaves no temp file
+
+A drop guard removes the temp file unless the rename ran; it is opened with `create_new`.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

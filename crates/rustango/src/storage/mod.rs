@@ -300,14 +300,32 @@ impl Storage for LocalStorage {
         // Temp file + rename: a reader never sees a torn file, a crash
         // leaves the old one (#1905).
         let tmp = path.with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
-        if let Err(e) = tokio::fs::write(&tmp, data).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(StorageError::Io(e.to_string()));
-        }
-        tokio::fs::rename(&tmp, &path).await.map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            StorageError::Io(e.to_string())
-        })
+        let io = |e: std::io::Error| StorageError::Io(e.to_string());
+        // Armed before the open, so a cancel at any await removes it.
+        let guard = TmpFile(Some(tmp.clone()));
+        let mut file = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                guard.keep();
+                return Err(io(e));
+            }
+            Err(e) => return Err(io(e)),
+        };
+        tokio::io::AsyncWriteExt::write_all(&mut file, data)
+            .await
+            .map_err(io)?;
+        tokio::io::AsyncWriteExt::flush(&mut file)
+            .await
+            .map_err(io)?;
+        drop(file);
+        tokio::fs::rename(&tmp, &path).await.map_err(io)?;
+        guard.keep();
+        Ok(())
     }
 
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
@@ -352,6 +370,24 @@ impl Storage for LocalStorage {
     fn url(&self, key: &str) -> Option<String> {
         let base = self.base_url.as_ref()?;
         Some(format!("{}/{}", base.trim_end_matches('/'), key))
+    }
+}
+
+/// Removes a temp file on drop, unless [`Self::keep`] ran: an error or a
+/// cancelled save leaves nothing behind.
+struct TmpFile(Option<PathBuf>);
+
+impl TmpFile {
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TmpFile {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
@@ -565,6 +601,52 @@ mod tests {
         let s = LocalStorage::new(dir.clone());
         s.save("a/b/c/file.txt", b"deep").await.unwrap();
         assert_eq!(s.load("a/b/c/file.txt").await.unwrap(), b"deep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tmp_file_guard_removes_unless_kept() {
+        let dir = tempdir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.tmp"), dir.join("b.tmp"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        drop(TmpFile(Some(a.clone())));
+        TmpFile(Some(b.clone())).keep();
+        assert!(!a.exists(), "a dropped guard left its file");
+        assert!(b.exists(), "a kept guard removed its file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save dropped mid-write leaves no temp file.
+    #[tokio::test]
+    async fn a_cancelled_local_save_leaves_no_temp_file() {
+        use std::future::Future as _;
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let data = vec![0u8; 64 << 20];
+        let tmp_seen = || {
+            std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+        };
+        {
+            let mut fut = std::pin::pin!(s.save("big.bin", &data));
+            loop {
+                let polled =
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(fut.as_mut().poll(cx))).await;
+                assert!(polled.is_pending(), "save finished before it was cancelled");
+                if tmp_seen() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+        // Let a write already in flight on the blocking pool finish.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!tmp_seen(), "a cancelled save left its temp file");
+        assert!(!dir.join("big.bin").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
