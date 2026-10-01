@@ -991,6 +991,10 @@ fn render_changes_split_inner(
                 if dialect.name() == "mysql" && is_uuid_default(f) {
                     out.immediate
                         .extend(add_column_backfilled(table, f, dialect));
+                } else if dialect.name() == "mysql" && !f.nullable && f.default.is_none() {
+                    // MySQL fills a NOT NULL ADD with '' or 0; MODIFY fails on a NULL row instead.
+                    out.immediate
+                        .extend(add_column_then_not_null(table, f, dialect));
                 } else {
                     out.immediate.push(add_column_sql(table, f, dialect));
                 }
@@ -1772,6 +1776,27 @@ fn add_column_backfilled(
     ]
 }
 
+/// `f` added nullable, then made NOT NULL by `MODIFY` (MySQL only).
+fn add_column_then_not_null(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Vec<String> {
+    let bare = FieldSnapshot {
+        nullable: true,
+        ..f.clone()
+    };
+    vec![
+        add_column_sql(table, &bare, dialect),
+        format!(
+            "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL",
+            dialect.quote_ident(table),
+            dialect.quote_ident(&f.column),
+            sql_type_with_dialect(f, dialect)
+        ),
+    ]
+}
+
 /// `UPDATE` setting each NULL `f` to its DEFAULT, evaluated per row.
 pub(crate) fn fill_nulls_sql(
     table: &str,
@@ -1896,6 +1921,38 @@ mod sql_type_tests {
             db_comment: None,
             fk: None,
         }
+    }
+
+    /// Added NOT NULL, MySQL would fill a row that slipped in after the empty check.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn mysql_not_null_add_on_empty_table_tightens_after() {
+        let snap = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "t".into(),
+                model: "T".into(),
+                fields: vec![fs("i32", false)],
+                composite_fks: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let add = [SchemaChange::AddColumn {
+            table: "t".into(),
+            column: "x".into(),
+        }];
+        let out = render_changes_split_for_empty(&add, &snap, &crate::sql::MySql, None).unwrap();
+        assert_eq!(out.immediate.len(), 2, "{:?}", out.immediate);
+        assert!(
+            !out.immediate[0].contains("NOT NULL"),
+            "{}",
+            out.immediate[0]
+        );
+        assert!(
+            out.immediate[1].starts_with("ALTER TABLE `t` MODIFY COLUMN `x` ")
+                && out.immediate[1].ends_with(" NOT NULL"),
+            "{}",
+            out.immediate[1]
+        );
     }
 
     #[test]

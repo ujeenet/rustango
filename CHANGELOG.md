@@ -17,6 +17,7 @@ A later system step's index on such a table is created.
 ### Fixed — converging a NOT NULL column with no default on an empty table (#2066)
 
 `migrate` adds it instead of asking for it by hand; a table with rows still fails.
+MySQL adds it nullable, then `MODIFY`s it NOT NULL, so a row written in between fails it instead of getting `''` or `0`.
 
 ## [0.59.15] — 2026-10-01
 
