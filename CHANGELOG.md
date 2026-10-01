@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)
+
+A bool facet showed `1`/`0`, linked `?flag=1` and never marked the active value on SQLite/MySQL.
+Edit-form and list cells now read a numeric bool as checked/unchecked, not empty.
+
 ### Fixed — admin bulk actions post under the admin prefix (#1765)
 
 The list's action form no longer posts to `/{table}/__action`, which 404ed under a prefix.

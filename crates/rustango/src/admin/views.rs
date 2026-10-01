@@ -872,9 +872,11 @@ async fn compute_facets(
                  ORDER BY facet_count DESC, {t}.{c}"
             )
         };
-        let facet_rows = fetch_facet_rows(&state.pool, &sql, &tail.params, fk_join.is_some())
-            .await
-            .map_err(|e| AdminError::Internal(e.to_string()))?;
+        let is_bool = field.ty == crate::core::FieldType::Bool;
+        let facet_rows =
+            fetch_facet_rows(&state.pool, &sql, &tail.params, fk_join.is_some(), is_bool)
+                .await
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
         let mut values = Vec::with_capacity(facet_rows.len());
         for (raw_value, display_text, count) in &facet_rows {
             // `raw_value` is already a string: the per-backend fetch
@@ -968,12 +970,13 @@ async fn compute_facets(
 /// Returns `(raw_value, display_text, count)` triples. The column
 /// value is stringified here so the caller stays backend-agnostic.
 /// Pass `expect_display = true` for the FK-joined facet, which also
-/// reads the joined display column.
+/// reads the joined display column, and `is_bool` for a bool column.
 async fn fetch_facet_rows(
     pool: &crate::sql::Pool,
     sql: &str,
     params: &[SqlValue],
     expect_display: bool,
+    is_bool: bool,
 ) -> Result<Vec<(String, Option<String>, i64)>, sqlx::Error> {
     // The fetch stays per-arm because sqlx's `Executor` is bound to
     // a concrete `Database`. Only the row decode is generic, so it
@@ -988,7 +991,7 @@ async fn fetch_facet_rows(
             let rows = q.fetch_all(pg).await?;
             Ok(rows
                 .iter()
-                .map(|r| decode_facet_row(r, expect_display))
+                .map(|r| decode_facet_row(r, expect_display, is_bool))
                 .collect())
         }
         #[cfg(feature = "mysql")]
@@ -1000,7 +1003,7 @@ async fn fetch_facet_rows(
             let rows = q.fetch_all(my).await?;
             Ok(rows
                 .iter()
-                .map(|r| decode_facet_row(r, expect_display))
+                .map(|r| decode_facet_row(r, expect_display, is_bool))
                 .collect())
         }
         #[cfg(feature = "sqlite")]
@@ -1012,7 +1015,7 @@ async fn fetch_facet_rows(
             let rows = q.fetch_all(sq).await?;
             Ok(rows
                 .iter()
-                .map(|r| decode_facet_row(r, expect_display))
+                .map(|r| decode_facet_row(r, expect_display, is_bool))
                 .collect())
         }
     }
@@ -1021,7 +1024,11 @@ async fn fetch_facet_rows(
 /// Per-row decoder for [`fetch_facet_rows`], generic over the row
 /// type so every backend shares one loop. The bounds are those of
 /// [`stringify_facet_value`] plus the display and count decodes.
-fn decode_facet_row<'r, R>(row: &'r R, expect_display: bool) -> (String, Option<String>, i64)
+fn decode_facet_row<'r, R>(
+    row: &'r R,
+    expect_display: bool,
+    is_bool: bool,
+) -> (String, Option<String>, i64)
 where
     R: sqlx::Row,
     &'r str: sqlx::ColumnIndex<R>,
@@ -1031,7 +1038,7 @@ where
     Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
-    let raw = stringify_facet_value(row);
+    let raw = stringify_facet_value(row, is_bool);
     let display = if expect_display {
         row.try_get::<Option<String>, _>("facet_display")
             .ok()
@@ -1045,8 +1052,9 @@ where
 
 /// Decode the `facet_value` column: text first, then the numeric and
 /// boolean scalars facets commonly hit. Returns an empty string when
-/// no shape matches.
-fn stringify_facet_value<'r, R>(row: &'r R) -> String
+/// no shape matches. A bool column reads as bool first: SQLite and
+/// MySQL store it as `1`/`0`, which the text and integer reads keep (#1730).
+fn stringify_facet_value<'r, R>(row: &'r R, is_bool: bool) -> String
 where
     R: sqlx::Row,
     &'r str: sqlx::ColumnIndex<R>,
@@ -1055,6 +1063,11 @@ where
     Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
+    if is_bool {
+        if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
+            return b.to_string();
+        }
+    }
     if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
         return s;
     }

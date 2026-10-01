@@ -1,5 +1,5 @@
-//! Admin list paging order, filter-keeping links and the mounted prefix on
-//! every backend (#1917 #1916 #1765).
+//! Admin list paging order, filter-keeping links, the mounted prefix and
+//! bool checkboxes on every backend (#1917 #1916 #1765 #1730).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -181,11 +181,41 @@ async fn action_form_posts_under_the_prefix(pool: &Pool) {
     );
 }
 
+/// A stored `true` renders a checked box, whatever the backend stores.
+async fn edit_form_checks_a_true_bool(pool: &Pool) {
+    let on = seed(pool, "on", true).await;
+    let off = seed(pool, "off", false).await;
+    let body = get(pool, &format!("/adminls_item/{on}/edit")).await;
+    assert!(
+        body.contains(r#"name="flag" id="flag" value="true" checked"#),
+        "{body}"
+    );
+    let body = get(pool, &format!("/adminls_item/{off}/edit")).await;
+    assert!(
+        body.contains(r#"name="flag" id="flag" value="true">"#),
+        "{body}"
+    );
+}
+
+/// A bool facet reads `true`/`false` and marks the active value, where
+/// SQLite and MySQL hand back `1`/`0`.
+async fn bool_facet_reads_true_and_toggles_off(pool: &Pool) {
+    seed(pool, "on", true).await;
+    seed(pool, "off", false).await;
+    let body = get(pool, "/adminls_item?flag=true").await;
+    assert!(body.contains(r#"class="active">true</a>"#), "{body}");
+    assert!(body.contains(">false</a>"), "{body}");
+    let links = list_links(&body);
+    assert!(!links.iter().any(|l| l.contains("flag=1")), "{links:?}");
+}
+
 tri_dialect_test! {
     model: Item,
     scenarios: [
         equal_sort_keys_page_in_pk_order,
         links_keep_the_whole_filter_state,
         action_form_posts_under_the_prefix,
+        edit_form_checks_a_true_bool,
+        bool_facet_reads_true_and_toggles_off,
     ],
 }
