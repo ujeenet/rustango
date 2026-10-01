@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — a panicking handler is a logged 500, not a dropped connection (#1541)
 
-`Cli` and `server::Builder` catch handler panics: an opaque 500 with the request id, logged under `rustango::error`. The oauth2 login no longer panics on a bad header value.
+`Cli` and `server::Builder` catch handler panics: an opaque `text/plain` 500 with the request id, CORS and security headers, logged under `rustango::error`. The oauth2 login no longer panics on a bad header value.
 
 ### Fixed — `EtagLayer` no longer blanks large or streamed bodies; method override answers 413 (#1866)
 

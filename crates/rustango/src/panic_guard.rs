@@ -28,7 +28,8 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 
 /// Turn a panicking handler into a logged, opaque 500 instead of a
 /// dropped connection (#1541). Mount it inside the request-id and
-/// access-log layers so both see the 500.
+/// access-log layers so both see the 500, and inside CORS and the
+/// security headers so the 500 carries them.
 #[cfg(any(feature = "manage", feature = "tenancy"))]
 #[must_use]
 pub(crate) fn catch_panics(router: axum::Router) -> axum::Router {
@@ -55,6 +56,10 @@ pub(crate) fn catch_panics(router: axum::Router) -> axum::Router {
                         crate::error::OPAQUE_SERVER_ERROR,
                     ));
                     *resp.status_mut() = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+                    resp.headers_mut().insert(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+                    );
                     resp
                 }
             }

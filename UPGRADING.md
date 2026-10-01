@@ -152,7 +152,7 @@ untouched.
 
 ### Handler panics are caught (#1541)
 
-`Cli` and `server::Builder` turn a panic into a 500 with body `internal server error`; a panic hook you rely on still runs.
+`Cli` and `server::Builder` turn a panic into a `text/plain` 500 with body `internal server error`, carrying CORS and the security headers; a panic hook you rely on still runs.
 
 ### `EtagLayer::default()` caps at 4 MiB; streams are not tagged (#1866)
 

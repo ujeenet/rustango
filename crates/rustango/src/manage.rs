@@ -1032,6 +1032,8 @@ impl Cli {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
             None => api,
         };
+        // Inside CORS and the security headers, so a panic's 500 carries them (#1541).
+        let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
@@ -1323,6 +1325,8 @@ impl Cli {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
             None => api,
         };
+        // Inside CORS; the builder catches the admin and console routes (#1541).
+        let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
@@ -1391,6 +1395,8 @@ impl Cli {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
             None => api,
         };
+        // Inside CORS; the builder catches the admin and console routes (#1541).
+        let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
@@ -2600,6 +2606,45 @@ mod assemble_app_tests {
         assert!(ok.headers().contains_key("x-frame-options"));
         let bad = send("evil.example").await.expect("request");
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// #1541 — a panic's 500 still carries CORS and the security headers.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn a_panic_500_carries_cors_and_security_headers() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.cors_allowed_origins = vec!["https://app.example".into()];
+        let app = Cli::new()
+            .with_settings(&s)
+            .api(Router::new().route(
+                "/boom",
+                axum::routing::get(|| async {
+                    if std::hint::black_box(true) {
+                        panic!("boom");
+                    }
+                    "unreachable"
+                }),
+            ))
+            .assemble_app(pool);
+        let req = Request::builder()
+            .uri("/boom")
+            .header("origin", "https://app.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("request");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let h = resp.headers();
+        assert_eq!(h["access-control-allow-origin"], "https://app.example");
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert!(h.contains_key("x-frame-options"));
+        assert!(h["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"));
     }
 }
 

@@ -836,6 +836,8 @@ impl<DB: Database> Builder<DB> {
             }
         }));
 
+        // Inside the security headers, so a panic's 500 carries them (#1541).
+        let app = crate::panic_guard::catch_panics(app);
         #[cfg(feature = "admin")]
         let app = match self.security_headers {
             Some(layer) => {
@@ -885,8 +887,7 @@ impl<DB: Database> Builder<DB> {
             // rules and why they live in one place.
             crate::access_log::mount_observability(app, access_log, redact)
         } else {
-            // A panic is a 500 with or without observability (#1541).
-            crate::panic_guard::catch_panics(app)
+            app
         };
         #[cfg(feature = "admin")]
         let app = match self.real_ip {

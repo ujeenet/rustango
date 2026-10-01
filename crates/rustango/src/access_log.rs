@@ -204,10 +204,13 @@ impl AccessLogLayer {
 /// ```text
 ///   TracingLayer   outermost — opens the span
 ///     access_log   inside it, so its line inherits the span
-///       request_id runs with the span current, so `record` lands on it
-///         catch_panics innermost — a panic becomes a logged 500
+///       request_id innermost — runs with the span current, so
+///                  `record` lands on it
 ///       handler
 /// ```
+///
+/// `catch_panics` is not mounted here: it goes inside CORS and the
+/// security headers, so each caller mounts it under those (#1541).
 ///
 /// `access_log: None` means `[logging] access_log = false`: the log
 /// line goes away, but **the span and request id stay**. That setting
@@ -236,8 +239,6 @@ pub(crate) fn mount_observability(
     // access_log = false` silently narrowed an `[audit]` setting
     // and a configured param was logged in clear text (#1610).
     let span = crate::tracing_layer::TracingLayer::new().redact(redact);
-    // Innermost, so a panic is a 500 the request id and access log see.
-    let router = crate::panic_guard::catch_panics(router);
     let router = router.request_id(crate::request_id::RequestIdLayer::default());
     let router = match access_log {
         Some(l) => router.access_log(l),
@@ -770,7 +771,7 @@ mod observability_mount_tests {
             .finish();
         let _g = tracing::subscriber::set_default(subscriber);
         let app = mount_observability(
-            Router::new().route(
+            crate::panic_guard::catch_panics(Router::new().route(
                 "/",
                 get(|| async {
                     if std::hint::black_box(true) {
@@ -778,7 +779,7 @@ mod observability_mount_tests {
                     }
                     "unreachable"
                 }),
-            ),
+            )),
             Some(AccessLogLayer::default()),
             default_redact_params(),
         );

@@ -22,7 +22,17 @@ async fn build(f: impl FnOnce(Builder) -> Builder) -> (axum::Router, tempfile::T
     let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
     // An api route with no layer of its own, so a layer moved onto the
     // admin routes alone would miss it.
-    let api = axum::Router::new().route("/app", get(|| async { "ok" }));
+    let api = axum::Router::new()
+        .route("/app", get(|| async { "ok" }))
+        .route(
+            "/boom",
+            get(|| async {
+                if std::hint::black_box(true) {
+                    panic!("boom");
+                }
+                "unreachable"
+            }),
+        );
     let b = Builder::from_pool(pool, url, "localhost").api(api);
     (f(b).into_router().await.expect("assemble"), tmp)
 }
@@ -136,4 +146,19 @@ async fn the_https_redirect_covers_both_branches() {
             "{host}{uri} must redirect"
         );
     }
+}
+
+/// #1541 — a panicking api route's 500 carries the security headers.
+#[tokio::test]
+async fn a_panic_500_carries_the_headers() {
+    let (app, _tmp) = app(true).await;
+    let req = Request::builder()
+        .uri("/boom")
+        .header("host", "acme.localhost")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.headers()["x-frame-options"], "DENY");
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
 }
