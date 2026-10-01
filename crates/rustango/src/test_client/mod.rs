@@ -386,8 +386,8 @@ impl<'a> RequestBuilder<'a> {
     }
 
     /// Send, then follow up to `max_hops` redirects like a browser:
-    /// 301/302/303 re-request with `GET` (`HEAD` stays `HEAD`) and no
-    /// body; 307/308 repeat the method and body. Returns the final
+    /// 301/302 turn `POST` into a bodyless `GET`, 303 does so for all but
+    /// `HEAD`; other methods and 307/308 repeat the method and body. Returns the final
     /// response and the visited `(status, location)` chain, ending with
     /// the final status and path.
     pub async fn send_following_redirects(
@@ -420,9 +420,10 @@ impl<'a> RequestBuilder<'a> {
             };
             chain.push((status, location.clone()));
             req.path = resolve_location(&req.path, &location);
-            if !matches!(status, 307 | 308) && req.method != Method::HEAD {
-                req.method = Method::GET;
+            if let Some(method) = redirect_method(status, &req.method) {
+                req.method = method;
                 req.content_type = None;
+                req.headers.retain(|(k, _)| !is_body_header(k));
                 body = None;
             }
             last = client.dispatch(req.with_body(body.clone())).await;
@@ -430,6 +431,29 @@ impl<'a> RequestBuilder<'a> {
         chain.push((last.status, req.path));
         (last, chain)
     }
+}
+
+/// The method a browser switches to on `status`, or `None` to repeat it
+/// (Fetch: 301/302 rewrite only POST; 303 everything but HEAD).
+fn redirect_method(status: u16, method: &Method) -> Option<Method> {
+    match status {
+        301 | 302 if *method == Method::POST => Some(Method::GET),
+        303 if *method != Method::HEAD && *method != Method::GET => Some(Method::GET),
+        _ => None,
+    }
+}
+
+/// Headers describing the body, which a browser drops with it.
+fn is_body_header(name: &HeaderName) -> bool {
+    use axum::http::header;
+    [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_ENCODING,
+        header::CONTENT_LANGUAGE,
+        header::CONTENT_LOCATION,
+    ]
+    .contains(name)
 }
 
 /// One request as [`TestClient::dispatch`] sends it.
@@ -475,7 +499,21 @@ impl TestClient {
             Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
         );
         if !safe && !has(&axum::http::header::ORIGIN) {
-            req = req.header(axum::http::header::ORIGIN, format!("http://{host}"));
+            // Behind a TLS proxy the browser's origin is https.
+            let scheme = out
+                .headers
+                .iter()
+                .find(|(k, _)| k == "x-forwarded-proto")
+                .and_then(|(_, v)| v.to_str().ok())
+                .filter(|v| {
+                    v.split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("https")
+                })
+                .map_or("http", |_| "https");
+            req = req.header(axum::http::header::ORIGIN, format!("{scheme}://{host}"));
         }
         if let Some(ct) = out.content_type {
             req = req.header("content-type", ct);
@@ -520,12 +558,38 @@ fn resolve_location(current: &str, location: &str) -> String {
             None => "/".to_owned(),
         };
     }
-    if location.starts_with('/') {
-        return location.to_owned();
-    }
     let base = current.split(['?', '#']).next().unwrap_or("/");
-    let dir = &base[..=base.rfind('/').unwrap_or(0)];
-    format!("{dir}{location}")
+    if location.starts_with('?') {
+        return format!("{base}{location}");
+    }
+    let joined = if location.starts_with('/') {
+        location.to_owned()
+    } else {
+        format!("{}{location}", &base[..=base.rfind('/').unwrap_or(0)])
+    };
+    let (path, query) = joined.split_at(joined.find(['?', '#']).unwrap_or(joined.len()));
+    format!("{}{query}", remove_dot_segments(path))
+}
+
+/// RFC 3986 §5.2.4: drop `.` segments, and `..` with its parent.
+fn remove_dot_segments(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    for (i, seg) in segments.iter().enumerate() {
+        let last = i + 1 == segments.len();
+        match *seg {
+            "." | ".." => {
+                if *seg == ".." {
+                    out.pop();
+                }
+                if last {
+                    out.push("");
+                }
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 /// One cookie as a browser keeps it: keyed by name and path.
@@ -1248,6 +1312,22 @@ mod tests {
         assert_eq!(forged.status, 403, "a foreign Origin is refused");
     }
 
+    /// Over TLS the CSRF layer refuses a missing or `http://` Origin, so this
+    /// passes only with the same-origin `https://` default.
+    #[tokio::test]
+    async fn default_origin_follows_x_forwarded_proto() {
+        let c = TestClient::new(csrf_app());
+        c.get("/login").send().await;
+        let token = c.csrf_token().expect("CSRF cookie");
+        let r = c
+            .post("/submit")
+            .header("x-forwarded-proto", "https")
+            .form(&[("_csrf", &token)])
+            .send()
+            .await;
+        assert_eq!(r.status, 200, "{}", r.text());
+    }
+
     #[tokio::test]
     async fn logout_reaches_the_server_with_session_and_token() {
         let c = TestClient::new(csrf_app());
@@ -1344,6 +1424,93 @@ mod tests {
         assert_eq!(dropped.text(), "GET", "303 becomes GET");
     }
 
+    /// Redirects to `/dest`, which echoes the method (also as `x-method`),
+    /// body and content type it received.
+    fn fetch_redirect_app() -> Router {
+        use axum::extract::Path;
+        use axum::http::{header, HeaderMap, Method, StatusCode};
+        Router::new()
+            .route(
+                "/r/{code}",
+                axum::routing::any(|Path(code): Path<u16>| async move {
+                    let status = StatusCode::from_u16(code).expect("status");
+                    (status, [(header::LOCATION, "/dest")])
+                }),
+            )
+            .route(
+                "/dest",
+                axum::routing::any(|m: Method, h: HeaderMap, body: String| async move {
+                    let ct = h
+                        .get("content-type")
+                        .map_or("-", |v| v.to_str().unwrap_or("?"));
+                    ([("x-method", m.to_string())], format!("{m} {body:?} {ct}"))
+                }),
+            )
+    }
+
+    #[tokio::test]
+    async fn redirect_methods_follow_the_fetch_rules() {
+        let app = fetch_redirect_app();
+        let c = TestClient::new(app);
+        let cases = [
+            (301, "POST", "GET \"\" -"),
+            (302, "POST", "GET \"\" -"),
+            (301, "PUT", "PUT \"x=1\" application/x-www-form-urlencoded"),
+            (
+                302,
+                "DELETE",
+                "DELETE \"x=1\" application/x-www-form-urlencoded",
+            ),
+            (303, "PUT", "GET \"\" -"),
+            (303, "POST", "GET \"\" -"),
+            (
+                308,
+                "POST",
+                "POST \"x=1\" application/x-www-form-urlencoded",
+            ),
+            (
+                307,
+                "PATCH",
+                "PATCH \"x=1\" application/x-www-form-urlencoded",
+            ),
+        ];
+        for (code, method, want) in cases {
+            let (r, chain) = c
+                .request(
+                    Method::from_bytes(method.as_bytes()).unwrap(),
+                    &format!("/r/{code}"),
+                )
+                .form(&[("x", "1")])
+                .send_following_redirects(2)
+                .await;
+            assert_eq!(r.text(), want, "{code} {method}");
+            assert_eq!(chain[0], (code, "/dest".to_owned()));
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_303_keeps_head() {
+        let c = TestClient::new(fetch_redirect_app());
+        let (head, _) = c
+            .request(Method::HEAD, "/r/303")
+            .send_following_redirects(2)
+            .await;
+        assert_eq!(head.header("x-method"), Some("HEAD"));
+    }
+
+    /// A body header the test set goes with the body.
+    #[tokio::test]
+    async fn redirect_303_drops_body_headers() {
+        let c = TestClient::new(fetch_redirect_app());
+        let (r, _) = c
+            .post("/r/303")
+            .header("content-type", "text/plain")
+            .body("x")
+            .send_following_redirects(2)
+            .await;
+        assert_eq!(r.text(), "GET \"\" -");
+    }
+
     #[tokio::test]
     async fn logout_without_path_only_clears_locally() {
         let c = TestClient::new(cookie_app());
@@ -1375,6 +1542,60 @@ mod tests {
         assert_eq!(jar.header_for("/admin"), None, "Max-Age=0 deletes");
     }
 
+    /// Expiry, not an empty value, deletes; a positive Max-Age keeps.
+    #[test]
+    fn max_age_decides_deletion_not_the_value() {
+        let mut jar = CookieJar::default();
+        jar.apply_set_cookie("s=live; Path=/; Max-Age=3600", "/");
+        assert_eq!(jar.header_for("/").as_deref(), Some("s=live"));
+        jar.apply_set_cookie("s=; Path=/; Max-Age=3600", "/");
+        assert_eq!(
+            jar.header_for("/").as_deref(),
+            Some("s="),
+            "empty value is kept"
+        );
+        jar.apply_set_cookie("s=gone; Path=/; Max-Age=0", "/");
+        assert_eq!(
+            jar.header_for("/"),
+            None,
+            "Max-Age=0 deletes a non-empty value"
+        );
+    }
+
+    #[test]
+    fn same_name_on_two_paths_sends_longest_first() {
+        let mut jar = CookieJar::default();
+        jar.apply_set_cookie("s=root; Path=/", "/");
+        jar.apply_set_cookie("s=admin; Path=/admin", "/");
+        assert_eq!(
+            jar.header_for("/admin/x").as_deref(),
+            Some("s=admin; s=root")
+        );
+        assert_eq!(jar.header_for("/x").as_deref(), Some("s=root"));
+    }
+
+    /// The query is not part of the path, for the default path or matching.
+    #[tokio::test]
+    async fn cookie_paths_ignore_the_query() {
+        use axum::http::header;
+        let app = Router::new()
+            .route(
+                "/a/set",
+                get(|| async { ([(header::SET_COOKIE, "t=1")], "set") }),
+            )
+            .route(
+                "/a/me",
+                get(|h: axum::http::HeaderMap| async move {
+                    h.get("cookie")
+                        .map_or("-", |v| v.to_str().unwrap_or("?"))
+                        .to_owned()
+                }),
+            );
+        let c = TestClient::new(app);
+        c.get("/a/set?next=/x/y/z").send().await;
+        assert_eq!(c.get("/a/me?q=/b/c").send().await.text(), "t=1");
+    }
+
     #[test]
     fn redirect_locations_resolve_to_paths() {
         assert_eq!(
@@ -1384,6 +1605,12 @@ mod tests {
         assert_eq!(resolve_location("/a/b", "https://h"), "/");
         assert_eq!(resolve_location("/a/b?q", "c"), "/a/c");
         assert_eq!(resolve_location("/a/b", "/d"), "/d");
+        assert_eq!(resolve_location("/a/b?x=1", "?page=2"), "/a/b?page=2");
+        assert_eq!(resolve_location("/a/b/c", "../x"), "/a/x");
+        assert_eq!(resolve_location("/a/b/c", "./x?n=../y"), "/a/b/x?n=../y");
+        assert_eq!(resolve_location("/a/b", "/d/./e/../f"), "/d/f");
+        assert_eq!(resolve_location("/a", "../../x"), "/x");
+        assert_eq!(resolve_location("/a/b/c", ".."), "/a/");
     }
 
     // ---------- get_following_redirects (issue #41 follow-up) ----------
