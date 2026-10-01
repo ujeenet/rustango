@@ -158,13 +158,14 @@ now gets an `[admin]` warning. Add the login, or ignore it if you gate the route
 
 ### `admin::Builder::new` cookies follow the secure-cookie policy
 
-They are `Secure` on the prod tier or when `[security].secure_cookies` is on. For plain HTTP,
-set it to `false` or call `.secure_cookies(false)`.
+They are `Secure` on the prod tier or when `[security].secure_cookies` is on, and under `manage` it
+defaults to on. So a dev config without it gets `Secure` cookies and login fails over plain HTTP:
+add `[security] secure_cookies = false` to `config/dev.toml`, or call `.secure_cookies(false)`.
 
 ### Commit and ship `system/migrations/` (#1988)
 
-Without it, `migrate` regenerates the chain and checks the live schema instead of the ledger.
-Commit it and add `COPY system /app/system` to an existing `Dockerfile`.
+Without it, `migrate` regenerates the chain and checks the live schema instead of the ledger,
+for the registry and every tenant. Commit it and add `COPY system /app/system` to an existing `Dockerfile`.
 
 ### `manage`-only builds log requests (#1514)
 

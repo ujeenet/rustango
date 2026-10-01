@@ -24,6 +24,8 @@ The getting-started guide teaches the gated admin and `create-admin`.
 
 The scaffolded `Dockerfile` now ships `system/`, and every template seeds it.
 A chain regenerated into an empty `system/` now converges by content: missing framework tables and columns are created.
+Every tenant converges too, not only the first, and tenants of a mixed-scope project use the committed `system/`.
+Converge adds one object at a time and lists what it cannot add; on SQLite a `now()` column gets a fixed default on a table with rows.
 
 ### Fixed — the `api` template gets the request span, `X-Request-Id` and access log (#1514)
 
