@@ -286,9 +286,12 @@ pub fn row_to_json_sqlite(
                 // `.to_string()` so the stored representation lines up.
                 row.try_get::<String, _>(field.column)
                     .map(|s| json!(s))
+                    // NUMERIC affinity stores `1` as INTEGER, `1.5` as REAL.
                     .or_else(|_| {
-                        // Small integers / floats may land in their
-                        // native affinity — fall back gracefully.
+                        row.try_get::<i64, _>(field.column)
+                            .map(|n| json!(n.to_string()))
+                    })
+                    .or_else(|_| {
                         row.try_get::<f64, _>(field.column)
                             .map(|n| json!(n.to_string()))
                     })

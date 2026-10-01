@@ -633,6 +633,12 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
+    /// Write the placeholder of a bound JSON value. PG and SQLite take
+    /// it as is; MySQL wraps it, since sqlx binds JSON as text.
+    fn write_json_param(&self, sql: &mut String, placeholder: &str) {
+        sql.push_str(placeholder);
+    }
+
     /// JSON containment: `<col> @> <p>::jsonb` (Postgres) /
     /// `JSON_CONTAINS(<col>, <p>)` (MySQL).
     fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {

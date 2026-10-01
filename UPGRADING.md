@@ -177,6 +177,23 @@ SQLite leaves out the FK of a column with a default (it refuses one on a table w
 **Breaking** on MySQL: new tables name the unique index `<table>_<column>_key`, not after the column.
 Two UNIQUE columns that map to one name (`a_b.c`, `a.b_c`) now fail to render: rename one.
 
+### Integer division and PostgreSQL date lookups (#1900)
+
+On MySQL, `F("n") / 2` over integers now truncates (7 / 2 = 3), as on PostgreSQL and SQLite.
+On PostgreSQL, `__date`/`__hour`/… and `trunc_*` on a `DateTime` column use UTC even after `SET TIME ZONE`.
+
+### MySQL `Decimal` columns are `DECIMAL(65, 28)` (#1899)
+
+New tables get the wider type; existing `DECIMAL(38, 10)` columns keep rounding past 10 places.
+Widen them with `ALTER TABLE t MODIFY c DECIMAL(65, 28)`. SQLite still keeps ~15 significant digits.
+Read-back values carry 28 decimal places (`1.5000…`); call `Decimal::normalize()` before display.
+
+### JSON comparisons match across backends (#1898)
+
+SQLite `as_text` JSON paths now yield text: compare them to `'1'` / `'true'`, not to `1`.
+SQLite still formats some values unlike PostgreSQL: `1.50` is `'1.5'`, `1e2` is `'100.0'`, big integers lose digits, objects have no spaces.
+On MySQL, `as_text` of a JSON null is now SQL NULL, not `'null'`.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

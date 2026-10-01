@@ -108,11 +108,78 @@ async fn an_array_indexed_path_executes(pool: &Pool) {
     .await;
 }
 
+/// Rows where `data` equals `v`, or `json_path(data, key, text) = s`.
+async fn count_json_eq(pool: &Pool, v: serde_json::Value) -> i64 {
+    use rustango::sql::CounterPool as _;
+    rustango::query::QuerySet::<Demo>::default()
+        .filter("data", SqlValue::Json(v))
+        .count(pool)
+        .await
+        .expect("count")
+}
+
+async fn count_text_eq(pool: &Pool, key: &str, s: &str) -> i64 {
+    use rustango::sql::CounterPool as _;
+    rustango::query::QuerySet::<Demo>::default()
+        .where_raw(WhereExpr::ExprCompare {
+            lhs: json_path(F("data"), &[key], true),
+            op: Op::Eq,
+            rhs: Expr::Literal(SqlValue::String(s.into())),
+        })
+        .count(pool)
+        .await
+        .expect("count")
+}
+
+/// #1898: MySQL compared a JSON column to the JSON bound as text.
+async fn json_equality_matches(pool: &Pool) {
+    let v = serde_json::json!({"n": 1, "b": true});
+    Demo {
+        id: Auto::Unset,
+        data: v.clone(),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    assert_eq!(count_json_eq(pool, v.clone()).await, 1);
+    assert_eq!(count_json_eq(pool, serde_json::json!({"n": 2})).await, 0);
+    // The null-safe `<=>` binds JSON the same way.
+    use rustango::sql::CounterPool as _;
+    let same = rustango::query::QuerySet::<Demo>::default()
+        .filter_op("data", Op::IsNotDistinctFrom, SqlValue::Json(v))
+        .count(pool)
+        .await
+        .expect("count");
+    assert_eq!(same, 1, "IS NOT DISTINCT FROM");
+}
+
+/// #1898: SQLite's as_text path returned the number 1 and the bool 1.
+async fn json_as_text_is_text(pool: &Pool) {
+    Demo {
+        id: Auto::Unset,
+        data: serde_json::json!({"n": 1, "b": true, "f": false, "s": "x", "z": null}),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    assert_eq!(count_text_eq(pool, "n", "1").await, 1, "number as text");
+    assert_eq!(count_text_eq(pool, "b", "true").await, 1, "bool as text");
+    assert_eq!(count_text_eq(pool, "f", "false").await, 1, "false as text");
+    assert_eq!(count_text_eq(pool, "s", "x").await, 1, "string unquoted");
+    assert_eq!(
+        count_text_eq(pool, "z", "null").await,
+        0,
+        "JSON null is NULL"
+    );
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
         a_single_key_path_executes,
         a_nested_key_path_executes,
         an_array_indexed_path_executes,
+        json_equality_matches,
+        json_as_text_is_text,
     ],
 }
