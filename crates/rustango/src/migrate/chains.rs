@@ -100,7 +100,8 @@ struct ProjectTables {
     owned: BTreeSet<String>,
     /// Tables any of its migrations creates, dropped later or not.
     claimed: BTreeSet<String>,
-    /// Tables its pending migrations write.
+    /// Tables its pending migrations write. Schema ops only: raw SQL and
+    /// callbacks are opaque, so a table they write is not counted busy.
     pending: BTreeSet<String>,
 }
 
