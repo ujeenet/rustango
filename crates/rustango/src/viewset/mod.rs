@@ -2083,6 +2083,8 @@ async fn run_list(
     //   ?title__icontains=hello      — pattern lookups
     //   ?published_at__isnull=true   — IS NULL / IS NOT NULL
     let mut filters: Vec<WhereExpr> = Vec::new();
+    let in_budget = crate::list_params::in_values_budget(acq.pool.dialect().max_bind_params());
+    let mut in_values = 0_usize;
     for (param_key, raw_val) in &params {
         // `list_params::is_reserved_list_key` is the single source of
         // truth, shared with template_views.
@@ -2100,10 +2102,24 @@ async fn run_list(
             continue;
         };
         match build_lookup_filter(field, lookup, raw_val) {
-            Ok(Some(predicate)) => filters.push(predicate),
+            Ok(Some(predicate)) => {
+                if let WhereExpr::Predicate(Filter {
+                    value: SqlValue::List(items),
+                    ..
+                }) = &predicate
+                {
+                    in_values += items.len();
+                }
+                filters.push(predicate);
+            }
             Ok(None) => {}
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
         }
+    }
+    // Every list value is a bind, so the sum must fit the dialect too.
+    if in_values > in_budget {
+        let e = crate::list_params::InListTooLong::Total(in_budget);
+        return json_error(StatusCode::BAD_REQUEST, &e.to_string());
     }
 
     // Filter backends add predicates, ANDed with the built-in

@@ -12,7 +12,8 @@
 //! * [`parse_ordering`] — splits `?ordering=col,-col2`.
 //! * [`clamp_page_size`] — resolves `?page_size=N`.
 //! * [`parse_page`] / [`page_offset`] — `?page=N` and its overflow-safe offset.
-//! * [`split_in_list`] — a `__in` value, capped at [`MAX_IN_VALUES`].
+//! * [`split_in_list`] — a `__in` value, capped at [`MAX_IN_VALUES`];
+//!   [`in_values_budget`] caps all lists of a request together.
 //!
 //! Each layer still builds its own WHERE clause, because viewset
 //! supports a richer filter syntax than the CBV.
@@ -25,6 +26,7 @@
 //! [`page_offset`]: crate::list_params::page_offset
 //! [`split_in_list`]: crate::list_params::split_in_list
 //! [`MAX_IN_VALUES`]: crate::list_params::MAX_IN_VALUES
+//! [`in_values_budget`]: crate::list_params::in_values_budget
 
 use std::collections::HashMap;
 
@@ -111,15 +113,34 @@ pub fn clamp_page_size(default: i64, max: i64, params: &HashMap<String, String>)
 /// dialect's bind limit, so a long list is a 400, not a driver error (#1865).
 pub const MAX_IN_VALUES: usize = 1000;
 
-/// A `__in` list longer than [`MAX_IN_VALUES`].
+/// Binds a list request keeps free for its other filters, search and paging.
+const RESERVED_BINDS: usize = 1000;
+
+/// A `__in` list longer than [`MAX_IN_VALUES`], or `__in` lists whose sum
+/// passes [`in_values_budget`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct InListTooLong;
+pub enum InListTooLong {
+    /// One list is over [`MAX_IN_VALUES`].
+    One,
+    /// All lists together are over this budget.
+    Total(usize),
+}
 
 impl std::fmt::Display for InListTooLong {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "an `__in` filter takes at most {MAX_IN_VALUES} values")
+        match self {
+            Self::One => write!(f, "an `__in` filter takes at most {MAX_IN_VALUES} values"),
+            Self::Total(n) => write!(f, "the `__in` filters take at most {n} values in total"),
+        }
     }
+}
+
+/// Most `__in` values one request may carry over all its lists, so a dialect
+/// with `max_bind_params` binds gets a 400 rather than a driver 500.
+#[must_use]
+pub fn in_values_budget(max_bind_params: usize) -> usize {
+    max_bind_params.saturating_sub(RESERVED_BINDS)
 }
 
 /// Split a comma-separated `__in` value, dropping empty entries.
@@ -135,7 +156,7 @@ pub fn split_in_list(raw: &str) -> Result<Vec<&str>, InListTooLong> {
         .take(MAX_IN_VALUES + 1)
         .collect();
     if parts.len() > MAX_IN_VALUES {
-        return Err(InListTooLong);
+        return Err(InListTooLong::One);
     }
     Ok(parts)
 }
@@ -194,7 +215,7 @@ mod tests {
         let ok = vec!["1"; MAX_IN_VALUES].join(",");
         assert_eq!(split_in_list(&ok).unwrap().len(), MAX_IN_VALUES);
         let long = vec!["1"; MAX_IN_VALUES + 1].join(",");
-        assert_eq!(split_in_list(&long), Err(InListTooLong));
+        assert_eq!(split_in_list(&long), Err(InListTooLong::One));
         assert_eq!(split_in_list("1,,2, ").unwrap(), ["1", "2"]);
     }
 

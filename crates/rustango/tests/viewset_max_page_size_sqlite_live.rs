@@ -163,3 +163,71 @@ async fn in_list_over_the_cap_is_a_400() {
     let over = status_of(app, &format!("/notes?id__in={}", ids(cap + 1))).await;
     assert_eq!(over, StatusCode::BAD_REQUEST);
 }
+
+/// Seventeen filterable columns, so one request can carry 34 `__in` lists.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "vs_mps_wide")]
+#[rustango(app = "vs_mps_app")]
+#[allow(dead_code)]
+pub struct Wide {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub f0: i64,
+    pub f1: i64,
+    pub f2: i64,
+    pub f3: i64,
+    pub f4: i64,
+    pub f5: i64,
+    pub f6: i64,
+    pub f7: i64,
+    pub f8: i64,
+    pub f9: i64,
+    pub f10: i64,
+    pub f11: i64,
+    pub f12: i64,
+    pub f13: i64,
+    pub f14: i64,
+    pub f15: i64,
+    pub f16: i64,
+}
+
+/// The `__in` lists of one request share SQLite's 32766-bind limit: a 400, not a 500.
+#[cfg(feature = "admin")]
+#[tokio::test]
+async fn in_lists_over_the_bind_total_are_a_400() {
+    let sq = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let pool = Pool::Sqlite(sq);
+    rustango::testkit::create_tables_for::<Wide>(&pool)
+        .await
+        .unwrap();
+    let names: Vec<String> = (0..17).map(|i| format!("f{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let app = ViewSet::for_model(Wide::SCHEMA)
+        .filter_fields(&refs)
+        .router_pool("/wide", pool);
+    let ids = (1..=rustango::list_params::MAX_IN_VALUES)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = |lists: usize| {
+        (0..lists)
+            .map(|i| {
+                let op = if i % 2 == 0 { "in" } else { "not_in" };
+                format!("f{}__{op}={ids}", i / 2)
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    };
+    let query = |lists: usize| {
+        Request::builder()
+            .method(Method::from_bytes(b"QUERY").unwrap())
+            .uri("/wide")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(body(lists)))
+            .unwrap()
+    };
+    let ok = app.clone().oneshot(query(31)).await.unwrap().status();
+    assert_eq!(ok, StatusCode::OK);
+    let over = app.oneshot(query(33)).await.unwrap().status();
+    assert_eq!(over, StatusCode::BAD_REQUEST);
+}
