@@ -44,6 +44,9 @@ type SeedFn = Box<dyn for<'a> FnOnce(&'a crate::sql::Pool) -> SeedFut<'a> + Send
 type ShutdownFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 type ShutdownFn = Box<dyn FnOnce() -> ShutdownFut + Send>;
 
+/// A router built from the serving pool. See [`Cli::nest_with`].
+type NestFn = Box<dyn FnOnce(crate::sql::Pool) -> Router + Send>;
+
 /// Run the [`Cli::on_shutdown`] hook, if one was registered.
 async fn run_shutdown_hook(hook: Option<ShutdownFn>) {
     if let Some(hook) = hook {
@@ -62,6 +65,8 @@ pub struct Cli {
     /// returns. Set via [`Cli::on_shutdown`] — the only place a job
     /// queue's `shutdown()` can actually execute (#1409).
     on_shutdown: Option<ShutdownFn>,
+    /// Routers built from the serving pool, by mount path.
+    nested: Vec<(String, NestFn)>,
     bind: String,
     migrations_dir: PathBuf,
     tenancy: bool,
@@ -139,6 +144,7 @@ impl Cli {
             api: Router::new(),
             seed: None,
             on_shutdown: None,
+            nested: Vec::new(),
             bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             migrations_dir: PathBuf::from("./migrations"),
             tenancy: false,
@@ -192,6 +198,24 @@ impl Cli {
     #[must_use]
     pub fn api(mut self, router: Router) -> Self {
         self.api = router;
+        self
+    }
+
+    /// Nest, at `path`, a router built from the pool `runserver` opens.
+    /// Other verbs never build it, so they run without a database (#1216).
+    ///
+    /// ```ignore
+    /// Cli::new().api(urls::api()).nest_with("/admin", urls::admin_router)
+    /// ```
+    ///
+    /// Single-database serving only: `runserver` refuses it with
+    /// [`Cli::tenancy`], whose pool is the registry's.
+    #[must_use]
+    pub fn nest_with<F>(mut self, path: impl Into<String>, router: F) -> Self
+    where
+        F: FnOnce(crate::sql::Pool) -> Router + Send + 'static,
+    {
+        self.nested.push((path.into(), Box::new(router)));
         self
     }
 
@@ -736,7 +760,7 @@ impl Cli {
         Ok(())
     }
 
-    async fn dispatch(self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    async fn dispatch(mut self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         // `dbshell` needs DATABASE_URL but NOT a sqlx pool — it execs
         // the native client (psql / mysql / sqlite3). Handle it before
         // the pool dance so it works even when sqlx can't connect
@@ -921,8 +945,19 @@ impl Cli {
                 .map_err(|e| format!("connect({shown}): {e}").into())
                 as Result<_, Box<dyn std::error::Error>>
         }?;
+        if args.first().map(String::as_str) == Some("check") {
+            self.build_nested(&pool);
+        }
         crate::migrate::manage::run(&pool, &self.migrations_dir, args).await?;
         Ok(())
+    }
+
+    /// Build, and drop, every [`Cli::nest_with`] router, so `check --deploy`
+    /// audits the admins `runserver` would mount (#1627).
+    fn build_nested(&mut self, pool: &crate::sql::Pool) {
+        for (_, build) in std::mem::take(&mut self.nested) {
+            drop(build(pool.clone()));
+        }
     }
 
     /// Everything between "the pool is open" and "bind the socket":
@@ -958,7 +993,10 @@ impl Cli {
         P: Clone + Send + Sync + 'static,
         P: Into<crate::sql::Pool>,
     {
-        let api = std::mem::take(&mut self.api);
+        let mut api = std::mem::take(&mut self.api);
+        for (path, build) in std::mem::take(&mut self.nested) {
+            api = api.nest(&path, build(pool.clone().into()));
+        }
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
@@ -1112,6 +1150,13 @@ impl Cli {
         // Logging install lives in `run()` (the outermost dispatch
         // point) so the WorkerGuard outlives every runserver +
         // management-verb path uniformly.
+        if self.tenancy && !self.nested.is_empty() {
+            return Err(
+                "Cli::nest_with needs a single-database app; with .tenancy() \
+                        the serving pool is the registry's"
+                    .into(),
+            );
+        }
         #[cfg(feature = "tenancy")]
         if self.tenancy {
             return self.runserver_tenancy().await;
@@ -2342,8 +2387,7 @@ mod assemble_app_tests {
     /// every run, and rebuilding the cache was not enough on its own
     /// because a sibling can poison it again a moment later.
     fn global_tracing_state() -> &'static std::sync::Mutex<()> {
-        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| std::sync::Mutex::new(()))
+        super::tracing_test_lock()
     }
 
     /// Take the lock, ignoring poisoning from an unrelated failure.
@@ -2524,8 +2568,16 @@ mod assemble_app_tests {
     }
 }
 
-/// #1514 — the request id reaches a build without `admin` (the `api`
-/// template's `manage` alone), not only the batteries ones.
+/// Shared by every test module here that installs a subscriber or sends
+/// a request: `tracing`'s per-callsite interest cache is process-global.
+#[cfg(all(test, feature = "sqlite", feature = "manage"))]
+fn tracing_test_lock() -> &'static std::sync::Mutex<()> {
+    static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// #1514 — the request id, span and access log reach a build without
+/// `admin` (the `api` template's `manage` alone), not only the batteries ones.
 #[cfg(all(test, feature = "sqlite", feature = "manage"))]
 mod observability_without_admin_tests {
     use super::*;
@@ -2533,20 +2585,106 @@ mod observability_without_admin_tests {
     use axum::http::Request;
     use tower::ServiceExt as _;
 
-    #[tokio::test]
-    async fn assembled_app_sends_x_request_id() {
-        let pool = crate::sql::Pool::connect("sqlite::memory:")
-            .await
+    fn serialized() -> std::sync::MutexGuard<'static, ()> {
+        super::tracing_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A plain `#[test]` on its own runtime, so one subscriber is current
+    /// for the span and every poll (see `assemble_app_tests`).
+    #[test]
+    fn assembled_app_logs_the_request_with_its_id() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = serialized();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let pool = rt
+            .block_on(crate::sql::Pool::connect("sqlite::memory:"))
             .expect("sqlite");
-        let api = Router::new().route("/x", axum::routing::get(|| async { "ok" }));
+        let api = Router::new().route(
+            "/x",
+            axum::routing::get(|| async {
+                tracing::info!("handler ran");
+                "ok"
+            }),
+        );
         let app = Cli::new().api(api).assemble_app(pool);
-        let res = app
-            .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
-            .await
-            .expect("request");
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+        tracing::callsite::rebuild_interest_cache();
+        let sent = "req-1514";
+        let res = tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(
+                app.oneshot(
+                    Request::builder()
+                        .uri("/x")
+                        .header("x-request-id", sent)
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+        })
+        .expect("request");
         assert!(
             res.headers().contains_key("x-request-id"),
             "no X-Request-Id on the assembled router: observability is gated off"
         );
+        let out = buf.contents();
+        let handler_line = out.lines().find(|l| l.contains("handler ran"));
+        assert!(
+            handler_line.is_some_and(|l| l.contains(sent)),
+            "the handler's event is not in the request span: {out}"
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.contains("rustango::access_log") && l.contains("/x")),
+            "no access-log line: {out}"
+        );
+    }
+
+    /// `check --deploy` sees an ungated admin mounted by `nest_with`.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn check_builds_the_nested_admin() {
+        let _serial = serialized();
+        let _g = crate::admin::ungated_flag_lock().lock().await;
+        crate::admin::reset_ungated_admin_built();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        Cli::new()
+            .nest_with("/admin", |p| crate::admin::router(p))
+            .build_nested(&pool);
+        let flagged = crate::admin::ungated_admin_built();
+        crate::admin::reset_ungated_admin_built();
+        assert!(flagged, "the nested admin was never built for the audit");
+    }
+
+    /// `nest_with` builds its router from the serving pool, at assembly.
+    #[tokio::test]
+    async fn nest_with_builds_from_the_serving_pool() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new()
+            .nest_with("/n", |p: crate::sql::Pool| {
+                let name = p.dialect().name();
+                Router::new().route("/x", axum::routing::get(move || async move { name }))
+            })
+            .assemble_app(pool);
+        let res = app
+            .oneshot(Request::builder().uri("/n/x").body(Body::empty()).unwrap())
+            .await
+            .expect("request");
+        let body = axum::body::to_bytes(res.into_body(), 64).await.unwrap();
+        assert_eq!(&body[..], b"sqlite");
     }
 }

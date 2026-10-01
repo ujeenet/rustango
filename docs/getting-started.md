@@ -511,7 +511,7 @@ use rustango::sql::Pool;
 pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
-        .admin_prefix("/admin") // must match the `.nest("/admin", …)` below
+        .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
         .with_session_auth(SessionSecret::from_env_or_random())
         .build()
 }
@@ -521,7 +521,7 @@ pub fn admin_router(pool: Pool) -> Router {
 
 `Builder::new` takes any backend's pool, so this helper names no driver and works on all three.
 
-`src/main.rs` builds the pool and nests the admin into the API router before handing it to the `Cli`. Keep the `mod blog;` line from Step 7 — that's what registers your `Post` model with the admin:
+`src/main.rs` hands the helper to the `Cli`, which builds the admin from the pool it serves with, so verbs like `makemigrations` still run without a database. Keep the `mod blog;` line from Step 7 — that's what registers your `Post` model with the admin:
 
 ```rust
 mod blog;
@@ -532,13 +532,9 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    // Lazy: no connection opens until the admin serves a request.
-    let pool = rustango::sql::Pool::connect_lazy(&std::env::var("DATABASE_URL")?)?;
-
-    let api = urls::api().nest("/admin", urls::admin_router(pool));
-
     rustango::manage::Cli::new()
-        .api(api)
+        .api(urls::api())
+        .nest_with("/admin", urls::admin_router)
         .with_health() // /health + /ready endpoints
         .run()
         .await

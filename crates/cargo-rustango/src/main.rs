@@ -944,7 +944,12 @@ mod tests {
         let main = templates::main_rs(Template::Fullstack, "demo");
         assert!(urls.contains("pub fn admin_router(pool: Pool)"), "{urls}");
         assert!(urls.contains(".with_session_auth("), "{urls}");
-        assert!(main.contains("urls::admin_router(pool)"), "{main}");
+        assert!(
+            main.contains(".nest_with(\"/admin\", urls::admin_router)"),
+            "{main}"
+        );
+        // #1216: no verb may need DATABASE_URL before `Cli::run`.
+        assert!(!main.contains("DATABASE_URL"), "{main}");
         for body in [&urls, &main] {
             for driver in ["PgPool", "SqlitePool", "MySqlPool"] {
                 assert!(!body.contains(driver), "names {driver}: {body}");

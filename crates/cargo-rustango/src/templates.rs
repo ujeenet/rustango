@@ -645,11 +645,10 @@ use {crate_name}::urls;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    // Lazy: no connection opens until the admin serves a request, so
-    // verbs that never touch the database run without one.
-    let pool = rustango::sql::Pool::connect_lazy(&std::env::var(\"DATABASE_URL\")?)?;
     rustango::manage::Cli::new()
-        .api(urls::api().nest(\"/admin\", urls::admin_router(pool)))
+        .api(urls::api())
+        // Built from the server's own pool, so other verbs need no database.
+        .nest_with(\"/admin\", urls::admin_router)
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready endpoints for load balancers
         // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),

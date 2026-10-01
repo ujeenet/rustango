@@ -11,11 +11,13 @@ A live test counts server-rejected statements on a repeat ensure.
 
 ### Fixed — the fullstack template mounts the admin again (#1272)
 
-`src/urls.rs` gets a driver-neutral `admin_router(pool)` behind a login, and `main.rs` nests it at `/admin`.
+`src/urls.rs` gets a driver-neutral `admin_router(pool)` behind a login, and `main.rs` mounts it with the new
+`Cli::nest_with("/admin", …)`, built from the server's own pool, so no other verb needs `DATABASE_URL` (#1216).
 
 ### Fixed — `check --deploy` warns about an admin with no login (#1627)
 
-Building an admin without `with_session_auth` now raises an `[admin]` warning.
+Building an admin without `with_session_auth` now raises an `[admin]` warning; `check` builds the `nest_with` routers to see it.
+`admin::Builder::new` now defaults `secure_cookies` from `session::secure_cookies()` (`[security].secure_cookies`, else the prod tier).
 The getting-started guide teaches the gated admin and `create-admin`.
 
 ### Fixed — a deploy image no longer skips framework schema changes (#1988)
