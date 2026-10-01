@@ -1117,12 +1117,21 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
     }
 
     let (scheme, rest) = registry_url.split_once("://")?;
+    // Split the query off first: it can hold a `/` (`sslrootcert=/ca.pem`)
+    // and its TLS options must carry over to the tenant.
+    let (rest, query) = match rest.split_once('?') {
+        Some((path, q)) => (path, Some(q)),
+        None => (rest, None),
+    };
     // Keep userinfo and authority; replace only the path segment.
     let (authority, _old_db) = rest.rsplit_once('/')?;
     if authority.is_empty() {
         return None;
     }
-    Some(format!("{scheme}://{authority}/{database}"))
+    Some(match query {
+        Some(q) => format!("{scheme}://{authority}/{database}?{q}"),
+        None => format!("{scheme}://{authority}/{database}"),
+    })
 }
 
 /// Scheme + host + port + database, lowercased, credentials and query
@@ -1724,6 +1733,33 @@ mod validation_tests {
                 .as_deref(),
             Some("mysql://app:pw@db.internal:3306/t_acme")
         );
+    }
+
+    /// #1932: the query is split off before the path, so a `/` inside it
+    /// is not the database segment and TLS options carry over.
+    #[test]
+    fn a_server_url_keeps_its_query_string() {
+        for (registry, want) in [
+            (
+                "postgres://app@db:5432/reg?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem",
+                "postgres://app@db:5432/tenant_acme?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem",
+            ),
+            (
+                "postgres://app@db:5432/reg?sslmode=require",
+                "postgres://app@db:5432/tenant_acme?sslmode=require",
+            ),
+            (
+                "mysql://app@db:3306/reg?ssl-mode=REQUIRED",
+                "mysql://app@db:3306/tenant_acme?ssl-mode=REQUIRED",
+            ),
+        ] {
+            assert_eq!(
+                tenant_url_on_registry_server(registry, "tenant_acme").as_deref(),
+                Some(want),
+                "registry `{registry}`"
+            );
+        }
+        assert!(tenant_url_on_registry_server("postgres://db?sslrootcert=/ca.pem", "t").is_none());
     }
 
     /// sqlite has no server, so the sibling is a file in the registry
