@@ -953,6 +953,8 @@ fn substitute(template: &str, params: &[(&str, &str)]) -> String {
 enum PluralFamily {
     /// No count-based form distinction (always `other`).
     NoDistinction,
+    /// Explicit one (1) / other, where the base language is French-style.
+    OneOther,
     /// French / Brazilian-Portuguese: 0 and 1 are `one`.
     FrenchStyle,
     /// West-Slavic (Polish): one / few / many.
@@ -976,7 +978,7 @@ enum PluralFamily {
 fn plural_family(locale: &Locale) -> Option<PluralFamily> {
     // European Portuguese counts 0 as plural, unlike `pt` / `pt-BR`.
     if locale.as_str() == "pt-pt" {
-        return None;
+        return Some(PluralFamily::OneOther);
     }
     match locale.base_language() {
         "zh" | "ja" | "ko" | "th" | "vi" | "id" | "ms" | "lo" | "km" | "my" => {
@@ -1003,6 +1005,13 @@ pub fn plural_category(locale: &str, n: i64) -> &'static str {
     let r100 = n % 100;
     match plural_family(&locale) {
         Some(PluralFamily::NoDistinction) => "other",
+        Some(PluralFamily::OneOther) => {
+            if n == 1 {
+                "one"
+            } else {
+                "other"
+            }
+        }
         Some(PluralFamily::FrenchStyle) => {
             if n == 0 || n == 1 {
                 "one"
@@ -1465,7 +1474,9 @@ mod tests {
         );
         assert_eq!(cats("he", &[1, 2, 3]), ["one", "two", "other"]);
         assert_eq!(cats("sl", &[1, 102, 3, 5]), ["one", "two", "few", "other"]);
-        assert_eq!(cats("pt-PT", &[0, 1]), ["other", "one"]);
+        assert_eq!(cats("pt-PT", &[0, 1, 2]), ["other", "one", "other"]);
+        assert!(plural_category_is_explicit("pt-PT"));
+        assert!(plural_category_is_explicit("pt_PT"));
         assert_eq!(cats("pt_BR", &[0, 1]), ["one", "one"]);
     }
 
