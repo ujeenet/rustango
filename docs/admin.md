@@ -153,7 +153,9 @@ the publish/archive action picker.
 **Filtering.** Click any value in a `list_filter` facet card to scope the list;
 the active filter shows as a chip with a **clear** link, and the row count and
 facet counts update. Filters, search, sorting and the date hierarchy all
-compose in the query string and can be combined.
+compose in the query string and can be combined. `?<field>=` works only on a
+`list_filter`, displayed, FK or inline-parent column, never a secret one, and
+`?<field>__isnull=1` lists the NULL rows.
 
 [![The posts list filtered by status=published: an active filter chip, the matching facet highlighted, search box, and the bulk-action picker](img/admin-list-filtered.png)](img/admin-list-filtered.png)
 

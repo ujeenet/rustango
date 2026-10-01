@@ -18,7 +18,7 @@ use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
     is_secret_field, lookup_model, primary_key_or_internal, render_cell_json, render_form,
-    render_secret_cell, resolve_model, resolve_model_and_pk, FormLayout, ListQuery,
+    render_secret_cell, resolve_model, resolve_model_and_pk, url_filterable, FormLayout, ListQuery,
 };
 use super::queryset_hooks::RowScope;
 use super::render;
@@ -231,6 +231,18 @@ const RESERVED_PARAMS: &[&str] = &[
     "trashed",
 ];
 
+/// `?<field>__isnull=1` lists the rows where `field` is NULL (#2006).
+const ISNULL_SUFFIX: &str = "__isnull";
+
+/// The URL pair that selects one facet value: NULL needs `__isnull`.
+fn facet_param(field: &str, key: &SqlValue, raw: &str) -> (String, String) {
+    if matches!(key, SqlValue::Null) {
+        (format!("{field}{ISNULL_SUFFIX}"), "1".to_owned())
+    } else {
+        (field.to_owned(), raw.to_owned())
+    }
+}
+
 /// Default cap on how many values one facet shows. Keeps the right
 /// rail compact on columns with many distinct values. The rest
 /// collapse into a "+N more" link (`?facet_show_all=<field>`).
@@ -265,7 +277,8 @@ pub(crate) async fn table_view(
     // Field filters stay apart so a facet can count without its own (#2004).
     let mut field_filters: Vec<(&'static str, Filter)> = Vec::new();
     let mut filters: Vec<Filter> = Vec::new();
-    let mut active_field_filters: Vec<(&'static str, String)> = Vec::new();
+    // The URL pairs of the field filters in force.
+    let mut active_field_filters: Vec<(String, String)> = Vec::new();
     // Names claimed by custom list filters, so `?status=draft` is not
     // also read as a field filter on a column of the same name.
     let custom_filter_names: Vec<&'static str> = crate::admin::list_filters::for_table(model.table)
@@ -281,21 +294,37 @@ pub(crate) async fn table_view(
         if value.is_empty() {
             continue;
         }
-        let Some(field) = model.field(key) else {
+        let (name, is_null) = match key.strip_suffix(ISNULL_SUFFIX) {
+            Some(base) => (base, true),
+            None => (key.as_str(), false),
+        };
+        // Only fields the list shows or filters on (#2031).
+        let Some(field) = model
+            .field(name)
+            .filter(|f| url_filterable(model, &admin_cfg, f))
+        else {
             continue;
         };
-        let Ok(v) = forms::parse_form_value(field, Some(value)) else {
-            continue;
+        let (op, v) = if is_null {
+            if value != "1" {
+                continue;
+            }
+            (Op::IsNull, SqlValue::Bool(true))
+        } else {
+            let Ok(v) = forms::parse_form_value(field, Some(value)) else {
+                continue;
+            };
+            (Op::Eq, v)
         };
         field_filters.push((
             field.name,
             Filter {
                 column: field.column,
-                op: Op::Eq,
+                op,
                 value: v,
             },
         ));
-        active_field_filters.push((field.name, value.clone()));
+        active_field_filters.push((key.clone(), value.clone()));
     }
     active_field_filters.sort();
 
@@ -662,7 +691,10 @@ pub(crate) async fn table_view(
     if let Some(qv) = q.as_deref() {
         list_query.push("q", qv);
     }
-    for (k, v) in active_field_filters.iter().chain(&active_custom_filters) {
+    for (k, v) in &active_field_filters {
+        list_query.push(k.clone(), v.clone());
+    }
+    for (k, v) in &active_custom_filters {
         list_query.push(*k, v.clone());
     }
     if !admin_cfg.date_hierarchy.is_empty() {
@@ -836,7 +868,7 @@ async fn compute_facets(
     other_filters: &[Filter],
     search: Option<&SearchClause>,
     admin_cfg: &crate::core::AdminConfig,
-    active_field_filters: &[(&'static str, String)],
+    active_field_filters: &[(String, String)],
     list_query: &ListQuery,
     show_all_facet: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, AdminError> {
@@ -848,11 +880,7 @@ async fn compute_facets(
         let Some(field) = model.field(filter_name) else {
             continue;
         };
-        let active_value: Option<&str> = active_field_filters
-            .iter()
-            .find(|(k, _)| k == &field.name)
-            .map(|(_, v)| v.as_str());
-
+        let isnull_key = format!("{}{ISNULL_SUFFIX}", field.name);
         let facet_filters: Vec<Filter> = field_filters
             .iter()
             .filter(|(name, _)| *name != field.name)
@@ -893,10 +921,10 @@ async fn compute_facets(
         }
         let mut values = Vec::with_capacity(facet_rows.len());
         for FacetRow {
+            key,
             raw,
             display: display_text,
             count,
-            ..
         } in &facet_rows
         {
             let raw = raw.clone();
@@ -910,12 +938,13 @@ async fn compute_facets(
                 render::escape(&raw)
             };
             let count: i64 = *count;
-            let is_active = active_value.map(|v| v == raw).unwrap_or(false);
+            let param = facet_param(field.name, key, &raw);
+            let is_active = active_field_filters.contains(&param);
             // Toggle URL: drop this filter when it is active, else
             // set it. The rest of the filter state is kept.
-            let mut toggle = list_query.without(&[field.name]);
+            let mut toggle = list_query.without(&[field.name, &isnull_key]);
             if !is_active {
-                toggle = toggle.with(field.name, raw.clone());
+                toggle = toggle.with(param.0, param.1);
             }
             let toggle_url = toggle.url();
 
@@ -966,7 +995,7 @@ async fn compute_facets(
         // FK facets render as a `<select>`; this is the "All" option,
         // which removes the filter.
         let clear_url = if is_fk {
-            Some(list_query.without(&[field.name]).url())
+            Some(list_query.without(&[field.name, &isnull_key]).url())
         } else {
             None
         };

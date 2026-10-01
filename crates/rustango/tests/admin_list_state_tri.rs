@@ -1,6 +1,7 @@
 //! Admin list paging order, filter-keeping links, the mounted prefix,
-//! bool checkboxes, soft-deleted rows and filtered facet counts on every
-//! backend (#1917 #1916 #1765 #1730 #1918 #2004).
+//! bool checkboxes, soft-deleted rows, filtered facet counts, encoded PK
+//! redirects, URL filter allow-list, and NULL facets on every
+//! backend (#1917 #1916 #1765 #1730 #1918 #2004 #1862 #2031 #2006).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -44,13 +45,33 @@ pub struct Item {
 }
 
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "adminls_slug", admin(list_display = "title"))]
+#[rustango(
+    table = "adminls_slug",
+    admin(
+        list_display = "title",
+        list_filter = "rank",
+        formfield_overrides = "token:password"
+    )
+)]
 #[allow(dead_code)]
 pub struct Slugged {
     #[rustango(primary_key, max_length = 32)]
     pub slug: String,
     #[rustango(max_length = 64)]
     pub title: String,
+    #[rustango(max_length = 64)]
+    pub token: String,
+    pub rank: Option<i64>,
+}
+
+async fn seed_slug(pool: &Pool, slug: &str, token: &str, rank: Option<i64>) {
+    let s = Slugged {
+        slug: slug.into(),
+        title: format!("{slug}-title"),
+        token: token.into(),
+        rank,
+    };
+    s.insert_pool(pool).await.expect("insert slug");
 }
 
 async fn setup(pool: &Pool) {
@@ -396,18 +417,49 @@ async fn facet_and_date_counts_follow_the_filters(pool: &Pool) {
 async fn string_pk_redirect_is_encoded(pool: &Pool) {
     let req = Request::builder()
         .method("POST")
-        .uri(format!("{PREFIX}/adminls_slug"))
+        .uri("/adminls_slug")
         .header("content-type", "application/x-www-form-urlencoded");
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix(PREFIX)
         .build();
-    let body = Body::from("slug=a%0D%0Ab%2Fc&title=t&_continue=1");
+    let body = Body::from("slug=a%0D%0Ab%2Fc&title=t&token=k&_continue=1");
     let res = app.oneshot(req.body(body).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     let to = res.headers()["location"].to_str().unwrap().to_owned();
     assert_eq!(to, format!("{PREFIX}/adminls_slug/a%0D%0Ab%2Fc"));
     // The encoded segment routes back to the row (404 otherwise).
-    get(pool, &to).await;
+    get(pool, to.strip_prefix(PREFIX).unwrap()).await;
+}
+
+/// A secret or unshown field is no URL filter; a displayed one is (#2031).
+async fn url_filters_skip_secret_and_unshown_fields(pool: &Pool) {
+    seed_slug(pool, "x", "alpha", Some(1)).await;
+    seed_slug(pool, "y", "beta", Some(2)).await;
+    let body = get(pool, "/adminls_slug?token=alpha").await;
+    assert!(
+        body.contains("x-title") && body.contains("y-title"),
+        "{body}"
+    );
+    let body = get(pool, "/adminls_slug?title=x-title").await;
+    assert!(
+        body.contains("x-title") && !body.contains("y-title"),
+        "{body}"
+    );
+}
+
+/// The NULL facet links `?rank__isnull=1`, which lists only NULL rows (#2006).
+async fn null_facet_lists_the_null_rows(pool: &Pool) {
+    seed_slug(pool, "x", "k", None).await;
+    seed_slug(pool, "y", "k", Some(3)).await;
+    let body = get(pool, "/adminls_slug").await;
+    assert!(body.contains("/adminls_slug?rank__isnull=1"), "{body}");
+    let body = get(pool, "/adminls_slug?rank__isnull=1").await;
+    assert!(
+        body.contains("x-title") && !body.contains("y-title"),
+        "{body}"
+    );
+    // The active NULL value toggles back off.
+    assert!(body.contains(r#"href="/adm/adminls_slug""#), "{body}");
 }
 
 tri_dialect_test! {
@@ -422,5 +474,7 @@ tri_dialect_test! {
         soft_deleted_rows_leave_the_list,
         facet_and_date_counts_follow_the_filters,
         string_pk_redirect_is_encoded,
+        url_filters_skip_secret_and_unshown_fields,
+        null_facet_lists_the_null_rows,
     ],
 }

@@ -18,6 +18,14 @@ A child's `password`-widget field shows only set/not set on the detail page, ren
 
 Rows the child's `view` hook refuses are not shown; a save that adds rows past `max_num` is refused; a slot past `INITIAL_FORMS` inserts, so a typed natural PK works.
 
+### Security — admin list URL filters only on shown columns (#2031)
+
+`?<field>=` applies only to `list_filter`, displayed, FK or inline-parent columns, and never to a secret one, so a URL cannot probe a hidden value.
+
+### Fixed — the NULL facet lists the NULL rows (#2006)
+
+It links `?<field>__isnull=1`, which the list reads as `IS NULL`; `?<field>=` showed every row.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

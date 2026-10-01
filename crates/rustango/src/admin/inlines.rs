@@ -105,6 +105,17 @@ pub struct InlineAdmin {
 
 inventory::collect!(InlineAdmin);
 
+/// `true` when `column` ties `child_table` rows to an inline's parent,
+/// the filter an inline's "edit the others" link sets.
+pub(crate) fn is_parent_pin(child_table: &str, column: &str) -> bool {
+    inventory::iter::<InlineAdmin>
+        .into_iter()
+        .any(|i| i.child_table == child_table && i.fk_column == column)
+        || inventory::iter::<InlineAdminGeneric>.into_iter().any(|i| {
+            i.child_table == child_table && (i.ct_column == column || i.pk_column == column)
+        })
+}
+
 /// Every inline registered against `parent_table`, in declaration
 /// order. Cheap — the inventory iterator is `O(N)` over all
 /// registrations but `N` is bounded by the number of admin inlines

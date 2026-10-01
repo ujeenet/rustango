@@ -155,6 +155,10 @@ untouched.
 **Breaking:** grant `{table}.change`, or declare `perm = "…"` on `register_admin_view!`, for
 POST/PUT/PATCH/DELETE views. `AdminCustomView` gains a `perm` field; struct literals must set it.
 
+### Admin list URL filters are allow-listed
+
+`?<field>=` is ignored unless the field is in `list_filter` or `list_display`, an FK, or an inline's parent column (#2031). Add the field to `list_filter` to keep a bookmarked filter.
+
 ### Admin inlines enforce `max_num` and use `INITIAL_FORMS`
 
 A save that adds inline rows past `max_num` re-renders with an error; slots past `INITIAL_FORMS` are inserts (#1717).
