@@ -310,8 +310,12 @@ pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) 
 
 /// A secret column's list/detail cell: whether it is set, never the value.
 pub(crate) fn render_secret_cell(row: &serde_json::Value, field: &FieldSchema) -> String {
-    let set = row
-        .get(field.name)
+    render_secret_value(row.get(field.name))
+}
+
+/// [`render_secret_cell`] for an already-read value.
+pub(crate) fn render_secret_value(value: Option<&serde_json::Value>) -> String {
+    let set = value
         .and_then(serde_json::Value::as_str)
         .is_some_and(|v| !v.is_empty());
     if set {

@@ -10,6 +10,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 `{table}.change` (or its `perm = "…"`), else 403. The admin and `CreateView`/`UpdateView`
 percent-encode PKs in redirects, so a CR/LF no longer panics.
 
+### Security — admin inlines hide secret fields (#1861)
+
+A child's `password`-widget field shows only set/not set on the detail page, renders empty on edit, and an empty one keeps the stored value.
+
+### Fixed — admin inlines: view hook per row, `max_num` on save, natural-PK inserts (#1717)
+
+Rows the child's `view` hook refuses are not shown; a save that adds rows past `max_num` is refused; a slot past `INITIAL_FORMS` inserts, so a typed natural PK works.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

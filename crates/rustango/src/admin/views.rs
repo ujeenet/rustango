@@ -2084,7 +2084,7 @@ pub(crate) async fn update_submit(
     {
         Ok(plan) => plan,
         Err(super::inlines::InlinePlanError::Admin(e)) => return Err(e),
-        Err(super::inlines::InlinePlanError::Gone(msg)) => {
+        Err(super::inlines::InlinePlanError::Rejected(msg)) => {
             let html = render_form(&state, model, Some(&form), true, Some(&msg));
             return Ok(Html(html).into_response());
         }

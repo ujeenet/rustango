@@ -101,6 +101,13 @@ pub fn total_forms(data: &HashMap<String, String>, prefix: &str) -> Result<usize
     Ok(n)
 }
 
+/// `<prefix>-INITIAL_FORMS`: rows below it are existing ones. `None`
+/// when absent or not a number.
+#[must_use]
+pub fn initial_forms(data: &HashMap<String, String>, prefix: &str) -> Option<usize> {
+    data.get(&format!("{prefix}-INITIAL_FORMS"))?.parse().ok()
+}
+
 /// Extract the per-row payload at index `idx`. Strips the
 /// `<prefix>-<idx>-` prefix from each key. Returns a fresh HashMap
 /// suitable for `F::parse`.

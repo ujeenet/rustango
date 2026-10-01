@@ -155,6 +155,10 @@ untouched.
 **Breaking:** grant `{table}.change`, or declare `perm = "…"` on `register_admin_view!`, for
 POST/PUT/PATCH/DELETE views. `AdminCustomView` gains a `perm` field; struct literals must set it.
 
+### Admin inlines enforce `max_num` and use `INITIAL_FORMS`
+
+A save that adds inline rows past `max_num` re-renders with an error; slots past `INITIAL_FORMS` are inserts (#1717).
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

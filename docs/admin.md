@@ -248,7 +248,9 @@ On the parent's **detail** page the children render as a read-only table; on the
 **edit** page they become an editable FormSet (add / change / delete rows in
 place). Options: `kind` (`Tabular` — one table row per child, or `Stacked` — a
 fieldset per child), `label`, `fields` (default: every scalar except the FK),
-`extra` (blank rows offered for adding), `max_num`, and `readonly_fields`.
+`extra` (blank rows offered for adding), `max_num` (a save that adds rows past
+it is refused), and `readonly_fields`. Inline rows pass the child's `view` hook,
+secret fields are never shown, and an extra row with a typed natural PK inserts.
 
 [![A post's detail page: read-only fields, the Comments inline table, and the audit-trail card showing the create entry as a JSON diff](img/admin-detail.png)](img/admin-detail.png)
 
