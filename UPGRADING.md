@@ -165,7 +165,7 @@ Refused origins and any-origin mode now send it, so shared caches key on `Origin
 
 ### `negotiate` honours `q=0` and specificity; flash cookies are byte-capped (#1957)
 
-`negotiate` returns `None` for a type the client refused with `q=0`. `messages::push` drops the oldest messages past `MAX_COOKIE_BYTES`.
+`negotiate` returns `None` for a type the client refused with `q=0`. `messages::push` drops the oldest messages past `MAX_COOKIE_BYTES`, and truncates a newest message that alone is too long.
 Use `WsHub::upgrade(ws)` instead of `ws.on_upgrade(.. ws_handler ..)` so `max_message_bytes` applies before buffering.
 
 ### Template fragment keys change (#1884)

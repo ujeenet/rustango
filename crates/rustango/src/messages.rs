@@ -164,10 +164,12 @@ pub fn push(
     // cookie over 4 KB whole, taking every message with it (#1957).
     loop {
         let cookie = set_cookie(secret, &existing, false);
-        if existing.is_empty()
-            || (existing.len() <= MAX_MESSAGES && cookie.len() <= MAX_COOKIE_BYTES)
-        {
+        if existing.len() <= MAX_MESSAGES && cookie.len() <= MAX_COOKIE_BYTES {
             return cookie;
+        }
+        if existing.len() == 1 {
+            // Never drop the newest: shorten it until it fits.
+            return truncate_to_fit(secret, existing.remove(0));
         }
         let dropped = existing.remove(0);
         tracing::warn!(
@@ -177,6 +179,42 @@ pub fn push(
             "messages cookie over MAX_MESSAGES={MAX_MESSAGES} or {MAX_COOKIE_BYTES} bytes — dropped oldest message"
         );
     }
+}
+
+/// The cookie for `msg` alone, its body cut at the longest char
+/// boundary that fits [`MAX_COOKIE_BYTES`] (tags too, if they alone overflow).
+fn truncate_to_fit(secret: &[u8], mut msg: Message) -> String {
+    let fits =
+        |m: &Message| set_cookie(secret, std::slice::from_ref(m), false).len() <= MAX_COOKIE_BYTES;
+    let full = std::mem::take(&mut msg.body);
+    if !fits(&msg) {
+        msg.tags.clear();
+    }
+    let cuts: Vec<usize> = full
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([full.len()])
+        .collect();
+    // Largest cut that fits; cut 0 (empty body) always does.
+    let (mut lo, mut hi) = (0, cuts.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        msg.body = full[..cuts[mid]].to_owned();
+        if fits(&msg) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    msg.body = full[..cuts[lo]].to_owned();
+    tracing::warn!(
+        target: "rustango::messages",
+        level = %msg.level.as_str(),
+        kept = msg.body.len(),
+        of = full.len(),
+        "message alone exceeds {MAX_COOKIE_BYTES} bytes — truncated its body"
+    );
+    set_cookie(secret, std::slice::from_ref(&msg), false)
 }
 
 /// Read every staged message, plus a clear-cookie value to attach to
@@ -560,6 +598,26 @@ mod tests {
         let (msgs, _) = drain(SECRET, &headers);
         assert!(!msgs.is_empty() && msgs.len() < 10);
         assert!(msgs.last().unwrap().body.starts_with("9-"), "newest lost");
+    }
+
+    /// A single message over the size cap is truncated, never dropped.
+    #[test]
+    fn push_truncates_an_oversized_newest_message() {
+        let mut headers = empty_headers();
+        let first = push(SECRET, &headers, Level::Info, "older", "");
+        headers = headers_with(&cookie_from_set(&first));
+        let body = format!("newest-{}", "é".repeat(5000));
+        let set = push(SECRET, &headers, Level::Error, &body, "");
+        assert!(
+            set.len() <= MAX_COOKIE_BYTES,
+            "cookie is {} bytes",
+            set.len()
+        );
+        let (msgs, _) = drain(SECRET, &headers_with(&cookie_from_set(&set)));
+        assert_eq!(msgs.len(), 1, "the newest must survive");
+        assert_eq!(msgs[0].level, Level::Error);
+        assert!(msgs[0].body.starts_with("newest-") && msgs[0].body.len() > 100);
+        assert!(body.starts_with(&msgs[0].body));
     }
 
     #[cfg(feature = "template_views")]
