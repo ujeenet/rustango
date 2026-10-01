@@ -2142,6 +2142,7 @@ mod tests {
     #[tokio::test]
     async fn tenant_header_reaches_the_builder() {
         use crate::server::resolver_tests::{registry, x_org_pick};
+        let _iso = crate::tenancy::isolated_resolver().await;
         let (_tmp, sq, url) = registry().await;
         let builder = |cli: Cli| {
             let b = crate::server::Builder::from_pool(sq.clone(), url.clone(), "localhost");
@@ -2164,6 +2165,9 @@ mod tests {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt as _;
+
+        // Its registry has no `rustango_orgs`, so it opens the global breaker.
+        let _iso = crate::tenancy::isolated_resolver().await;
 
         let mut s = crate::config::Settings::default();
         s.security.allowed_hosts = vec![".localhost".into()];

@@ -216,6 +216,8 @@ pub use resolver::{
 // could use to defeat the fingerprint or the breaker in production.
 // Gated to match `testkit`'s own gate, so a production build neither
 // compiles them in nor warns about an unused re-export.
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) use resolver::isolated as isolated_resolver;
 #[cfg(any(test, feature = "testkit"))]
 pub(crate) use resolver::{
     expire_generation, reset_generation, reset_org_cache, reset_registry_breaker,
