@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `create-admin` no longer logs a PG ERROR on every run (#1642)
+
+It swallowed a plain `CREATE TABLE` failure; it now uses the shared idempotent ensure path.
+A live test counts server-rejected statements on a repeat ensure.
+
 ### Fixed — the fullstack template mounts the admin again (#1272)
 
 `src/urls.rs` gets a driver-neutral `admin_router(pool)` behind a login, and `main.rs` nests it at `/admin`.
