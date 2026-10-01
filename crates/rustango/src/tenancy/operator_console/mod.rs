@@ -1321,8 +1321,8 @@ async fn change_password_submit(
     if form.new_password == form.current_password {
         return redir_err("New password must differ from the current password.");
     }
-    if form.new_password.chars().count() < 8 {
-        return redir_err("New password must be at least 8 characters.");
+    if let Err(e) = crate::password_validators::check_builtin_form_password(&form.new_password) {
+        return redir_err(&e.message);
     }
 
     let op_id = op.id.get().copied().unwrap_or(0);

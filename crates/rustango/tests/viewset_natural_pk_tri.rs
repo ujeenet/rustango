@@ -32,9 +32,22 @@ pub struct Token {
     pub name: String,
 }
 
+/// A server-side v7 PK and a database-computed column (#1725).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "vs_natural_pk_doc")]
+#[rustango(app = "vs_natural_pk_tri")]
+pub struct Doc {
+    #[rustango(primary_key, default_uuid_v7)]
+    pub id: rustango::sql::Auto<uuid::Uuid>,
+    pub qty: i64,
+    #[rustango(generated_as = "qty * 2")]
+    pub twice: i64,
+}
+
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
     rustango::testkit::matrix::fresh_table::<Token>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -42,6 +55,7 @@ fn app(pool: &Pool) -> axum::Router {
     ViewSet::for_model(Tag::SCHEMA)
         .router_pool("/tags", pool.clone())
         .merge(ViewSet::for_model(Token::SCHEMA).router_pool("/tokens", pool.clone()))
+        .merge(ViewSet::for_model(Doc::SCHEMA).router_pool("/docs", pool.clone()))
 }
 
 fn json(body: &str) -> serde_json::Value {
@@ -182,6 +196,21 @@ async fn sqlite_nullable_pk_column_still_rejects_a_missing_pk() {
     assert_eq!(Tag::objects().count(&pool).await.expect("count"), 0);
 }
 
+/// Create fills a `default_uuid_v7` PK and leaves a generated column to the database.
+async fn create_fills_a_v7_pk_and_skips_generated_columns(pool: &Pool) {
+    let (status, body) = send(pool, Method::POST, "/docs", r#"{"qty":3}"#).await;
+    assert_eq!(status, StatusCode::CREATED, "create: {body}");
+    let row = json(&body);
+    let id = row["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no id: {body}"));
+    assert_eq!(
+        uuid::Uuid::parse_str(id).expect("uuid").get_version_num(),
+        7
+    );
+    assert_eq!(row["twice"], 6, "create body: {body}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -190,5 +219,6 @@ tri_dialect_test! {
         create_without_the_pk_is_400_and_writes_nothing,
         update_cannot_change_the_pk,
         create_with_a_uuid_pk_round_trips,
+        create_fills_a_v7_pk_and_skips_generated_columns,
     ],
 }

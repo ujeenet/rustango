@@ -1,5 +1,6 @@
 //! Bare admin change-password: wrong current passwords lock the account
-//! like failed logins, so a stolen session cannot guess it (#1873).
+//! like failed logins, so a stolen session cannot guess it (#1873), and
+//! the new-password length is counted in characters (#1874).
 
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "testkit"))]
 
@@ -32,8 +33,7 @@ async fn post(
         .unwrap()
 }
 
-#[tokio::test]
-async fn change_password_misses_lock_the_account() {
+async fn boot(name: &str) -> (axum::Router, String) {
     let p = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -48,8 +48,7 @@ async fn change_password_misses_lock_the_account() {
     rustango::admin::totp_store::ensure_table(&pool)
         .await
         .unwrap();
-    let name = format!("cpw{}", std::process::id());
-    AdminUser::new_with_password(&name, "correct-horse", true)
+    AdminUser::new_with_password(name, "correct-horse", true)
         .unwrap()
         .insert_pool(&pool)
         .await
@@ -71,7 +70,14 @@ async fn change_password_misses_lock_the_account() {
                 .then(|| s.split(';').next().unwrap_or("").to_owned())
         })
         .expect("session cookie");
+    (app, session)
+}
 
+#[tokio::test]
+async fn change_password_misses_lock_the_account() {
+    let name = format!("cpw{}", std::process::id());
+    let (app, session) = boot(&name).await;
+    let login = |pass: &str| format!("username={name}&password={pass}");
     let change = |current: &str| {
         format!("current_password={current}&new_password=another-pass-9&new_password_confirm=another-pass-9")
     };
@@ -83,4 +89,25 @@ async fn change_password_misses_lock_the_account() {
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "change-password");
     let r = post(&app, "/login", "", login("correct-horse")).await;
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "login");
+}
+
+/// Five two-byte characters are ten bytes but still too short.
+#[tokio::test]
+async fn new_password_length_counts_characters_not_bytes() {
+    let (app, session) = boot("cpwlen").await;
+    let short = "%C3%A9".repeat(5);
+    let body =
+        format!("current_password=correct-horse&new_password={short}&new_password_confirm={short}");
+    let r = post(&app, "/account/password", &session, body).await;
+    let html = String::from_utf8(
+        axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        html.contains("at least 8"),
+        "short password accepted: {html}"
+    );
 }

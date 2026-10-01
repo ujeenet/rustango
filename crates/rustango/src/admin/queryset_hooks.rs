@@ -3,8 +3,8 @@
 //!
 //! An inventory registry of `(table, fn(&Parts) -> Vec<Filter>)`
 //! entries. The list, by-pk pages, actions, autocomplete and facets
-//! all add the filters to their WHERE clause (see `RowScope`). Use it to hide soft-deleted rows, show only rows
-//! the current user owns, or scope by tenant.
+//! all add the filters to their WHERE clause (see `RowScope`, which also hides
+//! soft-deleted rows). Use it to show only rows the current user owns, or scope by tenant.
 //!
 //! `manager_fn` and the `show_only` / `read_only` allowlists are the
 //! compile-time equivalents; this hook sees the request.
@@ -77,11 +77,22 @@ pub fn for_table(table: &str) -> Vec<&'static AdminQuerySetHook> {
 pub(crate) struct RowScope(Vec<Filter>);
 
 impl RowScope {
-    pub(crate) fn of(table: &str, parts: &Parts) -> Self {
+    /// The live rows: soft-deleted ones are out of scope (#1918).
+    pub(crate) fn of(model: &'static ModelSchema, parts: &Parts) -> Self {
+        Self::with_liveness(model, parts, false)
+    }
+
+    /// The soft-deleted rows, for the trash list and `restore_selected`.
+    pub(crate) fn trashed(model: &'static ModelSchema, parts: &Parts) -> Self {
+        Self::with_liveness(model, parts, true)
+    }
+
+    fn with_liveness(model: &'static ModelSchema, parts: &Parts, trashed: bool) -> Self {
         Self(
-            for_table(table)
+            for_table(model.table)
                 .iter()
                 .flat_map(|h| (h.hook)(parts))
+                .chain(crate::soft_delete::liveness_predicate(model, trashed))
                 .collect(),
         )
     }

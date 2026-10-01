@@ -58,6 +58,16 @@ pub struct Label {
     pub code: String,
 }
 
+/// A Rust-filled v7 PK (#1725).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv1725_doc", app = "tv1915")]
+pub struct Doc {
+    #[rustango(primary_key, default_uuid_v7)]
+    pub id: Auto<uuid::Uuid>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
 const CSRF: &str = "tv1915-csrf-token-tv1915-csrf-token-tv1915x";
 const UUID_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const FORM: &str = "application/x-www-form-urlencoded";
@@ -68,6 +78,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
     rustango::testkit::matrix::fresh_table::<Pin>(pool).await;
     rustango::testkit::matrix::fresh_table::<Label>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -103,6 +114,18 @@ fn app(pool: &Pool) -> axum::Router {
                 .template("form.html")
                 .success_url("/labels")
                 .router("/labels", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Tag::SCHEMA)
+                .template("form.html")
+                .success_url("/tags")
+                .router("/tags", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Doc::SCHEMA)
+                .template("form.html")
+                .success_url("/docs")
+                .router("/docs", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Pin::SCHEMA)
@@ -222,6 +245,22 @@ async fn a_duplicate_create_withholds_the_driver_error(pool: &Pool) {
     assert_eq!(body, "internal server error");
 }
 
+/// CreateView inserts a natural PK from the form and fills a v7 one (#1725).
+async fn create_view_writes_natural_and_v7_pks(pool: &Pool) {
+    let (status, body) = send(pool, Method::POST, "/tags/new", "code=go&name=Go").await;
+    assert!(status.is_redirection(), "natural pk: {status} {body}");
+    let tags: Vec<Tag> = Tag::objects().fetch(pool).await.expect("tags");
+    assert_eq!(tags.len(), 1);
+    assert_eq!((tags[0].code.as_str(), tags[0].name.as_str()), ("go", "Go"));
+
+    let (status, body) = send(pool, Method::POST, "/docs/new", "name=D").await;
+    assert!(status.is_redirection(), "v7 pk: {status} {body}");
+    let docs: Vec<Doc> = Doc::objects().fetch(pool).await.expect("docs");
+    assert_eq!(docs.len(), 1);
+    let id = *docs[0].id.get().expect("pk");
+    assert_eq!(id.get_version_num(), 7, "{id}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -229,5 +268,6 @@ tri_dialect_test! {
         create_and_update_bind_typed_values,
         list_filters_bind_typed_values,
         fk_display_binds_the_target_pk_type,
+        create_view_writes_natural_and_v7_pks,
     ],
 }

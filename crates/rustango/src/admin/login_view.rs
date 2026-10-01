@@ -408,13 +408,8 @@ async fn change_password_submit(
         ))
         .into_response();
     }
-    if form.new_password.len() < 8 {
-        return Html(render_change_password_form(
-            &state,
-            None,
-            Some("New password must be at least 8 characters."),
-        ))
-        .into_response();
+    if let Err(e) = crate::password_validators::check_builtin_form_password(&form.new_password) {
+        return Html(render_change_password_form(&state, None, Some(&e.message))).into_response();
     }
 
     // Load the row by the session's user_id, so the current password

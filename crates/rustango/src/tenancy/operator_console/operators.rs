@@ -55,11 +55,6 @@ use crate::tenancy::operators as ops;
 /// and rejected by others; neither is a good way to find out.
 const USERNAME_MAX: usize = 64;
 
-/// Matches the console's own change-password rule, so the two places
-/// that set an operator password cannot disagree about what is
-/// acceptable.
-const PASSWORD_MIN: usize = 8;
-
 #[derive(Deserialize)]
 pub(super) struct OperatorsQuery {
     #[serde(default)]
@@ -389,11 +384,7 @@ fn chosen_password(generate: bool, typed: &str, confirm: &str) -> Result<String,
     if typed != confirm {
         return Err("The password and its confirmation did not match.".into());
     }
-    if typed.chars().count() < PASSWORD_MIN {
-        return Err(format!(
-            "A password must be at least {PASSWORD_MIN} characters."
-        ));
-    }
+    crate::password_validators::check_builtin_form_password(typed).map_err(|e| e.message)?;
     Ok(typed.to_owned())
 }
 
@@ -494,12 +485,5 @@ mod tests {
             chosen_password(false, "longenough", "longenough").as_deref(),
             Ok("longenough")
         );
-    }
-
-    /// The console's own change-password form refuses anything under 8,
-    /// and two places that set the same field must not disagree.
-    #[test]
-    fn the_minimum_matches_the_change_password_form() {
-        assert_eq!(PASSWORD_MIN, 8);
     }
 }
