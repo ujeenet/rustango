@@ -164,6 +164,8 @@ Read-back values carry 28 decimal places (`1.5000…`); call `Decimal::normalize
 ### JSON comparisons match across backends (#1898)
 
 SQLite `as_text` JSON paths now yield text: compare them to `'1'` / `'true'`, not to `1`.
+SQLite still formats some values unlike PostgreSQL: `1.50` is `'1.5'`, `1e2` is `'100.0'`, big integers lose digits, objects have no spaces.
+On MySQL, `as_text` of a JSON null is now SQL NULL, not `'null'`.
 
 ## 0.59.11
 

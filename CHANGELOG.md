@@ -6,13 +6,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — grouped aggregate `having` / `order_by` on a joined column (#1975)
 
-Over a derived table (distinct, limit, …) they now read the projected `alias__col`.
+Over a derived table (distinct, limit, …) they now read the projected `alias__col`; a subquery inside them keeps its own aliases.
 `order_by(&[("a.name", ..)])` on a grouped aggregate now names `"a"."name"`, not one `"a.name"` identifier.
 
 ### Fixed — integer division, `__second` and date lookups agree across backends (#1900)
 
 MySQL divides two integer expressions with `DIV`; PostgreSQL floors `__second` (59.7 is 59).
-PostgreSQL date lookups and `trunc_*` on a `DateTime` column read it in UTC, not the session TimeZone.
+PostgreSQL date lookups and `trunc_*` on a `DateTime` column, also across a relation, read it in UTC, not the session TimeZone.
 
 ### Fixed — `Decimal` keeps its digits on MySQL; whole decimals show on SQLite (#1899)
 
@@ -21,8 +21,8 @@ The SQLite row decoder no longer shows a whole-number decimal as null.
 
 ### Fixed — JSON equality on MySQL; `as_text` JSON paths on SQLite (#1898)
 
-MySQL now binds a JSON value as `CAST(? AS JSON)`, so `filter("data", json)` matches.
-SQLite's `json_path(.., as_text = true)` returns text (`'1'`, `'true'`) like PostgreSQL's `->>`.
+MySQL now binds a JSON value as `CAST(? AS JSON)` (also for `<=>`), so `filter("data", json)` matches; its `as_text` of a JSON null is NULL.
+SQLite's `json_path(.., as_text = true)` returns text for numbers and booleans (`'1'`, `'true'`); other formatting can still differ from PostgreSQL.
 
 ## [0.59.11] — 2026-09-30
 
