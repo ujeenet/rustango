@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.13
+
 ### Admin `list.html` gets `hidden_params` (#1916)
 
 A custom `list.html` should loop `hidden_params` (not `active_filters`) for the search form's

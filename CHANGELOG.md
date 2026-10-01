@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.13] — 2026-10-01
+
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)
 
 A bool facet showed `1`/`0`, linked `?flag=1` and never marked the active value on SQLite/MySQL.
