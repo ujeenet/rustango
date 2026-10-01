@@ -68,6 +68,16 @@ pub type AdminActionFn = Arc<
 /// allowlist; this registry only holds the callables.
 pub(crate) type AdminActionRegistry = HashMap<&'static str, HashMap<&'static str, AdminActionFn>>;
 
+/// Set once this process builds an admin without
+/// [`Builder::with_session_auth`]; read by `check --deploy` (#1627).
+static UNGATED_ADMIN_BUILT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `true` when this process built an admin anyone can read and write.
+pub(crate) fn ungated_admin_built() -> bool {
+    UNGATED_ADMIN_BUILT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Mount the admin under any prefix using axum's nesting:
 /// `Router::new().nest("/admin", crate::admin::router(pool))`.
 ///
@@ -599,6 +609,10 @@ impl Builder {
     }
 
     pub fn build(self) -> Router {
+        // Tenant mode is gated by the tenancy layer around it.
+        if self.config.session_secret.is_none() && !self.config.tenant_mode {
+            UNGATED_ADMIN_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let audit_path = self.config.audit_url.clone();
         let audit_cleanup_path = format!("{audit_path}/cleanup");
         let session_secret = self.config.session_secret.clone();

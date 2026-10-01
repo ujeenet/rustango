@@ -4864,6 +4864,8 @@ pub(crate) struct DeployAuditEnv {
     pub database_url: Option<String>,
     pub apex_domain: Option<String>,
     pub bind: Option<String>,
+    /// An admin was built without session auth (#1627).
+    pub ungated_admin: bool,
 }
 
 fn deploy_audit_env() -> DeployAuditEnv {
@@ -4873,6 +4875,10 @@ fn deploy_audit_env() -> DeployAuditEnv {
         database_url: std::env::var("DATABASE_URL").ok(),
         apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
         bind: std::env::var("RUSTANGO_BIND").ok(),
+        #[cfg(feature = "admin")]
+        ungated_admin: crate::admin::ungated_admin_built(),
+        #[cfg(not(feature = "admin"))]
+        ungated_admin: false,
     }
 }
 
@@ -4901,6 +4907,14 @@ pub struct DeployAuditFindings {
 /// payloads issued by `auth_routes::JwtAuth` (#81). Same key
 /// covers both surfaces.
 pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindings) {
+    if env.ungated_admin {
+        out.warnings.push(
+            "[admin] the admin router has no authentication — anyone can read and write \
+             every model. Call `admin::Builder::with_session_auth(secret)`, or gate the \
+             route yourself."
+                .into(),
+        );
+    }
     // RUSTANGO_ENV — production should be explicitly tagged.
     match env.rustango_env.as_deref() {
         Some("prod" | "production") => {
@@ -6577,7 +6591,34 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
             apex_domain: Some("app.example.com".into()),
             bind: Some("0.0.0.0:8080".into()),
+            ungated_admin: false,
         }
+    }
+
+    /// #1627 — an admin built without session auth is named.
+    #[test]
+    fn deploy_audit_warns_on_an_ungated_admin() {
+        let env = DeployAuditEnv {
+            ungated_admin: true,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("with_session_auth")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// The flag the audit reads is set by building the admin itself.
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    #[tokio::test]
+    async fn building_an_ungated_admin_reaches_the_deploy_audit() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let _admin = crate::admin::router(pool);
+        assert!(deploy_audit_env().ungated_admin);
     }
 
     fn run(env: &DeployAuditEnv) -> DeployAuditFindings {

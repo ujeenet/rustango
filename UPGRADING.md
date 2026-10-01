@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `check --deploy` flags an ungated admin (#1627)
+
+An app that builds `admin::router(pool)` or a `Builder` without `with_session_auth`
+now gets an `[admin]` warning. Add the login, or ignore it if you gate the route yourself.
+
 ### Commit and ship `system/migrations/` (#1988)
 
 `migrate` now fails when that folder lacks a migration the database already applied.

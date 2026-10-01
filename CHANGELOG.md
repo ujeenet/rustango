@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `check --deploy` warns about an admin with no login (#1627)
+
+Building an admin without `with_session_auth` now raises an `[admin]` warning.
+The getting-started guide teaches the gated admin and `create-admin`.
+
 ### Fixed — a deploy image no longer skips framework schema changes (#1988)
 
 The scaffolded `Dockerfile` now ships `system/`, and every template seeds it.
