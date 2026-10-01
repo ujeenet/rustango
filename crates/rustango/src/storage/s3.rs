@@ -196,7 +196,8 @@ impl S3Storage {
 
         // Canonical headers: lowercase, sorted by name. A content type
         // is signed too, so S3 stores the one we sent (#1904).
-        let content_type = content_type.map(str::trim).filter(|c| !c.is_empty());
+        let content_type = canonical_header_value(content_type)?;
+        let content_type = content_type.as_deref();
         let ct_line = content_type.map_or(String::new(), |c| format!("content-type:{c}\n"));
         let canonical_headers = format!(
             "{ct_line}host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
@@ -276,6 +277,8 @@ impl S3Storage {
         let date_stamp = &amz_date[..8];
         let scope = format!("{date_stamp}/{}/s3/aws4_request", self.cfg.region);
         let credential = format!("{}/{scope}", self.cfg.access_key_id);
+        let content_type = canonical_header_value(content_type)?;
+        let content_type = content_type.as_deref();
 
         // Always sign `host`. A PUT with a content type signs that
         // too, so the browser must send the same value.
@@ -428,6 +431,23 @@ impl Storage for S3Storage {
 // =====================================================================
 // SigV4 primitives
 // =====================================================================
+
+/// A header value as SigV4 signs it: trimmed, inner runs of spaces
+/// collapsed to one. `None` when empty; control characters are refused.
+fn canonical_header_value(v: Option<&str>) -> Result<Option<String>, StorageError> {
+    let Some(v) = v else { return Ok(None) };
+    if v.chars().any(|c| c.is_control() && c != '\t') {
+        return Err(StorageError::Io(format!(
+            "content type {v:?} has a control character"
+        )));
+    }
+    let v = v
+        .split([' ', '\t'])
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok((!v.is_empty()).then_some(v))
+}
 
 /// Format unix seconds as `YYYYMMDDTHHMMSSZ`, which SigV4 wants.
 fn format_amz_date(unix_secs: u64) -> String {
@@ -846,11 +866,12 @@ mod tests {
                 .windows(4)
                 .position(|w| w == b"\r\n\r\n")
                 .unwrap_or(buf.len());
-            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+            let head = String::from_utf8_lossy(&buf[..end]).into_owned();
             // Drain the body, so closing does not reset the connection.
             let len: usize = head
+                .to_ascii_lowercase()
                 .lines()
-                .find_map(|l| l.strip_prefix("content-length:"))
+                .find_map(|l| l.strip_prefix("content-length:").map(str::to_owned))
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(0);
             while buf.len() < end + 4 + len {
@@ -876,19 +897,81 @@ mod tests {
         })
     }
 
+    /// Check the request's SigV4 signature as S3 would: rebuild the
+    /// canonical request from what was sent, re-sign with the test key.
+    fn verify_sigv4(head: &str) {
+        let mut lines = head.split("\r\n");
+        let mut req_line = lines.next().unwrap().split(' ');
+        let (method, path) = (req_line.next().unwrap(), req_line.next().unwrap());
+        let headers: Vec<(String, String)> = lines
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.to_owned()))
+            .collect();
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_else(|| panic!("no {name} in {head}"))
+        };
+        let auth = get("authorization");
+        let field = |name: &str| {
+            auth.split(|c| c == ' ' || c == ',')
+                .find_map(|p| p.strip_prefix(name))
+                .unwrap()
+                .to_owned()
+        };
+        let signed = field("SignedHeaders=");
+        let canonical_headers: String = signed
+            .split(';')
+            .map(|h| format!("{h}:{}\n", get(h)))
+            .collect();
+        let amz_date = get("x-amz-date");
+        let payload = get("x-amz-content-sha256");
+        let cr = format!("{method}\n{path}\n\n{canonical_headers}\n{signed}\n{payload}");
+        let scope = format!("{}/us-east-1/s3/aws4_request", &amz_date[..8]);
+        let sts = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+            sha256_hex(cr.as_bytes())
+        );
+        let key = derive_signing_key(&cfg().secret_access_key, &amz_date[..8], "us-east-1", "s3");
+        let want = hex_encode(&hmac_sha256(&key, sts.as_bytes()));
+        assert_eq!(
+            field("Signature="),
+            want,
+            "signature does not cover what was sent"
+        );
+    }
+
     #[tokio::test]
     async fn save_with_content_type_sends_and_signs_it() {
+        // A double space must be signed as S3 normalizes it.
         let (ep, req) = mock(200).await;
         mock_storage(ep)
-            .save_with_content_type("a.png", b"png", Some("image/png"))
+            .save_with_content_type("a.txt", b"txt", Some(" text/plain;  charset=utf-8 "))
             .await
             .unwrap();
         let head = req.await.unwrap();
-        assert!(head.contains("\r\ncontent-type: image/png"), "{head}");
+        let lower = head.to_ascii_lowercase();
         assert!(
-            head.contains("signedheaders=content-type;host;x-amz-content-sha256;x-amz-date"),
+            lower.contains("\r\ncontent-type: text/plain; charset=utf-8"),
             "{head}"
         );
+        assert!(
+            lower.contains("signedheaders=content-type;host;x-amz-content-sha256;x-amz-date"),
+            "{head}"
+        );
+        verify_sigv4(&head);
+    }
+
+    #[tokio::test]
+    async fn content_type_with_a_line_break_is_refused() {
+        let s = mock_storage("http://127.0.0.1:9".into());
+        let err = s
+            .save_with_content_type("a.txt", b"x", Some("text/plain\r\nx-evil: 1"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("control character"), "{err}");
     }
 
     #[tokio::test]
