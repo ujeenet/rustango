@@ -869,12 +869,13 @@ async fn migrate<W: Write>(
     let system_applied = apply_system_chain(pool, dir, w).await?;
 
     let applied = runner::migrate_pool(pool, dir).await?;
-    if applied.is_empty() && system_applied == 0 {
+    for m in &applied {
+        writeln!(w, "  applied {}", m.name)?;
+    }
+    // The system steps deferred behind a project-created table.
+    let deferred = apply_system_chain(pool, dir, w).await?;
+    if applied.is_empty() && system_applied + deferred == 0 {
         writeln!(w, "nothing to migrate (already up to date)")?;
-    } else {
-        for m in &applied {
-            writeln!(w, "  applied {}", m.name)?;
-        }
     }
     // Framework bootstrap table that isn't model-derived: the audit log
     // is created via idempotent DDL (`CREATE TABLE IF NOT EXISTS`) so any
@@ -1032,7 +1033,7 @@ async fn apply_system_chain<W: Write>(
     }
 
     let all = file::list_dir(&system_dir)?;
-    let wanted: Vec<&Migration> = all
+    let mut wanted: Vec<&Migration> = all
         .iter()
         .filter(|m| m.scope == super::MigrationScope::Tenant)
         .collect();
@@ -1062,6 +1063,22 @@ async fn apply_system_chain<W: Write>(
             })
             .collect()
     };
+    // A later step on a claimed table (an `AddColumn`) needs the project's
+    // table first, so it and everything after wait for the second pass.
+    if !claimed.is_empty() {
+        let applied = runner::applied_set_pool_with_ledger(pool, runner::SYSTEM_LEDGER_TABLE)
+            .await
+            .unwrap_or_default();
+        let blocked = wanted.iter().position(|m| {
+            !applied.contains(&m.name)
+                && runner::without_tables(m, &claimed).forward.iter().any(
+                    |op| matches!(op, Operation::Schema(c) if claimed.iter().any(|t| c.touches(t))),
+                )
+        });
+        if let Some(i) = blocked {
+            wanted.truncate(i);
+        }
+    }
 
     // Apply from a scratch directory holding just the tenant-scope files (with
     // project-claimed tables filtered out), so the runner's ledger bookkeeping

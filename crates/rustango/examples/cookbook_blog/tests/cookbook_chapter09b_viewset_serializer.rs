@@ -191,7 +191,8 @@ async fn create_response_uses_serializer_when_set() {
     let Some(pool) = pool().await else { return };
     fresh_author_table(&pool).await;
 
-    let payload = r#"{"name": "dave", "email": "dave@example.com"}"#;
+    // The serializer's name: the hidden `email` column is refused (#1994).
+    let payload = r#"{"name": "dave", "contact_email": "dave@example.com"}"#;
     let (status, body) = json_request(
         router_with_serializer(pool), Method::POST, "/api", Some(payload),
     ).await;

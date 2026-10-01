@@ -211,6 +211,40 @@ pub enum SchemaChange {
     },
 }
 
+impl SchemaChange {
+    /// Whether this change reads or writes `table`, FK targets included.
+    pub(crate) fn touches(&self, table: &str) -> bool {
+        match self {
+            Self::CreateTable(t)
+            | Self::DropTable(t)
+            | Self::DropM2MTable { through: t }
+            | Self::AddColumn { table: t, .. }
+            | Self::DropColumn { table: t, .. }
+            | Self::AlterColumnType { table: t, .. }
+            | Self::AlterColumnNullable { table: t, .. }
+            | Self::AlterColumnDefault { table: t, .. }
+            | Self::AlterColumnMaxLength { table: t, .. }
+            | Self::RenameColumn { table: t, .. }
+            | Self::AlterColumnUnique { table: t, .. }
+            | Self::CreateIndex { table: t, .. }
+            | Self::DropIndex { table: t, .. }
+            | Self::AddCheckConstraint { table: t, .. }
+            | Self::DropCheckConstraint { table: t, .. }
+            | Self::AddExclusionConstraint { table: t, .. }
+            | Self::DropExclusionConstraint { table: t, .. }
+            | Self::DropCompositeFk { table: t, .. } => t == table,
+            Self::RenameTable { old_name, new_name } => old_name == table || new_name == table,
+            Self::CreateM2MTable {
+                through,
+                src_table,
+                dst_table,
+                ..
+            } => [through, src_table, dst_table].iter().any(|t| *t == table),
+            Self::AddCompositeFk { table: t, to, .. } => t == table || to == table,
+        }
+    }
+}
+
 /// Compute the ordered list of changes from `prev` to `current`.
 ///
 /// **The order is a contract:** drop what hangs off a table or column

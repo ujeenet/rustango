@@ -14,6 +14,10 @@ The jar keeps `Path` and honours `Max-Age`/`Expires`; requests send `Host: tests
 `truncate_tables` runs in one transaction in any FK order on all three backends; `with_truncate_after` clears even when the body panics.
 A `Fixture` load types values from the table's model, rolls back on error and resets the PG sequence; `create_tables` is re-runnable.
 
+### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
+
+A system step that alters a table the project's own `0001` creates (a pre-system-chain scaffold) now waits for that migration; it failed with `relation does not exist`.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
