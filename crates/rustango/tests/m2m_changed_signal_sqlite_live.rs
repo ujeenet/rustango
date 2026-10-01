@@ -74,6 +74,26 @@ async fn add_fires_with_add_action_and_single_dst_pk() {
     assert_eq!(got[0].dst_pks, vec![7]);
 }
 
+/// `without_signals` silences `m2m_changed` like every other signal (#1929).
+#[tokio::test]
+async fn without_signals_suppresses_m2m_changed() {
+    let _g = suite_lock().lock().await;
+    clear_all();
+    let captured: Arc<Mutex<Vec<M2mChangedContext>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    connect_m2m_changed(move |ctx| {
+        let sink = sink.clone();
+        async move {
+            sink.lock().await.push(ctx);
+        }
+    });
+    let pool = pool_with_junction().await;
+    rustango::signals::without_signals(mgr(1).add(7, &pool))
+        .await
+        .unwrap();
+    assert!(captured.lock().await.is_empty(), "m2m_changed fired");
+}
+
 #[tokio::test]
 async fn remove_fires_with_remove_action() {
     let _g = suite_lock().lock().await;

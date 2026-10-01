@@ -156,6 +156,9 @@ pub fn disconnect_m2m_changed(id: ReceiverId) -> bool {
 /// Send `m2m_changed`. [`crate::sql::M2MManager`] calls this; it is
 /// public so tests and custom dispatch can too.
 pub async fn send_m2m_changed(ctx: M2mChangedContext) {
+    if super::signals_suppressed() {
+        return;
+    }
     let receivers: Vec<ChangedReceiver> = snapshot();
     for r in receivers {
         r(ctx.clone()).await;

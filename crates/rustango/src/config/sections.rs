@@ -15,10 +15,6 @@ pub struct Settings {
     /// `[database]`: connection URL, pool sizing, TLS.
     pub database: DatabaseSettings,
 
-    /// `[secret_key]`: base64 HMAC key for session cookies. It can be
-    /// a bare top-level string or a section; the loader accepts both.
-    pub secret_key: Option<String>,
-
     /// `[admin]`: which tables the admin shows, and branding.
     pub admin: AdminSettings,
 

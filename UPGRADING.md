@@ -158,6 +158,11 @@ Apex or marketing routes that resolve no tenant are no longer cached. Set `Cache
 
 A `boolean` field is `required` by default and must now be ticked. Set `"required": false` on optional checkboxes.
 
+### `Settings.secret_key` removed; repeat soft delete returns 0 (#1929)
+
+The field was never read; sessions use `RUSTANGO_SESSION_SECRET`. A key left in TOML is ignored.
+`soft_delete` on a deleted row, and `restore` on a live one, now return `0`.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)

@@ -20,6 +20,10 @@ On MySQL/SQLite the UPDATE could commit with no audit row when the BEFORE read f
 
 New `bind_pairs` takes repeated keys from `<select multiple>`; `NaN`/`inf` no longer pass float bounds.
 
+### Fixed — `without_signals` silences `m2m_changed`; a repeat soft delete keeps its stamp; unread `Settings.secret_key` removed (#1929)
+
+A second `soft_delete` matches no row, so the prune clock and audit log stay put. The cookbook no longer says `delete()` soft-deletes.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)

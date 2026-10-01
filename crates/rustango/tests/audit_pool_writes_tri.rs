@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rustango::audit::{self, AuditEntry, AuditLog};
-use rustango::sql::{Auto, CounterPool as _, Pool};
+use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -174,6 +174,22 @@ async fn failed_pre_read_fails_the_save(pool: &Pool) {
     assert_eq!(updated, 0, "the UPDATE committed without its audit row");
 }
 
+async fn second_soft_delete_keeps_the_first_stamp(pool: &Pool) {
+    let note = insert_note(pool).await;
+    assert_eq!(note.soft_delete(pool).await.unwrap(), 1);
+    let first = Note::objects().fetch(pool).await.unwrap()[0].deleted_at;
+    assert_eq!(note.soft_delete(pool).await.unwrap(), 0, "re-stamped");
+    assert_eq!(
+        Note::objects().fetch(pool).await.unwrap()[0].deleted_at,
+        first
+    );
+    assert_eq!(
+        audit_rows(pool).await,
+        2,
+        "a second soft delete wrote an audit row"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -183,5 +199,6 @@ tri_dialect_test! {
         no_row_changed_writes_no_audit_row,
         noop_save_writes_no_audit_row,
         failed_pre_read_fails_the_save,
+        second_soft_delete_keeps_the_first_stamp,
     ],
 }
