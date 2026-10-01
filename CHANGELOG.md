@@ -42,6 +42,10 @@ Each row is deleted on its read status with its tag links, and its object inside
 
 A drop guard removes the temp file unless the rename ran; it is opened with `create_new`.
 
+### Fixed — `finalize_upload` compares only `type/subtype`
+
+A backend that rewrites the type's parameters no longer fails a good upload.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

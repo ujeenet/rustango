@@ -1745,9 +1745,12 @@ fn stored_content_type(mime: &str) -> &str {
 /// Whether a direct upload landed as signed: the declared size and,
 /// when the backend stores a type, the safe type for the row's MIME.
 fn upload_matches(meta: &crate::storage::ObjectMeta, media: &Media) -> bool {
+    // `type/subtype` only: a backend may rewrite the parameters.
     let norm = |t: &str| {
-        t.split_whitespace()
-            .collect::<String>()
+        t.split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
             .to_ascii_lowercase()
     };
     u64::try_from(media.size_bytes) == Ok(meta.size)
@@ -1881,6 +1884,16 @@ mod tests {
         let mut m = bare_media();
         m.status = "garbage".into();
         assert!(m.status_enum().is_none());
+    }
+
+    #[test]
+    fn upload_matches_compares_the_main_type_only() {
+        let mut m = bare_media();
+        m.mime = "text/plain; charset=utf-8".into();
+        let meta = |ct: &str| crate::storage::ObjectMeta::new(0, Some(ct.to_owned()));
+        assert!(upload_matches(&meta("text/plain;charset=UTF-8"), &m));
+        assert!(upload_matches(&meta("Text/Plain"), &m));
+        assert!(!upload_matches(&meta("text/csv; charset=utf-8"), &m));
     }
 
     fn bare_media() -> Media {
