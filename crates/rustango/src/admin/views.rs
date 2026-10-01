@@ -752,10 +752,12 @@ pub(crate) async fn table_view(
             .collect();
 
     // Action menu items. Empty when the model declares no
-    // `admin.actions`, which hides the picker.
+    // `admin.actions`, which hides the picker. The trash list offers only
+    // `restore_selected`: every other action skips soft-deleted rows.
     let actions_ctx: Vec<serde_json::Value> = admin_cfg
         .actions
         .iter()
+        .filter(|name| !trashed || **name == "restore_selected")
         .map(|name| {
             let label = match *name {
                 "delete_selected" => "Delete selected".to_owned(),
@@ -1746,13 +1748,10 @@ pub(crate) async fn create_submit(
     }
 
     let pk_field = primary_key_or_internal(model)?;
-    // An auto PK is server-assigned and `readonly_fields` are
-    // display-only, so neither belongs in the INSERT.
+    // `readonly_fields` are display-only, so they are not form input.
+    // An auto PK never is; a `default_uuid_v7` one is stamped (#1725).
     let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&str> = admin_cfg.readonly_fields.to_vec();
-    if pk_field.auto {
-        skip.push(pk_field.name);
-    }
     skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
@@ -1777,12 +1776,13 @@ pub(crate) async fn create_submit(
         returning: vec![pk_field.column],
         on_conflict: None,
     };
-    // A server-assigned key is not known yet, so `pk` is empty then.
-    let typed_pk = if pk_field.auto {
-        String::new()
-    } else {
-        form.get(pk_field.name).cloned().unwrap_or_default()
-    };
+    // A database-assigned key is not known yet, so `pk` is empty then.
+    let typed_pk = query
+        .columns
+        .iter()
+        .position(|c| *c == pk_field.column)
+        .map(|i| query.values[i].to_display_string())
+        .unwrap_or_default();
     crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
         pk: typed_pk,
@@ -2292,23 +2292,29 @@ pub(crate) async fn action_submit(
     // value wins, whichever bar sent it.
     let mut action_name: Option<String> = None;
     let mut selected_raw: Vec<String> = Vec::new();
+    let mut trashed = false;
     for (k, v) in pairs {
         if (k == "action" || k == "action_bottom") && !v.is_empty() && action_name.is_none() {
             action_name = Some(v);
         } else if k == "_selected" {
             selected_raw.push(v);
+        } else if k == "trashed" {
+            trashed = v == "1";
         }
     }
+    // Back to the list the action was run from (#1918).
+    let list_url = if trashed && model.soft_delete_column.is_some() {
+        format!("{}/{}?trashed=1", state.config.admin_prefix, model.table)
+    } else {
+        format!("{}/{}", state.config.admin_prefix, model.table)
+    };
+    let back = || Ok(Redirect::to(&list_url).into_response());
     let Some(action) = action_name.filter(|s| !s.is_empty()) else {
         // No action picked: go back to the list.
-        return Ok(
-            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
-        );
+        return back();
     };
     if selected_raw.is_empty() {
-        return Ok(
-            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
-        );
+        return back();
     }
 
     let admin_cfg = admin_config_or_default(model);
@@ -2318,6 +2324,10 @@ pub(crate) async fn action_submit(
             model.name
         )));
     }
+    // Pick and permission-check the write before any row signal (#1928).
+    let Some(write) = BulkWrite::plan(&state, model, &action)? else {
+        return back();
+    };
 
     let pk_field = primary_key_or_internal(model)?;
 
@@ -2326,9 +2336,7 @@ pub(crate) async fn action_submit(
         .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
         .collect();
     if pk_values.is_empty() {
-        return Ok(
-            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
-        );
+        return back();
     }
 
     // Read every selected row before the action runs, so the audit
@@ -2338,7 +2346,7 @@ pub(crate) async fn action_submit(
     let mut before_rows = crate::sql::select_rows_as_json(
         &state.pool,
         // Only `restore_selected` acts on soft-deleted rows.
-        &if action == "restore_selected" {
+        &if matches!(write, BulkWrite::Restore(_)) {
             RowScope::trashed(model, &parts)
         } else {
             RowScope::of(model, &parts)
@@ -2366,21 +2374,14 @@ pub(crate) async fn action_submit(
     // Write only the rows that were checked, and audit exactly those.
     let pk_values = rows_with_pk(&mut before_rows, pk_field);
     if pk_values.is_empty() {
-        return Ok(
-            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
-        );
+        return back();
     }
 
-    let audit_op = if action == "delete_selected" {
-        if model.soft_delete_column.is_some() {
-            crate::audit::AuditOp::SoftDelete
-        } else {
-            crate::audit::AuditOp::Delete
-        }
-    } else if action == "restore_selected" {
-        crate::audit::AuditOp::Update
-    } else {
-        crate::audit::AuditOp::Update
+    let is_delete = matches!(write, BulkWrite::Delete);
+    let audit_op = match (is_delete, model.soft_delete_column) {
+        (true, Some(_)) => crate::audit::AuditOp::SoftDelete,
+        (true, None) => crate::audit::AuditOp::Delete,
+        (false, _) => crate::audit::AuditOp::Update,
     };
 
     // Per-row admin signals: delete for `delete_selected`, an edit for every other action.
@@ -2388,84 +2389,42 @@ pub(crate) async fn action_submit(
         .iter()
         .map(|row| render::read_value_as_string_json(row, pk_field).unwrap_or_default())
         .collect();
-    let is_delete = action == "delete_selected";
     send_row_signals(model.table, &row_pks, is_delete, true).await;
 
-    if action == "delete_selected" {
-        if !state.can_delete(model.table) {
-            return Err(AdminError::ReadOnly {
-                table: model.table.to_owned(),
-            });
-        }
-        if let Some(col) = model.soft_delete_column {
+    let in_pks = || {
+        WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::In,
+            value: SqlValue::List(pk_values.clone()),
+        })
+    };
+    let set_column = |column, value: SqlValue| UpdateQuery {
+        model,
+        set: vec![Assignment {
+            column,
+            value: value.into(),
+        }],
+        where_clause: in_pks(),
+    };
+    match write {
+        BulkWrite::Delete => match model.soft_delete_column {
             // Soft delete: stamp the column instead of a DELETE.
-            crate::sql::update_pool(
-                &state.pool,
-                &UpdateQuery {
-                    model,
-                    set: vec![Assignment {
-                        column: col,
-                        value: SqlValue::from(chrono::Utc::now()).into(),
-                    }],
-                    where_clause: WhereExpr::Predicate(Filter {
-                        column: pk_field.column,
-                        op: Op::In,
-                        value: SqlValue::List(pk_values),
-                    }),
-                },
-            )
-            .await?;
-        } else {
-            crate::sql::delete_pool(
-                &state.pool,
-                &DeleteQuery::by_pk_in(model, pk_field.column, pk_values),
-            )
-            .await?;
-        }
-    } else if action == "restore_selected" {
-        if state.is_read_only(model.table) {
-            return Err(AdminError::ReadOnly {
-                table: model.table.to_owned(),
-            });
-        }
-        // Built-in restore: clear the soft-delete column, where NULL
-        // means live. A model without that column is a no-op, so
-        // callers do not have to guard the action.
-        if let Some(col) = model.soft_delete_column {
-            crate::sql::update_pool(
-                &state.pool,
-                &UpdateQuery {
-                    model,
-                    set: vec![Assignment {
-                        column: col,
-                        value: SqlValue::Null.into(),
-                    }],
-                    where_clause: WhereExpr::Predicate(Filter {
-                        column: pk_field.column,
-                        op: Op::In,
-                        value: SqlValue::List(pk_values),
-                    }),
-                },
-            )
-            .await?;
-        }
-    } else if let Some(handler) = state.action_handler(model.table, &action) {
-        if state.is_read_only(model.table) {
-            return Err(AdminError::ReadOnly {
-                table: model.table.to_owned(),
-            });
+            Some(col) => {
+                let stamp = set_column(col, SqlValue::from(chrono::Utc::now()));
+                crate::sql::update_pool(&state.pool, &stamp).await?;
+            }
+            None => {
+                let query = DeleteQuery::by_pk_in(model, pk_field.column, pk_values.clone());
+                crate::sql::delete_pool(&state.pool, &query).await?;
+            }
+        },
+        // Built-in restore: clear the soft-delete column, where NULL means live.
+        BulkWrite::Restore(col) => {
+            crate::sql::update_pool(&state.pool, &set_column(col, SqlValue::Null)).await?;
         }
         // Handlers get the `Pool` enum, so a user action can match
         // on the backend if it needs to.
-        handler(&state.pool, &pk_values).await?;
-    } else {
-        return Err(AdminError::Internal(format!(
-            "action `{action}` is in `admin.actions` but no handler is registered \
-             on the admin builder; register it via \
-             `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-ins: \
-             delete_selected, restore_selected)",
-            model.table
-        )));
+        BulkWrite::Custom(handler) => handler(&state.pool, &pk_values).await?,
     }
 
     // One audit entry per row, emitted in a single batched INSERT.
@@ -2473,17 +2432,16 @@ pub(crate) async fn action_submit(
     // Other actions record the pre-action state plus an `__action`
     // marker, so the panel shows who ran what against which rows.
     let source = crate::audit::current_source();
-    let bulk_cfg = admin_config_or_default(model);
     let entries: Vec<crate::audit::PendingEntry> = before_rows
         .iter()
         .map(|row| {
             let pk_str = render::read_value_as_string_json(row, pk_field).unwrap_or_default();
-            let row = &mask_secrets(model, &bulk_cfg, row);
+            let row = &mask_secrets(model, &admin_cfg, row);
             let mut pairs: Vec<(&str, serde_json::Value)> = model
                 .scalar_fields()
                 .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
                 .collect();
-            if action != "delete_selected" {
+            if !is_delete {
                 // Tag the action name so the audit row reads as
                 // "alice ran publish_selected", not a plain edit.
                 pairs.push(("__action", serde_json::Value::String(action.clone())));
@@ -2511,7 +2469,46 @@ pub(crate) async fn action_submit(
     }
     send_row_signals(model.table, &row_pks, is_delete, false).await;
 
-    Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
+    back()
+}
+
+/// The write a bulk action makes, chosen and permission-checked before
+/// any row is read or signalled.
+enum BulkWrite {
+    /// `delete_selected`: a soft delete where the model has the column.
+    Delete,
+    /// `restore_selected`: clear this soft-delete column.
+    Restore(&'static str),
+    Custom(super::urls::AdminActionFn),
+}
+
+impl BulkWrite {
+    /// `None` is a no-op: `restore_selected` on a model without soft delete.
+    fn plan(
+        state: &AppState,
+        model: &'static crate::core::ModelSchema,
+        action: &str,
+    ) -> Result<Option<Self>, AdminError> {
+        let read_only = || AdminError::ReadOnly {
+            table: model.table.to_owned(),
+        };
+        match action {
+            "delete_selected" if !state.can_delete(model.table) => Err(read_only()),
+            "delete_selected" => Ok(Some(Self::Delete)),
+            _ if state.is_read_only(model.table) => Err(read_only()),
+            "restore_selected" => Ok(model.soft_delete_column.map(Self::Restore)),
+            _ => match state.action_handler(model.table, action) {
+                Some(handler) => Ok(Some(Self::Custom(handler))),
+                None => Err(AdminError::Internal(format!(
+                    "action `{action}` is in `admin.actions` but no handler is registered \
+                     on the admin builder; register it via \
+                     `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-ins: \
+                     delete_selected, restore_selected)",
+                    model.table
+                ))),
+            },
+        }
+    }
 }
 
 /// One admin pre/post signal per row of a bulk action, in row order (#1928).

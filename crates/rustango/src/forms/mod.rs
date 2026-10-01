@@ -504,7 +504,8 @@ pub fn collect_insert_values(
     let mut out = collect_values(model, form, skip)?;
     let now = chrono::Utc::now();
     for field in model.scalar_fields() {
-        if skip.contains(&field.name) || out.iter().any(|(c, _)| *c == field.column) {
+        // `skip` drops form input; a server-filled value is stamped even when skipped.
+        if out.iter().any(|(c, _)| *c == field.column) {
             continue;
         }
         if let Some(v) = insert_stamp(field, now) {

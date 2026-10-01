@@ -158,16 +158,19 @@ A tenant user can no longer set a new password shorter than 8 characters (counte
 
 A `#[rustango(soft_delete)]` row no longer shows in the admin once deleted; its detail page is a 404.
 Use the list's "Show deleted rows" link (`?trashed=1`) to see and restore them. `trashed` is now a reserved list param.
+The trash list offers only `restore_selected`; a custom `list.html` posts `trashed=1` with the action to return there.
 
 ### Admin facet and date counts follow the filters (#2004)
 
 Facet and date-strip counts now match the filtered list, not the whole table. The year strip lists at most
-the newest 200 years. `values()`/`aggregate()` dicts on PG/MySQL return `SqlValue::Date`/`DateTime` where they gave `Null`.
+the newest 200 years (`MAX_YEAR_BUCKETS`). `values()`/`aggregate()` dicts on PG/MySQL return `SqlValue::Date`/`DateTime`
+where they gave `Null`; code matching on `Null` or `String` for those cells must match the new variants.
 
 ### Admin pre-signals and per-row bulk-action signals fire (#1928)
 
 Receivers on `admin_pre_save` / `admin_pre_delete` now run. `delete_selected` sends delete signals per row;
 `restore_selected` and custom actions send `admin_pre_save`/`admin_post_save` with `change = true` per row.
+A refused action, or `restore_selected` on a model without soft delete, sends none.
 
 ### Natural PKs are form input on create (#1725)
 

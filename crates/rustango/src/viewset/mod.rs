@@ -1670,11 +1670,10 @@ impl WriteSet {
         &self,
         form: &HashMap<String, String>,
     ) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
-        // `auto` fields stay out of `skip` so their timestamps are stamped.
         let skip: Vec<&str> = self
             .schema
             .scalar_fields()
-            .filter(|f| !f.auto && !self.is_writable(f.name))
+            .filter(|f| !self.is_writable(f.name))
             .map(|f| f.name)
             .collect();
         let mut out = collect_insert_values(self.schema, form, &skip)?;

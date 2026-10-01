@@ -69,6 +69,7 @@
 {% else %}
 <form method="post" action="{{ admin_prefix }}/{{ model.table }}/__action" class="list-form">
   {{ csrf_input | safe }}
+  {% if trashed %}<input type="hidden" name="trashed" value="1">{% endif %}
   {% if actions and actions | length > 0 and not read_only and actions_on_top %}
   <div class="action-bar action-bar-top">
     <label>Action:

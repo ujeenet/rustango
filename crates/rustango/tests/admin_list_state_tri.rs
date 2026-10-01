@@ -306,13 +306,30 @@ async fn soft_deleted_rows_leave_the_list(pool: &Pool) {
         trash.contains("gone-row") && !trash.contains("alive-row"),
         "{trash}"
     );
-    let restored = post(
-        pool,
-        "/adminls_item/__action",
-        &format!("action=restore_selected&_selected={gone}"),
-    )
-    .await;
-    assert!(restored.is_redirection(), "{restored}");
+    // The trash list offers only restore, and its action keeps `?trashed=1`.
+    assert!(body.contains(r#"value="delete_selected""#), "{body}");
+    assert!(
+        trash.contains(r#"value="restore_selected""#)
+            && !trash.contains(r#"value="delete_selected""#)
+            && trash.contains(r#"name="trashed" value="1""#),
+        "{trash}"
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/adminls_item/__action")
+        .header("content-type", "application/x-www-form-urlencoded");
+    let form = format!("trashed=1&action=restore_selected&_selected={gone}");
+    let res = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix(PREFIX)
+        .build()
+        .oneshot(req.body(Body::from(form)).unwrap())
+        .await
+        .unwrap();
+    assert!(res.status().is_redirection(), "{}", res.status());
+    assert_eq!(
+        res.headers()["location"],
+        format!("{PREFIX}/adminls_item?trashed=1")
+    );
     let body = get(pool, "/adminls_item").await;
     assert!(
         body.contains("gone-row"),

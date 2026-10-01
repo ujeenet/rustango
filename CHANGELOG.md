@@ -12,22 +12,24 @@ console, now call `password_validators::check_builtin_form_password`.
 ### Fixed — admin hides soft-deleted rows (#1918)
 
 Lists, counts, facets, detail/edit/delete pages, actions and inlines skip rows with the soft-delete
-column set. `?trashed=1` lists them, and `restore_selected` acts only on them.
+column set. `?trashed=1` lists them, offers only `restore_selected`, and keeps the view across the action.
 
 ### Fixed — admin facet and date counts follow the active filters (#2004)
 
 Counts are within the list's filters, search and row scope; a facet ignores its own filter, as in Django.
+The year strip shows the newest 200 years (`MAX_YEAR_BUCKETS`).
 Both now run through the ORM. Dict rows (`values()`, `aggregate()`) decode date and timestamp cells on PG/MySQL instead of `NULL`.
 
 ### Fixed — admin signals: pre hooks fire, in order, and bulk actions send them (#1928)
 
 `admin_pre_save` / `admin_pre_delete` now run before the write, receivers run in registration order,
 and bulk actions send one signal per row: delete for `delete_selected`, save (`change = true`) for the rest.
+A refused or no-op action sends none.
 
 ### Fixed — natural PKs in CreateView and ModelForm; ViewSet create fills v7 PKs (#1725)
 
 HTML `CreateView` and `ModelForm` inserts now take a client-supplied PK (never on update), via one
-`FieldSchema::accepts_input` rule. Schema-driven INSERTs fill `default_uuid_v7` keys and skip `generated_as` columns.
+`FieldSchema::accepts_input` rule. Schema-driven INSERTs, admin create included, fill `default_uuid_v7` keys and skip `generated_as` columns.
 
 ## [0.59.13] — 2026-10-01
 

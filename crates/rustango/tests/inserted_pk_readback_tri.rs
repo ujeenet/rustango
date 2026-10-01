@@ -1,5 +1,5 @@
-//! ModelForm and the admin report the PK the INSERT wrote (#1894), and
-//! refuse before writing when MySQL cannot read it back (#1978).
+//! ModelForm and the admin report the PK the INSERT wrote (#1894), refuse
+//! before writing when MySQL cannot read it back (#1978), and fill v7 PKs (#1725).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -58,6 +58,34 @@ pub struct Line {
     pub doubled: f64,
 }
 
+/// A Rust-filled v7 PK, with an inline child that has one too (#1725).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pk1725_doc", app = "pk1894")]
+pub struct V7Doc {
+    #[rustango(primary_key, default_uuid_v7)]
+    pub id: rustango::sql::Auto<uuid::Uuid>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pk1725_line", app = "pk1894")]
+pub struct V7Line {
+    #[rustango(primary_key, default_uuid_v7)]
+    pub id: rustango::sql::Auto<uuid::Uuid>,
+    #[rustango(fk = "pk1725_doc", on = "id")]
+    pub doc_id: uuid::Uuid,
+    #[rustango(max_length = 32)]
+    pub title: String,
+}
+
+rustango::register_admin_inline!(
+    parent = "pk1725_doc",
+    child = "pk1725_line",
+    fk = "doc_id",
+    fields = &["doc_id", "title"],
+);
+
 const UUID_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const UUID_DEFAULT: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
@@ -66,6 +94,15 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Token>(pool).await;
     rustango::testkit::matrix::fresh_table::<Coupon>(pool).await;
     rustango::testkit::matrix::fresh_table::<Line>(pool).await;
+    rustango::testkit::matrix::drop_table(pool, V7Line::SCHEMA.table).await;
+    rustango::testkit::matrix::fresh_table::<V7Doc>(pool).await;
+    rustango::testkit::matrix::fresh_table::<V7Line>(pool).await;
+}
+
+fn v7(pk: &str) -> uuid::Uuid {
+    let id = uuid::Uuid::parse_str(pk).unwrap_or_else(|e| panic!("{pk:?}: {e}"));
+    assert_eq!(id.get_version_num(), 7, "{pk}");
+    id
 }
 
 async fn model_form_returns_the_written_pk(pool: &Pool) {
@@ -195,6 +232,48 @@ async fn integer_pk_inserts_beside_non_integer_returning_columns(pool: &Pool) {
     assert_eq!(line.doubled, want);
 }
 
+fn v7_admin(pool: &Pool) -> axum::Router {
+    rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .build()
+}
+
+async fn admin_create_fills_a_v7_pk(pool: &Pool) {
+    let loc = location(v7_admin(pool), "/pk1725_doc", "name=A&_continue=1".into()).await;
+    v7(loc.strip_prefix("/pk1725_doc/").expect("detail url"));
+}
+
+async fn model_form_fills_a_v7_pk(pool: &Pool) {
+    let form = ModelForm::new(V7Doc::SCHEMA, HashMap::from([("name".into(), "B".into())]))
+        .prepare_save()
+        .expect("valid");
+    match form.commit_pool(pool).await.expect("model form insert") {
+        SqlValue::Uuid(id) => assert_eq!(id.get_version_num(), 7, "{id}"),
+        other => panic!("ModelForm pk: {other:?}"),
+    }
+}
+
+async fn inline_row_fills_a_v7_pk(pool: &Pool) {
+    let mut doc = V7Doc {
+        id: rustango::sql::Auto::Unset,
+        name: "A".into(),
+    };
+    doc.insert_pool(pool).await.expect("parent");
+    let doc = *doc.id.get().expect("parent pk");
+    let body = format!(
+        "name=A&pk1725_line-TOTAL_FORMS=1&pk1725_line-INITIAL_FORMS=0\
+         &pk1725_line-MAX_NUM_FORMS=&pk1725_line-0-doc_id={doc}&pk1725_line-0-title=L"
+    );
+    let resp = post(v7_admin(pool), &format!("/pk1725_doc/{doc}"), &body).await;
+    assert!(resp.status().is_redirection(), "inline: {}", resp.status());
+    let lines: Vec<V7Line> = rustango::sql::FetcherPool::fetch(V7Line::objects(), pool)
+        .await
+        .expect("lines");
+    assert_eq!(lines.len(), 1, "inline row written");
+    v7(&lines[0].id.get().expect("pk").to_string());
+    assert_eq!(lines[0].doc_id, doc);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -202,5 +281,8 @@ tri_dialect_test! {
         admin_create_redirects_to_the_new_pk,
         db_default_pk_is_read_or_refused_before_the_insert,
         integer_pk_inserts_beside_non_integer_returning_columns,
+        admin_create_fills_a_v7_pk,
+        model_form_fills_a_v7_pk,
+        inline_row_fills_a_v7_pk,
     ],
 }
