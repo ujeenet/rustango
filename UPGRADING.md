@@ -182,7 +182,9 @@ A cookie logout now also ends that user's JWT refresh chains; clients must log i
 
 ### `confirmed_secret_checked` errors on an undecodable secret (#1875)
 
-It returned `Ok(None)` (no second factor); it now returns `Err`. `Debug` of `TotpSecret`,
+It returned `Ok(None)` (no second factor); it now returns `Err`, also for a secret under 10 bytes
+(`TotpSecret::from_base32` refuses those). `confirmed_secret` is deprecated: a read error looks like
+no device, so use `confirmed_secret_checked`. `Debug` of `TotpSecret`,
 `AdminTotp` and `Signer` no longer prints the secret.
 
 ## 0.59.16

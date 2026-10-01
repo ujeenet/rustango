@@ -226,6 +226,10 @@ pub async fn device(pool: &Pool, user_id: i64) -> Option<AdminTotp> {
 ///
 /// A read failure also gives `None`, which is why an authentication
 /// gate must not use this — see [`confirmed_secret_checked`] (#1644).
+#[deprecated(
+    since = "0.59.17",
+    note = "a read error looks like no device; use confirmed_secret_checked"
+)]
 pub async fn confirmed_secret(pool: &Pool, user_id: i64) -> Option<TotpSecret> {
     confirmed_secret_checked(pool, user_id).await.ok().flatten()
 }

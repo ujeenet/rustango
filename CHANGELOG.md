@@ -38,7 +38,8 @@ The IdP body or transport error is logged; the browser gets a fixed message.
 
 ### Security — credential hardening: undecodable TOTP secret, redacted Debug, HOTP digits, argon2 rehash (#1875)
 
-A confirmed TOTP row that is not base32 refuses the login instead of skipping 2FA. `TotpSecret`,
+A confirmed TOTP row that is not base32, or decodes to under 10 bytes, refuses the login instead
+of skipping 2FA; the lenient `totp_store::confirmed_secret` is deprecated. `TotpSecret`,
 `AdminTotp` and `Signer` redact secrets in `Debug`; 10-digit HOTP no longer overflows; the hasher
 chain rehashes argon2id below today's cost (`PasswordHasher::needs_rehash`, `passwords::needs_rehash`).
 

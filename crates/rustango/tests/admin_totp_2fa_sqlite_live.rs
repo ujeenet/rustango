@@ -1,4 +1,5 @@
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "totp"))]
+#![allow(deprecated)] // `confirmed_secret` stays covered until it is removed.
 //! Live SQLite test for the admin TOTP 2FA store + gating logic —
 //! issue #367. Covers the security-critical invariants the login
 //! challenge relies on:
@@ -162,6 +163,17 @@ async fn an_undecodable_confirmed_secret_is_an_error() {
         .execute_pool(&pool)
         .await
         .expect("corrupt the secret");
+    assert!(totp_store::confirmed_secret_checked(&pool, uid)
+        .await
+        .is_err());
+    // An empty secret decodes as base32 but is no key.
+    totp_store::AdminTotp::objects()
+        .filter("user_id", uid)
+        .update()
+        .set("secret_base32", "")
+        .execute_pool(&pool)
+        .await
+        .expect("empty the secret");
     assert!(totp_store::confirmed_secret_checked(&pool, uid)
         .await
         .is_err());

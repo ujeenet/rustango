@@ -26,6 +26,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The shortest secret [`TotpSecret::from_base32`] accepts: 80 bits.
+pub const MIN_SECRET_BYTES: usize = 10;
+
 /// A TOTP shared secret (raw bytes). Store base32-encoded on the user row.
 #[derive(Clone)]
 pub struct TotpSecret(pub Vec<u8>);
@@ -61,10 +64,13 @@ impl TotpSecret {
     }
 
     /// Decode a base32-encoded secret string (with or without padding).
-    /// Returns `None` for invalid base32.
+    /// Returns `None` for invalid base32 or a secret under
+    /// [`MIN_SECRET_BYTES`], so an empty column can't become a guessable key.
     #[must_use]
     pub fn from_base32(s: &str) -> Option<Self> {
-        base32_decode(s).map(Self)
+        base32_decode(s)
+            .filter(|b| b.len() >= MIN_SECRET_BYTES)
+            .map(Self)
     }
 }
 
@@ -351,6 +357,14 @@ mod tests {
         let encoded = s1.to_base32();
         let s2 = TotpSecret::from_base32(&encoded).unwrap();
         assert_eq!(s1.0, s2.0);
+    }
+
+    #[test]
+    fn from_base32_refuses_a_short_or_empty_secret() {
+        assert!(TotpSecret::from_base32("").is_none());
+        // 9 bytes, then 10.
+        assert!(TotpSecret::from_base32(&base32_encode(&[7; 9])).is_none());
+        assert!(TotpSecret::from_base32(&base32_encode(&[7; 10])).is_some());
     }
 
     #[test]
