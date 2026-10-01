@@ -7,10 +7,14 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
-use rustango::audit::{AuditOp, AuditSource, PendingEntry};
+use rustango::audit::{
+    AuditLog, AuditOp, AuditSource, PendingEntry, DELETE_CODENAME as CLEAN, VIEW_CODENAME as VIEW,
+};
 use rustango::core::{Filter, Op, SqlValue};
 use rustango::sql::{sqlx, FetcherPool as _};
-use rustango::tenancy::permissions::set_user_perm_pool;
+use rustango::tenancy::permissions::{
+    auto_create_permissions_pool, set_user_perm_pool, Permission,
+};
 use rustango::tenancy::tenant_console::{
     encode, PasswordFingerprint, SessionSecret, TenantSessionPayload, COOKIE_NAME,
 };
@@ -330,7 +334,7 @@ impl Env {
     }
 }
 
-/// #1858: a user with no `audit.view` gets 403 on the feed.
+/// #1858: a user without the feed codename gets 403 on the feed.
 #[tokio::test]
 async fn the_audit_feed_needs_audit_view() {
     let env = boot().await;
@@ -344,13 +348,13 @@ async fn the_audit_feed_needs_audit_view() {
     assert!(!body.contains("rustango_users/1"), "recent actions: {body}");
 }
 
-/// #1858: `audit.view` shows only rows of tables the user may view.
+/// #1858: the feed codename shows only rows of tables the user may view.
 #[tokio::test]
 async fn the_audit_feed_shows_only_viewable_tables() {
     let env = boot().await;
     env.audit("rustango_users", "1").await;
     env.audit("sec_note", "7").await;
-    let cookie = env.login(false, &["audit.view", "sec_note.view"]).await;
+    let cookie = env.login(false, &[VIEW, "sec_note.view"]).await;
     let (status, body) = env.get("/__admin/__audit", &cookie).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("sec_note-7"), "{body}");
@@ -358,12 +362,12 @@ async fn the_audit_feed_shows_only_viewable_tables() {
     assert!(!body.contains(">rustango_users<"), "facet rail: {body}");
 }
 
-/// #1858: cleanup without `audit.delete` is refused and deletes nothing.
+/// #1858: cleanup without the cleanup codename is refused and deletes nothing.
 #[tokio::test]
 async fn audit_cleanup_needs_audit_delete() {
     let env = boot().await;
     env.audit("sec_note", "1").await;
-    let cookie = env.login(false, &["audit.view", "sec_note.view"]).await;
+    let cookie = env.login(false, &[VIEW, "sec_note.view"]).await;
     let (status, _) = env
         .post(
             "/__admin/__audit/cleanup",
@@ -372,6 +376,49 @@ async fn audit_cleanup_needs_audit_delete() {
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(env.audit_rows().await, 1, "the trail must survive");
+}
+
+/// #1979: the feed codenames are seeded under the audit table.
+#[tokio::test]
+async fn feed_codenames_are_seeded_under_the_audit_table() {
+    let env = boot().await;
+    auto_create_permissions_pool(&env.tenant)
+        .await
+        .expect("seed");
+    for codename in [VIEW, CLEAN] {
+        let rows: Vec<Permission> = Permission::objects()
+            .filter("codename", codename)
+            .fetch(&env.tenant)
+            .await
+            .expect("permissions");
+        let tables: Vec<&str> = rows.iter().map(|r| r.perm_table.as_str()).collect();
+        assert_eq!(tables, ["rustango_audit_log"], "{codename}");
+    }
+}
+
+/// #1979: the feed codenames don't open or delete through the `AuditLog` model.
+#[tokio::test]
+async fn feed_codenames_do_not_open_the_audit_model() {
+    let env = boot().await;
+    env.audit("sec_note", "3").await;
+    let cookie = env.login(false, &[VIEW, CLEAN, "sec_note.view"]).await;
+    let (status, body) = env.get("/__admin/__audit", &cookie).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = env.get("/__admin/rustango_audit_log", &cookie).await;
+    assert!(status.is_client_error(), "{status}: {body}");
+    assert!(!body.contains("sec_note-3"), "{body}");
+
+    let rows: Vec<AuditLog> = AuditLog::objects()
+        .fetch(&env.tenant)
+        .await
+        .expect("audit rows");
+    let uri = format!(
+        "/__admin/rustango_audit_log/{}/delete",
+        rows[0].id.get().unwrap()
+    );
+    let (status, _) = env.post(&uri, &cookie, "").await;
+    assert!(status.is_client_error(), "{status}");
     assert_eq!(env.audit_rows().await, 1, "the trail must survive");
 }
 
@@ -586,7 +633,7 @@ async fn the_queryset_hook_scopes_inline_children() {
     assert!(titles.contains(&"their-kid".to_owned()), "{titles:?}");
 }
 
-/// The detail page's audit panel needs `audit.view` too.
+/// The detail page's audit panel needs the feed codename too.
 #[tokio::test]
 async fn the_detail_audit_panel_needs_audit_view() {
     let env = boot().await;
@@ -606,7 +653,7 @@ async fn the_detail_audit_panel_needs_audit_view() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!body.contains(&marker), "{body}");
 
-    let cookie = env.login(false, &["sec_note.view", "audit.view"]).await;
+    let cookie = env.login(false, &["sec_note.view", VIEW]).await;
     assert!(env.get(&uri, &cookie).await.1.contains(&marker));
 }
 
@@ -614,10 +661,10 @@ async fn the_detail_audit_panel_needs_audit_view() {
 #[tokio::test]
 async fn the_cleanup_form_needs_audit_delete() {
     let env = boot().await;
-    let reader = env.login(false, &["audit.view"]).await;
+    let reader = env.login(false, &[VIEW]).await;
     let (_, body) = env.get("/__admin/__audit", &reader).await;
     assert!(!body.contains("__audit/cleanup"), "{body}");
-    let cleaner = env.login(false, &["audit.view", "audit.delete"]).await;
+    let cleaner = env.login(false, &[VIEW, CLEAN]).await;
     let (_, body) = env.get("/__admin/__audit", &cleaner).await;
     assert!(body.contains("__audit/cleanup"), "{body}");
 }

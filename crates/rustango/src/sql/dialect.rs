@@ -333,6 +333,17 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Add a named UNIQUE on one column of an existing table. PG and MySQL
+    /// share this form; SQLite has no `ADD CONSTRAINT` and overrides it.
+    fn add_unique_constraint_sql(&self, table: &str, name: &str, column: &str) -> String {
+        format!(
+            "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({})",
+            self.quote_ident(table),
+            self.quote_ident(name),
+            self.quote_ident(column)
+        )
+    }
+
     /// `true` if partial indexes, `CREATE INDEX … WHERE <expr>`, are
     /// supported. MySQL has no equivalent, so the migration writer
     /// drops the WHERE clause there and warns.
@@ -619,6 +630,12 @@ pub trait Dialect: Send + Sync {
         } else {
             " IS NOT DISTINCT FROM "
         });
+        sql.push_str(placeholder);
+    }
+
+    /// Write the placeholder of a bound JSON value. PG and SQLite take
+    /// it as is; MySQL wraps it, since sqlx binds JSON as text.
+    fn write_json_param(&self, sql: &mut String, placeholder: &str) {
         sql.push_str(placeholder);
     }
 

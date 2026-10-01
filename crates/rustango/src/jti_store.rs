@@ -65,9 +65,9 @@ pub type JtiFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// ```ignore
 /// fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool> {
 ///     Box::pin(async move {
-///         // INSERT … ON CONFLICT DO NOTHING — one round trip, atomic,
-///         // and visible to every instance immediately.
-///         rows_affected == 1
+///         // One atomic round trip. Not `rows_affected == 1`: a MySQL
+///         // skip also reports 1 row, so a replay would pass.
+///         rustango::sql::insert_or_ignore(&pool, &insert).await.unwrap_or(false)
 ///     })
 /// }
 /// ```
@@ -83,8 +83,9 @@ pub trait JtiStore: Send + Sync {
     /// `exp_unix` is the JWT's `exp` claim (unix seconds). Stores MAY
     /// use it to prune entries.
     ///
-    /// Write it as one conditional write (`INSERT … ON CONFLICT DO
-    /// NOTHING`, Redis `SET NX`), never a read then a write.
+    /// Write it as one conditional write
+    /// ([`insert_or_ignore`](crate::sql::insert_or_ignore), Redis `SET NX`),
+    /// never a read then a write.
     fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool>;
 
     /// Rough count of tracked JTIs, for dashboards and tests. Not on

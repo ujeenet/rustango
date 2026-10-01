@@ -70,7 +70,7 @@ fn single_key_emits_json_extract_on_sqlite_and_mysql() {
     let my = my(&e).unwrap();
     let lite = sqlite(&e).unwrap();
     assert!(
-        my.contains("JSON_UNQUOTE(JSON_EXTRACT(`data`, '$.city'))"),
+        my.contains("JSON_UNQUOTE(NULLIF(JSON_EXTRACT(`data`, '$.city'), CAST('null' AS JSON)))"),
         "MySQL JSON_UNQUOTE form: {my}"
     );
     assert!(
@@ -95,7 +95,9 @@ fn multi_key_chain_emits_dotted_path_on_mysql_and_sqlite() {
     let my = my(&e).unwrap();
     let lite = sqlite(&e).unwrap();
     assert!(
-        my.contains("JSON_UNQUOTE(JSON_EXTRACT(`data`, '$.address.city'))"),
+        my.contains(
+            "JSON_UNQUOTE(NULLIF(JSON_EXTRACT(`data`, '$.address.city'), CAST('null' AS JSON)))"
+        ),
         "MySQL: {my}"
     );
     assert!(
@@ -176,16 +178,13 @@ fn empty_path_is_rejected() {
     }
 }
 
-// ---------- as_text noop on SQLite ----------
+// ---------- as_text casts to text on SQLite ----------
 
+/// #1898: json_extract returns numbers and 1/0 bools, so as_text casts.
 #[test]
-fn as_text_is_a_noop_on_sqlite_json_extract_returns_scalars_unquoted() {
-    let with_text = json_path(F("data"), &["city"], true);
-    let without_text = json_path(F("data"), &["city"], false);
-    let lite_text = sqlite(&with_text).unwrap();
-    let lite_json = sqlite(&without_text).unwrap();
-    assert_eq!(
-        lite_text, lite_json,
-        "SQLite emits identical SQL regardless of as_text"
-    );
+fn as_text_casts_to_text_on_sqlite() {
+    let lite_text = sqlite(&json_path(F("data"), &["city"], true)).unwrap();
+    let lite_json = sqlite(&json_path(F("data"), &["city"], false)).unwrap();
+    assert!(lite_text.contains("AS TEXT"), "{lite_text}");
+    assert!(!lite_json.contains("AS TEXT"), "{lite_json}");
 }
