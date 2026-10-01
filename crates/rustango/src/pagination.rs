@@ -338,8 +338,9 @@ fn join_url(path: &str, params: &BTreeMap<String, String>) -> String {
     let qs = params
         .iter()
         .map(|(k, v)| {
+            // Keys are decoded in `base_params`, so re-encode bare ones too.
             if v.is_empty() {
-                k.clone()
+                url_encode(k)
             } else {
                 format!("{}={}", url_encode(k), url_encode(v))
             }
@@ -568,6 +569,18 @@ mod tests {
             c.next.as_deref(),
             Some("/posts?cursor=c1&page_size=20&q=a%20b")
         );
+    }
+
+    #[test]
+    fn bare_keys_are_reencoded() {
+        let l = page_number_links("/api?x%26page%3D9&a%20b&%3Cq%22", 1, 10, 30);
+        let next = l.next.unwrap();
+        assert_eq!(next.matches("page=").count(), 1, "{next}");
+        assert!(next.contains("x%26page%3D9"), "{next}");
+        assert!(next.contains("a%20b"), "{next}");
+        assert!(!next.contains(['<', '"', ' ']), "{next}");
+        let c = cursor_links("/api?x%26cursor%3Dz", None, Some("n"), 10);
+        assert_eq!(c.next.unwrap().matches("cursor=").count(), 1);
     }
 
     #[test]
