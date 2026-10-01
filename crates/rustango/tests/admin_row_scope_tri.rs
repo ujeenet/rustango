@@ -257,6 +257,24 @@ async fn inline_post_enforces_max_num(pool: &Pool) {
     );
 }
 
+/// A repeated DELETE slot frees one row, not two, under `max_num`.
+async fn inline_duplicate_deletes_do_not_bypass_max_num(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a", p, "one", false).await;
+    seed_child(pool, "b", p, "two", false).await;
+    let form = "name=p&rowscope_child-TOTAL_FORMS=4&rowscope_child-INITIAL_FORMS=2\
+        &rowscope_child-0-code=a&rowscope_child-0-DELETE=on\
+        &rowscope_child-1-code=a&rowscope_child-1-DELETE=on\
+        &rowscope_child-2-code=c&rowscope_child-2-label=c&rowscope_child-2-secret=s\
+        &rowscope_child-3-code=d&rowscope_child-3-label=d&rowscope_child-3-secret=s";
+    let (status, body) = post(pool, &format!("/rowscope_parent/{p}"), form).await;
+    assert!(body.contains("at most 2 rows"), "{status}: {body}");
+    assert!(
+        child(pool, "d").await.is_none(),
+        "row past max_num was written"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -265,5 +283,6 @@ tri_dialect_test! {
         inlines_hide_secrets_and_refused_rows,
         inline_post_keeps_secrets_and_inserts_natural_pks,
         inline_post_enforces_max_num,
+        inline_duplicate_deletes_do_not_bypass_max_num,
     ],
 }

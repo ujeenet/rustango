@@ -49,7 +49,7 @@ use crate::core::{
     WhereExpr,
 };
 use crate::sql::{select_rows_as_json, ExecError, Pool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::errors::AdminError;
 use super::helpers::{admin_config_or_default, is_secret_field, lookup_model};
@@ -1127,14 +1127,22 @@ impl From<ExecError> for InlinePlanError {
 /// Inline writes that passed the child tables' admin gates. Every
 /// UPDATE and DELETE is keyed on the parent; every INSERT pins it.
 pub(crate) struct InlinePlan {
-    writes: Vec<InlineWrite>,
+    targets: Vec<TargetPlan>,
     failed: usize,
+}
+
+/// One inline's writes: existing rows first, then inserts.
+#[derive(Default)]
+struct TargetPlan {
+    existing: Vec<InlineWrite>,
+    inserts: Vec<crate::core::InsertQuery>,
+    /// Deletes the inserts rely on to stay within `max_num`.
+    deletes_needed: usize,
 }
 
 enum InlineWrite {
     Update(crate::core::UpdateQuery),
     Delete(crate::core::DeleteQuery),
-    Insert(crate::core::InsertQuery),
 }
 
 /// Check every submitted inline row (FK and generic) against the child
@@ -1161,7 +1169,7 @@ pub(crate) async fn plan_post(
     form: &HashMap<String, String>,
 ) -> Result<InlinePlan, InlinePlanError> {
     let mut plan = InlinePlan {
-        writes: Vec::new(),
+        targets: Vec::new(),
         failed: 0,
     };
     for target in inline_targets(state, parts, parent_model, parent_pk).await? {
@@ -1262,7 +1270,9 @@ async fn plan_target(
     // inserts rather than updates (#1717).
     let initial = crate::forms::formset::initial_forms(form, table);
     let natural_pk = (!target.pk.auto).then_some(target.pk);
-    let (mut inserts, mut deletes) = (0usize, 0usize);
+    let mut out = TargetPlan::default();
+    // Distinct PKs: a repeated DELETE slot removes one row (#1717).
+    let mut deleted: HashSet<String> = HashSet::new();
     for idx in 0..total_forms {
         let row = crate::forms::formset::row_payload(form, table, idx);
         let raw_pk = row.get(target.pk.name).cloned().unwrap_or_default();
@@ -1305,13 +1315,11 @@ async fn plan_target(
             }
             // Schema-driven INSERT: nothing else supplies these (#1464).
             crate::forms::stamp_auto_timestamps(target.child, &mut columns, &mut sql_values);
-            plan.writes
-                .push(InlineWrite::Insert(crate::core::InsertQuery::new(
-                    target.child,
-                    columns,
-                    sql_values,
-                )));
-            inserts += 1;
+            out.inserts.push(crate::core::InsertQuery::new(
+                target.child,
+                columns,
+                sql_values,
+            ));
             continue;
         }
 
@@ -1324,6 +1332,9 @@ async fn plan_target(
             if !state.can_delete(table) {
                 return Err(read_only().into());
             }
+            if !deleted.insert(pk.to_display_string()) {
+                continue;
+            }
             let Some(before) = target.fetch_own(&state.pool, &pk, &raw_pk).await? else {
                 continue;
             };
@@ -1331,12 +1342,11 @@ async fn plan_target(
             {
                 return Err(refused("delete").into());
             }
-            plan.writes
+            out.existing
                 .push(InlineWrite::Delete(crate::core::DeleteQuery::new(
                     target.child,
                     target.row_where(pk),
                 )));
-            deletes += 1;
             continue;
         }
 
@@ -1365,7 +1375,7 @@ async fn plan_target(
             .into_iter()
             .map(|(column, value)| crate::core::Assignment::new(column, value))
             .collect();
-        plan.writes
+        out.existing
             .push(InlineWrite::Update(crate::core::UpdateQuery::new(
                 target.child,
                 set,
@@ -1373,7 +1383,7 @@ async fn plan_target(
             )));
     }
     // `max_num` caps the rows a POST that adds any may leave (#1717).
-    if let Some(max) = target.max_num.filter(|_| inserts > 0) {
+    if let Some(max) = target.max_num.filter(|_| !out.inserts.is_empty()) {
         let count = crate::core::CountQuery {
             model: target.child,
             where_clause: target.rows.constrain(target.scope.all_where()),
@@ -1382,12 +1392,21 @@ async fn plan_target(
         };
         let existing = usize::try_from(crate::sql::count_rows_pool(&state.pool, &count).await?)
             .unwrap_or(usize::MAX);
-        if existing.saturating_sub(deletes).saturating_add(inserts) > max {
+        let deletes = out
+            .existing
+            .iter()
+            .filter(|w| matches!(w, InlineWrite::Delete(_)))
+            .count();
+        out.deletes_needed = existing
+            .saturating_add(out.inserts.len())
+            .saturating_sub(max);
+        if out.deletes_needed > deletes {
             return Err(InlinePlanError::Rejected(format!(
                 "{table} allows at most {max} rows here."
             )));
         }
     }
+    plan.targets.push(out);
     Ok(())
 }
 
@@ -1398,21 +1417,31 @@ pub(crate) async fn apply_plan(pool: &Pool, plan: InlinePlan) -> InlineApplyOutc
         failed: plan.failed,
         ..InlineApplyOutcome::default()
     };
-    for write in plan.writes {
-        match write {
-            InlineWrite::Update(q) => match crate::sql::update_pool(pool, &q).await {
-                Ok(_) => outcome.updated += 1,
-                Err(_) => outcome.failed += 1,
-            },
-            // 0 rows: deleted or moved since the plan was checked.
-            InlineWrite::Delete(q) => match crate::sql::delete_pool(pool, &q).await {
-                Ok(0) | Err(_) => outcome.failed += 1,
-                Ok(_) => outcome.deleted += 1,
-            },
-            InlineWrite::Insert(q) => match crate::sql::insert_pool(pool, &q).await {
+    for target in plan.targets {
+        let mut deleted = 0usize;
+        for write in target.existing {
+            match write {
+                InlineWrite::Update(q) => match crate::sql::update_pool(pool, &q).await {
+                    Ok(_) => outcome.updated += 1,
+                    Err(_) => outcome.failed += 1,
+                },
+                // 0 rows: deleted or moved since the plan was checked.
+                InlineWrite::Delete(q) => match crate::sql::delete_pool(pool, &q).await {
+                    Ok(0) | Err(_) => outcome.failed += 1,
+                    Ok(_) => deleted += 1,
+                },
+            }
+        }
+        outcome.deleted += deleted;
+        // A delete that removed nothing frees no room under `max_num`.
+        let skip = target.deletes_needed.saturating_sub(deleted);
+        let run = target.inserts.len().saturating_sub(skip);
+        outcome.failed += target.inserts.len() - run;
+        for q in target.inserts.into_iter().take(run) {
+            match crate::sql::insert_pool(pool, &q).await {
                 Ok(()) => outcome.inserted += 1,
                 Err(_) => outcome.failed += 1,
-            },
+            }
         }
     }
     outcome
