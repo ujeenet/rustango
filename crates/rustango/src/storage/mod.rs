@@ -249,9 +249,17 @@ impl Storage for LocalStorage {
                 .await
                 .map_err(|e| StorageError::Io(e.to_string()))?;
         }
-        tokio::fs::write(&path, data)
-            .await
-            .map_err(|e| StorageError::Io(e.to_string()))
+        // Temp file + rename: a reader never sees a torn file, a crash
+        // leaves the old one (#1905).
+        let tmp = path.with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        if let Err(e) = tokio::fs::write(&tmp, data).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(StorageError::Io(e.to_string()));
+        }
+        tokio::fs::rename(&tmp, &path).await.map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            StorageError::Io(e.to_string())
+        })
     }
 
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
@@ -509,6 +517,38 @@ mod tests {
         let s = LocalStorage::new(dir.clone());
         s.save("a/b/c/file.txt", b"deep").await.unwrap();
         assert_eq!(s.load("a/b/c/file.txt").await.unwrap(), b"deep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1905: a load racing a save sees the old file or the new one,
+    /// never a torn one, and no temp file is left behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_storage_save_is_atomic() {
+        let dir = tempdir();
+        let s = Arc::new(LocalStorage::new(dir.clone()));
+        const N: usize = 4 << 20;
+        s.save("f.bin", &vec![b'a'; N]).await.unwrap();
+        let writer = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                for i in 0..20u8 {
+                    s.save("f.bin", &vec![b'b' + i % 2; N]).await.unwrap();
+                }
+            })
+        };
+        while !writer.is_finished() {
+            let got = s.load("f.bin").await.unwrap();
+            assert_eq!(got.len(), N, "torn read");
+        }
+        writer.await.unwrap();
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("f.bin")]);
+        let meta = s.metadata("f.bin").await.unwrap().unwrap();
+        assert_eq!((meta.size, meta.content_type), (N as u64, None));
+        assert_eq!(s.metadata("nope").await.unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

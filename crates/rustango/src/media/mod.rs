@@ -385,19 +385,25 @@ impl MediaManager {
         storage
             .save_with_content_type(&key, &opts.bytes, Some(stored_content_type(&opts.mime)))
             .await?;
-        self.insert_row(InsertRow {
-            disk: opts.disk,
-            storage_key: key,
-            mime: opts.mime,
-            size_bytes,
-            original_filename: opts.original_filename,
-            status: MediaStatus::Ready,
-            uploaded_by_id: opts.uploaded_by_id,
-            derived_from_id: None,
-            collection_id: opts.collection_id,
-            metadata: opts.metadata,
-        })
-        .await
+        let inserted = self
+            .insert_row(InsertRow {
+                disk: opts.disk,
+                storage_key: key.clone(),
+                mime: opts.mime,
+                size_bytes,
+                original_filename: opts.original_filename,
+                status: MediaStatus::Ready,
+                uploaded_by_id: opts.uploaded_by_id,
+                derived_from_id: None,
+                collection_id: opts.collection_id,
+                metadata: opts.metadata,
+            })
+            .await;
+        if inserted.is_err() {
+            // No row means no sweep will ever find this object (#1905).
+            let _ = storage.delete(&key).await;
+        }
+        inserted
     }
 
     // --------- begin / finalize (direct browser upload)
