@@ -239,7 +239,26 @@ pub fn export_json(rows: &[(String, String, String)]) -> String {
     serde_json::to_string_pretty(&by_locale).unwrap_or_else(|_| "{}".to_owned())
 }
 
-/// Upsert each parsed edit into the override layer. Returns the count
+/// The edits that change something: an empty cell is a gap that falls
+/// back to the file catalog, so it is never written as `""`.
+#[must_use]
+pub fn changed_edits<'a>(
+    current: &[(String, String, String)],
+    edits: &'a [(String, String, String)],
+) -> Vec<&'a (String, String, String)> {
+    let current: std::collections::HashMap<(&str, &str), &str> = current
+        .iter()
+        .map(|(l, k, v)| ((l.as_str(), k.as_str()), v.as_str()))
+        .collect();
+    edits
+        .iter()
+        .filter(|(l, k, v)| {
+            !v.is_empty() && current.get(&(l.as_str(), k.as_str())) != Some(&v.as_str())
+        })
+        .collect()
+}
+
+/// Upsert each edit that [`changed_edits`] keeps. Returns the count
 /// written. `updated_by` records the operator.
 ///
 /// # Errors
@@ -250,10 +269,12 @@ pub async fn apply_edits(
     edits: &[(String, String, String)],
     updated_by: &str,
 ) -> Result<usize, crate::sql::ExecError> {
-    for (locale, key, value) in edits {
+    let current = editor_rows(pool).await?;
+    let changed = changed_edits(&current, edits);
+    for (locale, key, value) in &changed {
         upsert_pool(pool, locale, key, value, updated_by).await?;
     }
-    Ok(edits.len())
+    Ok(changed.len())
 }
 
 /// Delete each listed key (all locales) from the override layer. Returns
@@ -473,6 +494,19 @@ mod tests {
                 ("en".into(), "bye".into(), "Goodbye".into()),
             ]
         );
+    }
+
+    #[test]
+    fn changed_edits_skip_empty_and_unchanged_cells() {
+        let t = |l: &str, k: &str, v: &str| (l.to_owned(), k.to_owned(), v.to_owned());
+        let current = vec![t("en", "greet", "Hi"), t("fr", "bye", "Salut")];
+        let edits = vec![
+            t("en", "greet", "Hi"),      // unchanged
+            t("fr", "greet", ""),        // untouched gap
+            t("fr", "bye", "Au revoir"), // changed
+            t("de", "greet", "Hallo"),   // new
+        ];
+        assert_eq!(changed_edits(&current, &edits), vec![&edits[2], &edits[3]]);
     }
 
     #[test]

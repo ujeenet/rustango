@@ -150,6 +150,24 @@ untouched.
 
 ## Unreleased
 
+### Number filters round halves up (#1896)
+
+`floatformat`, `numberformat::format`, `format_number` and `format_currency` round half away from zero on the shortest decimal form, so `2.5` gives `3` (was `2`).
+
+### Stricter email, nullable bools and `timesince` (#1897)
+
+`validate_email` no longer trims: `" a@b.com"` fails, so trim before saving. A missing nullable `Option<bool>` form or JSON key saves `NULL`, not `false`.
+`save` checks every column, so a stored row with a spaced email now fails its next save, even of another field. Trim stored data first: load the rows, set `row.email = row.email.trim().to_owned()`, `save`. `objects().update().set(..)` checks only the set columns.
+`timesince(.., depth)` drops units after an empty one: a year and three days is `"1 year"`.
+
+### `plural_category` can return `"zero"` and `"two"` (#1921)
+
+Arabic, Hebrew and Slovenian now use those CLDR categories; add the forms to plural catalogs (a missing form falls back to `"other"`). `Locale::as_str` turns `_` into `-`.
+
+### `slugify` folds accented Latin letters (#2048)
+
+New slugs for accented titles change (`"Café"` → `"cafe"`, was `"caf"`); stored slugs are untouched. `unique_slug` falls back to `"untitled"`.
+
 ### SSO email verification and forwarded hosts (#1842)
 
 **Breaking:** a GitHub login now also calls `/user/emails` (needs the `user:email` scope or

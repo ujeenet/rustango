@@ -81,6 +81,25 @@ async fn editor_save_store_render_round_trip() {
     assert_eq!(editor_rows(&p).await.unwrap().len(), 4);
 }
 
+/// Saving an untouched grid writes nothing, and never an empty override (#1920).
+#[tokio::test]
+async fn untouched_save_does_not_blank_file_fallbacks() {
+    let p = pool().await;
+    let seed = vec![("en".to_owned(), "greet".to_owned(), "Hello".to_owned())];
+    apply_edits(&p, &seed, "alice").await.unwrap();
+    // The grid posts the en value as-is and an empty fr cell (fr.json serves it).
+    let untouched = vec![
+        ("en".to_owned(), "greet".to_owned(), "Hello".to_owned()),
+        ("fr".to_owned(), "greet".to_owned(), String::new()),
+    ];
+    assert_eq!(apply_edits(&p, &untouched, "bob").await.unwrap(), 0);
+    let rows = editor_rows(&p).await.unwrap();
+    assert_eq!(
+        rows,
+        vec![("en".to_owned(), "greet".to_owned(), "Hello".to_owned())]
+    );
+}
+
 #[tokio::test]
 async fn delete_key_and_export_round_trip() {
     let p = pool().await;

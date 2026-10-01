@@ -283,6 +283,17 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
     }
 
     match field.ty {
+        // A checkbox can't say NULL, so a nullable bool gets a tri-state select.
+        FieldType::Bool if field.nullable => {
+            let disabled = if pk_locked { " disabled" } else { "" };
+            let mut out = format!(r#"<select name="{name}" id="{name}"{disabled}>"#);
+            for (v, label) in [("", "Unknown"), ("true", "Yes"), ("false", "No")] {
+                let selected = if value == v { " selected" } else { "" };
+                let _ = write!(out, r#"<option value="{v}"{selected}>{label}</option>"#);
+            }
+            out.push_str("</select>");
+            out
+        }
         FieldType::Bool => {
             let checked = if value == "true" { " checked" } else { "" };
             format!(
@@ -858,6 +869,23 @@ mod tests {
         assert!(!html.contains("selected"));
         // Nullable ⇒ no `required` attribute
         assert!(!html.contains(" required"));
+    }
+
+    #[test]
+    fn render_input_nullable_bool_is_a_tri_state_select() {
+        let f = field("flag", "flag", FieldType::Bool);
+        let html = render_input(&f, "", false);
+        assert!(html.starts_with("<select"), "{html}");
+        assert!(
+            html.contains(r#"<option value="" selected>Unknown</option>"#),
+            "{html}"
+        );
+        assert!(render_input(&f, "false", false).contains(r#"value="false" selected"#));
+        let not_null = FieldSchema {
+            nullable: false,
+            ..f
+        };
+        assert!(render_input(&not_null, "true", false).contains(r#"type="checkbox""#));
     }
 
     #[test]

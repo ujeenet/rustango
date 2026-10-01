@@ -52,17 +52,15 @@ pub fn format(
     if !value.is_finite() {
         return value.to_string();
     }
-    let negative = value < 0.0;
-    let abs = value.abs();
-    let formatted = match decimal_pos {
-        Some(p) => format!("{abs:.p$}"),
-        None => {
-            let s = format!("{abs}");
-            // `Display` for f64 gives the shortest round-trip form, so
-            // "5" stays "5" and nothing is padded.
-            s
-        }
+    let signed = match decimal_pos {
+        Some(p) => round_half_up(value, p),
+        // `Display` for f64 gives the shortest round-trip form, so
+        // "5" stays "5" and nothing is padded.
+        // `-0.0 == 0.0`, so this prints "0", never "-0".
+        None => format!("{}", if value == 0.0 { 0.0 } else { value }),
     };
+    let negative = signed.starts_with('-');
+    let formatted = signed.trim_start_matches('-').to_owned();
     let (int_part, frac_part) = match formatted.split_once('.') {
         Some((i, f)) => (i.to_owned(), Some(f.to_owned())),
         None => (formatted, None),
@@ -108,7 +106,7 @@ pub fn format(
 pub fn floatformat(value: f64, precision: i64) -> String {
     let abs = precision.unsigned_abs() as usize;
     let drop_trailing = precision <= 0;
-    let formatted = format!("{value:.abs$}");
+    let formatted = round_half_up(value, abs);
     if drop_trailing {
         if let Some((int_part, frac_part)) = formatted.split_once('.') {
             if frac_part.chars().all(|c| c == '0') {
@@ -117,6 +115,58 @@ pub fn floatformat(value: f64, precision: i64) -> String {
         }
     }
     formatted
+}
+
+/// `value` to `decimals` places, halves away from zero on its shortest
+/// decimal form (`0.125` → `0.13`, `2.5` → `3`), and never `-0`.
+pub(crate) fn round_half_up(value: f64, decimals: usize) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    // f64 `Display` never uses an exponent, so this is plain digits.
+    let shortest = format!("{}", value.abs());
+    let (int_part, frac_part) = shortest.split_once('.').unwrap_or((&shortest, ""));
+    let mut digits: Vec<u8> = int_part
+        .bytes()
+        .chain(
+            frac_part
+                .bytes()
+                .chain(std::iter::repeat(b'0'))
+                .take(decimals),
+        )
+        .collect();
+    if frac_part
+        .as_bytes()
+        .get(decimals)
+        .is_some_and(|d| *d >= b'5')
+    {
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if digits[i] == b'9' {
+                digits[i] = b'0';
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
+    }
+    let int_len = digits.len() - decimals;
+    let mut out = String::with_capacity(digits.len() + 2);
+    if value < 0.0 && digits.iter().any(|d| *d != b'0') {
+        out.push('-');
+    }
+    // Only ASCII digits went in.
+    out.push_str(std::str::from_utf8(&digits[..int_len]).unwrap_or("0"));
+    if decimals > 0 {
+        out.push('.');
+        out.push_str(std::str::from_utf8(&digits[int_len..]).unwrap_or(""));
+    }
+    out
 }
 
 /// Group an `i64`, with no float rounding to worry about.
@@ -364,5 +414,16 @@ mod tests {
         assert_eq!(floatformat(-34.5, -1), "-34.5");
         assert_eq!(floatformat(-34.0, -1), "-34");
         assert_eq!(floatformat(-1.2345, 2), "-1.23");
+    }
+
+    #[test]
+    fn floatformat_rounds_half_up_and_drops_negative_zero() {
+        assert_eq!(floatformat(0.125, 2), "0.13");
+        assert_eq!(floatformat(2.5, 0), "3");
+        assert_eq!(floatformat(-2.5, 0), "-3");
+        assert_eq!(floatformat(-0.4, 0), "0");
+        assert_eq!(floatformat(9.995, 2), "10.00");
+        assert_eq!(format(-0.001, ".", Some(2), 0, ""), "0.00");
+        assert_eq!(format(-0.0, ".", None, 0, ""), "0");
     }
 }

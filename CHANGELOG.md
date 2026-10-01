@@ -4,6 +4,32 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — humanize and number rounding (#1896)
+
+`naturaltime`/`timesince` read 360–364 days as "12 months", not "0 years"; KRW shows `₩`, CLP `$`, and unknown codes no longer leak memory.
+`floatformat`, `format_number` and `format_currency` round halves up (`0.125` → `0.13`, `2.5` → `3`) and never print `-0`.
+
+### Fixed — email, IRI, nullable-bool and timesince parsing (#1897)
+
+`validate_email` rejects whitespace, control chars and over-long addresses; `uri_to_iri` keeps `%25`; an absent nullable bool is `NULL` (admin shows a Yes/No/Unknown select, preset to the model default); `timesince` stops at the first zero unit.
+
+### Fixed — i18n plural rules, `pt_BR` locales, `q=0` and placeholder substitution (#1921)
+
+Plural rules for ar, cs/sk, lt, ro, he and sl, and `pt-PT` 0 is plural; `Locale` treats `_` as `-` so `pt_BR.json` serves `pt-BR`, and `LocaleMiddleware` matches a `pt_BR` cookie too.
+`negotiate_language` skips `q=0`; placeholders fill in one pass, so a value is never re-substituted and Tera arg order no longer matters.
+
+### Fixed — feeds and sitemaps drop XML-illegal control chars; custom guids are not permalinks (#1925)
+
+A stray `\u{8}` in a title no longer breaks the whole document; `.with_guid(..)` emits `<guid isPermaLink="false">`.
+
+### Fixed — `slugify` keeps accented Latin letters; `unique_slug` never builds an empty slug (#2048)
+
+`"Café"` slugs to `"cafe"` (was `"caf"`); all-punctuation input gives `"untitled"`, `"untitled-2"` instead of `""`, `"-2"`.
+
+### Fixed — the translations editor no longer blanks file-catalog fallbacks (#1920)
+
+`apply_edits` writes only non-empty, changed cells, so saving an untouched grid no longer stores `""` over `fr.json` or re-upserts every row.
+
 ### Security — GitHub email verification is read, member `redirect_uri` ignores spoofed hosts (#1842)
 
 **Breaking:** the GitHub preset takes `email_verified` from `/user/emails` and Facebook

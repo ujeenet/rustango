@@ -1819,8 +1819,8 @@ async fn org_edit_submit(
     if !database_url_supplied {
         skip.push(DATABASE_URL_FIELD);
     }
-    // An unchecked checkbox is simply absent from the form;
-    // `collect_values` already reads a missing bool as `false`.
+    // An unticked checkbox is absent from the form; `collect_values`
+    // reads it as `false` for a NOT NULL bool (`active`), NULL if nullable.
 
     let collected = match crate::forms::collect_values(super::Org::SCHEMA, &form, &skip) {
         Ok(v) => v,
