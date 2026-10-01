@@ -191,11 +191,50 @@ impl RouteConfig {
     pub fn audit_full_url(&self) -> String {
         format!("{}{}", self.admin_url, self.audit_url)
     }
+
+    /// The tenant-admin URLs as seen under a path-prefix tenant's
+    /// `prefix`, so routes match and links keep the prefix (#2059).
+    /// `brand_url` is served before the tenant resolves, so it stays.
+    #[must_use]
+    pub(crate) fn under_prefix(&self, prefix: &str) -> Self {
+        let p = prefix.trim_end_matches('/');
+        let join = |url: &str| format!("{p}{url}");
+        Self {
+            login_url: join(&self.login_url),
+            logout_url: join(&self.logout_url),
+            admin_url: join(&self.admin_url),
+            static_url: join(&self.static_url),
+            change_password_url: join(&self.change_password_url),
+            impersonation_handoff_url: join(&self.impersonation_handoff_url),
+            ..self.clone()
+        }
+    }
+}
+
+/// Is `path` at or below the path prefix `prefix` (`/acme`)?
+pub(crate) fn path_is_under(path: &str, prefix: &str) -> bool {
+    let p = prefix.trim_end_matches('/');
+    !p.is_empty()
+        && path
+            .strip_prefix(p)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_prefix_covers_its_segment_only() {
+        assert!(path_is_under("/acme", "/acme"));
+        assert!(path_is_under("/acme/admin", "/acme"));
+        assert!(!path_is_under("/acmecorp/admin", "/acme"));
+        assert!(!path_is_under("/admin", "/acme"));
+        let r = RouteConfig::default().under_prefix("/acme");
+        assert_eq!(r.admin_url, "/acme/admin");
+        assert_eq!(r.impersonation_handoff_url, "/acme/_impersonation_handoff");
+        assert_eq!(r.brand_url, "/_brand");
+    }
 
     /// Since v0.29 (#85), `Default::default()` returns the
     /// friendly preset. Apps that haven't opted into `.routes(...)`

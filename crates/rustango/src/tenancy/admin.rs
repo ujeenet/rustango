@@ -367,6 +367,20 @@ where
         }
     };
 
+    // A path-prefix tenant's admin lives under its prefix (#2059).
+    let prefixed;
+    let routes = match org
+        .path_prefix
+        .as_deref()
+        .filter(|p| super::routes::path_is_under(parts.uri.path(), p))
+    {
+        Some(p) => {
+            prefixed = routes.under_prefix(p);
+            &prefixed
+        }
+        None => routes,
+    };
+
     // A schema-mode PG tenant gets a short-lived pool with
     // `search_path` already set; a database-mode tenant gets a cheap
     // clone of its cached pool. Schema mode on another backend errors.

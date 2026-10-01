@@ -2216,19 +2216,28 @@ async fn org_impersonate(
     // token. Scheme comes from `RUSTANGO_TENANT_SCHEME`, defaulting to
     // http for local dev.
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
+    let prefix = org
+        .path_prefix
+        .as_deref()
+        .map_or("", |p| p.trim_end_matches('/'));
     let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         pat.to_owned()
     } else {
-        // No host pattern: build `<slug>.<apex>` from env.
+        // No host pattern: a path-prefix tenant lives on the apex,
+        // any other on `<slug>.<apex>`.
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
-        format!("{}.{}", slug, apex)
+        if prefix.is_empty() {
+            format!("{}.{}", slug, apex)
+        } else {
+            apex
+        }
     };
     let port_suffix = handoff_port_suffix(
         org.port,
         std::env::var("RUSTANGO_TENANT_PORT").ok(),
         headers.get(header::HOST).and_then(|v| v.to_str().ok()),
     );
-    let handoff_path = state.tenant_handoff_url.trim_end_matches('/');
+    let handoff_path = format!("{prefix}{}", state.tenant_handoff_url.trim_end_matches('/'));
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
     let redirect_to = format!("{scheme}://{host}{port_suffix}{handoff_path}?token={token}");
