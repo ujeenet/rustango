@@ -628,6 +628,8 @@ where
     refuse_nested_lock()?;
     let dialect = Postgres;
     let mut lock_conn = pool.acquire().await?;
+    // A cancelled run must not pool a session that still holds the lock.
+    lock_conn.close_on_drop();
     if let Some(acquire_sql) = dialect.acquire_session_lock_sql() {
         sqlx::query(&acquire_sql)
             .bind(MIGRATE_LOCK_KEY)
@@ -2320,6 +2322,8 @@ where
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let mut lock_conn = pg.acquire().await?;
+            // A cancelled run must not pool a session that still holds the lock.
+            lock_conn.close_on_drop();
             sqlx::query("SELECT pg_advisory_lock($1)")
                 .bind(MIGRATE_LOCK_KEY)
                 .execute(&mut *lock_conn)
@@ -2337,6 +2341,7 @@ where
         crate::sql::Pool::Mysql(my) => {
             let lock_name = format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY);
             let mut lock_conn = my.acquire().await?;
+            lock_conn.close_on_drop();
             sqlx::query("SELECT GET_LOCK(?, -1)")
                 .bind(&lock_name)
                 .execute(&mut *lock_conn)

@@ -392,6 +392,58 @@ async fn nested_lock_is_an_error(backend: Backend) {
     assert!(err.to_string().contains("holds the migrate lock"), "{err}");
 }
 
+/// A cancelled migrate leaves no session holding the lock in its pool.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn cancelled_run_releases_lock(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((a, url)) = fresh(backend, tmp.path(), "cancel").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let sleep = match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => "SELECT pg_sleep(30)",
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => "SELECT SLEEP(30)",
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite => unreachable!(),
+    };
+    let dir = tmp.path().join("slow");
+    write_raw(
+        &dir,
+        "0001_slow",
+        vec![json!({ "data": { "sql": sleep, "reversible": false } })],
+    );
+    let slow = rustango::migrate::migrate_pool(&a, &dir);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), slow)
+            .await
+            .is_err(),
+        "the slow migrate was cancelled"
+    );
+    let b = Pool::connect(&url).await.unwrap();
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let next = rustango::migrate::migrate_pool(&b, &empty);
+    tokio::time::timeout(std::time::Duration::from_secs(15), next)
+        .await
+        .expect("the cancelled run still holds the lock")
+        .expect("migrate");
+    drop(a);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn cancelled_run_releases_lock_postgres() {
+    cancelled_run_releases_lock(Backend::Postgres).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn cancelled_run_releases_lock_mysql() {
+    cancelled_run_releases_lock(Backend::Mysql).await;
+}
+
 /// Finding 3 — a framework table the project created and later dropped is
 /// the system chain's again, on a fresh database and on one that has it.
 async fn owned_table_dropped_later(backend: Backend) {

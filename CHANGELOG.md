@@ -14,6 +14,7 @@ A system step that FKs a project-created framework table waits for it on PG/MySQ
 Steps on those tables run after the project chain, under one migrate lock; a table the project later drops is the framework's again.
 A later system step's index on such a table is created.
 `pre_migrate`/`post_migrate` fire outside that lock, and a migrate started while the task holds it fails instead of hanging.
+A cancelled migrate closes its lock connection, so the pool does not keep the lock.
 
 ### Fixed — converging a NOT NULL column with no default on an empty table (#2066)
 
