@@ -1,7 +1,7 @@
 //! `CachePageLayer` must not share a page between tenants that the
 //! resolver tells apart by something other than `Host` (#1674).
 //!
-//! One Host, the standard resolver chain, `X-Org` picks the tenant.
+//! One Host, the standard chain plus `X-Org`, which picks the tenant.
 
 #![cfg(all(feature = "cache-page", feature = "tenancy", feature = "sqlite"))]
 
@@ -18,8 +18,8 @@ use rustango::cache_page::CachePageLayer;
 use rustango::extractors::DatabaseTenantContext;
 use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::{
-    session::SessionSecret, BackendKind, ChainResolver, DatabasePools, Org, OrgResolver,
-    TenancyError,
+    session::SessionSecret, BackendKind, ChainResolver, DatabasePools, HeaderResolver, Org,
+    OrgResolver, TenancyError,
 };
 use tower::ServiceExt as _;
 
@@ -46,7 +46,7 @@ async fn registry() -> Pool {
 }
 
 async fn context() -> Arc<DatabaseTenantContext<sqlx::Sqlite>> {
-    context_with(ChainResolver::standard("app.test")).await
+    context_with(ChainResolver::standard("app.test").push(HeaderResolver::default())).await
 }
 
 async fn context_with(resolver: ChainResolver) -> Arc<DatabaseTenantContext<sqlx::Sqlite>> {
@@ -267,6 +267,7 @@ async fn server_builder_keys_the_page_on_the_tenant() {
     let hits = Arc::new(AtomicU32::new(0));
     let api = page(hits.clone()).layer(CachePageLayer::new(Arc::new(InMemoryCache::new())));
     let app = rustango::server::Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+        .header_resolver(HeaderResolver::default())
         .api(api)
         .into_router()
         .await

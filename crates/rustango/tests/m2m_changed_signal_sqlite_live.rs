@@ -71,7 +71,7 @@ async fn add_fires_with_add_action_and_single_dst_pk() {
     assert_eq!(got[0].src_col, "post_id");
     assert_eq!(got[0].dst_col, "tag_id");
     assert_eq!(got[0].src_pk, SqlValue::I64(1));
-    assert_eq!(got[0].dst_pks, vec![7]);
+    assert_eq!(got[0].dst_pks, vec![SqlValue::I64(7)]);
 }
 
 #[tokio::test]
@@ -98,7 +98,7 @@ async fn remove_fires_with_remove_action() {
     let got = captured.lock().await;
     assert_eq!(got.len(), 1);
     assert!(matches!(got[0].action, M2mAction::Remove));
-    assert_eq!(got[0].dst_pks, vec![7]);
+    assert_eq!(got[0].dst_pks, vec![SqlValue::I64(7)]);
 }
 
 #[tokio::test]
@@ -121,7 +121,7 @@ async fn set_fires_with_set_action_and_full_new_set() {
     let got = captured.lock().await;
     assert_eq!(got.len(), 1, "set fires once, got: {got:?}");
     assert!(matches!(got[0].action, M2mAction::Set));
-    assert_eq!(got[0].dst_pks, vec![7, 8, 9]);
+    assert_eq!(got[0].dst_pks, [7, 8, 9].map(SqlValue::I64));
 }
 
 #[tokio::test]
@@ -142,7 +142,7 @@ async fn set_with_empty_slice_fires_set_with_empty_pks() {
     mgr(1).add(7, &pool).await.unwrap();
     captured.lock().await.clear();
 
-    mgr(1).set(&[], &pool).await.unwrap();
+    mgr(1).set::<i64>(&[], &pool).await.unwrap();
 
     let got = captured.lock().await;
     assert_eq!(got.len(), 1);

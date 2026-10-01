@@ -146,8 +146,48 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
         .page_size(2)
         .tenant_router("/api/widgets");
 
-    let app = axum::Router::new().merge(vs_router).layer(Extension(ctx));
+    let app = axum::Router::new().merge(vs_router);
+    #[cfg(feature = "template_views")]
+    let app = app.merge(template_views_router());
+    let app = app.layer(Extension(ctx));
     (slug, pool, app)
+}
+
+/// Tenant template views on the same model, for the bad-URL-PK 404 (#1950).
+#[cfg(feature = "template_views")]
+fn template_views_router() -> axum::Router {
+    use rustango::template_views::{DeleteView, DetailView, UpdateView};
+    let mut t = tera::Tera::default();
+    t.add_raw_template("page.html", "page").unwrap();
+    let t = Arc::new(t);
+    DetailView::for_model(Widget::SCHEMA)
+        .template("page.html")
+        .tenant_router("/tv", t.clone())
+        .merge(
+            UpdateView::for_model(Widget::SCHEMA)
+                .template("page.html")
+                .success_url("/tv")
+                .tenant_router("/tv", t.clone()),
+        )
+        .merge(
+            DeleteView::for_model(Widget::SCHEMA)
+                .template("page.html")
+                .success_url("/tv")
+                .tenant_router("/tv", t),
+        )
+}
+
+/// A URL PK that is not an integer is a 404 on the tenant views, not a PG 500.
+#[cfg(feature = "template_views")]
+#[tokio::test]
+async fn tenant_template_views_404_on_a_garbage_pk() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else { return };
+    let (slug, _pool, app) = fixture(pool).await;
+    for uri in ["/tv/abc", "/tv/abc/edit", "/tv/abc/delete"] {
+        let resp = app.clone().oneshot(req_get(uri, &slug)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "GET {uri}");
+    }
 }
 
 fn req_get(uri: &str, slug: &str) -> Request<Body> {

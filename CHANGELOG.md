@@ -4,9 +4,61 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.15] — 2026-10-01
+
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
 
 A system step that alters a table the project's own `0001` creates (a pre-system-chain scaffold) now waits for that migration; it failed with `relation does not exist`.
+
+### Security — the default tenant chain no longer trusts `X-Org` (#1856)
+
+`ChainResolver::standard` and `server::Builder` resolve by host only; opt in with `Builder::header_resolver` / `Cli::tenant_header`.
+`PortResolver` reads the listener port (`ListenerPort`), not the client URI; the apex check ignores case and reads HTTP/2 `:authority`.
+
+### Fixed — `Cli::with_welcome()` / `with_health()` work on manage-only builds (#2013)
+
+Both are gated on `_http_layers` instead of `admin`, so the `api` template's `/` and `/health` mount.
+
+### Fixed — static files stream off the async workers and honour `Range` (#1531)
+
+Resolve and open run in `spawn_blocking`, the root is canonicalized once, and bodies stream; a single byte range gets a `206`.
+`If-Range` matches the file's strong `ETag` or `Last-Modified`; a malformed `Range` gets a `200`; the cached root expires after a second.
+
+### Fixed — `LocaleMiddleware` sends `Vary`; `localtime` no longer panics (#1924)
+
+Responses vary on `Accept-Language` (and `Cookie` when the cookie is read); a bad `format=` is a render error.
+
+### Fixed — S3 stores the content type, `exists()` surfaces errors, virtual-hosted endpoints keep the bucket (#1904)
+
+`Storage::save_with_content_type` (media passes its MIME); `exists` errs on anything but 2xx/404; `<bucket>.<endpoint-host>` when `path_style = false`.
+The signed content type is SigV4-normalized and CR/LF is refused; media stores active MIMEs as `application/octet-stream`.
+
+### Fixed — template views, M2M and bulk writes on non-integer keys (#1950)
+
+A template-view URL PK that does not parse as the PK type is a 404, not a PostgreSQL 500.
+M2M managers take String / Uuid destination keys (`all_as::<K>()` reads them, a Uuid on MySQL and
+SQLite too); a key that doesn't fit the junction column converts or is a `TypeMismatch`, not a PG 500.
+A bulk insert with set PKs fills unset `auto_now` / `default_uuid_v7` fields instead of binding NULL.
+
+### Fixed — list `__in` filters and huge page numbers (#1865)
+
+A ViewSet `?field__in=` list over 1000 values, or lists over the dialect's bind limit together, is a
+400, not a driver 500. `?page=` past `i64` range
+is an empty page in the ViewSet, `ListView`, admin and `paginate` instead of a negative OFFSET.
+
+### Fixed — `ListView` uses the model's `default_order` (#2005)
+
+With no builder `order_by`, `ListView` sorts by `default_order` before the PK, like the admin.
+
+### Fixed — `column = "..."` on a `ForeignKey` field compiles (#1936)
+
+The derive used the SQL column as the Rust field name for `select_related` and prefetch.
+
+### Fixed — `truncate_html` on a bare `&`, `slugify` on non-ASCII, pagination links (#1919)
+
+A bare `&` is plain text, so `AT&T …` truncates and a later `;` keeps tags closed. `slugify` of
+all-non-ASCII text returns `slugify_unicode` instead of `""`. Page links no longer double-encode, and
+a bare key like `?x%26page%3D9` stays encoded instead of adding a second `page`.
 
 ## [0.59.14] — 2026-10-01
 

@@ -414,6 +414,10 @@ admin = [
     "dep:http-body",
     "dep:http-body-util",
     "dep:serde_urlencoded",
+    # #1531 — `static_files` streams files off the async runtime.
+    "dep:tokio-util",
+    "tokio/fs",
+    "tokio/io-util",
 ]
 
 # SSO for the admin login (`rustango::admin::sso`) — sign in with an
@@ -507,7 +511,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.59.14", path = "../rustango-macros" }
+rustango-macros = { version = "0.59.15", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -567,6 +571,7 @@ subtle           = { workspace = true }
 # build; making the dependency honest costs no extra crate.
 tokio            = { workspace = true, features = ["time"] }
 tower            = { workspace = true, optional = true }
+tokio-util       = { version = "0.7", features = ["io"], optional = true }
 redis            = { workspace = true, optional = true }
 
 # `oauth2` feature deps — optional.

@@ -250,7 +250,11 @@ fn localtime_filter(
         return Ok(value.clone());
     };
     let local = utc_dt.with_timezone(&current_offset());
-    Ok(tera::Value::String(local.format(format).to_string()))
+    // `to_string()` panics on a bad specifier like `%Q`; `write!` reports it (#1924).
+    let mut out = String::new();
+    std::fmt::Write::write_fmt(&mut out, format_args!("{}", local.format(format)))
+        .map_err(|_| tera::Error::msg(format!("localtime: invalid format {format:?}")))?;
+    Ok(tera::Value::String(out))
 }
 
 #[cfg(test)]
@@ -457,5 +461,18 @@ mod tests {
         ctx.insert("ts", &dt.timestamp());
         let out = tera.render("t", &ctx).unwrap();
         assert_eq!(out, "2026-01-15 12:00:00");
+    }
+
+    /// #1924 — a bad strftime specifier is a render error, not a panic.
+    #[cfg(feature = "template_views")]
+    #[test]
+    fn localtime_filter_rejects_bad_format() {
+        let mut tera = tera::Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ ts | localtime(format=\"%Q\") }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("ts", &0);
+        assert!(tera.render("t", &ctx).is_err());
     }
 }

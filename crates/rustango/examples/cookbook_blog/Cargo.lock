@@ -1936,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.59.14"
+version = "0.59.15"
 dependencies = [
  "argon2",
  "async-stream",
@@ -1971,6 +1971,7 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
  "tokio",
+ "tokio-util",
  "toml",
  "tower",
  "tracing",
@@ -1982,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.59.14"
+version = "0.59.15"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2702,6 +2703,19 @@ dependencies = [
  "log",
  "tokio",
  "tungstenite",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

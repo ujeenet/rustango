@@ -76,6 +76,9 @@ pub struct Cli {
     /// `None` keeps the v0.27 defaults.
     #[cfg(feature = "tenancy")]
     routes: Option<crate::tenancy::RouteConfig>,
+    /// See [`Cli::tenant_header`].
+    #[cfg(feature = "tenancy")]
+    tenant_header: Option<crate::tenancy::HeaderResolver>,
     /// Bootstrap initializer used by the `init-tenancy` verb when
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
@@ -151,6 +154,8 @@ impl Cli {
             #[cfg(feature = "tenancy")]
             routes: None,
             #[cfg(feature = "tenancy")]
+            tenant_header: None,
+            #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
@@ -189,6 +194,15 @@ impl Cli {
     #[must_use]
     pub fn routes(mut self, routes: crate::tenancy::RouteConfig) -> Self {
         self.routes = Some(routes);
+        self
+    }
+
+    /// Opt in to resolving the tenant from a header (`X-Org`) when no
+    /// host matched; off by default (#1856).
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_header(mut self, resolver: crate::tenancy::HeaderResolver) -> Self {
+        self.tenant_header = Some(resolver);
         self
     }
 
@@ -997,15 +1011,15 @@ impl Cli {
         for (path, build) in std::mem::take(&mut self.nested) {
             api = api.nest(&path, build(pool.clone().into()));
         }
-        #[cfg(feature = "admin")]
+        // `_http_layers`, not `admin`: the manage-only `api` template calls
+        // `.with_welcome()` / `.with_health()` too (#2013).
+        #[cfg(feature = "_http_layers")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
             api
         };
-        // `crate::health` is gated on `admin` rather than on a backend
-        // (#1208), so the merge is too — but it is now the only one.
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         let api = if self.health_endpoints {
             api.merge(crate::health::health_router(pool.clone()))
         } else {
@@ -1036,9 +1050,12 @@ impl Cli {
         builder: crate::server::Builder<DB>,
         outer: Option<OuterLayers>,
     ) -> crate::server::Builder<DB> {
-        let builder = builder
+        let mut builder = builder
             .observability(self.access_log_layer())
             .span_redact(self.span_redact_params());
+        if let Some(h) = &self.tenant_header {
+            builder = builder.header_resolver(h.clone());
+        }
         match outer {
             Some(o) => o.apply_to(builder),
             None => builder,
@@ -1295,7 +1312,7 @@ impl Cli {
         // `take` rather than a move: `mount_observability` below needs
         // `&self`, and moving the field out would partially move `self`.
         let api = std::mem::take(&mut self.api);
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
@@ -1363,7 +1380,7 @@ impl Cli {
         // `take` rather than a move: `mount_observability` below needs
         // `&self`, and moving the field out would partially move `self`.
         let api = std::mem::take(&mut self.api);
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
@@ -1453,7 +1470,7 @@ impl Default for Cli {
 /// surfaces as a `tracing::warn!` instead of a process abort.
 /// `Router` implements `UnwindSafe` so the catch is sound; the
 /// fallback returns the original router unchanged.
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 fn try_mount_welcome(api: Router) -> Router {
     let api_for_probe = api.clone();
     // v0.37 (#5) — axum's `Router::merge` panics with "Overlapping
@@ -2083,6 +2100,24 @@ mod tests {
         assert!(inert_layer_settings(&s).is_empty());
     }
 
+    /// #1856 — `Cli::tenant_header` reaches the builder's resolver chain.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenant_header_reaches_the_builder() {
+        use crate::server::resolver_tests::{registry, x_org_pick};
+        let (_tmp, sq, url) = registry().await;
+        let builder = |cli: Cli| {
+            let b = crate::server::Builder::from_pool(sq.clone(), url.clone(), "localhost");
+            cli.tenancy_builder(b, None)
+        };
+        assert_eq!(x_org_pick(&builder(Cli::new()), &sq).await, None);
+        let cli = Cli::new().tenant_header(crate::tenancy::HeaderResolver::default());
+        assert_eq!(
+            x_org_pick(&builder(cli), &sq).await.as_deref(),
+            Some("acme")
+        );
+    }
+
     /// #1699, #1700 — what both tenancy paths hand the builder, checked
     /// by request: headers, Host allowlist outermost, HTTPS redirect with
     /// its proxy header and exempt paths.
@@ -2665,6 +2700,28 @@ mod observability_without_admin_tests {
         let flagged = crate::admin::ungated_admin_built();
         crate::admin::reset_ungated_admin_built();
         assert!(flagged, "the nested admin was never built for the audit");
+    }
+
+    /// #2013 — `.with_welcome()` / `.with_health()` mount on a manage-only build.
+    #[tokio::test]
+    async fn welcome_and_health_mount_without_admin() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().with_welcome().with_health().assemble_app(pool);
+        for path in ["/", "/health"] {
+            let res = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .expect("request");
+            assert_eq!(
+                res.status(),
+                axum::http::StatusCode::OK,
+                "{path} not mounted"
+            );
+        }
     }
 
     /// `nest_with` builds its router from the serving pool, at assembly.
