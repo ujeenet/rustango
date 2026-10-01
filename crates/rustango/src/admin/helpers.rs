@@ -622,6 +622,16 @@ pub(crate) fn render_form(
     )
 }
 
+/// A new form preselects the model default; only a nullable bool can
+/// show "false" apart from blank (NULL).
+fn new_form_bool_value(f: &FieldSchema) -> &'static str {
+    match f.default.map(|d| d.trim_matches('\'').to_ascii_lowercase()) {
+        Some(d) if d == "true" || d == "1" => "true",
+        Some(d) if f.nullable && (d == "false" || d == "0") => "false",
+        _ => "",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_form_with_inlines_and_pickers(
     state: &AppState,
@@ -683,12 +693,8 @@ fn render_form_with_inlines_and_pickers(
         let value = match prefill.and_then(|m| m.get(f.name)) {
             _ if is_secret => "",
             Some(v) => v.as_str(),
-            // A new form pre-checks a checkbox whose model default is true.
             None if prefill.is_none() && f.ty == crate::core::FieldType::Bool => {
-                match f.default.map(|d| d.trim_matches('\'').to_ascii_lowercase()) {
-                    Some(d) if d == "true" || d == "1" => "true",
-                    _ => "",
-                }
+                new_form_bool_value(f)
             }
             None => "",
         };
@@ -981,6 +987,23 @@ mod tests {
             render_cell_json(&row, &f, &fk_map, "/adm"),
             r#"<a href="/adm/author/7">Ann</a>"#
         );
+    }
+
+    #[test]
+    fn new_form_bool_preselects_the_default() {
+        let mut f = FieldSchema::new("flag", "flag", FieldType::Bool);
+        f.nullable = true;
+        f.default = Some("false");
+        assert_eq!(new_form_bool_value(&f), "false");
+        f.default = Some("0");
+        assert_eq!(new_form_bool_value(&f), "false");
+        f.default = None;
+        assert_eq!(new_form_bool_value(&f), "");
+        f.default = Some("TRUE");
+        assert_eq!(new_form_bool_value(&f), "true");
+        f.nullable = false;
+        f.default = Some("false");
+        assert_eq!(new_form_bool_value(&f), "");
     }
 
     #[test]
