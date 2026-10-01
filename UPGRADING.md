@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.12
+
 ### Edited constraints now migrate (#1881)
 
 **Breaking:** the next `makemigrations` picks up CHECK, EXCLUDE, composite FK and M2M edits it

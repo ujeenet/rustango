@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.12] — 2026-10-01
+
 ### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)
 
 Same-name edits migrate as Drop + Add, and `Option<T>` → `T` with a default fills NULLs before `SET NOT NULL`.
