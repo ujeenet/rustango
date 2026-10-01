@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `Cli` and `server::Builder` catch handler panics: an opaque 500 with the request id, logged under `rustango::error`. The oauth2 login no longer panics on a bad header value.
 
+### Fixed — `EtagLayer` no longer blanks large or streamed bodies; method override answers 413 (#1866)
+
+`EtagLayer::default()` caps at 4 MiB like `new()`; a body over the cap or of unknown size passes through untouched. An over-limit `_method` form gets `413`, not an empty body.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

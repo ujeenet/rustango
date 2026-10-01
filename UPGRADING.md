@@ -154,6 +154,11 @@ untouched.
 
 `Cli` and `server::Builder` turn a panic into a 500 with body `internal server error`; a panic hook you rely on still runs.
 
+### `EtagLayer::default()` caps at 4 MiB; streams are not tagged (#1866)
+
+The derived default had no cap. A body with no size hint (stream, SSE) or over the cap now passes through without an `ETag`.
+`MethodOverrideLayer` answers `413` to a form over `body_limit` instead of forwarding an empty POST.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
