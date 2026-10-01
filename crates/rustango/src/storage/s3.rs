@@ -81,6 +81,11 @@ pub struct S3Config {
 pub struct S3Storage {
     cfg: S3Config,
     http: reqwest::Client,
+    /// The SigV4 key for one date stamp. It depends only on the secret,
+    /// date, region and service, so a page of presigns derives it once (#1570).
+    signing_key: std::sync::Mutex<Option<(String, Arc<[u8]>)>>,
+    #[cfg(test)]
+    derivations: std::sync::atomic::AtomicUsize,
 }
 
 /// The endpoint without its `http(s)://` scheme.
@@ -97,7 +102,35 @@ impl S3Storage {
         Self {
             cfg,
             http: reqwest::Client::new(),
+            signing_key: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            derivations: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The signing key for `date_stamp`, derived once per date.
+    fn signing_key(&self, date_stamp: &str) -> Arc<[u8]> {
+        let mut slot = self
+            .signing_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((date, key)) = slot.as_ref() {
+            if date == date_stamp {
+                return key.clone();
+            }
+        }
+        #[cfg(test)]
+        self.derivations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let key: Arc<[u8]> = derive_signing_key(
+            &self.cfg.secret_access_key,
+            date_stamp,
+            &self.cfg.region,
+            "s3",
+        )
+        .into();
+        *slot = Some((date_stamp.to_owned(), key.clone()));
+        key
     }
 
     /// Use your own reqwest client, for custom timeouts, proxies or
@@ -216,12 +249,7 @@ impl S3Storage {
         let scope = format!("{date_stamp}/{}/s3/aws4_request", self.cfg.region);
         let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
 
-        let signing_key = derive_signing_key(
-            &self.cfg.secret_access_key,
-            date_stamp,
-            &self.cfg.region,
-            "s3",
-        );
+        let signing_key = self.signing_key(date_stamp);
         let signature = hex_encode(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
         let auth = format!(
@@ -323,12 +351,7 @@ impl S3Storage {
         let cr_hash = sha256_hex(canonical_request.as_bytes());
         let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
 
-        let signing_key = derive_signing_key(
-            &self.cfg.secret_access_key,
-            date_stamp,
-            &self.cfg.region,
-            "s3",
-        );
+        let signing_key = self.signing_key(date_stamp);
         let signature = hex_encode(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
         Ok(format!(
@@ -774,6 +797,20 @@ mod tests {
             .unwrap();
         assert!(url.contains("X-Amz-SignedHeaders=host"));
         assert!(!url.contains("content-type"));
+    }
+
+    /// #1570: a page of presigns derives the SigV4 key once, not per row.
+    #[tokio::test]
+    async fn presigning_a_page_derives_the_signing_key_once() {
+        let s = S3Storage::new(cfg());
+        for i in 0..50 {
+            let key = format!("k/{i}");
+            s.presigned_get_url(&key, std::time::Duration::from_secs(60))
+                .await
+                .unwrap();
+        }
+        let n = s.derivations.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(n <= 2, "derived {n} times for one page");
     }
 
     #[tokio::test]
