@@ -35,6 +35,8 @@
 //! file's mtime, and a matching `If-Modified-Since` gets a 304 with no
 //! body.
 //!
+//! Bodies stream from disk, and a single `Range: bytes=` span gets a 206.
+//!
 //! [`StaticFiles::no_canonicalize`]: crate::static_files::StaticFiles::no_canonicalize
 //! [`StaticFiles::serve_hidden`]: crate::static_files::StaticFiles::serve_hidden
 //! [`StaticFiles::cache_control`]: crate::static_files::StaticFiles::cache_control
@@ -138,32 +140,52 @@ pub(crate) fn warn_if_uploads_prefix(prefix: &str) {
 /// `.nest("/static", static_router(...))`.
 #[must_use]
 pub fn static_router(files: StaticFiles) -> Router {
+    let root = if files.canonicalize {
+        std::fs::canonicalize(&files.root).ok()
+    } else {
+        None
+    };
     Router::new()
         .route("/{*path}", get(serve))
-        .with_state(Arc::new(files))
+        .with_state(Arc::new(Mount {
+            files,
+            root: std::sync::RwLock::new(root),
+        }))
+}
+
+/// A mount plus its canonical root, resolved once rather than per request (#1531).
+struct Mount {
+    files: StaticFiles,
+    root: std::sync::RwLock<Option<PathBuf>>,
+}
+
+/// An open file, checked to be a regular file under the root.
+struct Opened {
+    path: PathBuf,
+    file: std::fs::File,
+    len: u64,
+    mtime: Option<u64>,
 }
 
 async fn serve(
-    State(files): State<Arc<StaticFiles>>,
+    State(mount): State<Arc<Mount>>,
     PathExt(rel): PathExt<String>,
     headers: HeaderMap,
     method: Method,
 ) -> Response {
-    let resolved = match resolve_path(&files, &rel) {
-        Some(p) => p,
-        None => return not_found(),
+    // Every filesystem call runs off the async workers (#1531).
+    let m = Arc::clone(&mount);
+    let opened = match tokio::task::spawn_blocking(move || open_file(&m, &rel)).await {
+        Ok(Some(o)) => o,
+        Ok(None) | Err(_) => return not_found(),
     };
-
-    let meta = match std::fs::metadata(&resolved) {
-        Ok(m) if m.is_file() => m,
-        Ok(_) | Err(_) => return not_found(),
-    };
-
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs());
+    let files = &mount.files;
+    let Opened {
+        path,
+        file,
+        len,
+        mtime,
+    } = opened;
 
     if let Some(secs) = mtime {
         if let Some(ims) = headers.get(header::IF_MODIFIED_SINCE) {
@@ -175,18 +197,36 @@ async fn serve(
         }
     }
 
+    let last_modified = mtime.map(format_http_date);
+    let range = match requested_range(&headers, last_modified.as_deref(), len) {
+        Ok(r) => r,
+        Err(()) => return range_not_satisfiable(len),
+    };
+    let (start, count) = range.unwrap_or((0, len));
+
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
-        match std::fs::read(&resolved) {
-            Ok(bytes) => Body::from(bytes),
-            Err(_) => return not_found(),
+        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+        let mut file = tokio::fs::File::from_std(file);
+        if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+            return not_found();
         }
+        // Streamed, so memory per request is one read buffer, not the file.
+        Body::new(KnownLen {
+            inner: Body::from_stream(tokio_util::io::ReaderStream::new(file.take(count))),
+            len: count,
+        })
     };
 
-    let mime = mime_for(&resolved);
+    let mime = mime_for(&path);
+    let status = if range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
     let mut resp = Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .body(body)
         .unwrap_or_else(|_| Response::new(Body::empty()));
     let h = resp.headers_mut();
@@ -208,16 +248,127 @@ async fn serve(
             h.insert(header::CACHE_CONTROL, v);
         }
     }
-    h.insert(header::CONTENT_LENGTH, HeaderValue::from(meta.len()));
-    if let Some(secs) = mtime {
-        if let Ok(v) = HeaderValue::from_str(&format_http_date(secs)) {
-            h.insert(header::LAST_MODIFIED, v);
+    h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(count));
+    if range.is_some() {
+        let cr = format!("bytes {start}-{}/{len}", start + count - 1);
+        if let Ok(v) = HeaderValue::from_str(&cr) {
+            h.insert(header::CONTENT_RANGE, v);
         }
+    }
+    if let Some(v) = last_modified.and_then(|s| HeaderValue::from_str(&s).ok()) {
+        h.insert(header::LAST_MODIFIED, v);
     }
     resp
 }
 
-fn resolve_path(files: &StaticFiles, rel: &str) -> Option<PathBuf> {
+/// A streamed body that still reports its exact size, so a size-aware
+/// layer such as `CompressionLayer` treats it like a buffered one.
+struct KnownLen {
+    inner: Body,
+    len: u64,
+}
+
+impl http_body::Body for KnownLen {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::pin::Pin::new(&mut self.inner).poll_frame(cx)
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.len)
+    }
+}
+
+/// Resolve, open and stat `rel`. Blocking: call it from `spawn_blocking`.
+fn open_file(mount: &Mount, rel: &str) -> Option<Opened> {
+    let path = resolve_path(mount, rel)?;
+    let file = std::fs::File::open(&path).ok()?;
+    // Stat the open handle, so the checked file is the one served.
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    Some(Opened {
+        path,
+        file,
+        len: meta.len(),
+        mtime,
+    })
+}
+
+/// The single `Range: bytes=` span to serve, as `(start, count)`.
+///
+/// `Ok(None)` serves the whole file: no header, several ranges, a
+/// stale `If-Range`, or a unit we don't know. `Err` is a 416.
+fn requested_range(
+    headers: &HeaderMap,
+    last_modified: Option<&str>,
+    len: u64,
+) -> Result<Option<(u64, u64)>, ()> {
+    let Some(spec) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) else {
+        return Ok(None);
+    };
+    if let Some(if_range) = headers.get(header::IF_RANGE) {
+        if Some(if_range.to_str().unwrap_or_default()) != last_modified {
+            return Ok(None);
+        }
+    }
+    let Some(spec) = spec.trim().strip_prefix("bytes=") else {
+        return Ok(None);
+    };
+    if spec.contains(',') {
+        return Ok(None);
+    }
+    let Some((a, b)) = spec.trim().split_once('-') else {
+        return Ok(None);
+    };
+    let (start, end) = match (a.trim(), b.trim()) {
+        ("", "") => return Ok(None),
+        // `bytes=-N`: the last N bytes.
+        ("", n) => {
+            let n: u64 = n.parse().map_err(|_| ())?;
+            if n == 0 || len == 0 {
+                return Err(());
+            }
+            (len.saturating_sub(n), len - 1)
+        }
+        (a, b) => {
+            let start: u64 = a.parse().map_err(|_| ())?;
+            let end = if b.is_empty() {
+                len.saturating_sub(1)
+            } else {
+                b.parse::<u64>().map_err(|_| ())?.min(len.saturating_sub(1))
+            };
+            if start >= len || end < start {
+                return Err(());
+            }
+            (start, end)
+        }
+    };
+    Ok(Some((start, end - start + 1)))
+}
+
+fn range_not_satisfiable(len: u64) -> Response {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::CONTENT_RANGE, format!("bytes */{len}"))
+        .body(Body::empty())
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+fn resolve_path(mount: &Mount, rel: &str) -> Option<PathBuf> {
+    let files = &mount.files;
     // 1. An empty path is never valid.
     if rel.is_empty() {
         return None;
@@ -252,9 +403,17 @@ fn resolve_path(files: &StaticFiles, rel: &str) -> Option<PathBuf> {
     // 3. Resolve the real path, so a symlink cannot lead out of the root.
     if files.canonicalize {
         let canon = std::fs::canonicalize(&joined).ok()?;
+        let cached = mount.root.read().ok().and_then(|r| r.clone());
+        if cached.as_ref().is_some_and(|root| canon.starts_with(root)) {
+            return Some(canon);
+        }
+        // A root missing at startup, or a re-pointed root symlink: resolve it again.
         let root_canon = std::fs::canonicalize(&files.root).ok()?;
         if !canon.starts_with(&root_canon) {
             return None;
+        }
+        if let Ok(mut w) = mount.root.write() {
+            *w = Some(root_canon);
         }
         return Some(canon);
     }
@@ -642,6 +801,79 @@ mod tests {
             assert!(prefix_logs(p).contains("with_uploads"), "{p}");
         }
         assert_eq!(prefix_logs("/static"), "");
+    }
+
+    /// #1531 — the body streams in chunks instead of one whole-file buffer.
+    #[tokio::test]
+    async fn large_file_streams_in_chunks() {
+        use http_body_util::BodyExt as _;
+        let dir = TempDir::new().unwrap();
+        let big = vec![7u8; 1 << 20];
+        write_file(&dir, "big.bin", &big);
+        let mut body = get(server(&dir), "/big.bin").await.into_body();
+        // Exact, so `CompressionLayer` still compresses a streamed asset.
+        assert_eq!(http_body::Body::size_hint(&body).exact(), Some(1 << 20));
+        let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert!(first.len() < big.len(), "first frame is the whole file");
+        let rest = body.collect().await.unwrap().to_bytes();
+        assert_eq!(first.len() + rest.len(), big.len());
+    }
+
+    /// The cached root follows a re-pointed root symlink (release swaps).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn root_symlink_swap_keeps_serving() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "a/x.txt", b"a");
+        write_file(&dir, "b/x.txt", b"b");
+        let cur = dir.path().join("current");
+        std::os::unix::fs::symlink(dir.path().join("a"), &cur).unwrap();
+        let app = static_router(StaticFiles::new(&cur));
+        assert_eq!(get(app.clone(), "/x.txt").await.status(), 200);
+        std::fs::remove_file(&cur).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("b"), &cur).unwrap();
+        let r = get(app, "/x.txt").await;
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            &axum::body::to_bytes(r.into_body(), 8).await.unwrap()[..],
+            b"b"
+        );
+    }
+
+    async fn ranged(app: Router, range: &str) -> Response {
+        let req = Request::builder()
+            .uri("/r.txt")
+            .header(header::RANGE, range)
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    /// #1531 — single byte ranges get a 206; bad ones a 416.
+    #[tokio::test]
+    async fn range_requests_are_honoured() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "r.txt", b"0123456789");
+        let full = get(server(&dir), "/r.txt").await;
+        assert_eq!(full.headers()[header::ACCEPT_RANGES], "bytes");
+        for (spec, want, cr) in [
+            ("bytes=2-4", &b"234"[..], "bytes 2-4/10"),
+            ("bytes=7-", b"789", "bytes 7-9/10"),
+            ("bytes=-3", b"789", "bytes 7-9/10"),
+            ("bytes=8-99", b"89", "bytes 8-9/10"),
+        ] {
+            let r = ranged(server(&dir), spec).await;
+            assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT, "{spec}");
+            assert_eq!(r.headers()[header::CONTENT_RANGE], cr, "{spec}");
+            assert_eq!(r.headers()[header::CONTENT_LENGTH], want.len().to_string());
+            let b = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
+            assert_eq!(&b[..], want, "{spec}");
+        }
+        let r = ranged(server(&dir), "bytes=10-").await;
+        assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(r.headers()[header::CONTENT_RANGE], "bytes */10");
+        // Several ranges: the whole file is a valid answer.
+        assert_eq!(ranged(server(&dir), "bytes=0-1,4-5").await.status(), 200);
     }
 
     #[test]

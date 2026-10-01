@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — static files stream off the async workers and honour `Range` (#1531)
+
+Resolve and open run in `spawn_blocking`, the root is canonicalized once, and bodies stream; a single byte range gets a `206`.
+
 ### Fixed — `Cli::with_welcome()` / `with_health()` work on manage-only builds (#2013)
 
 Both are gated on `_http_layers` instead of `admin`, so the `api` template's `/` and `/health` mount.
