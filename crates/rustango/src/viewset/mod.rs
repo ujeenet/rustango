@@ -688,7 +688,7 @@ pub struct ViewSet {
     search_fields: Vec<String>,
     /// Allow-list for `?ordering=`. When non-empty, only these fields
     /// are honored and unknown names are dropped. Empty (the default)
-    /// means any field on the schema is sortable.
+    /// means the fields the response renders.
     ordering_fields: Vec<String>,
     default_page_size: usize,
     default_ordering: Vec<(String, bool)>,
@@ -934,8 +934,8 @@ impl ViewSet {
 
     /// Allow-list for `?ordering=`. When set, only these names are
     /// honored; unknown ones are dropped, so a client cannot sort on
-    /// a sensitive column. Unset (the default) means any schema field
-    /// is sortable.
+    /// a sensitive column. Unset (the default) means the fields the
+    /// response renders; none when it renders none (#1996).
     pub fn ordering_fields(mut self, fields: &[&str]) -> Self {
         self.ordering_fields = fields.iter().map(|&s| s.to_owned()).collect();
         self

@@ -162,6 +162,10 @@ It stamps the column; soft-deleted rows then read as `404` and leave the list.
 
 A template must render `form.errors` (`__all__` for a row-level error) to show it.
 
+### `list_params::parse_ordering` with an empty allow-list sorts on nothing (#1996)
+
+Pass the sortable names explicitly; empty no longer means every field.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

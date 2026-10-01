@@ -16,6 +16,10 @@ With no `.ordering(..)`, the list uses `default_order`, as ListView and the admi
 
 The form re-renders with `422` and an error on the taken field (`__all__` when no single field is to blame), not a `500`.
 
+### Security — an empty `?ordering=` allow-list permits nothing (#1996)
+
+`list_params::parse_ordering` with an empty allow-list drops every token, so a serializer that renders no model field no longer makes every column a sort key.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
