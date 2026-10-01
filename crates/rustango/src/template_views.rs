@@ -2174,6 +2174,15 @@ fn resolve_order_by(
     spec: &[(String, bool)],
 ) -> Result<Vec<crate::core::OrderItem>, String> {
     let mut out = Vec::with_capacity(spec.len());
+    // No builder order: the model's `default_order`, as the admin list does (#2005).
+    if spec.is_empty() {
+        out.extend(schema.default_order.iter().filter_map(|(name, desc)| {
+            schema
+                .field(name)
+                .or_else(|| schema.field_by_column(name))
+                .map(|f| crate::core::OrderItem::column(f.column, *desc))
+        }));
+    }
     for (name, desc) in spec {
         let field = schema
             .fields
@@ -4106,6 +4115,21 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].column_name(), Some("id"));
         assert!(!out[0].is_desc(), "PK fallback is ASC");
+    }
+
+    /// No builder order: the model's `default_order` applies, then the PK (#2005).
+    #[test]
+    fn resolve_order_by_empty_uses_model_default_order() {
+        let mut s = schema_two_fields().clone();
+        s.default_order = &[("title", true)];
+        let s: &'static ModelSchema = Box::leak(Box::new(s));
+        let out = resolve_order_by(s, &[]).unwrap();
+        let cols: Vec<_> = out.iter().map(|o| (o.column_name(), o.is_desc())).collect();
+        assert_eq!(cols, [(Some("title"), true), (Some("id"), false)]);
+        // An explicit builder order still wins.
+        let out = resolve_order_by(s, &[("id".into(), true)]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].column_name(), Some("id"));
     }
 
     /// `ListView` builder accepts filter_fields + search_fields.

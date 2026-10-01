@@ -149,6 +149,10 @@ untouched.
 ---
 
 ## Unreleased
+### `ListView` falls back to `default_order` (#2005)
+
+A `ListView` with no `order_by` now sorts by the model's `default_order`, then the PK.
+
 
 ## 0.59.13
 

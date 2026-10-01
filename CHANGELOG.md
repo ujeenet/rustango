@@ -3,6 +3,10 @@
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
 ## [Unreleased]
+### Fixed — `ListView` uses the model's `default_order` (#2005)
+
+With no builder `order_by`, `ListView` sorts by `default_order` before the PK, like the admin.
+
 ### Fixed — `column = "..."` on a `ForeignKey` field compiles (#1936)
 
 The derive used the SQL column as the Rust field name for `select_related` and prefetch.
