@@ -40,24 +40,23 @@ use crate::sql::{ExecError, Pool};
 /// matches the rows that are still live.
 #[must_use]
 pub fn active_filter(model: &'static ModelSchema) -> Option<WhereExpr> {
-    let col = model.soft_delete_column?;
-    Some(WhereExpr::Predicate(Filter {
-        column: col,
+    liveness_predicate(model, false).map(WhereExpr::Predicate)
+}
+
+/// `<col> IS NULL` (live) or `IS NOT NULL` (trashed); `None` without a soft-delete column.
+pub(crate) fn liveness_predicate(model: &'static ModelSchema, trashed: bool) -> Option<Filter> {
+    Some(Filter {
+        column: model.soft_delete_column?,
         op: Op::IsNull,
-        value: SqlValue::Bool(true),
-    }))
+        value: SqlValue::Bool(!trashed),
+    })
 }
 
 /// `Some(<col> IS NOT NULL)` for a soft-delete model, else `None`. It
 /// matches the deleted rows, as a Trash page needs.
 #[must_use]
 pub fn trashed_filter(model: &'static ModelSchema) -> Option<WhereExpr> {
-    let col = model.soft_delete_column?;
-    Some(WhereExpr::Predicate(Filter {
-        column: col,
-        op: Op::IsNull,
-        value: SqlValue::Bool(false),
-    }))
+    liveness_predicate(model, true).map(WhereExpr::Predicate)
 }
 
 /// Add "not deleted" to `existing`. A model with no soft-delete column

@@ -519,3 +519,87 @@ async fn mixed_scope_tenants_use_the_committed_system_chain() {
         "the tenant ran a regenerated chain, not the committed one"
     );
 }
+
+/// A framework change the engine can't emit fails `migrate`, rather than
+/// applying the stale chain (#2014).
+#[tokio::test]
+async fn migrate_fails_when_the_system_chain_cannot_be_generated() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    let dir = tmp.path().join("deploy/migrations");
+    manage_migrate(&pool, dir.clone())
+        .await
+        .expect("first deploy");
+    poison_users_username(&tmp.path().join("deploy/system/migrations"));
+
+    let err = manage_migrate(&pool, dir)
+        .await
+        .expect_err("a generation error must fail migrate")
+        .to_string();
+    assert!(err.contains("rustango_users.username"), "{err}");
+}
+
+/// A `min` on the committed `rustango_users.username`: no op can move a
+/// live table there, so generating the tenant chain fails.
+fn poison_users_username(sys: &std::path::Path) {
+    let last = rustango::migrate::file::list_dir(sys)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|m| m.scope == rustango::migrate::MigrationScope::Tenant)
+        .expect("a tenant system migration");
+    let path = sys.join(format!("{}.json", last.name));
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let field = json["snapshot"]["tables"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|t| t["name"] == "rustango_users")
+        .and_then(|t| {
+            t["fields"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|f| f["column"] == "username")
+        })
+        .expect("rustango_users.username");
+    field["min"] = serde_json::json!(7);
+    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+}
+
+/// #2014 on the tenant runner: a chain that can't be generated fails it.
+#[tokio::test]
+async fn migrate_tenants_fails_when_the_system_chain_cannot_be_generated() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("app");
+    let dir = root.join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg_url = format!("sqlite:{}?mode=rwc", tmp.path().join("reg.db").display());
+    let reg = rustango::sql::sqlx::SqlitePool::connect(&reg_url)
+        .await
+        .unwrap();
+    let pools = rustango::tenancy::TenantPools::new(reg.clone());
+    let registry = Pool::Sqlite(reg);
+    rustango::tenancy::migrate_registry_pool(&registry, &dir)
+        .await
+        .expect("registry");
+    sqlite_org(tmp.path(), "t1")
+        .insert_pool(&registry)
+        .await
+        .unwrap();
+    let report = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")
+        .await
+        .unwrap();
+    assert!(report.all_ok(), "{report:?}");
+
+    poison_users_username(&root.join("system/migrations"));
+    let err = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")
+        .await
+        .expect_err("a generation error must fail migrate-tenants")
+        .to_string();
+    assert!(err.contains("rustango_users.username"), "{err}");
+}

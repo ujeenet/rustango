@@ -441,6 +441,22 @@ async fn values_decode_uuid_and_bytes(pool: &Pool) {
     assert_eq!(agg[0]["token"], want[0]);
 }
 
+/// #2004: `values()` read date and timestamp cells as Null on PG and MySQL.
+async fn values_decode_dates_and_timestamps(pool: &Pool) {
+    if pool.dialect().name() == "sqlite" {
+        return; // SQLite stores both as text.
+    }
+    seed_meas(pool, 0, "2024-01-06T12:30:00Z").await;
+    let dict = Meas::objects()
+        .values_dict(&["at", "taken_on"])
+        .fetch(pool)
+        .await
+        .expect("values_dict");
+    let at: chrono::DateTime<chrono::Utc> = "2024-01-06T12:30:00Z".parse().unwrap();
+    assert_eq!(dict[0]["at"], SqlValue::DateTime(at));
+    assert_eq!(dict[0]["taken_on"], SqlValue::Date(at.date_naive()));
+}
+
 /// #1900: MySQL's `/` gave 3.5 for two integers, stored as 4.
 async fn integer_division_truncates(pool: &Pool) {
     use rustango::core::{BinOp, Expr};
@@ -501,6 +517,7 @@ tri_dialect_test! {
         distinct_on_keeps_search_and_derived_joins,
         paginate_orders_by_pk,
         values_decode_uuid_and_bytes,
+        values_decode_dates_and_timestamps,
         integer_division_truncates,
         second_lookup_truncates,
         relation_date_lookup,
@@ -572,6 +589,34 @@ async fn pg_date_column_is_not_shifted() {
         };
         assert_eq!(n.unwrap(), 1, "{key}");
     }
+}
+
+/// #2004: a PG `timestamp` (no zone) cell decodes as UTC, not Null.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn pg_values_decode_a_timestamp_without_zone() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    seed_meas(&pool, 0, "2024-01-06T12:30:00Z").await;
+    let pg = pool.as_postgres().expect("pg");
+    // The model maps `at` to `timestamptz`; turn it into a zoneless `timestamp`.
+    rustango::sql::sqlx::query(
+        "ALTER TABLE orm_dialect_tri_meas ALTER COLUMN at TYPE timestamp USING at AT TIME ZONE 'UTC'",
+    )
+    .execute(pg)
+    .await
+    .unwrap();
+    let dict = Meas::objects()
+        .values_dict(&["at"])
+        .fetch(&pool)
+        .await
+        .expect("values_dict");
+    let at: chrono::DateTime<chrono::Utc> = "2024-01-06T12:30:00Z".parse().unwrap();
+    assert_eq!(dict[0]["at"], SqlValue::DateTime(at));
 }
 
 /// #1935: `upsert` took a field `index(unique)` or a partial unique index

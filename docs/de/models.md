@@ -230,6 +230,9 @@ v4, `default_uuid_v7` ein zeitlich sortierbares v7 (besser für Index-Lokalität
 pub id: Auto<uuid::Uuid>,
 ```
 
+Ein rohes `INSERT` ohne eine `auto_uuid`-Spalte bekommt den DB-`DEFAULT`: ein v4 auf Postgres und SQLite,
+aber MySQLs `UUID()` ist ein v1 (aus Zeit und Host).
+
 ### Zusammengesetzte Primärschlüssel
 
 Native mehrspaltige Primärschlüssel werden **nicht unterstützt** — genau ein Feld darf

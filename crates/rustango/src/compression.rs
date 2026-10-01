@@ -34,19 +34,22 @@
 //! - SSE (`text/event-stream`) — the compressor buffers, which breaks
 //!   live streaming.
 //! - Bodies over `max_body_bytes`, since we buffer the whole body.
+//! - Bodies with no known size (streams), and `206 Partial Content`.
 
 use std::io::Write;
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, HttpBody as _};
 use axum::http::header::{
     ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, VARY,
 };
-use axum::http::{HeaderValue, Request, Response};
+use axum::http::{HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 use flate2::write::{DeflateEncoder, GzEncoder};
 use flate2::Compression;
+
+use crate::body_limit::collect_capped;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
@@ -150,7 +153,8 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
     let Some(encoding) = chosen else {
         return ensure_vary(response);
     };
-    if !response.status().is_success() {
+    // A 206's `Content-Range` counts the raw bytes.
+    if !response.status().is_success() || response.status() == StatusCode::PARTIAL_CONTENT {
         return ensure_vary(response);
     }
     if response.headers().get(CONTENT_ENCODING).is_some() {
@@ -169,15 +173,22 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
         }
     }
 
+    // A stream (no exact size) passes through live; buffering it would stall it.
+    let size = response.body().size_hint().exact();
+    if size.is_none_or(|n| n > cfg.max_body_bytes as u64) {
+        return ensure_vary(response);
+    }
+
     let (mut parts, body) = response.into_parts();
-    let bytes = match to_bytes(body, cfg.max_body_bytes).await {
-        Ok(b) => b,
-        // Body too large, or the stream failed. We already consumed the
-        // original, so all we can send is an empty body.
-        Err(_) => {
-            let mut resp = Response::from_parts(parts, Body::empty());
-            ensure_vary_in_place(resp.headers_mut());
-            return resp;
+    let bytes = match collect_capped(body, cfg.max_body_bytes).await {
+        Ok(Ok(b)) => b,
+        // Bigger than its size hint said: send it all, uncompressed.
+        Ok(Err(whole)) => return ensure_vary(Response::from_parts(parts, whole)),
+        Err(e) => {
+            tracing::error!(target: "rustango::error", error = %e, "response body failed");
+            let mut resp = Response::new(Body::empty());
+            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            return ensure_vary(resp);
         }
     };
     if bytes.len() < cfg.min_size_bytes {
@@ -284,6 +295,7 @@ fn pick_encoding(accept_encoding: &str, supported: &[Encoding]) -> Option<Encodi
     // Pick the first encoding we support whose q > 0. This is not full
     // RFC 7231 q sorting: our own preference order wins.
     let mut acceptable = Vec::new();
+    let mut refused = Vec::new();
     for raw in accept_encoding.split(',') {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -301,10 +313,16 @@ fn pick_encoding(accept_encoding: &str, supported: &[Encoding]) -> Option<Encodi
         });
         if q > 0.0 {
             acceptable.push(token.to_ascii_lowercase());
+        } else {
+            refused.push(token.to_ascii_lowercase());
         }
     }
+    // `*` covers only the encodings not named with `q=0`.
     if acceptable.iter().any(|t| t == "*") {
-        return supported.first().copied();
+        return supported
+            .iter()
+            .copied()
+            .find(|e| !refused.iter().any(|t| t == e.header_value()));
     }
     supported
         .iter()
@@ -390,7 +408,7 @@ fn ensure_vary_in_place(headers: &mut axum::http::HeaderMap) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
+    use axum::body::to_bytes;
     use axum::response::IntoResponse;
     use axum::routing::get;
     use flate2::read::{DeflateDecoder, GzDecoder};
@@ -640,6 +658,132 @@ mod tests {
     fn pick_encoding_handles_star() {
         let supported = vec![Encoding::Gzip, Encoding::Deflate];
         assert_eq!(pick_encoding("*", &supported), Some(Encoding::Gzip));
+    }
+
+    #[test]
+    fn star_skips_an_encoding_refused_with_q_zero() {
+        let supported = vec![Encoding::Gzip, Encoding::Deflate];
+        assert_eq!(
+            pick_encoding("gzip;q=0, *", &supported),
+            Some(Encoding::Deflate)
+        );
+        assert_eq!(pick_encoding("gzip;q=0, deflate;q=0, *", &supported), None);
+    }
+
+    /// Never an empty `200`: a body over the cap or with no known size passes through (#1954).
+    #[tokio::test]
+    async fn large_and_streaming_bodies_pass_through_whole() {
+        let big = "x".repeat(64 * 1024);
+        let app = Router::new()
+            .route(
+                "/big",
+                get({
+                    let big = big.clone();
+                    move || async move { ([(CONTENT_TYPE, "text/plain")], big).into_response() }
+                }),
+            )
+            .route(
+                "/stream",
+                get(|| async {
+                    // No size hint: a stream.
+                    let body = Body::new(crate::body_limit::Prefixed {
+                        head: Some("y".repeat(32 * 1024).into()),
+                        rest: Body::from("y".repeat(32 * 1024)),
+                    });
+                    ([(CONTENT_TYPE, "application/x-ndjson")], body).into_response()
+                }),
+            )
+            .compression(CompressionLayer::default().max_body_bytes(16 * 1024));
+        for (path, ch) in [("/big", 'x'), ("/stream", 'y')] {
+            let resp = req(app.clone(), Some("gzip"), path).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(resp.headers().get(CONTENT_ENCODING).is_none(), "{path}");
+            let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+            assert_eq!(bytes.len(), 64 * 1024, "{path}");
+            assert!(bytes.iter().all(|b| *b == ch as u8), "{path}");
+        }
+    }
+
+    /// A small stream is sent live and whole, not buffered to compress it (#1954).
+    #[tokio::test]
+    async fn a_small_stream_passes_through_uncompressed() {
+        let app = Router::new()
+            .route(
+                "/stream",
+                get(|| async {
+                    let body = Body::new(crate::body_limit::Prefixed {
+                        head: Some("y".repeat(2048).into()),
+                        rest: Body::from("y".repeat(2048)),
+                    });
+                    ([(CONTENT_TYPE, "application/x-ndjson")], body).into_response()
+                }),
+            )
+            .compression(CompressionLayer::default());
+        let resp = req(app, Some("gzip"), "/stream").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(CONTENT_ENCODING).is_none());
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(bytes.len(), 4096);
+    }
+
+    /// Sized like a small body, then fails mid-read.
+    struct Failing;
+
+    impl http_body::Body for Failing {
+        type Data = axum::body::Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(Some(Err(std::io::Error::other("upstream reset"))))
+        }
+
+        fn size_hint(&self) -> http_body::SizeHint {
+            http_body::SizeHint::with_exact(4096)
+        }
+    }
+
+    /// A body that fails while buffered is a `500`, never an empty `200`.
+    #[tokio::test]
+    async fn a_failing_body_is_a_500() {
+        let app = Router::new()
+            .route(
+                "/fail",
+                get(|| async {
+                    ([(CONTENT_TYPE, "text/plain")], Body::new(Failing)).into_response()
+                }),
+            )
+            .compression(CompressionLayer::default());
+        let resp = req(app, Some("gzip"), "/fail").await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// A `206` is left alone: compressing it breaks `Content-Range` (#1954).
+    #[tokio::test]
+    async fn partial_content_is_not_compressed() {
+        let app = Router::new()
+            .route(
+                "/part",
+                get(|| async {
+                    (
+                        StatusCode::PARTIAL_CONTENT,
+                        [
+                            (CONTENT_TYPE, "text/plain"),
+                            (axum::http::header::CONTENT_RANGE, "bytes 0-4095/9000"),
+                        ],
+                        "z".repeat(4096),
+                    )
+                        .into_response()
+                }),
+            )
+            .compression(CompressionLayer::default());
+        let resp = req(app, Some("gzip"), "/part").await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(resp.headers().get(CONTENT_ENCODING).is_none());
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(bytes.len(), 4096);
     }
 
     #[test]

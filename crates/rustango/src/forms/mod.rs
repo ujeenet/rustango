@@ -464,7 +464,8 @@ pub fn collect_values(
         // Dropping them is right for an UPDATE. For an INSERT, use
         // [`collect_insert_values`] — the timestamps among them have to
         // be supplied rather than left to the column default (#1464).
-        if field.auto || skip.contains(&field.name) {
+        // A generated column is computed by the database; writing it fails.
+        if field.auto || field.generated_as.is_some() || skip.contains(&field.name) {
             continue;
         }
         let raw = form.get(field.name).map(String::as_str);
@@ -503,14 +504,27 @@ pub fn collect_insert_values(
     let mut out = collect_values(model, form, skip)?;
     let now = chrono::Utc::now();
     for field in model.scalar_fields() {
-        if field.is_auto_timestamp()
-            && !skip.contains(&field.name)
-            && !out.iter().any(|(c, _)| *c == field.column)
-        {
-            out.push((field.column, SqlValue::DateTime(now)));
+        // `skip` drops form input; a server-filled value is stamped even when skipped.
+        if out.iter().any(|(c, _)| *c == field.column) {
+            continue;
+        }
+        if let Some(v) = insert_stamp(field, now) {
+            out.push((field.column, v));
         }
     }
     Ok(out)
+}
+
+/// The value a schema-driven INSERT supplies for a server-assigned
+/// column: the clock for `auto_now*`, a fresh v7 for `default_uuid_v7` (#1725).
+fn insert_stamp(field: &FieldSchema, now: chrono::DateTime<chrono::Utc>) -> Option<SqlValue> {
+    if field.is_auto_timestamp() {
+        Some(SqlValue::DateTime(now))
+    } else if field.is_rust_side_uuid() {
+        Some(SqlValue::Uuid(uuid::Uuid::now_v7()))
+    } else {
+        None
+    }
 }
 
 /// Add the server-assigned timestamps to a schema-driven INSERT's
@@ -533,9 +547,12 @@ pub fn stamp_auto_timestamps(
 ) {
     let now = chrono::Utc::now();
     for field in model.scalar_fields() {
-        if field.is_auto_timestamp() && !columns.contains(&field.column) {
+        if columns.contains(&field.column) {
+            continue;
+        }
+        if let Some(v) = insert_stamp(field, now) {
             columns.push(field.column);
-            values.push(SqlValue::DateTime(now));
+            values.push(v);
         }
     }
 }
@@ -621,8 +638,8 @@ impl ModelForm {
     /// Applied AFTER `fields(...)` if both
     /// are set, so `.fields(&["a", "b", "c"]).exclude(&["b"])`
     /// produces `["a", "c"]`. Excluding a field also drops it from
-    /// validation / INSERT / UPDATE; PK / auto fields are excluded
-    /// unconditionally regardless of this list.
+    /// validation / INSERT / UPDATE. `auto` and generated fields are always
+    /// excluded, and so is the PK on update (#1725).
     pub fn exclude(mut self, fields: &[&str]) -> Self {
         for f in fields {
             self.exclude_fields.push((*f).to_owned());
@@ -631,7 +648,12 @@ impl ModelForm {
     }
 
     fn should_include(&self, field: &FieldSchema) -> bool {
-        if field.primary_key || field.auto {
+        let kind = if self.pk_value.is_some() {
+            crate::core::WriteKind::Update
+        } else {
+            crate::core::WriteKind::Insert
+        };
+        if !field.accepts_input(kind) {
             return false;
         }
         if self.exclude_fields.iter().any(|n| n == field.name) {
@@ -645,7 +667,7 @@ impl ModelForm {
 
     /// v0.49 — test-only accessor returning the field NAMES the form
     /// currently includes (after applying `fields(...)` /
-    /// `exclude(...)` and skipping PK / auto). Useful for asserting
+    /// `exclude(...)` and `FieldSchema::accepts_input`). Useful for asserting
     /// the builder semantics without driving a full validate/save.
     #[cfg(test)]
     pub(crate) fn included_field_names(&self) -> Vec<&'static str> {
@@ -1651,6 +1673,26 @@ mod model_form_tests {
         // Post: id is auto-PK (excluded), title + body remain.
         let included = form.included_field_names();
         assert_eq!(included, vec!["title", "body"]);
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_tag")]
+    #[allow(dead_code)]
+    pub struct Tag {
+        #[rustango(primary_key, max_length = 32)]
+        pub slug: String,
+        #[rustango(max_length = 64)]
+        pub name: String,
+    }
+
+    /// A natural PK is form input on insert, and pinned on update (#1725).
+    #[test]
+    fn modelform_keeps_a_natural_pk_on_insert_only() {
+        let schema = <Tag as crate::core::Model>::SCHEMA;
+        let insert = ModelForm::new(schema, HashMap::new());
+        assert_eq!(insert.included_field_names(), vec!["slug", "name"]);
+        let update = ModelForm::for_update(schema, HashMap::new(), SqlValue::String("go".into()));
+        assert_eq!(update.included_field_names(), vec!["name"]);
     }
 
     #[test]

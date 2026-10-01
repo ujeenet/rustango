@@ -225,6 +225,9 @@ aléatoire, `default_uuid_v7` un v7 triable dans le temps (meilleure localité d
 pub id: Auto<uuid::Uuid>,
 ```
 
+Un `INSERT` brut qui omet une colonne `auto_uuid` reçoit le `DEFAULT` de la base : un v4 sur Postgres et
+SQLite, mais le `UUID()` de MySQL est un v1 (basé sur l'heure et l'hôte).
+
 ### Clés primaires composites
 
 Les clés primaires multi-colonnes natives ne sont **pas prises en charge** — exactement un champ peut être

@@ -73,6 +73,9 @@ pub struct Operator {
     /// rejected by `validate_session`. `None` for accounts that
     /// haven't rotated since v0.28.4 — those sessions stay valid.
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Stamped on logout: sessions issued at or before it are refused, on
+    /// every device (#1855).
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Per-tenant user. Lives in the tenant's storage (schema or
@@ -86,7 +89,7 @@ pub struct Operator {
         list_display = "username, is_superuser, active, created_at",
         search_fields = "username",
         ordering = "username",
-        readonly_fields = "created_at, password_changed_at",
+        readonly_fields = "created_at, password_changed_at, sessions_revoked_at",
         formfield_overrides = "password_hash: password",
     )
 )]
@@ -131,6 +134,9 @@ pub struct User {
     /// rotated since v0.28.4 — those sessions stay valid until
     /// they expire normally.
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Stamped on logout: sessions issued at or before it are refused, on
+    /// every device (#1855).
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // The admin form's password is hashed here; a change also stamps
@@ -276,40 +282,15 @@ pub async fn authenticate_user(
     username: &str,
     password: &str,
 ) -> Result<Option<User>, TenancyError> {
-    use crate::sql::sqlx::Row;
-    // We can't reuse `User::objects().fetch(&pool)` here because we
-    // have a connection, not a pool. Hand-write the query — small
-    // surface, not a hot path.
-    let user_rows = rustango::sql::sqlx::query(
-        "SELECT id, username, password_hash, is_superuser, active, created_at \
-         FROM rustango_users WHERE username = $1",
-    )
-    .bind(username)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some(row) = user_rows else {
+    // Through the ORM, so every column (cut-offs included) decodes or errors.
+    let rows: Vec<User> = User::objects()
+        .where_(User::username.eq(username.to_owned()))
+        .fetch_on(&mut *conn)
+        .await?;
+    let Some(user) = rows.into_iter().next() else {
         // H1: equalize timing for the unknown-user path.
         password::verify_dummy_async(password).await?;
         return Ok(None);
-    };
-    let user = User {
-        id: Auto::Set(row.try_get::<i64, _>("id")?),
-        username: row.try_get::<String, _>("username")?,
-        password_hash: row.try_get::<String, _>("password_hash")?,
-        // Defensive get — tolerates rows from tenants not yet migrated
-        // to the SSO `email` column (mirrors `data` / `password_changed_at`).
-        #[cfg(feature = "sso")]
-        email: row.try_get::<Option<String>, _>("email").ok().flatten(),
-        is_superuser: row.try_get::<bool, _>("is_superuser")?,
-        active: row.try_get::<bool, _>("active")?,
-        created_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?,
-        data: row
-            .try_get::<serde_json::Value, _>("data")
-            .unwrap_or_else(|_| serde_json::json!({})),
-        password_changed_at: row
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("password_changed_at")
-            .ok()
-            .flatten(),
     };
     let password_ok = password::verify_async(password, &user.password_hash).await?;
     if !user.active || !password_ok {

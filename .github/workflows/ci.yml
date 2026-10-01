@@ -1070,7 +1070,7 @@ jobs:
           cargo test -p rustango --no-default-features
           --features sqlite,tenancy,admin-sso,testkit
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
-          --test admin_create_users_tri
+          --test admin_create_users_tri --test logout_revokes_sessions_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
@@ -1259,6 +1259,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
+      # Suites that make their own `rustango_*` databases (#1988) need CREATE rights.
+      - name: Grant rustango_* databases
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -uroot -prustango -e "
+            GRANT ALL PRIVILEGES ON \`rustango\_%\`.* TO 'rustango'@'%';
+            FLUSH PRIVILEGES;"
       - run: cargo test -p rustango --features mysql,jobs-postgres --test jobs_mysql_live
       - run: cargo test -p rustango --features mysql,jobs-postgres,testkit --test jobs_worker_survives_tri
       - run: cargo test -p rustango --features mysql --test mysql_live
@@ -1300,6 +1306,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
+      - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri

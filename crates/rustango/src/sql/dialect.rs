@@ -40,6 +40,12 @@ fn write_pg_array_keys(
     sql.push(']');
 }
 
+/// `true` for the canonical random-UUID DEFAULT (`auto_uuid`), which only
+/// Postgres has as a function (#1987).
+pub(crate) fn is_uuid_expr(expr: &str) -> bool {
+    expr.trim().eq_ignore_ascii_case("gen_random_uuid()")
+}
+
 /// Turns the dialect-neutral query IR into a parameterized statement,
 /// and supplies the DDL primitives the migration runner needs.
 ///
@@ -322,6 +328,12 @@ pub trait Dialect: Send + Sync {
              spelling, or `None` if it has none.",
             self.name()
         )
+    }
+
+    /// Query for the names of the FKs on one column, binding `(table,
+    /// column)`. `Some` where `DROP COLUMN` keeps them (MySQL, 1828).
+    fn foreign_key_names_sql(&self) -> Option<&'static str> {
+        None
     }
 
     /// Statement that moves `table.column`'s serial counter past the rows

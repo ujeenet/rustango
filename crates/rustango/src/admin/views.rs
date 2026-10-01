@@ -227,6 +227,8 @@ const RESERVED_PARAMS: &[&str] = &[
     "year",
     "month",
     "day",
+    // `trashed=1` lists the soft-deleted rows (#1918).
+    "trashed",
 ];
 
 /// Default cap on how many values one facet shows. Keeps the right
@@ -264,6 +266,8 @@ pub(crate) async fn table_view(
 
     // Build per-field filters from extra query params. Unknown fields
     // and unparseable values are dropped: a bad URL should not 500.
+    // Field filters stay apart so a facet can count without its own (#2004).
+    let mut field_filters: Vec<(&'static str, Filter)> = Vec::new();
     let mut filters: Vec<Filter> = Vec::new();
     let mut active_field_filters: Vec<(&'static str, String)> = Vec::new();
     // Names claimed by custom list filters, so `?status=draft` is not
@@ -287,11 +291,14 @@ pub(crate) async fn table_view(
         let Ok(v) = forms::parse_form_value(field, Some(value)) else {
             continue;
         };
-        filters.push(Filter {
-            column: field.column,
-            op: Op::Eq,
-            value: v,
-        });
+        field_filters.push((
+            field.name,
+            Filter {
+                column: field.column,
+                op: Op::Eq,
+                value: v,
+            },
+        ));
         active_field_filters.push((field.name, value.clone()));
     }
     active_field_filters.sort();
@@ -312,7 +319,13 @@ pub(crate) async fn table_view(
 
     // Queryset hooks only add WHERE conjuncts, so they compose with
     // search, facets, the date hierarchy and pagination.
-    let scope = RowScope::of(model.table, &parts);
+    let trashed = model.soft_delete_column.is_some()
+        && params.get("trashed").map(String::as_str) == Some("1");
+    let scope = if trashed {
+        RowScope::trashed(model, &parts)
+    } else {
+        RowScope::of(model, &parts)
+    };
     filters.extend(scope.filters().iter().cloned());
 
     // Date hierarchy. With `admin(date_hierarchy = "field")` set and
@@ -349,7 +362,13 @@ pub(crate) async fn table_view(
         }
     });
 
-    let where_clause = WhereExpr::and_predicates(filters.clone());
+    let where_clause = WhereExpr::and_predicates(
+        field_filters
+            .iter()
+            .map(|(_, f)| f.clone())
+            .chain(filters.iter().cloned())
+            .collect(),
+    );
 
     // Skip `SELECT COUNT(*)` on big tables. Turned on per table by
     // `Builder::skip_count_for(...)`, or per request by `?count=skip`
@@ -391,7 +410,7 @@ pub(crate) async fn table_view(
     let mut rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
-            where_clause,
+            where_clause: where_clause.clone(),
             search: search.clone(),
             joins,
             order_by,
@@ -583,7 +602,8 @@ pub(crate) async fn table_view(
             };
             // A detail URL needs a pk. Rows without one keep plain
             // cell content.
-            let detail_href = pk.as_deref().map(|pk_str| {
+            // A trashed row has no detail page.
+            let detail_href = pk.as_deref().filter(|_| !trashed).map(|pk_str| {
                 format!(
                     "{prefix}/{table}/{pk_str}",
                     prefix = state.config.admin_prefix,
@@ -656,6 +676,9 @@ pub(crate) async fn table_view(
             list_query.push(key, v.clone());
         }
     }
+    if trashed {
+        list_query.push("trashed", "1");
+    }
     let pager_suffix_str = list_query.suffix();
     let hidden_params: Vec<serde_json::Value> = list_query
         .without(&["q"])
@@ -672,7 +695,9 @@ pub(crate) async fn table_view(
     let facets_ctx: Vec<serde_json::Value> = compute_facets(
         &state,
         model,
-        &scope,
+        &field_filters,
+        &filters,
+        search.as_ref(),
         &admin_cfg,
         &active_field_filters,
         &list_query,
@@ -686,7 +711,12 @@ pub(crate) async fn table_view(
     let date_hierarchy_ctx: Option<serde_json::Value> = if admin_cfg.date_hierarchy.is_empty() {
         None
     } else {
-        compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query).await?
+        let source = SelectQuery {
+            where_clause: where_clause.clone(),
+            search: search.clone(),
+            ..SelectQuery::new(model)
+        };
+        compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query, source).await?
     };
 
     // Right-rail card per custom list filter: the filter title and
@@ -722,10 +752,12 @@ pub(crate) async fn table_view(
             .collect();
 
     // Action menu items. Empty when the model declares no
-    // `admin.actions`, which hides the picker.
+    // `admin.actions`, which hides the picker. The trash list offers only
+    // `restore_selected`: every other action skips soft-deleted rows.
     let actions_ctx: Vec<serde_json::Value> = admin_cfg
         .actions
         .iter()
+        .filter(|name| !trashed || **name == "restore_selected")
         .map(|name| {
             let label = match *name {
                 "delete_selected" => "Delete selected".to_owned(),
@@ -776,6 +808,12 @@ pub(crate) async fn table_view(
         // guard simply renders no pager.
         "count_skipped": count_skipped,
         "has_next": has_next_skipped,
+        "trashed": trashed,
+        "trash_toggle_url": model.soft_delete_column.map(|_| if trashed {
+            list_query.without(&["trashed", "page"]).url()
+        } else {
+            list_query.without(&["page"]).with("trashed", "1").url()
+        }),
     });
     Ok(Html(render_with_chrome(
         "list.html",
@@ -787,17 +825,19 @@ pub(crate) async fn table_view(
 /// For each `admin.list_filter` field, compute the distinct values,
 /// their row counts, and the URL each value toggles to.
 ///
-/// One `GROUP BY` round-trip per facet field. That is fine for a
-/// handful of facets with modest cardinality. Drop the field from
-/// `list_filter` if a column has tens of thousands of distinct
-/// values. FK columns also show the joined display value.
+/// Counts are within the list's filters and search, minus the facet's
+/// own field filter, as Django does (#2004). One ORM `GROUP BY` per
+/// facet, plus one lookup for an FK facet's display values.
 ///
 /// Clicking the active value clears that filter. Clicking another
 /// value sets it.
+#[allow(clippy::too_many_arguments)]
 async fn compute_facets(
     state: &AppState,
     model: &'static crate::core::ModelSchema,
-    scope: &RowScope,
+    field_filters: &[(&'static str, Filter)],
+    other_filters: &[Filter],
+    search: Option<&SearchClause>,
     admin_cfg: &crate::core::AdminConfig,
     active_field_filters: &[(&'static str, String)],
     list_query: &ListQuery,
@@ -807,18 +847,6 @@ async fn compute_facets(
         return Ok(Vec::new());
     }
     let mut out = Vec::with_capacity(admin_cfg.list_filter.len());
-    // Counts only rows the queryset hooks let this request see.
-    let tail = crate::sql::compile_where_order_tail(
-        state.pool.dialect(),
-        &scope.constrain(WhereExpr::And(Vec::new())),
-        None,
-        &[],
-        None,
-        None,
-        Some(model.table),
-        Some(model),
-    )
-    .map_err(|e| AdminError::Internal(e.to_string()))?;
     for filter_name in admin_cfg.list_filter {
         let Some(field) = model.field(filter_name) else {
             continue;
@@ -828,61 +856,53 @@ async fn compute_facets(
             .find(|(k, _)| k == &field.name)
             .map(|(_, v)| v.as_str());
 
-        // For FK fields, join the target table on its display column
-        // so the card shows "Dr. Maeve O'Hara (3)", not "1 (3)".
-        // Falls back to the raw value for non-FK fields, targets
-        // hidden from the admin, and targets with no `display = "…"`.
-        let fk_join: Option<(&'static str, &'static str, &'static str)> =
-            field.relation.and_then(|rel| match rel {
-                crate::core::Relation::Fk { to, on } | crate::core::Relation::O2O { to, on } => {
-                    let target = lookup_model(state, to)?;
-                    let display_field = target.display_field()?;
-                    Some((target.table, on, display_field.column))
-                }
-            });
-
-        // Order by count descending so the most used value is first,
-        // then by the displayed value so output is stable across
-        // requests. Identifiers go through the dialect's
-        // `quote_ident`, so the same SQL works on all backends.
-        let dialect = state.pool.dialect();
-        let where_sql = &tail.sql;
-        let sql = if let Some((target_table, target_pk, display_col)) = fk_join {
-            let src_t = dialect.quote_ident(model.table);
-            let src_c = dialect.quote_ident(field.column);
-            let tgt_t = dialect.quote_ident(target_table);
-            let tgt_pk = dialect.quote_ident(target_pk);
-            let tgt_disp = dialect.quote_ident(display_col);
-            format!(
-                "SELECT {src_t}.{src_c} AS facet_value, \
-                        {tgt_t}.{tgt_disp} AS facet_display, \
-                        COUNT(*) AS facet_count \
-                 FROM {src_t} \
-                 LEFT JOIN {tgt_t} ON {tgt_t}.{tgt_pk} = {src_t}.{src_c}{where_sql} \
-                 GROUP BY {src_t}.{src_c}, {tgt_t}.{tgt_disp} \
-                 ORDER BY facet_count DESC, {tgt_t}.{tgt_disp}"
-            )
-        } else {
-            let t = dialect.quote_ident(model.table);
-            let c = dialect.quote_ident(field.column);
-            format!(
-                "SELECT {t}.{c} AS facet_value, COUNT(*) AS facet_count \
-                 FROM {t}{where_sql} \
-                 GROUP BY {t}.{c} \
-                 ORDER BY facet_count DESC, {t}.{c}"
-            )
+        let facet_filters: Vec<Filter> = field_filters
+            .iter()
+            .filter(|(name, _)| *name != field.name)
+            .map(|(_, f)| f.clone())
+            .chain(other_filters.iter().cloned())
+            .collect();
+        let source = SelectQuery {
+            where_clause: WhereExpr::and_predicates(facet_filters),
+            search: search.cloned(),
+            ..SelectQuery::new(model)
         };
         let is_bool = field.ty == crate::core::FieldType::Bool;
-        let facet_rows =
-            fetch_facet_rows(&state.pool, &sql, &tail.params, fk_join.is_some(), is_bool)
-                .await
-                .map_err(|e| AdminError::Internal(e.to_string()))?;
+        let mut facet_rows = fetch_facet_counts(state, source, field, is_bool).await?;
+        // An FK facet shows the target's display value: "Dr. Maeve O'Hara (3)", not "1 (3)".
+        let fk_target = field.relation.and_then(|rel| match rel {
+            crate::core::Relation::Fk { to, on } | crate::core::Relation::O2O { to, on } => {
+                let target = lookup_model(state, to)?;
+                Some((target, target.field_by_column(on)?, target.display_field()?))
+            }
+        });
+        let is_fk = fk_target.is_some();
+        if let Some((target, on_field, display_field)) = fk_target {
+            let keys: Vec<SqlValue> = facet_rows
+                .iter()
+                .map(|r| r.key.clone())
+                .filter(|v| !matches!(v, SqlValue::Null))
+                .collect();
+            let names = fk_display_names(state, target, on_field, display_field, keys).await?;
+            for r in &mut facet_rows {
+                r.display = names.get(&r.raw).cloned();
+            }
+            // Most used first, then by the shown name, as the old JOIN ordered.
+            facet_rows.sort_by(|a, b| {
+                b.count
+                    .cmp(&a.count)
+                    .then_with(|| a.display.cmp(&b.display))
+            });
+        }
         let mut values = Vec::with_capacity(facet_rows.len());
-        for (raw_value, display_text, count) in &facet_rows {
-            // `raw_value` is already a string: the per-backend fetch
-            // stringifies it. This is the shape `parse_form_value`
-            // accepts back when the URL round-trips.
-            let raw = raw_value.clone();
+        for FacetRow {
+            raw,
+            display: display_text,
+            count,
+            ..
+        } in &facet_rows
+        {
+            let raw = raw.clone();
             // Joined FK facets show the target's display value, other
             // facets show the raw key.
             let display = if raw.is_empty() {
@@ -948,14 +968,14 @@ async fn compute_facets(
         };
         // FK facets render as a `<select>`; this is the "All" option,
         // which removes the filter.
-        let clear_url = if fk_join.is_some() {
+        let clear_url = if is_fk {
             Some(list_query.without(&[field.name]).url())
         } else {
             None
         };
         out.push(serde_json::json!({
             "field": field.name,
-            "is_fk": fk_join.is_some(),
+            "is_fk": is_fk,
             "values": values,
             "more_count": more_count,
             "show_all_url": show_all_url,
@@ -965,141 +985,114 @@ async fn compute_facets(
     Ok(out)
 }
 
-/// Run a facet `GROUP BY` on the current backend.
-///
-/// Returns `(raw_value, display_text, count)` triples. The column
-/// value is stringified here so the caller stays backend-agnostic.
-/// Pass `expect_display = true` for the FK-joined facet, which also
-/// reads the joined display column, and `is_bool` for a bool column.
-async fn fetch_facet_rows(
-    pool: &crate::sql::Pool,
-    sql: &str,
-    params: &[SqlValue],
-    expect_display: bool,
+/// One facet value: the stored key, its URL form, the FK display name and the count.
+struct FacetRow {
+    key: SqlValue,
+    raw: String,
+    display: Option<String>,
+    count: i64,
+}
+
+/// `SELECT <col>, COUNT(*) … GROUP BY <col>` over `source`'s rows, most used first.
+async fn fetch_facet_counts(
+    state: &AppState,
+    source: SelectQuery,
+    field: &'static FieldSchema,
     is_bool: bool,
-) -> Result<Vec<(String, Option<String>, i64)>, sqlx::Error> {
-    // The fetch stays per-arm because sqlx's `Executor` is bound to
-    // a concrete `Database`. Only the row decode is generic, so it
-    // lives in `decode_facet_row`.
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let mut q = sqlx::query(sql);
-            for v in params {
-                q = crate::sql::bind_query(q, v.clone());
+) -> Result<Vec<FacetRow>, AdminError> {
+    use crate::core::{AggregateExpr, AggregateQuery, Expr, OrderItem};
+    let mut agg = AggregateQuery::over_select(
+        source,
+        vec![("facet_count".into(), AggregateExpr::Count(None))],
+    );
+    agg.group_by = vec![field.column];
+    agg.order_by = vec![
+        OrderItem::expr(Expr::Aggregate(Box::new(AggregateExpr::Count(None))), true),
+        OrderItem::column(field.column, false),
+    ];
+    let rows = crate::sql::fetch_aggregate_dict(&state.pool, &agg).await?;
+    Ok(rows
+        .into_iter()
+        .map(|mut row| {
+            let key = row.remove(field.column).unwrap_or(SqlValue::Null);
+            FacetRow {
+                raw: facet_value_string(&key, is_bool),
+                key,
+                display: None,
+                count: sql_int(row.get("facet_count")),
             }
-            let rows = q.fetch_all(pg).await?;
-            Ok(rows
-                .iter()
-                .map(|r| decode_facet_row(r, expect_display, is_bool))
-                .collect())
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let mut q = sqlx::query(sql);
-            for v in params {
-                q = crate::sql::bind_query_my(q, v.clone());
-            }
-            let rows = q.fetch_all(my).await?;
-            Ok(rows
-                .iter()
-                .map(|r| decode_facet_row(r, expect_display, is_bool))
-                .collect())
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let mut q = sqlx::query(sql);
-            for v in params {
-                q = crate::sql::bind_query_sqlite(q, v.clone());
-            }
-            let rows = q.fetch_all(sq).await?;
-            Ok(rows
-                .iter()
-                .map(|r| decode_facet_row(r, expect_display, is_bool))
-                .collect())
-        }
+        })
+        .collect())
+}
+
+/// `on value -> display value` for an FK facet's keys.
+async fn fk_display_names(
+    state: &AppState,
+    target: &'static crate::core::ModelSchema,
+    on_field: &'static FieldSchema,
+    display_field: &'static FieldSchema,
+    keys: Vec<SqlValue>,
+) -> Result<HashMap<String, String>, AdminError> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = crate::sql::select_rows_as_json(
+        &state.pool,
+        &SelectQuery::by_pk_in(target, on_field.column, keys),
+        &[on_field, display_field],
+    )
+    .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                render::read_value_as_string_json(row, on_field)?,
+                render::read_value_as_string_json(row, display_field)?,
+            ))
+        })
+        .collect())
+}
+
+/// The URL form of a facet key, the shape `parse_form_value` reads back.
+/// SQLite and MySQL hand a bool back as `1`/`0` (#1730).
+fn facet_value_string(v: &SqlValue, is_bool: bool) -> String {
+    match v {
+        SqlValue::Null => String::new(),
+        SqlValue::I16(n) if is_bool => (*n != 0).to_string(),
+        SqlValue::I32(n) if is_bool => (*n != 0).to_string(),
+        SqlValue::I64(n) if is_bool => (*n != 0).to_string(),
+        other => other.to_display_string(),
     }
 }
 
-/// Per-row decoder for [`fetch_facet_rows`], generic over the row
-/// type so every backend shares one loop. The bounds are those of
-/// [`stringify_facet_value`] plus the display and count decodes.
-fn decode_facet_row<'r, R>(
-    row: &'r R,
-    expect_display: bool,
-    is_bool: bool,
-) -> (String, Option<String>, i64)
-where
-    R: sqlx::Row,
-    &'r str: sqlx::ColumnIndex<R>,
-    Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    Option<i64>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-{
-    let raw = stringify_facet_value(row, is_bool);
-    let display = if expect_display {
-        row.try_get::<Option<String>, _>("facet_display")
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
-    let count: i64 = row.try_get("facet_count").unwrap_or(0);
-    (raw, display, count)
-}
-
-/// Decode the `facet_value` column: text first, then the numeric and
-/// boolean scalars facets commonly hit. Returns an empty string when
-/// no shape matches. A bool column reads as bool first: SQLite and
-/// MySQL store it as `1`/`0`, which the text and integer reads keep (#1730).
-fn stringify_facet_value<'r, R>(row: &'r R, is_bool: bool) -> String
-where
-    R: sqlx::Row,
-    &'r str: sqlx::ColumnIndex<R>,
-    Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    Option<i64>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-{
-    if is_bool {
-        if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
-            return b.to_string();
-        }
+/// An aggregate's integer result; `0` when missing.
+fn sql_int(v: Option<&SqlValue>) -> i64 {
+    match v {
+        Some(SqlValue::I64(n)) => *n,
+        Some(SqlValue::I32(n)) => i64::from(*n),
+        Some(SqlValue::I16(n)) => i64::from(*n),
+        _ => 0,
     }
-    if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
-        return s;
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>("facet_value") {
-        return n.to_string();
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i32>, _>("facet_value") {
-        return n.to_string();
-    }
-    if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
-        return b.to_string();
-    }
-    String::new()
 }
 
 // ============================================================== DATE HIERARCHY
 //
 // Breadcrumb and drill children for the list view's clickable
-// year/month/day strip. One GROUP BY against the model's table,
-// narrowed by the parent level's WHERE so a deeper level only sees
-// its own slice. The bucket expression per dialect:
-//
-// - PG / MySQL: `EXTRACT({YEAR|MONTH|DAY} FROM <col>)`
-// - SQLite:     `CAST(strftime('%Y'|'%m'|'%d', <col>) AS INTEGER)`
+// year/month/day strip. Each child bucket is one filtered `COUNT(*)`
+// over the list's rows, so the counts match the filtered list (#2004).
+
+/// Years before the newest this many are not listed in the strip.
+const MAX_YEAR_BUCKETS: i32 = 200;
+
 async fn compute_date_hierarchy(
     state: &AppState,
     model: &'static crate::core::ModelSchema,
     admin_cfg: &crate::core::AdminConfig,
     sel: crate::admin::date_hierarchy::DateSelection,
     list_query: &ListQuery,
+    source: SelectQuery,
 ) -> Result<Option<serde_json::Value>, AdminError> {
-    use crate::admin::date_hierarchy::{range, DrillLevel};
+    use crate::admin::date_hierarchy::{range, DateSelection, DrillLevel};
 
     let field_name = admin_cfg.date_hierarchy;
     let Some(field) = model.field(field_name) else {
@@ -1171,32 +1164,48 @@ async fn compute_date_hierarchy(
         })));
     };
 
-    let dialect = state.pool.dialect();
-    let table_q = dialect.quote_ident(model.table);
-    let col_q = format!("{}.{}", table_q, dialect.quote_ident(field.column));
-    let bucket_expr = level.bucket_expr(dialect, &col_q);
-    let where_sql = if range(sel).is_some() {
-        // Bind through placeholders so sqlx handles quoting and
-        // escaping instead of string formatting.
-        let p1 = dialect.placeholder(1);
-        let p2 = dialect.placeholder(2);
-        format!("WHERE {col_q} >= {p1} AND {col_q} < {p2}")
-    } else {
-        String::new()
+    let children: Vec<DateSelection> = match level {
+        DrillLevel::Year => match year_span(state, &source, field).await? {
+            Some((lo, hi)) => (lo.max(hi - MAX_YEAR_BUCKETS + 1)..=hi)
+                .rev()
+                .map(|y| DateSelection {
+                    year: Some(y),
+                    month: None,
+                    day: None,
+                })
+                .collect(),
+            None => Vec::new(),
+        },
+        DrillLevel::Month => (1..=12)
+            .map(|m| DateSelection {
+                month: Some(m),
+                ..sel
+            })
+            .collect(),
+        DrillLevel::Day => (1..=31)
+            .map(|d| DateSelection {
+                day: Some(d),
+                ..sel
+            })
+            .collect(),
     };
-    let order_dir = match level {
-        DrillLevel::Year => "DESC", // newest year first
-        _ => "ASC",
+    // A day the month lacks has no range, and an empty filter would count every row.
+    let children: Vec<DateSelection> = children
+        .into_iter()
+        .filter(|c| range(*c).is_some())
+        .collect();
+    let bucket_of = |c: &DateSelection| match level {
+        DrillLevel::Year => c.year.unwrap_or(0),
+        DrillLevel::Month => c.month.map_or(0, |m| m as i32),
+        DrillLevel::Day => c.day.map_or(0, |d| d as i32),
     };
-    let sql = format!(
-        "SELECT {bucket_expr} AS bucket, COUNT(*) AS bucket_count \
-         FROM {table_q} {where_sql} \
-         GROUP BY bucket \
-         ORDER BY bucket {order_dir}"
-    );
-
-    let buckets_raw =
-        fetch_date_hierarchy_buckets(&state.pool, &sql, range(sel), &field.ty).await?;
+    let counts = bucket_counts(state, model, field_name, source, &children).await?;
+    let buckets_raw: Vec<(i32, i64)> = children
+        .iter()
+        .zip(counts)
+        .filter(|(_, n)| *n > 0)
+        .map(|(c, n)| (bucket_of(c), n))
+        .collect();
 
     let buckets_ctx: Vec<serde_json::Value> = buckets_raw
         .into_iter()
@@ -1251,149 +1260,69 @@ async fn compute_date_hierarchy(
     })))
 }
 
-/// Fetch the date-hierarchy buckets. The parent level's `[lo, hi)`
-/// range is bound as real parameters, never formatted into the SQL.
-async fn fetch_date_hierarchy_buckets(
-    pool: &crate::sql::Pool,
-    sql: &str,
-    range: Option<(chrono::NaiveDate, chrono::NaiveDate)>,
-    field_ty: &crate::core::FieldType,
-) -> Result<Vec<(i32, i64)>, AdminError> {
-    use chrono::{TimeZone, Utc};
-    // The bind is the same on every backend; only the `bucket`
-    // decode differs (PG returns NUMERIC, the others INT), so each
-    // arm calls its own `decode_bucket_*_row`.
-    let lo_hi = range.map(|(lo, hi)| match field_ty {
-        crate::core::FieldType::DateTime => {
-            let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
-            let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
-            (BucketBind::DateTime(lo_dt, hi_dt), true)
-        }
-        crate::core::FieldType::Date => (BucketBind::Date(lo, hi), true),
-        _ => (BucketBind::None, false),
-    });
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let mut q = sqlx::query(sql);
-            if let Some((bind, _)) = &lo_hi {
-                q = bind.apply_pg(q);
-            }
-            let rows = q
-                .fetch_all(pg)
-                .await
-                .map_err(|e| AdminError::Internal(e.to_string()))?;
-            Ok(rows.iter().map(decode_bucket_pg_row).collect())
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let mut q = sqlx::query(sql);
-            if let Some((bind, _)) = &lo_hi {
-                q = bind.apply_my(q);
-            }
-            let rows = q
-                .fetch_all(my)
-                .await
-                .map_err(|e| AdminError::Internal(e.to_string()))?;
-            Ok(rows.iter().map(decode_bucket_my_row).collect())
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let mut q = sqlx::query(sql);
-            if let Some((bind, _)) = &lo_hi {
-                q = bind.apply_sq(q);
-            }
-            let rows = q
-                .fetch_all(sq)
-                .await
-                .map_err(|e| AdminError::Internal(e.to_string()))?;
-            Ok(rows.iter().map(decode_bucket_sq_row).collect())
-        }
+/// The first and last year `field` holds among `source`'s rows.
+async fn year_span(
+    state: &AppState,
+    source: &SelectQuery,
+    field: &'static FieldSchema,
+) -> Result<Option<(i32, i32)>, AdminError> {
+    use crate::core::{AggregateExpr, AggregateQuery};
+    let agg = AggregateQuery::over_select(
+        source.clone(),
+        vec![
+            ("lo".into(), AggregateExpr::Min(field.column)),
+            ("hi".into(), AggregateExpr::Max(field.column)),
+        ],
+    );
+    let row = crate::sql::fetch_aggregate_dict(&state.pool, &agg)
+        .await?
+        .into_iter()
+        .next();
+    let year = |key: &str| row.as_ref().and_then(|r| year_of(r.get(key)?));
+    Ok(year("lo").zip(year("hi")))
+}
+
+/// The year of a `MIN`/`MAX` over a date column. SQLite returns its stored text.
+fn year_of(v: &SqlValue) -> Option<i32> {
+    use chrono::Datelike as _;
+    match v {
+        SqlValue::Date(d) => Some(d.year()),
+        SqlValue::DateTime(dt) => Some(dt.year()),
+        SqlValue::String(s) => s.get(..4)?.parse().ok(),
+        _ => None,
     }
 }
 
-/// Range bind for the date-hierarchy SELECT. The lo/hi pair binds as
-/// a [`chrono::NaiveDate`] for a Date column, or a
-/// [`chrono::DateTime<Utc>`] for a DateTime column.
-#[derive(Debug, Clone, Copy)]
-enum BucketBind {
-    None,
-    Date(chrono::NaiveDate, chrono::NaiveDate),
-    DateTime(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
-}
-
-impl BucketBind {
-    #[cfg(feature = "postgres")]
-    fn apply_pg<'a>(
-        &self,
-        q: sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    ) -> sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments> {
-        match self {
-            BucketBind::None => q,
-            BucketBind::Date(lo, hi) => q.bind(*lo).bind(*hi),
-            BucketBind::DateTime(lo, hi) => q.bind(*lo).bind(*hi),
-        }
+/// One `COUNT(*) FILTER (WHERE <bucket range>)` per child, in one query.
+async fn bucket_counts(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+    field_name: &str,
+    source: SelectQuery,
+    children: &[crate::admin::date_hierarchy::DateSelection],
+) -> Result<Vec<i64>, AdminError> {
+    if children.is_empty() {
+        return Ok(Vec::new());
     }
-    #[cfg(feature = "mysql")]
-    fn apply_my<'a>(
-        &self,
-        q: sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    ) -> sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-        match self {
-            BucketBind::None => q,
-            BucketBind::Date(lo, hi) => q.bind(*lo).bind(*hi),
-            BucketBind::DateTime(lo, hi) => q.bind(*lo).bind(*hi),
-        }
-    }
-    #[cfg(feature = "sqlite")]
-    fn apply_sq<'a>(
-        &self,
-        q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
-    ) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
-        match self {
-            BucketBind::None => q,
-            // A `Date` has no time part, so it binds as itself.
-            BucketBind::Date(lo, hi) => q.bind(*lo).bind(*hi),
-            // A `DateTime` must use the canonical encoder. The bounds
-            // are compared against a TEXT column, and every other
-            // writer emits the fixed-width shape. sqlx's own encoding
-            // is variable-width, so the filter would miss rows whose
-            // fractional seconds differ in length.
-            BucketBind::DateTime(lo, hi) => q
-                .bind(crate::sql::encode_datetime(*lo))
-                .bind(crate::sql::encode_datetime(*hi)),
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-fn decode_bucket_pg_row(row: &sqlx::postgres::PgRow) -> (i32, i64) {
-    use sqlx::Row as _;
-    // PG's EXTRACT returns NUMERIC. Decoding as f64 and casting
-    // avoids pulling in a Decimal feature.
-    let bucket: f64 = row.try_get("bucket").unwrap_or(0.0);
-    let count: i64 = row.try_get("bucket_count").unwrap_or(0);
-    (bucket as i32, count)
-}
-
-#[cfg(feature = "mysql")]
-fn decode_bucket_my_row(row: &sqlx::mysql::MySqlRow) -> (i32, i64) {
-    use sqlx::Row as _;
-    // MySQL EXTRACT returns INT; try i64 first then i32.
-    let bucket: i64 = row
-        .try_get::<i64, _>("bucket")
-        .or_else(|_| row.try_get::<i32, _>("bucket").map(i64::from))
-        .unwrap_or(0);
-    let count: i64 = row.try_get("bucket_count").unwrap_or(0);
-    (bucket as i32, count)
-}
-
-#[cfg(feature = "sqlite")]
-fn decode_bucket_sq_row(row: &sqlx::sqlite::SqliteRow) -> (i32, i64) {
-    use sqlx::Row as _;
-    let bucket: i64 = row.try_get("bucket").unwrap_or(0);
-    let count: i64 = row.try_get("bucket_count").unwrap_or(0);
-    (bucket as i32, count)
+    let aggregates = children
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let range = crate::admin::date_hierarchy::predicates(model, field_name, *c);
+            let count =
+                crate::core::aggregates::count_all().filter(WhereExpr::and_predicates(range));
+            (format!("b{i}").into(), count.into())
+        })
+        .collect();
+    let agg = crate::core::AggregateQuery::over_select(source, aggregates);
+    let row = crate::sql::fetch_aggregate_dict(&state.pool, &agg)
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    Ok((0..children.len())
+        .map(|i| sql_int(row.get(&format!("b{i}"))))
+        .collect())
 }
 
 /// `admin.ordering`, else the model's `default_order`, then the PK as a
@@ -1519,7 +1448,7 @@ pub(crate) async fn autocomplete_view(
     let rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
-            where_clause: RowScope::of(model.table, &parts).constrain(WhereExpr::And(Vec::new())),
+            where_clause: RowScope::of(model, &parts).constrain(WhereExpr::And(Vec::new())),
             search,
             order_by: vec![crate::core::OrderItem::column(display_field.column, false)],
             limit: Some(limit),
@@ -1566,7 +1495,7 @@ pub(crate) async fn detail_view(
         &state.pool,
         &SelectQuery {
             joins: build_fk_joins(&state, model),
-            ..RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone())
+            ..RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone())
         },
         &detail_fields,
     )
@@ -1819,13 +1748,10 @@ pub(crate) async fn create_submit(
     }
 
     let pk_field = primary_key_or_internal(model)?;
-    // An auto PK is server-assigned and `readonly_fields` are
-    // display-only, so neither belongs in the INSERT.
+    // `readonly_fields` are display-only, so they are not form input.
+    // An auto PK never is; a `default_uuid_v7` one is stamped (#1725).
     let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&str> = admin_cfg.readonly_fields.to_vec();
-    if pk_field.auto {
-        skip.push(pk_field.name);
-    }
     skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
@@ -1850,6 +1776,19 @@ pub(crate) async fn create_submit(
         returning: vec![pk_field.column],
         on_conflict: None,
     };
+    // A database-assigned key is not known yet, so `pk` is empty then.
+    let typed_pk = query
+        .columns
+        .iter()
+        .position(|c| *c == pk_field.column)
+        .map(|i| query.values[i].to_display_string())
+        .unwrap_or_default();
+    crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
+        table: model.table,
+        pk: typed_pk,
+        change: false,
+    })
+    .await;
     let written = match crate::sql::insert_returning_pool(&state.pool, &query).await {
         Ok(returning) => crate::sql::inserted_pk(&query, &returning, pk_field),
         Err(e) => Err(e),
@@ -1986,7 +1925,7 @@ pub(crate) async fn edit_form(
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
+        &RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &edit_fields,
     )
     .await?
@@ -2072,7 +2011,7 @@ pub(crate) async fn update_submit(
     let pre_update_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let pre_update_row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
+        &RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &pre_update_fields,
     )
     .await?;
@@ -2165,6 +2104,12 @@ pub(crate) async fn update_submit(
             value: pk_value,
         }),
     };
+    crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
+        table: model.table,
+        pk: pk_raw.clone(),
+        change: true,
+    })
+    .await;
     if let Err(e) = crate::sql::update_pool(&state.pool, &query).await {
         let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
         return Ok(Html(html).into_response());
@@ -2213,7 +2158,7 @@ pub(crate) async fn delete_submit(
     let delete_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let before_row = crate::sql::select_one_row_as_json(
         &state.pool,
-        &RowScope::of(model.table, &parts).by_pk(model, pk_field.column, pk_value.clone()),
+        &RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone()),
         &delete_fields,
     )
     .await?;
@@ -2241,6 +2186,11 @@ pub(crate) async fn delete_submit(
         crate::audit::AuditOp::Delete
     };
 
+    crate::signals::admin::send_admin_pre_delete(crate::signals::admin::AdminDeleteContext {
+        table: model.table,
+        pk: pk_raw.clone(),
+    })
+    .await;
     if let Some(col) = model.soft_delete_column {
         crate::sql::update_pool(
             &state.pool,
@@ -2342,23 +2292,29 @@ pub(crate) async fn action_submit(
     // value wins, whichever bar sent it.
     let mut action_name: Option<String> = None;
     let mut selected_raw: Vec<String> = Vec::new();
+    let mut trashed = false;
     for (k, v) in pairs {
         if (k == "action" || k == "action_bottom") && !v.is_empty() && action_name.is_none() {
             action_name = Some(v);
         } else if k == "_selected" {
             selected_raw.push(v);
+        } else if k == "trashed" {
+            trashed = v == "1";
         }
     }
+    // Back to the list the action was run from (#1918).
+    let list_url = if trashed && model.soft_delete_column.is_some() {
+        format!("{}/{}?trashed=1", state.config.admin_prefix, model.table)
+    } else {
+        format!("{}/{}", state.config.admin_prefix, model.table)
+    };
+    let back = || Ok(Redirect::to(&list_url).into_response());
     let Some(action) = action_name.filter(|s| !s.is_empty()) else {
         // No action picked: go back to the list.
-        return Ok(
-            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
-        );
+        return back();
     };
     if selected_raw.is_empty() {
-        return Ok(
-            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
-        );
+        return back();
     }
 
     let admin_cfg = admin_config_or_default(model);
@@ -2368,6 +2324,10 @@ pub(crate) async fn action_submit(
             model.name
         )));
     }
+    // Pick and permission-check the write before any row signal (#1928).
+    let Some(write) = BulkWrite::plan(&state, model, &action)? else {
+        return back();
+    };
 
     let pk_field = primary_key_or_internal(model)?;
 
@@ -2376,9 +2336,7 @@ pub(crate) async fn action_submit(
         .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
         .collect();
     if pk_values.is_empty() {
-        return Ok(
-            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
-        );
+        return back();
     }
 
     // Read every selected row before the action runs, so the audit
@@ -2387,7 +2345,13 @@ pub(crate) async fn action_submit(
     let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let mut before_rows = crate::sql::select_rows_as_json(
         &state.pool,
-        &RowScope::of(model.table, &parts).by_pk_in(model, pk_field.column, pk_values.clone()),
+        // Only `restore_selected` acts on soft-deleted rows.
+        &if matches!(write, BulkWrite::Restore(_)) {
+            RowScope::trashed(model, &parts)
+        } else {
+            RowScope::of(model, &parts)
+        }
+        .by_pk_in(model, pk_field.column, pk_values.clone()),
         &action_fields,
     )
     .await?;
@@ -2410,98 +2374,57 @@ pub(crate) async fn action_submit(
     // Write only the rows that were checked, and audit exactly those.
     let pk_values = rows_with_pk(&mut before_rows, pk_field);
     if pk_values.is_empty() {
-        return Ok(
-            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
-        );
+        return back();
     }
 
-    let audit_op = if action == "delete_selected" {
-        if model.soft_delete_column.is_some() {
-            crate::audit::AuditOp::SoftDelete
-        } else {
-            crate::audit::AuditOp::Delete
-        }
-    } else if action == "restore_selected" {
-        crate::audit::AuditOp::Update
-    } else {
-        crate::audit::AuditOp::Update
+    let is_delete = matches!(write, BulkWrite::Delete);
+    let audit_op = match (is_delete, model.soft_delete_column) {
+        (true, Some(_)) => crate::audit::AuditOp::SoftDelete,
+        (true, None) => crate::audit::AuditOp::Delete,
+        (false, _) => crate::audit::AuditOp::Update,
     };
 
-    if action == "delete_selected" {
-        if !state.can_delete(model.table) {
-            return Err(AdminError::ReadOnly {
-                table: model.table.to_owned(),
-            });
-        }
-        if let Some(col) = model.soft_delete_column {
+    // Per-row admin signals: delete for `delete_selected`, an edit for every other action.
+    let row_pks: Vec<String> = before_rows
+        .iter()
+        .map(|row| render::read_value_as_string_json(row, pk_field).unwrap_or_default())
+        .collect();
+    send_row_signals(model.table, &row_pks, is_delete, true).await;
+
+    let in_pks = || {
+        WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::In,
+            value: SqlValue::List(pk_values.clone()),
+        })
+    };
+    let set_column = |column, value: SqlValue| UpdateQuery {
+        model,
+        set: vec![Assignment {
+            column,
+            value: value.into(),
+        }],
+        where_clause: in_pks(),
+    };
+    match write {
+        BulkWrite::Delete => match model.soft_delete_column {
             // Soft delete: stamp the column instead of a DELETE.
-            crate::sql::update_pool(
-                &state.pool,
-                &UpdateQuery {
-                    model,
-                    set: vec![Assignment {
-                        column: col,
-                        value: SqlValue::from(chrono::Utc::now()).into(),
-                    }],
-                    where_clause: WhereExpr::Predicate(Filter {
-                        column: pk_field.column,
-                        op: Op::In,
-                        value: SqlValue::List(pk_values),
-                    }),
-                },
-            )
-            .await?;
-        } else {
-            crate::sql::delete_pool(
-                &state.pool,
-                &DeleteQuery::by_pk_in(model, pk_field.column, pk_values),
-            )
-            .await?;
-        }
-    } else if action == "restore_selected" {
-        if state.is_read_only(model.table) {
-            return Err(AdminError::ReadOnly {
-                table: model.table.to_owned(),
-            });
-        }
-        // Built-in restore: clear the soft-delete column, where NULL
-        // means live. A model without that column is a no-op, so
-        // callers do not have to guard the action.
-        if let Some(col) = model.soft_delete_column {
-            crate::sql::update_pool(
-                &state.pool,
-                &UpdateQuery {
-                    model,
-                    set: vec![Assignment {
-                        column: col,
-                        value: SqlValue::Null.into(),
-                    }],
-                    where_clause: WhereExpr::Predicate(Filter {
-                        column: pk_field.column,
-                        op: Op::In,
-                        value: SqlValue::List(pk_values),
-                    }),
-                },
-            )
-            .await?;
-        }
-    } else if let Some(handler) = state.action_handler(model.table, &action) {
-        if state.is_read_only(model.table) {
-            return Err(AdminError::ReadOnly {
-                table: model.table.to_owned(),
-            });
+            Some(col) => {
+                let stamp = set_column(col, SqlValue::from(chrono::Utc::now()));
+                crate::sql::update_pool(&state.pool, &stamp).await?;
+            }
+            None => {
+                let query = DeleteQuery::by_pk_in(model, pk_field.column, pk_values.clone());
+                crate::sql::delete_pool(&state.pool, &query).await?;
+            }
+        },
+        // Built-in restore: clear the soft-delete column, where NULL means live.
+        BulkWrite::Restore(col) => {
+            crate::sql::update_pool(&state.pool, &set_column(col, SqlValue::Null)).await?;
         }
         // Handlers get the `Pool` enum, so a user action can match
         // on the backend if it needs to.
-        handler(&state.pool, &pk_values).await?;
-    } else {
-        return Err(AdminError::Internal(format!(
-            "action `{action}` is in `admin.actions` but no handler is registered \
-             on the admin builder; register it via \
-             `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-ins: \
-             delete_selected, restore_selected)",
-            model.table
-        )));
+        BulkWrite::Custom(handler) => handler(&state.pool, &pk_values).await?,
     }
 
     // One audit entry per row, emitted in a single batched INSERT.
@@ -2509,17 +2432,16 @@ pub(crate) async fn action_submit(
     // Other actions record the pre-action state plus an `__action`
     // marker, so the panel shows who ran what against which rows.
     let source = crate::audit::current_source();
-    let bulk_cfg = admin_config_or_default(model);
     let entries: Vec<crate::audit::PendingEntry> = before_rows
         .iter()
         .map(|row| {
             let pk_str = render::read_value_as_string_json(row, pk_field).unwrap_or_default();
-            let row = &mask_secrets(model, &bulk_cfg, row);
+            let row = &mask_secrets(model, &admin_cfg, row);
             let mut pairs: Vec<(&str, serde_json::Value)> = model
                 .scalar_fields()
                 .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
                 .collect();
-            if action != "delete_selected" {
+            if !is_delete {
                 // Tag the action name so the audit row reads as
                 // "alice ran publish_selected", not a plain edit.
                 pairs.push(("__action", serde_json::Value::String(action.clone())));
@@ -2545,8 +2467,76 @@ pub(crate) async fn action_submit(
             );
         }
     }
+    send_row_signals(model.table, &row_pks, is_delete, false).await;
 
-    Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
+    back()
+}
+
+/// The write a bulk action makes, chosen and permission-checked before
+/// any row is read or signalled.
+enum BulkWrite {
+    /// `delete_selected`: a soft delete where the model has the column.
+    Delete,
+    /// `restore_selected`: clear this soft-delete column.
+    Restore(&'static str),
+    Custom(super::urls::AdminActionFn),
+}
+
+impl BulkWrite {
+    /// `None` is a no-op: `restore_selected` on a model without soft delete.
+    fn plan(
+        state: &AppState,
+        model: &'static crate::core::ModelSchema,
+        action: &str,
+    ) -> Result<Option<Self>, AdminError> {
+        let read_only = || AdminError::ReadOnly {
+            table: model.table.to_owned(),
+        };
+        match action {
+            "delete_selected" if !state.can_delete(model.table) => Err(read_only()),
+            "delete_selected" => Ok(Some(Self::Delete)),
+            _ if state.is_read_only(model.table) => Err(read_only()),
+            "restore_selected" => Ok(model.soft_delete_column.map(Self::Restore)),
+            _ => match state.action_handler(model.table, action) {
+                Some(handler) => Ok(Some(Self::Custom(handler))),
+                None => Err(AdminError::Internal(format!(
+                    "action `{action}` is in `admin.actions` but no handler is registered \
+                     on the admin builder; register it via \
+                     `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-ins: \
+                     delete_selected, restore_selected)",
+                    model.table
+                ))),
+            },
+        }
+    }
+}
+
+/// One admin pre/post signal per row of a bulk action, in row order (#1928).
+async fn send_row_signals(table: &'static str, pks: &[String], is_delete: bool, pre: bool) {
+    use crate::signals::admin::{self as sig, AdminDeleteContext, AdminSaveContext};
+    for pk in pks {
+        let pk = pk.clone();
+        match (is_delete, pre) {
+            (true, true) => sig::send_admin_pre_delete(AdminDeleteContext { table, pk }).await,
+            (true, false) => sig::send_admin_post_delete(AdminDeleteContext { table, pk }).await,
+            (false, true) => {
+                sig::send_admin_pre_save(AdminSaveContext {
+                    table,
+                    pk,
+                    change: true,
+                })
+                .await;
+            }
+            (false, false) => {
+                sig::send_admin_post_save(AdminSaveContext {
+                    table,
+                    pk,
+                    change: true,
+                })
+                .await;
+            }
+        }
+    }
 }
 
 /// The object-permission hooks a bulk action must pass on every row. A custom

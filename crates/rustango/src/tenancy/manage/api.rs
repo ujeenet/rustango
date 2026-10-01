@@ -258,6 +258,7 @@ where
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&registry).await?;
     Ok(op)
@@ -308,6 +309,7 @@ where
         created_at: chrono::Utc::now(),
         data: serde_json::json!({}),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     user.save_pool(&scoped).await?;
     Ok(user)

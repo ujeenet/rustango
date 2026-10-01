@@ -98,6 +98,19 @@ struct CookiePayload {
     /// `""`, which never matches, so they need one fresh login.
     #[serde(default)]
     auth_hash: PasswordFingerprint,
+    /// Issued-at, Unix seconds; checked against `sessions_revoked_at` (#1855).
+    /// `0` for older cookies.
+    #[serde(default)]
+    iat: i64,
+}
+
+/// What the gate checks a cookie against the user's live row with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CookieAuth {
+    /// Fingerprint of the password hash at login.
+    pub(crate) auth_hash: PasswordFingerprint,
+    /// Issued-at, Unix seconds.
+    pub(crate) iat: i64,
 }
 
 impl CookiePayload {
@@ -108,12 +121,13 @@ impl CookiePayload {
 
 /// Sign a fresh session and return the cookie value to set. Lasts 8
 /// hours. `auth_hash` is the fingerprint of the user's current
-/// `password_hash`.
+/// `password_hash`; `sessions_revoked_at` is the user's logout cut-off.
 #[must_use]
 pub(crate) fn encode(
     secret: &AdminSessionSecret,
     session: AdminSession,
     auth_hash: &PasswordFingerprint,
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
     let payload = CookiePayload {
         user_id: session.user_id,
@@ -121,6 +135,7 @@ pub(crate) fn encode(
         is_superuser: session.is_superuser,
         exp: chrono::Utc::now().timestamp() + DEFAULT_TTL_SECS,
         auth_hash: auth_hash.clone(),
+        iat: crate::session::issued_at(sessions_revoked_at),
     };
     let json = serde_json::to_vec(&payload).expect("payload serializes");
     let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json);
@@ -129,23 +144,16 @@ pub(crate) fn encode(
     format!("{body}.{sig_b64}")
 }
 
-/// Verify and decode a cookie value. Returns `Some(session)` only when
-/// the signature is valid **and** the payload has not expired. Every
-/// other case, such as a malformed or tampered cookie, returns `None`,
-/// and the caller must treat the request as unauthenticated.
-#[must_use]
-pub(crate) fn decode(secret: &AdminSessionSecret, value: &str) -> Option<AdminSession> {
-    decode_full(secret, value).map(|(session, _auth_hash)| session)
-}
-
-/// Like [`decode`], but also returns the cookie's stored password
-/// fingerprint, so the gate can compare it with the user's current
-/// hash and drop sessions from before a password change.
+/// Verify and decode a cookie value. Returns `Some` only when the
+/// signature is valid **and** the payload has not expired. Every other
+/// case, such as a malformed or tampered cookie, returns `None`, and the
+/// caller must treat the request as unauthenticated. The [`CookieAuth`]
+/// lets the gate drop sessions from before a password change or logout.
 #[must_use]
 pub(crate) fn decode_full(
     secret: &AdminSessionSecret,
     value: &str,
-) -> Option<(AdminSession, PasswordFingerprint)> {
+) -> Option<(AdminSession, CookieAuth)> {
     let (body, sig_b64) = value.split_once('.')?;
     let expected = sign(secret, body.as_bytes());
     let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -169,7 +177,10 @@ pub(crate) fn decode_full(
             username: payload.username,
             is_superuser: payload.is_superuser,
         },
-        payload.auth_hash,
+        CookieAuth {
+            auth_hash: payload.auth_hash,
+            iat: payload.iat,
+        },
     ))
 }
 
@@ -189,11 +200,12 @@ mod tests {
     fn round_trip_recovers_session_fields_and_auth_hash() {
         let secret = AdminSessionSecret::from_bytes(vec![42u8; 32]);
         let fp = PasswordFingerprint::of(&secret, "$argon2id$fake-hash");
-        let cookie = encode(&secret, session(7, "alice", true), &fp);
-        let (s, auth_hash) = decode_full(&secret, &cookie).expect("valid cookie verifies");
+        let cookie = encode(&secret, session(7, "alice", true), &fp, None);
+        let (s, auth) = decode_full(&secret, &cookie).expect("valid cookie verifies");
         assert_eq!(s.user_id, 7);
         assert!(s.is_superuser);
-        assert_eq!(auth_hash, fp);
+        assert_eq!(auth.auth_hash, fp);
+        assert!(auth.iat > 0);
     }
 
     #[test]
@@ -213,10 +225,11 @@ mod tests {
             &secret,
             session(1, "bob", false),
             &PasswordFingerprint::default(),
+            None,
         );
         let (body, _sig) = cookie.split_once('.').unwrap();
         let bad = format!("{body}.AAAA");
-        assert!(decode(&secret, &bad).is_none());
+        assert!(decode_full(&secret, &bad).is_none());
     }
 
     #[test]
@@ -227,7 +240,8 @@ mod tests {
             &secret_a,
             session(1, "bob", false),
             &PasswordFingerprint::default(),
+            None,
         );
-        assert!(decode(&secret_b, &cookie).is_none());
+        assert!(decode_full(&secret_b, &cookie).is_none());
     }
 }

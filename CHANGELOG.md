@@ -4,6 +4,88 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.14] — 2026-10-01
+
+### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
+
+`RustangoError` DB, hashing, JWT-issue and env errors answer 500/503 with an opaque body; `get_object_or_404`, `render()`, template-view and operator-console 500s too.
+`file_response` strips every control and bidi-override character and always sends `Content-Disposition: attachment`.
+
+### Fixed — public `/ready` no longer returns driver errors or probe targets (#1840)
+
+A failing check reports only its status and latency; the error is logged under `rustango::error`. `HealthRouter::show_errors()` opts back in.
+
+### Fixed — compression no longer empties large or streaming responses (#1954)
+
+Bodies over `max_body_bytes`, without a known size, or `206` pass through whole; `gzip;q=0, *` no longer gzips.
+
+### Fixed — ViewSet form-urlencoded bodies run serializer validation (#1993)
+
+A form body is typed by its model fields and checked like JSON; it no longer skips `validate`, lengths, ranges and choices.
+`Array`, `HStore` and `Vector` implement `OpenApiSchema`, so a serializer can carry them with `openapi` on.
+
+### Fixed — a ViewSet `source` rename no longer lets the model column be written (#1994)
+
+The model key behind a renamed field is dropped from JSON and form bodies before the write.
+
+### Fixed — a UUID-default column adds on MySQL and SQLite (#1987)
+
+`AddColumn` with `gen_random_uuid()` adds the column bare, fills each row, then sets the DEFAULT (MySQL refused with 1674).
+
+### Fixed — SQLite adds a `now()` column to a table with rows (#2017)
+
+`migrate` and unapply retry a refused `AddColumn` with the time frozen, as the system-chain converge does.
+
+### Fixed — MySQL drops an FK column, forward and on unapply (#1981)
+
+`DropColumn` of an FK column drops its constraint first, found by column so renames and 64-byte names work (MySQL refused with 1828). New export `migrate::unapply_pool_with_ledger`.
+
+### Fixed — `auto_uuid` tables create on MySQL and SQLite (#1987)
+
+`DEFAULT gen_random_uuid()` was a syntax error there. MySQL now gets `(UUID())`, SQLite a random v4 UUID blob (needs SQLite 3.41+).
+
+### Fixed — a system-migration generation error fails `migrate` (#2014)
+
+An unsupported framework field change (or an unwritable `system/migrations/`) was dropped, and `migrate` applied the stale chain.
+
+### Fixed — tenant migration failures exit non-zero; ledger bootstrap takes the migrate lock (#1844)
+
+`migrate-tenants`, `migrate` and `migrate --fake --all-tenants` now fail when any tenant failed.
+The ledger `CREATE TABLE` runs under the migrate lock (the legacy `PgPool` runner too), so concurrent PG replicas no longer hit 23505.
+
+### Fixed — change-password forms share one 8-character rule (#1874)
+
+The bare admin counted bytes and the tenant admin had no minimum. Both, and the operator
+console, now call `password_validators::check_builtin_form_password`.
+
+### Fixed — admin hides soft-deleted rows (#1918)
+
+Lists, counts, facets, detail/edit/delete pages, actions and inlines skip rows with the soft-delete
+column set. `?trashed=1` lists them, offers only `restore_selected`, and keeps the view across the action.
+
+### Fixed — admin facet and date counts follow the active filters (#2004)
+
+Counts are within the list's filters, search and row scope; a facet ignores its own filter, as in Django.
+The year strip shows the newest 200 years (`MAX_YEAR_BUCKETS`).
+Both now run through the ORM. Dict rows (`values()`, `aggregate()`) decode date and timestamp cells on PG/MySQL instead of `NULL`.
+
+### Fixed — admin signals: pre hooks fire, in order, and bulk actions send them (#1928)
+
+`admin_pre_save` / `admin_pre_delete` now run before the write, receivers run in registration order,
+and bulk actions send one signal per row: delete for `delete_selected`, save (`change = true`) for the rest.
+A refused or no-op action sends none.
+
+### Fixed — natural PKs in CreateView and ModelForm; ViewSet create fills v7 PKs (#1725)
+
+HTML `CreateView` and `ModelForm` inserts now take a client-supplied PK (never on update), via one
+`FieldSchema::accepts_input` rule. Schema-driven INSERTs, admin create included, fill `default_uuid_v7` keys and skip `generated_as` columns.
+
+### Security — logout revokes signed sessions server-side (#1855)
+
+Logout on the tenant admin, operator console and bare admin stamps a new `sessions_revoked_at` column, and every
+session check refuses cookies issued at or before it; `member_auth::logout` does the same for members.
+A logout that cannot read the user is a 500; an impersonation handoff from before the operator's logout is refused.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

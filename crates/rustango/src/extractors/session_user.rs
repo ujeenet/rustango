@@ -93,14 +93,15 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
 
         let user = users.into_iter().next().filter(|u| u.active);
         // Reject a session minted before the user's last password
-        // change, as `tenancy::admin::validate_session` does.
+        // change or logout, as `tenancy::admin::validate_session` does.
         let user = user.filter(|u| {
-            crate::tenancy::session::survives_password_change(
+            crate::tenancy::session::session_survives(
                 keys.session,
                 &payload.pwf,
                 payload.iat,
                 &u.password_hash,
                 u.password_changed_at,
+                u.sessions_revoked_at,
             )
         });
         Ok(SessionUser(user))
@@ -145,12 +146,13 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
 
         let op = ops.into_iter().next().filter(|o| {
             o.active
-                && crate::tenancy::session::survives_password_change(
+                && crate::tenancy::session::session_survives(
                     keys.operator,
                     &payload.pwf,
                     payload.iat,
                     &o.password_hash,
                     o.password_changed_at,
+                    o.sessions_revoked_at,
                 )
         });
         Ok(SessionOperator(op))
