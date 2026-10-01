@@ -154,6 +154,10 @@ untouched.
 
 With no `.ordering(..)` the list uses `default_order`, then the PK.
 
+### ViewSet `DELETE` soft-deletes a `#[rustango(soft_delete)]` model (#1998)
+
+It stamps the column; soft-deleted rows then read as `404` and leave the list.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

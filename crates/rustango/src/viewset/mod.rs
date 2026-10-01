@@ -1308,6 +1308,10 @@ impl AcquiredConn {
         crate::audit::delete(&self.pool, q).await
     }
 
+    async fn soft_delete(&mut self, q: &UpdateQuery) -> Result<u64, crate::sql::ExecError> {
+        crate::audit::update_as(&self.pool, q, crate::audit::AuditOp::SoftDelete).await
+    }
+
     #[cfg(feature = "tenancy")]
     async fn has_perm(&mut self, uid: i64, codename: &str) -> bool {
         crate::tenancy::permissions::has_perm_pool(uid, codename, &self.pool)
@@ -1795,14 +1799,16 @@ macro_rules! or_500 {
     };
 }
 
-/// The model's global scopes plus every filter backend's predicates for
-/// this request, to be ANDed into whatever query the action runs.
+/// The model's global scopes, its soft-delete liveness and every filter
+/// backend's predicates, to be ANDed into whatever query the action runs.
 fn scope_filters(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
     let mut all = state.vs.schema.global_scope_exprs(&[]);
+    // A soft-deleted row reads as gone to every action (#1998).
+    all.extend(crate::soft_delete::active_filter(state.vs.schema));
     all.extend(
         state
             .vs
@@ -3121,19 +3127,32 @@ async fn handle_destroy(
         Err(resp) => return resp,
     };
 
-    let query = DeleteQuery {
-        model: state.vs.schema,
-        where_clause: narrow(
-            WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: pk_val,
-            }),
-            scope,
-        ),
+    // A soft-delete model stamps its column, as the admin does (#1998).
+    let deleted = if let Some(col) = state.vs.schema.soft_delete_column {
+        let mut query = crate::soft_delete::__mark_query(
+            state.vs.schema,
+            col,
+            pk_field.column,
+            pk_val,
+            Some(chrono::Utc::now()),
+        );
+        query.where_clause = narrow(query.where_clause, scope);
+        acq.soft_delete(&query).await
+    } else {
+        let query = DeleteQuery {
+            model: state.vs.schema,
+            where_clause: narrow(
+                WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::Eq,
+                    value: pk_val,
+                }),
+                scope,
+            ),
+        };
+        acq.delete(&query).await
     };
-
-    match acq.delete(&query).await {
+    match deleted {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => no_content(),
         Err(e) => json_server_error("viewset::destroy", &e),

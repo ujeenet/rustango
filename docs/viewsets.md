@@ -516,6 +516,9 @@ caught by validation or by the database.
 > returned `400 bulk entry 5`, and named none of the rows it had created.
 > Constraint violations are exactly the class validation cannot decide up front.
 
+On a `#[rustango(soft_delete)]` model, `DELETE` stamps the column instead of
+deleting, and every action treats a soft-deleted row as gone.
+
 ---
 
 ## Choosing which operations to expose

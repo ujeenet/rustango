@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 With no `.ordering(..)`, the list uses `default_order`, as ListView and the admin do; the PK always breaks ties.
 
+### Fixed — the ViewSet honours `#[rustango(soft_delete)]` (#1998)
+
+`DELETE` stamps the soft-delete column instead of deleting the row, and list, retrieve, update and destroy hide soft-deleted rows.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

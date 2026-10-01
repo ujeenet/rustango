@@ -132,7 +132,9 @@ async fn viewset_update_and_delete_are_audited(pool: &Pool) {
     assert_eq!(ops(pool, "update").await, 1);
     let status = send(app(), Method::DELETE, &uri, String::new(), false).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(ops(pool, "delete").await, 1);
+    // `Doc` is soft-delete, so the ViewSet stamps it (#1998).
+    assert_eq!(ops(pool, "soft_delete").await, 1);
+    assert_eq!(ops(pool, "delete").await, 0);
 }
 
 /// Single and bulk create each write one `create` row (#1816).

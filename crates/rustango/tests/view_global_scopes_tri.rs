@@ -1,6 +1,7 @@
 //! `ViewSet` and the template views apply the model's global scopes:
 //! a row every `QuerySet` hides is not listed, counted, read or written (#1746).
 //! The ViewSet list follows `default_order` (#2047).
+//! The ViewSet soft-deletes on `DELETE` and hides soft-deleted rows (#1998).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -73,6 +74,17 @@ pub struct Pet {
 }
 
 #[derive(Model, Debug, Clone)]
+#[rustango(table = "scope1998_memo", app = "scope1746")]
+pub struct Memo {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub tag: String,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Model, Debug, Clone)]
 #[rustango(table = "order2047_rank", app = "scope1746", default_order = "-rank")]
 pub struct Ranked {
     #[rustango(primary_key)]
@@ -87,6 +99,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Owner>(pool).await;
     rustango::testkit::matrix::fresh_table::<Pet>(pool).await;
     rustango::testkit::matrix::fresh_table::<Note>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Memo>(pool).await;
     rustango::testkit::matrix::fresh_table::<Ranked>(pool).await;
 }
 
@@ -194,6 +207,7 @@ fn app(pool: &Pool) -> axum::Router {
                 .search_fields(&["name"])
                 .router_pool("/api/owners", pool.clone()),
         )
+        .merge(ViewSet::for_model(Memo::SCHEMA).router_pool("/api/memos", pool.clone()))
         .merge(ViewSet::for_model(Ranked::SCHEMA).router_pool("/api/ranked", pool.clone()))
         .merge(
             DetailView::for_model(Note::SCHEMA)
@@ -541,6 +555,56 @@ async fn search_narrows_an_or_scope(pool: &Pool) {
     }
 }
 
+async fn memos(pool: &Pool) -> Vec<Memo> {
+    Memo::objects()
+        .without_global_scopes()
+        .fetch(pool)
+        .await
+        .expect("memos")
+}
+
+/// DELETE stamps `deleted_at`, and every action then treats the row as gone (#1998).
+async fn viewset_soft_deletes_and_hides_deleted_rows(pool: &Pool) {
+    let mut pks = Vec::new();
+    for tag in ["a", "b"] {
+        let mut m = Memo {
+            id: Auto::default(),
+            tag: tag.into(),
+            deleted_at: None,
+        };
+        m.insert_pool(pool).await.expect("seed memo");
+        pks.push(*m.id.get().expect("pk"));
+    }
+    let gone = format!("/api/memos/{}", pks[0]);
+    let (status, _) = send(pool, Method::DELETE, &gone, JSON, "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "DELETE");
+
+    let rows = memos(pool).await;
+    assert_eq!(rows.len(), 2, "the row is kept, not deleted");
+    let row = rows
+        .iter()
+        .find(|m| *m.id.get().unwrap() == pks[0])
+        .unwrap();
+    assert!(row.deleted_at.is_some(), "deleted_at stamped");
+
+    let (_, body) = get(pool, "/api/memos").await;
+    let v = json(&body);
+    assert_eq!(v["count"], 1, "{body}");
+    assert_eq!(v["results"][0]["tag"], "b", "{body}");
+    let (status, _) = get(pool, &gone).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "retrieve");
+    let (status, _) = send(pool, Method::PATCH, &gone, JSON, r#"{"tag":"x"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "update");
+    let (status, _) = send(pool, Method::DELETE, &gone, JSON, "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "second DELETE");
+    let rows = memos(pool).await;
+    let row = rows
+        .iter()
+        .find(|m| *m.id.get().unwrap() == pks[0])
+        .unwrap();
+    assert_eq!(row.tag, "a", "a deleted row is not updated");
+}
+
 /// The list follows the model's `default_order`, ties broken by the PK (#2047).
 async fn viewset_lists_in_default_order(pool: &Pool) {
     // Explicit PKs, inserted out of order, so a tie shows the tiebreak.
@@ -589,6 +653,7 @@ tri_dialect_test! {
         template_writes_on_visible_rows_work,
         fk_display_skips_scoped_out_targets,
         search_narrows_an_or_scope,
+        viewset_soft_deletes_and_hides_deleted_rows,
         viewset_lists_in_default_order,
     ],
 }
