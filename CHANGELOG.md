@@ -11,11 +11,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — email, IRI, nullable-bool and timesince parsing (#1897)
 
-`validate_email` rejects whitespace, control chars and over-long addresses; `uri_to_iri` keeps `%25`; an absent nullable bool is `NULL` (admin shows a Yes/No/Unknown select); `timesince` stops at the first zero unit.
+`validate_email` rejects whitespace, control chars and over-long addresses; `uri_to_iri` keeps `%25`; an absent nullable bool is `NULL` (admin shows a Yes/No/Unknown select, preset to the model default); `timesince` stops at the first zero unit.
 
 ### Fixed — i18n plural rules, `pt_BR` locales, `q=0` and placeholder substitution (#1921)
 
-Plural rules for ar, cs/sk, lt, ro, he and sl, and `pt-PT` 0 is plural; `Locale` treats `_` as `-` so `pt_BR.json` serves `pt-BR`.
+Plural rules for ar, cs/sk, lt, ro, he and sl, and `pt-PT` 0 is plural; `Locale` treats `_` as `-` so `pt_BR.json` serves `pt-BR`, and `LocaleMiddleware` matches a `pt_BR` cookie too.
 `negotiate_language` skips `q=0`; placeholders fill in one pass, so a value is never re-substituted and Tera arg order no longer matters.
 
 ### Fixed — feeds and sitemaps drop XML-illegal control chars; custom guids are not permalinks (#1925)
