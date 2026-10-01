@@ -1140,6 +1140,7 @@ pub(crate) mod resolver_tests {
     /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.
     #[tokio::test]
     async fn x_org_is_ignored_unless_opted_in() {
+        let _iso = crate::tenancy::isolated_resolver().await;
         let (_tmp, sq, url) = registry().await;
         let plain = Builder::<sqlx::Sqlite>::from_pool(sq.clone(), url.clone(), "localhost");
         assert_eq!(x_org_pick(&plain, &sq).await, None);

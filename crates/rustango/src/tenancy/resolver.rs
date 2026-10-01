@@ -810,6 +810,19 @@ pub(crate) fn reset_registry_breaker() {
     REGISTRY_DOWN.close();
 }
 
+/// Serializes lib tests that resolve through this module's globals and
+/// starts each from a closed breaker and empty caches (#2067).
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) async fn isolated() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let guard = LOCK.lock().await;
+    reset_registry_breaker();
+    reset_org_cache();
+    reset_generation();
+    invalidate_host_cache();
+    guard
+}
+
 /// Convert an `ExecError` into the `sqlx::Error` shape `TenancyError`
 /// stores. We don't want `TenancyError::Driver` to wrap the full
 /// `ExecError` because it carries `QueryError`/`SqlError` shapes
