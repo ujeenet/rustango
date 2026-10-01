@@ -857,24 +857,52 @@ async fn migrate<W: Write>(
         return Ok(());
     }
 
-    // The framework's own `rustango_*` tables come from the generated
-    // `system/migrations/` chain. In tenancy mode that chain is applied per
-    // tenant by `tenancy::migrate`; a single-database project has no such
-    // hook, so apply it here — otherwise a non-tenancy project using e.g.
-    // `media` would never get its tables at all (the pre-0.51 `ensure_*`
-    // calls that used to cover this are gone). System migrations run BEFORE
-    // the project's, so user models may FK framework tables (#1171), and go
-    // through the fake-initial runner so a database whose framework tables
-    // predate the chain reconciles instead of colliding (#1167).
-    let system_applied = apply_system_chain(pool, dir, w).await?;
+    migrate_with_framework(pool, dir, w, runner::Signals::Skip, |held| {
+        runner::migrate_pool_locked(held, pool, dir, None)
+    })
+    .await
+}
 
-    let applied = runner::migrate_pool(pool, dir).await?;
-    for m in &applied {
+/// Everything a plain `migrate` does: the framework's system chain and the
+/// project chain via `project`, in [`super::chains::migrate_chains`]'s order, then
+/// the framework bootstrap DDL. The `Cli` auto-migrate shares it (#2056).
+///
+/// In tenancy mode the system chain is applied per tenant by
+/// `tenancy::migrate`; a single-database project gets it here, before its
+/// own migrations so user models may FK framework tables (#1171).
+///
+/// # Errors
+/// As [`super::chains::migrate_chains`], plus the bootstrap DDL.
+pub(crate) async fn migrate_with_framework<W, F, Fut>(
+    pool: &Pool,
+    dir: &Path,
+    w: &mut W,
+    signals: super::Signals,
+    project: F,
+) -> Result<(), MigrateError>
+where
+    W: Write,
+    F: FnOnce(super::LockHeld) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Migration>, MigrateError>>,
+{
+    let chain = system_chain(dir)?;
+    let applied = super::chains::migrate_chains(
+        pool,
+        &chain,
+        super::MigrationScope::Tenant,
+        dir,
+        None,
+        signals,
+        project,
+    )
+    .await?;
+    for m in &applied.system {
+        writeln!(w, "  applied {} (system)", m.name)?;
+    }
+    for m in &applied.project {
         writeln!(w, "  applied {}", m.name)?;
     }
-    // The system steps deferred behind a project-created table.
-    let deferred = apply_system_chain(pool, dir, w).await?;
-    if applied.is_empty() && system_applied + deferred == 0 {
+    if applied.system.is_empty() && applied.project.is_empty() {
         writeln!(w, "nothing to migrate (already up to date)")?;
     }
     // Framework bootstrap table that isn't model-derived: the audit log
@@ -995,13 +1023,7 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     stamp_replaces(dir, &before, &removed, w)
 }
 
-/// Apply the framework's generated `system/migrations/` chain to a
-/// single-database (non-tenancy) project, returning how many were applied.
-///
-/// Tenancy projects get this per tenant via
-/// `tenancy::migrate::apply_system_migrations`; this is the single-DB
-/// counterpart, so both shapes materialize the framework's own tables the
-/// same way instead of a non-tenancy project silently ending up with none.
+/// The system chain a single-database project applies.
 ///
 /// Only the **tenant**-scope chain runs. The two scopes exist because a
 /// tenancy deployment splits them across different databases, and they
@@ -1015,107 +1037,14 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
 ///
 /// Generation is a no-op once the files exist (normally written by
 /// `makemigrations` and committed); a generation error fails `migrate` (#2014).
-async fn apply_system_chain<W: Write>(
-    pool: &Pool,
-    dir: &Path,
-    w: &mut W,
-) -> Result<usize, MigrateError> {
-    let chain = crate::migrate::make::SystemChain::for_migrations_dir(
+fn system_chain(dir: &Path) -> Result<super::make::SystemChain, MigrateError> {
+    super::make::SystemChain::for_migrations_dir(
         dir,
         &[
             crate::core::ModelScope::Registry,
             crate::core::ModelScope::Tenant,
         ],
-    )?;
-    let system_dir = chain.dir().to_path_buf();
-    if !system_dir.is_dir() {
-        return Ok(0);
-    }
-
-    let all = file::list_dir(&system_dir)?;
-    let mut wanted: Vec<&Migration> = all
-        .iter()
-        .filter(|m| m.scope == super::MigrationScope::Tenant)
-        .collect();
-    if wanted.is_empty() {
-        return Ok(0);
-    }
-
-    // Tables the project's OWN pending migrations will create. A project
-    // scaffolded before the system chain existed carries the framework tables
-    // in its `0001_initial` (that is where `makemigrations` used to put them),
-    // so creating them here too would collide the moment that migration runs.
-    // The project's chain wins for anything it declares; the system chain
-    // fills in only what the project does not own (e.g. `media`, added to the
-    // framework later). Modern projects declare none of them, so the system
-    // chain creates the full set as usual.
-    let claimed: Vec<String> = {
-        let project_applied = runner::applied_set_pool(pool).await.unwrap_or_default();
-        file::list_dir(dir)
-            .unwrap_or_default()
-            .iter()
-            .filter(|m| !project_applied.contains(&m.name))
-            .flat_map(|m| {
-                m.forward.iter().filter_map(|op| match op {
-                    Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => Some(t.clone()),
-                    _ => None,
-                })
-            })
-            .collect()
-    };
-    // A later step on a claimed table (an `AddColumn`) needs the project's
-    // table first, so it and everything after wait for the second pass.
-    if !claimed.is_empty() {
-        let applied = runner::applied_set_pool_with_ledger(pool, runner::SYSTEM_LEDGER_TABLE)
-            .await
-            .unwrap_or_default();
-        let blocked = wanted.iter().position(|m| {
-            !applied.contains(&m.name)
-                && runner::without_tables(m, &claimed).forward.iter().any(
-                    |op| matches!(op, Operation::Schema(c) if claimed.iter().any(|t| c.touches(t))),
-                )
-        });
-        if let Some(i) = blocked {
-            wanted.truncate(i);
-        }
-    }
-
-    // Apply from a scratch directory holding just the tenant-scope files (with
-    // project-claimed tables filtered out), so the runner's ledger bookkeeping
-    // stays a plain whole-directory operation.
-    let scratch: Option<std::path::PathBuf> = if wanted.len() == all.len() && claimed.is_empty() {
-        None
-    } else {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "rustango_system_scoped_{}_{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&p)?;
-        for mig in &wanted {
-            let effective = if claimed.is_empty() {
-                (*mig).clone()
-            } else {
-                runner::without_tables(mig, &claimed)
-            };
-            file::write(&p.join(format!("{}.json", effective.name)), &effective)?;
-        }
-        Some(p)
-    };
-    let run_dir = scratch.clone().unwrap_or_else(|| system_dir.clone());
-
-    let applied = runner::migrate_system_chain(pool, &chain, &run_dir, None).await;
-    if let Some(p) = &scratch {
-        let _ = std::fs::remove_dir_all(p);
-    }
-    let applied = applied?;
-    for m in &applied {
-        writeln!(w, "  applied {} (system)", m.name)?;
-    }
-    Ok(applied.len())
+    )
 }
 
 /// Record, on each freshly-generated migration, the names it collapsed.

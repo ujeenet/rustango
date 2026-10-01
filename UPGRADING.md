@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### `runserver` auto-migrate and the registry run apply the system chain first (#2056)
+
+`runserver` now applies the system chain like `manage migrate`. `migrate_registry` applies it before the project's registry migrations, not after.
+
+### Framework tables a project's own migrations create get new columns (#2052)
+
+`migrate` adds missing framework columns to them after the project chain; a NOT NULL column without a default on a table with rows fails until added by hand (an empty table is fine, #2066).
+
+### A migrate inside a running migrate is an error (#2055)
+
+A callback or observer that migrates while the outer run holds the lock now gets an error, not a hang. Migrate from `post_migrate` instead: it fires after the lock is released.
+
 ## 0.59.16
 
 ### Custom admin views need `change` for writes

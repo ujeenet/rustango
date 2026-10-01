@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `runserver` auto-migrate applies the framework's system chain (#2056)
+
+It ran only the project chain, so tables and columns like `sessions_revoked_at` were missing and logins failed.
+
+### Fixed — system and project chains apply in one safe order everywhere (#2055, #2052)
+
+A system step that FKs a project-created framework table waits for it on PG/MySQL; such tables get the framework's newer columns, on the tenancy runners too.
+Steps on those tables run after the project chain, under one migrate lock; a table the project later drops is the framework's again.
+A later system step's index on such a table is created.
+A system step that only FKs such a table first adds just the FK target columns.
+`pre_migrate`/`post_migrate` fire outside that lock, and a migrate started while the task holds it fails instead of hanging.
+A cancelled migrate closes its lock connection, so the pool does not keep the lock.
+
+### Fixed — converging a NOT NULL column with no default on an empty table (#2066)
+
+`migrate` adds it instead of asking for it by hand; a table with rows still fails.
+MySQL adds it nullable, then `MODIFY`s it NOT NULL, so a row written in between fails it instead of getting `''` or `0`.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
