@@ -4,6 +4,28 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
+
+`RustangoError` DB, hashing, JWT-issue and env errors answer 500/503 with an opaque body; `get_object_or_404`, `render()`, template-view and operator-console 500s too.
+`file_response` strips every control and bidi-override character and always sends `Content-Disposition: attachment`.
+
+### Fixed — public `/ready` no longer returns driver errors or probe targets (#1840)
+
+A failing check reports only its status and latency; the error is logged under `rustango::error`. `HealthRouter::show_errors()` opts back in.
+
+### Fixed — compression no longer empties large or streaming responses (#1954)
+
+Bodies over `max_body_bytes`, without a known size, or `206` pass through whole; `gzip;q=0, *` no longer gzips.
+
+### Fixed — ViewSet form-urlencoded bodies run serializer validation (#1993)
+
+A form body is typed by its model fields and checked like JSON; it no longer skips `validate`, lengths, ranges and choices.
+`Array`, `HStore` and `Vector` implement `OpenApiSchema`, so a serializer can carry them with `openapi` on.
+
+### Fixed — a ViewSet `source` rename no longer lets the model column be written (#1994)
+
+The model key behind a renamed field is dropped from JSON and form bodies before the write.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

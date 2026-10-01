@@ -79,7 +79,7 @@ pub(super) async fn org_hosts_view(
 
     let hosts = match org_host::list_for_org(&state.registry, &slug).await {
         Ok(h) => h,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return super::server_error("operator_console", &e),
     };
 
     let mut ctx = Context::new();

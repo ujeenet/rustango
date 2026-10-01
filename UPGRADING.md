@@ -150,6 +150,27 @@ untouched.
 
 ## Unreleased
 
+### `RustangoError` status changes (#1955)
+
+DB errors inside `Auth`/`AuthFlow`/`BulkAction`, `Env`, `JwtIssue` and hashing errors are now `500`; `Busy` is `503`.
+Their message is withheld unless `RUSTANGO_DISCLOSE_ERRORS` is set.
+
+### `/ready` drops each check's `error` field (#1840)
+
+Call `HealthRouter::show_errors()` to keep it on an endpoint only operators reach.
+
+### `CompressionLayer` skips streams and `206` (#1954)
+
+A body with no exact size hint (`Body::from_stream`) is now sent uncompressed instead of buffered.
+
+### ViewSet form bodies are validated (#1993)
+
+A form-urlencoded write that broke a serializer rule now gets the same `422` as JSON.
+
+### ViewSet ignores a renamed field's model column on write (#1994)
+
+With `#[serializer(source = "body")] content`, send `content`; a `body` key is now dropped.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

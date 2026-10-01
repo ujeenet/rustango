@@ -38,7 +38,7 @@
 
 use axum::body::Body;
 use axum::extract::{Form, Path, Query, State};
-use axum::http::{header, Response, StatusCode};
+use axum::http::{header, Response};
 use axum::response::{IntoResponse, Redirect};
 use axum::Extension;
 use serde::Deserialize;
@@ -136,7 +136,7 @@ async fn page(
         match super::Paged::of_model(&state.registry, auth::Operator::SCHEMA, requested_page).await
         {
             Ok(p) => p,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => return super::server_error("operator_console", &e),
         };
     let rows: Vec<auth::Operator> = match auth::Operator::objects()
         .order_by(&[("username", false)])
@@ -147,11 +147,7 @@ async fn page(
     {
         Ok(r) => r,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not read the operator list: {e}"),
-            )
-                .into_response();
+            return super::server_error("could not read the operator list", &e);
         }
     };
     let me = id_of(op);
@@ -168,7 +164,7 @@ async fn page(
     .await
     {
         Ok(n) => usize::try_from(n).unwrap_or(usize::MAX),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return super::server_error("operator_console", &e),
     };
 
     let view: Vec<_> = rows

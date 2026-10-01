@@ -49,6 +49,15 @@ pub struct Pin {
     pub tag: ForeignKey<Tag, String>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv1915_label", app = "tv1915")]
+pub struct Label {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(unique, max_length = 32)]
+    pub code: String,
+}
+
 const CSRF: &str = "tv1915-csrf-token-tv1915-csrf-token-tv1915x";
 const UUID_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const FORM: &str = "application/x-www-form-urlencoded";
@@ -58,6 +67,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Event>(pool).await;
     rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
     rustango::testkit::matrix::fresh_table::<Pin>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Label>(pool).await;
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -87,6 +97,12 @@ fn app(pool: &Pool) -> axum::Router {
                 .template("list.html")
                 .filter_fields(&["author_id", "done", "token", "day", "note", "at"])
                 .router("/events", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Label::SCHEMA)
+                .template("form.html")
+                .success_url("/labels")
+                .router("/labels", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Pin::SCHEMA)
@@ -197,9 +213,19 @@ async fn fk_display_binds_the_target_pk_type(pool: &Pool) {
     assert_eq!(body, "Rust;");
 }
 
+/// A failed INSERT answers an opaque 500, not the driver text (#1955).
+async fn a_duplicate_create_withholds_the_driver_error(pool: &Pool) {
+    let (status, body) = send(pool, Method::POST, "/labels/new", "code=rs").await;
+    assert!(status.is_redirection(), "first create: {status} {body}");
+    let (status, body) = send(pool, Method::POST, "/labels/new", "code=rs").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body, "internal server error");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        a_duplicate_create_withholds_the_driver_error,
         create_and_update_bind_typed_values,
         list_filters_bind_typed_values,
         fk_display_binds_the_target_pk_type,
