@@ -1,5 +1,5 @@
-//! `register_admin_queryset!` scopes by-pk reads, and facet counts
-//! on every backend (#1859); inlines hide secrets and
+//! `register_admin_queryset!` scopes by-pk reads, facet counts and FK
+//! facet labels on every backend (#1859, #2029); inlines hide secrets and
 //! rows the view hook refuses, cap rows and insert natural PKs (#1861, #1717).
 
 #![cfg(all(
@@ -34,6 +34,22 @@ fn owner_one(_: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("owner_id", Op::Eq, SqlValue::I64(1))]
 }
 rustango::register_admin_queryset!("rowscope_item", owner_one);
+
+/// An FK facet onto `rowscope_item`, whose hook hides owner 77.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "rowscope_note",
+    admin(list_display = "body", list_filter = "item_id")
+)]
+#[allow(dead_code)]
+pub struct Note {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub body: String,
+    #[rustango(fk = "rowscope_item", on = "id")]
+    pub item_id: i64,
+}
 
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rowscope_parent", display = "name")]
@@ -80,8 +96,10 @@ fn not_hidden(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -
 rustango::register_admin_object_permission!("rowscope_child", "view", not_hidden);
 
 async fn setup(pool: &Pool) {
-    use rustango::testkit::matrix::fresh_table;
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "rowscope_note").await;
     fresh_table::<Item>(pool).await;
+    fresh_table::<Note>(pool).await;
     fresh_table::<Parent>(pool).await;
     fresh_table::<Child>(pool).await;
 }
@@ -139,6 +157,21 @@ async fn hidden_rows_are_404_and_uncounted(pool: &Pool) {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("owner_id=1"), "own facet: {body}");
     assert!(!body.contains("owner_id=77"), "scoped facet: {body}");
+}
+
+/// An FK facet labels a hidden target by its key, not its title (#2029).
+async fn fk_facet_hides_a_hidden_targets_name(pool: &Pool) {
+    let theirs = seed(pool, "secret-title", 77).await;
+    let mut note = Note {
+        id: Auto::default(),
+        body: "n".into(),
+        item_id: theirs,
+    };
+    note.insert_pool(pool).await.expect("insert note");
+    let (status, body) = get(pool, "/rowscope_note").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(&format!("item_id={theirs}")), "facet: {body}");
+    assert!(!body.contains("secret-title"), "hidden name leaked: {body}");
 }
 
 async fn seed_child(pool: &Pool, code: &str, parent_id: i64, label: &str, hidden: bool) {
@@ -228,6 +261,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         hidden_rows_are_404_and_uncounted,
+        fk_facet_hides_a_hidden_targets_name,
         inlines_hide_secrets_and_refused_rows,
         inline_post_keeps_secrets_and_inserts_natural_pks,
         inline_post_enforces_max_num,

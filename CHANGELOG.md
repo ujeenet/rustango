@@ -26,6 +26,14 @@ Rows the child's `view` hook refuses are not shown; a save that adds rows past `
 
 It links `?<field>__isnull=1`, which the list reads as `IS NULL`; `?<field>=` showed every row.
 
+### Security — FK facet labels respect the target's queryset hooks (#2029)
+
+A target row the hooks hide is shown by its key, not its display value.
+
+### Fixed — admin bulk actions cap the selected keys (#2049)
+
+More than 10,000 `_selected` keys is a 400, and FK facet labels load in chunks, so one `IN` list stays under every dialect's bind cap.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

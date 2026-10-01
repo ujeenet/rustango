@@ -231,6 +231,9 @@ const RESERVED_PARAMS: &[&str] = &[
     "trashed",
 ];
 
+/// Most keys one `IN` list binds: under every dialect's bind cap (#2049).
+const MAX_IN_KEYS: usize = 10_000;
+
 /// `?<field>__isnull=1` lists the rows where `field` is NULL (#2006).
 const ISNULL_SUFFIX: &str = "__isnull";
 
@@ -723,6 +726,7 @@ pub(crate) async fn table_view(
     let show_all_facet = params.get("facet_show_all").map(String::as_str);
     let facets_ctx: Vec<serde_json::Value> = compute_facets(
         &state,
+        &parts,
         model,
         &field_filters,
         &filters,
@@ -863,6 +867,7 @@ pub(crate) async fn table_view(
 #[allow(clippy::too_many_arguments)]
 async fn compute_facets(
     state: &AppState,
+    parts: &axum::http::request::Parts,
     model: &'static crate::core::ModelSchema,
     field_filters: &[(&'static str, Filter)],
     other_filters: &[Filter],
@@ -908,7 +913,8 @@ async fn compute_facets(
                 .map(|r| r.key.clone())
                 .filter(|v| !matches!(v, SqlValue::Null))
                 .collect();
-            let names = fk_display_names(state, target, on_field, display_field, keys).await?;
+            let names =
+                fk_display_names(state, parts, target, on_field, display_field, keys).await?;
             for r in &mut facet_rows {
                 r.display = names.get(&r.raw).cloned();
             }
@@ -1051,32 +1057,33 @@ async fn fetch_facet_counts(
         .collect())
 }
 
-/// `on value -> display value` for an FK facet's keys.
+/// `on value -> display value` for an FK facet's keys, inside the
+/// target's queryset hooks (#2029) and in bind-capped chunks (#2049).
 async fn fk_display_names(
     state: &AppState,
+    parts: &axum::http::request::Parts,
     target: &'static crate::core::ModelSchema,
     on_field: &'static FieldSchema,
     display_field: &'static FieldSchema,
     keys: Vec<SqlValue>,
 ) -> Result<HashMap<String, String>, AdminError> {
-    if keys.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let rows = crate::sql::select_rows_as_json(
-        &state.pool,
-        &SelectQuery::by_pk_in(target, on_field.column, keys),
-        &[on_field, display_field],
-    )
-    .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
+    let scope = RowScope::of(target, parts);
+    let mut names = HashMap::new();
+    for chunk in keys.chunks(MAX_IN_KEYS) {
+        let rows = crate::sql::select_rows_as_json(
+            &state.pool,
+            &scope.by_pk_in(target, on_field.column, chunk.to_vec()),
+            &[on_field, display_field],
+        )
+        .await?;
+        names.extend(rows.iter().filter_map(|row| {
             Some((
                 render::read_value_as_string_json(row, on_field)?,
                 render::read_value_as_string_json(row, display_field)?,
             ))
-        })
-        .collect())
+        }));
+    }
+    Ok(names)
 }
 
 /// The URL form of a facet key, the shape `parse_form_value` reads back.
@@ -2329,6 +2336,14 @@ pub(crate) async fn action_submit(
         } else if k == "trashed" {
             trashed = v == "1";
         }
+    }
+    if selected_raw.len() > MAX_IN_KEYS {
+        return Err(AdminError::Form(forms::FormError::Parse {
+            field: "_selected".to_owned(),
+            ty: "selection",
+            value: selected_raw.len().to_string(),
+            detail: format!("an action takes at most {MAX_IN_KEYS} rows"),
+        }));
     }
     // Back to the list the action was run from (#1918).
     let list_url = if trashed && model.soft_delete_column.is_some() {

@@ -1,7 +1,7 @@
 //! Admin list paging order, filter-keeping links, the mounted prefix,
 //! bool checkboxes, soft-deleted rows, filtered facet counts, encoded PK
-//! redirects, URL filter allow-list, and NULL facets on every
-//! backend (#1917 #1916 #1765 #1730 #1918 #2004 #1862 #2031 #2006).
+//! redirects, URL filter allow-list, NULL facets and capped actions on every
+//! backend (#1917 #1916 #1765 #1730 #1918 #2004 #1862 #2031 #2006 #2049).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -462,6 +462,22 @@ async fn null_facet_lists_the_null_rows(pool: &Pool) {
     assert!(body.contains(r#"href="/adm/adminls_slug""#), "{body}");
 }
 
+/// A bulk action past the bind-safe key cap is a 400 and writes nothing (#2049).
+async fn bulk_action_selection_is_capped(pool: &Pool) {
+    let id = seed(pool, "kept-row", false).await;
+    let mut form = String::from("action=delete_selected");
+    for _ in 0..10_001 {
+        form.push_str(&format!("&_selected={id}"));
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri("/adminls_item/__action")
+        .header("content-type", "application/x-www-form-urlencoded");
+    let (status, body) = send(pool, req, Body::from(form)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(get(pool, "/adminls_item").await.contains("kept-row"));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -476,5 +492,6 @@ tri_dialect_test! {
         string_pk_redirect_is_encoded,
         url_filters_skip_secret_and_unshown_fields,
         null_facet_lists_the_null_rows,
+        bulk_action_selection_is_capped,
     ],
 }
