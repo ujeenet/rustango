@@ -38,41 +38,35 @@
 //! - `flag:<name>:user:<user_id>` — per-user override
 //! - `flag:<name>:pct` — rollout percentage, 0..=100
 //!
-//! Entries get a 1 hour TTL by default, so a write reaches every replica
-//! within an hour even with no invalidation. Change it with
-//! [`FeatureFlags::ttl`].
+//! Entries never expire by default: flag state is durable. Opt in to
+//! expiry with [`FeatureFlags::ttl`]. Use a cache that does not evict.
 //!
 //! [`FeatureFlags::ttl`]: crate::feature_flags::FeatureFlags::ttl
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cache::BoxedCache;
 
 const KEY_PREFIX: &str = "flag";
-const DEFAULT_TTL_SECS: u64 = 3600;
 
 #[derive(Clone)]
 pub struct FeatureFlags {
     cache: BoxedCache,
-    ttl: Arc<Duration>,
+    /// `None` = never expire; a kill switch must not lapse on its own.
+    ttl: Option<Duration>,
 }
 
 impl FeatureFlags {
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
-        Self {
-            cache,
-            ttl: Arc::new(Duration::from_secs(DEFAULT_TTL_SECS)),
-        }
+        Self { cache, ttl: None }
     }
 
-    /// Set the per-entry TTL. A lower value spreads changes to other
-    /// replicas faster; a higher one costs less cache traffic. Default
-    /// is 1 hour.
+    /// Make every write expire after `ttl`; the flag then reads as never
+    /// set. Default: no expiry.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = Arc::new(ttl);
+        self.ttl = Some(ttl);
         self
     }
 
@@ -90,10 +84,7 @@ impl FeatureFlags {
 
     /// Globally enable the flag for everyone.
     pub async fn enable(&self, name: &str) {
-        let _ = self
-            .cache
-            .set(&self.global_key(name), "on", Some(*self.ttl))
-            .await;
+        let _ = self.cache.set(&self.global_key(name), "on", self.ttl).await;
     }
 
     /// Globally disable the flag. This beats any rollout percentage,
@@ -102,7 +93,7 @@ impl FeatureFlags {
     pub async fn disable(&self, name: &str) {
         let _ = self
             .cache
-            .set(&self.global_key(name), "off", Some(*self.ttl))
+            .set(&self.global_key(name), "off", self.ttl)
             .await;
     }
 
@@ -124,7 +115,7 @@ impl FeatureFlags {
         let p = percent.min(100);
         let _ = self
             .cache
-            .set(&self.pct_key(name), &p.to_string(), Some(*self.ttl))
+            .set(&self.pct_key(name), &p.to_string(), self.ttl)
             .await;
     }
 
@@ -133,7 +124,7 @@ impl FeatureFlags {
     pub async fn enable_for_user(&self, name: &str, user_id: &str) {
         let _ = self
             .cache
-            .set(&self.user_key(name, user_id), "on", Some(*self.ttl))
+            .set(&self.user_key(name, user_id), "on", self.ttl)
             .await;
     }
 
@@ -141,7 +132,7 @@ impl FeatureFlags {
     pub async fn disable_for_user(&self, name: &str, user_id: &str) {
         let _ = self
             .cache
-            .set(&self.user_key(name, user_id), "off", Some(*self.ttl))
+            .set(&self.user_key(name, user_id), "off", self.ttl)
             .await;
     }
 
@@ -372,6 +363,64 @@ mod tests {
         assert!(!f.is_enabled_for("new", "alice").await);
         // Bob had no state, so clear had nothing to do for him.
         assert!(!f.is_enabled_for("new", "bob").await);
+    }
+
+    /// Records the TTL of every write, so a test sees what reaches the backend.
+    struct TtlSpy {
+        inner: InMemoryCache,
+        ttls: std::sync::Mutex<Vec<Option<Duration>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for TtlSpy {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.inner.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.ttls.lock().unwrap().push(ttl);
+            self.inner.set(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.inner.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.inner.exists(k).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+    }
+
+    #[tokio::test]
+    async fn writes_never_expire_by_default() {
+        // #1956: every write used a 1 h TTL, so `enable` / `disable` lapsed.
+        let spy = StdArc::new(TtlSpy {
+            inner: InMemoryCache::new(),
+            ttls: std::sync::Mutex::new(Vec::new()),
+        });
+        let f = FeatureFlags::new(spy.clone());
+        f.enable("new").await;
+        f.disable("new").await;
+        f.set_percentage("new", 10).await;
+        f.enable_for_user("new", "a").await;
+        f.disable_for_user("new", "a").await;
+        let ttls = spy.ttls.lock().unwrap().clone();
+        assert_eq!(ttls, vec![None; 5]);
+    }
+
+    #[tokio::test]
+    async fn opt_in_ttl_expires_the_flag() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let f = FeatureFlags::new(cache).ttl(Duration::from_millis(30));
+        f.enable("new").await;
+        assert!(f.is_enabled("new").await);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!f.is_enabled("new").await);
     }
 
     #[test]

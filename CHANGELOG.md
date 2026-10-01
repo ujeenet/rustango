@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — feature flags no longer expire after an hour (#1956)
+
+`FeatureFlags` writes with no TTL, so `enable` / `disable` stick. `FeatureFlags::ttl` opts in to expiry.
+
 ## [0.59.11] — 2026-09-30
 
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Feature flags never expire by default (#1956)
+
+Flag writes no longer carry a 1 hour TTL. To keep the old expiry, call `.ttl(Duration::from_secs(3600))`.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)
