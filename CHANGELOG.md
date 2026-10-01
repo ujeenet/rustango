@@ -16,7 +16,7 @@ proxy named in `RealIpLayer::trust_proxies`, and so do tenant and admin SSO and 
 **Breaking:** a sealed challenge carries its ceremony and issue time, expires after 5 min
 and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused, and
 `update_sign_count` never moves the counter back and returns a `#[must_use]` `SignCountUpdate`.
-`verify_authentication` returns the UV flag.
+`verify_authentication` returns the UV flag. `open_challenge` warns once on a process-local cache.
 
 ### Security — `[auth] argon2_*` set the cost of new password hashes (#1728)
 

@@ -137,8 +137,14 @@ fn verify_at(
 /// malformed, tampered, signed with another `secret`, issued for another
 /// `purpose`, older than [`CHALLENGE_TTL`], or already opened once.
 ///
-/// One-time use is one atomic `cache.add`; use a cache shared by all
-/// replicas. Fails closed on a cache error or a cache that stores nothing.
+/// One-time use is one atomic `cache.add`, so a custom [`Cache::add`]
+/// must be atomic; use a cache shared by all replicas. Fails closed on a
+/// cache error or a cache that stores nothing.
+///
+/// Put the tenant and user id in `context` at seal time, and compare
+/// them with the current request here: the token alone binds neither.
+///
+/// [`Cache::add`]: crate::cache::Cache::add
 pub async fn open_challenge(
     sealed: &str,
     purpose: CeremonyPurpose,
@@ -152,6 +158,15 @@ pub async fn open_challenge(
             "passkey challenge refused: the cache keeps nothing (`NullCache`); use a shared cache"
         );
         return None;
+    }
+    if cache.is_process_local() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                target: "rustango::passkey",
+                "passkey challenges use a process-local cache; another replica can open one again"
+            );
+        });
     }
     let sig = &sealed[sealed.rfind('.')? + 1..];
     let ttl = CHALLENGE_TTL + Duration::from_secs(CLOCK_SKEW_SECS.unsigned_abs());
