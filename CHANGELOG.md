@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `EtagLayer::default()` caps at 4 MiB like `new()`; a body over the cap or of unknown size passes through untouched. An over-limit `_method` form gets `413`, not an empty body.
 
+### Fixed — CORS sends `Vary: Origin` on refused origins and in any-origin mode (#1867)
+
+Only the always-`*` policy (any origin with credentials) leaves it out.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

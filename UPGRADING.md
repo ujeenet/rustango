@@ -159,6 +159,10 @@ untouched.
 The derived default had no cap. A body with no size hint (stream, SSE) or over the cap now passes through without an `ETag`.
 `MethodOverrideLayer` answers `413` to a form over `body_limit` instead of forwarding an empty POST.
 
+### CORS adds `Vary: Origin` more often (#1867)
+
+Refused origins and any-origin mode now send it, so shared caches key on `Origin`.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

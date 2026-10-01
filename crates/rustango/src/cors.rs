@@ -37,9 +37,9 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::header::{
-    HeaderName, HeaderValue, ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
+    HeaderValue, ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
     ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
-    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, ORIGIN, VARY,
+    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, ORIGIN,
 };
 use axum::http::{Method, Request, Response, StatusCode};
 use axum::middleware::Next;
@@ -329,16 +329,18 @@ fn attach_cors_headers(
     request_headers: Option<&str>,
     response: &mut Response<Body>,
 ) {
+    // The answer depends on Origin unless it is always `*`, refusals
+    // included, so a shared cache must key on it (#1867).
+    let always_wildcard = matches!(cfg.allow_origin, AllowOrigin::Any) && cfg.allow_credentials;
+    if !always_wildcard {
+        crate::vary::add_vary(response.headers_mut(), "Origin");
+    }
     let Some(allow_origin) = cfg.resolve_origin(request_origin) else {
         return;
     };
     let headers = response.headers_mut();
     if let Ok(v) = HeaderValue::from_str(&allow_origin) {
         headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, v);
-    }
-    // Vary: Origin so caches don't serve a wrong-origin response
-    if matches!(cfg.allow_origin, AllowOrigin::List(_)) {
-        headers.append(VARY, HeaderValue::from_static("origin"));
     }
 
     if !cfg.allow_methods.is_empty() {
@@ -378,7 +380,6 @@ fn attach_cors_headers(
             headers.insert(ACCESS_CONTROL_MAX_AGE, v);
         }
     }
-    let _ = (HeaderName::from_static("vary"),); // silence unused import in some configs
 }
 
 #[cfg(test)]
@@ -443,6 +444,33 @@ mod tests {
             "a wildcard response must not claim credentials: got {:?}",
             h.get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
         );
+    }
+
+    /// A refused origin and an echoed Any-mode origin both vary by
+    /// `Origin`; only the always-`*` policy does not (#1867).
+    #[test]
+    fn vary_origin_is_sent_unless_the_answer_is_always_star() {
+        let vary = |cfg: &CorsLayer, origin: Option<&str>| {
+            let mut res = Response::new(Body::empty());
+            attach_cors_headers(cfg, origin, None, &mut res);
+            res.headers()
+                .get(axum::http::header::VARY)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+        let list = CorsLayer::new().allow_origins(vec!["https://app.example.com"]);
+        assert_eq!(
+            vary(&list, Some("https://evil.example")).as_deref(),
+            Some("Origin")
+        );
+        assert_eq!(vary(&list, None).as_deref(), Some("Origin"));
+        let any = CorsLayer::new().allow_any_origin();
+        assert_eq!(
+            vary(&any, Some("https://x.example")).as_deref(),
+            Some("Origin")
+        );
+        assert_eq!(vary(&any, None).as_deref(), Some("Origin"));
+        let star = CorsLayer::new().allow_any_origin().allow_credentials(true);
+        assert_eq!(vary(&star, Some("https://x.example")), None);
     }
 
     /// An allowlist is the supported way to do credentialed CORS, so
