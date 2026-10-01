@@ -1269,7 +1269,8 @@ impl ThrottleStore {
         }
     }
 
-    /// Spend `cost` from `key`'s window: `Err(retry_after_secs)` when over `rule.max`.
+    /// Spend `cost` from `key`'s window: `Err(retry_after_secs)` when over
+    /// `rule.max`. A rejected spend charges nothing, so it cannot lock a client out.
     fn spend(&self, key: String, rule: ThrottleRule, cost: u32, now: Instant) -> Result<(), u64> {
         // A poisoned mutex means an earlier panic mid-update. Fail open
         // rather than reject every request from here on.
@@ -1288,11 +1289,12 @@ impl ThrottleStore {
         if w.ended(now) {
             *w = fresh;
         }
-        w.count = w.count.saturating_add(cost);
-        if w.count > rule.max {
+        let count = w.count.saturating_add(cost);
+        if count > rule.max {
             let left = w.window.saturating_sub(now.duration_since(w.start));
             return Err(left.as_secs().max(1));
         }
+        w.count = count;
         Ok(())
     }
 
@@ -2855,6 +2857,17 @@ async fn handle_create(
                 );
                 return json_error(StatusCode::PAYLOAD_TOO_LARGE, &msg);
             }
+            // More rows than a whole window allows can never pass: say so.
+            if let Some(rule) = state.vs.throttle.create {
+                if rows.len() > rule.max as usize {
+                    let msg = format!(
+                        "bulk create of {} rows exceeds the create throttle of {} per window",
+                        rows.len(),
+                        rule.max
+                    );
+                    return json_error(StatusCode::PAYLOAD_TOO_LARGE, &msg);
+                }
+            }
             let extra = u32::try_from(rows.len().saturating_sub(1)).unwrap_or(u32::MAX);
             if let Some(resp) = client
                 .as_deref()
@@ -3543,6 +3556,18 @@ mod throttle_store_tests {
             store.spend("spent".into(), rule, 1, now).is_err(),
             "no reset"
         );
+    }
+
+    /// A rejected spend charges nothing (#1999 review).
+    #[test]
+    fn a_rejected_spend_is_free() {
+        let store = ThrottleStore::new(4);
+        let rule = ThrottleRule::new(3, 60);
+        let now = Instant::now();
+        assert!(store.spend("k".into(), rule, 50, now).is_err());
+        assert!(store.spend("k".into(), rule, 2, now).is_ok());
+        assert!(store.spend("k".into(), rule, 2, now).is_err());
+        assert!(store.spend("k".into(), rule, 1, now).is_ok());
     }
 
     #[test]

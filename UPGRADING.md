@@ -170,6 +170,7 @@ Pass the sortable names explicitly; empty no longer means every field.
 ### ViewSet bulk create takes at most 1000 rows (#1999)
 
 More is a `413` (raise with `max_bulk_create(n)`); each row spends one `create` throttle unit.
+A bulk larger than the `create` throttle's `max` is a `413`; a throttled request no longer counts.
 
 ### ViewSet `QUERY` shares the `list` throttle with `GET` (#1997)
 
