@@ -35,6 +35,11 @@
 //!
 //! Handlers run inside the admin's session-auth scope when one is
 //! configured, so the operator must be signed in to reach them.
+//!
+//! With `Builder::with_user_perms`, a view needs `{table}.view` for a
+//! GET or QUERY and `{table}.change` for POST, PUT, PATCH or DELETE; the
+//! rest get 403. A trailing `perm = "publish"` asks for
+//! `{table}.publish` instead, with or without `with_user_perms`.
 
 use axum::http::Method;
 use axum::response::Response;
@@ -73,6 +78,30 @@ pub struct AdminCustomView {
     /// `async fn(Pool, Request) -> Response` into the boxed-future
     /// shape above.
     pub handler: CustomViewHandler,
+    /// The action codename the user needs, as in `{table}.<perm>`.
+    /// `None` means `view` for a safe method and `change` for a write,
+    /// checked only under `Builder::with_user_perms`.
+    pub perm: Option<&'static str>,
+}
+
+impl AdminCustomView {
+    /// The method the route answers on: an unsupported one mounts as GET.
+    #[must_use]
+    pub fn mount_method(&self) -> Method {
+        match self.method.as_str() {
+            "POST" | "PUT" | "PATCH" | "DELETE" | "QUERY" => self.method.clone(),
+            _ => Method::GET,
+        }
+    }
+
+    /// The action this view needs: its declared `perm`, else by the mounted method.
+    #[must_use]
+    pub fn required_perm(&self) -> &'static str {
+        self.perm.unwrap_or(match self.mount_method().as_str() {
+            "GET" | "QUERY" => "view",
+            _ => "change",
+        })
+    }
 }
 
 inventory::collect!(AdminCustomView);
@@ -107,8 +136,8 @@ pub(crate) fn is_reserved(suffix: &str) -> bool {
 
 /// Register a custom admin view for one model.
 ///
-/// See [the module-level docs](self) for the argument shape and the
-/// reserved suffixes.
+/// See [the module-level docs](self) for the argument shape, the
+/// reserved suffixes and the optional trailing `perm = "…"`.
 ///
 /// ```ignore
 /// rustango::register_admin_view!(
@@ -125,6 +154,12 @@ pub(crate) fn is_reserved(suffix: &str) -> bool {
 #[macro_export]
 macro_rules! register_admin_view {
     ($table:expr, $suffix:expr, $method:expr, $label:expr, $handler:expr $(,)?) => {
+        $crate::register_admin_view!(@entry $table, $suffix, $method, $label, $handler, ::core::option::Option::None);
+    };
+    ($table:expr, $suffix:expr, $method:expr, $label:expr, $handler:expr, perm = $perm:expr $(,)?) => {
+        $crate::register_admin_view!(@entry $table, $suffix, $method, $label, $handler, ::core::option::Option::Some($perm));
+    };
+    (@entry $table:expr, $suffix:expr, $method:expr, $label:expr, $handler:expr, $perm:expr) => {
         // Wrap the user's expression in a non-capturing fn, so the
         // inventory entry holds a plain fn pointer, which is const
         // constructible. A closure with no captures fits.
@@ -143,6 +178,7 @@ macro_rules! register_admin_view {
                     }
                     __rustango_admin_view_handler
                 },
+                perm: $perm,
             }
         }
     };

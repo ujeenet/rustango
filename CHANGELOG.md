@@ -4,6 +4,37 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
+
+**Breaking:** under `with_user_perms`, a `register_admin_view!` write route now needs
+`{table}.change` (or its `perm = "…"`), else 403. The admin and `CreateView`/`UpdateView`
+percent-encode PKs in redirects, so a CR/LF no longer panics; a `/` in a `success_url`
+value becomes `%2F`.
+
+### Security — admin inlines hide secret fields (#1861)
+
+A child's `password`-widget field shows only set/not set on the detail page, renders empty on edit, and an empty one keeps the stored value.
+
+### Fixed — admin inlines: view hook per row, `max_num` on save, natural-PK inserts (#1717)
+
+Rows the child's `view` hook refuses are not shown; a save that adds rows past `max_num` is refused; a slot past `INITIAL_FORMS` inserts, so a typed natural PK works.
+
+### Security — admin list URL filters only on shown columns (#2031)
+
+`?<field>=` applies only to `list_filter`, displayed, FK or inline-parent columns, and never to a secret one, so a URL cannot probe a hidden value.
+
+### Fixed — the NULL facet lists the NULL rows (#2006)
+
+It links `?<field>__isnull=1`, which the list reads as `IS NULL`; `?<field>=` showed every row.
+
+### Security — FK facet labels respect the target's queryset hooks (#2029)
+
+A target row the hooks hide is shown by its key, not its display value.
+
+### Fixed — admin bulk actions cap the selected keys (#2049)
+
+More than 10,000 `_selected` keys is a 400, and FK facet labels load in chunks, so one `IN` list stays under every dialect's bind cap.
+
 ### Fixed — the ViewSet list follows the model's `default_order` (#2047)
 
 With no `.ordering(..)`, the list uses `default_order`, as ListView and the admin do; the PK always breaks ties.

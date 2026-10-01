@@ -150,6 +150,25 @@ untouched.
 
 ## Unreleased
 
+### Custom admin views need `change` for writes
+
+**Breaking:** under `with_user_perms`, grant `{table}.change`, or declare `perm = "…"` on
+`register_admin_view!`, for POST/PUT/PATCH/DELETE views. Without it only a declared `perm` is checked.
+`AdminCustomView` gains a `perm` field; struct literals must set it.
+
+### Admin list URL filters are allow-listed
+
+`?<field>=` is ignored unless the field is in `list_filter` or `list_display`, an FK, or an inline's parent column (#2031). Add the field to `list_filter` to keep a bookmarked filter.
+
+### `success_url` placeholders are percent-encoded
+
+`{pk}` and `{column}` values in a `CreateView`/`UpdateView` `success_url` are encoded as one path
+segment, so a `/` in the value becomes `%2F` (#1862).
+
+### Admin inlines enforce `max_num` and use `INITIAL_FORMS`
+
+A save that adds inline rows past `max_num` re-renders with an error; slots past `INITIAL_FORMS` are inserts (#1717).
+
 ### The ViewSet list follows the model's `default_order` (#2047)
 
 With no `.ordering(..)` the list uses `default_order`, then the PK.
