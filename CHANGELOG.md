@@ -16,6 +16,11 @@ proxy named in `RealIpLayer::trust_proxies`. New `OAuth2Provider::with_emails_ur
 and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused, and
 `update_sign_count` never moves the counter back. `verify_authentication` returns the UV flag.
 
+### Security — `[auth] argon2_*` set the cost of new password hashes (#1728)
+
+The keys were read by nothing. New `passwords::Argon2Params`, `configure_argon2` and
+`argon2_params`; an invalid combination keeps the default and logs an error.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

@@ -1,6 +1,6 @@
 //! The `[auth]` login keys reach the gate, the lockout and the hash
 //! queue, and a value set in code wins over them in either order
-//! (#1609, #1732). Own binary: it sets process-global state, in order.
+//! (#1609, #1732); `argon2_*` reach the hasher (#1728). Own binary: it sets process-global state, in order.
 
 #![cfg(all(
     feature = "config",
@@ -97,6 +97,32 @@ async fn auth_keys_reach_the_gate_and_code_wins() {
         account_lockout::shared().lock_duration(),
         Duration::from_secs(31)
     );
+}
+
+/// `[auth] argon2_*` set the cost of new hashes; code wins (#1728).
+#[test]
+fn argon2_keys_reach_the_hasher() {
+    use rustango::passwords::{self, Argon2Params};
+    // An invalid combination keeps the default.
+    apply(|a| a.argon2_parallelism = Some(0));
+    assert_eq!(passwords::argon2_params(), Argon2Params::DEFAULT);
+
+    apply(|a| {
+        a.argon2_memory_kib = Some(8_192);
+        a.argon2_iterations = Some(3);
+    });
+    let h = passwords::hash("pw").unwrap();
+    assert!(h.contains("$m=8192,t=3,p=1$"), "{h}");
+    assert!(passwords::verify("pw", &h).unwrap());
+
+    assert!(passwords::configure_argon2(
+        Argon2Params::new(9_216, 2, 1).unwrap()
+    ));
+    apply(|a| a.argon2_memory_kib = Some(8_192));
+    let h2 = passwords::hash("pw").unwrap();
+    assert!(h2.contains("$m=9216,t=2,p=1$"), "{h2}");
+    // Hashes made at the old cost still verify.
+    assert!(passwords::verify("pw", &h).unwrap());
 }
 
 fn ip_ext(ip: &str) -> axum::http::Extensions {

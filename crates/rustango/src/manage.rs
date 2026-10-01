@@ -1750,6 +1750,28 @@ fn apply_login_settings(a: &crate::config::AuthSettings) {
             ignored("hash_wait_ms");
         }
     }
+    #[cfg(feature = "passwords")]
+    if a.argon2_memory_kib.is_some()
+        || a.argon2_iterations.is_some()
+        || a.argon2_parallelism.is_some()
+    {
+        use crate::passwords::{configure_argon2_from_settings, Argon2Params};
+        let d = Argon2Params::DEFAULT;
+        match Argon2Params::new(
+            a.argon2_memory_kib.unwrap_or(d.memory_kib()),
+            a.argon2_iterations.unwrap_or(d.iterations()),
+            a.argon2_parallelism.unwrap_or(d.parallelism()),
+        ) {
+            Ok(p) if !configure_argon2_from_settings(p) => ignored("argon2_*"),
+            Ok(_) => {}
+            // An invalid combination keeps the default cost (#1728).
+            Err(e) => tracing::error!(
+                target: "rustango::manage",
+                error = %e,
+                "[auth] argon2_* keys are invalid; keeping the default cost"
+            ),
+        }
+    }
     #[cfg(feature = "admin")]
     if a.login_ip_limit.is_some()
         || a.login_ip_window_secs.is_some()

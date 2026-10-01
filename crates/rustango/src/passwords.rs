@@ -42,7 +42,7 @@ pub enum PasswordError {
     Busy,
 }
 
-/// Hash a password with argon2id. Returns a standard PHC string.
+/// Hash a password with argon2id at [`argon2_params`]. Returns a standard PHC string.
 ///
 /// argon2id is deliberately slow and memory-hungry, and every hash
 /// gets a fresh random salt, so a stolen table cannot be attacked with
@@ -52,11 +52,15 @@ pub enum PasswordError {
 /// # Errors
 /// [`PasswordError::Hash`] on argon2 failures.
 pub fn hash(password: &str) -> Result<String, PasswordError> {
+    hash_with(argon2_params(), password)
+}
+
+fn hash_with(params: Argon2Params, password: &str) -> Result<String, PasswordError> {
     use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
-    use argon2::Argon2;
 
     let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
+    params
+        .hasher()
         .hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
         .map_err(|e| PasswordError::Hash(e.to_string()))
@@ -79,18 +83,100 @@ pub fn verify(password: &str, stored_hash: &str) -> Result<bool, PasswordError> 
         .is_ok())
 }
 
-/// A valid argon2id hash of a fixed throwaway password, built once on
-/// first use at the same cost as a real stored hash. Backs
+/// A valid argon2id hash of a fixed throwaway password at the current
+/// [`argon2_params`] cost, like a real stored hash. Backs
 /// [`verify_dummy`].
 fn dummy_hash() -> &'static str {
-    use std::sync::OnceLock;
-    static DUMMY: OnceLock<String> = OnceLock::new();
-    DUMMY
-        .get_or_init(|| {
-            hash("rustango-timing-equalization-dummy")
-                .expect("argon2id hashing of a fixed dummy input cannot fail")
+    use std::sync::{PoisonError, RwLock};
+    // Rebuilt when the cost changes, so an unknown user costs what a real one does.
+    static DUMMY: RwLock<Option<(Argon2Params, &'static str)>> = RwLock::new(None);
+    let params = argon2_params();
+    if let Some((p, h)) = *DUMMY.read().unwrap_or_else(PoisonError::into_inner) {
+        if p == params {
+            return h;
+        }
+    }
+    let h: &'static str = hash_with(params, "rustango-timing-equalization-dummy")
+        .expect("argon2id hashing of a fixed dummy input cannot fail")
+        .leak();
+    *DUMMY.write().unwrap_or_else(PoisonError::into_inner) = Some((params, h));
+    h
+}
+
+/// Argon2id cost for new hashes. Only a valid combination can be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2Params {
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+}
+
+impl Argon2Params {
+    /// The argon2 crate default: m=19456 KiB, t=2, p=1 (OWASP floor).
+    pub const DEFAULT: Self = Self {
+        memory_kib: argon2::Params::DEFAULT_M_COST,
+        iterations: argon2::Params::DEFAULT_T_COST,
+        parallelism: argon2::Params::DEFAULT_P_COST,
+    };
+
+    /// # Errors
+    /// [`PasswordError::Hash`] when argon2 rejects the combination.
+    pub fn new(memory_kib: u32, iterations: u32, parallelism: u32) -> Result<Self, PasswordError> {
+        argon2::Params::new(memory_kib, iterations, parallelism, None)
+            .map_err(|e| PasswordError::Hash(e.to_string()))?;
+        Ok(Self {
+            memory_kib,
+            iterations,
+            parallelism,
         })
-        .as_str()
+    }
+
+    #[must_use]
+    pub fn memory_kib(&self) -> u32 {
+        self.memory_kib
+    }
+
+    #[must_use]
+    pub fn iterations(&self) -> u32 {
+        self.iterations
+    }
+
+    #[must_use]
+    pub fn parallelism(&self) -> u32 {
+        self.parallelism
+    }
+
+    fn hasher(self) -> argon2::Argon2<'static> {
+        let params = argon2::Params::new(self.memory_kib, self.iterations, self.parallelism, None)
+            .expect("validated in Argon2Params::new");
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+    }
+}
+
+impl Default for Argon2Params {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+static ARGON2: crate::boot_slot::BootSlot<Argon2Params> = crate::boot_slot::BootSlot::new();
+
+/// Set the argon2id cost for new hashes. Call at boot. It replaces the
+/// `[auth] argon2_*` values; `false` if an earlier call won.
+pub fn configure_argon2(params: Argon2Params) -> bool {
+    ARGON2.set_explicit(params)
+}
+
+/// The `[auth] argon2_*` values; `false` if app code already set them.
+#[cfg(feature = "config")]
+pub(crate) fn configure_argon2_from_settings(params: Argon2Params) -> bool {
+    ARGON2.set_from_settings(params)
+}
+
+/// The argon2id cost [`hash`] uses now.
+#[must_use]
+pub fn argon2_params() -> Argon2Params {
+    *ARGON2.get(|| Argon2Params::DEFAULT)
 }
 
 /// Do one verification's worth of work and throw the result away.
