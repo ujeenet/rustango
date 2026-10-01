@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `RustangoError` status changes (#1955)
+
+DB errors inside `Auth`/`AuthFlow`/`BulkAction`, `Env`, `JwtIssue` and hashing errors are now `500`; `Busy` is `503`.
+Their message is withheld unless `RUSTANGO_DISCLOSE_ERRORS` is set.
+
 ### `/ready` drops each check's `error` field (#1840)
 
 Call `HealthRouter::show_errors()` to keep it on an endpoint only operators reach.
