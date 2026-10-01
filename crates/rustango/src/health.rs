@@ -46,6 +46,10 @@
 //! - [`HealthRouter::http_probe`] GETs a URL and wants a 2xx. Needs
 //!   the `http-client` feature.
 //!
+//! A failing check's error text is logged, not sent: it can name
+//! hosts, ports or DB users. [`HealthRouter::show_errors`] puts it in
+//! the body, for an endpoint only operators reach.
+//!
 //! ## Sample response
 //!
 //! ```json
@@ -59,6 +63,7 @@
 //! ```
 //!
 //! [`HealthRouter::check`]: crate::health::HealthRouter::check
+//! [`HealthRouter::show_errors`]: crate::health::HealthRouter::show_errors
 //! [`HealthRouter::tcp_probe`]: crate::health::HealthRouter::tcp_probe
 //! [`HealthRouter::cache_probe`]: crate::health::HealthRouter::cache_probe
 //! [`HealthRouter::http_probe`]: crate::health::HealthRouter::http_probe
@@ -94,6 +99,8 @@ pub struct HealthRouter {
     /// Whether the built-in `database` probe runs. Turn it off to
     /// register your own with a different query.
     include_db_probe: bool,
+    /// Put each failing check's error text in the body. Off: it is logged only.
+    show_errors: bool,
 }
 
 #[derive(Clone)]
@@ -102,6 +109,7 @@ struct HealthState {
     extra_checks: Arc<Vec<(String, Option<String>, CheckFn)>>,
     per_check_timeout: Duration,
     include_db_probe: bool,
+    show_errors: bool,
 }
 
 impl HealthRouter {
@@ -115,7 +123,16 @@ impl HealthRouter {
             extra_checks: Vec::new(),
             per_check_timeout: Duration::from_secs(5),
             include_db_probe: true,
+            show_errors: false,
         }
+    }
+
+    /// Put each failing check's error in the `/ready` body. Errors can
+    /// name hosts, ports and DB users, so only for a private endpoint.
+    #[must_use]
+    pub fn show_errors(mut self) -> Self {
+        self.show_errors = true;
+        self
     }
 
     /// Change the per-check timeout. A lower value reports failure
@@ -258,6 +275,7 @@ impl HealthRouter {
             extra_checks: Arc::new(self.extra_checks),
             per_check_timeout: self.per_check_timeout,
             include_db_probe: self.include_db_probe,
+            show_errors: self.show_errors,
         };
         Router::new()
             .route("/health", get(handle_live))
@@ -291,14 +309,14 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
                 .map_err(|e| e.to_string())
         })
         .await;
-        if record(&mut checks, "database", outcome) {
+        if record(&mut checks, "database", outcome, state.show_errors) {
             all_ok = false;
         }
     }
 
     for (name, target, check) in state.extra_checks.iter() {
         let outcome = run_with_timeout(state.per_check_timeout, target.as_deref(), check()).await;
-        if record(&mut checks, name, outcome) {
+        if record(&mut checks, name, outcome, state.show_errors) {
             all_ok = false;
         }
     }
@@ -349,11 +367,15 @@ fn record(
     checks: &mut serde_json::Map<String, Value>,
     name: &str,
     (outcome, elapsed): (Result<(), String>, Duration),
+    show_errors: bool,
 ) -> bool {
     let latency_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let (status_str, error_field) = match outcome {
         Ok(()) => ("ok", None),
-        Err(e) => ("error", Some(truncate(&e, 200))),
+        Err(e) => {
+            tracing::warn!(target: "rustango::error", check = name, error = %e, "readiness check failed");
+            ("error", show_errors.then(|| truncate(&e, 200)))
+        }
     };
     let mut entry = serde_json::Map::new();
     entry.insert("status".into(), Value::String(status_str.into()));
@@ -442,6 +464,7 @@ mod tests {
     async fn ready_passes_with_only_passing_extra_checks() {
         let app = HealthRouter::new(lazy_pool())
             .skip_db_probe()
+            .show_errors()
             .check("always_ok", || async { Ok(()) })
             .into_router();
         let resp = app
@@ -465,6 +488,7 @@ mod tests {
     async fn ready_returns_503_when_one_check_fails() {
         let app = HealthRouter::new(lazy_pool())
             .skip_db_probe()
+            .show_errors()
             .check("ok", || async { Ok(()) })
             .check("broken", || async { Err("nope".into()) })
             .into_router();
@@ -489,6 +513,7 @@ mod tests {
     async fn slow_check_is_killed_by_timeout() {
         let app = HealthRouter::new(lazy_pool())
             .skip_db_probe()
+            .show_errors()
             .timeout(Duration::from_millis(50))
             .check("slow", || async {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -540,6 +565,7 @@ mod tests {
         let huge = "x".repeat(500);
         let app = HealthRouter::new(lazy_pool())
             .skip_db_probe()
+            .show_errors()
             .check("verbose", move || {
                 let huge = huge.clone();
                 async move { Err(huge) }
@@ -564,11 +590,44 @@ mod tests {
         assert!(err.ends_with('…'));
     }
 
+    /// A public `/ready` withholds probe errors and targets by default (#1840).
+    #[tokio::test]
+    async fn ready_withholds_errors_and_targets_by_default() {
+        let app = HealthRouter::new(lazy_pool())
+            .tcp_probe("redis", "127.0.0.1:1")
+            .check("db2", || async {
+                Err("password authentication failed for user app".into())
+            })
+            .timeout(Duration::from_millis(500))
+            .into_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "error");
+        for name in ["redis", "db2"] {
+            assert_eq!(v["checks"][name]["status"], "error", "{v}");
+            assert!(v["checks"][name].get("error").is_none(), "{v}");
+        }
+        let text = v.to_string();
+        assert!(
+            !text.contains("127.0.0.1") && !text.contains("password"),
+            "{text}"
+        );
+    }
+
     #[tokio::test]
     async fn tcp_probe_failure_reports_addr_in_error() {
         // 127.0.0.1:1 should reliably refuse on every CI machine.
         let app = HealthRouter::new(lazy_pool())
             .skip_db_probe()
+            .show_errors()
             .tcp_probe("nothing-listening", "127.0.0.1:1")
             .timeout(Duration::from_millis(500))
             .into_router();
@@ -595,6 +654,7 @@ mod tests {
         let cache: BoxedCache = Arc::new(InMemoryCache::new());
         let app = HealthRouter::new(lazy_pool())
             .skip_db_probe()
+            .show_errors()
             .cache_probe("memory", cache)
             .into_router();
         let resp = app

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `/ready` drops each check's `error` field (#1840)
+
+Call `HealthRouter::show_errors()` to keep it on an endpoint only operators reach.
+
 ### `CompressionLayer` skips streams and `206` (#1954)
 
 A body with no exact size hint (`Body::from_stream`) is now sent uncompressed instead of buffered.

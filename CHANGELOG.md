@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — public `/ready` no longer returns driver errors or probe targets (#1840)
+
+A failing check reports only its status and latency; the error is logged under `rustango::error`. `HealthRouter::show_errors()` opts back in.
+
 ### Fixed — compression no longer empties large or streaming responses (#1954)
 
 Bodies over `max_body_bytes`, without a known size, or `206` pass through whole; `gzip;q=0, *` no longer gzips.
