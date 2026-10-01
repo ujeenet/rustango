@@ -150,6 +150,32 @@ untouched.
 
 ## Unreleased
 
+### The ViewSet list follows the model's `default_order` (#2047)
+
+With no `.ordering(..)` the list uses `default_order`, then the PK.
+
+### ViewSet `DELETE` soft-deletes a `#[rustango(soft_delete)]` model (#1998)
+
+It stamps the column; soft-deleted rows then read as `404` and leave the list.
+
+### `CreateView` answers a duplicate unique value with `422` and the form (#2033)
+
+A template must render `form.errors` (`__all__` for a row-level error) to show it.
+
+### `list_params::parse_ordering` with an empty allow-list sorts on nothing (#1996)
+
+Pass the sortable names explicitly; empty no longer means every field.
+`ViewSet::ordering_fields(&[])` now disables `?ordering=` instead of allowing the rendered fields.
+
+### ViewSet bulk create takes at most 1000 rows (#1999)
+
+More is a `413` (raise with `max_bulk_create(n)`); each row spends one `create` throttle unit.
+A bulk larger than the `create` throttle's `max` is a `413`; a throttled request no longer counts.
+
+### ViewSet `QUERY` shares the `list` throttle with `GET` (#1997)
+
+A client that sends both now spends one budget, not two.
+
 ### Handler panics are caught (#1541)
 
 `Cli` and `server::Builder` turn a panic into a `text/plain` 500 with body `internal server error`, carrying CORS and the security headers; a panic hook you rely on still runs. A panic inside a streaming response body is not caught.

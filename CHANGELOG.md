@@ -4,6 +4,33 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the ViewSet list follows the model's `default_order` (#2047)
+
+With no `.ordering(..)`, the list uses `default_order`, as ListView and the admin do; the PK always breaks ties.
+
+### Fixed — the ViewSet honours `#[rustango(soft_delete)]` (#1998)
+
+`DELETE` stamps the soft-delete column instead of deleting the row, and list, retrieve, update and destroy hide soft-deleted rows.
+
+### Fixed — a duplicate unique value on a `CreateView` is a form error (#2033)
+
+The form re-renders with `422` and an error on the taken field (`__all__` when no single field is to blame), not a `500`, on `router` and `tenant_router`.
+
+### Security — an empty `?ordering=` allow-list permits nothing (#1996)
+
+`list_params::parse_ordering` with an empty allow-list drops every token, so a serializer that renders no model field no longer makes every column a sort key.
+`ViewSet::ordering_fields(&[])` makes nothing sortable.
+
+### Security — ViewSet bulk create is capped; the throttle map is bounded (#1999)
+
+A bulk create takes at most `max_bulk_create(n)` rows (default 1000, else `413`) and spends one `create` throttle unit per row.
+A rejected request charges no units; a bulk larger than the `create` throttle's `max` is a `413`.
+The throttle store sweeps ended windows once it holds 100k keys, so per-client keys no longer grow forever.
+
+### Security — ViewSet `QUERY` requests are throttled (#1997)
+
+`QUERY` spends the `list` throttle, the same budget as `GET`.
+
 ### Fixed — a panicking handler is a logged 500, not a dropped connection (#1541)
 
 `Cli` and `server::Builder` catch handler panics: an opaque `text/plain` 500 with the request id, CORS and security headers, logged under `rustango::error`. The oauth2 login no longer panics on a bad header value.

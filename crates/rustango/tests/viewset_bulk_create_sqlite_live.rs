@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use rustango::core::Model as _;
-use rustango::sql::{Auto, Pool};
+use rustango::sql::{Auto, CounterPool as _, Pool};
 use rustango::viewset::ViewSet;
 use rustango::Model;
 use tower::ServiceExt;
@@ -157,4 +157,54 @@ async fn bulk_entry_that_is_not_an_object_returns_400() {
         msg.contains("not a JSON object") || msg.contains("entry 1"),
         "error message should call out the bad shape, got: {msg}"
     );
+}
+
+/// A bulk over `max_bulk_create` is a `413` and writes nothing (#1999).
+#[tokio::test]
+async fn bulk_over_the_row_cap_is_413() {
+    let pool = fresh_pool().await;
+    let app = ViewSet::for_model(Widget::SCHEMA)
+        .max_bulk_create(2)
+        .router_pool("/widgets", pool.clone());
+    let three =
+        r#"[{"label":"a","priority":1},{"label":"b","priority":2},{"label":"c","priority":3}]"#;
+    let (status, body) = post_json(app.clone(), three).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(rows(&pool).await, 0, "the 413 wrote rows");
+    let two = r#"[{"label":"a","priority":1},{"label":"b","priority":2}]"#;
+    let (status, body) = post_json(app, two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(rows(&pool).await, 2);
+}
+
+async fn rows(pool: &Pool) -> i64 {
+    Widget::objects().count(pool).await.unwrap()
+}
+
+fn bulk(n: usize) -> String {
+    let rows: Vec<_> = (0..n)
+        .map(|i| serde_json::json!({"label": format!("r{i}"), "priority": 1}))
+        .collect();
+    serde_json::Value::from(rows).to_string()
+}
+
+/// A rejected bulk charges no throttle units; one over the whole window is a 413.
+#[tokio::test]
+async fn a_rejected_bulk_does_not_lock_the_client_out() {
+    let pool = fresh_pool().await;
+    let app = ViewSet::for_model(Widget::SCHEMA)
+        .throttle_all(4, 60)
+        .router_pool("/widgets", pool.clone());
+    let (status, body) = post_json(app.clone(), &bulk(5)).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert!(body.contains("create throttle of 4"), "{body}");
+    // Spent: 1 (the 413 request). The 3-row bulk needs 3 more: over 4.
+    let (status, _) = post_json(app.clone(), &bulk(1)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = post_json(app.clone(), &bulk(3)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // The 429 bulk charged nothing past its own request unit.
+    let (status, body) = post_json(app.clone(), &bulk(1)).await;
+    assert_eq!(status, StatusCode::CREATED, "locked out: {body}");
+    assert_eq!(rows(&pool).await, 2);
 }

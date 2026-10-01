@@ -340,3 +340,68 @@ async fn ordering_stays_open_when_no_fields_restriction_is_set() {
         "with no `fields` restriction every column is exposed anyway"
     );
 }
+
+/// A hand-written serializer keeps the trait's empty
+/// `readable_source_fields`, so it names no sort key.
+#[derive(serde::Serialize)]
+struct HandPost {
+    id: i64,
+    title: String,
+}
+
+impl rustango::serializer::ModelSerializer for HandPost {
+    type Model = Post;
+    fn from_model(m: &Post) -> Self {
+        Self {
+            id: m.id.get().copied().unwrap_or_default(),
+            title: m.title.clone(),
+        }
+    }
+    fn writable_fields() -> &'static [&'static str] {
+        &[]
+    }
+}
+
+/// An empty readable set allows no `?ordering=`, not every column (#1996).
+#[tokio::test]
+async fn ordering_is_closed_when_the_serializer_renders_no_model_field() {
+    let pool = fresh_pool().await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+        .page_size(50)
+        .serializer::<HandPost>()
+        .router_pool("/posts", pool.clone());
+
+    seed_divergent(&pool).await;
+
+    let resp = app
+        .clone()
+        .oneshot(get("/posts?ordering=secret_score"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(ids(&body), vec![1, 2, 3], "secret order leaked: {body}");
+}
+
+/// `.ordering_fields(&[])` makes nothing sortable, not every rendered field.
+#[tokio::test]
+async fn an_empty_ordering_fields_list_sorts_on_nothing() {
+    let pool = fresh_pool().await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+        .page_size(50)
+        .ordering(&[("id", false)])
+        .ordering_fields(&[])
+        .router_pool("/posts", pool.clone());
+
+    seed_divergent(&pool).await;
+
+    for q in ["secret_score", "-rating"] {
+        let resp = app
+            .clone()
+            .oneshot(get(&format!("/posts?ordering={q}")))
+            .await
+            .unwrap();
+        let body = body_json(resp).await;
+        assert_eq!(ids(&body), vec![1, 2, 3], "?ordering={q} was honoured");
+    }
+}
