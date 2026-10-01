@@ -70,7 +70,7 @@ fn single_key_emits_json_extract_on_sqlite_and_mysql() {
     let my = my(&e).unwrap();
     let lite = sqlite(&e).unwrap();
     assert!(
-        my.contains("JSON_UNQUOTE(JSON_EXTRACT(`data`, '$.city'))"),
+        my.contains("JSON_UNQUOTE(NULLIF(JSON_EXTRACT(`data`, '$.city'), CAST('null' AS JSON)))"),
         "MySQL JSON_UNQUOTE form: {my}"
     );
     assert!(
@@ -95,7 +95,9 @@ fn multi_key_chain_emits_dotted_path_on_mysql_and_sqlite() {
     let my = my(&e).unwrap();
     let lite = sqlite(&e).unwrap();
     assert!(
-        my.contains("JSON_UNQUOTE(JSON_EXTRACT(`data`, '$.address.city'))"),
+        my.contains(
+            "JSON_UNQUOTE(NULLIF(JSON_EXTRACT(`data`, '$.address.city'), CAST('null' AS JSON)))"
+        ),
         "MySQL: {my}"
     );
     assert!(

@@ -141,22 +141,36 @@ async fn json_equality_matches(pool: &Pool) {
     .insert_pool(pool)
     .await
     .expect("seed");
-    assert_eq!(count_json_eq(pool, v).await, 1);
+    assert_eq!(count_json_eq(pool, v.clone()).await, 1);
     assert_eq!(count_json_eq(pool, serde_json::json!({"n": 2})).await, 0);
+    // The null-safe `<=>` binds JSON the same way.
+    use rustango::sql::CounterPool as _;
+    let same = rustango::query::QuerySet::<Demo>::default()
+        .filter_op("data", Op::IsNotDistinctFrom, SqlValue::Json(v))
+        .count(pool)
+        .await
+        .expect("count");
+    assert_eq!(same, 1, "IS NOT DISTINCT FROM");
 }
 
 /// #1898: SQLite's as_text path returned the number 1 and the bool 1.
 async fn json_as_text_is_text(pool: &Pool) {
     Demo {
         id: Auto::Unset,
-        data: serde_json::json!({"n": 1, "b": true, "s": "x"}),
+        data: serde_json::json!({"n": 1, "b": true, "f": false, "s": "x", "z": null}),
     }
     .insert_pool(pool)
     .await
     .expect("seed");
     assert_eq!(count_text_eq(pool, "n", "1").await, 1, "number as text");
     assert_eq!(count_text_eq(pool, "b", "true").await, 1, "bool as text");
+    assert_eq!(count_text_eq(pool, "f", "false").await, 1, "false as text");
     assert_eq!(count_text_eq(pool, "s", "x").await, 1, "string unquoted");
+    assert_eq!(
+        count_text_eq(pool, "z", "null").await,
+        0,
+        "JSON null is NULL"
+    );
 }
 
 tri_dialect_test! {

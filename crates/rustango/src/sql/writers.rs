@@ -41,9 +41,21 @@ pub(super) struct Sql<'d> {
     /// the places SQL accepts an aggregate call.
     pub aggregate_allowed: bool,
     /// Set while writing a grouped aggregate's HAVING and ORDER BY over
-    /// a derived table: `(table, join aliases)`. An aliased column on one
-    /// of those joins reads the derived `"<table>"."<alias>__<col>"`.
-    pub derived_joins: Option<(&'static str, Vec<&'static str>)>,
+    /// a derived table. See [`DerivedJoins`].
+    pub derived_joins: Option<DerivedJoins>,
+    /// `(scope depth, alias, target)` of every model join in the open
+    /// queries, so the writer can type an aliased column.
+    pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
+}
+
+/// The joins a grouped aggregate's derived table hides. An aliased
+/// column on one of them reads the derived `"<table>"."<alias>__<col>"`,
+/// but only at `depth`: a nested query pushes a scope frame and sees
+/// its own aliases.
+pub(super) struct DerivedJoins {
+    depth: usize,
+    table: &'static str,
+    aliases: Vec<&'static str>,
 }
 
 impl<'d> Sql<'d> {
@@ -56,6 +68,7 @@ impl<'d> Sql<'d> {
             current_qualify_alias: None,
             aggregate_allowed: false,
             derived_joins: None,
+            join_types: Vec::new(),
         }
     }
 
@@ -68,6 +81,7 @@ impl<'d> Sql<'d> {
             current_qualify_alias: None,
             aggregate_allowed: false,
             derived_joins: None,
+            join_types: Vec::new(),
         }
     }
 
@@ -85,20 +99,28 @@ impl<'d> Sql<'d> {
     /// own in `INSERT` or `UPDATE SET`.
     pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<&'static str>) {
         let needs_cast = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
-        let is_json = matches!(value, SqlValue::Json(_));
-        self.params.push(value);
-        let p = self.d.placeholder(self.params.len());
-        if is_json {
-            self.d.write_json_param(&mut self.sql, &p);
-        } else {
-            self.sql.push_str(&p);
-        }
+        let p = self.bind(value);
+        self.sql.push_str(&p);
         if needs_cast {
             if let Some(ty) = cast {
                 self.sql.push_str("::");
                 self.sql.push_str(ty);
             }
         }
+    }
+
+    /// Add `value` to the bind list and return its placeholder, which
+    /// a JSON value gets wrapped in by the dialect.
+    pub(super) fn bind(&mut self, value: SqlValue) -> String {
+        let is_json = matches!(value, SqlValue::Json(_));
+        self.params.push(value);
+        let p = self.d.placeholder(self.params.len());
+        if !is_json {
+            return p;
+        }
+        let mut wrapped = String::new();
+        self.d.write_json_param(&mut wrapped, &p);
+        wrapped
     }
 
     /// [`Self::push_param_typed`] with no cast, for values whose
@@ -503,6 +525,29 @@ fn write_subquery_joins(
 }
 
 fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    with_join_types(b, &query.joins, None, |b| write_select_body(b, query))
+}
+
+/// Run `f` with `joins` (and a derived `source`'s joins) typed at the
+/// current scope depth.
+fn with_join_types(
+    b: &mut Sql<'_>,
+    joins: &[crate::core::Join],
+    source: Option<&SelectQuery>,
+    f: impl FnOnce(&mut Sql<'_>) -> Result<(), SqlError>,
+) -> Result<(), SqlError> {
+    let mark = b.join_types.len();
+    let depth = b.scope_stack.len();
+    let src = source.map_or(&[][..], |s| &s.joins[..]);
+    for j in joins.iter().chain(src) {
+        b.join_types.push((depth, j.alias, j.target));
+    }
+    let r = f(b);
+    b.join_types.truncate(mark);
+    r
+}
+
+fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     // `.distinct_on(cols)` is native on PG. Elsewhere the window
     // fallback emits the whole statement, so return early.
     if let Some(crate::core::DistinctMode::On(cols)) = &query.distinct {
@@ -745,7 +790,9 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
     // The scope frame gives a HAVING predicate's aggregates a model
     // to resolve their COALESCE-default cast against.
     b.scope_stack.push(query.model);
-    let r = write_aggregate_inner(b, query);
+    let r = with_join_types(b, &query.joins, query.source.as_deref(), |b| {
+        write_aggregate_inner(b, query)
+    });
     b.scope_stack.pop();
     r
 }
@@ -839,8 +886,11 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
     // HAVING and ORDER BY see the derived table, not its joins.
     let prev_derived = b.derived_joins.take();
     if let Some(src) = query.source.as_deref() {
-        let aliases = src.joins.iter().map(|j| j.alias).collect();
-        b.derived_joins = Some((query.model.table, aliases));
+        b.derived_joins = Some(DerivedJoins {
+            depth: b.scope_stack.len(),
+            table: query.model.table,
+            aliases: src.joins.iter().map(|j| j.alias).collect(),
+        });
     }
     let r = write_aggregate_tail(b, query);
     b.derived_joins = prev_derived;
@@ -1645,11 +1695,13 @@ fn write_expr(
             // An explicit `<alias>.<col>`, written as given unless the
             // join lives inside a derived table.
             let qualified = match &b.derived_joins {
-                Some((table, joins)) if joins.contains(alias) => format!(
-                    "{}.{}",
-                    b.d.quote_ident(table),
-                    b.d.quote_ident(&format!("{alias}__{column}"))
-                ),
+                Some(dj) if dj.depth == b.scope_stack.len() && dj.aliases.contains(alias) => {
+                    format!(
+                        "{}.{}",
+                        b.d.quote_ident(dj.table),
+                        b.d.quote_ident(&format!("{alias}__{column}"))
+                    )
+                }
                 _ => format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column)),
             };
             b.sql.push_str(&qualified);
@@ -1681,7 +1733,7 @@ fn write_expr(
 }
 
 /// The type of `expr` when the writer can tell: a literal, a column of
-/// the current model, or integer arithmetic over those.
+/// the current model or a join, or integer arithmetic over those.
 fn expr_type(b: &Sql<'_>, expr: &crate::core::Expr) -> Option<crate::core::FieldType> {
     use crate::core::{BinOp as BO, Expr, FieldType};
     match expr {
@@ -1689,12 +1741,28 @@ fn expr_type(b: &Sql<'_>, expr: &crate::core::Expr) -> Option<crate::core::Field
         Expr::Column(c) if b.current_qualify_alias.is_none() => {
             b.scope_stack.last()?.field_by_column(c).map(|f| f.ty)
         }
+        Expr::AliasedColumn { alias, column } => {
+            alias_model(b, alias)?.field_by_column(column).map(|f| f.ty)
+        }
         Expr::BinOp {
             op: BO::Add | BO::Sub | BO::Mul | BO::Div | BO::Mod,
             ..
         } if is_int_expr(b, expr) => Some(FieldType::I64),
         _ => None,
     }
+}
+
+/// The model `alias` names, innermost query first: its joins, then its
+/// table.
+fn alias_model(b: &Sql<'_>, alias: &str) -> Option<&'static ModelSchema> {
+    (1..=b.scope_stack.len()).rev().find_map(|depth| {
+        b.join_types
+            .iter()
+            .rev()
+            .find(|(d, a, _)| *d == depth && *a == alias)
+            .map(|(_, _, m)| *m)
+            .or_else(|| Some(b.scope_stack[depth - 1]).filter(|m| m.table == alias))
+    })
 }
 
 /// True for arithmetic whose operands are both known integers.
@@ -1809,11 +1877,12 @@ fn write_json_path(
     }
     if dialect == "mysql" {
         if as_text {
-            b.sql.push_str("JSON_UNQUOTE(JSON_EXTRACT(");
+            // A JSON null reads as SQL NULL, as PG's `->>` gives.
+            b.sql.push_str("JSON_UNQUOTE(NULLIF(JSON_EXTRACT(");
             write_expr(b, source, None)?;
             b.sql.push_str(", '");
             b.sql.push_str(&json_path);
-            b.sql.push_str("'))");
+            b.sql.push_str("'), CAST('null' AS JSON)))");
         } else {
             b.sql.push_str("JSON_EXTRACT(");
             write_expr(b, source, None)?;
@@ -4163,8 +4232,7 @@ fn write_filter(
         }
         Op::IsDistinctFrom | Op::IsNotDistinctFrom => {
             require_op(b.d, filter.op)?;
-            b.params.push(filter.value.clone());
-            let p = b.d.placeholder(b.params.len());
+            let p = b.bind(filter.value.clone());
             b.d.write_null_safe_eq(
                 &mut b.sql,
                 &qualified_col,

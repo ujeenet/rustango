@@ -54,18 +54,37 @@ pub struct Meas {
     pub id: Auto<i64>,
     pub n: i64,
     pub at: chrono::DateTime<chrono::Utc>,
+    pub taken_on: chrono::NaiveDate,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_reading")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Reading {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub meas: rustango::sql::ForeignKey<Meas>,
 }
 
 /// Seed one `Meas` row at the RFC 3339 instant `at`.
+/// Seed one `Meas` row at the RFC 3339 instant `at`, plus a `Reading`
+/// of it.
 async fn seed_meas(pool: &Pool, n: i64, at: &str) {
-    Meas {
+    let at: chrono::DateTime<chrono::Utc> = at.parse().expect("instant");
+    let mut m = Meas {
         id: Auto::default(),
         n,
-        at: at.parse().expect("instant"),
+        at,
+        taken_on: at.date_naive(),
+    };
+    m.insert_pool(pool).await.expect("seed meas");
+    Reading {
+        id: Auto::default(),
+        meas: rustango::sql::ForeignKey::unloaded(m.id.get().copied().expect("id")),
     }
     .insert_pool(pool)
     .await
-    .expect("seed meas");
+    .expect("seed reading");
 }
 
 fn post(slug: &str, parent_id: Option<i64>) -> Post {
@@ -81,7 +100,9 @@ async fn setup(pool: &Pool) {
     fresh_table::<Code>(pool).await;
     fresh_table::<Post>(pool).await;
     fresh_table::<Blob>(pool).await;
+    rustango::testkit::matrix::drop_table(pool, Reading::SCHEMA.table).await;
     fresh_table::<Meas>(pool).await;
+    fresh_table::<Reading>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -450,6 +471,20 @@ async fn second_lookup_truncates(pool: &Pool) {
     assert_eq!(n, 1);
 }
 
+/// #1900: a date lookup across a relation reads the joined column.
+async fn relation_date_lookup(pool: &Pool) {
+    seed_meas(pool, 0, "2024-01-06T23:30:00Z").await;
+    let day = chrono::NaiveDate::from_ymd_opt(2024, 1, 6).unwrap();
+    for (key, v) in [
+        ("meas__at__date", SqlValue::Date(day)),
+        ("meas__at__hour", SqlValue::I64(23)),
+        ("meas__taken_on__day", SqlValue::I64(6)),
+    ] {
+        let n = Reading::objects().filter(key, v).count(pool).await;
+        assert_eq!(n.expect("count"), 1, "{key}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -468,6 +503,7 @@ tri_dialect_test! {
         values_decode_uuid_and_bytes,
         integer_division_truncates,
         second_lookup_truncates,
+        relation_date_lookup,
     ],
 }
 
@@ -481,7 +517,7 @@ async fn pg_date_lookups_use_utc() {
         eprintln!("DATABASE_URL not set — skipping");
         return;
     };
-    fresh_table::<Meas>(&pool).await;
+    setup(&pool).await;
     seed_meas(&pool, 0, "2024-01-06T23:30:00Z").await;
     let day = chrono::NaiveDate::from_ymd_opt(2024, 1, 6).unwrap();
     // sqlx starts every session in UTC; SET LOCAL ends with the tx.
@@ -496,7 +532,44 @@ async fn pg_date_lookups_use_utc() {
         ("at__hour", SqlValue::I64(23)),
         ("at__week_day", SqlValue::I64(6)),
     ] {
-        let n = Meas::objects().filter(key, v).count_on(&mut *tx).await;
+        let n = Meas::objects()
+            .filter(key, v.clone())
+            .count_on(&mut *tx)
+            .await;
+        assert_eq!(n.unwrap(), 1, "{key}");
+        // The same lookup through a relation reads the joined column.
+        let span = format!("meas__{key}");
+        let n = Reading::objects().filter(&span, v).count_on(&mut *tx).await;
+        assert_eq!(n.unwrap(), 1, "{span}");
+    }
+}
+
+/// #1900: a DATE has no zone, so the UTC shift must skip it. On a Tokyo
+/// session `date AT TIME ZONE 'UTC'` is the day before.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn pg_date_column_is_not_shifted() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    seed_meas(&pool, 0, "2024-01-06T12:00:00Z").await;
+    let mut tx = pool.as_postgres().expect("pg").begin().await.unwrap();
+    rustango::sql::sqlx::query("SET LOCAL TIME ZONE 'Asia/Tokyo'")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for key in ["taken_on__day", "meas__taken_on__day"] {
+        let n = if key.starts_with("meas") {
+            Reading::objects()
+                .filter(key, 6_i64)
+                .count_on(&mut *tx)
+                .await
+        } else {
+            Meas::objects().filter(key, 6_i64).count_on(&mut *tx).await
+        };
         assert_eq!(n.unwrap(), 1, "{key}");
     }
 }
