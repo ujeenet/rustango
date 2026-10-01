@@ -1032,6 +1032,8 @@ impl Cli {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
             None => api,
         };
+        // Inside CORS and the security headers, so a panic's 500 carries them (#1541).
+        let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
@@ -1323,6 +1325,8 @@ impl Cli {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
             None => api,
         };
+        // Inside CORS; the builder catches the admin and console routes (#1541).
+        let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
@@ -1391,6 +1395,8 @@ impl Cli {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
             None => api,
         };
+        // Inside CORS; the builder catches the admin and console routes (#1541).
+        let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
@@ -1555,7 +1561,7 @@ fn apply_settings_layers_or_warn(
 /// The layer-driving settings that `s` configures, by dotted name.
 ///
 /// Only settings that would actually install a layer count — a configured
-/// `secret_key` is not evidence that anyone expected CORS. Pure, so the
+/// `database.url` is not evidence that anyone expected CORS. Pure, so the
 /// warning's precision is unit-testable.
 #[cfg(feature = "config")]
 fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
@@ -2096,7 +2102,7 @@ mod tests {
 
         // A setting that drives no layer must NOT trigger the warning.
         let mut s = Settings::default();
-        s.secret_key = Some("irrelevant".into());
+        s.database.url = Some("irrelevant".into());
         assert!(inert_layer_settings(&s).is_empty());
     }
 
@@ -2105,6 +2111,7 @@ mod tests {
     #[tokio::test]
     async fn tenant_header_reaches_the_builder() {
         use crate::server::resolver_tests::{registry, x_org_pick};
+        let _iso = crate::tenancy::isolated_resolver().await;
         let (_tmp, sq, url) = registry().await;
         let builder = |cli: Cli| {
             let b = crate::server::Builder::from_pool(sq.clone(), url.clone(), "localhost");
@@ -2127,6 +2134,9 @@ mod tests {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt as _;
+
+        // Its registry has no `rustango_orgs`, so it opens the global breaker.
+        let _iso = crate::tenancy::isolated_resolver().await;
 
         let mut s = crate::config::Settings::default();
         s.security.allowed_hosts = vec![".localhost".into()];
@@ -2600,6 +2610,45 @@ mod assemble_app_tests {
         assert!(ok.headers().contains_key("x-frame-options"));
         let bad = send("evil.example").await.expect("request");
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// #1541 — a panic's 500 still carries CORS and the security headers.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn a_panic_500_carries_cors_and_security_headers() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.cors_allowed_origins = vec!["https://app.example".into()];
+        let app = Cli::new()
+            .with_settings(&s)
+            .api(Router::new().route(
+                "/boom",
+                axum::routing::get(|| async {
+                    if std::hint::black_box(true) {
+                        panic!("boom");
+                    }
+                    "unreachable"
+                }),
+            ))
+            .assemble_app(pool);
+        let req = Request::builder()
+            .uri("/boom")
+            .header("origin", "https://app.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("request");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let h = resp.headers();
+        assert_eq!(h["access-control-allow-origin"], "https://app.example");
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert!(h.contains_key("x-frame-options"));
+        assert!(h["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"));
     }
 }
 

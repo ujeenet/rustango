@@ -111,36 +111,39 @@ mod tests {
     #[tokio::test]
     async fn with_overridden_swaps_in_overlay() {
         let mut overlay = Settings::default();
-        overlay.secret_key = Some("test-override-secret".into());
+        overlay.database.url = Some("test-override-secret".into());
 
         with_overridden(overlay.clone(), async move {
             assert!(has_overlay());
             let active = current();
-            assert_eq!(active.secret_key.as_deref(), Some("test-override-secret"));
+            assert_eq!(active.database.url.as_deref(), Some("test-override-secret"));
         })
         .await;
 
         // Outside the scope, no overlay.
         assert!(!has_overlay());
         let outside = current();
-        assert_ne!(outside.secret_key.as_deref(), Some("test-override-secret"));
+        assert_ne!(
+            outside.database.url.as_deref(),
+            Some("test-override-secret")
+        );
     }
 
     #[tokio::test]
     async fn overlay_is_scoped_per_task() {
         // Two tasks, two overlays; neither sees the other's.
         let mut a = Settings::default();
-        a.secret_key = Some("alpha".into());
+        a.database.url = Some("alpha".into());
         let mut b = Settings::default();
-        b.secret_key = Some("beta".into());
+        b.database.url = Some("beta".into());
 
         let ta = tokio::spawn(with_overridden(a, async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            current().secret_key
+            current().database.url
         }));
         let tb = tokio::spawn(with_overridden(b, async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            current().secret_key
+            current().database.url
         }));
         let (got_a, got_b) = (ta.await.unwrap(), tb.await.unwrap());
         assert_eq!(got_a.as_deref(), Some("alpha"));
@@ -150,18 +153,18 @@ mod tests {
     #[tokio::test]
     async fn nested_overlay_replaces_outer() {
         let mut outer = Settings::default();
-        outer.secret_key = Some("outer".into());
+        outer.database.url = Some("outer".into());
         let mut inner = Settings::default();
-        inner.secret_key = Some("inner".into());
+        inner.database.url = Some("inner".into());
 
         with_overridden(outer.clone(), async move {
-            assert_eq!(current().secret_key.as_deref(), Some("outer"));
+            assert_eq!(current().database.url.as_deref(), Some("outer"));
             with_overridden(inner, async {
-                assert_eq!(current().secret_key.as_deref(), Some("inner"));
+                assert_eq!(current().database.url.as_deref(), Some("inner"));
             })
             .await;
             // The outer overlay is back.
-            assert_eq!(current().secret_key.as_deref(), Some("outer"));
+            assert_eq!(current().database.url.as_deref(), Some("outer"));
         })
         .await;
     }
@@ -172,9 +175,9 @@ mod tests {
         // order is not fixed, so check only that at most one call
         // returns true.
         let mut a = Settings::default();
-        a.secret_key = Some("fallback-a".into());
+        a.database.url = Some("fallback-a".into());
         let mut b = Settings::default();
-        b.secret_key = Some("fallback-b".into());
+        b.database.url = Some("fallback-b".into());
         let result_a = install_fallback(a);
         let result_b = install_fallback(b);
         assert!(

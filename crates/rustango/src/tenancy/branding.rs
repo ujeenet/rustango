@@ -210,6 +210,49 @@ pub async fn save_brand_asset(
     Ok(filename)
 }
 
+/// Delete the `kind` files other than `kept` (a [`save_brand_asset`] result).
+/// Call it only after the `Org` column names `kept`, or the old path dangles (#1933).
+///
+/// # Errors
+/// [`BrandError::InvalidSlug`] or a storage failure.
+pub async fn prune_brand_asset(
+    slug: &str,
+    kind: BrandAssetKind,
+    kept: &str,
+    storage: &BoxedStorage,
+) -> Result<(), BrandError> {
+    let keep_ext = std::path::Path::new(kept)
+        .extension()
+        .and_then(|e| e.to_str());
+    delete_stem(slug, kind, keep_ext, storage).await
+}
+
+/// Delete every saved brand asset for `slug`. Called when a tenant is purged.
+///
+/// # Errors
+/// [`BrandError::InvalidSlug`] or a storage failure.
+pub async fn delete_brand_assets(slug: &str, storage: &BoxedStorage) -> Result<(), BrandError> {
+    for kind in [BrandAssetKind::Logo, BrandAssetKind::Favicon] {
+        delete_stem(slug, kind, None, storage).await?;
+    }
+    Ok(())
+}
+
+async fn delete_stem(
+    slug: &str,
+    kind: BrandAssetKind,
+    keep_ext: Option<&str>,
+    storage: &BoxedStorage,
+) -> Result<(), BrandError> {
+    for (_, ext) in ALLOWED_CONTENT_TYPES {
+        if Some(*ext) != keep_ext {
+            let key = storage_key(slug, &format!("{}.{ext}", kind.stem()))?;
+            storage.delete(&key).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Read a previously-saved brand asset. Returns `(bytes, content_type)`.
 ///
 /// # Errors
@@ -366,6 +409,39 @@ pub fn brand_asset_url(slug: &str, path: Option<&str>, storage: &BoxedStorage) -
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn reupload_and_purge_leave_no_stale_brand_file() {
+        let storage: BoxedStorage = Arc::new(crate::storage::InMemoryStorage::new());
+        let logo = BrandAssetKind::Logo;
+        save_brand_asset("acme", logo, b"p", Some("image/png"), &storage)
+            .await
+            .unwrap();
+        let kept = save_brand_asset("acme", logo, b"w", Some("image/webp"), &storage)
+            .await
+            .unwrap();
+        prune_brand_asset("acme", logo, &kept, &storage)
+            .await
+            .unwrap();
+        assert!(
+            load_brand_asset("acme", "logo.png", &storage)
+                .await
+                .is_err(),
+            "old logo still served"
+        );
+        assert!(load_brand_asset("acme", "logo.webp", &storage)
+            .await
+            .is_ok());
+        let fav = BrandAssetKind::Favicon;
+        save_brand_asset("acme", fav, b"i", Some("image/x-icon"), &storage)
+            .await
+            .unwrap();
+        delete_brand_assets("acme", &storage).await.unwrap();
+        for f in ["logo.webp", "favicon.ico"] {
+            let gone = load_brand_asset("acme", f, &storage).await.is_err();
+            assert!(gone, "purge kept {f}");
+        }
+    }
 
     #[test]
     fn hex_color_accepts_six_digit() {

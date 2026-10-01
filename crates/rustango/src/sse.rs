@@ -24,7 +24,13 @@
 //! //
 //! //   let mut rx = bus.subscribe();
 //! //   let stream = async_stream::stream! {
-//! //       while let Ok(event) = rx.recv().await {
+//! //       loop {
+//! //           let event = match rx.recv().await {
+//! //               Ok(event) => event,
+//! //               // A slow client skipped messages; keep it connected.
+//! //               Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+//! //               Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+//! //           };
 //! //           let json = serde_json::to_string(&event).unwrap_or_default();
 //! //           yield Ok::<_, std::convert::Infallible>(
 //! //               axum::response::sse::Event::default().data(json)

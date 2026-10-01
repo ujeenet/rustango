@@ -36,8 +36,8 @@
 //!   parallel fan-out, `tokio::spawn` inside the subscriber.
 //! - The event is cloned once per subscriber, so `E` must be
 //!   `Clone + Send + Sync + 'static`.
-//! - If a subscriber panics, the rest do not run and the panic reaches
-//!   the caller of `publish`. `tokio::spawn` isolates it.
+//! - A panicking subscriber is logged and skipped; the rest still run
+//!   and `publish` returns normally.
 //! - The bus is cheap to clone; state is shared. Pass clones into axum
 //!   state or your services.
 
@@ -140,8 +140,16 @@ impl EventBus {
             // The downcast always succeeds: handlers are only ever
             // stored under their own TypeId.
             if let Ok(wrapper) = any.downcast::<TypedHandler<E>>() {
-                let fut = (wrapper.f)(event.clone());
-                fut.await;
+                // One panicking subscriber must not skip the rest (#1957).
+                let event = event.clone();
+                let run = crate::panic_guard::catch_unwind(async move { (wrapper.f)(event).await });
+                if let Err(panic) = run.await {
+                    tracing::error!(
+                        event = std::any::type_name::<E>(),
+                        panic = crate::panic_guard::panic_message(&*panic),
+                        "event subscriber panicked"
+                    );
+                }
             }
         }
     }
@@ -187,6 +195,25 @@ mod tests {
         bus.publish(PingEvent(3)).await;
         bus.publish(PingEvent(7)).await;
         assert_eq!(counter.load(Ordering::SeqCst), 10);
+    }
+
+    /// A panicking subscriber is skipped; later ones still run (#1957).
+    #[tokio::test]
+    async fn a_panicking_subscriber_does_not_stop_the_rest() {
+        let bus = EventBus::new();
+        bus.subscribe::<PingEvent, _>(|_| Box::pin(async { panic!("subscriber boom") }))
+            .await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        bus.subscribe::<PingEvent, _>(move |_| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .await;
+        bus.publish(PingEvent(1)).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

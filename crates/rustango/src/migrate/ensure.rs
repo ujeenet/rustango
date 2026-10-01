@@ -56,7 +56,7 @@ fn is_add_column(stmt: &str) -> bool {
 /// * **SQLite** reports nothing usable either way, so it keeps the text
 ///   match. Its messages are not localised.
 #[cfg_attr(not(feature = "mysql"), allow(unused_variables))]
-fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: &str) -> bool {
+pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: &str) -> bool {
     let crate::sql::ExecError::Driver(err) = e else {
         return false;
     };

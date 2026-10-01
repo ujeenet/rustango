@@ -2035,7 +2035,7 @@ async fn org_edit_branding(
     Extension(op): Extension<auth::Operator>,
     mut mp: Multipart,
 ) -> Response<Body> {
-    let mut updates: Vec<(&'static str, Option<String>)> = Vec::new();
+    let mut updates: Vec<(BrandAssetKind, &'static str, String)> = Vec::new();
     while let Ok(Some(field)) = mp.next_field().await {
         let name = field.name().map(str::to_owned);
         let kind = match name.as_deref() {
@@ -2066,7 +2066,7 @@ async fn org_edit_branding(
                     BrandAssetKind::Logo => "logo_path",
                     BrandAssetKind::Favicon => "favicon_path",
                 };
-                updates.push((column, Some(filename)));
+                updates.push((kind, column, filename));
             }
             Err(branding::BrandError::TooLarge { actual, max }) => {
                 return redirect_with_error(
@@ -2092,13 +2092,9 @@ async fn org_edit_branding(
     use crate::core::Model as _;
     let assignments: Vec<crate::core::Assignment> = updates
         .iter()
-        .map(|(col, v)| crate::core::Assignment {
+        .map(|(_, col, v)| crate::core::Assignment {
             column: *col,
-            value: v
-                .as_ref()
-                .map(|s| crate::core::SqlValue::String(s.clone()))
-                .unwrap_or(crate::core::SqlValue::Null)
-                .into(),
+            value: crate::core::SqlValue::String(v.clone()).into(),
         })
         .collect();
     let update_q = crate::core::UpdateQuery {
@@ -2113,6 +2109,13 @@ async fn org_edit_branding(
     if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
         return redirect_with_error(&slug, &format!("update failed: {e}"));
     }
+    // Only now does no column name the old file (#1933).
+    for (kind, _, kept) in &updates {
+        if let Err(e) = branding::prune_brand_asset(&slug, *kind, kept, &state.brand_storage).await
+        {
+            tracing::warn!(slug = %slug, error = %e, "stale brand file not deleted");
+        }
+    }
     // Branding lives on the `Org` row that resolution caches, so an
     // upload without this leaves the previous logo rendering until the
     // entry expires.
@@ -2125,7 +2128,7 @@ async fn org_edit_branding(
     let operator_id = op.id.get().copied().unwrap_or(0);
     let assets: Vec<String> = updates
         .iter()
-        .map(|(col, _)| match *col {
+        .map(|(_, col, _)| match *col {
             "logo_path" => "logo".to_owned(),
             "favicon_path" => "favicon".to_owned(),
             other => other.to_owned(),
@@ -2275,23 +2278,11 @@ async fn org_impersonate(
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         format!("{}.{}", slug, apex)
     };
-    // Port: `RUSTANGO_TENANT_PORT` wins, for deployments where the
-    // listener port differs from the public one. Otherwise reuse the
-    // port from the request's Host header, so dev on `:8080` and prod
-    // on a standard port both work with no configuration.
-    let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
-        .ok()
-        .filter(|s| !s.is_empty() && s != "80" && s != "443")
-        .map(|p| format!(":{p}"))
-        .or_else(|| {
-            headers
-                .get(header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|h| h.rsplit_once(':').map(|(_, port)| port.to_owned()))
-                .filter(|p| !p.is_empty() && p != "80" && p != "443")
-                .map(|p| format!(":{p}"))
-        })
-        .unwrap_or_default();
+    let port_suffix = handoff_port_suffix(
+        org.port,
+        std::env::var("RUSTANGO_TENANT_PORT").ok(),
+        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+    );
     let handoff_path = state.tenant_handoff_url.trim_end_matches('/');
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
@@ -2314,6 +2305,50 @@ async fn org_impersonate(
         "minted impersonation handoff token",
     );
     resp
+}
+
+/// Port for the handoff URL. A port-routed org's own port wins (#1933);
+/// then `RUSTANGO_TENANT_PORT`; then the console request's port.
+fn handoff_port_suffix(
+    org_port: Option<i32>,
+    env_port: Option<String>,
+    host: Option<&str>,
+) -> String {
+    let usable = |p: &str| !p.is_empty() && p != "80" && p != "443";
+    if let Some(p) = org_port {
+        let p = p.to_string();
+        return if usable(&p) {
+            format!(":{p}")
+        } else {
+            String::new()
+        };
+    }
+    env_port
+        .filter(|p| usable(p))
+        .or_else(|| {
+            host.and_then(|h| h.rsplit_once(':'))
+                .map(|(_, p)| p.to_owned())
+                .filter(|p| usable(p))
+        })
+        .map(|p| format!(":{p}"))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod handoff_port_tests {
+    use super::handoff_port_suffix;
+
+    #[test]
+    fn a_port_routed_org_lands_on_its_own_port() {
+        let env = Some("9000".to_owned());
+        assert_eq!(
+            handoff_port_suffix(Some(8443), env.clone(), Some("ops:8080")),
+            ":8443"
+        );
+        assert_eq!(handoff_port_suffix(None, env, Some("ops:8080")), ":9000");
+        assert_eq!(handoff_port_suffix(None, None, Some("ops:8080")), ":8080");
+        assert_eq!(handoff_port_suffix(Some(443), None, Some("ops:8080")), "");
+    }
 }
 
 /// #1526. These exercise `sanitize_next` — the function the login

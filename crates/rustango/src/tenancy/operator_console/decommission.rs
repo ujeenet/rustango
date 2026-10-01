@@ -80,6 +80,11 @@ pub(super) async fn purge(
         Ok(report) => {
             audit(&state, &op, &slug, "tenant_purge").await;
             let mut msg = format!("purged `{slug}`");
+            if let Err(e) =
+                super::super::branding::delete_brand_assets(&slug, &state.brand_storage).await
+            {
+                let _ = write!(msg, " — brand files left in place: {e}");
+            }
             if let Some(schema) = &report.schema_dropped {
                 let _ = write!(msg, " — dropped schema `{schema}`");
             }

@@ -42,6 +42,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::body::{to_bytes, Body};
@@ -55,20 +56,28 @@ use tower::ServiceExt;
 /// in-process — no network, no real socket. Each call to `.send()` consumes
 /// a clone of the router so the client itself is reusable across tests.
 ///
-/// ## Cookie persistence
+/// ## Browser behaviour
 ///
-/// The client carries a cookie jar shared between requests, like a
-/// browser. Every `Set-Cookie` response header is parsed
-/// (name+value only; `Path`/`Domain`/`Max-Age`/etc are ignored, which
-/// is fine for tests against a single in-process router) and merged
-/// into the jar. Every subsequent request automatically sends the
-/// jar back as a single `Cookie:` header so multi-step auth flows
-/// (`POST /login` then `GET /me`) just work. Issue #41.
+/// Requests look like a browser's on `http://testserver`, so a test that
+/// passes here also passes in one:
+///
+/// - **Cookie jar.** `Set-Cookie` is stored with its `Path`; `Max-Age=0`
+///   or a past `Expires` deletes, and a cookie is only sent to matching
+///   paths. `Domain` and `Secure` are ignored (one host).
+/// - **`Host: testserver`**, plus a same-origin `Origin` on unsafe
+///   methods, unless the request sets its own.
+/// - **Peer address** `127.0.0.1` as `ConnectInfo`, like a real
+///   connection; override per request with [`RequestBuilder::remote_addr`].
+/// - **CSRF** is enforced, not bypassed: send the token with
+///   [`RequestBuilder::with_csrf`] or a `_csrf` form field.
 #[derive(Clone)]
 pub struct TestClient {
     router: Router,
-    cookies: Arc<Mutex<HashMap<String, String>>>,
+    cookies: Arc<Mutex<CookieJar>>,
 }
+
+/// Host every request is addressed to unless it sets its own.
+pub const TEST_HOST: &str = "testserver";
 
 impl TestClient {
     /// Wrap a router for testing.
@@ -76,40 +85,48 @@ impl TestClient {
     pub fn new(router: Router) -> Self {
         Self {
             router,
-            cookies: Arc::new(Mutex::new(HashMap::new())),
+            cookies: Arc::new(Mutex::new(CookieJar::default())),
         }
     }
 
-    /// Snapshot of the current cookie jar (name → value). Useful in
+    fn jar(&self) -> std::sync::MutexGuard<'_, CookieJar> {
+        self.cookies.lock().expect("cookie jar poisoned")
+    }
+
+    /// Snapshot of the live cookie jar (name → value). Useful in
     /// tests for asserting that a session cookie was issued.
     #[must_use]
     pub fn cookies(&self) -> HashMap<String, String> {
-        self.cookies.lock().expect("cookie jar poisoned").clone()
+        self.jar().snapshot()
     }
 
-    /// Read one cookie by name. Returns `None` if absent.
+    /// Read one cookie by name. Returns `None` if absent or expired.
     #[must_use]
     pub fn cookie(&self, name: &str) -> Option<String> {
-        self.cookies
-            .lock()
-            .expect("cookie jar poisoned")
-            .get(name)
-            .cloned()
+        self.jar().snapshot().remove(name)
+    }
+
+    /// The CSRF token cookie the [`crate::forms::csrf`] layer set, if any.
+    #[must_use]
+    pub fn csrf_token(&self) -> Option<String> {
+        self.cookie(crate::forms::csrf::CSRF_COOKIE)
     }
 
     /// Inject a cookie directly into the jar without going through a
     /// `Set-Cookie` round trip. Handy for tests that pre-seed an
     /// auth cookie minted by a session backend.
     pub fn set_cookie(&self, name: impl Into<String>, value: impl Into<String>) {
-        self.cookies
-            .lock()
-            .expect("cookie jar poisoned")
-            .insert(name.into(), value.into());
+        self.jar().store(StoredCookie {
+            name: name.into(),
+            value: value.into(),
+            path: "/".to_owned(),
+            expires_at: None,
+        });
     }
 
     /// Drop every cookie from the jar.
     pub fn clear_cookies(&self) {
-        self.cookies.lock().expect("cookie jar poisoned").clear();
+        self.jar().cookies.clear();
     }
 
     /// Convenience: POST a form to `path` and return the response.
@@ -193,15 +210,16 @@ impl TestClient {
         self
     }
 
-    /// Convenience: clear the cookie jar (so the next request looks
-    /// fully logged-out) and optionally hit `path` (a logout endpoint
-    /// that may itself emit a `Set-Cookie: name=; Max-Age=0`
-    /// expiration). Pass `None` to only drop the jar locally.
+    /// Log out like a browser: `Some(path)` POSTs there with the jar and
+    /// the CSRF token, and the jar changes only by the response's
+    /// `Set-Cookie`. `None` just drops the jar locally.
     pub async fn logout(&self, path: Option<&str>) -> Option<TestResponse> {
-        self.clear_cookies();
         match path {
-            Some(p) => Some(self.post(p.to_owned()).send().await),
-            None => None,
+            Some(p) => Some(self.post(p.to_owned()).with_csrf().send().await),
+            None => {
+                self.clear_cookies();
+                None
+            }
         }
     }
 
@@ -213,18 +231,8 @@ impl TestClient {
 
     /// Issue a GET request and follow up to `max_hops` 3xx redirects.
     /// Returns the final response **plus** the chain of visited
-    /// (status, location) pairs.
-    ///
-    /// Each hop reuses the same cookie jar, so `Set-Cookie` from an
-    /// intermediate hop is visible to the next request. The original
-    /// request's headers / content-type are NOT propagated: every
-    /// hop is a GET, matching browser behaviour.
-    ///
-    /// Stops following when:
-    /// - The response status is not 3xx.
-    /// - The response is 3xx but has no `Location` header.
-    /// - `max_hops` has been reached. The final response in the
-    ///   chain is whatever the last hop returned (likely still 3xx).
+    /// (status, location) pairs. See
+    /// [`RequestBuilder::send_following_redirects`].
     ///
     /// ```ignore
     /// let (final_res, chain) = client.get_following_redirects("/old", 5).await;
@@ -237,26 +245,7 @@ impl TestClient {
         path: impl Into<String>,
         max_hops: usize,
     ) -> (TestResponse, Vec<(u16, String)>) {
-        let mut current_path: String = path.into();
-        let mut chain: Vec<(u16, String)> = Vec::new();
-        let mut last: TestResponse = self.get(current_path.clone()).send().await;
-        for _ in 0..max_hops {
-            let status = last.status;
-            if !(300..400).contains(&status) {
-                break;
-            }
-            let location = match last.header("location") {
-                Some(loc) => loc.to_owned(),
-                None => break,
-            };
-            chain.push((status, location.clone()));
-            current_path = location;
-            last = self.get(current_path.clone()).send().await;
-        }
-        // Final hop's status + (resolved) location, for callers that
-        // want the destination URL alongside the response.
-        chain.push((last.status, current_path));
-        (last, chain)
+        self.get(path).send_following_redirects(max_hops).await
     }
 
     /// Build a `POST` request to `path`.
@@ -307,6 +296,7 @@ impl TestClient {
             headers: Vec::new(),
             body: Body::empty(),
             content_type: None,
+            remote_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         }
     }
 }
@@ -319,6 +309,7 @@ pub struct RequestBuilder<'a> {
     headers: Vec<(HeaderName, HeaderValue)>,
     body: Body,
     content_type: Option<&'static str>,
+    remote_addr: SocketAddr,
 }
 
 impl<'a> RequestBuilder<'a> {
@@ -361,62 +352,193 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
+    /// Send the jar's CSRF token as the `X-CSRF-Token` header, as a
+    /// page's script would. No-op when the jar holds no token.
+    #[must_use]
+    pub fn with_csrf(self) -> Self {
+        match self.client.csrf_token() {
+            Some(token) => self.header("x-csrf-token", &token),
+            None => self,
+        }
+    }
+
+    /// The peer address handlers see as `ConnectInfo<SocketAddr>`.
+    /// Defaults to `127.0.0.1`.
+    #[must_use]
+    pub fn remote_addr(mut self, addr: SocketAddr) -> Self {
+        self.remote_addr = addr;
+        self
+    }
+
     /// Send the request and await the response.
     pub async fn send(self) -> TestResponse {
-        let mut req = Request::builder().method(&self.method).uri(&self.path);
-        if let Some(ct) = self.content_type {
+        let client = self.client;
+        client
+            .dispatch(Outgoing {
+                method: self.method,
+                path: self.path,
+                headers: self.headers,
+                body: self.body,
+                content_type: self.content_type,
+                remote_addr: self.remote_addr,
+            })
+            .await
+    }
+
+    /// Send, then follow up to `max_hops` redirects like a browser:
+    /// 301/302 turn `POST` into a bodyless `GET`, 303 does so for all but
+    /// `HEAD`; other methods and 307/308 repeat the method and body. Returns the final
+    /// response and the visited `(status, location)` chain, ending with
+    /// the final status and path.
+    pub async fn send_following_redirects(
+        self,
+        max_hops: usize,
+    ) -> (TestResponse, Vec<(u16, String)>) {
+        let client = self.client;
+        let mut body = Some(
+            to_bytes(self.body, 16 * 1024 * 1024)
+                .await
+                .unwrap_or_default(),
+        );
+        let mut req = Outgoing {
+            method: self.method,
+            path: self.path,
+            headers: self.headers,
+            body: Body::empty(),
+            content_type: self.content_type,
+            remote_addr: self.remote_addr,
+        };
+        let mut chain: Vec<(u16, String)> = Vec::new();
+        let mut last = client.dispatch(req.with_body(body.clone())).await;
+        for _ in 0..max_hops {
+            let status = last.status;
+            if !(300..400).contains(&status) {
+                break;
+            }
+            let Some(location) = last.header("location").map(str::to_owned) else {
+                break;
+            };
+            chain.push((status, location.clone()));
+            req.path = resolve_location(&req.path, &location);
+            if let Some(method) = redirect_method(status, &req.method) {
+                req.method = method;
+                req.content_type = None;
+                req.headers.retain(|(k, _)| !is_body_header(k));
+                body = None;
+            }
+            last = client.dispatch(req.with_body(body.clone())).await;
+        }
+        chain.push((last.status, req.path));
+        (last, chain)
+    }
+}
+
+/// The method a browser switches to on `status`, or `None` to repeat it
+/// (Fetch: 301/302 rewrite only POST; 303 everything but HEAD).
+fn redirect_method(status: u16, method: &Method) -> Option<Method> {
+    match status {
+        301 | 302 if *method == Method::POST => Some(Method::GET),
+        303 if *method != Method::HEAD && *method != Method::GET => Some(Method::GET),
+        _ => None,
+    }
+}
+
+/// Headers describing the body, which a browser drops with it.
+fn is_body_header(name: &HeaderName) -> bool {
+    use axum::http::header;
+    [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_ENCODING,
+        header::CONTENT_LANGUAGE,
+        header::CONTENT_LOCATION,
+    ]
+    .contains(name)
+}
+
+/// One request as [`TestClient::dispatch`] sends it.
+struct Outgoing {
+    method: Method,
+    path: String,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    body: Body,
+    content_type: Option<&'static str>,
+    remote_addr: SocketAddr,
+}
+
+impl Outgoing {
+    fn with_body(&self, body: Option<axum::body::Bytes>) -> Self {
+        Self {
+            method: self.method.clone(),
+            path: self.path.clone(),
+            headers: self.headers.clone(),
+            body: body.map_or_else(Body::empty, Body::from),
+            content_type: self.content_type,
+            remote_addr: self.remote_addr,
+        }
+    }
+}
+
+impl TestClient {
+    async fn dispatch(&self, out: Outgoing) -> TestResponse {
+        let has = |name: &HeaderName| out.headers.iter().any(|(k, _)| k == name);
+        let host = out
+            .headers
+            .iter()
+            .find(|(k, _)| k == axum::http::header::HOST)
+            .and_then(|(_, v)| v.to_str().ok())
+            .unwrap_or(TEST_HOST)
+            .to_owned();
+        let mut req = Request::builder().method(&out.method).uri(&out.path);
+        if !has(&axum::http::header::HOST) {
+            req = req.header(axum::http::header::HOST, TEST_HOST);
+        }
+        // Browsers send Origin on every request that is not GET/HEAD.
+        let safe = matches!(
+            out.method,
+            Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
+        );
+        if !safe && !has(&axum::http::header::ORIGIN) {
+            // Behind a TLS proxy the browser's origin is https.
+            let scheme = out
+                .headers
+                .iter()
+                .find(|(k, _)| k == "x-forwarded-proto")
+                .and_then(|(_, v)| v.to_str().ok())
+                .filter(|v| {
+                    v.split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("https")
+                })
+                .map_or("http", |_| "https");
+            req = req.header(axum::http::header::ORIGIN, format!("{scheme}://{host}"));
+        }
+        if let Some(ct) = out.content_type {
             req = req.header("content-type", ct);
         }
-        // Attach the cookie jar as a single `Cookie:` header (the
-        // wire format the server side will see). Only emit when
-        // non-empty so requests that
-        // legitimately need no cookies don't get a stray header.
-        {
-            let jar = self.client.cookies.lock().expect("cookie jar poisoned");
-            if !jar.is_empty() {
-                let cookie_header = jar
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                req = req.header("cookie", cookie_header);
-            }
+        let request_path = out.path.split(['?', '#']).next().unwrap_or("/").to_owned();
+        if let Some(cookie_header) = self.jar().header_for(&request_path) {
+            req = req.header("cookie", cookie_header);
         }
-        for (k, v) in self.headers {
+        for (k, v) in out.headers {
             req = req.header(k, v);
         }
-        let req = req.body(self.body).unwrap();
+        let mut req = req.body(out.body).expect("invalid test request");
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(out.remote_addr));
         let response = self
-            .client
             .router
             .clone()
             .oneshot(req)
             .await
             .expect("test request panicked");
-        // Extract Set-Cookie response headers *before* moving the
-        // response into TestResponse::from_axum — the jar is merged
-        // here so the next request through this client sees the
-        // freshly issued cookies.
-        let set_cookies: Vec<String> = response
-            .headers()
-            .get_all("set-cookie")
-            .iter()
-            .filter_map(|v| v.to_str().ok().map(str::to_owned))
-            .collect();
         {
-            let mut jar = self.client.cookies.lock().expect("cookie jar poisoned");
-            for raw in &set_cookies {
-                if let Some((name, value)) = parse_set_cookie(raw) {
-                    // RFC 6265: empty value + Max-Age=0 / Expires in
-                    // the past is a deletion. We only parse name+value
-                    // here, so an empty value is treated as deletion —
-                    // which is what callers want (the next request
-                    // shouldn't carry a logout's invalidation cookie).
-                    if value.is_empty() {
-                        jar.remove(&name);
-                    } else {
-                        jar.insert(name, value);
-                    }
+            let mut jar = self.jar();
+            for raw in response.headers().get_all("set-cookie") {
+                if let Ok(raw) = raw.to_str() {
+                    jar.apply_set_cookie(raw, &request_path);
                 }
             }
         }
@@ -424,13 +546,159 @@ impl<'a> RequestBuilder<'a> {
     }
 }
 
-/// Parse the `name=value` head of a `Set-Cookie` header, ignoring
-/// every `; attr=val` segment after. Returns `None` for malformed
-/// inputs (no `=`).
-fn parse_set_cookie(raw: &str) -> Option<(String, String)> {
-    let head = raw.split(';').next()?.trim();
-    let (name, value) = head.split_once('=')?;
-    Some((name.trim().to_owned(), value.trim().to_owned()))
+/// `location` resolved against the current request path, as a path.
+/// Absolute URLs keep only their path and query (one host).
+fn resolve_location(current: &str, location: &str) -> String {
+    if let Some(rest) = location
+        .strip_prefix("http://")
+        .or_else(|| location.strip_prefix("https://"))
+    {
+        return match rest.find('/') {
+            Some(i) => rest[i..].to_owned(),
+            None => "/".to_owned(),
+        };
+    }
+    let base = current.split(['?', '#']).next().unwrap_or("/");
+    if location.starts_with('?') {
+        return format!("{base}{location}");
+    }
+    let joined = if location.starts_with('/') {
+        location.to_owned()
+    } else {
+        format!("{}{location}", &base[..=base.rfind('/').unwrap_or(0)])
+    };
+    let (path, query) = joined.split_at(joined.find(['?', '#']).unwrap_or(joined.len()));
+    format!("{}{query}", remove_dot_segments(path))
+}
+
+/// RFC 3986 §5.2.4: drop `.` segments, and `..` with its parent.
+fn remove_dot_segments(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    for (i, seg) in segments.iter().enumerate() {
+        let last = i + 1 == segments.len();
+        match *seg {
+            "." | ".." => {
+                if *seg == ".." {
+                    out.pop();
+                }
+                if last {
+                    out.push("");
+                }
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// One cookie as a browser keeps it: keyed by name and path.
+#[derive(Clone, Debug)]
+struct StoredCookie {
+    name: String,
+    value: String,
+    path: String,
+    expires_at: Option<i64>,
+}
+
+/// The client's cookie store (RFC 6265 subset for one host).
+#[derive(Default)]
+struct CookieJar {
+    cookies: Vec<StoredCookie>,
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+impl CookieJar {
+    fn live(&self) -> impl Iterator<Item = &StoredCookie> {
+        let now = unix_now();
+        self.cookies
+            .iter()
+            .filter(move |c| c.expires_at.is_none_or(|t| t > now))
+    }
+
+    fn store(&mut self, cookie: StoredCookie) {
+        self.cookies
+            .retain(|c| !(c.name == cookie.name && c.path == cookie.path));
+        self.cookies.push(cookie);
+    }
+
+    /// Name → value of the live cookies; the longest path wins a clash.
+    fn snapshot(&self) -> HashMap<String, String> {
+        let mut live: Vec<&StoredCookie> = self.live().collect();
+        live.sort_by_key(|c| c.path.len());
+        live.into_iter()
+            .map(|c| (c.name.clone(), c.value.clone()))
+            .collect()
+    }
+
+    /// The `Cookie:` header for `path`, longest paths first (RFC 6265 5.4).
+    fn header_for(&self, path: &str) -> Option<String> {
+        let mut matching: Vec<&StoredCookie> = self
+            .live()
+            .filter(|c| path_matches(path, &c.path))
+            .collect();
+        if matching.is_empty() {
+            return None;
+        }
+        matching.sort_by_key(|c| std::cmp::Reverse(c.path.len()));
+        Some(
+            matching
+                .iter()
+                .map(|c| format!("{}={}", c.name, c.value))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+
+    /// Store, replace or delete per one `Set-Cookie` received for `request_path`.
+    fn apply_set_cookie(&mut self, raw: &str, request_path: &str) {
+        let Ok(parsed) = cookie::Cookie::parse(raw) else {
+            return;
+        };
+        let path = match parsed.path() {
+            Some(p) if p.starts_with('/') => p.to_owned(),
+            _ => default_path(request_path),
+        };
+        // Max-Age wins over Expires (RFC 6265 5.3 step 3).
+        let expires_at = match (parsed.max_age(), parsed.expires_datetime()) {
+            (Some(age), _) => Some(unix_now() + age.whole_seconds()),
+            (None, Some(at)) => Some(at.unix_timestamp()),
+            (None, None) => None,
+        };
+        let cookie = StoredCookie {
+            name: parsed.name().to_owned(),
+            value: parsed.value().to_owned(),
+            path,
+            expires_at,
+        };
+        if cookie.expires_at.is_some_and(|t| t <= unix_now()) {
+            self.cookies
+                .retain(|c| !(c.name == cookie.name && c.path == cookie.path));
+        } else {
+            self.store(cookie);
+        }
+    }
+}
+
+/// RFC 6265 5.1.4 default-path: the request path up to its last `/`.
+fn default_path(request_path: &str) -> String {
+    match request_path.rfind('/') {
+        Some(0) | None => "/".to_owned(),
+        Some(i) => request_path[..i].to_owned(),
+    }
+}
+
+/// RFC 6265 5.1.4 path-match.
+fn path_matches(request_path: &str, cookie_path: &str) -> bool {
+    request_path == cookie_path
+        || (request_path.starts_with(cookie_path)
+            && (cookie_path.ends_with('/')
+                || request_path.as_bytes().get(cookie_path.len()) == Some(&b'/')))
 }
 
 // ============================================================================
@@ -645,7 +913,11 @@ impl FactoryRequestBuilder {
 /// Captured response from a test request.
 pub struct TestResponse {
     pub status: u16,
+    /// One value per name; a repeated header keeps its last value. Use
+    /// [`Self::header_all`] or [`Self::header_map`] for every value.
     pub headers: HashMap<String, String>,
+    /// Every response header, repeats included (e.g. `Set-Cookie`).
+    pub header_map: axum::http::HeaderMap,
     pub body: Vec<u8>,
 }
 
@@ -658,6 +930,7 @@ impl TestResponse {
             .iter()
             .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
             .collect();
+        let header_map = parts.headers;
         // Use a generous limit (16 MiB) for test responses
         let body = to_bytes(body, 16 * 1024 * 1024)
             .await
@@ -666,6 +939,7 @@ impl TestResponse {
         Self {
             status,
             headers,
+            header_map,
             body,
         }
     }
@@ -711,6 +985,16 @@ impl TestResponse {
                 None
             }
         })
+    }
+
+    /// Every value of a response header, in order (case-insensitive).
+    #[must_use]
+    pub fn header_all(&self, name: &str) -> Vec<&str> {
+        self.header_map
+            .get_all(name.to_ascii_lowercase().as_str())
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect()
     }
 }
 
@@ -925,7 +1209,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_cookie_value_is_treated_as_deletion() {
+    async fn max_age_zero_deletes_the_cookie() {
         let c = TestClient::new(cookie_app());
         c.post("/login").send().await;
         assert!(c.cookie("session").is_some());
@@ -961,9 +1245,270 @@ mod tests {
         assert!(c.cookie("session").is_some());
         let r = c.logout(Some("/logout")).await;
         assert_eq!(r.expect("response").status, 200);
-        // Local clear ran *before* the request, so the jar is empty
-        // regardless of what the server returned.
+        // Gone because the server expired it, as in a browser.
         assert!(c.cookie("session").is_none());
+        assert_eq!(c.cookie("csrftoken").as_deref(), Some("xyz"));
+    }
+
+    // ---------- browser parity (#1958) ----------
+
+    fn csrf_app() -> Router {
+        use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+        use axum::response::IntoResponse;
+
+        async fn login() -> impl IntoResponse {
+            let mut h = HeaderMap::new();
+            h.insert(
+                header::SET_COOKIE,
+                HeaderValue::from_static("session=abc; Path=/; HttpOnly"),
+            );
+            (h, "form")
+        }
+        // Revokes only when the session reaches it, like a real logout.
+        async fn logout(h: HeaderMap) -> impl IntoResponse {
+            let has_session = h
+                .get("cookie")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|c| c.contains("session=abc"));
+            if !has_session {
+                return (StatusCode::UNAUTHORIZED, HeaderMap::new(), "no session");
+            }
+            let mut out = HeaderMap::new();
+            out.insert(
+                header::SET_COOKIE,
+                HeaderValue::from_static("session=; Path=/; Max-Age=0"),
+            );
+            (StatusCode::OK, out, "bye")
+        }
+        Router::new()
+            .route("/login", get(login))
+            .route("/submit", post(|| async { "saved" }))
+            .route("/logout", post(logout))
+            .layer(crate::forms::csrf::layer())
+    }
+
+    #[tokio::test]
+    async fn csrf_protected_form_post_needs_the_token_like_a_browser() {
+        let c = TestClient::new(csrf_app());
+        assert_eq!(c.get("/login").send().await.status, 200);
+        let token = c.csrf_token().expect("GET sets the CSRF cookie");
+
+        let bare = c.post("/submit").form(&[("x", "1")]).send().await;
+        assert_eq!(bare.status, 403, "no token is refused");
+
+        let ok = c
+            .post("/submit")
+            .form(&[("x", "1"), ("_csrf", &token)])
+            .send()
+            .await;
+        assert_eq!(ok.status, 200, "{}", ok.text());
+
+        let forged = c
+            .post("/submit")
+            .header("origin", "http://evil.example")
+            .form(&[("_csrf", &token)])
+            .send()
+            .await;
+        assert_eq!(forged.status, 403, "a foreign Origin is refused");
+    }
+
+    /// Over TLS the CSRF layer refuses a missing or `http://` Origin, so this
+    /// passes only with the same-origin `https://` default.
+    #[tokio::test]
+    async fn default_origin_follows_x_forwarded_proto() {
+        let c = TestClient::new(csrf_app());
+        c.get("/login").send().await;
+        let token = c.csrf_token().expect("CSRF cookie");
+        let r = c
+            .post("/submit")
+            .header("x-forwarded-proto", "https")
+            .form(&[("_csrf", &token)])
+            .send()
+            .await;
+        assert_eq!(r.status, 200, "{}", r.text());
+    }
+
+    #[tokio::test]
+    async fn logout_reaches_the_server_with_session_and_token() {
+        let c = TestClient::new(csrf_app());
+        c.get("/login").send().await;
+        assert!(c.cookie("session").is_some());
+        let r = c.logout(Some("/logout")).await.expect("response");
+        assert_eq!(r.status, 200, "{}", r.text());
+        assert!(c.cookie("session").is_none(), "the server's expiry applied");
+    }
+
+    #[tokio::test]
+    async fn unsafe_requests_carry_host_and_same_origin() {
+        let app = Router::new().route(
+            "/who",
+            post(|h: axum::http::HeaderMap| async move {
+                let get = |n: &str| {
+                    h.get(n)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("-")
+                        .to_owned()
+                };
+                format!("{} {}", get("host"), get("origin"))
+            }),
+        );
+        let c = TestClient::new(app);
+        assert_eq!(
+            c.post("/who").send().await.text(),
+            "testserver http://testserver"
+        );
+        let custom = c.post("/who").header("host", "acme.test").send().await;
+        assert_eq!(custom.text(), "acme.test http://acme.test");
+    }
+
+    #[tokio::test]
+    async fn handlers_see_a_peer_address() {
+        use axum::extract::ConnectInfo;
+        let app = Router::new().route(
+            "/ip",
+            get(|ConnectInfo(addr): ConnectInfo<SocketAddr>| async move { addr.ip().to_string() }),
+        );
+        let c = TestClient::new(app);
+        let r = c.get("/ip").send().await;
+        assert_eq!((r.status, r.text().as_str()), (200, "127.0.0.1"));
+        let other = c
+            .get("/ip")
+            .remote_addr(SocketAddr::from(([10, 0, 0, 7], 1)))
+            .send()
+            .await;
+        assert_eq!(other.text(), "10.0.0.7");
+    }
+
+    #[tokio::test]
+    async fn repeated_set_cookie_headers_are_all_kept() {
+        let c = TestClient::new(cookie_app());
+        let r = c.post("/login").send().await;
+        assert_eq!(r.header_all("Set-Cookie").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn redirects_keep_or_drop_the_method_like_a_browser() {
+        use axum::http::{header, StatusCode};
+        let app = Router::new()
+            .route(
+                "/temp",
+                post(|| async {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(header::LOCATION, "/dest")],
+                    )
+                }),
+            )
+            .route(
+                "/seeother",
+                post(|| async { (StatusCode::SEE_OTHER, [(header::LOCATION, "/dest")]) }),
+            )
+            .route(
+                "/dest",
+                get(|| async { "GET".to_owned() })
+                    .post(|body: String| async move { format!("POST {body}") }),
+            );
+        let c = TestClient::new(app);
+        let (kept, chain) = c
+            .post("/temp")
+            .body("payload")
+            .send_following_redirects(3)
+            .await;
+        assert_eq!(kept.text(), "POST payload", "307 repeats method and body");
+        assert_eq!(chain, vec![(307, "/dest".into()), (200, "/dest".into())]);
+        let (dropped, _) = c
+            .post("/seeother")
+            .body("payload")
+            .send_following_redirects(3)
+            .await;
+        assert_eq!(dropped.text(), "GET", "303 becomes GET");
+    }
+
+    /// Redirects to `/dest`, which echoes the method (also as `x-method`),
+    /// body and content type it received.
+    fn fetch_redirect_app() -> Router {
+        use axum::extract::Path;
+        use axum::http::{header, HeaderMap, Method, StatusCode};
+        Router::new()
+            .route(
+                "/r/{code}",
+                axum::routing::any(|Path(code): Path<u16>| async move {
+                    let status = StatusCode::from_u16(code).expect("status");
+                    (status, [(header::LOCATION, "/dest")])
+                }),
+            )
+            .route(
+                "/dest",
+                axum::routing::any(|m: Method, h: HeaderMap, body: String| async move {
+                    let ct = h
+                        .get("content-type")
+                        .map_or("-", |v| v.to_str().unwrap_or("?"));
+                    ([("x-method", m.to_string())], format!("{m} {body:?} {ct}"))
+                }),
+            )
+    }
+
+    #[tokio::test]
+    async fn redirect_methods_follow_the_fetch_rules() {
+        let app = fetch_redirect_app();
+        let c = TestClient::new(app);
+        let cases = [
+            (301, "POST", "GET \"\" -"),
+            (302, "POST", "GET \"\" -"),
+            (301, "PUT", "PUT \"x=1\" application/x-www-form-urlencoded"),
+            (
+                302,
+                "DELETE",
+                "DELETE \"x=1\" application/x-www-form-urlencoded",
+            ),
+            (303, "PUT", "GET \"\" -"),
+            (303, "POST", "GET \"\" -"),
+            (
+                308,
+                "POST",
+                "POST \"x=1\" application/x-www-form-urlencoded",
+            ),
+            (
+                307,
+                "PATCH",
+                "PATCH \"x=1\" application/x-www-form-urlencoded",
+            ),
+        ];
+        for (code, method, want) in cases {
+            let (r, chain) = c
+                .request(
+                    Method::from_bytes(method.as_bytes()).unwrap(),
+                    &format!("/r/{code}"),
+                )
+                .form(&[("x", "1")])
+                .send_following_redirects(2)
+                .await;
+            assert_eq!(r.text(), want, "{code} {method}");
+            assert_eq!(chain[0], (code, "/dest".to_owned()));
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_303_keeps_head() {
+        let c = TestClient::new(fetch_redirect_app());
+        let (head, _) = c
+            .request(Method::HEAD, "/r/303")
+            .send_following_redirects(2)
+            .await;
+        assert_eq!(head.header("x-method"), Some("HEAD"));
+    }
+
+    /// A body header the test set goes with the body.
+    #[tokio::test]
+    async fn redirect_303_drops_body_headers() {
+        let c = TestClient::new(fetch_redirect_app());
+        let (r, _) = c
+            .post("/r/303")
+            .header("content-type", "text/plain")
+            .body("x")
+            .send_following_redirects(2)
+            .await;
+        assert_eq!(r.text(), "GET \"\" -");
     }
 
     #[tokio::test]
@@ -984,20 +1529,88 @@ mod tests {
     }
 
     #[test]
-    fn parse_set_cookie_handles_attributes() {
+    fn jar_honours_path_and_expiry() {
+        let mut jar = CookieJar::default();
+        jar.apply_set_cookie("a=1; Path=/admin", "/login");
+        jar.apply_set_cookie("b=2", "/account/login");
+        jar.apply_set_cookie("old=x; Expires=Wed, 21 Oct 2015 07:28:00 GMT", "/");
+        assert_eq!(jar.header_for("/admin/users").as_deref(), Some("a=1"));
+        assert_eq!(jar.header_for("/administrator"), None);
+        assert_eq!(jar.header_for("/account/x").as_deref(), Some("b=2"));
+        assert_eq!(jar.header_for("/"), None, "past Expires is never stored");
+        jar.apply_set_cookie("a=; Path=/admin; Max-Age=0", "/");
+        assert_eq!(jar.header_for("/admin"), None, "Max-Age=0 deletes");
+    }
+
+    /// Expiry, not an empty value, deletes; a positive Max-Age keeps.
+    #[test]
+    fn max_age_decides_deletion_not_the_value() {
+        let mut jar = CookieJar::default();
+        jar.apply_set_cookie("s=live; Path=/; Max-Age=3600", "/");
+        assert_eq!(jar.header_for("/").as_deref(), Some("s=live"));
+        jar.apply_set_cookie("s=; Path=/; Max-Age=3600", "/");
         assert_eq!(
-            parse_set_cookie("session=abc; Path=/; HttpOnly").unwrap(),
-            ("session".to_owned(), "abc".to_owned())
+            jar.header_for("/").as_deref(),
+            Some("s="),
+            "empty value is kept"
         );
+        jar.apply_set_cookie("s=gone; Path=/; Max-Age=0", "/");
         assert_eq!(
-            parse_set_cookie("foo=bar").unwrap(),
-            ("foo".to_owned(), "bar".to_owned())
+            jar.header_for("/"),
+            None,
+            "Max-Age=0 deletes a non-empty value"
         );
+    }
+
+    #[test]
+    fn same_name_on_two_paths_sends_longest_first() {
+        let mut jar = CookieJar::default();
+        jar.apply_set_cookie("s=root; Path=/", "/");
+        jar.apply_set_cookie("s=admin; Path=/admin", "/");
         assert_eq!(
-            parse_set_cookie("expired=; Max-Age=0").unwrap(),
-            ("expired".to_owned(), String::new())
+            jar.header_for("/admin/x").as_deref(),
+            Some("s=admin; s=root")
         );
-        assert!(parse_set_cookie("no-equals-sign").is_none());
+        assert_eq!(jar.header_for("/x").as_deref(), Some("s=root"));
+    }
+
+    /// The query is not part of the path, for the default path or matching.
+    #[tokio::test]
+    async fn cookie_paths_ignore_the_query() {
+        use axum::http::header;
+        let app = Router::new()
+            .route(
+                "/a/set",
+                get(|| async { ([(header::SET_COOKIE, "t=1")], "set") }),
+            )
+            .route(
+                "/a/me",
+                get(|h: axum::http::HeaderMap| async move {
+                    h.get("cookie")
+                        .map_or("-", |v| v.to_str().unwrap_or("?"))
+                        .to_owned()
+                }),
+            );
+        let c = TestClient::new(app);
+        c.get("/a/set?next=/x/y/z").send().await;
+        assert_eq!(c.get("/a/me?q=/b/c").send().await.text(), "t=1");
+    }
+
+    #[test]
+    fn redirect_locations_resolve_to_paths() {
+        assert_eq!(
+            resolve_location("/a/b", "http://testserver/x?y=1"),
+            "/x?y=1"
+        );
+        assert_eq!(resolve_location("/a/b", "https://h"), "/");
+        assert_eq!(resolve_location("/a/b?q", "c"), "/a/c");
+        assert_eq!(resolve_location("/a/b", "/d"), "/d");
+        assert_eq!(resolve_location("/a/b?x=1", "?page=2"), "/a/b?page=2");
+        assert_eq!(resolve_location("/a/b/c", "../x"), "/a/x");
+        assert_eq!(resolve_location("/a/b/c", "./x?n=../y"), "/a/b/x?n=../y");
+        assert_eq!(resolve_location("/a/b", "/d/./e/../f"), "/d/f");
+        assert_eq!(resolve_location("/a", "../../x"), "/x");
+        assert_eq!(resolve_location("/a/b/c", ".."), "/a/");
     }
 
     // ---------- get_following_redirects (issue #41 follow-up) ----------

@@ -19,9 +19,9 @@
 //! ## How it works
 //!
 //! A fixture is an array of JSON objects. Each object becomes one
-//! `INSERT INTO <table> (col, ...) VALUES (...)`. Column names come from
-//! the object keys and are checked; values are bound as parameters, so
-//! there is no SQL injection.
+//! `INSERT INTO <table> (col, ...) VALUES (...)`, all in one transaction.
+//! When a registered model owns the table, keys must be its fields and
+//! values are typed from them; values are always bound as parameters.
 //!
 //! Fixtures load in the order you register them, so load parent tables
 //! before child tables to satisfy foreign keys.
@@ -33,7 +33,7 @@ use serde_json::Value;
 
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
-use crate::sql::Pool;
+use crate::sql::{Pool, PoolTx};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FixtureError {
@@ -119,19 +119,36 @@ impl Fixture {
         Ok(self)
     }
 
-    /// Insert every row into `table` on any supported backend.
-    /// Placeholders and quoting come from the pool's dialect.
+    /// Insert every row into `table` on any supported backend, in one
+    /// transaction. When a registered model owns `table`, values are
+    /// typed from its fields and its id sequence is moved past the
+    /// loaded ids; other tables bind JSON scalars as-is.
     ///
     /// # Errors
-    /// [`FixtureError::Database`] on driver-level failures.
+    /// [`FixtureError::Format`] for a key the model has no field for or
+    /// a value of the wrong type; [`FixtureError::Database`] on driver
+    /// failures. Nothing is inserted on error.
     pub async fn load_into_pool(&self, table: &str, pool: &Pool) -> Result<usize, FixtureError> {
+        load_all_pool(&[(table, self)], pool).await
+    }
+
+    async fn load_tx(&self, table: &str, tx: &mut PoolTx<'_>) -> Result<usize, FixtureError> {
         validate_ident(table)?;
-        let mut count = 0;
+        let schema = model_for_table(table, &self.rows, &self.name)?;
         for row in &self.rows {
-            insert_row_pool(pool, table, row).await?;
-            count += 1;
+            match schema {
+                Some(schema) => insert_typed_row(tx, schema, row, &self.name).await?,
+                None => insert_row_raw(tx, table, row).await?,
+            }
         }
-        Ok(count)
+        if let Some((sql, binds)) =
+            schema.and_then(|s| crate::migrate::manage::reset_sequence_stmt(tx.dialect(), s))
+        {
+            crate::sql::raw_execute_tx(tx, &sql, binds)
+                .await
+                .map_err(|e| FixtureError::Database(e.to_string()))?;
+        }
+        Ok(self.rows.len())
     }
 
     /// PG-typed back-compat shim around [`Self::load_into_pool`].
@@ -145,8 +162,8 @@ impl Fixture {
     }
 }
 
-/// Load several fixtures in order on any supported backend. Stops at
-/// the first error.
+/// Load several fixtures in order on any supported backend, in one
+/// transaction: the first error rolls every fixture back.
 ///
 /// # Errors
 /// First fixture error encountered.
@@ -154,10 +171,15 @@ pub async fn load_all_pool(
     fixtures: &[(&str, &Fixture)],
     pool: &Pool,
 ) -> Result<usize, FixtureError> {
+    let db = |e: crate::sql::ExecError| FixtureError::Database(e.to_string());
+    let mut tx = crate::sql::write_transaction_pool(pool).await.map_err(db)?;
     let mut total = 0;
     for (table, fixture) in fixtures {
-        total += fixture.load_into_pool(table, pool).await?;
+        total += fixture.load_tx(table, &mut tx).await?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| db(crate::sql::ExecError::Driver(e)))?;
     Ok(total)
 }
 
@@ -170,8 +192,100 @@ pub async fn load_all(fixtures: &[(&str, &Fixture)], pool: &PgPool) -> Result<us
     load_all_pool(fixtures, &Pool::Postgres(pool.clone())).await
 }
 
-async fn insert_row_pool(
-    pool: &Pool,
+/// The registered model whose table is `table`, if any.
+fn model_for_table(
+    table: &str,
+    rows: &[serde_json::Map<String, Value>],
+    fixture: &str,
+) -> Result<Option<&'static crate::core::ModelSchema>, FixtureError> {
+    let candidates: Vec<&crate::core::ModelEntry> = inventory::iter::<crate::core::ModelEntry>()
+        .filter(|e| e.schema.table == table)
+        .collect();
+    pick_model(&candidates, rows, fixture)
+}
+
+/// Two models can share a table (a custom user model on `rustango_users`):
+/// prefer the one whose fields cover every key, then the project's own.
+fn pick_model(
+    candidates: &[&crate::core::ModelEntry],
+    rows: &[serde_json::Map<String, Value>],
+    fixture: &str,
+) -> Result<Option<&'static crate::core::ModelSchema>, FixtureError> {
+    if candidates.len() <= 1 {
+        return Ok(candidates.first().map(|e| e.schema));
+    }
+    let covers = |e: &&&crate::core::ModelEntry| {
+        rows.iter().flat_map(|r| r.keys()).all(|key| {
+            e.schema
+                .scalar_fields()
+                .any(|f| f.name == key || f.column == key)
+        })
+    };
+    let covering: Vec<&crate::core::ModelEntry> =
+        candidates.iter().filter(covers).copied().collect();
+    let fits = if covering.is_empty() {
+        candidates
+    } else {
+        &covering[..]
+    };
+    let project: Vec<&crate::core::ModelEntry> =
+        fits.iter().filter(|e| !e.is_framework()).copied().collect();
+    match (fits, &project[..]) {
+        ([only], _) | (_, [only]) => Ok(Some(only.schema)),
+        _ => Err(FixtureError::Format {
+            file: fixture.to_owned(),
+            detail: format!(
+                "models {} all fit table `{}`; remove one",
+                fits.iter()
+                    .map(|e| format!("`{}::{}`", e.module_path, e.schema.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                fits[0].schema.table,
+            ),
+        }),
+    }
+}
+
+/// One row through the ORM insert, each value typed by its field.
+async fn insert_typed_row(
+    tx: &mut PoolTx<'_>,
+    schema: &'static crate::core::ModelSchema,
+    row: &serde_json::Map<String, Value>,
+    fixture: &str,
+) -> Result<(), FixtureError> {
+    let bad = |detail: String| FixtureError::Format {
+        file: fixture.to_owned(),
+        detail,
+    };
+    if row.is_empty() {
+        return Err(bad("row has no columns".into()));
+    }
+    let mut columns = Vec::with_capacity(row.len());
+    let mut values = Vec::with_capacity(row.len());
+    for (key, raw) in row {
+        let field = schema
+            .scalar_fields()
+            .find(|f| f.name == key || f.column == key)
+            .ok_or_else(|| bad(format!("`{}` has no field `{key}`", schema.table)))?;
+        let value = crate::migrate::manage::json_to_sql_value(raw, field)
+            .map_err(|e| bad(format!("field `{key}`: {e}")))?;
+        columns.push(field.column);
+        values.push(value);
+    }
+    let query = crate::core::InsertQuery {
+        model: schema,
+        columns,
+        values,
+        returning: vec![],
+        on_conflict: None,
+    };
+    crate::sql::insert_tx(tx, &query)
+        .await
+        .map_err(|e| FixtureError::Database(e.to_string()))
+}
+
+async fn insert_row_raw(
+    tx: &mut PoolTx<'_>,
     table: &str,
     row: &serde_json::Map<String, Value>,
 ) -> Result<(), FixtureError> {
@@ -185,7 +299,7 @@ async fn insert_row_pool(
     for col in &columns {
         validate_ident(col)?;
     }
-    let dialect = pool.dialect();
+    let dialect = tx.dialect();
     let cols_sql: Vec<String> = columns.iter().map(|c| dialect.quote_ident(c)).collect();
     let placeholders: Vec<String> = (1..=columns.len())
         .map(|i| dialect.placeholder(i))
@@ -196,13 +310,11 @@ async fn insert_row_pool(
         cols_sql.join(", "),
         placeholders.join(", "),
     );
-    // One `SqlValue` per row value; `raw_execute_pool` binds them
-    // through the executor's per-backend macros.
     let binds: Vec<crate::core::SqlValue> = columns
         .iter()
         .map(|col| value_to_sqlvalue(&row[col.as_str()]))
         .collect();
-    crate::sql::raw_execute_pool(pool, &sql, binds)
+    crate::sql::raw_execute_tx(tx, &sql, binds)
         .await
         .map_err(|e| FixtureError::Database(e.to_string()))?;
     Ok(())
@@ -254,6 +366,99 @@ fn validate_ident(name: &str) -> Result<(), FixtureError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[allow(dead_code)]
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "fx_pick_users")]
+    pub struct FxPlainUser {
+        #[rustango(primary_key)]
+        pub id: crate::sql::Auto<i64>,
+        #[rustango(max_length = 32)]
+        pub username: String,
+    }
+
+    #[allow(dead_code)]
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "fx_pick_users")]
+    pub struct FxCustomUser {
+        #[rustango(primary_key)]
+        pub id: crate::sql::Auto<i64>,
+        #[rustango(max_length = 32)]
+        pub username: String,
+        #[rustango(max_length = 32)]
+        pub display_name: String,
+    }
+
+    fn entry(
+        schema: &'static crate::core::ModelSchema,
+        framework: bool,
+    ) -> crate::core::ModelEntry {
+        let path = if framework {
+            "rustango::tenancy::auth"
+        } else {
+            "app::models"
+        };
+        crate::core::ModelEntry::new(schema, path)
+    }
+
+    /// The picked model's name, trying both registration orders.
+    fn pick(
+        a: &crate::core::ModelEntry,
+        b: &crate::core::ModelEntry,
+        keys: serde_json::Value,
+    ) -> Result<&'static str, FixtureError> {
+        let rows = vec![keys.as_object().unwrap().clone()];
+        let one = pick_model(&[a, b], &rows, "fx")?.unwrap().name;
+        let two = pick_model(&[b, a], &rows, "fx")?.unwrap().name;
+        assert_eq!(one, two, "the pick depends on registration order");
+        Ok(one)
+    }
+
+    #[test]
+    fn pick_model_prefers_the_model_covering_the_keys() {
+        use crate::core::Model as _;
+        let (plain, custom) = (
+            entry(FxPlainUser::SCHEMA, true),
+            entry(FxCustomUser::SCHEMA, true),
+        );
+        let keys = json!({"username": "a", "display_name": "A"});
+        assert_eq!(pick(&plain, &custom, keys).unwrap(), "FxCustomUser");
+    }
+
+    #[test]
+    fn pick_model_prefers_the_project_model_when_both_cover() {
+        use crate::core::Model as _;
+        let keys = || json!({"username": "a"});
+        let (fw, app) = (
+            entry(FxPlainUser::SCHEMA, true),
+            entry(FxCustomUser::SCHEMA, false),
+        );
+        assert_eq!(pick(&fw, &app, keys()).unwrap(), "FxCustomUser");
+        let (fw, app) = (
+            entry(FxCustomUser::SCHEMA, true),
+            entry(FxPlainUser::SCHEMA, false),
+        );
+        assert_eq!(pick(&fw, &app, keys()).unwrap(), "FxPlainUser");
+        // No model covers `nickname`: still the project model, whose insert reports the key.
+        let keys = json!({"nickname": "a"});
+        assert_eq!(pick(&fw, &app, keys).unwrap(), "FxPlainUser");
+    }
+
+    #[test]
+    fn pick_model_errors_naming_both_when_ambiguous() {
+        use crate::core::Model as _;
+        let (a, b) = (
+            entry(FxPlainUser::SCHEMA, false),
+            entry(FxCustomUser::SCHEMA, false),
+        );
+        let err = pick(&a, &b, json!({"username": "a"}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("FxPlainUser") && err.contains("FxCustomUser"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn fixture_with_row_increments_count() {

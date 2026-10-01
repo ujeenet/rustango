@@ -47,6 +47,7 @@ use std::sync::Arc;
 use crate::sql::sqlx::postgres::{PgPool, PgPoolOptions};
 use crate::sql::sqlx::{self, Database};
 use tokio::sync::RwLock;
+use tracing::Instrument as _;
 
 use super::error::TenancyError;
 use super::org::{Org, StorageMode};
@@ -816,68 +817,73 @@ impl<DB: Database> TenantPools<DB> {
         // Cache miss — instrument so the cold path is visible in
         // tracing output. (#60, v0.27.7)
         let span = tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "database");
-        let _enter = span.enter();
-        let resolve_start = std::time::Instant::now();
-        // Resolve + connect outside the write lock so vault calls
-        // don't block other tenants' lookups.
-        let reference = org.database_url.as_deref().ok_or_else(|| {
-            TenancyError::Validation(format!(
-                "org `{}` is `storage_mode = database` but has no `database_url`",
-                org.slug
-            ))
-        })?;
-        let url = self.secrets.resolve(reference).await?;
-        tracing::debug!(
-            target: "rustango::tenancy::pools",
-            slug = %org.slug,
-            elapsed_ms = resolve_start.elapsed().as_millis() as u64,
-            "secrets resolver resolved tenant URL",
-        );
-        let connect_start = std::time::Instant::now();
-        let pool = build_database_pool::<DB>(&url, &self.config).await?;
-        tracing::info!(
-            target: "rustango::tenancy::pools",
-            slug = %org.slug,
-            elapsed_ms = connect_start.elapsed().as_millis() as u64,
-            min_conn = self.config.database_pool_min_connections,
-            max_conn = self.config.database_pool_max_connections,
-            "tenant pool connected (database mode)",
-        );
-        let pool = Arc::new(pool);
-
-        // Insert under write lock; check for race, then make room.
-        let mut cache = self.cache.write().await;
-        if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
-            existing.touch(self.next_tick());
-            return Ok(Arc::clone(&existing.pool));
-        }
-        // A pool built from an older source is replaced, not kept.
-        cache.remove(&org.slug);
-        // Evict rather than refuse: refusing left tenant 65 down until
-        // restart (#1527).
-        for slug in evict_to_fit(&mut cache, self.config.max_cached_database_pools) {
+        // `.instrument`, not `enter()`: a guard held across `.await`
+        // tags other tasks' events with this tenant (#1884).
+        async {
+            let resolve_start = std::time::Instant::now();
+            // Resolve + connect outside the write lock so vault calls
+            // don't block other tenants' lookups.
+            let reference = org.database_url.as_deref().ok_or_else(|| {
+                TenancyError::Validation(format!(
+                    "org `{}` is `storage_mode = database` but has no `database_url`",
+                    org.slug
+                ))
+            })?;
+            let url = self.secrets.resolve(reference).await?;
+            tracing::debug!(
+                target: "rustango::tenancy::pools",
+                slug = %org.slug,
+                elapsed_ms = resolve_start.elapsed().as_millis() as u64,
+                "secrets resolver resolved tenant URL",
+            );
+            let connect_start = std::time::Instant::now();
+            let pool = build_database_pool::<DB>(&url, &self.config).await?;
             tracing::info!(
                 target: "rustango::tenancy::pools",
-                evicted = %slug,
-                for_slug = %org.slug,
-                cap = self.config.max_cached_database_pools,
-                "evicted the least recently used tenant pool to make room",
+                slug = %org.slug,
+                elapsed_ms = connect_start.elapsed().as_millis() as u64,
+                min_conn = self.config.database_pool_min_connections,
+                max_conn = self.config.database_pool_max_connections,
+                "tenant pool connected (database mode)",
             );
+            let pool = Arc::new(pool);
+
+            // Insert under write lock; check for race, then make room.
+            let mut cache = self.cache.write().await;
+            if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
+                existing.touch(self.next_tick());
+                return Ok(Arc::clone(&existing.pool));
+            }
+            // A pool built from an older source is replaced, not kept.
+            cache.remove(&org.slug);
+            // Evict rather than refuse: refusing left tenant 65 down until
+            // restart (#1527).
+            for slug in evict_to_fit(&mut cache, self.config.max_cached_database_pools) {
+                tracing::info!(
+                    target: "rustango::tenancy::pools",
+                    evicted = %slug,
+                    for_slug = %org.slug,
+                    cap = self.config.max_cached_database_pools,
+                    "evicted the least recently used tenant pool to make room",
+                );
+            }
+            if self.config.max_cached_database_pools == 0 {
+                // Caching disabled: hand back the pool without storing it.
+                return Ok(pool);
+            }
+            cache.insert(
+                org.slug.clone(),
+                CachedPool::new(Arc::clone(&pool), source, self.next_tick()),
+            );
+            self.warn_if_near_cap(
+                cache.len(),
+                self.config.max_cached_database_pools,
+                "database",
+            );
+            Ok(pool)
         }
-        if self.config.max_cached_database_pools == 0 {
-            // Caching disabled: hand back the pool without storing it.
-            return Ok(pool);
-        }
-        cache.insert(
-            org.slug.clone(),
-            CachedPool::new(Arc::clone(&pool), source, self.next_tick()),
-        );
-        self.warn_if_near_cap(
-            cache.len(),
-            self.config.max_cached_database_pools,
-            "database",
-        );
-        Ok(pool)
+        .instrument(span)
+        .await
     }
 }
 
@@ -955,55 +961,58 @@ where
         use crate::core::Column as _;
         use crate::sql::FetcherPool as _;
         let span = tracing::info_span!("tenant_pools_prewarm");
-        let _enter = span.enter();
-        let started = std::time::Instant::now();
-        let registry_pool = self.registry_pool();
-        let orgs: Vec<Org> = Org::objects()
-            .where_(Org::storage_mode.eq("database".to_owned()))
-            .where_(Org::active.eq(true))
-            .fetch(&registry_pool)
-            .await?;
-        let total = orgs.len();
-        let mut report = PrewarmReport {
-            total_active: total,
-            warmed: 0,
-            failed: 0,
-            skipped_cap: 0,
-        };
-        for org in orgs {
-            if self.cache.read().await.len() >= self.config.max_cached_database_pools {
-                tracing::warn!(
-                    target: "rustango::tenancy::pools",
-                    slug = %org.slug,
-                    cap = self.config.max_cached_database_pools,
-                    "skipping pre-warm: cache cap reached",
-                );
-                report.skipped_cap += 1;
-                continue;
-            }
-            match self.pool_for_database_mode(&org).await {
-                Ok(_) => report.warmed += 1,
-                Err(e) => {
+        async {
+            let started = std::time::Instant::now();
+            let registry_pool = self.registry_pool();
+            let orgs: Vec<Org> = Org::objects()
+                .where_(Org::storage_mode.eq("database".to_owned()))
+                .where_(Org::active.eq(true))
+                .fetch(&registry_pool)
+                .await?;
+            let total = orgs.len();
+            let mut report = PrewarmReport {
+                total_active: total,
+                warmed: 0,
+                failed: 0,
+                skipped_cap: 0,
+            };
+            for org in orgs {
+                if self.cache.read().await.len() >= self.config.max_cached_database_pools {
                     tracing::warn!(
                         target: "rustango::tenancy::pools",
                         slug = %org.slug,
-                        error = %e,
-                        "pre-warm failed for tenant",
+                        cap = self.config.max_cached_database_pools,
+                        "skipping pre-warm: cache cap reached",
                     );
-                    report.failed += 1;
+                    report.skipped_cap += 1;
+                    continue;
+                }
+                match self.pool_for_database_mode(&org).await {
+                    Ok(_) => report.warmed += 1,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "rustango::tenancy::pools",
+                            slug = %org.slug,
+                            error = %e,
+                            "pre-warm failed for tenant",
+                        );
+                        report.failed += 1;
+                    }
                 }
             }
+            tracing::info!(
+                target: "rustango::tenancy::pools",
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                total = report.total_active,
+                warmed = report.warmed,
+                failed = report.failed,
+                skipped_cap = report.skipped_cap,
+                "prewarm complete",
+            );
+            Ok(report)
         }
-        tracing::info!(
-            target: "rustango::tenancy::pools",
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            total = report.total_active,
-            warmed = report.warmed,
-            failed = report.failed,
-            skipped_cap = report.skipped_cap,
-            "prewarm complete",
-        );
-        Ok(report)
+        .instrument(span)
+        .await
     }
 }
 
@@ -1099,9 +1108,9 @@ impl TenantPools<sqlx::Postgres> {
     /// point of schema mode, which exists to *reduce* per-tenant
     /// connection overhead relative to database mode.
     ///
-    /// Past `max_cached_scoped_pools` this falls back to the old
-    /// per-call build and warns, rather than erroring — see that
-    /// field for why, and for the connection arithmetic.
+    /// Past `max_cached_scoped_pools` this evicts the least recently
+    /// used scoped pool to make room — see that field for the
+    /// connection arithmetic.
     ///
     /// # Errors
     /// As [`Self::pool_for_org`] plus [`TenancyError::Driver`] for
@@ -1121,46 +1130,53 @@ impl TenantPools<sqlx::Postgres> {
 
                 let span =
                     tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "schema");
-                let _enter = span.enter();
-                let connect_start = std::time::Instant::now();
-                let scoped = self.build_scoped_pool(&schema, &registry).await?;
-                tracing::info!(
-                    target: "rustango::tenancy::pools",
-                    slug = %org.slug,
-                    schema = %schema,
-                    elapsed_ms = connect_start.elapsed().as_millis() as u64,
-                    max_conn = self.config.scoped_pool_max_connections,
-                    "tenant pool connected (schema mode)",
-                );
-
-                // Insert under write lock; check for race, then make room.
-                let mut cache = self.scoped_cache.write().await;
-                if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
-                    existing.touch(self.next_tick());
-                    return Ok((*existing.pool).clone());
-                }
-                cache.remove(&org.slug);
-                // Evict rather than skip the cache: skipping built a
-                // fresh pool per request, uncapped (#1528). Safe here
-                // because a scoped pool is cheap to rebuild.
-                for slug in evict_to_fit(&mut cache, self.config.max_cached_scoped_pools) {
+                async {
+                    let connect_start = std::time::Instant::now();
+                    let scoped = self.build_scoped_pool(&schema, &registry).await?;
                     tracing::info!(
                         target: "rustango::tenancy::pools",
-                        evicted = %slug,
-                        for_slug = %org.slug,
-                        cap = self.config.max_cached_scoped_pools,
-                        "evicted the least recently used scoped pool to make room",
+                        slug = %org.slug,
+                        schema = %schema,
+                        elapsed_ms = connect_start.elapsed().as_millis() as u64,
+                        max_conn = self.config.scoped_pool_max_connections,
+                        "tenant pool connected (schema mode)",
                     );
+
+                    // Insert under write lock; check for race, then make room.
+                    let mut cache = self.scoped_cache.write().await;
+                    if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
+                        existing.touch(self.next_tick());
+                        return Ok((*existing.pool).clone());
+                    }
+                    cache.remove(&org.slug);
+                    // Evict rather than skip the cache: skipping built a
+                    // fresh pool per request, uncapped (#1528). Safe here
+                    // because a scoped pool is cheap to rebuild.
+                    for slug in evict_to_fit(&mut cache, self.config.max_cached_scoped_pools) {
+                        tracing::info!(
+                            target: "rustango::tenancy::pools",
+                            evicted = %slug,
+                            for_slug = %org.slug,
+                            cap = self.config.max_cached_scoped_pools,
+                            "evicted the least recently used scoped pool to make room",
+                        );
+                    }
+                    if self.config.max_cached_scoped_pools == 0 {
+                        return Ok(scoped);
+                    }
+                    cache.insert(
+                        org.slug.clone(),
+                        CachedPool::new(Arc::new(scoped.clone()), source, self.next_tick()),
+                    );
+                    self.warn_if_near_cap(
+                        cache.len(),
+                        self.config.max_cached_scoped_pools,
+                        "schema",
+                    );
+                    Ok(scoped)
                 }
-                if self.config.max_cached_scoped_pools == 0 {
-                    return Ok(scoped);
-                }
-                cache.insert(
-                    org.slug.clone(),
-                    CachedPool::new(Arc::new(scoped.clone()), source, self.next_tick()),
-                );
-                self.warn_if_near_cap(cache.len(), self.config.max_cached_scoped_pools, "schema");
-                Ok(scoped)
+                .instrument(span)
+                .await
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
         }
@@ -1450,6 +1466,53 @@ mod tests {
         // `cap == 0` means caching is off; it must never warn.
         pools.warned_near_cap.store(false, Ordering::Relaxed);
         assert!(!pools.claim_near_cap_warning(0, 0), "cap 0 must not warn");
+    }
+
+    /// The cold-path span must not stay entered across `.await`, or
+    /// other work on the thread logs under this tenant (#1884).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_pool_init_span_does_not_leak_onto_other_tasks() {
+        struct Parked(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl SecretsResolver for Parked {
+            async fn resolve(
+                &self,
+                r: &str,
+            ) -> Result<String, super::super::secrets::SecretsError> {
+                self.0.notified().await;
+                Err(super::super::secrets::SecretsError::NotFound(r.to_owned()))
+            }
+        }
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let pools: TenantPools<sqlx::Sqlite> = TenantPools::with_secrets(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
+            Parked(gate.clone()),
+        );
+        let org = Org {
+            slug: "leaky".into(),
+            storage_mode: "database".into(),
+            database_url: Some("ref".into()),
+            ..crate::testkit::org()
+        };
+        let (res, ()) = tokio::join!(pools.pool_for_database_mode(&org), async {
+            tokio::task::yield_now().await;
+            tracing::info!("other-task-event");
+            gate.notify_one();
+        });
+        assert!(res.is_err());
+        let out = buf.contents();
+        let line = out
+            .lines()
+            .find(|l| l.contains("other-task-event"))
+            .expect("logged");
+        assert!(!line.contains("tenant_pool_init"), "span leaked: {line}");
     }
 
     #[cfg(feature = "postgres")]

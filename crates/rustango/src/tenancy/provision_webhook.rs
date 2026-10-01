@@ -302,7 +302,7 @@ async fn handle(
     // The run is opened *synchronously* so the caller gets an id it
     // can poll, and so the idempotency constraint fires now rather
     // than inside a spawned task where nobody would see it.
-    let run = store::open_run(
+    let run = match store::open_run(
         &registry,
         &request.slug,
         request.mode.as_str(),
@@ -312,12 +312,28 @@ async fn handle(
         Some(&payload.event_id),
     )
     .await
-    .map_err(|e| {
-        // Almost certainly the unique constraint — the race above.
-        // Re-read rather than guess, so a genuine failure is not
-        // reported as a duplicate.
-        Refusal::Internal(format!("could not open a provisioning run: {e}"))
-    })?;
+    {
+        Ok(run) => run,
+        Err(e) => {
+            // Almost certainly the unique key: a twin delivery won the race.
+            // Re-read rather than guess, so a real failure stays a 500.
+            let existing = store::run_by_idempotency_key(&registry, &payload.event_id)
+                .await
+                .ok()
+                .flatten();
+            return match existing {
+                Some(existing) => Ok(Accepted {
+                    run_id: existing.id.get().copied().unwrap_or_default(),
+                    slug: existing.slug,
+                    state: existing.state,
+                    duplicate: true,
+                }),
+                None => Err(Refusal::Internal(format!(
+                    "could not open a provisioning run: {e}"
+                ))),
+            };
+        }
+    };
     let run_id = run.id.get().copied().unwrap_or_default();
 
     let provisioner = Arc::clone(&state.provisioner);

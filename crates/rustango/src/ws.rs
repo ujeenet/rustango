@@ -35,7 +35,8 @@
 //!     ws: WebSocketUpgrade,
 //!     State(hub): State<WsHub<Tick>>,
 //! ) -> Response {
-//!     ws.on_upgrade(move |socket| ws_handler(socket, hub.clone()))
+//!     // Applies `max_message_bytes` to the frame reader too.
+//!     hub.upgrade(ws)
 //! }
 //!
 //! let app = Router::new().route("/ws", get(ws_route)).with_state(hub);
@@ -73,7 +74,8 @@ pub struct WsConfig {
     /// meaning server-push only.
     pub on_message: Option<fn(&str) -> Option<String>>,
     /// Close the connection if a message is larger than this.
-    /// Default: 1 MiB.
+    /// Default: 1 MiB. Only [`WsHub::upgrade`] enforces it before the
+    /// message is buffered; a bare `on_upgrade` checks it afterwards.
     pub max_message_bytes: usize,
 }
 
@@ -123,6 +125,21 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
         self
     }
 
+    /// Upgrade with the frame and message reader capped at
+    /// `max_message_bytes`, then run [`ws_handler`]. A bare
+    /// `on_upgrade` reads up to 64 MiB before the size check (#1957).
+    #[must_use = "the upgrade response must be returned"]
+    pub fn upgrade(&self, ws: axum::extract::WebSocketUpgrade) -> axum::response::Response
+    where
+        T: DeserializeOwned,
+    {
+        let hub = self.clone();
+        let max = self.config.max_message_bytes;
+        ws.max_message_size(max)
+            .max_frame_size(max)
+            .on_upgrade(move |socket| ws_handler(socket, hub))
+    }
+
     /// Send `event` to every connected client and return how many
     /// receivers saw it. With no clients it does nothing.
     pub fn broadcast(&self, event: T) -> usize {
@@ -142,10 +159,11 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
     }
 }
 
-/// Drive one connected WebSocket. Spawn it from your axum handler:
+/// Drive one connected WebSocket. [`WsHub::upgrade`] calls it with
+/// the size cap applied; call it yourself only if you set that cap:
 ///
 /// ```ignore
-/// ws.on_upgrade(move |socket| ws_handler(socket, hub.clone()))
+/// ws.max_message_size(n).on_upgrade(move |socket| ws_handler(socket, hub.clone()))
 /// ```
 ///
 /// It returns when the client disconnects, a ping fails, or the bus
@@ -242,6 +260,56 @@ mod tests {
     #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
     struct Tick {
         value: i64,
+    }
+
+    /// `upgrade` caps the frame reader: a frame header announcing more
+    /// than `max_message_bytes` closes the socket at once instead of
+    /// waiting to buffer the payload (#1957).
+    #[tokio::test]
+    async fn upgrade_refuses_an_oversized_frame_before_buffering_it() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let hub = WsHub::new(EventBus::<Tick>::new(4)).max_message_bytes(1024);
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws: axum::extract::WebSocketUpgrade| {
+                let hub = hub.clone();
+                async move { hub.upgrade(ws) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tcp.write_all(
+            b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut b = [0u8; 1];
+            tcp.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        assert!(
+            head.starts_with(b"HTTP/1.1 101"),
+            "{}",
+            String::from_utf8_lossy(&head)
+        );
+        // Masked binary frame header claiming a 2 MiB payload; no payload follows.
+        let mut frame = vec![0x82, 0x80 | 127];
+        frame.extend_from_slice(&(2u64 * 1024 * 1024).to_be_bytes());
+        frame.extend_from_slice(&[1, 2, 3, 4]);
+        tcp.write_all(&frame).await.unwrap();
+
+        let mut sink = Vec::new();
+        let closed = tokio::time::timeout(Duration::from_secs(3), tcp.read_to_end(&mut sink)).await;
+        assert!(
+            closed.is_ok(),
+            "the server kept waiting for the oversized payload"
+        );
     }
 
     #[tokio::test]

@@ -345,6 +345,18 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Statements that empty `tables` in any order, run in one
+    /// transaction. Default (SQLite): FK checks deferred to `COMMIT`.
+    fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
+        std::iter::once("PRAGMA defer_foreign_keys = ON".to_owned())
+            .chain(
+                tables
+                    .iter()
+                    .map(|t| format!("DELETE FROM {}", self.quote_ident(t))),
+            )
+            .collect()
+    }
+
     /// Add a named UNIQUE on one column of an existing table. PG and MySQL
     /// share this form; SQLite has no `ADD CONSTRAINT` and overrides it.
     fn add_unique_constraint_sql(&self, table: &str, name: &str, column: &str) -> String {

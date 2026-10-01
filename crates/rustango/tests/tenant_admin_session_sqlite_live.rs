@@ -156,11 +156,9 @@ async fn a_password_change_in_the_login_second_ends_a_tenant_admin_session() {
     );
 }
 
-/// An operator password change ends their open impersonation session.
-/// The cookie is minted through the real console and handoff.
-#[tokio::test]
-async fn an_operator_password_change_ends_their_impersonation_session() {
-    let env = boot().await;
+/// Log an operator into the console and start impersonating `env`'s
+/// tenant. Returns the operator and the handoff redirect.
+async fn start_impersonation(env: &Env) -> (Operator, String) {
     let password = "operator-password-1";
     let mut op = Operator {
         id: Auto::default(),
@@ -227,6 +225,45 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
     )
     .await;
     let location = first(&start, "location");
+    (op, location)
+}
+
+/// A port-routed org's handoff lands on its own port (#1933).
+#[tokio::test]
+async fn impersonating_a_port_routed_org_lands_on_its_port() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.port = Some(8443);
+    org.save_pool(&env.registry).await.expect("set port");
+    let (_, location) = start_impersonation(&env).await;
+    assert!(
+        location.contains(&format!("{}:8443/", env.host)),
+        "got {location}"
+    );
+}
+
+/// An operator password change ends their open impersonation session.
+/// The cookie is minted through the real console and handoff.
+#[tokio::test]
+async fn an_operator_password_change_ends_their_impersonation_session() {
+    let env = boot().await;
+    let (mut op, location) = start_impersonation(&env).await;
+    let first = |resp: &axum::response::Response, name| {
+        resp.headers()
+            .get(name)
+            .unwrap_or_else(|| panic!("response has {name}"))
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
     let handoff = &location[location
         .find("/__impersonation_handoff")
         .expect("handoff url")..];

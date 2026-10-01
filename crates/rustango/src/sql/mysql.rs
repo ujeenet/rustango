@@ -296,6 +296,20 @@ impl Dialect for MySql {
         ))
     }
 
+    /// No deferred FKs: the hint drops checks for one statement only, so
+    /// no session state leaks back into the pool (a `SET` would).
+    fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
+        tables
+            .iter()
+            .map(|t| {
+                format!(
+                    "DELETE /*+ SET_VAR(foreign_key_checks=0) */ FROM {}",
+                    self.quote_ident(t)
+                )
+            })
+            .collect()
+    }
+
     /// `CAST AS CHAR`: information_schema columns decode as binary otherwise.
     fn foreign_key_names_sql(&self) -> Option<&'static str> {
         Some(
