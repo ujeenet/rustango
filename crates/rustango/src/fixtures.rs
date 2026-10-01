@@ -134,7 +134,7 @@ impl Fixture {
 
     async fn load_tx(&self, table: &str, tx: &mut PoolTx<'_>) -> Result<usize, FixtureError> {
         validate_ident(table)?;
-        let schema = model_for_table(table);
+        let schema = model_for_table(table, &self.rows, &self.name)?;
         for row in &self.rows {
             match schema {
                 Some(schema) => insert_typed_row(tx, schema, row, &self.name).await?,
@@ -193,10 +193,57 @@ pub async fn load_all(fixtures: &[(&str, &Fixture)], pool: &PgPool) -> Result<us
 }
 
 /// The registered model whose table is `table`, if any.
-fn model_for_table(table: &str) -> Option<&'static crate::core::ModelSchema> {
-    inventory::iter::<crate::core::ModelEntry>()
-        .map(|e| e.schema)
-        .find(|s| s.table == table)
+fn model_for_table(
+    table: &str,
+    rows: &[serde_json::Map<String, Value>],
+    fixture: &str,
+) -> Result<Option<&'static crate::core::ModelSchema>, FixtureError> {
+    let candidates: Vec<&crate::core::ModelEntry> = inventory::iter::<crate::core::ModelEntry>()
+        .filter(|e| e.schema.table == table)
+        .collect();
+    pick_model(&candidates, rows, fixture)
+}
+
+/// Two models can share a table (a custom user model on `rustango_users`):
+/// prefer the one whose fields cover every key, then the project's own.
+fn pick_model(
+    candidates: &[&crate::core::ModelEntry],
+    rows: &[serde_json::Map<String, Value>],
+    fixture: &str,
+) -> Result<Option<&'static crate::core::ModelSchema>, FixtureError> {
+    if candidates.len() <= 1 {
+        return Ok(candidates.first().map(|e| e.schema));
+    }
+    let covers = |e: &&&crate::core::ModelEntry| {
+        rows.iter().flat_map(|r| r.keys()).all(|key| {
+            e.schema
+                .scalar_fields()
+                .any(|f| f.name == key || f.column == key)
+        })
+    };
+    let covering: Vec<&crate::core::ModelEntry> =
+        candidates.iter().filter(covers).copied().collect();
+    let fits = if covering.is_empty() {
+        candidates
+    } else {
+        &covering[..]
+    };
+    let project: Vec<&crate::core::ModelEntry> =
+        fits.iter().filter(|e| !e.is_framework()).copied().collect();
+    match (fits, &project[..]) {
+        ([only], _) | (_, [only]) => Ok(Some(only.schema)),
+        _ => Err(FixtureError::Format {
+            file: fixture.to_owned(),
+            detail: format!(
+                "models {} all fit table `{}`; remove one",
+                fits.iter()
+                    .map(|e| format!("`{}::{}`", e.module_path, e.schema.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                fits[0].schema.table,
+            ),
+        }),
+    }
 }
 
 /// One row through the ORM insert, each value typed by its field.
@@ -319,6 +366,99 @@ fn validate_ident(name: &str) -> Result<(), FixtureError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[allow(dead_code)]
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "fx_pick_users")]
+    pub struct FxPlainUser {
+        #[rustango(primary_key)]
+        pub id: crate::sql::Auto<i64>,
+        #[rustango(max_length = 32)]
+        pub username: String,
+    }
+
+    #[allow(dead_code)]
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "fx_pick_users")]
+    pub struct FxCustomUser {
+        #[rustango(primary_key)]
+        pub id: crate::sql::Auto<i64>,
+        #[rustango(max_length = 32)]
+        pub username: String,
+        #[rustango(max_length = 32)]
+        pub display_name: String,
+    }
+
+    fn entry(
+        schema: &'static crate::core::ModelSchema,
+        framework: bool,
+    ) -> crate::core::ModelEntry {
+        let path = if framework {
+            "rustango::tenancy::auth"
+        } else {
+            "app::models"
+        };
+        crate::core::ModelEntry::new(schema, path)
+    }
+
+    /// The picked model's name, trying both registration orders.
+    fn pick(
+        a: &crate::core::ModelEntry,
+        b: &crate::core::ModelEntry,
+        keys: serde_json::Value,
+    ) -> Result<&'static str, FixtureError> {
+        let rows = vec![keys.as_object().unwrap().clone()];
+        let one = pick_model(&[a, b], &rows, "fx")?.unwrap().name;
+        let two = pick_model(&[b, a], &rows, "fx")?.unwrap().name;
+        assert_eq!(one, two, "the pick depends on registration order");
+        Ok(one)
+    }
+
+    #[test]
+    fn pick_model_prefers_the_model_covering_the_keys() {
+        use crate::core::Model as _;
+        let (plain, custom) = (
+            entry(FxPlainUser::SCHEMA, true),
+            entry(FxCustomUser::SCHEMA, true),
+        );
+        let keys = json!({"username": "a", "display_name": "A"});
+        assert_eq!(pick(&plain, &custom, keys).unwrap(), "FxCustomUser");
+    }
+
+    #[test]
+    fn pick_model_prefers_the_project_model_when_both_cover() {
+        use crate::core::Model as _;
+        let keys = || json!({"username": "a"});
+        let (fw, app) = (
+            entry(FxPlainUser::SCHEMA, true),
+            entry(FxCustomUser::SCHEMA, false),
+        );
+        assert_eq!(pick(&fw, &app, keys()).unwrap(), "FxCustomUser");
+        let (fw, app) = (
+            entry(FxCustomUser::SCHEMA, true),
+            entry(FxPlainUser::SCHEMA, false),
+        );
+        assert_eq!(pick(&fw, &app, keys()).unwrap(), "FxPlainUser");
+        // No model covers `nickname`: still the project model, whose insert reports the key.
+        let keys = json!({"nickname": "a"});
+        assert_eq!(pick(&fw, &app, keys).unwrap(), "FxPlainUser");
+    }
+
+    #[test]
+    fn pick_model_errors_naming_both_when_ambiguous() {
+        use crate::core::Model as _;
+        let (a, b) = (
+            entry(FxPlainUser::SCHEMA, false),
+            entry(FxCustomUser::SCHEMA, false),
+        );
+        let err = pick(&a, &b, json!({"username": "a"}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("FxPlainUser") && err.contains("FxCustomUser"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn fixture_with_row_increments_count() {

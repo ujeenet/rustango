@@ -121,6 +121,51 @@ async fn truncate_empty_slice_is_a_no_op(pool: &Pool) {
     assert_eq!(counts(pool).await, (1, 1));
 }
 
+/// Only the parent is listed while a child points at it: PG cascades and
+/// restarts ids, MySQL leaves the orphan, SQLite fails at COMMIT and rolls back.
+async fn truncate_unlisted_child_follows_the_dialect(pool: &Pool) {
+    seed_parent_and_child(pool).await;
+    let res = truncate_tables(pool, &["tdb1959_parent"]).await;
+    match pool.dialect().name() {
+        "postgres" => {
+            res.expect("truncate");
+            assert_eq!(counts(pool).await, (0, 0), "CASCADE clears the child");
+        }
+        "mysql" => {
+            res.expect("truncate");
+            assert_eq!(counts(pool).await, (0, 1), "the orphan child stays");
+        }
+        _ => {
+            assert!(res.is_err(), "the deferred FK check fails at COMMIT");
+            assert_eq!(counts(pool).await, (1, 1), "rolled back");
+            return;
+        }
+    }
+    let mut p = Parent {
+        id: Auto::default(),
+        name: "after".into(),
+    };
+    p.insert_pool(pool).await.expect("parent");
+    let id = p.id.get().copied().expect("pk");
+    if pool.dialect().name() == "postgres" {
+        assert_eq!(id, 1, "RESTART IDENTITY");
+    } else {
+        assert!(id > 1, "MySQL ids keep counting: {id}");
+    }
+}
+
+/// A failing statement rolls back the tables already cleared.
+async fn truncate_rolls_back_on_error(pool: &Pool) {
+    seed_parent_and_child(pool).await;
+    let res = truncate_tables(
+        pool,
+        &["tdb1959_child", "tdb1959_parent", "tdb1959_missing"],
+    )
+    .await;
+    assert!(res.is_err(), "missing table");
+    assert_eq!(counts(pool).await, (1, 1), "nothing was cleared");
+}
+
 fn row(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     v.as_object().expect("object").clone()
 }
@@ -197,9 +242,49 @@ tri_dialect_test! {
         truncate_after_clears_on_ok_and_err,
         truncate_after_clears_when_body_panics,
         truncate_empty_slice_is_a_no_op,
+        truncate_unlisted_child_follows_the_dialect,
+        truncate_rolls_back_on_error,
         fixture_loads_typed_values_and_resets_the_sequence,
         fixture_load_is_all_or_nothing,
         fixture_rejects_a_key_the_model_lacks,
         create_tables_is_re_runnable,
     ],
+}
+
+/// A custom user model next to the built-in `User` on `rustango_users`.
+#[cfg(feature = "tenancy")]
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rustango_users", app = "tdb1959")]
+pub struct AppUser {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub username: String,
+    #[rustango(max_length = 64)]
+    pub display_name: String,
+}
+
+/// The extra field picks the custom model, whatever the link order.
+/// SQLite only: the live servers share `rustango_users` with other suites.
+#[cfg(all(feature = "sqlite", feature = "tenancy"))]
+#[tokio::test]
+async fn user_fixture_with_an_extra_field_uses_the_custom_model() {
+    let on_users = rustango::inventory::iter::<rustango::core::ModelEntry>()
+        .filter(|e| e.schema.table == "rustango_users")
+        .count();
+    assert!(on_users >= 2, "the built-in User must be registered too");
+    let pool = rustango::testkit::matrix::Backend::Sqlite
+        .pool()
+        .await
+        .expect("sqlite");
+    rustango::testkit::matrix::fresh_table::<AppUser>(&pool).await;
+    Fixture::new("users")
+        .with_row(row(
+            serde_json::json!({"username": "a", "display_name": "A"}),
+        ))
+        .load_into_pool("rustango_users", &pool)
+        .await
+        .expect("load");
+    let users = AppUser::objects().fetch(&pool).await.expect("fetch");
+    assert_eq!(users[0].display_name, "A");
 }
