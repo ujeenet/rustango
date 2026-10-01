@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Webhooks with private targets still refuse cloud metadata
+
+`allow_private_targets` no longer reaches `169.254.169.254` and the other metadata addresses (#1821).
+
 ## 0.59.16
 
 ### Custom admin views need `change` for writes

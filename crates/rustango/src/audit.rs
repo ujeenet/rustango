@@ -1577,9 +1577,18 @@ where
     emit_many_tx(tx, &entries).await
 }
 
-#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "admin", feature = "tenancy", feature = "forms")),
+    allow(dead_code)
+)]
 fn audited_create(query: &crate::core::InsertQuery) -> Option<AuditedCreate> {
     crate::core::ModelEntry::for_schema(query.model).and_then(|e| e.audited_create())
+}
+
+/// `true` when inserts on `model` write a `create` audit row.
+#[cfg_attr(not(feature = "template_views"), allow(dead_code))]
+pub(crate) fn audits_creates(model: &crate::core::ModelSchema) -> bool {
+    crate::core::ModelEntry::for_schema(model).is_some_and(|e| e.audited_create().is_some())
 }
 
 /// Run `query` and return the new row's PK, writing a `create` audit row
@@ -1590,20 +1599,40 @@ fn audited_create(query: &crate::core::InsertQuery) -> Option<AuditedCreate> {
 ///
 /// # Errors
 /// As [`crate::sql::insert_returning_pool`], plus the audit write.
-#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "admin", feature = "tenancy", feature = "forms")),
+    allow(dead_code)
+)]
 pub(crate) async fn insert(
     pool: &crate::sql::Pool,
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
+    Ok(insert_returning(pool, query, pk_field).await?.0)
+}
+
+/// [`insert`], also handing back the RETURNING row.
+///
+/// # Errors
+/// As [`insert`].
+#[cfg_attr(
+    not(any(feature = "admin", feature = "tenancy", feature = "forms")),
+    allow(dead_code)
+)]
+pub(crate) async fn insert_returning(
+    pool: &crate::sql::Pool,
+    query: &crate::core::InsertQuery,
+    pk_field: &crate::core::FieldSchema,
+) -> Result<(crate::core::SqlValue, crate::sql::InsertReturningPool), crate::sql::ExecError> {
     if audited_create(query).is_none() {
         let returning = crate::sql::insert_returning_pool(pool, query).await?;
-        return crate::sql::inserted_pk(query, &returning, pk_field);
+        let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
+        return Ok((pk, returning));
     }
     let mut tx = crate::sql::transaction_pool(pool).await?;
-    let pk = insert_tx(&mut tx, query, pk_field).await?;
+    let inserted = insert_returning_tx(&mut tx, query, pk_field).await?;
     tx.commit().await?;
-    Ok(pk)
+    Ok(inserted)
 }
 
 /// [`insert`] inside an open transaction.
@@ -1616,6 +1645,18 @@ pub(crate) async fn insert_tx(
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
+    Ok(insert_returning_tx(tx, query, pk_field).await?.0)
+}
+
+#[cfg_attr(
+    not(any(feature = "admin", feature = "tenancy", feature = "forms")),
+    allow(dead_code)
+)]
+async fn insert_returning_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &crate::core::InsertQuery,
+    pk_field: &crate::core::FieldSchema,
+) -> Result<(crate::core::SqlValue, crate::sql::InsertReturningPool), crate::sql::ExecError> {
     let returning = crate::sql::insert_returning_tx(tx, query).await?;
     let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
     if let Some(record) = audited_create(query) {
@@ -1626,7 +1667,7 @@ pub(crate) async fn insert_tx(
                 source: Box::new(e),
             })?;
     }
-    Ok(pk)
+    Ok((pk, returning))
 }
 
 /// Run `query`, auditing each row when its model is audited (#1794). The

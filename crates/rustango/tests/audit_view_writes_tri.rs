@@ -177,6 +177,41 @@ async fn template_views_writes_are_audited(pool: &Pool) {
     assert_eq!(ops(pool, "delete").await, 2);
 }
 
+/// CreateView, with and without a `{pk}` success URL, and `ModelForm`
+/// writes each audit with the real PK (#1821).
+async fn template_create_and_model_form_are_audited(pool: &Pool) {
+    use rustango::template_views::CreateView;
+    let tera = Arc::new(tera::Tera::default());
+    for url in ["/docs", "/docs/{pk}"] {
+        let app = CreateView::for_model(Doc::SCHEMA).success_url(url).router(
+            "/docs",
+            tera.clone(),
+            pool.clone(),
+        );
+        let status = send(app, Method::POST, "/docs/new", "title=c".into(), true).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+    }
+    let docs = Doc::objects().fetch(pool).await.expect("fetch");
+    let mut pks: Vec<String> = docs
+        .iter()
+        .map(|d| d.id.get().unwrap().to_string())
+        .collect();
+    let mut audited = created_pks(pool, DOC).await;
+    pks.sort();
+    audited.sort();
+    assert_eq!(audited, pks);
+
+    let data = |t: &str| [("title".to_owned(), t.to_owned())].into_iter().collect();
+    let form = rustango::forms::ModelForm::new(Doc::SCHEMA, data("f"));
+    let pk = form.save(pool).await.expect("form insert");
+    assert!(created_pks(pool, DOC)
+        .await
+        .contains(&pk.to_display_string()));
+    let form = rustango::forms::ModelForm::for_update(Doc::SCHEMA, data("g"), pk);
+    form.save(pool).await.expect("form update");
+    assert_eq!(ops(pool, "update").await, 1);
+}
+
 async fn soft_delete_restore_and_purge_are_audited(pool: &Pool) {
     use rustango::soft_delete;
     let pks = seed(pool).await;
@@ -260,6 +295,7 @@ tri_dialect_test! {
         viewset_update_and_delete_are_audited,
         viewset_create_is_audited,
         template_views_writes_are_audited,
+        template_create_and_model_form_are_audited,
         soft_delete_restore_and_purge_are_audited,
     ],
 }

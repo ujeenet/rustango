@@ -54,6 +54,15 @@ impl Allowlist {
         list
     }
 
+    /// Every address; metadata endpoints stay refused (#1821).
+    fn any_address() -> Self {
+        let nets = ["0.0.0.0/0", "::/0"].map(|n| CidrRange::parse(n).expect("valid CIDR"));
+        Self {
+            hosts: Vec::new(),
+            nets: nets.into(),
+        }
+    }
+
     fn allows_host(&self, host: &str) -> bool {
         let host = normalize_host(host);
         self.hosts.iter().any(|h| *h == host)
@@ -77,12 +86,20 @@ pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_n
 pub(crate) enum TargetPolicy {
     /// Public addresses, plus what the allowlist names.
     Public(Allowlist),
-    /// No address check.
+    /// Private addresses too; cloud-metadata ones are still refused.
     #[cfg_attr(not(any(test, feature = "webhook-delivery")), allow(dead_code))]
     AllowPrivate,
 }
 
 impl TargetPolicy {
+    /// The allowlist this policy checks addresses against.
+    fn allowlist(&self) -> std::borrow::Cow<'_, Allowlist> {
+        match self {
+            Self::Public(allow) => std::borrow::Cow::Borrowed(allow),
+            Self::AllowPrivate => std::borrow::Cow::Owned(Allowlist::any_address()),
+        }
+    }
+
     /// Public addresses only.
     #[cfg_attr(not(any(test, feature = "webhook-delivery")), allow(dead_code))]
     pub(crate) fn public_only() -> Self {
@@ -210,9 +227,8 @@ fn build_client(
             warn_proxied_once();
             builder.proxy(reqwest::Proxy::all(url)?)
         }
-        (None, TargetPolicy::AllowPrivate) => builder,
-        (None, TargetPolicy::Public(allow)) => {
-            builder.dns_resolver(Arc::new(CheckingResolver(allow.clone())))
+        (None, policy) => {
+            builder.dns_resolver(Arc::new(CheckingResolver(policy.allowlist().into_owned())))
         }
     };
     builder.build()
@@ -293,9 +309,7 @@ async fn check_url(url: &str, policy: &TargetPolicy) -> Result<reqwest::Url, Tar
             url.scheme()
         )));
     }
-    if let TargetPolicy::Public(allow) = policy {
-        check_host(&url, allow).await?;
-    }
+    check_host(&url, &policy.allowlist()).await?;
     Ok(url)
 }
 
@@ -563,6 +577,18 @@ mod tests {
         assert!(check_url("http://10.0.0.1/", &TargetPolicy::AllowPrivate)
             .await
             .is_ok());
+        // Private targets never open cloud metadata (#1821).
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://100.100.100.200/",
+        ] {
+            let err = check_url(url, &TargetPolicy::AllowPrivate).await.err();
+            assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
+        }
+        let at = vec![SocketAddr::new("169.254.170.2".parse().unwrap(), 80)];
+        let route = checked_addrs("x", at, &TargetPolicy::AllowPrivate.allowlist());
+        assert!(matches!(route, Err(TargetError::Blocked)));
     }
 
     #[tokio::test]
