@@ -25,6 +25,11 @@ use tokio::sync::oneshot;
 ///
 /// Returns `(port, body_rx)`. Spawn before connecting the mailer.
 async fn spawn_mock() -> (u16, oneshot::Receiver<String>) {
+    spawn_mock_with(b"250 Ok\r\n").await
+}
+
+/// [`spawn_mock`] whose `RCPT TO` reply is `rcpt_reply`.
+async fn spawn_mock_with(rcpt_reply: &'static [u8]) -> (u16, oneshot::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = oneshot::channel();
@@ -62,8 +67,10 @@ async fn spawn_mock() -> (u16, oneshot::Receiver<String>) {
                 // Single-line EHLO so lettre doesn't think we
                 // advertise STARTTLS / AUTH.
                 write.write_all(b"250 mock.test\r\n").await.unwrap();
-            } else if upper.starts_with("MAIL FROM") || upper.starts_with("RCPT TO") {
+            } else if upper.starts_with("MAIL FROM") {
                 write.write_all(b"250 Ok\r\n").await.unwrap();
+            } else if upper.starts_with("RCPT TO") {
+                write.write_all(rcpt_reply).await.unwrap();
             } else if upper.starts_with("DATA") {
                 write
                     .write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n")
@@ -298,4 +305,30 @@ async fn smtp_mailer_refuses_crlf_in_a_custom_header() {
         matches!(err, rustango::email::MailError::BadHeader(_)),
         "{err}"
     );
+}
+
+/// A 5xx is final, a 4xx is worth a retry (#1948).
+#[tokio::test]
+async fn only_a_transient_smtp_refusal_is_retryable() {
+    for (reply, retryable) in [
+        (&b"550 No such user\r\n"[..], false),
+        (&b"451 Try again later\r\n"[..], true),
+    ] {
+        let (port, _rx) = spawn_mock_with(reply).await;
+        let mailer = SmtpMailer::builder("127.0.0.1")
+            .port(port)
+            .tls(TlsMode::None)
+            .build()
+            .expect("build ok");
+        let email = Email::new()
+            .from("noreply@example.com")
+            .to("alice@example.com")
+            .subject("s")
+            .body("b");
+        let err = tokio::time::timeout(Duration::from_secs(5), mailer.send(&email))
+            .await
+            .expect("send within timeout")
+            .expect_err("the server refused");
+        assert_eq!(err.is_retryable(), retryable, "{err}");
+    }
 }

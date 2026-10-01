@@ -158,6 +158,10 @@ Provisioning and `create_tenant` refuse a schema named `public` (#1868). Rename 
 
 Editing or provisioning a tenant with a host another tenant uses (base or extra) is refused (#1931). The console edit form now rejects a host with a port, a bad `path_prefix` or `port`.
 
+### Mail config errors
+
+`email::from_settings` returns `MailError::Config` for `backend = "file"` without `file_email_dir` and for unknown backends, instead of using the console (#1948). A permanent SMTP refusal is the new `MailError::Rejected`, which `is_retryable()` is false for.
+
 ### Impersonation username
 
 An impersonation session's username is `operator:<username>`, not empty (#1939).

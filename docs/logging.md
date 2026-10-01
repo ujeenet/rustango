@@ -119,7 +119,6 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::cache` | Cache backends |
 | `rustango::cache_page` | Page-cache middleware |
 | `rustango::cors` | CORS policy decisions |
-| `rustango::email` | Mail dispatch |
 | `rustango::email::smtp` | SMTP transport |
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |

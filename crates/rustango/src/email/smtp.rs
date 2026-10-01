@@ -336,10 +336,14 @@ impl Mailer for SmtpMailer {
             .multipart(body_part)
             .map_err(|e| MailError::InvalidMessage(format!("message build: {e}")))?;
 
-        self.transport
-            .send(message)
-            .await
-            .map_err(|e| MailError::Transport(format!("smtp send: {e}")))?;
+        self.transport.send(message).await.map_err(|e| {
+            // A 5xx is the server's final answer; retrying cannot help (#1948).
+            if e.is_permanent() {
+                MailError::Rejected(format!("smtp send: {e}"))
+            } else {
+                MailError::Transport(format!("smtp send: {e}"))
+            }
+        })?;
         Ok(())
     }
 }

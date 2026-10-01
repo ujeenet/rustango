@@ -183,8 +183,15 @@ impl OpBrand {
     fn from_env() -> Self {
         let mut out = Self::defaults();
         #[cfg(feature = "config")]
-        if let Ok(s) = crate::config::Settings::load_from_env() {
-            Self::apply_brand_settings(&mut out, &s.brand);
+        match crate::config::Settings::load_from_env() {
+            Ok(s) => Self::apply_brand_settings(&mut out, &s.brand),
+            Err(e) if e.is_missing_config() => {}
+            // A broken config should say so, not silently drop the brand (#1948).
+            Err(e) => tracing::warn!(
+                target: "rustango::tenancy::operator_console",
+                error = %e,
+                "the config does not load; console branding uses defaults"
+            ),
         }
         Self::apply_env_overrides(&mut out);
         out

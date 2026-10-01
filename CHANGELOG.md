@@ -24,6 +24,10 @@ The tenant admin serves login, admin and handoff under the org's `path_prefix`; 
 
 The update diff no longer records a skipped readonly/hidden value as "after"; impersonation sessions are named `operator:<username>`, so `updated_by` is never empty.
 
+### Fixed — mail and console config failures are loud (#1948)
+
+`mail.backend = "file"` without a dir and unknown backends are errors; an SMTP 5xx is `MailError::Rejected`, not retried; a broken config logs a warning in the console.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

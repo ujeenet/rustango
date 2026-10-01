@@ -381,6 +381,9 @@ pub enum MailError {
     BadHeader(String),
     #[error("transport error: {0}")]
     Transport(String),
+    /// The server refused the message for good (an SMTP 5xx).
+    #[error("rejected: {0}")]
+    Rejected(String),
     /// The `[mail]` settings cannot build the backend they ask for.
     #[error("mail config: {0}")]
     Config(String),
@@ -808,42 +811,30 @@ async fn send_to_list(
 /// # Errors
 /// [`MailError::Config`] when `backend = "smtp"` cannot be built: no
 /// `smtp_host`, a bad `from_address` or `smtp_tls`, or no `email-smtp`
-/// feature. Falling back to the console put reset links in logs (#1923).
+/// feature; also for `file` without `file_email_dir` or an unknown
+/// backend. Falling back to the console put reset links in logs (#1923).
 #[cfg(feature = "config")]
 pub fn from_settings(s: &crate::config::MailSettings) -> Result<BoxedMailer, MailError> {
     Ok(match s.backend.as_deref() {
         Some("smtp") => smtp_from_settings(s)?,
         Some("memory") => Arc::new(InMemoryMailer::new()),
         Some("null" | "none") => Arc::new(NullMailer),
-        Some("file") => file_from_settings_or_warn(s),
+        Some("file") => match s.file_email_dir.as_deref() {
+            Some(dir) => Arc::new(FileMailer::new(dir)),
+            // An error, like smtp: the console would put mail in logs (#1948).
+            None => {
+                return Err(MailError::Config(
+                    "mail.backend = \"file\" but [mail].file_email_dir is unset".into(),
+                ))
+            }
+        },
         Some("console") | None => Arc::new(ConsoleMailer),
         Some(other) => {
-            tracing::warn!(
-                target: "rustango::email",
-                backend = %other,
-                "unknown mail.backend value; falling back to ConsoleMailer",
-            );
-            Arc::new(ConsoleMailer)
+            return Err(MailError::Config(format!(
+                "unknown mail.backend `{other}`; use console, memory, null, file or smtp"
+            )))
         }
     })
-}
-
-/// File-backend resolver — needs `[mail].file_email_dir` to be set,
-/// otherwise warns and falls back to `ConsoleMailer` so the app still
-/// boots. Issue #417.
-#[cfg(feature = "config")]
-fn file_from_settings_or_warn(s: &crate::config::MailSettings) -> BoxedMailer {
-    match s.file_email_dir.as_deref() {
-        Some(dir) => Arc::new(FileMailer::new(dir)),
-        None => {
-            tracing::warn!(
-                target: "rustango::email",
-                "mail.backend = \"file\" but [mail].file_email_dir is unset; \
-                 falling back to ConsoleMailer.",
-            );
-            Arc::new(ConsoleMailer)
-        }
-    }
 }
 
 /// `backend = "smtp"`: an [`SmtpMailer`] or an error, never the console.
@@ -967,7 +958,19 @@ mod tests {
             .expect("null backend never errors on valid email");
     }
 
-    /// Unknown / unset backend falls back to ConsoleMailer (which
+    /// A `file` backend with no directory, or an unknown backend, is an
+    /// error rather than a console that logs the mail (#1948).
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_file_backend_without_a_dir_or_an_unknown_backend_is_an_error() {
+        let mut s = crate::config::MailSettings::default();
+        s.backend = Some("file".into());
+        assert!(matches!(from_settings(&s), Err(MailError::Config(_))));
+        s.backend = Some("smtpp".into());
+        assert!(matches!(from_settings(&s), Err(MailError::Config(_))));
+    }
+
+    /// Unset backend falls back to ConsoleMailer (which
     /// prints — we just check the call succeeds; capturing stdout
     /// in a unit test would race with parallel runners).
     #[cfg(feature = "config")]
