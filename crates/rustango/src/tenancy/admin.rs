@@ -1520,7 +1520,9 @@ async fn change_password_submit(
             return crate::login_throttle::LoginRefused::Busy.into_response()
         }
         Err(e) => {
-            return redir_err(&format!("hash failed: {e}"));
+            // The hasher's text stays in the log, not the redirect URL (#2021).
+            warn!(target: "rustango::tenancy::admin", error = %e, "change-password hash");
+            return redir_err("Could not update the password; please try again.");
         }
     };
     user.password_hash = new_hash;

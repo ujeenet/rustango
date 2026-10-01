@@ -26,6 +26,10 @@ The keys were read by nothing. New `passwords::Argon2Params`, `configure_argon2`
 `/refresh` checks `sessions_revoked_at`, so a chain started before a logout stops rotating.
 A JWT login stamps its session start after the last logout.
 
+### Security — tenant `change_password` keeps hasher errors out of the redirect URL (#2021)
+
+The error is logged; the form shows a fixed message.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
