@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### SQLite `now()` columns added to a filled table get a fixed default (#2017)
+
+SQLite can't add a `now()` DEFAULT to a table with rows, so the column's DEFAULT is the time of the migration.
+The ORM binds `auto_now_add` / `auto_now` on insert; raw `INSERT`s that omit the column get that fixed time.
+
 ### `migrate` fails when the system chain can't be generated (#2014)
 
 `migrate`, `migrate-registry` and `migrate-tenants` now return the generation error instead of applying a stale

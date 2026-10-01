@@ -250,6 +250,49 @@ async fn fk_column_drops(pool: &Pool) {
         .expect("DropColumn of an FK column applies");
 }
 
+/// A `now()` column added to a table with rows, forward and by unapply.
+/// SQLite refuses a non-constant DEFAULT there (#2017).
+async fn now_column_adds_to_a_filled_table(pool: &Pool) {
+    let t = "mad_nw_item";
+    let chain = Chain::new(pool, "nw", &[t]).await;
+    let stamp = col(
+        "created_at",
+        "datetime",
+        json!({"nullable": false, "default": "now()"}),
+    );
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id()])]}))
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "id"])
+        .await
+        .unwrap();
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), stamp])]}))
+        .await
+        .expect("AddColumn with now() on a table with rows");
+    let dropped = chain
+        .step(pool, json!({"tables": [table(t, vec![id()])]}))
+        .await
+        .expect("DropColumn");
+    chain
+        .undo(pool, &dropped)
+        .await
+        .expect("unapply re-adds the now() column");
+    exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[t, "id"])
+        .await
+        .expect("the column still has a default");
+    let sql = q(
+        pool,
+        "SELECT COUNT(*) FROM {} WHERE {} IS NULL",
+        &[t, "created_at"],
+    );
+    let nulls: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(nulls, vec![(0,)], "every row has a timestamp");
+}
+
 /// A NOT NULL FK column with a default, added to a table with rows.
 /// SQLite refuses inline `REFERENCES` beside a non-NULL default there.
 async fn add_fk_column_with_default_to_filled_table(pool: &Pool) {
@@ -804,6 +847,7 @@ tri_dialect_test!(
         unique_drops_on_long_names,
         add_column_keeps_fk_and_unique,
         fk_column_drops,
+        now_column_adds_to_a_filled_table,
         add_fk_column_with_default_to_filled_table,
         long_fk_names_apply,
         column_drops_after_its_index_and_check,

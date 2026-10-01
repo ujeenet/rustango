@@ -2241,6 +2241,9 @@ where
 /// One schema op rendered for the runner.
 struct Step {
     batch: super::diff::RenderedBatch,
+    /// SQLite's retry with `now()` frozen, for a table with rows (#2017).
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    frozen: Option<super::diff::RenderedBatch>,
 }
 
 /// Render `change`, which moves the schema from `before` to `after`.
@@ -2251,21 +2254,45 @@ fn render_step(
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<Step, MigrateError> {
     let changes = std::slice::from_ref(change);
-    let batch = super::diff::render_changes_between(changes, before, after, dialect)
-        .map_err(MigrateError::Validation)?;
-    Ok(Step { batch })
+    let render = |snap: &SchemaSnapshot| {
+        super::diff::render_changes_between(changes, before, snap, dialect)
+            .map_err(MigrateError::Validation)
+    };
+    let frozen = super::ensure::frozen_now_default(dialect, after, changes)
+        .map(|snap| render(&snap))
+        .transpose()?;
+    Ok(Step {
+        batch: render(after)?,
+        frozen,
+    })
 }
 
-/// Run `step` on SQLite. Returns the deferred FK statements.
+/// Run `step` on SQLite, retrying a refused `now()` ADD COLUMN with the
+/// time frozen, as `ensure` does. Returns the deferred FK statements.
 #[cfg(feature = "sqlite")]
 async fn run_step_sqlite(
     conn: &mut sqlx::SqliteConnection,
     step: Step,
 ) -> Result<Vec<String>, MigrateError> {
-    for stmt in &step.batch.immediate {
-        sqlx::query(stmt).execute(&mut *conn).await?;
+    let Step { batch, frozen } = step;
+    for (i, stmt) in batch.immediate.iter().enumerate() {
+        let Err(e) = sqlx::query(stmt).execute(&mut *conn).await else {
+            continue;
+        };
+        // The ADD COLUMN is the first statement; nothing ran before it.
+        let Some(frozen) = frozen.filter(|_| i == 0) else {
+            return Err(e.into());
+        };
+        tracing::warn!(
+            target: "rustango::migrate",
+            "column added with a fixed DEFAULT: SQLite can't add `now()` to a table with rows"
+        );
+        for stmt in &frozen.immediate {
+            sqlx::query(stmt).execute(&mut *conn).await?;
+        }
+        return Ok(frozen.deferred_fks);
     }
-    Ok(step.batch.deferred_fks)
+    Ok(batch.deferred_fks)
 }
 
 /// [`run_step_sqlite`] for the non-atomic runners, on any backend.

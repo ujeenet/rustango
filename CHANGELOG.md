@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SQLite adds a `now()` column to a table with rows (#2017)
+
+`migrate` and unapply retry a refused `AddColumn` with the time frozen, as the system-chain converge does.
+
 ### Fixed — MySQL drops an FK column, forward and on unapply (#1981)
 
 `DropColumn` of an FK column drops its constraint first (MySQL refused with 1828). New export `migrate::unapply_pool_with_ledger`.

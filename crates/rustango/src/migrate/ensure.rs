@@ -244,7 +244,7 @@ pub(crate) async fn converge_groups(
             continue;
         };
         // SQLite refuses a non-constant DEFAULT on a table with rows.
-        let retried = match frozen_now_default(pool, snapshot, group) {
+        let retried = match frozen_now_default(pool.dialect(), snapshot, group) {
             Some(snap) => match render(group, &snap) {
                 Ok(b) => run_statements(pool, &b.immediate).await.is_ok(),
                 Err(_) => false,
@@ -270,13 +270,14 @@ pub(crate) async fn converge_groups(
 
 /// `snapshot` with the `now()` default of the column `group` adds fixed to
 /// the current time, on SQLite only. The ORM binds these columns on insert.
-fn frozen_now_default(
-    pool: &Pool,
+pub(super) fn frozen_now_default(
+    dialect: &dyn crate::sql::Dialect,
     snapshot: &super::SchemaSnapshot,
     group: &[super::SchemaChange],
 ) -> Option<super::SchemaSnapshot> {
     #[cfg(feature = "sqlite")]
-    if let (Pool::Sqlite(_), [super::SchemaChange::AddColumn { table, column }]) = (pool, group) {
+    if let ("sqlite", [super::SchemaChange::AddColumn { table, column }]) = (dialect.name(), group)
+    {
         let mut table = snapshot.table(table)?.clone();
         let field = table.fields.iter_mut().find(|f| &f.column == column)?;
         if !field
@@ -293,7 +294,7 @@ fn frozen_now_default(
             ..Default::default()
         });
     }
-    let _ = (pool, snapshot, group);
+    let _ = (dialect, snapshot, group);
     None
 }
 
