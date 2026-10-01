@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — the default tenant chain no longer trusts `X-Org` (#1856)
+
+`ChainResolver::standard` and `server::Builder` resolve by host only; opt in with `Builder::header_resolver` / `Cli::tenant_header`.
+`PortResolver` reads the listener port (`ListenerPort`), not the client URI; the apex check ignores case.
+
 ### Fixed — `Cli::with_welcome()` / `with_health()` work on manage-only builds (#2013)
 
 Both are gated on `_http_layers` instead of `admin`, so the `api` template's `/` and `/health` mount.

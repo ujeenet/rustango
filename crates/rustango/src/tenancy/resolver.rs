@@ -13,13 +13,13 @@
 //! | [`SubdomainResolver`]  | `Org.host_pattern` ↔ `Host` hdr | Default — composed first in `ChainResolver::default()`. |
 //! | [`PathPrefixResolver`] | `Org.path_prefix` ↔ URL path    | Opt-in — caller adds explicitly.               |
 //! | [`HeaderResolver`]     | `Org.slug` ↔ user header value  | API-only deployments.                          |
-//! | [`PortResolver`]       | `Org.port` ↔ incoming port      | Niche — hard-isolated tenant ports.            |
+//! | [`PortResolver`]       | `Org.port` ↔ listener port      | Niche — hard-isolated tenant ports.            |
 //! | [`ChainResolver`]      | tries each in order             | Operator builds the chain in `main.rs`.        |
 //!
-//! # `ChainResolver::default()`
+//! # `ChainResolver::standard()`
 //!
-//! `[Subdomain, Header]`. Path-prefix is **not** in the default chain —
-//! the operator opts in explicitly when they need both modes.
+//! `[Subdomain, RegisteredHost]`. Header and path-prefix are **not** in
+//! it — the operator opts in explicitly when they need those modes.
 //!
 //! # Apex (no subdomain) handling
 //!
@@ -99,7 +99,7 @@ impl OrgResolver for SubdomainResolver {
             return Ok(None);
         };
         // Apex only — no tenant resolution.
-        if host == self.apex_domain {
+        if host.eq_ignore_ascii_case(&self.apex_domain) {
             return Ok(None);
         }
         // Pick up a tenant created or suspended by another pod before
@@ -524,6 +524,9 @@ impl OrgResolver for PathPrefixResolver {
 /// JWT-authenticated deployments where the credential is itself
 /// tenant-scoped this is fine; for ambient-cookie deployments,
 /// always pair this resolver with `allow_only`.
+///
+/// Not in [`ChainResolver::standard`]: push it yourself (#1856).
+#[derive(Clone)]
 pub struct HeaderResolver {
     pub header_name: HeaderName,
     allowed_slugs: Option<std::collections::HashSet<String>>,
@@ -593,16 +596,26 @@ impl OrgResolver for HeaderResolver {
 
 // ---------------- PortResolver ----------------
 
-/// Match the request URL's port against `Org.port`. Niche — used
-/// for hard-isolated tenant ports in compliance / pen-test
-/// scenarios. Most deployments don't need this and shouldn't put
-/// it in their resolver chain.
+/// Match the port the request was accepted on against `Org.port`.
+/// Niche — used for hard-isolated tenant ports in compliance /
+/// pen-test scenarios. Most deployments don't need this and
+/// shouldn't put it in their resolver chain.
+///
+/// Reads the [`ListenerPort`] request extension, never the URI: an
+/// absolute-form request line lets the client pick that port (#1856).
 pub struct PortResolver;
+
+/// The local port of the listener that accepted the request.
+///
+/// `server::Builder::serve` inserts it; when you serve yourself, add
+/// `axum::Extension(ListenerPort(port))` per listener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListenerPort(pub u16);
 
 #[async_trait]
 impl OrgResolver for PortResolver {
     async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError> {
-        let Some(port) = parts.uri.port_u16() else {
+        let Some(ListenerPort(port)) = parts.extensions.get::<ListenerPort>().copied() else {
             return Ok(None);
         };
         find_active_org_by(registry, Org::port.eq(i32::from(port))).await
@@ -615,10 +628,9 @@ impl OrgResolver for PortResolver {
 /// from one resolver falls through to the next; an `Err` short-
 /// circuits (the caller usually surfaces it as 500).
 ///
-/// Default: `[SubdomainResolver, HeaderResolver]` — subdomain-first
-/// per the v0.5 design, with `X-Org` as a fallback for API clients.
-/// `PathPrefixResolver` is **not** in the default chain — operators
-/// add it explicitly when they need path-based routing too.
+/// [`ChainResolver::standard`] is `[SubdomainResolver, RegisteredHostResolver]`.
+/// `HeaderResolver` and `PathPrefixResolver` are **not** in it —
+/// operators add them explicitly when they need them.
 pub struct ChainResolver {
     resolvers: Vec<Box<dyn OrgResolver>>,
 }
@@ -640,20 +652,23 @@ impl ChainResolver {
         self
     }
 
-    /// Standard chain: subdomain first, then `X-Org` header. The
-    /// `apex_domain` is the bare app domain (e.g. `"app.example.com"`)
-    /// — `app.com` itself never resolves to a tenant; only its
-    /// subdomains do.
+    /// Standard chain: the tenant's host, then its extra registered
+    /// hosts. The `apex_domain` is the bare app domain (e.g.
+    /// `"app.example.com"`) — `app.com` itself never resolves to a
+    /// tenant; only its subdomains do.
+    ///
+    /// No `X-Org` fallback: a client header must not pick the tenant on
+    /// a host nobody registered (#1856). Push a [`HeaderResolver`],
+    /// ideally with [`HeaderResolver::allow_only`], to opt in.
     #[must_use]
     pub fn standard(apex_domain: impl Into<String>) -> Self {
         Self::new()
             .push(SubdomainResolver::new(apex_domain))
-            // After the base host, before the header fallback: an extra
-            // hostname must never outrank a tenant's own `host_pattern`,
-            // and until an operator registers one the table is empty, so
-            // no existing deployment changes behaviour.
+            // After the base host: an extra hostname must never outrank a
+            // tenant's own `host_pattern`, and until an operator registers
+            // one the table is empty, so no existing deployment changes
+            // behaviour.
             .push(RegisteredHostResolver)
-            .push(HeaderResolver::default())
     }
 }
 
@@ -697,6 +712,15 @@ impl OrgResolver for ChainResolver {
 /// so a few thousand case variants of a real host fill a bounded map with
 /// duplicates, evicting genuine entries and taking a write lock on the
 /// process-global cache each time.
+/// Whether the request's `Host` (port stripped) is the apex, ignoring
+/// case like every other host comparison here (#1856).
+pub(crate) fn host_is_apex(headers: &http::HeaderMap, apex: &str) -> bool {
+    headers
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.split(':').next().unwrap_or(s).eq_ignore_ascii_case(apex))
+}
+
 fn host_from_parts(parts: &Parts) -> Option<String> {
     if let Some(value) = parts.headers.get(http::header::HOST) {
         if let Ok(s) = value.to_str() {
@@ -820,6 +844,16 @@ mod tests {
             r.allowed_slugs.is_none(),
             "default resolver should not have an allowlist"
         );
+    }
+
+    /// #1856 — `APP.test` is the apex, not a tenant host to fall through on.
+    #[test]
+    fn apex_match_ignores_case_and_port() {
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::HOST, "APP.Test:8080".parse().unwrap());
+        assert!(host_is_apex(&h, "app.test"));
+        assert!(!host_is_apex(&h, "acme.app.test"));
+        assert!(!host_is_apex(&http::HeaderMap::new(), "app.test"));
     }
 
     #[test]

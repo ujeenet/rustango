@@ -11,7 +11,7 @@ use tower::ServiceExt as _;
 use crate::extractors::TenantContext;
 use crate::tenancy::{
     admin::TenantAdminBuilder, operator_console, ChainResolver, DefaultTenantDb, HeaderResolver,
-    RegisteredHostResolver, SubdomainResolver, TenantPools,
+    ListenerPort, TenantPools,
 };
 
 /// Stateless API router that the user supplies. The Builder injects
@@ -105,6 +105,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// `TrustedRealIp` (#1745).
     #[cfg(feature = "admin")]
     real_ip: Option<crate::real_ip::RealIpLayer>,
+    /// Opt-in `X-Org`-style fallback after the host resolvers (#1856).
+    header_resolver: Option<HeaderResolver>,
     _phantom: PhantomData<DB>,
 }
 
@@ -178,6 +180,7 @@ impl<DB: Database> Builder<DB> {
             ssl_redirect: None,
             #[cfg(feature = "admin")]
             real_ip: None,
+            header_resolver: None,
             _phantom: PhantomData,
         }
     }
@@ -219,6 +222,16 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn real_ip(mut self, layer: crate::real_ip::RealIpLayer) -> Self {
         self.real_ip = Some(layer);
+        self
+    }
+
+    /// Resolve the tenant from a request header when no host matched.
+    ///
+    /// Off by default, since the client picks the value (#1856). Pair
+    /// it with [`HeaderResolver::allow_only`] or tenant-scoped credentials.
+    #[must_use]
+    pub fn header_resolver(mut self, resolver: HeaderResolver) -> Self {
+        self.header_resolver = Some(resolver);
         self
     }
 
@@ -605,7 +618,7 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
-        let resolver_for_admin = build_resolver(&self.apex);
+        let resolver_for_admin = self.resolver();
 
         // v0.27.7 (#60) — pre-warm tenant pools on boot when the
         // app's `TenantPoolsConfig.prewarm_active_tenants` flag
@@ -652,7 +665,7 @@ impl<DB: Database> Builder<DB> {
         );
         let ctx = Arc::new(TenantContext {
             pools: self.pools.clone(),
-            resolver: build_resolver(&self.apex),
+            resolver: self.resolver(),
             session_secret: session_secret_for_tenant.clone(),
             operator_secret: operator_secret.clone(),
         });
@@ -810,13 +823,8 @@ impl<DB: Database> Builder<DB> {
                 let mut tenants = tenants.clone();
                 let apex = apex.clone();
                 async move {
-                    let host = req
-                        .headers()
-                        .get(axum::http::header::HOST)
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.split(':').next().unwrap_or(s).to_owned())
-                        .unwrap_or_default();
-                    let response = if host == apex {
+                    let on_apex = crate::tenancy::host_is_apex(req.headers(), &apex);
+                    let response = if on_apex {
                         operator.as_service().oneshot(req).await
                     } else {
                         tenants.as_service().oneshot(req).await
@@ -891,6 +899,15 @@ impl<DB: Database> Builder<DB> {
         Ok(app)
     }
 
+    /// The standard chain, plus the opt-in header fallback.
+    fn resolver(&self) -> ChainResolver {
+        let chain = ChainResolver::standard(self.apex.clone());
+        match &self.header_resolver {
+            Some(h) => chain.push(h.clone()),
+            None => chain,
+        }
+    }
+
     /// How long [`Self::serve`] lets open connections finish after the
     /// stop signal. Default [`crate::shutdown::DEFAULT_DRAIN_TIMEOUT`].
     #[must_use]
@@ -920,6 +937,8 @@ impl<DB: Database> Builder<DB> {
         let drain = self.drain_timeout;
         let app = self.into_router().await?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        // `PortResolver` reads this, never the client-sent URI port (#1856).
+        let app = app.layer(Extension(ListenerPort(listener.local_addr()?.port())));
         // v0.30.16 — `into_make_service_with_connect_info` is what
         // populates `ConnectInfo<SocketAddr>` in request extensions.
         // Without it, `access_log` (and any other middleware that
@@ -937,16 +956,6 @@ impl<DB: Database> Builder<DB> {
         .await?;
         Ok(())
     }
-}
-
-fn build_resolver(apex: &str) -> ChainResolver {
-    ChainResolver::new()
-        .push(SubdomainResolver::new(apex.to_owned()))
-        // Extra tenant hostnames (`rustango_org_hosts`). Additive: it only
-        // runs when the base `host_pattern` did not match, and the lookup
-        // fails soft so a not-yet-migrated database behaves as before.
-        .push(RegisteredHostResolver)
-        .push(HeaderResolver::default())
 }
 
 /// Build the axum router that claims every URL the tenant admin

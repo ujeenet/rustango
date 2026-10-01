@@ -76,6 +76,9 @@ pub struct Cli {
     /// `None` keeps the v0.27 defaults.
     #[cfg(feature = "tenancy")]
     routes: Option<crate::tenancy::RouteConfig>,
+    /// See [`Cli::tenant_header`].
+    #[cfg(feature = "tenancy")]
+    tenant_header: Option<crate::tenancy::HeaderResolver>,
     /// Bootstrap initializer used by the `init-tenancy` verb when
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
@@ -151,6 +154,8 @@ impl Cli {
             #[cfg(feature = "tenancy")]
             routes: None,
             #[cfg(feature = "tenancy")]
+            tenant_header: None,
+            #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
@@ -189,6 +194,15 @@ impl Cli {
     #[must_use]
     pub fn routes(mut self, routes: crate::tenancy::RouteConfig) -> Self {
         self.routes = Some(routes);
+        self
+    }
+
+    /// Opt in to resolving the tenant from a header (`X-Org`) when no
+    /// host matched; off by default (#1856).
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_header(mut self, resolver: crate::tenancy::HeaderResolver) -> Self {
+        self.tenant_header = Some(resolver);
         self
     }
 
@@ -1036,9 +1050,12 @@ impl Cli {
         builder: crate::server::Builder<DB>,
         outer: Option<OuterLayers>,
     ) -> crate::server::Builder<DB> {
-        let builder = builder
+        let mut builder = builder
             .observability(self.access_log_layer())
             .span_redact(self.span_redact_params());
+        if let Some(h) = &self.tenant_header {
+            builder = builder.header_resolver(h.clone());
+        }
         match outer {
             Some(o) => o.apply_to(builder),
             None => builder,

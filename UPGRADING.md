@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### The standard tenant chain drops the `X-Org` fallback (#1856)
+
+A request is resolved by host only. To keep header routing, add `HeaderResolver::default().allow_only([...])` via `Builder::header_resolver`, `Cli::tenant_header` or `ChainResolver::push`.
+`PortResolver` matches the `ListenerPort` extension that `Builder::serve` inserts; add it yourself if you serve another way.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)
