@@ -26,6 +26,10 @@ A stray `\u{8}` in a title no longer breaks the whole document; `.with_guid(..)`
 
 `"Café"` slugs to `"cafe"` (was `"caf"`); all-punctuation input gives `"untitled"`, `"untitled-2"` instead of `""`, `"-2"`.
 
+### Fixed — the translations editor no longer blanks file-catalog fallbacks (#1920)
+
+`apply_edits` writes only non-empty, changed cells, so saving an untouched grid no longer stores `""` over `fr.json` or re-upserts every row.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
