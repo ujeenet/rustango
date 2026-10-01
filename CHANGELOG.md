@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `auto_uuid` tables create on MySQL and SQLite (#1987)
+
+`DEFAULT gen_random_uuid()` was a syntax error there. MySQL now gets `(UUID())`, SQLite a random v4 UUID blob (needs SQLite 3.41+).
+
 ### Fixed — a system-migration generation error fails `migrate` (#2014)
 
 An unsupported framework field change (or an unwritable `system/migrations/`) was dropped, and `migrate` applied the stale chain.

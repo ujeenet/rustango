@@ -205,6 +205,7 @@ impl Dialect for MySql {
     ///   default's precision to match the column, and a `DateTime`
     ///   column is `DATETIME(6)`; without the `(6)` it rejects the
     ///   default outright.
+    /// - `gen_random_uuid()` becomes the 8.0.13+ expression `(UUID())`.
     /// - `'<lit>'::<type>` becomes `'<lit>'`.
     /// - A JSON, TEXT or BLOB column takes no literal default, only
     ///   MySQL 8.0.13+'s `DEFAULT (<expr>)` form, so those get
@@ -218,6 +219,7 @@ impl Dialect for MySql {
             "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {
                 out = "CURRENT_TIMESTAMP(6)".to_owned();
             }
+            e if super::dialect::is_uuid_expr(e) => return "(UUID())".to_owned(),
             _ => {
                 if let Some(idx) = out.rfind("::") {
                     let suffix = &out[idx + 2..];

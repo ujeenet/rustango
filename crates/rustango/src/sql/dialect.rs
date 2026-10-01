@@ -40,6 +40,12 @@ fn write_pg_array_keys(
     sql.push(']');
 }
 
+/// `true` for the canonical random-UUID DEFAULT (`auto_uuid`), which only
+/// Postgres has as a function (#1987).
+pub(crate) fn is_uuid_expr(expr: &str) -> bool {
+    expr.trim().eq_ignore_ascii_case("gen_random_uuid()")
+}
+
 /// Turns the dialect-neutral query IR into a parameterized statement,
 /// and supplies the DDL primitives the migration runner needs.
 ///

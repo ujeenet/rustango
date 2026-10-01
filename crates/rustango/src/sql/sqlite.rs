@@ -85,6 +85,12 @@ pub(crate) fn encode_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
 pub(crate) const SQLITE_CANONICAL_GLOB: &str =
     "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00";
 
+/// A random v4 UUID as 16 bytes, the form sqlx binds a `Uuid` in. `unhex`
+/// needs SQLite 3.41+ (the bundled one is newer).
+pub(crate) const SQLITE_UUID_V4: &str =
+    "(unhex(hex(randomblob(6)) || '4' || substr(hex(randomblob(2)), 2) \
+     || substr('89AB', 1 + (abs(random()) % 4), 1) || substr(hex(randomblob(8)), 2)))";
+
 /// `true` for a DEFAULT meaning "the current time", which SQLite renders
 /// as a non-constant expression.
 pub(crate) fn is_now_expr(expr: &str) -> bool {
@@ -185,6 +191,7 @@ impl Dialect for Sqlite {
     ///   whose output does not sort against the values the bind path
     ///   writes. The parentheses are required: SQLite accepts a
     ///   non-constant DEFAULT only as an expression.
+    /// - `gen_random_uuid()` becomes [`SQLITE_UUID_V4`].
     /// - `'<lit>'::<type>` becomes `'<lit>'`, since SQLite has no
     ///   `::` cast and the bare literal is already right.
     /// - Everything else passes through. `ty` and `max_length` are
@@ -193,6 +200,9 @@ impl Dialect for Sqlite {
         let trimmed = expr.trim();
         if is_now_expr(trimmed) {
             return format!("(strftime('{SQLITE_DATETIME_FORMAT}','now'))");
+        }
+        if super::dialect::is_uuid_expr(trimmed) {
+            return SQLITE_UUID_V4.to_owned();
         }
         // Strip a Postgres `::<type>` cast, so `'[]'::jsonb` becomes
         // `'[]'`. `::` cannot appear inside a quoted literal, so
