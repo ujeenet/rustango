@@ -313,9 +313,14 @@ fn base_params(base: &str) -> BTreeMap<String, String> {
                 continue;
             }
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            // Decode here: `join_url` encodes once, so `a%20b` must not become `a%2520b` (#1919).
+            let (k, v) = (
+                crate::url_codec::url_decode(k),
+                crate::url_codec::url_decode(v),
+            );
             // Drop the params overridden below.
-            if !matches!(k, "page" | "page_size" | "cursor") {
-                out.insert(k.to_owned(), v.to_owned());
+            if !matches!(k.as_str(), "page" | "page_size" | "cursor") {
+                out.insert(k, v);
             }
         }
     }
@@ -548,6 +553,21 @@ mod tests {
         let l = cursor_links("/posts", None, Some("c1"), 20);
         assert!(l.current.is_none());
         assert_eq!(l.next.as_deref(), Some("/posts?cursor=c1&page_size=20"));
+    }
+
+    /// Params already encoded in `base` are encoded once, not twice (#1919).
+    #[test]
+    fn base_query_params_are_not_double_encoded() {
+        let l = page_number_links("/posts?q=a%20b&tag=c%2Bd", 1, 20, 100);
+        assert_eq!(
+            l.next.as_deref(),
+            Some("/posts?page=2&page_size=20&q=a%20b&tag=c%2Bd")
+        );
+        let c = cursor_links("/posts?q=a+b", None, Some("c1"), 20);
+        assert_eq!(
+            c.next.as_deref(),
+            Some("/posts?cursor=c1&page_size=20&q=a%20b")
+        );
     }
 
     #[test]

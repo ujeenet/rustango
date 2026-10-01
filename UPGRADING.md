@@ -153,6 +153,9 @@ untouched.
 
 A `ListView` with no `order_by` now sorts by the model's `default_order`, then the PK.
 
+### `slugify` keeps non-ASCII-only text (#1919)
+
+`slugify("Привет мир")` is `"привет-мир"`, not `""`. Mixed text still drops non-ASCII letters.
 
 ## 0.59.13
 

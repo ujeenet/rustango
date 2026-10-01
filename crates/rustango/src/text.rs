@@ -10,7 +10,8 @@
 /// - Lowercases ASCII letters
 /// - Replaces non-alphanumeric runs with a single `-`
 /// - Strips leading and trailing `-`
-/// - Drops non-ASCII characters (use [`slugify_unicode`] for transliteration support)
+/// - Drops non-ASCII characters; when that leaves nothing, returns
+///   [`slugify_unicode`] instead, so `"Привет мир"` gives `"привет-мир"`
 ///
 /// # Examples
 ///
@@ -34,6 +35,11 @@ pub fn slugify(s: &str) -> String {
         }
     }
     let trimmed = out.trim_end_matches('-');
+    if trimmed.is_empty() {
+        // All-non-ASCII input ("Привет мир") keeps its letters rather than
+        // slugging to "" (#1919).
+        return slugify_unicode(s);
+    }
     trimmed.to_owned()
 }
 
@@ -1010,7 +1016,7 @@ fn truncate_html_visible_count(html: &str, limit: usize, suffix: &str, by_words:
     let mut count: usize = 0;
     let mut in_word = false; // tracks whitespace-state for word counting
     let mut bytes = html.char_indices().peekable();
-    while let Some((_, ch)) = bytes.next() {
+    while let Some((i, ch)) = bytes.next() {
         if ch == '<' {
             // Capture tag content up to matching `>`.
             let mut tag = String::from('<');
@@ -1024,24 +1030,10 @@ fn truncate_html_visible_count(html: &str, limit: usize, suffix: &str, by_words:
             update_open_tags(&mut open_tags, &tag);
             continue;
         }
-        if ch == '&' {
-            // Treat an entity as a single visible character; copy
-            // verbatim until `;` (or fall back to a single char if
-            // malformed).
-            let mut ent = String::from('&');
-            let mut saw_semi = false;
-            for (_, c) in bytes.by_ref() {
-                ent.push(c);
-                if c == ';' {
-                    saw_semi = true;
-                    break;
-                }
-                if ent.len() > 16 {
-                    break; // malformed; stop accumulating
-                }
-            }
-            out.push_str(&ent);
-            let _ = saw_semi; // malformed entity still counts as 1 unit
+        if let Some(n) = entity_len(&html[i..]) {
+            // A character reference is one visible unit, copied verbatim.
+            out.push_str(&html[i..i + n]);
+            while bytes.next_if(|(j, _)| *j < i + n).is_some() {}
             if by_words {
                 in_word = true;
             } else {
@@ -1092,8 +1084,8 @@ fn count_visible(html: &str, by_words: bool) -> usize {
     let mut count = 0usize;
     let mut in_tag = false;
     let mut in_word = false;
-    let mut chars = html.chars();
-    while let Some(ch) = chars.next() {
+    let mut chars = html.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
         if in_tag {
             if ch == '>' {
                 in_tag = false;
@@ -1104,13 +1096,9 @@ fn count_visible(html: &str, by_words: bool) -> usize {
             in_tag = true;
             continue;
         }
-        if ch == '&' {
-            // Skip to `;` (entity counts as 1 unit).
-            for c in chars.by_ref() {
-                if c == ';' {
-                    break;
-                }
-            }
+        if let Some(n) = entity_len(&html[i..]) {
+            // A character reference counts as one unit.
+            while chars.next_if(|(j, _)| *j < i + n).is_some() {}
             if by_words {
                 in_word = true;
             } else {
@@ -1135,6 +1123,22 @@ fn count_visible(html: &str, by_words: bool) -> usize {
         count += 1;
     }
     count
+}
+
+/// Byte length of the character reference opening `s` (`&amp;`, `&#38;`,
+/// `&#x26;`), or `None` for a bare `&`, which is plain text (#1919).
+fn entity_len(s: &str) -> Option<usize> {
+    let body = s.strip_prefix('&')?;
+    let end = body.bytes().take(32).position(|b| b == b';')?;
+    let name = &body[..end];
+    let ok = match name.strip_prefix('#') {
+        Some(num) => match num.strip_prefix(['x', 'X']) {
+            Some(hex) => !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            None => !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()),
+        },
+        None => !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric()),
+    };
+    ok.then_some(end + 2)
 }
 
 fn update_open_tags(stack: &mut Vec<String>, tag: &str) {
@@ -2552,7 +2556,17 @@ mod tests {
     #[test]
     fn slugify_drops_non_ascii() {
         assert_eq!(slugify("Café"), "caf");
-        assert_eq!(slugify("日本語"), "");
+    }
+
+    /// All-non-ASCII input falls back to the Unicode slug, not "" (#1919).
+    #[test]
+    fn slugify_non_ascii_only_falls_back_to_unicode() {
+        assert_eq!(slugify("Привет мир"), "привет-мир");
+        assert_eq!(slugify("日本語"), "日本語");
+        assert_eq!(
+            unique_slug("Привет мир", |s| s == "привет-мир"),
+            "привет-мир-2"
+        );
     }
 
     #[test]
@@ -4661,6 +4675,19 @@ mod tests {
         // Both `a` and `&amp;` were emitted, then suffix.
         assert!(out.contains("a&amp;"));
         assert!(out.ends_with("…"));
+    }
+
+    /// A bare `&` is one plain character, not the start of an entity (#1919).
+    #[test]
+    fn truncate_html_bare_ampersand_is_plain_text() {
+        assert_eq!(truncate_html_chars("AT&T rocks", 4, "…"), "AT&T…");
+        // A later `;` must not swallow the `<b>` tag and leave it unclosed.
+        assert_eq!(
+            truncate_html_chars("a & <b>bold; text</b>", 6, "…"),
+            "a & <b>bo…</b>"
+        );
+        assert_eq!(truncate_html_words("AT&T is big; ok", 2, "…"), "AT&T is…");
+        assert_eq!(truncate_html_chars("x&#x26;y&#38;z", 3, "…"), "x&#x26;y…");
     }
 
     #[test]

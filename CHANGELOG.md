@@ -11,6 +11,10 @@ With no builder `order_by`, `ListView` sorts by `default_order` before the PK, l
 
 The derive used the SQL column as the Rust field name for `select_related` and prefetch.
 
+### Fixed — `truncate_html` on a bare `&`, `slugify` on non-ASCII, pagination links (#1919)
+
+A bare `&` is plain text, so `AT&T …` truncates and a later `;` keeps tags closed. `slugify` of
+all-non-ASCII text returns `slugify_unicode` instead of `""`. Page links no longer double-encode.
 
 ## [0.59.13] — 2026-10-01
 
