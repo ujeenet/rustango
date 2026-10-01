@@ -411,9 +411,15 @@ where
         // set a host-scoped cookie, and redirect to the admin index.
         // `JtiBlacklist` makes the token single use.
         if path == routes.impersonation_handoff_url && method == axum::http::Method::GET {
-            return redeem_impersonation_handoff(&org, cfg, routes, parts.uri.query())
-                .await
-                .into_response();
+            return redeem_impersonation_handoff(
+                &org,
+                cfg,
+                routes,
+                parts.uri.query(),
+                &pools.registry_pool(),
+            )
+            .await
+            .into_response();
         }
         // SSO (admin-sso) — multi-provider OpenID Connect / social OAuth.
         // `{login}/sso/{slug}` starts the handshake for one provider;
@@ -511,23 +517,32 @@ where
             );
             // End the user's sessions everywhere. An impersonation logout
             // leaves the operator's console session alone.
-            if let SessionCheck::Authenticated {
-                user_id,
-                impersonated_by: None,
-                sessions_revoked_at,
-                ..
-            } = validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool()).await
-            {
-                if let Err(e) = crate::session::revoke_sessions::<super::auth::User>(
-                    &pool,
-                    user_id,
-                    sessions_revoked_at,
-                )
-                .await
+            let revoked =
+                match validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool())
+                    .await
                 {
-                    warn!(target: "rustango::tenancy::admin", slug = %org.slug, error = %e, "logout revoke failed");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
-                }
+                    SessionCheck::Authenticated {
+                        user_id,
+                        impersonated_by: None,
+                        sessions_revoked_at,
+                        iat,
+                        ..
+                    } => crate::session::revoke_sessions::<super::auth::User>(
+                        &pool,
+                        user_id,
+                        sessions_revoked_at,
+                        iat,
+                    )
+                    .await
+                    .map(drop)
+                    .map_err(|e| e.to_string()),
+                    // Never report a logout that did not happen.
+                    SessionCheck::Error(e) => Err(e),
+                    _ => Ok(()),
+                };
+            if let Err(e) = revoked {
+                warn!(target: "rustango::tenancy::admin", slug = %org.slug, error = %e, "logout revoke failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
             }
             send_user_logged_out(UserLoggedOutContext {
                 source: "tenant_admin",
@@ -727,6 +742,8 @@ enum SessionCheck {
         impersonated_by: Option<i64>,
         /// The tenant user's cut-off, for logout (#1855). `None` when impersonating.
         sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+        /// The cookie's issued-at, so logout's cut-off covers it (#1855).
+        iat: i64,
     },
     Anonymous,
     Error(String),
@@ -807,6 +824,7 @@ async fn validate_session(
                     username: String::new(),
                     impersonated_by: Some(operator_id),
                     sessions_revoked_at: None,
+                    iat: payload.iat,
                 }
             }
             // Operator gone, deactivated, changed password or logged out → drop it.
@@ -855,6 +873,7 @@ async fn validate_session(
         username: user.username.clone(),
         impersonated_by: None,
         sessions_revoked_at: user.sessions_revoked_at,
+        iat: payload.iat,
     }
 }
 
@@ -1180,8 +1199,11 @@ async fn redeem_impersonation_handoff(
     cfg: &TenantSessionConfig,
     routes: &super::routes::RouteConfig,
     query: Option<&str>,
+    registry: &crate::sql::Pool,
 ) -> Response {
     use super::impersonation_handoff::{decode, JtiBlacklist};
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
 
     let token = match query.and_then(extract_token_param) {
         Some(t) => t,
@@ -1199,6 +1221,31 @@ async fn redeem_impersonation_handoff(
             return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
         }
     };
+    // A token minted before the operator logged out or changed password is dead.
+    let op = match super::auth::Operator::objects()
+        .where_(super::auth::Operator::id.eq(payload.op))
+        .fetch(registry)
+        .await
+    {
+        Ok(rows) => rows.into_iter().next(),
+        Err(e) => {
+            warn!(target: "rustango::tenancy::admin", slug = %org.slug, error = %e, "handoff operator lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "operator lookup failed").into_response();
+        }
+    };
+    if !op.is_some_and(|op| {
+        op.active
+            && super::session::session_survives(
+                &cfg.secret,
+                &payload.pwf,
+                payload.iat,
+                &op.password_hash,
+                op.password_changed_at,
+                op.sessions_revoked_at,
+            )
+    }) {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
     if let Err(e) = JtiBlacklist::shared()
         .mark_used(&payload.jti, payload.exp)
         .await
@@ -1217,7 +1264,10 @@ async fn redeem_impersonation_handoff(
     // so browsers accept it on localhost too.
     let ttl_secs = i64::try_from(routes.impersonation_ttl.as_secs())
         .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
-    let session = TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs, payload.pwf);
+    let mut session =
+        TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs, payload.pwf);
+    // The session dates from the handoff's mint, on the console's clock.
+    session.iat = payload.iat;
     let cookie_value = tenant_console::encode(&cfg.secret, &session);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")

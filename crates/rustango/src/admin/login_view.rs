@@ -821,21 +821,26 @@ async fn logout_submit(
     });
     // End the user's sessions everywhere; only a live cookie may (#1855).
     if let Some((secret, (sess, auth))) = &decoded {
-        if let GateCheck::Live {
-            sessions_revoked_at,
-            ..
-        } = live_check(&state.pool, secret, sess.user_id, auth).await
-        {
-            if let Err(e) = crate::session::revoke_sessions::<AdminUser>(
+        let revoked = match live_check(&state.pool, secret, sess.user_id, auth).await {
+            GateCheck::Live {
+                sessions_revoked_at,
+                ..
+            } => crate::session::revoke_sessions::<AdminUser>(
                 &state.pool,
                 sess.user_id,
                 sessions_revoked_at,
+                auth.iat,
             )
             .await
-            {
-                tracing::warn!(target: "rustango::admin", error = %e, "logout revoke failed");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
-            }
+            .map(drop)
+            .map_err(|e| e.to_string()),
+            GateCheck::Reject => Ok(()),
+            // Never report a logout that did not happen.
+            GateCheck::DbError => Err("session lookup failed".to_owned()),
+        };
+        if let Err(e) = revoked {
+            tracing::warn!(target: "rustango::admin", error = %e, "logout revoke failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
         }
     }
 

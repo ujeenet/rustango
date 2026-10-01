@@ -155,6 +155,8 @@ untouched.
 `User`, `Operator` and `AdminUser` gain a nullable `sessions_revoked_at`; run `migrate` (struct literals need the field).
 Cookies are stateless, so logout ends all of that user's browser sessions, not only this one. Call
 `member_auth::logout(pool, &user)` instead of `clear_cookie()` alone. An impersonation logout leaves the operator signed in.
+`HandoffPayload` gains `iat` (struct literals need it). `authenticate_user` now reads through the ORM, so a tenant
+`rustango_users` missing a column errors instead of filling a default.
 
 ## 0.59.13
 

@@ -476,6 +476,40 @@ async fn opt_in_links_then_sub_wins_over_a_changed_email() {
     assert_ne!(ann, bob);
 }
 
+/// A tenant SSO login gets `iat` = the logout cut-off + 1 (#1855).
+#[tokio::test]
+async fn a_tenant_sso_login_lands_after_the_logout_cutoff() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    let cut = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 60, 0).unwrap();
+    let mut row = User::objects()
+        .filter("id", ann)
+        .fetch(env.pool())
+        .await
+        .unwrap()
+        .remove(0);
+    row.sessions_revoked_at = Some(cut);
+    row.save_pool(env.pool()).await.unwrap();
+
+    env.idp.assert("sub-ann", "ann@example.com");
+    let resp = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
+    let session = set_cookies(&resp)
+        .into_iter()
+        .find_map(|c| {
+            c.strip_prefix(&format!("{COOKIE_NAME}="))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| panic!("no session cookie; location {:?}", location(&resp)));
+    assert_eq!(
+        decode(&env.secret, &env.tenants[0].slug, &session)
+            .unwrap()
+            .iat,
+        cut.timestamp() + 1
+    );
+}
+
 #[tokio::test]
 async fn opt_in_never_links_a_superuser_or_staff() {
     let _g = SUITE.lock().await;
@@ -881,6 +915,56 @@ async fn bare_admin_never_links_by_email_and_signs_in_by_link() {
     root.save_pool(&pool).await.unwrap();
     let resp = handshake(&app, "admin.test", "/login", "corp").await;
     assert!(!signed_in(&resp), "{}", location(&resp));
+}
+
+/// A bare-admin SSO login gets `iat` = the logout cut-off + 1 (#1855).
+#[tokio::test]
+async fn a_bare_admin_sso_login_lands_after_the_logout_cutoff() {
+    use base64::Engine as _;
+    use rustango::admin::AdminUser;
+    let _g = SUITE.lock().await;
+    let (app, pool, idp) = bare_admin().await;
+    let mut root = AdminUser::objects()
+        .filter("username", "root")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", root.id.get().copied().unwrap())
+        .await
+        .unwrap();
+    let cut = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 60, 0).unwrap();
+    root.sessions_revoked_at = Some(cut);
+    root.save_pool(&pool).await.unwrap();
+
+    idp.assert("sub-root", "root@example.com");
+    let resp = handshake(&app, "admin.test", "/login", "corp").await;
+    let cookie = set_cookies(&resp)
+        .into_iter()
+        .find_map(|c| c.strip_prefix("rustango_admin_session=").map(str::to_owned))
+        .unwrap_or_else(|| panic!("not signed in: {}", location(&resp)));
+    let body = cookie.split_once('.').unwrap().0;
+    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(body)
+        .unwrap();
+    let iat = serde_json::from_slice::<serde_json::Value>(&json).unwrap()["iat"].as_i64();
+    assert_eq!(iat, Some(cut.timestamp() + 1));
+    let home = send(
+        &app,
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, "admin.test")
+            .header(header::COOKIE, format!("rustango_admin_session={cookie}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(home.status(), StatusCode::OK, "the SSO session must work");
 }
 
 #[tokio::test]

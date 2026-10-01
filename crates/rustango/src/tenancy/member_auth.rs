@@ -266,7 +266,8 @@ pub fn clear_cookie() -> String {
 /// [`crate::sql::ExecError`] when the cut-off cannot be stored.
 pub async fn logout(pool: &crate::sql::Pool, user: &User) -> Result<String, crate::sql::ExecError> {
     if let Some(&id) = user.id.get() {
-        crate::session::revoke_sessions::<User>(pool, id, user.sessions_revoked_at).await?;
+        // No cookie here, so no skew cover: the cut-off is this node's clock.
+        crate::session::revoke_sessions::<User>(pool, id, user.sessions_revoked_at, 0).await?;
     }
     Ok(clear_cookie())
 }

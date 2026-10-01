@@ -102,6 +102,9 @@ pub struct HandoffPayload {
     /// The operator's [`PasswordFingerprint`]. Copied into the
     /// impersonation cookie, so an operator password change ends it.
     pub pwf: PasswordFingerprint,
+    /// Issued-at, Unix seconds; the impersonation session inherits it (#1855).
+    #[serde(default)]
+    pub iat: i64,
 }
 
 impl HandoffPayload {
@@ -128,6 +131,7 @@ impl HandoffPayload {
             exp: now + ttl_secs,
             jti,
             pwf,
+            iat: now,
         }
     }
 

@@ -430,9 +430,19 @@ pub(crate) fn issued_at(sessions_revoked_at: Option<chrono::DateTime<chrono::Utc
     sessions_revoked_at.map_or(now, |ts| now.max(ts.timestamp() + 1))
 }
 
-/// End every session of row `id` of `T`, on every device. `sessions_revoked_at`
-/// is the row's current value; the cut-off is the `iat` a login now would get,
-/// so it covers every session issued so far. The WHERE never moves it back.
+/// Logout cut-off: covers every session issued so far, the logged-out
+/// cookie included even when a faster-clock replica minted it.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn logout_cutoff(
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    cookie_iat: i64,
+) -> i64 {
+    issued_at(sessions_revoked_at).max(cookie_iat.saturating_add(1))
+}
+
+/// End every session of row `id` of `T`, on every device, at [`logout_cutoff`].
+/// `sessions_revoked_at` is the row's current value; the WHERE never moves it back.
 ///
 /// # Errors
 /// [`crate::sql::ExecError`] from the update.
@@ -441,11 +451,13 @@ pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
     pool: &crate::sql::Pool,
     id: i64,
     sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    cookie_iat: i64,
 ) -> Result<u64, crate::sql::ExecError> {
     use crate::query::Q;
     use crate::sql::UpdaterPool as _;
-    let cutoff = chrono::DateTime::from_timestamp(issued_at(sessions_revoked_at), 0)
-        .unwrap_or_else(chrono::Utc::now);
+    let cutoff =
+        chrono::DateTime::from_timestamp(logout_cutoff(sessions_revoked_at, cookie_iat), 0)
+            .unwrap_or_else(chrono::Utc::now);
     crate::query::QuerySet::<T>::default()
         .filter("id", id)
         .where_(Q::is_null(SESSIONS_REVOKED_AT) | Q::lt(SESSIONS_REVOKED_AT, cutoff))
@@ -482,6 +494,16 @@ mod tests {
         let next = issued_at(cut);
         assert!(next > now);
         assert!(session_survives(&secret, &pwf, next, "$h", None, cut));
+    }
+
+    /// The cut-off covers a cookie minted ahead of this node's clock (#1855).
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn a_logout_cutoff_covers_a_cookie_from_a_faster_clock() {
+        let ahead = chrono::Utc::now().timestamp() + 100;
+        assert_eq!(logout_cutoff(None, ahead), ahead + 1);
+        let later = chrono::DateTime::from_timestamp(ahead + 50, 0);
+        assert_eq!(logout_cutoff(later, ahead), ahead + 51);
     }
 
     /// A short key is refused, not signed with. `sign` would accept

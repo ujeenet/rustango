@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Logout on the tenant admin, operator console and bare admin stamps a new `sessions_revoked_at` column, and every
 session check refuses cookies issued at or before it; `member_auth::logout` does the same for members.
+A logout that cannot read the user is a 500; an impersonation handoff from before the operator's logout is refused.
 
 ## [0.59.13] — 2026-10-01
 
