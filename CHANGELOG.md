@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `TestClient` and `LiveServer` behave like a browser (#1958)
+
+The jar keeps `Path` and honours `Max-Age`/`Expires`; requests send `Host: testserver`, a same-origin `Origin` and a `127.0.0.1` peer; 307/308 keep the method; `logout()` reaches the server with the session and CSRF token.
+`LiveServer` serves with `ConnectInfo`; `TestResponse::header_all` returns repeated headers.
+
 ### Fixed — test DB helpers work on MySQL and after a panic; fixtures load typed and atomic (#1959)
 
 `truncate_tables` runs in one transaction in any FK order on all three backends; `with_truncate_after` clears even when the body panics.

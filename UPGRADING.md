@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `TestClient` acts like a browser (#1958)
+
+`logout(Some(path))` no longer clears the jar first; only the server's `Set-Cookie` removes cookies. Requests now carry `Host: testserver`, `Origin` on unsafe methods and a `127.0.0.1` `ConnectInfo`.
+An empty `Set-Cookie` value is stored, not deleted; `TestResponse` has a new `header_map` field, so struct literals need it.
+
 ### `truncate_tables` and `Fixture` loads are one transaction (#1959)
 
 A failing table or row rolls back the whole call. Fixture keys for a model table must be its fields, and values are typed from them.
