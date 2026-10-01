@@ -196,24 +196,30 @@ fn admin_sso_feature_toggles_provider_table() {
     );
 }
 
-/// `true` when `table` exists in the SQLite database behind `pool`.
-async fn has_table(pool: &rustango::sql::Pool, table: &str) -> bool {
+/// `true` when `table` has `column` in the SQLite database behind `pool`.
+async fn has_column(pool: &rustango::sql::Pool, table: &str, column: &str) -> bool {
     let sq = pool.as_sqlite().expect("sqlite pool");
     let n: i64 = rustango::sql::sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+        "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
     )
     .bind(table)
+    .bind(column)
     .fetch_one(sq)
     .await
     .unwrap();
     n == 1
 }
 
-/// #1988 — an image without `system/` regenerated `0001_initial`, found it
-/// in the ledger, and migrated nothing. A framework table the upgrade adds
-/// is modelled by dropping one; `migrate` must not report success without it.
+/// `true` when `table` exists in the SQLite database behind `pool`.
+async fn has_table(pool: &rustango::sql::Pool, table: &str) -> bool {
+    has_column(pool, table, "id").await
+}
+
+/// #1988 — an image without `system/` regenerates a baseline whose name
+/// is already in the ledger. A framework table the upgrade adds is
+/// modelled by dropping one; a second dir must restore it, not skip it.
 #[tokio::test]
-async fn single_db_migrate_from_a_dir_without_system_does_not_skip() {
+async fn single_db_migrate_from_a_dir_without_system_restores_the_schema() {
     use rustango::sql::Pool;
     let tmp = tempfile::tempdir().unwrap();
     let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
@@ -240,16 +246,15 @@ async fn single_db_migrate_from_a_dir_without_system_does_not_skip() {
         .await
         .unwrap();
 
-    let second = migrate(tmp.path().join("deploy2/migrations")).await;
-    assert!(
-        second.is_err() || has_table(&pool, table).await,
-        "migrate returned Ok and left {table} missing"
-    );
+    migrate(tmp.path().join("deploy2/migrations"))
+        .await
+        .expect("a second dir migrates the same database");
+    assert!(has_table(&pool, table).await, "{table} was skipped");
 }
 
-/// The tenancy runner regenerates through the same path (#1988).
+/// The tenancy runner takes the same path; a dropped column comes back too.
 #[tokio::test]
-async fn registry_migrate_from_a_dir_without_system_does_not_skip() {
+async fn registry_migrate_from_a_dir_without_system_restores_the_schema() {
     use rustango::sql::Pool;
     let tmp = tempfile::tempdir().unwrap();
     let url = format!("sqlite:{}?mode=rwc", tmp.path().join("reg.db").display());
@@ -264,14 +269,20 @@ async fn registry_migrate_from_a_dir_without_system_does_not_skip() {
     migrate(tmp.path().join("deploy1/migrations"))
         .await
         .expect("first deploy");
-    let table = "rustango_operators";
-    rustango::sql::raw_execute_pool(&pool, &format!("DROP TABLE {table}"), Vec::new())
-        .await
-        .unwrap();
+    let (table, column) = ("rustango_operators", "password_changed_at");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        &format!("ALTER TABLE {table} DROP COLUMN {column}"),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
-    let second = migrate(tmp.path().join("deploy2/migrations")).await;
+    migrate(tmp.path().join("deploy2/migrations"))
+        .await
+        .expect("a second dir migrates the same database");
     assert!(
-        second.is_err() || has_table(&pool, table).await,
-        "migrate_registry_pool returned Ok and left {table} missing"
+        has_column(&pool, table, column).await,
+        "{table}.{column} was skipped"
     );
 }

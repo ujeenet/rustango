@@ -105,15 +105,6 @@ async fn delete_ledger_entry(pool: &rustango::sql::Pool, name: &str) {
         .await;
 }
 
-/// Each test's fresh dir has no `system/migrations/`, which `migrate`
-/// refuses against a ledger other tests filled (#1988). Forget that chain.
-async fn forget_system_chain(pool: &rustango::sql::Pool) {
-    let pg = pool.as_postgres().expect("test pool is postgres");
-    let _ = sqlx::query("DELETE FROM __rustango_system_migrations__")
-        .execute(pg)
-        .await;
-}
-
 fn args(cmd: &[&str]) -> Vec<String> {
     cmd.iter().map(|s| (*s).to_string()).collect()
 }
@@ -465,7 +456,6 @@ async fn migrate_subcommand_applies_pending() {
     drop_table(&pool, &table).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
-    forget_system_chain(&pool).await;
     manage::run(&pool, &dir, args(&["migrate"])).await.unwrap();
 
     let exists: bool = sqlx::query(
@@ -596,7 +586,6 @@ async fn downgrade_subcommand_steps_back_one_by_default() {
         drop_table(&pool, t).await;
     }
 
-    forget_system_chain(&pool).await;
     manage::run(&pool, &dir, args(&["migrate"])).await.unwrap();
     // Default `downgrade` (no arg) → 1 step.
     manage::run(&pool, &dir, args(&["downgrade"]))
@@ -759,7 +748,6 @@ async fn run_with_writer_captures_migrate_output() {
     delete_ledger_entry(&pool, &mig_name).await;
 
     let mut buf: Vec<u8> = Vec::new();
-    forget_system_chain(&pool).await;
     manage::run_with_writer(&pool, &dir, args(&["migrate"]), &mut buf)
         .await
         .unwrap();
@@ -848,4 +836,63 @@ async fn help_lists_new_commands() {
     for cmd in &["about", "check", "docs", "version"] {
         assert!(output.contains(cmd), "help missing `{cmd}`");
     }
+}
+
+/// #1988 — a second dir regenerates a baseline the ledger already names;
+/// `migrate` must restore a framework table and column the DB lacks.
+/// Runs in a database of its own, since it drops framework schema.
+#[cfg(feature = "tenancy")]
+#[tokio::test]
+async fn migrate_from_a_dir_without_system_restores_the_schema() {
+    let Some(admin) = pool().await else {
+        return;
+    };
+    let _g = live_lock().lock().await;
+    let admin = admin.as_postgres().unwrap().clone();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let db = format!("rustango_1988_{}", std::process::id());
+    let (base, _) = url.rsplit_once('/').unwrap();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let pg = PgPool::connect(&format!("{base}/{db}")).await.unwrap();
+    let pool: rustango::sql::Pool = pg.clone().into();
+
+    let first = fresh_dir("1988a").join("migrations");
+    std::fs::create_dir_all(&first).unwrap();
+    manage::run(&pool, &first, args(&["migrate"]))
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE rustango_user_permissions")
+        .execute(&pg)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE rustango_users DROP COLUMN password_changed_at")
+        .execute(&pg)
+        .await
+        .unwrap();
+
+    let second = fresh_dir("1988b").join("migrations");
+    std::fs::create_dir_all(&second).unwrap();
+    let result = manage::run(&pool, &second, args(&["migrate"])).await;
+    let present: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_name = 'rustango_user_permissions'), \
+                (SELECT COUNT(*) FROM information_schema.columns \
+                 WHERE table_name = 'rustango_users' AND column_name = 'password_changed_at')",
+    )
+    .fetch_one(&pg)
+    .await
+    .unwrap();
+    pg.close().await;
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute(&admin)
+        .await;
+    result.expect("a second dir migrates the same database");
+    assert_eq!(present, (1, 1), "the dropped table or column was skipped");
 }

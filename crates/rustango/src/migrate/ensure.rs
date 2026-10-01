@@ -114,16 +114,8 @@ pub(crate) async fn apply_idempotent(
     pool: &Pool,
     snapshot: &super::SchemaSnapshot,
 ) -> Result<(), sqlx::Error> {
-    let schema = creation_schema(pool).await?;
     let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
-    let batch = super::diff::render_changes_split_in_schema(
-        &changes,
-        snapshot,
-        pool.dialect(),
-        schema.as_deref(),
-    )
-    .map_err(sqlx::Error::Protocol)?;
-    apply_batch(pool, &batch).await
+    apply_changes_idempotent(pool, snapshot, &changes).await
 }
 
 /// Add each `(table, column)` of `snapshot` that a table created by an
@@ -145,15 +137,45 @@ pub(crate) async fn add_columns_idempotent(
             column: (*column).to_owned(),
         })
         .collect();
+    apply_changes_idempotent(pool, snapshot, &changes).await
+}
+
+/// Render `changes` against `snapshot` and run them, tolerating objects
+/// that already exist.
+///
+/// # Errors
+/// A render failure, or any driver failure that is not "already exists".
+pub(crate) async fn apply_changes_idempotent(
+    pool: &Pool,
+    snapshot: &super::SchemaSnapshot,
+    changes: &[super::SchemaChange],
+) -> Result<(), sqlx::Error> {
     let schema = creation_schema(pool).await?;
     let batch = super::diff::render_changes_split_in_schema(
-        &changes,
+        changes,
         snapshot,
         pool.dialect(),
         schema.as_deref(),
     )
     .map_err(sqlx::Error::Protocol)?;
     apply_batch(pool, &batch).await
+}
+
+/// Column names `table` has in the schema new tables land in.
+///
+/// # Errors
+/// Driver failures from the catalog read.
+pub(crate) async fn live_columns(
+    pool: &Pool,
+    table: &str,
+) -> Result<std::collections::HashSet<String>, super::MigrateError> {
+    // MySQL reads `""` as `DATABASE()`; SQLite ignores the schema.
+    let schema = creation_schema(pool).await?.unwrap_or_default();
+    Ok(super::inspectdb::list_columns(pool, &schema, table)
+        .await?
+        .into_iter()
+        .map(|c| c.name)
+        .collect())
 }
 
 /// Where Postgres creates unqualified tables; `None` on backends

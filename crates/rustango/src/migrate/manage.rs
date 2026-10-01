@@ -1026,15 +1026,13 @@ async fn apply_system_chain<W: Write>(
     } else {
         dir
     };
-    let system_dir = crate::migrate::make::generate_system_chain(
-        pool,
+    let (system_dir, origin) = crate::migrate::make::generate_system_chain(
         project_root,
         &[
             crate::core::ModelScope::Registry,
             crate::core::ModelScope::Tenant,
         ],
-    )
-    .await?;
+    );
     if !system_dir.is_dir() {
         return Ok(0);
     }
@@ -1098,9 +1096,7 @@ async fn apply_system_chain<W: Write>(
     };
     let run_dir = scratch.clone().unwrap_or_else(|| system_dir.clone());
 
-    let applied =
-        runner::migrate_pool_with_ledger_fake_initial(pool, &run_dir, runner::SYSTEM_LEDGER_TABLE)
-            .await;
+    let applied = runner::migrate_system_chain(pool, &run_dir, origin, None).await;
     if let Some(p) = &scratch {
         let _ = std::fs::remove_dir_all(p);
     }

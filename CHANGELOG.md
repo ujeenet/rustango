@@ -21,7 +21,7 @@ The getting-started guide teaches the gated admin and `create-admin`.
 ### Fixed — a deploy image no longer skips framework schema changes (#1988)
 
 The scaffolded `Dockerfile` now ships `system/`, and every template seeds it.
-`migrate` refuses a `system/migrations/` that lacks a migration the ledger has applied.
+A chain regenerated into an empty `system/` now converges by content: missing framework tables and columns are created.
 
 ### Fixed — the `api` template gets the request span, `X-Request-Id` and access log (#1514)
 

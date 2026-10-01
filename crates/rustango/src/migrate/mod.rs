@@ -58,6 +58,7 @@ pub use runner::migrate_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger_fake_initial;
 pub use runner::migrate_pool_with_ledger_fake_initial_with_progress;
 pub use runner::migrate_pool_with_progress;
+pub(crate) use runner::{migrate_system_chain, ChainOrigin};
 // Always on: entry points that work on PG, MySQL and SQLite through the
 // `Pool` enum, plus the inventory and builder surface.
 pub use runner::{

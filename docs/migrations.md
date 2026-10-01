@@ -41,10 +41,10 @@ emits a `DropColumn` / `DropTable`. Scaffolded projects ship an
 generates and applies it (see [scaffolding](scaffolding.md)).
 
 **Commit `system/migrations/` and deploy it with the binary**, as the
-scaffolded `Dockerfile` does. `migrate` refuses to run when the folder
-lacks a migration the database's ledger has applied: regenerating it
-from scratch would reuse the applied name and skip the framework's
-schema changes.
+scaffolded `Dockerfile` does. Regenerated names depend on features and
+version, so when the folder is empty `migrate` ignores the ledger names:
+it creates the framework tables and columns the database lacks, then
+records the new chain. It never drops anything on that path.
 
 `migrate` applies the system chain **before** your project's migrations.
 In tenancy mode the two scopes deliberately overlap on the shared

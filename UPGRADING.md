@@ -157,7 +157,7 @@ now gets an `[admin]` warning. Add the login, or ignore it if you gate the route
 
 ### Commit and ship `system/migrations/` (#1988)
 
-`migrate` now fails when that folder lacks a migration the database already applied.
+Without it, `migrate` regenerates the chain and checks the live schema instead of the ledger.
 Commit it and add `COPY system /app/system` to an existing `Dockerfile`.
 
 ### `manage`-only builds log requests (#1514)

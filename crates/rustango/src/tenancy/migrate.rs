@@ -228,8 +228,7 @@ async fn apply_system_migrations_opts(
     };
     // Generate from the compiled models (a no-op when the on-disk
     // system migrations already match them).
-    let system_dir =
-        crate::migrate::make::generate_system_chain(pool, project_root, &[scope]).await?;
+    let (system_dir, origin) = crate::migrate::make::generate_system_chain(project_root, &[scope]);
     if !system_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -247,11 +246,11 @@ async fn apply_system_migrations_opts(
     // the plain runner.
     let applied = match scoped_subset(&system_dir, migration_scope).await? {
         ScopedDir::Owned(temp) => {
-            let r = apply_system_dir(pool, temp.path(), observer).await?;
+            let r = apply_system_dir(pool, temp.path(), origin, observer).await?;
             drop(temp);
             r
         }
-        ScopedDir::Original => apply_system_dir(pool, &system_dir, observer).await?,
+        ScopedDir::Original => apply_system_dir(pool, &system_dir, origin, observer).await?,
     };
     Ok(applied)
 }
@@ -262,22 +261,10 @@ async fn apply_system_migrations_opts(
 async fn apply_system_dir(
     pool: &crate::sql::Pool,
     dir: &Path,
+    origin: crate::migrate::ChainOrigin,
     observer: Option<&dyn crate::migrate::MigrationObserver>,
 ) -> Result<Vec<Migration>, TenancyError> {
-    Ok(match observer {
-        Some(observer) => {
-            crate::migrate::migrate_pool_with_ledger_fake_initial_with_progress(
-                pool,
-                dir,
-                SYSTEM_LEDGER,
-                observer,
-            )
-            .await?
-        }
-        None => {
-            crate::migrate::migrate_pool_with_ledger_fake_initial(pool, dir, SYSTEM_LEDGER).await?
-        }
-    })
+    Ok(crate::migrate::migrate_system_chain(pool, dir, origin, observer).await?)
 }
 
 /// Apply registry-scoped pending migrations to the registry DB.
