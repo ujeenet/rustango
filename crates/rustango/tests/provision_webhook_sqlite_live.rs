@@ -327,7 +327,7 @@ async fn a_retried_delivery_returns_the_first_run() {
 /// **The real case.** Two deliveries of one event arriving at once —
 /// the check-then-insert window. The unique constraint on
 /// `idempotency_key`, not the handler, is what has to win.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_simultaneous_deliveries_create_one_tenant() {
     let holder = tempfile::tempdir().expect("tenants dir");
     let b = boot(&holder).await;
@@ -335,25 +335,34 @@ async fn two_simultaneous_deliveries_create_one_tenant() {
     let body = body_for(&slug, "evt-race", chrono::Utc::now().timestamp());
     let sig = signed(&body);
 
-    let (a, c) = tokio::join!(
-        b.app.clone().oneshot(post(body.clone(), Some(&sig))),
-        b.app.clone().oneshot(post(body.clone(), Some(&sig))),
-    );
-    let (a, c) = (a.unwrap(), c.unwrap());
+    let handles: Vec<_> = (0..8)
+        .map(|_| tokio::spawn(b.app.clone().oneshot(post(body.clone(), Some(&sig)))))
+        .collect();
+    let mut resps = Vec::new();
+    for h in handles {
+        resps.push(h.await.unwrap().unwrap());
+    }
 
-    // One may be accepted and one rejected, or one accepted and one
-    // de-duplicated — both are correct. What is never correct is two
-    // tenants.
-    let statuses = [a.status(), c.status()];
+    // One accepted, the rest de-duplicated; the loser of the unique-key
+    // race is a duplicate too, never a 500 (#1933).
+    let statuses: Vec<_> = resps.iter().map(|r| r.status()).collect();
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::ACCEPTED)
+            .count(),
+        1,
+        "{statuses:?}"
+    );
     assert!(
         statuses
             .iter()
-            .any(|s| *s == StatusCode::ACCEPTED || *s == StatusCode::OK),
-        "at least one delivery should have been handled: {statuses:?}"
+            .all(|s| *s == StatusCode::ACCEPTED || *s == StatusCode::OK),
+        "a racing delivery failed: {statuses:?}"
     );
 
     // Let whichever run started finish.
-    for resp in [a, c] {
+    for resp in resps {
         if let Some(id) = json_of(resp).await["run_id"].as_i64() {
             let _ =
                 tokio::time::timeout(std::time::Duration::from_secs(10), await_run(&b, id)).await;

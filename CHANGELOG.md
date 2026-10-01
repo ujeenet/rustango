@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `CachePageLayer` bypasses the cache when no tenant resolves, so a route varying on an input the resolver ignored cannot leak one tenant's page to another.
 
+### Fixed — tenancy lifecycle: PG permission seeding, port-routed impersonation, webhook race, stale brand files (#1933)
+
+PG tenants seed `auth.access_admin` and extra permissions; impersonation lands on a port-routed org's own port; a webhook delivery that loses the idempotency race gets the existing run (200), not a 500; re-upload and purge delete old brand files.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)

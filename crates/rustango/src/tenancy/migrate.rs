@@ -857,8 +857,8 @@ async fn run_for_one_tenant(
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
-            if let Err(e) = super::permissions::auto_create_permissions(&pool).await {
-                tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for schema-mode tenant");
+            if let Err(e) = super::permissions::auto_create_permissions_pool(&dbpool).await {
+                tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions_pool failed for schema-mode tenant");
             }
             if let Err(e) = crate::contenttypes::ensure_seeded(&dbpool).await {
                 tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for schema-mode tenant");
@@ -888,8 +888,8 @@ async fn run_for_one_tenant(
                 None => migrate::migrate(tenant_pool.pool(), dir).await?,
             });
             // Data seeders (rows, not DDL — kept): #61 + #89.
-            if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
-                tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");
+            if let Err(e) = super::permissions::auto_create_permissions_pool(&dbpool).await {
+                tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions_pool failed for database-mode tenant");
             }
             if let Err(e) = crate::contenttypes::ensure_seeded(&dbpool).await {
                 tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");

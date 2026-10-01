@@ -207,7 +207,35 @@ pub async fn save_brand_asset(
     let filename = format!("{}.{ext}", kind.stem());
     let key = storage_key(slug, &filename)?;
     storage.save(&key, bytes).await?;
+    // A different extension would leave the old file served (#1933).
+    delete_stem(slug, kind, Some(ext), storage).await?;
     Ok(filename)
+}
+
+/// Delete every saved brand asset for `slug`. Called when a tenant is purged.
+///
+/// # Errors
+/// [`BrandError::InvalidSlug`] or a storage failure.
+pub async fn delete_brand_assets(slug: &str, storage: &BoxedStorage) -> Result<(), BrandError> {
+    for kind in [BrandAssetKind::Logo, BrandAssetKind::Favicon] {
+        delete_stem(slug, kind, None, storage).await?;
+    }
+    Ok(())
+}
+
+async fn delete_stem(
+    slug: &str,
+    kind: BrandAssetKind,
+    keep_ext: Option<&str>,
+    storage: &BoxedStorage,
+) -> Result<(), BrandError> {
+    for (_, ext) in ALLOWED_CONTENT_TYPES {
+        if Some(*ext) != keep_ext {
+            let key = storage_key(slug, &format!("{}.{ext}", kind.stem()))?;
+            storage.delete(&key).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Read a previously-saved brand asset. Returns `(bytes, content_type)`.
@@ -366,6 +394,34 @@ pub fn brand_asset_url(slug: &str, path: Option<&str>, storage: &BoxedStorage) -
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn reupload_and_purge_leave_no_stale_brand_file() {
+        let storage: BoxedStorage = Arc::new(crate::storage::InMemoryStorage::new());
+        let logo = BrandAssetKind::Logo;
+        save_brand_asset("acme", logo, b"p", Some("image/png"), &storage)
+            .await
+            .unwrap();
+        save_brand_asset("acme", logo, b"w", Some("image/webp"), &storage)
+            .await
+            .unwrap();
+        assert!(
+            load_brand_asset("acme", "logo.png", &storage)
+                .await
+                .is_err(),
+            "old logo still served"
+        );
+        assert!(load_brand_asset("acme", "logo.webp", &storage)
+            .await
+            .is_ok());
+        delete_brand_assets("acme", &storage).await.unwrap();
+        assert!(
+            load_brand_asset("acme", "logo.webp", &storage)
+                .await
+                .is_err(),
+            "purge kept the logo"
+        );
+    }
 
     #[test]
     fn hex_color_accepts_six_digit() {

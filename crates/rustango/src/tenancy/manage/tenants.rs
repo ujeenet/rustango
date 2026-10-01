@@ -504,6 +504,10 @@ where
     if report.row_deleted {
         writeln!(w, "  removed Org row")?;
     }
+    let brand = super::super::branding::default_brand_storage();
+    if let Err(e) = super::super::branding::delete_brand_assets(&slug, &brand).await {
+        writeln!(w, "  brand files left in place: {e}")?;
+    }
     Ok(())
 }
 
