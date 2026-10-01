@@ -162,6 +162,11 @@ Requests go to `<bucket>.<endpoint-host>`; set `path_style = true` for MinIO-sty
 ### `Storage` gains `save_with_content_type` (#1904)
 
 A provided method; a `Storage` impl with its own method of that name must rename it.
+`MediaManager::save_bytes` stores HTML, XML, SVG, JS and malformed MIMEs as `application/octet-stream`; the row keeps the declared type.
+
+### Static files send an `ETag`; `EtagLayer` keeps an existing one (#1531)
+
+`EtagLayer` no longer rehashes a response that already has an `ETag`, nor tags a `206`. A compressed response gets a weak ETag and no `Accept-Ranges`.
 
 ## 0.59.14
 
