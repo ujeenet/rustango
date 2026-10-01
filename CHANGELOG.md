@@ -49,6 +49,25 @@ The SQLite row decoder no longer shows a whole-number decimal as null.
 MySQL now binds a JSON value as `CAST(? AS JSON)` (also for `<=>`), so `filter("data", json)` matches; its `as_text` of a JSON null is NULL.
 SQLite's `json_path(.., as_text = true)` returns text for numbers and booleans (`'1'`, `'true'`); other formatting can still differ from PostgreSQL.
 
+### Fixed — a model on table `audit` no longer grants the audit feed (#1979)
+
+The feed now needs `rustango_audit_log.view_feed` / `.clean_feed`, which no model's CRUD codename
+can equal. The old `audit.*` names still work while no model uses table `audit`.
+
+### Fixed — a parent with 1000+ inline children can be saved again (#1977)
+
+The edit form renders at most `MAX_FORMS` inline slots and links the child list for the rest.
+Rows it leaves out are not touched by the save.
+
+### Fixed — an INSERT whose generated PK can't be read back writes no row (#1978, #1969)
+
+On MySQL a non-integer DB-default PK is refused before the INSERT, so a re-submit can't duplicate it.
+SQLite reads a TEXT UUID default back. A submitted PK is reported as written (#1969, via #1894).
+
+### Fixed — `JtiStore` docs no longer suggest `rows_affected` after `DO NOTHING` (#1968)
+
+A MySQL skip reports one row too, so a replay passed. The example uses `sql::insert_or_ignore`.
+
 ## [0.59.11] — 2026-09-30
 
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)

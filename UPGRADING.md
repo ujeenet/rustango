@@ -194,6 +194,19 @@ SQLite `as_text` JSON paths now yield text: compare them to `'1'` / `'true'`, no
 SQLite still formats some values unlike PostgreSQL: `1.50` is `'1.5'`, `1e2` is `'100.0'`, big integers lose digits, objects have no spaces.
 On MySQL, `as_text` of a JSON null is now SQL NULL, not `'null'`.
 
+### Audit feed codenames are `rustango_audit_log.view_feed` / `.clean_feed` (#1979)
+
+Grant these instead of `audit.view` / `audit.delete`. The old names are ignored once a model uses table `audit`.
+
+### `InlineFormPanel` gains `more_rows_filter` (#1977)
+
+A struct literal needs the new field. Panels past the formset cap show only the first rows.
+
+### MySQL refuses an INSERT whose DB-default PK is not an integer (#1978)
+
+`insert_returning_pool` returns `GeneratedPkUnreadable` before writing; it used to insert, then fail.
+Submit the PK (or use `default_uuid_v7`) for such models on MySQL.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

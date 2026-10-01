@@ -42,6 +42,10 @@
     <section class="admin-inline-form admin-inline-form-{{ panel.kind }}"
              data-child-table="{{ panel.child_table }}">
       <h2>{{ panel.label }}</h2>
+      {% if panel.more_rows_filter %}
+        <p class="inline-form-more">Showing the first {{ panel.initial_forms }} rows.
+          <a href="{{ admin_prefix }}/{{ panel.child_table }}?{{ panel.more_rows_filter }}">Edit the others in the list</a>.</p>
+      {% endif %}
       <input type="hidden" name="{{ panel.prefix }}-TOTAL_FORMS" value="{{ panel.total_forms }}">
       <input type="hidden" name="{{ panel.prefix }}-INITIAL_FORMS" value="{{ panel.initial_forms }}">
       <input type="hidden" name="{{ panel.prefix }}-MAX_NUM_FORMS"
