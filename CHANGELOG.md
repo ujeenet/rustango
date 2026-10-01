@@ -34,6 +34,10 @@ A second finalize no longer deletes a `Ready` row's object or flips `Failed` bac
 
 `begin_upload` signs `If-None-Match: *`, so a replayed URL cannot swap a finalized object; `UploadTicket.headers` lists what to send.
 
+### Fixed — `purge_pending` deletes the storage objects, and sweeps `Failed` rows too
+
+Each row is deleted on its read status with its tag links, and its object inside the same transaction.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

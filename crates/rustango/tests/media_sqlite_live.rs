@@ -525,3 +525,50 @@ async fn finalize_on_a_failed_row_stays_failed() {
     let stored = mgr.get(t.media_id).await.unwrap().unwrap();
     assert_eq!(stored.status_enum(), Some(MediaStatus::Failed));
 }
+
+/// Purging Pending and Failed rows takes their objects too; a missing
+/// key is fine, and a Ready row is kept.
+#[tokio::test]
+async fn purge_pending_deletes_unconfirmed_objects() {
+    use rustango::media::{MediaStatus, UploadIntent};
+    let (mgr, disk, _) = bucket_manager().await;
+    let begin = |name: &'static str| {
+        let mgr = &mgr;
+        async move {
+            mgr.begin_upload(UploadIntent::new("default", "image/png", name, 10))
+                .await
+                .expect("begin")
+        }
+    };
+    let (pending, failed, empty, ready) = (
+        begin("p.png").await,
+        begin("f.png").await,
+        begin("e.png").await,
+        begin("r.png").await,
+    );
+    disk.put(&pending.storage_key, b"0123456789", "image/png");
+    let f = mgr
+        .finalize_upload(failed.media_id)
+        .await
+        .expect("finalize");
+    assert_eq!(f.status_enum(), Some(MediaStatus::Failed));
+    // The PUT lands after finalize already gave up.
+    disk.put(&failed.storage_key, b"0123456789", "image/png");
+    disk.put(&ready.storage_key, b"0123456789", "image/png");
+    mgr.finalize_upload(ready.media_id).await.expect("finalize");
+    mgr.tag(pending.media_id, &["t"]).await.expect("tag");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let purged = mgr
+        .purge_pending(std::time::Duration::ZERO)
+        .await
+        .expect("purge");
+    assert_eq!(purged, 3);
+    for t in [&pending, &failed, &empty] {
+        assert!(mgr.get(t.media_id).await.unwrap().is_none(), "row kept");
+        assert!(!disk.has(&t.storage_key), "object left: {}", t.storage_key);
+    }
+    assert!(mgr.tags_for(pending.media_id).await.unwrap().is_empty());
+    assert!(mgr.get(ready.media_id).await.unwrap().is_some());
+    assert!(disk.has(&ready.storage_key), "a Ready object was purged");
+}

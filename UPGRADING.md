@@ -159,6 +159,8 @@ the browser must send that header and exactly `size_bytes` bytes.
 **Breaking:** `Storage::presigned_put_url` takes `&PutConditions` instead of the type and length. Direct-upload PUTs
 must also send `If-None-Match: *` (all of `UploadTicket.headers`); allow that header in the bucket's CORS rule.
 
+`purge_pending` now also deletes old `Failed` rows, and the storage object of every row it purges.
+
 ### `save_uploads` keeps nothing on error
 
 Any error now deletes the files the request already saved, not only `TooManyFiles`. Random key prefixes are UUIDs, not nanos.

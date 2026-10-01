@@ -325,17 +325,7 @@ async fn a_deep_subtree_is_deleted_at_every_level() {
     );
 }
 
-// `purge_pending` is fixed the same way as `purge` — links first — but
-// has **no test here, deliberately**. Creating a Pending row needs
-// `begin_upload`, which calls `presigned_put_url`; `InMemoryStorage`
-// does not implement it, so the call fails before inserting and the
-// row cannot exist in this suite. A test would skip, and a skipping
-// test that prints `ok` is what this whole PR stack exists to stop.
-//
-// Covered instead by: the statement shape executed against a live
-// MySQL 8 and SQLite, and by symmetry with `purge` above, which is
-// tested. That `InMemoryStorage` cannot reach the upload-ticket path at
-// all is a coverage hole of its own, recorded on #1548.
+// `purge_pending` needs a presigning backend; `media_sqlite_live.rs` covers it.
 
 /// A failed collection delete must not leave the media orphaned.
 ///
@@ -676,28 +666,18 @@ async fn set_tags_still_replaces_the_whole_set() {
 }
 
 // =====================================================================
-// `purge_pending` is one predicated, bounded statement
+// `purge_pending`: predicated per-row deletes, bounded
 // =====================================================================
 //
-// 0.57.6 was a single `DELETE ... WHERE status='pending' AND
-// uploaded_at < ?`. 0.57.7 replaced it with a SELECT resolving ids plus
-// a transaction deleting by id, then patched that twice. Two review
-// rounds found six defects in that shape and none in this one, so it is
-// back — with a `LIMIT` for the one thing the original lacked.
-//
-// These guards pin the three properties that shape gives for free, and
-// each fails on **every** backend rather than only where a literal
-// happens to bite. The previous chunking guard used SQLite's 32 766
-// ceiling as its number, so it could not fail on PostgreSQL or MySQL.
+// It reads keys first, to delete the objects too, so each DELETE carries
+// the status it was read with. These guards pin that it is predicated,
+// keeps a surviving row's tags, and is bounded on every backend.
 
 /// The predicate is on the destructive statement, so a row that is not
 /// `pending` when the DELETE runs is not deleted — whatever it was when
 /// the sweep started.
 ///
-/// With one statement there is no window to interleave: the predicate
-/// and the row set are evaluated together, which is the entire reason
-/// for going back to this shape. The guard proves the predicate is
-/// *there* by giving the sweep a Ready row it would otherwise match on
+/// The guard gives the sweep a Ready row it would otherwise match on
 /// age alone.
 #[tokio::test]
 async fn purge_pending_leaves_a_finalized_row_alone() {

@@ -274,6 +274,12 @@ async fn upload_url_is_create_only() {
         "replayed PUT replaced the object"
     );
     assert_eq!(manager.load_bytes(&m).await.expect("load"), b"ten-bytes!");
+    let again = manager
+        .finalize_upload(ticket.media_id)
+        .await
+        .expect("refinalize");
+    assert_eq!(again.status_enum(), Some(MediaStatus::Ready));
+    assert_eq!(manager.load_bytes(&m).await.expect("load"), b"ten-bytes!");
     manager.purge(&m).await.expect("purge");
 }
 
