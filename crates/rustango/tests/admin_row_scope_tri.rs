@@ -105,9 +105,16 @@ async fn setup(pool: &Pool) {
 }
 
 async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
-    let app = rustango::admin::Builder::new(pool.clone())
-        .admin_prefix("")
-        .build();
+    post_as(pool, uri, form, |b| b).await
+}
+
+async fn post_as(
+    pool: &Pool,
+    uri: &str,
+    form: &str,
+    admin: impl FnOnce(rustango::admin::Builder) -> rustango::admin::Builder,
+) -> (StatusCode, String) {
+    let app = admin(rustango::admin::Builder::new(pool.clone()).admin_prefix("")).build();
     let req = Request::builder()
         .method("POST")
         .uri(uri)
@@ -275,6 +282,43 @@ async fn inline_duplicate_deletes_do_not_bypass_max_num(pool: &Pool) {
     );
 }
 
+/// A read-only user guessing a secret gets the same answer right or wrong.
+async fn inline_secret_guess_is_no_oracle(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a", p, "one", false).await;
+    let mut statuses = Vec::new();
+    for guess in ["pw-a", "wrong"] {
+        let form = format!(
+            "name=p&rowscope_child-TOTAL_FORMS=1&rowscope_child-INITIAL_FORMS=1\
+             &rowscope_child-0-code=a&rowscope_child-0-label=one&rowscope_child-0-secret={guess}"
+        );
+        let uri = format!("/rowscope_parent/{p}");
+        let (status, _) = post_as(pool, &uri, &form, |b| b.read_only(["rowscope_child"])).await;
+        statuses.push(status);
+    }
+    assert_eq!(statuses[0], statuses[1], "the answer tells a right guess");
+    assert_eq!(statuses[0], StatusCode::FORBIDDEN);
+}
+
+/// Editing or deleting a child the view hook refuses, by a guessed PK, is refused.
+async fn inline_post_refuses_hidden_children(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_child(pool, "b", p, "ghost", true).await;
+    for slot in [
+        "rowscope_child-0-label=edited",
+        "rowscope_child-0-DELETE=on",
+    ] {
+        let form = format!(
+            "name=p&rowscope_child-TOTAL_FORMS=1&rowscope_child-INITIAL_FORMS=1\
+             &rowscope_child-0-code=b&{slot}"
+        );
+        let (status, body) = post(pool, &format!("/rowscope_parent/{p}"), &form).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{slot}: {body}");
+        let b = child(pool, "b").await.expect("hidden row kept");
+        assert_eq!(b.label, "ghost", "{slot}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -284,5 +328,7 @@ tri_dialect_test! {
         inline_post_keeps_secrets_and_inserts_natural_pks,
         inline_post_enforces_max_num,
         inline_duplicate_deletes_do_not_bypass_max_num,
+        inline_secret_guess_is_no_oracle,
+        inline_post_refuses_hidden_children,
     ],
 }

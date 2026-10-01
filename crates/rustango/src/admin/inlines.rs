@@ -1063,38 +1063,55 @@ impl InlineTarget {
     /// The child row under this parent; `None` when no row has this PK.
     ///
     /// # Errors
-    /// [`AdminError::RowNotFound`] when the PK belongs to another parent.
+    /// [`AdminError::RowNotFound`] when the PK belongs to another parent
+    /// or the `view` hook refuses the row.
     async fn fetch_own(
         &self,
         pool: &Pool,
+        parts: &Parts,
         pk: &SqlValue,
         raw_pk: &str,
     ) -> Result<Option<serde_json::Value>, AdminError> {
+        let not_found = || AdminError::RowNotFound {
+            table: self.child.table.to_owned(),
+            pk: raw_pk.to_owned(),
+        };
         let fields: Vec<&'static FieldSchema> = self.child.scalar_fields().collect();
         let query = SelectQuery {
             where_clause: self.row_where(pk.clone()),
             ..SelectQuery::new(self.child)
         };
         if let Some(row) = crate::sql::select_one_row_as_json(pool, &query, &fields).await? {
-            return Ok(Some(row));
+            let visible = crate::admin::object_permissions::is_allowed(
+                self.child.table,
+                "view",
+                parts,
+                Some(&row),
+            );
+            return if visible {
+                Ok(Some(row))
+            } else {
+                Err(not_found())
+            };
         }
         let any_parent = SelectQuery::by_pk(self.child, self.pk.column, pk.clone());
         match crate::sql::select_one_row_as_json(pool, &any_parent, &[self.pk]).await? {
-            Some(_) => Err(AdminError::RowNotFound {
-                table: self.child.table.to_owned(),
-                pk: raw_pk.to_owned(),
-            }),
+            Some(_) => Err(not_found()),
             None => Ok(None),
         }
     }
 
     /// `true` when every submitted value equals the stored one, read
-    /// the way the edit form renders it.
+    /// the way the edit form renders it. A typed secret is always a
+    /// change: comparing it would make the skip a guessing oracle.
     fn unchanged(&self, before: &serde_json::Value, values: &[(&'static str, SqlValue)]) -> bool {
         values.iter().all(|(column, submitted)| {
             let Some(f) = self.writable.iter().find(|f| f.column == *column) else {
                 return false;
             };
+            if self.secrets.contains(&f.name) {
+                return false;
+            }
             let stored = crate::admin::render::render_value_for_input_json(before, f);
             crate::forms::parse_form_value(f, Some(&stored)).is_ok_and(|v| v == *submitted)
         })
@@ -1159,7 +1176,7 @@ enum InlineWrite {
 /// # Errors
 /// [`AdminError::ReadOnly`] or [`AdminError::Forbidden`] when a child
 /// gate refuses a row; [`AdminError::RowNotFound`] when a submitted child
-/// PK is under another parent; [`InlinePlanError::Rejected`] when an edited
+/// PK is under another parent or hidden by its `view` hook; [`InlinePlanError::Rejected`] when an edited
 /// row no longer exists or the rows would pass `max_num`.
 pub(crate) async fn plan_post(
     state: &AppState,
@@ -1335,7 +1352,7 @@ async fn plan_target(
             if !deleted.insert(pk.to_display_string()) {
                 continue;
             }
-            let Some(before) = target.fetch_own(&state.pool, &pk, &raw_pk).await? else {
+            let Some(before) = target.fetch_own(&state.pool, parts, &pk, &raw_pk).await? else {
                 continue;
             };
             if !crate::admin::object_permissions::is_allowed(table, "delete", parts, Some(&before))
@@ -1357,7 +1374,7 @@ async fn plan_target(
         if values.is_empty() {
             continue;
         }
-        let Some(before) = target.fetch_own(&state.pool, &pk, &raw_pk).await? else {
+        let Some(before) = target.fetch_own(&state.pool, parts, &pk, &raw_pk).await? else {
             return Err(InlinePlanError::Rejected(format!(
                 "{table} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
             )));
