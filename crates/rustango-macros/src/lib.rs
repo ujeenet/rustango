@@ -1029,10 +1029,9 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        // FK field's Rust ident matches its SQL column name in v0.8
-        // (no `column = "..."` rename ships on FK fields).
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1134,8 +1133,9 @@ fn load_related_impl_my_tokens(
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1202,8 +1202,9 @@ fn load_related_impl_sqlite_tokens(
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1264,8 +1265,9 @@ fn load_related_impl_sqlite_tokens(
 fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         if rel.pk_kind == DetectedKind::I64 {
             // i64 FK — return the stored PK so prefetch_related can
             // group children by it. Nullable variant unwraps via
@@ -1302,8 +1304,9 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     // opt OUT of the legacy i64 method (it returns None) but opt IN
     // here.
     let value_arms = fk_relations.iter().map(|rel| {
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         if rel.nullable {
             quote! {
                 #fk_col => self.#field_ident
@@ -1392,7 +1395,8 @@ fn reverse_helper_tokens(
         let pg_method_ident = syn::Ident::new(&pg_suffix, child_ident.span());
         let pool_method_ident = syn::Ident::new(&pool_suffix, child_ident.span());
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
+        let fk_name = rel.field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let doc = format!(
             "Fetch every `{child_ident}` whose `{fk_col}` foreign key points at this row. \
              Single SQL query — `SELECT … FROM <{child_ident} table> WHERE {fk_col} = $1` — \
@@ -2098,9 +2102,9 @@ struct FkRelation {
     /// Inner type of `ForeignKey<T, K>` — the parent model. The reverse
     /// helper is emitted as `impl <ParentType> { … }`.
     parent_type: Type,
-    /// SQL column name on the child table for this FK (e.g. `"author"`).
-    /// Used in the generated `WHERE <fk_column> = $1` clause.
-    fk_column: String,
+    /// Rust field ident of the FK. Its name is the key for select_related,
+    /// prefetch and filters; the SQL column may differ (#1936).
+    field_ident: syn::Ident,
     /// `K`'s underlying scalar kind — drives the `match SqlValue { … }`
     /// arm emitted by [`load_related_impl_tokens`]. `I64` for the
     /// default `ForeignKey<T>` (no explicit K); other kinds when the
@@ -2166,7 +2170,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         if let Some(parent_ty) = info.fk_inner.clone() {
             out.fk_relations.push(FkRelation {
                 parent_type: parent_ty,
-                fk_column: info.column.clone(),
+                field_ident: info.ident.clone(),
                 pk_kind: info.fk_pk_kind,
                 nullable: info.nullable,
                 related_name: info.related_name.clone(),
