@@ -205,6 +205,7 @@ async fn migrate_with_system<F, Fut>(
     scope: MigrationScope,
     dir: &Path,
     observer: Option<&dyn crate::migrate::MigrationObserver>,
+    signals: crate::migrate::Signals,
     project: F,
 ) -> Result<Vec<Migration>, TenancyError>
 where
@@ -212,7 +213,8 @@ where
     Fut: std::future::Future<Output = Result<Vec<Migration>, crate::migrate::MigrateError>>,
 {
     let applied =
-        crate::migrate::chains::migrate_chains(pool, chain, scope, dir, observer, project).await?;
+        crate::migrate::chains::migrate_chains(pool, chain, scope, dir, observer, signals, project)
+            .await?;
     let mut all = applied.system;
     all.extend(applied.project);
     Ok(all)
@@ -278,6 +280,7 @@ pub async fn migrate_registry_pool(
         MigrationScope::Registry,
         project_dir,
         None,
+        crate::migrate::Signals::Skip,
         |held| crate::migrate::migrate_pool_locked(held, registry, project_dir, None),
     )
     .await?;
@@ -701,6 +704,7 @@ where
         system_progress
             .as_ref()
             .map(|o| o as &dyn crate::migrate::MigrationObserver),
+        crate::migrate::Signals::Skip,
         |held| {
             let observer = project_progress
                 .as_ref()
@@ -843,6 +847,7 @@ async fn run_for_one_tenant(
                 MigrationScope::Tenant,
                 dir,
                 system_progress,
+                crate::migrate::Signals::Fire,
                 |held| {
                     let observer = project_progress
                         .as_ref()
@@ -879,6 +884,7 @@ async fn run_for_one_tenant(
                 MigrationScope::Tenant,
                 dir,
                 system_progress,
+                crate::migrate::Signals::Fire,
                 |held| {
                     let observer = project_progress
                         .as_ref()

@@ -10,7 +10,7 @@ use super::diff::SchemaChange;
 use super::file::{self, Migration, MigrationScope, Operation};
 use super::make::SystemChain;
 use super::progress::MigrationObserver;
-use super::runner::LockHeld;
+use super::runner::{LockHeld, Signals};
 use super::{ensure, runner, MigrateError, SchemaSnapshot};
 use crate::sql::Pool;
 
@@ -32,6 +32,29 @@ pub(crate) struct Applied {
 /// Either chain's error, a column convergence could not add, or a system
 /// step still waiting after the project chain ran.
 pub(crate) async fn migrate_chains<F, Fut>(
+    pool: &Pool,
+    chain: &SystemChain,
+    scope: MigrationScope,
+    project_dir: &Path,
+    observer: Option<&dyn MigrationObserver>,
+    signals: Signals,
+    project: F,
+) -> Result<Applied, MigrateError>
+where
+    F: FnOnce(LockHeld) -> Fut,
+    Fut: Future<Output = Result<Vec<Migration>, MigrateError>>,
+{
+    let run = locked_chains(pool, chain, scope, project_dir, observer, project);
+    match signals {
+        Signals::Skip => run.await,
+        Signals::Fire => {
+            let names = |a: &Applied| a.project.iter().map(|m| m.name.clone()).collect();
+            runner::with_migrate_signals(run, names).await
+        }
+    }
+}
+
+async fn locked_chains<F, Fut>(
     pool: &Pool,
     chain: &SystemChain,
     scope: MigrationScope,

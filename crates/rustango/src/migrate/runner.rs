@@ -472,14 +472,18 @@ async fn migrate_with_ledger(
     ledger: &str,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
-    with_migrate_signals(async {
-        ensure_ledger_for(pool, ledger).await?;
-        with_migrate_lock(pool, migrate_with_ledger_body(pool, dir, ledger, observer)).await
-    })
+    with_migrate_signals(
+        async {
+            ensure_ledger_for(pool, ledger).await?;
+            with_migrate_lock(pool, migrate_with_ledger_body(pool, dir, ledger, observer)).await
+        },
+        |newly| newly.iter().map(|m| m.name.clone()).collect(),
+    )
     .await
 }
 
-/// [`migrate_with_progress`] for a caller that holds the migrate lock.
+/// [`migrate_with_progress`] for a caller that holds the migrate lock. Fires
+/// no signals: they would run under the lock, so [`Signals::Fire`] does.
 #[cfg(feature = "postgres")]
 #[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
 pub(crate) async fn migrate_locked(
@@ -489,35 +493,44 @@ pub(crate) async fn migrate_locked(
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     let enum_pool = crate::sql::Pool::Postgres(pool.clone());
-    with_migrate_signals(async {
-        create_ledger_locked(&enum_pool, LEDGER_TABLE).await?;
-        migrate_with_ledger_body(pool, dir, LEDGER_TABLE, observer).await
-    })
-    .await
+    create_ledger_locked(&enum_pool, LEDGER_TABLE).await?;
+    migrate_with_ledger_body(pool, dir, LEDGER_TABLE, observer).await
 }
 
-/// `pre_migrate` / `post_migrate` around the legacy PG run.
-#[cfg(feature = "postgres")]
-async fn with_migrate_signals(
-    run: impl std::future::Future<Output = Result<Vec<Migration>, MigrateError>>,
-) -> Result<Vec<Migration>, MigrateError> {
+/// Whether a run fires `pre_migrate` / `post_migrate`. They fire outside
+/// the migrate lock, so a handler may migrate again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signals {
+    /// The PG `migrate` runner's contract.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    Fire,
+    Skip,
+}
+
+/// `pre_migrate` / `post_migrate` around `run`; `applied` names what it applied.
+pub(crate) async fn with_migrate_signals<T>(
+    run: impl std::future::Future<Output = Result<T, MigrateError>>,
+    applied: impl FnOnce(&T) -> Vec<String>,
+) -> Result<T, MigrateError> {
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
         send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
     send_pre_migrate(PreMigrateContext { source: "migrate" }).await;
-    let newly = run.await?;
+    let out = run.await?;
     // #411 — post_migrate fires once after the file-based migrate
     // session completes. `applied` lists newly-applied migration
     // names (empty when everything was already applied).
     #[cfg(feature = "signals")]
     send_post_migrate(PostMigrateContext {
         source: "migrate",
-        applied: newly.iter().map(|m| m.name.clone()).collect(),
+        applied: applied(&out),
     })
     .await;
-    Ok(newly)
+    #[cfg(not(feature = "signals"))]
+    let _ = applied;
+    Ok(out)
 }
 
 /// The legacy PG run; the caller holds the migrate lock.
@@ -612,6 +625,7 @@ where
     // SQLite (when added in slice 10.5) returns `None` and the body
     // runs without a session lock (SQLite's single-writer model
     // achieves the same exclusion via `BEGIN EXCLUSIVE`).
+    refuse_nested_lock()?;
     let dialect = Postgres;
     let mut lock_conn = pool.acquire().await?;
     if let Some(acquire_sql) = dialect.acquire_session_lock_sql() {
@@ -620,7 +634,7 @@ where
             .execute(&mut *lock_conn)
             .await?;
     }
-    let result = body.await;
+    let result = LOCK_HELD.scope((), body).await;
     // Always try to release. If unlock fails (e.g. connection died),
     // Postgres releases on session close so we won't deadlock peers
     // forever — and we want the original error from `result` to
@@ -2279,10 +2293,29 @@ where
     hold_migrate_lock(pool, body(LockHeld(()))).await
 }
 
+tokio::task_local! {
+    /// Set while this task holds the migrate lock.
+    static LOCK_HELD: ();
+}
+
+/// A second lock from the task holding it would wait on itself forever.
+fn refuse_nested_lock() -> Result<(), MigrateError> {
+    if LOCK_HELD.try_with(|()| ()).is_ok() {
+        return Err(MigrateError::Validation(
+            "migrate called while this task holds the migrate lock; \
+             run it after the outer migrate returns"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn hold_migrate_lock<F, R>(pool: &crate::sql::Pool, body: F) -> Result<R, MigrateError>
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
+    refuse_nested_lock()?;
+    let body = LOCK_HELD.scope((), body);
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {

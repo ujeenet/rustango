@@ -857,7 +857,7 @@ async fn migrate<W: Write>(
         return Ok(());
     }
 
-    migrate_with_framework(pool, dir, w, |held| {
+    migrate_with_framework(pool, dir, w, runner::Signals::Skip, |held| {
         runner::migrate_pool_locked(held, pool, dir, None)
     })
     .await
@@ -877,6 +877,7 @@ pub(crate) async fn migrate_with_framework<W, F, Fut>(
     pool: &Pool,
     dir: &Path,
     w: &mut W,
+    signals: super::Signals,
     project: F,
 ) -> Result<(), MigrateError>
 where
@@ -891,6 +892,7 @@ where
         super::MigrationScope::Tenant,
         dir,
         None,
+        signals,
         project,
     )
     .await?;

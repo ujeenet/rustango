@@ -191,6 +191,20 @@ fn write_step(dir: &Path, name: &str, prev: Option<&str>, snapshot: Value, ops: 
     std::fs::write(dir.join(format!("{name}.json")), mig.to_string()).unwrap();
 }
 
+/// Write migration `name` with `forward` ops as given to `dir`.
+fn write_raw(dir: &Path, name: &str, forward: Vec<Value>) {
+    let mig = json!({
+        "name": name,
+        "created_at": "2026-01-01T00:00:00Z",
+        "prev": null,
+        "atomic": false,
+        "snapshot": { "tables": [] },
+        "forward": forward,
+    });
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(format!("{name}.json")), mig.to_string()).unwrap();
+}
+
 /// Both scopes of today's system chain under `root`.
 fn system_chain(root: &Path) {
     for scope in [ModelScope::Registry, ModelScope::Tenant] {
@@ -343,6 +357,39 @@ async fn later_index_on_owned(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("first run");
     assert!(has_index(&pool, index).await, "{table}.{index} missing");
     manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+/// A callback that migrates again while the outer migrate holds the lock.
+fn nested_migrate(pool: Pool) -> rustango::migrate::callbacks::MigrationCallbackFut {
+    Box::pin(async move {
+        let dir = tempfile::tempdir().unwrap();
+        rustango::migrate::migrate_pool(&pool, dir.path())
+            .await
+            .map(|_| ())
+    })
+}
+
+rustango::register_migration_callback!("syschain_nested_migrate", nested_migrate);
+
+/// A nested migrate lock is an error, not a hang.
+async fn nested_lock_is_an_error(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "nested").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let dir = tmp.path().join("migrations");
+    write_raw(
+        &dir,
+        "0001_nested",
+        vec![json!({ "callback": { "name": "syschain_nested_migrate" } })],
+    );
+    let run = rustango::migrate::migrate_pool(&pool, &dir);
+    let err = tokio::time::timeout(std::time::Duration::from_secs(60), run)
+        .await
+        .expect("a nested lock must not hang")
+        .expect_err("a nested lock is refused");
+    assert!(err.to_string().contains("holds the migrate lock"), "{err}");
 }
 
 /// Finding 3 — a framework table the project created and later dropped is
@@ -597,10 +644,15 @@ async fn tenant_project_table_converges(backend: Backend) {
     assert!(has_column(&tenant, table, column).await, "{table}.{column}");
 }
 
+/// The signal tests: `post_migrate` receivers are process-global.
+#[cfg(feature = "postgres")]
+static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// #2052 on a schema-mode tenant: its own `rustango_users` gets the column.
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn schema_mode_tenant_converges() {
+    let _signals = SIGNALS.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let Some((registry, registry_url)) = fresh(Backend::Postgres, tmp.path(), "schema").await
     else {
@@ -650,6 +702,57 @@ async fn schema_mode_tenant_converges() {
     assert_eq!(n, 1, "t1.{table}.{column}");
 }
 
+/// A `post_migrate` receiver may migrate again: the signal fires outside the lock.
+#[cfg(all(feature = "postgres", feature = "signals"))]
+#[tokio::test]
+async fn post_migrate_receiver_can_migrate() {
+    use std::sync::{Arc, Mutex};
+    let _signals = SIGNALS.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((registry, registry_url)) = fresh(Backend::Postgres, tmp.path(), "signal").await
+    else {
+        eprintln!("skipping — DATABASE_URL unset");
+        return;
+    };
+    let boot = tmp.path().join("boot/migrations");
+    std::fs::create_dir_all(&boot).unwrap();
+    rustango::tenancy::migrate_registry_pool(&registry, &boot)
+        .await
+        .expect("registry tables");
+    let mut org = rustango::tenancy::Org {
+        slug: "t1".into(),
+        display_name: "t1".into(),
+        storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
+        backend_kind: "postgres".into(),
+        schema_name: Some("t1".into()),
+        database_url: None,
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&registry).await.unwrap();
+    let dir = tmp.path().join("app/migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let seen: Arc<Mutex<Option<Result<(), String>>>> = Arc::default();
+    let (pool, boot, out) = (registry.clone(), boot.clone(), seen.clone());
+    let id = rustango::signals::migrate::connect_post_migrate(move |_| {
+        let (pool, boot, out) = (pool.clone(), boot.clone(), out.clone());
+        async move {
+            let r = rustango::migrate::migrate_pool(&pool, &boot).await;
+            *out.lock().unwrap() = Some(r.map(|_| ()).map_err(|e| e.to_string()));
+        }
+    });
+    let Pool::Postgres(pg) = &registry else {
+        unreachable!()
+    };
+    let pools = rustango::tenancy::TenantPools::new(pg.clone());
+    let run = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url);
+    let report = tokio::time::timeout(std::time::Duration::from_secs(60), run).await;
+    rustango::signals::migrate::disconnect_post_migrate(id);
+    let report = report.expect("no hang").expect("tenants");
+    assert!(report.all_ok(), "{report:?}");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen, Some(Ok(())), "the receiver's migrate");
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn concurrent_migrates_postgres() {
@@ -688,4 +791,5 @@ per_backend!(
     owned_table_dropped_later,
     not_null_column_on_empty_table,
     later_index_on_owned,
+    nested_lock_is_an_error,
 );

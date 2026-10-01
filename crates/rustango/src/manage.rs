@@ -52,9 +52,13 @@ async fn auto_migrate(
     pool: &crate::sql::Pool,
     dir: &std::path::Path,
 ) -> Result<(), crate::migrate::MigrateError> {
-    crate::migrate::manage::migrate_with_framework(pool, dir, &mut std::io::stderr(), |held| {
-        crate::migrate::migrate_pool_locked(held, pool, dir, None)
-    })
+    crate::migrate::manage::migrate_with_framework(
+        pool,
+        dir,
+        &mut std::io::stderr(),
+        crate::migrate::Signals::Skip,
+        |held| crate::migrate::migrate_pool_locked(held, pool, dir, None),
+    )
     .await
 }
 
@@ -1282,6 +1286,7 @@ impl Cli {
                 &crate::sql::Pool::from(pool.clone()),
                 dir,
                 &mut std::io::stderr(),
+                crate::migrate::Signals::Fire,
                 |held| crate::migrate::migrate_locked(held, &pool, dir, None),
             )
             .await?;
