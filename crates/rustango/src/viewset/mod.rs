@@ -1635,6 +1635,35 @@ impl WriteSet {
         self.writable.iter().any(|f| f.name == name)
     }
 
+    /// The fields an UPDATE writes when the body carries them.
+    fn updatable(&self) -> impl Iterator<Item = &'static crate::core::FieldSchema> + '_ {
+        self.writable
+            .iter()
+            .copied()
+            .filter(|f| !f.primary_key && !f.auto)
+    }
+
+    /// `body` cut to the keys the UPDATE writes, so PATCH validation
+    /// overlays only those on the stored row (#1995).
+    fn patch_body(&self, bridge: &dyn SerializerBridge, body: &Value) -> Value {
+        let Some(obj) = body.as_object() else {
+            return body.clone();
+        };
+        let written = |key: &str| {
+            bridge
+                .writable_field_names()
+                .iter()
+                .zip(bridge.writable_model_fields())
+                .any(|(n, m)| *n == key && self.updatable().any(|f| f.name == *m))
+        };
+        Value::Object(
+            obj.iter()
+                .filter(|(k, _)| written(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+    }
+
     /// The INSERT's `(column, value)` list: writable fields from `form`,
     /// the server-stamped timestamps, then the pins.
     fn insert_values(
@@ -1662,8 +1691,8 @@ impl WriteSet {
         partial: bool,
     ) -> Result<Vec<Assignment>, FormError> {
         let mut out = Vec::new();
-        for field in &self.writable {
-            if field.primary_key || field.auto || (partial && !form.contains_key(field.name)) {
+        for field in self.updatable() {
+            if partial && !form.contains_key(field.name) {
                 continue;
             }
             match parse_form_value(field, form.get(field.name).map(String::as_str)) {
@@ -2897,7 +2926,8 @@ async fn update_inner(
         (Some(bridge), Some(body)) if partial => {
             let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val.clone());
             q.where_clause = narrow(q.where_clause, scope.clone());
-            match bridge.validate_patch(&mut acq, &q, body).await {
+            let body = write_set.patch_body(bridge.as_ref(), body);
+            match bridge.validate_patch(&mut acq, &q, &body).await {
                 Ok(r) => r.map_err(|errs| json_form_errors(&errs)),
                 Err(e) => return json_server_error("viewset::update::validate", &e),
             }
