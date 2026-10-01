@@ -8,7 +8,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** under `with_user_perms`, a `register_admin_view!` write route now needs
 `{table}.change` (or its `perm = "…"`), else 403. The admin and `CreateView`/`UpdateView`
-percent-encode PKs in redirects, so a CR/LF no longer panics.
+percent-encode PKs in redirects, so a CR/LF no longer panics; a `/` in a `success_url`
+value becomes `%2F`.
 
 ### Security — admin inlines hide secret fields (#1861)
 

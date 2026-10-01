@@ -311,6 +311,7 @@ pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) 
 /// `true` when the list may filter on `field` from the URL: a
 /// `list_filter`, displayed or FK column, or an inline's parent pin.
 /// Never a secret, so a URL cannot probe its value (#2031).
+/// Every FK column is allowed on purpose: inline and facet links filter on it.
 #[must_use]
 pub(crate) fn url_filterable(
     model: &'static ModelSchema,

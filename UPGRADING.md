@@ -160,6 +160,11 @@ untouched.
 
 `?<field>=` is ignored unless the field is in `list_filter` or `list_display`, an FK, or an inline's parent column (#2031). Add the field to `list_filter` to keep a bookmarked filter.
 
+### `success_url` placeholders are percent-encoded
+
+`{pk}` and `{column}` values in a `CreateView`/`UpdateView` `success_url` are encoded as one path
+segment, so a `/` in the value becomes `%2F` (#1862).
+
 ### Admin inlines enforce `max_num` and use `INITIAL_FORMS`
 
 A save that adds inline rows past `max_num` re-renders with an error; slots past `INITIAL_FORMS` are inserts (#1717).
