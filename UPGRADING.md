@@ -162,6 +162,7 @@ The derived default had no cap. A body with no size hint (stream, SSE) or over t
 ### CORS adds `Vary: Origin` more often (#1867)
 
 Refused origins and any-origin mode now send it, so shared caches key on `Origin`.
+A preflight that echoes the requested headers also varies on `Access-Control-Request-Headers` and `-Method`.
 
 ### `negotiate` honours `q=0` and specificity; flash cookies are byte-capped (#1957)
 

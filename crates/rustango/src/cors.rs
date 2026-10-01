@@ -350,6 +350,11 @@ fn attach_cors_headers(
     }
 
     let allow_headers = if cfg.allow_headers.is_empty() {
+        // An echoed answer depends on the request, so a cache must key on it.
+        if request_headers.is_some() {
+            crate::vary::add_vary(headers, "Access-Control-Request-Headers");
+            crate::vary::add_vary(headers, "Access-Control-Request-Method");
+        }
         request_headers.map(str::to_owned)
     } else {
         Some(cfg.allow_headers.join(", "))
@@ -471,6 +476,20 @@ mod tests {
         assert_eq!(vary(&any, None).as_deref(), Some("Origin"));
         let star = CorsLayer::new().allow_any_origin().allow_credentials(true);
         assert_eq!(vary(&star, Some("https://x.example")), None);
+
+        // A preflight that echoes the requested headers varies on them too.
+        let mut res = Response::new(Body::empty());
+        attach_cors_headers(
+            &list,
+            Some("https://app.example.com"),
+            Some("X-Custom"),
+            &mut res,
+        );
+        assert_eq!(res.headers()[ACCESS_CONTROL_ALLOW_HEADERS], "X-Custom");
+        assert_eq!(
+            res.headers()[axum::http::header::VARY],
+            "Origin, Access-Control-Request-Headers, Access-Control-Request-Method"
+        );
     }
 
     /// An allowlist is the supported way to do credentialed CORS, so
