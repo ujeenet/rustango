@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.14] — 2026-10-01
+
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
 
 `RustangoError` DB, hashing, JWT-issue and env errors answer 500/503 with an opaque body; `get_object_or_404`, `render()`, template-view and operator-console 500s too.

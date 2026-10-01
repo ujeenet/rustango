@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.14
+
 ### `RustangoError` status changes (#1955)
 
 DB errors inside `Auth`/`AuthFlow`/`BulkAction`, `Env`, `JwtIssue` and hashing errors are now `500`; `Busy` is `503`.
