@@ -1969,6 +1969,11 @@ async fn duplicate_errors(
     }
     // A composite UNIQUE, or a row gone since: no single field to blame.
     if errors.is_empty() {
+        tracing::warn!(
+            target: "rustango::template_views",
+            table = schema.table,
+            "unique violation blames no submitted field; shown as a form-wide error"
+        );
         errors.insert("__all__".to_owned(), DUPLICATE_VALUE.to_owned());
     }
     errors
