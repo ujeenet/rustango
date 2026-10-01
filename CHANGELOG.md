@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `tenant_url_on_registry_server` splits the query off first, so `sslrootcert=/ca.pem` is not cut and `sslmode` carries over.
 
+### Security — a schema-mode tenant cannot be named `public` (#1868)
+
+`public` holds the registry and ends every tenant's `search_path`; provisioning and `create_tenant` now refuse it.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

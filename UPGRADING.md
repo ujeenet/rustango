@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Schema-mode tenants cannot use `public`
+
+Provisioning and `create_tenant` refuse a schema named `public` (#1868). Rename any such tenant's schema.
+
 ## 0.59.16
 
 ### Custom admin views need `change` for writes

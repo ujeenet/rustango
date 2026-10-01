@@ -914,7 +914,7 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
 ///
 /// The rule is the slug's, plus underscores: a schema name is not a
 /// hostname label, and Postgres is happy with `_`.
-fn validate_schema_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_schema_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("a schema name is required".into());
     }
@@ -945,6 +945,13 @@ fn validate_schema_name(name: &str) -> Result<(), String> {
     if name.starts_with("pg_") || name == "information_schema" {
         return Err(format!(
             "schema name `{name}` is reserved by Postgres — choose another"
+        ));
+    }
+    // `public` holds the registry tables and ends every tenant's
+    // `search_path`, so a tenant there would share both.
+    if name == "public" {
+        return Err(format!(
+            "schema name `{name}` is the registry's schema — choose another"
         ));
     }
     Ok(())
@@ -1536,6 +1543,7 @@ mod validation_tests {
             "pg_toast",           // reserved
             "pg_anything",        // the whole `pg_` namespace is reserved
             "information_schema", // reserved
+            "public",             // the registry's schema (#1868)
         ] {
             assert!(
                 validate_schema_name(bad).is_err(),
