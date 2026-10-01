@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ViewSet `PATCH` validates only the sent fields (#1995)
+
+Field rules skip absent fields, and the cross-field `validate` hook sees the stored row with the patch applied.
+
 ### Fixed — `check_unique_together_pool` reports collisions on PostgreSQL (#1872)
 
 The probe now runs as an ORM `exists` count; its raw `SELECT 1` failed to decode on PG and hid the field error.

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### ViewSet `PATCH` validates over the stored row (#1995)
+
+A serializer `PATCH` now loads the row once before the update. `ModelSerializer` gains a defaulted
+`validate_patch`; a hand-written impl keeps the old body-only check unless it overrides it.
+
 ### Feature flags never expire by default (#1956)
 
 Flag writes no longer carry a 1 hour TTL. To keep the old expiry, call `.ttl(Duration::from_secs(3600))`.

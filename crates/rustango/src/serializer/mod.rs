@@ -217,6 +217,17 @@ pub trait ModelSerializer: serde::Serialize + Sized {
         Err(errors)
     }
 
+    /// Validate a partial-update body against the `stored` row: field
+    /// rules run only on sent fields, the cross-field hook on the merge.
+    /// The macro writes this; the default validates `body` alone.
+    ///
+    /// # Errors
+    /// A `FormErrors` naming every field that failed to parse or validate.
+    fn validate_patch(stored: &Self::Model, body: &Value) -> Result<(), crate::forms::FormErrors> {
+        let _ = stored;
+        Self::from_writable_json(body)?.validate()
+    }
+
     /// Run the serializer's validators. The macro overrides this when
     /// the serializer declares any `validate = "..."`, on a field or
     /// on the container. By default it does nothing.

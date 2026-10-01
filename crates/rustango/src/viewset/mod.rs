@@ -272,6 +272,15 @@ impl PaginationStyle {
 /// [`crate::sql::select_rows_pool_with_related`], which decodes on all
 /// three backends, then maps each model through `S::from_model` and
 /// `to_value`.
+/// Outer `Err`: the row load failed. Inner `Err`: the body is invalid.
+type PatchCheck<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<Result<(), crate::forms::FormErrors>, crate::sql::ExecError>>
+            + Send
+            + 'a,
+    >,
+>;
+
 trait SerializerBridge: Send + Sync {
     /// Fetch every row matching `q` and render it through the
     /// serializer (replaces the default field-level projection).
@@ -292,6 +301,15 @@ trait SerializerBridge: Send + Sync {
     /// call the serializer's `validate()` hook. `Err` carries
     /// per-field errors for a 400 response.
     fn validate_body(&self, body: &Value) -> Result<(), crate::forms::FormErrors>;
+
+    /// PATCH: validate `body` over the row `q` loads (#1995). No row
+    /// skips the check; the UPDATE then answers 404.
+    fn validate_patch<'a>(
+        &'a self,
+        acq: &'a mut AcquiredConn,
+        q: &'a SelectQuery,
+        body: &'a Value,
+    ) -> PatchCheck<'a>;
 
     /// The **model** field names the serializer accepts on write,
     /// with `source` resolved. The write path skips every other
@@ -355,6 +373,20 @@ where
         // then run the serializer's validation hook.
         let s = S::from_writable_json(body)?;
         s.validate()
+    }
+
+    fn validate_patch<'a>(
+        &'a self,
+        acq: &'a mut AcquiredConn,
+        q: &'a SelectQuery,
+        body: &'a Value,
+    ) -> PatchCheck<'a> {
+        Box::pin(async move {
+            let models = acq.select_rows_typed::<S::Model>(q).await?;
+            Ok(models
+                .first()
+                .map_or(Ok(()), |m| S::validate_patch(m, body)))
+        })
     }
 
     fn writable_model_fields(&self) -> &'static [&'static str] {
@@ -2860,7 +2892,19 @@ async fn update_inner(
         Err(e) => return e.into_response(),
     };
 
-    if let Err(resp) = serializer_validate(&state, json.as_ref()) {
+    // PATCH checks only the sent fields, over the stored row (#1995).
+    let validated = match (&state.vs.serializer, json.as_ref()) {
+        (Some(bridge), Some(body)) if partial => {
+            let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val.clone());
+            q.where_clause = narrow(q.where_clause, scope.clone());
+            match bridge.validate_patch(&mut acq, &q, body).await {
+                Ok(r) => r.map_err(|errs| json_form_errors(&errs)),
+                Err(e) => return json_server_error("viewset::update::validate", &e),
+            }
+        }
+        _ => serializer_validate(&state, json.as_ref()),
+    };
+    if let Err(resp) = validated {
         return resp;
     }
 
