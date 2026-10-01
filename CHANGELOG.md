@@ -21,6 +21,11 @@ and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused
 The keys were read by nothing. New `passwords::Argon2Params`, `configure_argon2` and
 `argon2_params`; an invalid combination keeps the default and logs an error.
 
+### Security — a logout ends JWT refresh chains (#2036)
+
+`/refresh` checks `sessions_revoked_at`, so a chain started before a logout stops rotating.
+A JWT login stamps its session start after the last logout.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

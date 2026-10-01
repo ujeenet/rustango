@@ -169,6 +169,10 @@ the upgrade no longer open. The `passkey` feature now enables `cache`.
 New hashes use `argon2_memory_kib` / `argon2_iterations` / `argon2_parallelism` when set;
 check them before deploying. Existing hashes keep verifying at their own cost.
 
+### JWT refresh honours logout (#2036)
+
+A cookie logout now also ends that user's JWT refresh chains; clients must log in again.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
