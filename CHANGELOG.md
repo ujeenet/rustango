@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — compression no longer empties large or streaming responses (#1954)
+
+Bodies over `max_body_bytes`, without a known size, or `206` pass through whole; `gzip;q=0, *` no longer gzips.
+
 ### Fixed — ViewSet form-urlencoded bodies run serializer validation (#1993)
 
 A form body is typed by its model fields and checked like JSON; it no longer skips `validate`, lengths, ranges and choices.

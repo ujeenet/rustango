@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `CompressionLayer` skips streams and `206` (#1954)
+
+A body with no exact size hint (`Body::from_stream`) is now sent uncompressed instead of buffered.
+
 ### ViewSet form bodies are validated (#1993)
 
 A form-urlencoded write that broke a serializer rule now gets the same `422` as JSON.

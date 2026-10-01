@@ -140,6 +140,53 @@ pub(crate) fn over_cap(e: &axum::Error) -> bool {
     false
 }
 
+/// Read a body up to `cap`. `Ok(Err(body))` gives back the whole body when it is larger.
+#[cfg(feature = "admin")]
+pub(crate) async fn collect_capped(
+    mut body: Body,
+    cap: usize,
+) -> Result<Result<axum::body::Bytes, Body>, axum::Error> {
+    use http_body_util::BodyExt;
+    let mut buf = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let Ok(data) = frame?.into_data() else {
+            continue;
+        };
+        if buf.len() + data.len() > cap {
+            buf.extend_from_slice(&data);
+            return Ok(Err(Body::new(Prefixed {
+                head: Some(axum::body::Bytes::from(buf)),
+                rest: body,
+            })));
+        }
+        buf.extend_from_slice(&data);
+    }
+    Ok(Ok(axum::body::Bytes::from(buf)))
+}
+
+/// The bytes already read, then the rest of the stream.
+#[cfg(feature = "admin")]
+pub(crate) struct Prefixed {
+    pub(crate) head: Option<axum::body::Bytes>,
+    pub(crate) rest: Body,
+}
+
+#[cfg(feature = "admin")]
+impl http_body::Body for Prefixed {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<axum::body::Bytes>, axum::Error>>> {
+        if let Some(head) = self.head.take() {
+            return std::task::Poll::Ready(Some(Ok(http_body::Frame::data(head))));
+        }
+        std::pin::Pin::new(&mut self.rest).poll_frame(cx)
+    }
+}
+
 fn too_large(limit: usize) -> Response {
     crate::api_errors::ApiError::from_status(StatusCode::PAYLOAD_TOO_LARGE, "payload too large")
         .with_details(serde_json::json!({ "limit_bytes": limit }))
