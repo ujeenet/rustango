@@ -4907,6 +4907,21 @@ mod tests {
         }))
     }
 
+    /// A lookup field `parse_pk_string` refuses (a date) goes through `parse_form_value`.
+    #[test]
+    fn coerce_pk_falls_back_to_the_form_parser() {
+        let day = crate::core::FieldSchema {
+            name: "day",
+            column: "day",
+            ty: FieldType::Date,
+            primary_key: false,
+            ..*schema_two_fields().primary_key().unwrap()
+        };
+        let want = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        assert_eq!(coerce_pk(&day, "2026-10-01"), Some(SqlValue::Date(want)));
+        assert!(coerce_pk(&day, "not-a-date").is_none());
+    }
+
     /// `coerce_pk` for a String PK passes through verbatim.
     #[test]
     fn coerce_pk_string_field() {

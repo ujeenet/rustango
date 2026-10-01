@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::core::Model as _;
 use rustango::sql::{Auto, FetcherPool as _, ForeignKey, Pool};
-use rustango::template_views::{CreateView, DetailView, ListView, UpdateView};
+use rustango::template_views::{CreateView, DeleteView, DetailView, ListView, UpdateView};
 use rustango::{tri_dialect_test, Model};
 use tera::Tera;
 use tower::ServiceExt as _;
@@ -108,6 +108,12 @@ fn app(pool: &Pool) -> axum::Router {
             ListView::for_model(Event::SCHEMA)
                 .template("list.html")
                 .filter_fields(&["author_id", "done", "token", "day", "note", "at"])
+                .router("/events", t.clone(), pool.clone()),
+        )
+        .merge(
+            DeleteView::for_model(Event::SCHEMA)
+                .template("detail.html")
+                .success_url("/events")
                 .router("/events", t.clone(), pool.clone()),
         )
         .merge(
@@ -254,6 +260,37 @@ async fn garbage_url_pk_is_a_404(pool: &Pool) {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    for (method, uri) in [
+        (Method::GET, "/events/abc/edit"),
+        (Method::GET, "/events/abc/delete"),
+        (Method::POST, "/events/abc/delete"),
+    ] {
+        let (status, body) = send(pool, method.clone(), uri, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}: {body}");
+    }
+}
+
+/// `?page=i64::MAX` is an empty page on every paging path, not an overflow (#1865).
+async fn huge_page_is_an_empty_page(pool: &Pool) {
+    let (status, body) = send(
+        pool,
+        Method::POST,
+        "/events/new",
+        &form("2026-09-29", 7, true),
+    )
+    .await;
+    assert!(status.is_redirection(), "seed: {status} {body}");
+    let (status, body) = send(pool, Method::GET, &format!("/events?page={}", i64::MAX), "").await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "rows=0"));
+    let (rows, total) = Event::objects()
+        .paginate(i64::MAX, 20, pool)
+        .await
+        .expect("paginate");
+    assert_eq!((rows.len(), total), (0, 1));
+    assert!(Event::for_page(i64::MAX, 20, pool)
+        .await
+        .expect("for_page")
+        .is_empty());
 }
 
 /// A failed INSERT answers an opaque 500, not the driver text (#1955).
@@ -289,6 +326,7 @@ tri_dialect_test! {
         list_filters_bind_typed_values,
         fk_display_binds_the_target_pk_type,
         garbage_url_pk_is_a_404,
+        huge_page_is_an_empty_page,
         create_view_writes_natural_and_v7_pks,
     ],
 }

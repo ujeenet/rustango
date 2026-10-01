@@ -1,5 +1,6 @@
 //! The admin audit feed's per-user table scope renders valid SQL on
 //! every backend (#1858), and a model table named `audit` can't open it (#1979).
+//! Huge `?page=` values are empty pages (#1865).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -27,6 +28,7 @@ const SEEN: &str = "audscope_seen";
 const HIDDEN: &str = "audscope_hidden";
 
 async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Audit>(pool).await;
     audit::ensure_table_pool(pool).await.expect("audit table");
     for t in [SEEN, HIDDEN] {
         AuditLog::delete_where("entity_table", t, pool)
@@ -187,6 +189,17 @@ async fn seen_rows(pool: &Pool) -> Vec<AuditLog> {
         .expect("seen rows")
 }
 
+/// `?page=i64::MAX` is an empty page in the feed and a model list, not an overflow (#1865).
+async fn huge_page_is_an_empty_page(pool: &Pool) {
+    let perms = [audit::VIEW_CODENAME, "audscope_seen.view", "audit.view"];
+    let page = format!("page={}", i64::MAX);
+    let (status, body) = get(pool, &perms, &format!("/__audit?{page}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("mark-audscope_seen"), "{body}");
+    let (status, body) = get(pool, &perms, &format!("/audit?{page}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -195,5 +208,6 @@ tri_dialect_test! {
         feed_urls_carry_the_admin_prefix,
         audit_model_perms_do_not_open_the_feed,
         feed_perms_do_not_open_the_audit_model,
+        huge_page_is_an_empty_page,
     ],
 }

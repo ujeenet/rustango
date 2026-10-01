@@ -153,12 +153,14 @@ untouched.
 ### M2M destination keys are `impl Into<SqlValue>` (#1950)
 
 `add` / `remove` / `contains` take any key and `set` any `&[K]`; integers still bind as `i64`.
-An empty `set(&[])` needs a type now: `set::<i64>(&[])`, or call `clear()`.
+An empty `set(&[])` needs a type now: `set::<i64>(&[])`, or call `clear()`. `all_as::<K>()` takes a
+`FlatScalar` key. A key the junction column can't hold is an `ExecError::Query(TypeMismatch)`.
 **Breaking:** `M2mChangedContext::dst_pks` is `Vec<SqlValue>`. A bad URL PK in a template view is a 404.
 
 ### ViewSet `__in` lists cap at 1000 values (#1865)
 
-A longer `?field__in=` / `?field__not_in=` list is a 400. Split larger lookups into several requests.
+A longer `?field__in=` / `?field__not_in=` list is a 400, as are lists summing past the dialect's bind
+limit (less 1000). `InListTooLong` is an enum. Split larger lookups into several requests.
 
 ### `ListView` falls back to `default_order` (#2005)
 

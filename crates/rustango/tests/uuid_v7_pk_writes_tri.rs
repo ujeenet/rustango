@@ -169,13 +169,19 @@ async fn pg_bulk_insert_set_pk_fills_unset_timestamps(pool: &Pool) {
             id: Auto::Set(id),
             name: format!("t{id}"),
         };
-        let mut rows = vec![ticket(10), ticket(11)];
+        // One row sets its own stamp: a mixed set/unset batch keeps it.
+        let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("ts");
+        let mut rows = vec![ticket(10), ticket(11), ticket(12)];
+        rows[2].created_at = Auto::Set(at);
         Ticket::bulk_insert(&mut rows, pg)
             .await
             .expect("bulk_insert");
-        let stored = Ticket::objects().fetch(pool).await.expect("fetch");
-        assert_eq!(stored.len(), 2);
+        let mut stored = Ticket::objects().fetch(pool).await.expect("fetch");
+        stored.sort_by_key(|t| *t.id.get().expect("id"));
+        let ids: Vec<i64> = stored.iter().map(|t| *t.id.get().unwrap()).collect();
+        assert_eq!(ids, [10, 11, 12], "the given ids are stored");
         assert!(stored.iter().all(|t| t.created_at.get().is_some()));
+        assert_eq!(stored[2].created_at.get(), Some(&at));
     }
     let _ = pool;
 }
