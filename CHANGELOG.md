@@ -14,6 +14,11 @@ console, now call `password_validators::check_builtin_form_password`.
 Lists, counts, facets, detail/edit/delete pages, actions and inlines skip rows with the soft-delete
 column set. `?trashed=1` lists them, and `restore_selected` acts only on them.
 
+### Fixed — admin facet and date counts follow the active filters (#2004)
+
+Counts are within the list's filters, search and row scope; a facet ignores its own filter, as in Django.
+Both now run through the ORM. Dict rows (`values()`, `aggregate()`) decode date and timestamp cells on PG/MySQL instead of `NULL`.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

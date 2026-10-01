@@ -7,13 +7,9 @@
 //! 1. Reads `?year=YYYY` `&month=MM` `&day=DD` from the query string.
 //! 2. Adds two filters (`>= lo`, `< hi`) on the named column, for the
 //!    half-open range `[lo, hi)` the selection implies.
-//! 3. Counts the child buckets at the current level with one `GROUP BY`
-//!    query: years when nothing is selected, then months, then days.
+//! 3. Counts the child buckets at the current level, within the list's
+//!    filters: years when nothing is selected, then months, then days.
 //! 4. Renders a breadcrumb and the child list above the table.
-//!
-//! The bucket query is per dialect: `EXTRACT(YEAR FROM <col>)` on
-//! Postgres and MySQL, `CAST(strftime('%Y', <col>) AS INTEGER)` on
-//! SQLite.
 //!
 //! The range comparison binds two `SqlValue::Date` or `DateTime`
 //! params. No query value is ever put into the SQL text, so it cannot
@@ -139,26 +135,6 @@ impl DrillLevel {
             (Some(_), None, _) => Some(Self::Month),
             (Some(_), Some(_), None) => Some(Self::Day),
             (Some(_), Some(_), Some(_)) => None, // a day has no children
-        }
-    }
-
-    /// Per-dialect SQL fragment that reads this level's bucket value as
-    /// an integer. `col_quoted` must already be quoted.
-    pub(crate) fn bucket_expr(self, dialect: &dyn crate::sql::Dialect, col_quoted: &str) -> String {
-        let part = match self {
-            Self::Year => "YEAR",
-            Self::Month => "MONTH",
-            Self::Day => "DAY",
-        };
-        let strftime_token = match self {
-            Self::Year => "%Y",
-            Self::Month => "%m",
-            Self::Day => "%d",
-        };
-        if dialect.name() == "sqlite" {
-            format!("CAST(strftime('{strftime_token}', {col_quoted}) AS INTEGER)")
-        } else {
-            format!("EXTRACT({part} FROM {col_quoted})")
         }
     }
 }

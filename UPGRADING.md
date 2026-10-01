@@ -159,6 +159,11 @@ A tenant user can no longer set a new password shorter than 8 characters (counte
 A `#[rustango(soft_delete)]` row no longer shows in the admin once deleted; its detail page is a 404.
 Use the list's "Show deleted rows" link (`?trashed=1`) to see and restore them. `trashed` is now a reserved list param.
 
+### Admin facet and date counts follow the filters (#2004)
+
+Facet and date-strip counts now match the filtered list, not the whole table. The year strip lists at most
+the newest 200 years. `values()`/`aggregate()` dicts on PG/MySQL return `SqlValue::Date`/`DateTime` where they gave `Null`.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

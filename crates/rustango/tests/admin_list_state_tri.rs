@@ -1,6 +1,6 @@
 //! Admin list paging order, filter-keeping links, the mounted prefix,
-//! bool checkboxes and soft-deleted rows on every backend
-//! (#1917 #1916 #1765 #1730 #1918).
+//! bool checkboxes, soft-deleted rows and filtered facet counts on every
+//! backend (#1917 #1916 #1765 #1730 #1918 #2004).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -320,6 +320,46 @@ async fn soft_deleted_rows_leave_the_list(pool: &Pool) {
     );
 }
 
+/// Facet and date counts are within the other filters; a facet ignores its own.
+async fn facet_and_date_counts_follow_the_filters(pool: &Pool) {
+    for (title, flag, rank, y) in [
+        ("a", true, 0, 2024),
+        ("b", true, 1, 2023),
+        ("c", false, 1, 2024),
+    ] {
+        let mut item = seed_item(pool, title, flag).await;
+        item.rank = rank;
+        item.made_on = chrono::NaiveDate::from_ymd_opt(y, 3, 9).unwrap();
+        item.save_pool(pool).await.expect("set row");
+    }
+    let body = get(pool, "/adminls_item?flag=true").await;
+    let count_after = |link: &str| {
+        let at = body
+            .find(link)
+            .unwrap_or_else(|| panic!("no {link}: {body}"));
+        let rest = &body[at..];
+        rest[rest.find('(').unwrap() + 1..rest.find(')').unwrap()].to_owned()
+    };
+    assert_eq!(
+        count_after("flag=true&rank=1\""),
+        "1",
+        "rank facet ignores flag"
+    );
+    assert_eq!(count_after("flag=true&rank=0\""), "1");
+    assert_eq!(
+        count_after("?flag=false\""),
+        "1",
+        "flag facet drops its own filter"
+    );
+    assert_eq!(count_after(">2024 <small>"), "1", "year count ignores flag");
+    assert_eq!(count_after(">2023 <small>"), "1");
+    let body = get(pool, "/adminls_item?flag=false&year=2024").await;
+    assert!(
+        body.contains(">March <small>(1)</small>"),
+        "month count ignores flag: {body}"
+    );
+}
+
 tri_dialect_test! {
     model: Item,
     scenarios: [
@@ -330,5 +370,6 @@ tri_dialect_test! {
         edit_form_checks_a_true_bool,
         bool_facet_reads_true_and_toggles_off,
         soft_deleted_rows_leave_the_list,
+        facet_and_date_counts_follow_the_filters,
     ],
 }
