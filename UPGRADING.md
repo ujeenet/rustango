@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin edits need the audit table
+
+An admin edit writes its audit row in the UPDATE's transaction, so a missing `rustango_audit_log` table now fails the edit (#2060). `manage migrate` creates it.
+
 ### Webhooks with private targets still refuse cloud metadata
 
 `allow_private_targets` no longer reaches `169.254.169.254` and the other metadata addresses (#1821).

@@ -584,6 +584,31 @@ mod admin_views {
         assert!(stamp(pool, pks[0]).await.is_none());
     }
 
+    /// An edit whose audit row cannot be written is not saved (#2060).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn admin_edit_rolls_back_when_its_audit_fails() {
+        // No audit table here, so the emit fails.
+        let pool = rustango::testkit::matrix::sqlite_file_pool().await;
+        rustango::testkit::matrix::fresh_table::<AdminDoc>(&pool).await;
+        let seed =
+            rustango::core::InsertQuery::new(AdminDoc::SCHEMA, vec!["title"], vec!["a".into()]);
+        rustango::sql::insert_pool(&pool, &seed)
+            .await
+            .expect("seed");
+        let pk = AdminDoc::objects().fetch(&pool).await.unwrap()[0]
+            .id
+            .get()
+            .copied()
+            .unwrap();
+        post(&pool, &format!("/{TABLE}/{pk}"), "title=z".into()).await;
+        let docs = AdminDoc::objects().fetch(&pool).await.unwrap();
+        assert_eq!(
+            docs[0].title, "a",
+            "the edit committed without its audit row"
+        );
+    }
+
     tri_dialect_test! {
         setup: setup,
         scenarios: [

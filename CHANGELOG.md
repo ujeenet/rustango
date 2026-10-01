@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `CreateView` and `ModelForm::save` write the `create` (or `update`) audit row in the write's transaction. A webhook allowed private targets still refuses cloud-metadata addresses.
 
+### Fixed — an admin edit commits with its audit row (#2060)
+
+The diff entry is written in the UPDATE's transaction; if it fails, the edit is not saved.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

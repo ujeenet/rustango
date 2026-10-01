@@ -2145,15 +2145,20 @@ pub(crate) async fn update_submit(
         change: true,
     })
     .await;
-    if let Err(e) = crate::sql::update_pool(&state.pool, &query).await {
+    // "Before" comes from the SELECT, "after" from the form. The
+    // per-request `with_source(User { id })` that `tenancy::admin`
+    // installs gives a "who changed what" trail for free. The entry
+    // commits with the UPDATE, so an edit is never left unaudited (#2060).
+    let entry =
+        super::audit::admin_audit_diff_entry(model, &pk_raw, before_row.as_ref(), &audit_form);
+    let written = match &entry {
+        Some(entry) => crate::audit::save_one_with_audit(&state.pool, &query, entry).await,
+        None => crate::sql::update_pool(&state.pool, &query).await,
+    };
+    if let Err(e) = written {
         let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
         return Ok(Html(html).into_response());
     }
-    // "Before" comes from the SELECT, "after" from the form. The
-    // per-request `with_source(User { id })` that `tenancy::admin`
-    // installs gives a "who changed what" trail for free.
-    super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &audit_form)
-        .await;
     // The `post_save` hook fires after the UPDATE and the audit
     // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
