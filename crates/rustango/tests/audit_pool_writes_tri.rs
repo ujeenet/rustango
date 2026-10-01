@@ -190,6 +190,54 @@ async fn second_soft_delete_keeps_the_first_stamp(pool: &Pool) {
     );
 }
 
+/// The macro `save(&PgPool)` runs outside a transaction, so its
+/// pre-read guard is the only thing between a failure and an unaudited UPDATE.
+async fn pg_macro_save_skips_noop_and_fails_on_pre_read(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    pg_macro_save(pool).await;
+}
+
+#[cfg(feature = "postgres")]
+async fn pg_macro_save(pool: &Pool) {
+    let Some(pg) = pool.as_postgres() else {
+        return;
+    };
+    let mut note = insert_note(pool).await;
+    note.save(pg).await.expect("no-op save");
+    assert_eq!(
+        audit_rows(pool).await,
+        1,
+        "a no-op save wrote an update row"
+    );
+    note.title = "changed".into();
+    note.save(pg).await.expect("save");
+    assert_eq!(audit_rows(pool).await, 2);
+
+    let mut stamp = Stamp {
+        id: Auto::default(),
+        title: "old".into(),
+        created_at: Auto::default(),
+    };
+    stamp.insert_pool(pool).await.expect("insert");
+    rustango::sql::raw_execute_pool(
+        pool,
+        r#"ALTER TABLE "audit1907_stamp" DROP COLUMN "created_at""#,
+        Vec::new(),
+    )
+    .await
+    .expect("drop column");
+    stamp.title = "new".into();
+    assert!(stamp.save(pg).await.is_err(), "save ran unaudited");
+    let updated = Stamp::objects()
+        .filter("title", "new")
+        .count(pool)
+        .await
+        .expect("count");
+    assert_eq!(updated, 0, "the UPDATE ran without its audit row");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -200,5 +248,6 @@ tri_dialect_test! {
         noop_save_writes_no_audit_row,
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
+        pg_macro_save_skips_noop_and_fails_on_pre_read,
     ],
 }

@@ -2191,23 +2191,11 @@ pub(crate) async fn delete_submit(
         pk: pk_raw.clone(),
     })
     .await;
-    if let Some(col) = model.soft_delete_column {
-        crate::sql::update_pool(
-            &state.pool,
-            &UpdateQuery {
-                model,
-                set: vec![Assignment {
-                    column: col,
-                    value: SqlValue::from(chrono::Utc::now()).into(),
-                }],
-                where_clause: WhereExpr::Predicate(Filter {
-                    column: pk_field.column,
-                    op: Op::Eq,
-                    value: pk_value,
-                }),
-            },
-        )
-        .await?;
+    let list_url = format!("{}/{}", state.config.admin_prefix, model.table);
+    let affected = if let Some(col) = model.soft_delete_column {
+        let now = Some(chrono::Utc::now());
+        let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
+        crate::sql::update_pool(&state.pool, &stamp).await?
     } else {
         crate::sql::delete_pool(
             &state.pool,
@@ -2220,7 +2208,11 @@ pub(crate) async fn delete_submit(
                 }),
             },
         )
-        .await?;
+        .await?
+    };
+    // Deleted by someone else since the read: keep their stamp and audit row (#1929).
+    if affected == 0 {
+        return Ok(Redirect::to(&list_url).into_response());
     }
 
     let delete_cfg = admin_config_or_default(model);
@@ -2257,7 +2249,7 @@ pub(crate) async fn delete_submit(
         pk: pk_raw.clone(),
     })
     .await;
-    Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
+    Ok(Redirect::to(&list_url).into_response())
 }
 
 // ============================================================== ACTIONS
@@ -2391,41 +2383,45 @@ pub(crate) async fn action_submit(
         .collect();
     send_row_signals(model.table, &row_pks, is_delete, true).await;
 
-    let in_pks = || {
-        WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::In,
-            value: SqlValue::List(pk_values.clone()),
-        })
+    let mark = |col, deleted_at| {
+        mark_each(
+            &state.pool,
+            model,
+            col,
+            pk_field.column,
+            &pk_values,
+            deleted_at,
+        )
     };
-    let set_column = |column, value: SqlValue| UpdateQuery {
-        model,
-        set: vec![Assignment {
-            column,
-            value: value.into(),
-        }],
-        where_clause: in_pks(),
-    };
-    match write {
+    let changed = match write {
         BulkWrite::Delete => match model.soft_delete_column {
             // Soft delete: stamp the column instead of a DELETE.
-            Some(col) => {
-                let stamp = set_column(col, SqlValue::from(chrono::Utc::now()));
-                crate::sql::update_pool(&state.pool, &stamp).await?;
-            }
+            Some(col) => Some(mark(col, Some(chrono::Utc::now())).await?),
             None => {
                 let query = DeleteQuery::by_pk_in(model, pk_field.column, pk_values.clone());
                 crate::sql::delete_pool(&state.pool, &query).await?;
+                None
             }
         },
         // Built-in restore: clear the soft-delete column, where NULL means live.
-        BulkWrite::Restore(col) => {
-            crate::sql::update_pool(&state.pool, &set_column(col, SqlValue::Null)).await?;
-        }
+        BulkWrite::Restore(col) => Some(mark(col, None).await?),
         // Handlers get the `Pool` enum, so a user action can match
         // on the backend if it needs to.
-        BulkWrite::Custom(handler) => handler(&state.pool, &pk_values).await?,
-    }
+        BulkWrite::Custom(handler) => {
+            handler(&state.pool, &pk_values).await?;
+            None
+        }
+    };
+    // A row someone else marked since the read keeps their stamp and audit row (#1929).
+    let (before_rows, row_pks) = match changed {
+        Some(changed) => before_rows
+            .into_iter()
+            .zip(row_pks)
+            .zip(changed)
+            .filter_map(|(pair, changed)| changed.then_some(pair))
+            .unzip(),
+        None => (before_rows, row_pks),
+    };
 
     // One audit entry per row, emitted in a single batched INSERT.
     // For `delete_selected` the changes JSON is what was deleted.
@@ -2547,6 +2543,23 @@ fn row_perms(action: &str) -> (&'static str, Option<&str>) {
         "restore_selected" => ("change", None),
         custom => ("change", Some(custom)),
     }
+}
+
+/// Soft delete or restore each row on its own; `true` where the row changed.
+async fn mark_each(
+    pool: &crate::sql::Pool,
+    model: &'static crate::core::ModelSchema,
+    col: &'static str,
+    pk_column: &'static str,
+    pks: &[SqlValue],
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Vec<bool>, crate::sql::ExecError> {
+    let mut changed = Vec::with_capacity(pks.len());
+    for pk in pks {
+        let q = crate::soft_delete::__mark_query(model, col, pk_column, pk.clone(), deleted_at);
+        changed.push(crate::sql::update_pool(pool, &q).await? > 0);
+    }
+    Ok(changed)
 }
 
 /// Keep the rows whose PK round-trips and return those PKs, so the rows
