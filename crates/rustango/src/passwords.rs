@@ -87,10 +87,13 @@ pub fn verify(password: &str, stored_hash: &str) -> Result<bool, PasswordError> 
 /// [`argon2_params`] cost, like a real stored hash. Backs
 /// [`verify_dummy`].
 fn dummy_hash() -> &'static str {
+    dummy_hash_for(argon2_params())
+}
+
+fn dummy_hash_for(params: Argon2Params) -> &'static str {
     use std::sync::{PoisonError, RwLock};
     // Rebuilt when the cost changes, so an unknown user costs what a real one does.
     static DUMMY: RwLock<Option<(Argon2Params, &'static str)>> = RwLock::new(None);
-    let params = argon2_params();
     if let Some((p, h)) = *DUMMY.read().unwrap_or_else(PoisonError::into_inner) {
         if p == params {
             return h;
@@ -586,6 +589,16 @@ mod tests {
         let (r, n) = ticks_while(verify_dummy_async("nobody")).await;
         assert!(r.is_ok());
         assert!(n >= 2, "verify_dummy_async stalled the runtime ({n} ticks)");
+    }
+
+    /// A cost change rebuilds the dummy hash at the new cost.
+    #[test]
+    fn dummy_hash_follows_the_cost() {
+        let a = Argon2Params::new(8, 1, 1).unwrap();
+        let b = Argon2Params::new(16, 1, 1).unwrap();
+        assert!(dummy_hash_for(a).contains("$m=8,t=1,p=1$"));
+        assert!(dummy_hash_for(b).contains("$m=16,t=1,p=1$"));
+        assert!(dummy_hash_for(a).contains("$m=8,t=1,p=1$"));
     }
 
     #[tokio::test]

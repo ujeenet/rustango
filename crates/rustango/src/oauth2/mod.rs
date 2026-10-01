@@ -955,7 +955,7 @@ mod tests {
             .route(
                 "/user/emails",
                 axum::routing::get(|| async {
-                    r#"[{"email":"pub@example.com","primary":true,"verified":true}]"#
+                    r#"[{"email":"primary@example.com","primary":true,"verified":true}]"#
                 }),
             );
         let base = serve(app).await;
@@ -968,7 +968,8 @@ mod tests {
             .complete_with(&flow, "code", &flow.state, &loopback())
             .await
             .unwrap();
-        assert_eq!(user.email.as_deref(), Some("pub@example.com"));
+        // Only `/user/emails` knows this address, so it was fetched.
+        assert_eq!(user.email.as_deref(), Some("primary@example.com"));
         assert!(user.email_verified);
     }
 
