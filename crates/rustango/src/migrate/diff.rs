@@ -732,7 +732,18 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, None)
+    render_changes_split_inner(changes, None, current, dialect, None)
+}
+
+/// As [`render_changes_split_with_dialect`], with the schema `before` the
+/// changes too: a dropped FK column's constraint goes first (#1981).
+pub(crate) fn render_changes_between(
+    changes: &[SchemaChange],
+    before: &SchemaSnapshot,
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<RenderedBatch, String> {
+    render_changes_split_inner(changes, Some(before), current, dialect, None)
 }
 
 /// As [`render_changes_split_with_dialect`], but every FK target is
@@ -744,7 +755,7 @@ pub(crate) fn render_changes_split_in_schema(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema)
+    render_changes_split_inner(changes, None, current, dialect, schema)
 }
 
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
@@ -851,6 +862,7 @@ impl UniqueNames {
 
 fn render_changes_split_inner(
     changes: &[SchemaChange],
+    before: Option<&SchemaSnapshot>,
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
@@ -890,6 +902,16 @@ fn render_changes_split_inner(
                         "DROP INDEX IF EXISTS {}",
                         dialect.quote_ident(&name)
                     ));
+                }
+                // MySQL refuses to drop a column its FK uses (1828).
+                let had_fk = before
+                    .and_then(|b| b.table(table))
+                    .and_then(|t| t.field(column))
+                    .is_some_and(|f| f.fk.is_some());
+                if had_fk && !dialect.inline_fks_in_create_table() {
+                    let name = super::ddl::fk_constraint_name(table, column);
+                    out.immediate
+                        .extend(dialect.drop_foreign_key_sql(table, &name));
                 }
                 out.immediate.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",

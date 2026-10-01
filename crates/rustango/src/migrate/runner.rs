@@ -482,7 +482,7 @@ async fn migrate_with_ledger(
     let newly = with_migrate_lock(pool, async {
         let all = file::list_dir(dir)?;
         let applied = applied_set_for(pool, ledger).await?;
-        let pending = pending_migrations(all, &applied);
+        let pending = pending_migrations(&all, &applied);
 
         let total = pending.len();
         emit(observer, || MigrationEvent::Planned { total });
@@ -1653,7 +1653,7 @@ async fn migrate_pool_with_ledger_opts(
                 )));
             }
         }
-        let pending = pending_migrations(all, &applied);
+        let pending = pending_migrations(&all, &applied);
 
         let total = pending.len();
         emit(observer, || MigrationEvent::Planned { total });
@@ -1672,7 +1672,9 @@ async fn migrate_pool_with_ledger_opts(
             // the observer before it propagates. `?` on its own would
             // leave a watcher looking at a migration stuck on "started"
             // forever, which is the state this exists to prevent.
-            let outcome = reconcile_and_apply(pool, &mig, &applied, ledger, fake_initial).await;
+            let before = snapshot_before(&all, &mig);
+            let outcome =
+                reconcile_and_apply(pool, &mig, &before, &applied, ledger, fake_initial).await;
             let outcome = match outcome {
                 Ok(outcome) => outcome,
                 Err(e) => {
@@ -1709,6 +1711,7 @@ async fn migrate_pool_with_ledger_opts(
 async fn reconcile_and_apply(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    before: &SchemaSnapshot,
     applied: &HashSet<String>,
     ledger: &str,
     fake_initial: bool,
@@ -1726,11 +1729,7 @@ async fn reconcile_and_apply(
                 ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
-            if effective.atomic {
-                apply_atomic_pool(pool, &effective, ledger).await?;
-            } else {
-                apply_nonatomic_pool(pool, &effective, ledger).await?;
-            }
+            apply_one_pool(pool, &effective, before, ledger).await?;
             Ok(outcome)
         }
     }
@@ -1922,7 +1921,7 @@ pub(crate) fn without_tables(mig: &Migration, existing: &[String]) -> Migration 
 /// on disk for a release or two, so older deployments can still migrate
 /// forward. Without this filter those files would look pending
 /// on the very next run and try to recreate tables that already exist.
-fn pending_migrations(all: Vec<Migration>, applied: &HashSet<String>) -> Vec<Migration> {
+fn pending_migrations(all: &[Migration], applied: &HashSet<String>) -> Vec<Migration> {
     let superseded: HashSet<&str> = all
         .iter()
         .filter(|m| applied.contains(&m.name))
@@ -2239,6 +2238,49 @@ where
     }
 }
 
+/// One schema op rendered for the runner.
+struct Step {
+    batch: super::diff::RenderedBatch,
+}
+
+/// Render `change`, which moves the schema from `before` to `after`.
+fn render_step(
+    change: &super::SchemaChange,
+    before: &SchemaSnapshot,
+    after: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<Step, MigrateError> {
+    let changes = std::slice::from_ref(change);
+    let batch = super::diff::render_changes_between(changes, before, after, dialect)
+        .map_err(MigrateError::Validation)?;
+    Ok(Step { batch })
+}
+
+/// Run `step` on SQLite. Returns the deferred FK statements.
+#[cfg(feature = "sqlite")]
+async fn run_step_sqlite(
+    conn: &mut sqlx::SqliteConnection,
+    step: Step,
+) -> Result<Vec<String>, MigrateError> {
+    for stmt in &step.batch.immediate {
+        sqlx::query(stmt).execute(&mut *conn).await?;
+    }
+    Ok(step.batch.deferred_fks)
+}
+
+/// [`run_step_sqlite`] for the non-atomic runners, on any backend.
+async fn run_step_pool(pool: &crate::sql::Pool, step: Step) -> Result<Vec<String>, MigrateError> {
+    #[cfg(feature = "sqlite")]
+    #[allow(irrefutable_let_patterns)] // a sqlite-only build
+    if let crate::sql::Pool::Sqlite(sq) = pool {
+        return run_step_sqlite(&mut *sq.acquire().await?, step).await;
+    }
+    for stmt in &step.batch.immediate {
+        crate::sql::raw_execute_pool(pool, stmt, ::std::vec::Vec::new()).await?;
+    }
+    Ok(step.batch.deferred_fks)
+}
+
 /// Apply one migration inside a transaction. Both backends support
 /// the same `BEGIN`/`COMMIT`/`ROLLBACK` shape, but sqlx's `Transaction<DB>`
 /// is generic over the backend so the body is inlined per-arm rather
@@ -2249,6 +2291,7 @@ where
 async fn apply_atomic_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic, _pool)");
@@ -2261,12 +2304,7 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = super::diff::render_changes_split_with_dialect(
-                            std::slice::from_ref(change),
-                            &mig.snapshot,
-                            dialect,
-                        )
-                        .map_err(MigrateError::Validation)?;
+                        let batch = render_step(change, before, &mig.snapshot, dialect)?.batch;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -2355,12 +2393,7 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = super::diff::render_changes_split_with_dialect(
-                            std::slice::from_ref(change),
-                            &mig.snapshot,
-                            dialect,
-                        )
-                        .map_err(MigrateError::Validation)?;
+                        let batch = render_step(change, before, &mig.snapshot, dialect)?.batch;
                         // Counted per *statement*, not per operation:
                         // one operation can render several, and each
                         // auto-commits on its own, so an operation
@@ -2408,16 +2441,8 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = super::diff::render_changes_split_with_dialect(
-                            std::slice::from_ref(change),
-                            &mig.snapshot,
-                            dialect,
-                        )
-                        .map_err(MigrateError::Validation)?;
-                        for stmt in batch.immediate {
-                            sqlx::query(&stmt).execute(&mut *tx).await?;
-                        }
-                        deferred_fks.extend(batch.deferred_fks);
+                        let step = render_step(change, before, &mig.snapshot, dialect)?;
+                        deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                     }
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
@@ -2451,6 +2476,7 @@ async fn apply_atomic_pool(
 async fn apply_nonatomic_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
@@ -2458,16 +2484,8 @@ async fn apply_nonatomic_pool(
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let batch = super::diff::render_changes_split_with_dialect(
-                    std::slice::from_ref(change),
-                    &mig.snapshot,
-                    pool.dialect(),
-                )
-                .map_err(MigrateError::Validation)?;
-                for stmt in batch.immediate {
-                    crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
-                }
-                deferred_fks.extend(batch.deferred_fks);
+                let step = render_step(change, before, &mig.snapshot, pool.dialect())?;
+                deferred_fks.extend(run_step_pool(pool, step).await?);
             }
             Operation::Data(d) => {
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
@@ -2555,8 +2573,9 @@ pub async fn migrate_to_pool_with_ledger(
         let mut touched = Vec::new();
         match head {
             None => {
-                for mig in all.into_iter().filter(|m| m.name.as_str() <= target) {
-                    apply_one_pool(pool, &mig, ledger).await?;
+                for mig in all.iter().filter(|m| m.name.as_str() <= target) {
+                    apply_one_pool(pool, mig, &snapshot_before(&all, mig), ledger).await?;
+                    let mig = mig.clone();
                     touched.push(mig);
                 }
             }
@@ -2565,12 +2584,13 @@ pub async fn migrate_to_pool_with_ledger(
                 match target.cmp(h.as_str()) {
                     Ordering::Equal => {}
                     Ordering::Greater => {
-                        for mig in all.into_iter().filter(|m| {
+                        for mig in all.iter().filter(|m| {
                             m.name.as_str() > h.as_str()
                                 && m.name.as_str() <= target
                                 && !applied.contains(&m.name)
                         }) {
-                            apply_one_pool(pool, &mig, ledger).await?;
+                            apply_one_pool(pool, mig, &snapshot_before(&all, mig), ledger).await?;
+                            let mig = mig.clone();
                             touched.push(mig);
                         }
                     }
@@ -2741,16 +2761,27 @@ pub async fn migrate_dry_run_pool_with_ledger(
 
 // ---- internal helpers ----
 
+/// `before` is the schema `mig` starts from: the snapshot of its `prev`.
 async fn apply_one_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     if mig.atomic {
-        apply_atomic_pool(pool, mig, ledger).await
+        apply_atomic_pool(pool, mig, before, ledger).await
     } else {
-        apply_nonatomic_pool(pool, mig, ledger).await
+        apply_nonatomic_pool(pool, mig, before, ledger).await
     }
+}
+
+/// The snapshot of `mig.prev` in `all`; empty for the first migration.
+fn snapshot_before(all: &[Migration], mig: &Migration) -> SchemaSnapshot {
+    mig.prev
+        .as_ref()
+        .and_then(|p| all.iter().find(|m| &m.name == p))
+        .map(|m| m.snapshot.clone())
+        .unwrap_or_default()
 }
 
 async fn unapply_all_in_order_pool(
@@ -2865,12 +2896,8 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = super::diff::render_changes_split_with_dialect(
-                            std::slice::from_ref(change),
-                            snapshot,
-                            pool.dialect(),
-                        )
-                        .map_err(MigrateError::Validation)?;
+                        let batch =
+                            render_step(change, &target.snapshot, snapshot, pool.dialect())?.batch;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -2908,12 +2935,8 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = super::diff::render_changes_split_with_dialect(
-                            std::slice::from_ref(change),
-                            snapshot,
-                            pool.dialect(),
-                        )
-                        .map_err(MigrateError::Validation)?;
+                        let batch =
+                            render_step(change, &target.snapshot, snapshot, pool.dialect())?.batch;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -2941,16 +2964,8 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = super::diff::render_changes_split_with_dialect(
-                            std::slice::from_ref(change),
-                            snapshot,
-                            pool.dialect(),
-                        )
-                        .map_err(MigrateError::Validation)?;
-                        for stmt in batch.immediate {
-                            sqlx::query(&stmt).execute(&mut *tx).await?;
-                        }
-                        deferred_fks.extend(batch.deferred_fks);
+                        let step = render_step(change, &target.snapshot, snapshot, pool.dialect())?;
+                        deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                     }
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
@@ -3016,13 +3031,14 @@ async fn migrate_embedded_pool_with_ledger(
 
         let applied = applied_set_pool_with_ledger(pool, ledger).await?;
         let pending: Vec<Migration> = all
-            .into_iter()
+            .iter()
             .filter(|m| !applied.contains(&m.name))
+            .cloned()
             .collect();
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            apply_one_pool(pool, &mig, ledger).await?;
+            apply_one_pool(pool, &mig, &snapshot_before(&all, &mig), ledger).await?;
             newly.push(mig);
         }
         Ok(newly)
@@ -3042,16 +3058,8 @@ async fn unapply_nonatomic_pool(
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let batch = super::diff::render_changes_split_with_dialect(
-                    std::slice::from_ref(change),
-                    snapshot,
-                    pool.dialect(),
-                )
-                .map_err(MigrateError::Validation)?;
-                for stmt in batch.immediate {
-                    crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
-                }
-                deferred_fks.extend(batch.deferred_fks);
+                let step = render_step(change, &target.snapshot, snapshot, pool.dialect())?;
+                deferred_fks.extend(run_step_pool(pool, step).await?);
             }
             Operation::Data(d) => {
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;

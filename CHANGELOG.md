@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL drops an FK column, forward and on unapply (#1981)
+
+`DropColumn` of an FK column drops its constraint first (MySQL refused with 1828). New export `migrate::unapply_pool_with_ledger`.
+
 ### Fixed — `auto_uuid` tables create on MySQL and SQLite (#1987)
 
 `DEFAULT gen_random_uuid()` was a syntax error there. MySQL now gets `(UUID())`, SQLite a random v4 UUID blob (needs SQLite 3.41+).

@@ -9,8 +9,7 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::migrate::{
-    make_migrations_from, migrate_pool_with_ledger, render_changes_split_with_dialect,
-    SchemaChange, SchemaSnapshot,
+    make_migrations_from, migrate_pool_with_ledger, unapply_pool_with_ledger, SchemaSnapshot,
 };
 use rustango::sql::{raw_execute_pool, Pool};
 use rustango::testkit::matrix::drop_table;
@@ -66,12 +65,20 @@ impl Chain {
         }
     }
 
-    /// `makemigrations` against `current`, then `migrate`.
-    async fn step(&self, pool: &Pool, current: Value) -> Result<(), String> {
-        make_migrations_from(self.dir.path(), &snap(current), None)
+    /// `makemigrations` against `current`, then `migrate`; the new name.
+    async fn step(&self, pool: &Pool, current: Value) -> Result<String, String> {
+        let mig = make_migrations_from(self.dir.path(), &snap(current), None)
             .map_err(|e| e.to_string())?
             .expect("the snapshot changed, so a migration is written");
         migrate_pool_with_ledger(pool, self.dir.path(), &self.ledger)
+            .await
+            .map(|_| mig.name)
+            .map_err(|e| e.to_string())
+    }
+
+    /// `migrate` back past the head migration `name`.
+    async fn undo(&self, pool: &Pool, name: &str) -> Result<(), String> {
+        unapply_pool_with_ledger(pool, self.dir.path(), name, &self.ledger)
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -92,17 +99,6 @@ async fn exec(pool: &Pool, sql: &str, names: &[&str]) -> Result<(), String> {
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
-}
-
-/// Render `changes` for the pool's dialect and run them, as `unapply` would.
-async fn apply_ops(pool: &Pool, changes: &[SchemaChange]) -> Result<(), String> {
-    let b = render_changes_split_with_dialect(changes, &SchemaSnapshot::default(), pool.dialect())?;
-    for sql in b.immediate.iter().chain(&b.deferred_fks) {
-        raw_execute_pool(pool, sql, Vec::new())
-            .await
-            .map_err(|e| format!("{sql}: {e}"))?;
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------- #1880
@@ -176,7 +172,7 @@ async fn add_column_keeps_fk_and_unique(pool: &Pool) {
         )
         .await
         .expect("initial");
-    chain
+    let added = chain
         .step(
             pool,
             json!({"tables": [
@@ -222,20 +218,36 @@ async fn add_column_keeps_fk_and_unique(pool: &Pool) {
         pool.dialect().name()
     );
 
-    // The rollback: unapply inverts each AddColumn to a DropColumn.
-    let drop = |c: &str| SchemaChange::DropColumn {
-        table: b.into(),
-        column: c.into(),
-    };
-    let undo = by_dialect! { pool,
-        postgres => vec![drop("email"), drop("author_id")],
-            because "DROP COLUMN takes its constraints with it",
-        mysql => vec![drop("email")],
-            because "MySQL refuses to drop a column an FK still uses (1828), a separate gap",
-        sqlite => vec![drop("email"), drop("author_id")],
-            because "the unique index is dropped first, or SQLite refuses the column",
-    };
-    apply_ops(pool, &undo.value).await.expect(undo.why);
+    // MySQL refused to drop the FK column (1828) (#1981).
+    chain
+        .undo(pool, &added)
+        .await
+        .expect("unapply drops the FK and unique columns");
+}
+
+/// Dropping an FK column drops its constraint first; MySQL refused (1828).
+async fn fk_column_drops(pool: &Pool) {
+    let (a, b) = ("mad_fd_author", "mad_fd_book");
+    let chain = Chain::new(pool, "fd", &[b, a]).await;
+    let with = |fields: Vec<Value>| json!({"tables": [table(a, vec![id()]), table(b, fields)]});
+    chain
+        .step(pool, with(vec![id(), col("author_id", "i64", fk(a))]))
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    chain
+        .step(pool, with(vec![id()]))
+        .await
+        .expect("DropColumn of an FK column applies");
 }
 
 /// A NOT NULL FK column with a default, added to a table with rows.
@@ -791,6 +803,7 @@ tri_dialect_test!(
     scenarios: [
         unique_drops_on_long_names,
         add_column_keeps_fk_and_unique,
+        fk_column_drops,
         add_fk_column_with_default_to_filled_table,
         long_fk_names_apply,
         column_drops_after_its_index_and_check,
