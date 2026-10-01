@@ -1026,13 +1026,15 @@ async fn apply_system_chain<W: Write>(
     } else {
         dir
     };
-    for scope in [
-        crate::core::ModelScope::Registry,
-        crate::core::ModelScope::Tenant,
-    ] {
-        let _ = crate::migrate::make::make_migrations_system(project_root, scope, None);
-    }
-    let system_dir = project_root.join("system").join("migrations");
+    let system_dir = crate::migrate::make::generate_system_chain(
+        pool,
+        project_root,
+        &[
+            crate::core::ModelScope::Registry,
+            crate::core::ModelScope::Tenant,
+        ],
+    )
+    .await?;
     if !system_dir.is_dir() {
         return Ok(0);
     }

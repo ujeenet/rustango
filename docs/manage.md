@@ -477,7 +477,7 @@ Writes:
   config/default.toml                       (shared knobs)
   config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
-  system/migrations/                        (tenant template — framework tables, generated)
+  system/migrations/                        (framework tables, generated — commit them)
   src/{lib,main,models,views,urls}.rs
 ```
 
@@ -489,7 +489,7 @@ no TOML edits. Between them they carry `[database]` pool tuning, `[admin]`,
 [`check --deploy`](#check---deploy)'s settings audit reads. See
 [Scaffolding](scaffolding.md) for the per-tier contents.
 
-The tenant template ships an **empty** `system/migrations/` folder. The
+Every template ships an **empty** `system/migrations/` folder. The
 framework's own tables (`rustango_orgs`, `rustango_users`,
 roles/permissions, …) are generated into it from the compiled models on
 the first `cargo run -- migrate` — there's no hand-shipped bootstrap

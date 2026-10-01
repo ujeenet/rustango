@@ -226,10 +226,10 @@ async fn apply_system_migrations_opts(
     } else {
         dir
     };
-    // Best-effort generate from the compiled models (Ok(None) when the
-    // on-disk system migrations already match the models).
-    let _ = crate::migrate::make_migrations_system(project_root, scope, None);
-    let system_dir = project_root.join("system").join("migrations");
+    // Generate from the compiled models (a no-op when the on-disk
+    // system migrations already match them).
+    let system_dir =
+        crate::migrate::make::generate_system_chain(pool, project_root, &[scope]).await?;
     if !system_dir.is_dir() {
         return Ok(Vec::new());
     }

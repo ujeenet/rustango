@@ -195,3 +195,83 @@ fn admin_sso_feature_toggles_provider_table() {
         "disabling admin-sso must DropTable the shared providers: {disable}"
     );
 }
+
+/// `true` when `table` exists in the SQLite database behind `pool`.
+async fn has_table(pool: &rustango::sql::Pool, table: &str) -> bool {
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    let n: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+    )
+    .bind(table)
+    .fetch_one(sq)
+    .await
+    .unwrap();
+    n == 1
+}
+
+/// #1988 — an image without `system/` regenerated `0001_initial`, found it
+/// in the ledger, and migrated nothing. A framework table the upgrade adds
+/// is modelled by dropping one; `migrate` must not report success without it.
+#[tokio::test]
+async fn single_db_migrate_from_a_dir_without_system_does_not_skip() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    let migrate = |dir: std::path::PathBuf| {
+        let pool = pool.clone();
+        async move {
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut out = Vec::new();
+            rustango::migrate::manage::run_with_writer(
+                &pool,
+                &dir,
+                ["migrate".to_owned()],
+                &mut out,
+            )
+            .await
+        }
+    };
+    migrate(tmp.path().join("deploy1/migrations"))
+        .await
+        .expect("first deploy");
+    let table = "rustango_user_permissions";
+    rustango::sql::raw_execute_pool(&pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .unwrap();
+
+    let second = migrate(tmp.path().join("deploy2/migrations")).await;
+    assert!(
+        second.is_err() || has_table(&pool, table).await,
+        "migrate returned Ok and left {table} missing"
+    );
+}
+
+/// The tenancy runner regenerates through the same path (#1988).
+#[tokio::test]
+async fn registry_migrate_from_a_dir_without_system_does_not_skip() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("reg.db").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    let migrate = |dir: std::path::PathBuf| {
+        let pool = pool.clone();
+        async move {
+            std::fs::create_dir_all(&dir).unwrap();
+            rustango::tenancy::migrate_registry_pool(&pool, &dir).await
+        }
+    };
+    migrate(tmp.path().join("deploy1/migrations"))
+        .await
+        .expect("first deploy");
+    let table = "rustango_operators";
+    rustango::sql::raw_execute_pool(&pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .unwrap();
+
+    let second = migrate(tmp.path().join("deploy2/migrations")).await;
+    assert!(
+        second.is_err() || has_table(&pool, table).await,
+        "migrate_registry_pool returned Ok and left {table} missing"
+    );
+}

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Commit and ship `system/migrations/` (#1988)
+
+`migrate` now fails when that folder lacks a migration the database already applied.
+Commit it and add `COPY system /app/system` to an existing `Dockerfile`.
+
 ### `manage`-only builds log requests (#1514)
 
 A build without `admin` (the `api` template) now sends `X-Request-Id` and writes

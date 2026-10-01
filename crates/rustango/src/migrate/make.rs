@@ -287,6 +287,49 @@ pub fn make_migrations_system(
     Ok(Some(mig))
 }
 
+/// Regenerate `system/migrations/` for `scopes` before applying it, but
+/// only when the dir holds every system migration `pool` has applied.
+///
+/// A dir missing them (a deploy image that shipped `migrations/` alone)
+/// would regenerate `0001_initial` from today's models, match the
+/// ledger by name and apply nothing (#1988).
+///
+/// # Errors
+/// [`MigrateError::Validation`] naming the missing files; ledger reads.
+pub(crate) async fn generate_system_chain(
+    pool: &crate::sql::Pool,
+    project_root: &Path,
+    scopes: &[crate::core::ModelScope],
+) -> Result<std::path::PathBuf, MigrateError> {
+    let ledger = super::runner::SYSTEM_LEDGER_TABLE;
+    let dir = project_root.join("system").join("migrations");
+    super::runner::ensure_ledger_pool_with_ledger(pool, ledger).await?;
+    let applied = super::runner::applied_set_pool_with_ledger(pool, ledger).await?;
+    let on_disk = file::list_dir(&dir)?;
+    let known: std::collections::HashSet<&str> = on_disk
+        .iter()
+        .flat_map(|m| std::iter::once(m.name.as_str()).chain(m.replaces.iter().map(String::as_str)))
+        .collect();
+    let mut missing: Vec<&str> = applied
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !known.contains(n))
+        .collect();
+    if !missing.is_empty() {
+        missing.sort_unstable();
+        return Err(MigrateError::Validation(format!(
+            "{} lacks applied framework migration(s) {}; ship `system/migrations/` \
+             with the binary (commit it), or framework schema changes are skipped",
+            dir.display(),
+            missing.join(", "),
+        )));
+    }
+    for &scope in scopes {
+        let _ = make_migrations_system(project_root, scope, None);
+    }
+    Ok(dir)
+}
+
 /// [`make_migrations`] with the current snapshot passed in, instead
 /// of read from the registry.
 ///

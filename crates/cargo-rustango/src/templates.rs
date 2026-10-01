@@ -373,8 +373,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/{name} /usr/local/bin/{name}
 # Migrations and settings are read at run time, so they travel with the
-# binary rather than being baked into it.
+# binary rather than being baked into it. `system/` holds the framework's
+# own migrations: without it `migrate` skips framework schema changes.
 COPY migrations /app/migrations
+COPY system /app/system
 COPY config /app/config
 # Never root. The numeric id keeps the ownership stable if the image is
 # rebuilt on a host whose useradd picks a different one.
@@ -503,6 +505,7 @@ src/
   urls.rs         — pub fn api() -> Router aggregator
 
 migrations/       — JSON migration files (committed to git)
+system/migrations/ — the framework's own migrations (commit them too; the image ships them)
 ```
 
 Adding a new model is one struct in `models.rs`; the auto-admin sees
@@ -856,10 +859,9 @@ pub fn api() -> Router<()> {
     }
 }
 // The framework no longer ships hardcoded bootstrap migration JSON.
-// `cargo rustango new --template tenant` seeds an empty `system/
-// migrations/` folder; `cargo run -- makemigrations` generates the
-// framework's own tables from the compiled models, and
-// `cargo run -- migrate` applies them.
+// `cargo rustango new` seeds an empty `system/migrations/` folder;
+// `cargo run -- makemigrations` generates the framework's own tables
+// from the compiled models, and `cargo run -- migrate` applies them.
 
 // ---------------- Tiered settings files (#87) ----------------
 //

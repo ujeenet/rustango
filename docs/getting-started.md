@@ -863,7 +863,7 @@ export RUSTANGO_ENV=prod
 export DATABASE_URL=postgres://prod-host/myblog
 export RUSTANGO_SESSION_SECRET=$(openssl rand -base64 32)
 
-# 2. Run migrations
+# 2. Run migrations (ship `migrations/` AND `system/migrations/` with the binary)
 cargo run --release -- migrate
 
 # 3. Audit

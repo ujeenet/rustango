@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a deploy image no longer skips framework schema changes (#1988)
+
+The scaffolded `Dockerfile` now ships `system/`, and every template seeds it.
+`migrate` refuses a `system/migrations/` that lacks a migration the ledger has applied.
+
 ### Fixed — the `api` template gets the request span, `X-Request-Id` and access log (#1514)
 
 They were gated on `admin`, so a `manage`-only build mounted none of them.
