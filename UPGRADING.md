@@ -168,6 +168,10 @@ the upgrade no longer open. The `passkey` feature now enables `cache`.
 
 New hashes use `argon2_memory_kib` / `argon2_iterations` / `argon2_parallelism` when set;
 check them before deploying. Existing hashes keep verifying at their own cost.
+Built-in logins store a new hash when the old one is weaker, which also ends that
+user's other sessions. Until every user logs in once, login time differs between old-cost
+and unknown accounts, which tells an attacker which accounts exist. Custom login code can
+call `passwords::upgrade_stored_hash`.
 
 ### JWT refresh honours logout (#2036)
 

@@ -19,7 +19,8 @@ and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused
 ### Security — `[auth] argon2_*` set the cost of new password hashes (#1728)
 
 The keys were read by nothing. New `passwords::Argon2Params`, `configure_argon2` and
-`argon2_params`; an invalid combination keeps the default and logs an error.
+`argon2_params`; an invalid combination keeps the default and logs an error. Built-in logins
+store a fresh hash when the old one is weaker (`passwords::upgrade_stored_hash`).
 
 ### Security — a logout ends JWT refresh chains (#2036)
 

@@ -333,6 +333,14 @@ async fn login_submit(
 
     // A successful login clears the failure counter and any lock.
     attempt.succeeded().await;
+    let stored_hash = &crate::passwords::upgrade_stored_hash(
+        &state.pool,
+        AdminUser::SCHEMA,
+        id,
+        &form.password,
+        stored_hash,
+    )
+    .await;
 
     // Bind the cookie to a fingerprint of the current password hash, so
     // a password change or reset invalidates it.

@@ -524,7 +524,7 @@ async fn login_in(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let Some(user) = users.into_iter().next() else {
+    let Some(mut user) = users.into_iter().next() else {
         // H1: spend a verify's worth of work on the unknown-user path so
         // timing doesn't reveal whether the username exists.
         crate::tenancy::password::verify_dummy_async(&body.password)
@@ -564,6 +564,14 @@ async fn login_in(
     }
 
     attempt.succeeded().await;
+    user.password_hash = crate::passwords::upgrade_stored_hash(
+        t.pool(),
+        <User as crate::core::Model>::SCHEMA,
+        uid,
+        &body.password,
+        &user.password_hash,
+    )
+    .await;
 
     let user_id = uid;
     send_user_logged_in(UserLoggedInContext {

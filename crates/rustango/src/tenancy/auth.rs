@@ -220,7 +220,7 @@ pub async fn authenticate_operator_pool(
     password: &str,
 ) -> Result<Option<Operator>, TenancyError> {
     let op = find_operator(registry, username).await?;
-    check_operator_password(op, password).await
+    check_operator_password(registry, op, password).await
 }
 
 /// The operator row for `username`, active or not.
@@ -239,6 +239,7 @@ pub(crate) async fn find_operator(
 /// `Some(op)` when `op` is active and `password` matches; the same work
 /// for a missing row.
 pub(crate) async fn check_operator_password(
+    registry: &crate::sql::Pool,
     op: Option<Operator>,
     password: &str,
 ) -> Result<Option<Operator>, TenancyError> {
@@ -250,10 +251,20 @@ pub(crate) async fn check_operator_password(
     };
     // Verify before the active check so active vs inactive accounts
     // take the same time (audit H1).
+    let mut op = op;
     let password_ok = password::verify_async(password, &op.password_hash).await?;
     if !op.active || !password_ok {
         return Ok(None);
     }
+    let id = op.id.get().copied().unwrap_or_default();
+    op.password_hash = crate::passwords::upgrade_stored_hash(
+        registry,
+        <Operator as crate::core::Model>::SCHEMA,
+        id,
+        password,
+        &op.password_hash,
+    )
+    .await;
     Ok(Some(op))
 }
 
@@ -287,7 +298,7 @@ pub async fn authenticate_user(
         .where_(User::username.eq(username.to_owned()))
         .fetch_on(&mut *conn)
         .await?;
-    let Some(user) = rows.into_iter().next() else {
+    let Some(mut user) = rows.into_iter().next() else {
         // H1: equalize timing for the unknown-user path.
         password::verify_dummy_async(password).await?;
         return Ok(None);
@@ -295,6 +306,23 @@ pub async fn authenticate_user(
     let password_ok = password::verify_async(password, &user.password_hash).await?;
     if !user.active || !password_ok {
         return Ok(None);
+    }
+    if let Some(new) = crate::passwords::rehash_async(password, &user.password_hash).await {
+        let id = user.id.get().copied().unwrap_or_default();
+        let q = crate::passwords::rehash_update(
+            <User as crate::core::Model>::SCHEMA,
+            id,
+            &user.password_hash,
+            &new,
+        );
+        let applied = crate::sql::update_on(&mut *conn, &q).await;
+        user.password_hash = crate::passwords::rehash_applied(
+            applied,
+            <User as crate::core::Model>::SCHEMA,
+            id,
+            &user.password_hash,
+            new,
+        );
     }
     Ok(Some(user))
 }
@@ -329,7 +357,7 @@ pub async fn authenticate_user_pool(
         .where_(User::username.eq(username.to_owned()))
         .fetch(pool)
         .await?;
-    let Some(user) = rows.into_iter().next() else {
+    let Some(mut user) = rows.into_iter().next() else {
         // H1: equalize timing for the unknown-user path.
         password::verify_dummy_async(password).await?;
         return Ok(None);
@@ -338,6 +366,15 @@ pub async fn authenticate_user_pool(
     if !user.active || !password_ok {
         return Ok(None);
     }
+    let id = user.id.get().copied().unwrap_or_default();
+    user.password_hash = crate::passwords::upgrade_stored_hash(
+        pool,
+        <User as crate::core::Model>::SCHEMA,
+        id,
+        password,
+        &user.password_hash,
+    )
+    .await;
     Ok(Some(user))
 }
 

@@ -238,6 +238,77 @@ pub async fn verify_dummy_async(password: &str) -> Result<(), PasswordError> {
     off_runtime(move || verify_dummy(&password)).await
 }
 
+/// A fresh hash of `password` when `stored` is below today's cost. Call
+/// only after a successful verify; `None` when current or busy.
+pub async fn rehash_async(password: &str, stored: &str) -> Option<String> {
+    if !needs_rehash(stored) {
+        return None;
+    }
+    hash_async(password).await.ok()
+}
+
+/// After a successful login on `model` row `id`, store a fresh hash when
+/// `stored` is weak. Returns the hash now in force; a concurrent change wins.
+pub async fn upgrade_stored_hash(
+    pool: &crate::sql::Pool,
+    model: &'static crate::core::ModelSchema,
+    id: i64,
+    password: &str,
+    stored: &str,
+) -> String {
+    let Some(new) = rehash_async(password, stored).await else {
+        return stored.to_owned();
+    };
+    let applied = crate::sql::update_pool(pool, &rehash_update(model, id, stored, &new)).await;
+    rehash_applied(applied, model, id, stored, new)
+}
+
+/// `UPDATE model SET password_hash = new WHERE id = ? AND password_hash = old`.
+pub(crate) fn rehash_update(
+    model: &'static crate::core::ModelSchema,
+    id: i64,
+    old: &str,
+    new: &str,
+) -> crate::core::UpdateQuery {
+    use crate::core::{Assignment, Expr, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
+    let eq = |column, value| {
+        WhereExpr::Predicate(Filter {
+            column,
+            op: Op::Eq,
+            value,
+        })
+    };
+    UpdateQuery {
+        model,
+        set: vec![Assignment {
+            column: "password_hash",
+            value: Expr::Literal(SqlValue::String(new.to_owned())),
+        }],
+        where_clause: WhereExpr::And(vec![
+            eq("id", SqlValue::I64(id)),
+            eq("password_hash", SqlValue::String(old.to_owned())),
+        ]),
+    }
+}
+
+/// The hash in force after running [`rehash_update`].
+pub(crate) fn rehash_applied<E: std::fmt::Display>(
+    applied: Result<u64, E>,
+    model: &'static crate::core::ModelSchema,
+    id: i64,
+    stored: &str,
+    new: String,
+) -> String {
+    match applied {
+        Ok(1) => new,
+        Ok(_) => stored.to_owned(),
+        Err(e) => {
+            tracing::warn!(target: "rustango::passwords", table = model.table, id, error = %e, "cannot store the upgraded password hash");
+            stored.to_owned()
+        }
+    }
+}
+
 /// Default for how long a hash job waits for a free slot.
 pub const DEFAULT_HASH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
