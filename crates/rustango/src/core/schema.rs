@@ -1377,6 +1377,7 @@ impl ModelSchema {
     /// `order` plus each primary-key column it lacks, ascending, so rows
     /// tied on the sort keys come back in the same order on every page.
     #[must_use]
+    #[cfg(any(feature = "admin", feature = "template_views"))]
     pub(crate) fn with_pk_tiebreak(
         &self,
         mut order: Vec<super::OrderItem>,
