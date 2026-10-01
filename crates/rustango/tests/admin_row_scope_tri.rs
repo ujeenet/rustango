@@ -100,6 +100,32 @@ fn not_out(_: &axum::http::request::Parts) -> Vec<Filter> {
 }
 rustango::register_admin_queryset!("rowscope_child", not_out);
 
+/// An auto-PK child with a secret, capped at one row per parent.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "rowscope_autochild",
+    admin(formfield_overrides = "token:password")
+)]
+#[allow(dead_code)]
+pub struct AutoChild {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub parent_id: i64,
+    #[rustango(max_length = 64)]
+    pub note: String,
+    #[rustango(max_length = 64)]
+    pub token: String,
+}
+
+rustango::register_admin_inline!(
+    parent = "rowscope_parent",
+    child = "rowscope_autochild",
+    fk = "parent_id",
+    fields = &["note"],
+    extra = 1,
+    max_num = Some(1),
+);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "rowscope_note").await;
@@ -107,6 +133,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Note>(pool).await;
     fresh_table::<Parent>(pool).await;
     fresh_table::<Child>(pool).await;
+    fresh_table::<AutoChild>(pool).await;
 }
 
 async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
@@ -340,6 +367,60 @@ async fn inline_max_num_counts_hidden_rows(pool: &Pool) {
     );
 }
 
+async fn seed_auto_child(pool: &Pool, parent_id: i64, note: &str) -> i64 {
+    let mut c = AutoChild {
+        id: Auto::default(),
+        parent_id,
+        note: note.into(),
+        token: "tok".into(),
+    };
+    c.insert_pool(pool).await.expect("insert auto child");
+    *c.id.get().expect("pk")
+}
+
+async fn auto_children(pool: &Pool) -> Vec<AutoChild> {
+    AutoChild::objects().fetch(pool).await.expect("fetch")
+}
+
+/// A lowered INITIAL_FORMS turns an auto-PK row into an insert: it needs `add` and `max_num`.
+async fn inline_lowered_initial_forms_is_an_insert(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    let id = seed_auto_child(pool, p, "old").await;
+    let form = format!(
+        "name=p&rowscope_autochild-TOTAL_FORMS=1&rowscope_autochild-INITIAL_FORMS=0\
+         &rowscope_autochild-0-id={id}&rowscope_autochild-0-note=dup"
+    );
+    let uri = format!("/rowscope_parent/{p}");
+    let perms = [
+        "rowscope_parent.view",
+        "rowscope_parent.change",
+        "rowscope_autochild.view",
+        "rowscope_autochild.change",
+    ];
+    let (status, body) = post_as(pool, &uri, &form, |b| {
+        b.with_user_perms(perms.iter().map(|p| (*p).to_owned()))
+    })
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "no add perm: {body}");
+    let (status, body) = post(pool, &uri, &form).await;
+    assert!(body.contains("at most 1 rows"), "{status}: {body}");
+    let rows = auto_children(pool).await;
+    assert_eq!(rows.len(), 1, "row inserted");
+    assert_eq!(rows[0].note, "old", "row updated");
+}
+
+/// `?<secret>__isnull=1` is ignored, so it cannot probe whether a secret is set.
+async fn list_ignores_isnull_on_a_secret(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_auto_child(pool, p, "listed-note").await;
+    let (status, body) = get(pool, "/rowscope_autochild?token__isnull=1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("listed-note"),
+        "secret filter applied: {body}"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -352,5 +433,7 @@ tri_dialect_test! {
         inline_secret_guess_is_no_oracle,
         inline_post_refuses_hidden_children,
         inline_max_num_counts_hidden_rows,
+        inline_lowered_initial_forms_is_an_insert,
+        list_ignores_isnull_on_a_secret,
     ],
 }
