@@ -501,13 +501,24 @@ async fn parent_with_over_max_forms_children_still_saves() {
         ("ips_child-0-id", "1"),
         ("ips_child-0-parent_id", "1"),
         ("ips_child-0-title", "c1 edited"),
+        ("ips_child-1-id", "3"),
+        ("ips_child-1-parent_id", "1"),
+        ("ips_child-1-title", "bulk"),
+        ("ips_child-1-DELETE", "on"),
     ];
     let status = post(app(pool.clone()), "/ips_parent/1", &form).await;
     assert!(is_redirect(status), "TOTAL_FORMS={total}: got {status}");
     assert_eq!(parent_name(&pool, 1).await, "p1 renamed");
     let kids = children(&pool).await;
-    assert_eq!(kids.len(), 1002, "rows past the cap are untouched");
+    assert_eq!(
+        kids.len(),
+        1001,
+        "one ticked row gone, rows past the cap kept"
+    );
     assert_eq!(kids[0], (1, 1, "c1 edited".into()));
+    assert_eq!(kids[1], (2, 2, "c2".into()), "other parent untouched");
+    assert_eq!(kids[2].0, 4, "ticked row 3 is gone");
+    assert_eq!(kids.last().unwrap().0, 1002, "unrendered row kept");
     assert!(
         page.contains(r#"href="/ips_child?parent_id=1""#),
         "rows past the cap are linked"
