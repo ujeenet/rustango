@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed — `migrate` on a fresh database with a project-created framework table
+### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
 
 A system step that alters a table the project's own `0001` creates (a pre-system-chain scaffold) now waits for that migration; it failed with `relation does not exist`.
 
