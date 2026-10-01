@@ -26,6 +26,31 @@ A form body is typed by its model fields and checked like JSON; it no longer ski
 
 The model key behind a renamed field is dropped from JSON and form bodies before the write.
 
+### Fixed — a UUID-default column adds on MySQL and SQLite (#1987)
+
+`AddColumn` with `gen_random_uuid()` adds the column bare, fills each row, then sets the DEFAULT (MySQL refused with 1674).
+
+### Fixed — SQLite adds a `now()` column to a table with rows (#2017)
+
+`migrate` and unapply retry a refused `AddColumn` with the time frozen, as the system-chain converge does.
+
+### Fixed — MySQL drops an FK column, forward and on unapply (#1981)
+
+`DropColumn` of an FK column drops its constraint first, found by column so renames and 64-byte names work (MySQL refused with 1828). New export `migrate::unapply_pool_with_ledger`.
+
+### Fixed — `auto_uuid` tables create on MySQL and SQLite (#1987)
+
+`DEFAULT gen_random_uuid()` was a syntax error there. MySQL now gets `(UUID())`, SQLite a random v4 UUID blob (needs SQLite 3.41+).
+
+### Fixed — a system-migration generation error fails `migrate` (#2014)
+
+An unsupported framework field change (or an unwritable `system/migrations/`) was dropped, and `migrate` applied the stale chain.
+
+### Fixed — tenant migration failures exit non-zero; ledger bootstrap takes the migrate lock (#1844)
+
+`migrate-tenants`, `migrate` and `migrate --fake --all-tenants` now fail when any tenant failed.
+The ledger `CREATE TABLE` runs under the migrate lock (the legacy `PgPool` runner too), so concurrent PG replicas no longer hit 23505.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

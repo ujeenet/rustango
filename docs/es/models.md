@@ -231,6 +231,9 @@ aleatorio, `default_uuid_v7` un v7 ordenable por tiempo (mejor para la localidad
 pub id: Auto<uuid::Uuid>,
 ```
 
+Un `INSERT` en crudo que omite una columna `auto_uuid` recibe el `DEFAULT` de la base: un v4 en Postgres y
+SQLite, pero el `UUID()` de MySQL es un v1 (basado en la hora y el host).
+
 ### Claves primarias compuestas
 
 Las claves primarias nativas de varias columnas **no están soportadas** — exactamente un

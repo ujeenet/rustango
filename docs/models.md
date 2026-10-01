@@ -225,6 +225,9 @@ v4, `default_uuid_v7` a time-sortable v7 (better for index locality):
 pub id: Auto<uuid::Uuid>,
 ```
 
+A raw `INSERT` that omits an `auto_uuid` column gets its DB `DEFAULT`: a v4 on Postgres and SQLite,
+but MySQL's `UUID()` is a v1 (time and host based).
+
 ### Composite primary keys
 
 Native multi-column primary keys are **not supported** — exactly one field may

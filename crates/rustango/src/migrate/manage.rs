@@ -1012,9 +1012,8 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
 /// everything an app actually uses (users, roles, permissions, api keys,
 /// audit log, content types, media, …) is tenant-scoped.
 ///
-/// Generation is best-effort and a no-op once the files exist (they are
-/// normally written by `makemigrations` and committed). A missing
-/// `system/migrations/` directory simply means there is nothing to do.
+/// Generation is a no-op once the files exist (normally written by
+/// `makemigrations` and committed); a generation error fails `migrate` (#2014).
 async fn apply_system_chain<W: Write>(
     pool: &Pool,
     dir: &Path,
@@ -1026,7 +1025,7 @@ async fn apply_system_chain<W: Write>(
             crate::core::ModelScope::Registry,
             crate::core::ModelScope::Tenant,
         ],
-    );
+    )?;
     let system_dir = chain.dir().to_path_buf();
     if !system_dir.is_dir() {
         return Ok(0);

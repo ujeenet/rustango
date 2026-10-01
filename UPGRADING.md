@@ -171,6 +171,26 @@ A form-urlencoded write that broke a serializer rule now gets the same `422` as 
 
 With `#[serializer(source = "body")] content`, send `content`; a `body` key is now dropped.
 
+### A UUID-default column added to a filled SQLite table is nullable (#1987)
+
+SQLite can't add a `gen_random_uuid()` DEFAULT to a table with rows, so the column is backfilled and left nullable with no DEFAULT;
+the ORM binds the value on insert. MySQL's DEFAULT `UUID()` gives v1 UUIDs, not v4.
+
+### SQLite `now()` columns added to a filled table get a fixed default (#2017)
+
+SQLite can't add a `now()` DEFAULT to a table with rows, so the column's DEFAULT is the time of the migration.
+The ORM binds `auto_now_add` / `auto_now` on insert; raw `INSERT`s that omit the column get that fixed time.
+
+### `migrate` fails when the system chain can't be generated (#2014)
+
+`migrate`, `migrate-registry` and `migrate-tenants` now return the generation error instead of applying a stale
+`system/migrations/` chain. A read-only image must ship an up-to-date `system/migrations/`.
+
+### Tenant migrate verbs fail on a failed tenant (#1844)
+
+`migrate-tenants`, the combined `migrate` and `migrate --fake --all-tenants` return an error (non-zero exit)
+when any tenant failed, after printing the full report. Deploy scripts that relied on exit 0 now stop.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)
