@@ -454,6 +454,8 @@ impl Storage for S3Storage {
             .ok()
     }
 
+    /// Without `s3:ListBucket`, S3 answers a missing key with 403, not
+    /// 404; that stays an error, so a finalize fails closed.
     async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
         let resp = self.signed_request("HEAD", key, b"", None).await?;
         let status = resp.status();

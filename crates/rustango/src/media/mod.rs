@@ -488,7 +488,8 @@ impl MediaManager {
     /// # Errors
     /// `Db` if the row is missing or the update fails. `Storage` for
     /// transport failures, or a backend that cannot report
-    /// [`crate::storage::ObjectMeta`].
+    /// [`crate::storage::ObjectMeta`]. Without `s3:ListBucket`, S3 answers
+    /// a HEAD on a missing key with 403, so this fails closed (router: 502).
     pub async fn finalize_upload(&self, media_id: i64) -> Result<Media, MediaError> {
         let media = self
             .get(media_id)

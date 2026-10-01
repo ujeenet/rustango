@@ -177,6 +177,8 @@ supports two upload flows:
   then you confirm the row. The PUT must send every header in
   `ticket.headers` (`Content-Type`, `If-None-Match: *`), so the bucket's CORS
   rule must allow both. The URL can create the object once and never replace it.
+  Grant `s3:ListBucket` too: without it S3 answers a missing object with 403,
+  and finalize returns 502 instead of marking the row `Failed`.
 
 ```rust
 use rustango::media::{Media, MediaManager};
