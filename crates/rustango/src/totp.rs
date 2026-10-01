@@ -27,8 +27,15 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A TOTP shared secret (raw bytes). Store base32-encoded on the user row.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TotpSecret(pub Vec<u8>);
+
+/// Redacted: a logged secret is a second factor given away (#1875).
+impl std::fmt::Debug for TotpSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TotpSecret(<redacted>)")
+    }
+}
 
 impl TotpSecret {
     /// Generate a 20-byte random secret, the RFC 4226 minimum.
@@ -177,8 +184,9 @@ fn hotp(secret: &[u8], counter: u64, digits: u32) -> String {
         | (hash[offset + 2] as u32) << 8
         | (hash[offset + 3] as u32);
 
-    let modulo = 10u32.pow(digits.min(10));
-    let value = bin_code % modulo;
+    // u64: 10^10 overflows u32 (#1875).
+    let modulo = 10u64.pow(digits.min(10));
+    let value = u64::from(bin_code) % modulo;
     format!("{:0width$}", value, width = digits as usize)
 }
 
@@ -262,6 +270,13 @@ mod tests {
         assert_eq!(matched_step_at(&s, &now, t, 30, 6, 1), Some(t / 30));
         let far = generate_at(&s, t + 90, 30, 6);
         assert_eq!(matched_step_at(&s, &far, t, 30, 6, 1), None);
+    }
+
+    #[test]
+    fn ten_digits_do_not_overflow_and_debug_is_redacted() {
+        let s = TotpSecret(b"12345678901234567890".to_vec());
+        assert_eq!(generate_at(&s, 59, 30, 10).len(), 10);
+        assert_eq!(format!("{s:?}"), "TotpSecret(<redacted>)");
     }
 
     #[test]

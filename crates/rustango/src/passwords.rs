@@ -189,6 +189,24 @@ pub fn verify_dummy(password: &str) {
     let _ = verify(password, dummy_hash());
 }
 
+/// `true` when `stored` is not argon2id v19 at least as strong as
+/// [`argon2_params`] on every axis, so a login should store a new hash.
+#[must_use]
+pub fn needs_rehash(stored: &str) -> bool {
+    let Ok(parsed) = argon2::password_hash::PasswordHash::new(stored) else {
+        return true;
+    };
+    let Ok(p) = argon2::Params::try_from(&parsed) else {
+        return true;
+    };
+    let want = argon2_params();
+    parsed.algorithm != argon2::Algorithm::Argon2id.ident()
+        || parsed.version != Some(argon2::Version::V0x13.into())
+        || p.m_cost() < want.memory_kib
+        || p.t_cost() < want.iterations
+        || p.p_cost() < want.parallelism
+}
+
 // ------------------------------------------------------------------ Async variants
 
 /// [`hash`] on the blocking pool. Use this from async code: an inline

@@ -137,3 +137,32 @@ async fn an_unreadable_device_table_is_an_error_not_an_absent_device() {
     // must not use it.
     assert!(totp_store::confirmed_secret(&pool, uid).await.is_none());
 }
+
+/// A confirmed row whose secret won't decode still gates login: it is an
+/// error, not "no second factor" (#1875).
+#[tokio::test]
+async fn an_undecodable_confirmed_secret_is_an_error() {
+    use rustango::sql::UpdaterPool as _;
+    let pool = pool().await;
+    let uid = 9;
+    let secret = TotpSecret::generate();
+    totp_store::start_enrollment(&pool, uid, &secret)
+        .await
+        .expect("enroll");
+    totp_store::confirm(&pool, uid).await.expect("confirm");
+    let dev = totp_store::device(&pool, uid).await.expect("device");
+    assert!(
+        !format!("{dev:?}").contains(&secret.to_base32()),
+        "Debug leaks the secret"
+    );
+    totp_store::AdminTotp::objects()
+        .filter("user_id", uid)
+        .update()
+        .set("secret_base32", "not-base32!")
+        .execute_pool(&pool)
+        .await
+        .expect("corrupt the secret");
+    assert!(totp_store::confirmed_secret_checked(&pool, uid)
+        .await
+        .is_err());
+}

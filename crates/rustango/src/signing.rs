@@ -61,11 +61,22 @@ pub enum SignError {
 
 /// Value signer. Holds a secret and a salt, and signs or verifies
 /// with salted HMAC-SHA256.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Signer {
     secret: Vec<u8>,
     salt: Vec<u8>,
     sep: char,
+}
+
+/// The key is redacted (#1875).
+impl std::fmt::Debug for Signer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Signer")
+            .field("secret", &"<redacted>")
+            .field("salt", &String::from_utf8_lossy(&self.salt))
+            .field("sep", &self.sep)
+            .finish()
+    }
 }
 
 impl Signer {
@@ -336,6 +347,12 @@ mod tests {
     use super::*;
 
     // -------- Signer --------
+
+    #[test]
+    fn debug_redacts_the_key() {
+        let out = format!("{:?}", Signer::new(b"super-secret-key"));
+        assert!(!out.contains("super") && !out.contains("115, 117"), "{out}");
+    }
 
     /// The default salts are wire format: changing one breaks every
     /// signature already issued.

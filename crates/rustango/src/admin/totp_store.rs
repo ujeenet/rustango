@@ -17,7 +17,7 @@ use crate::Model;
 /// One admin TOTP device. `confirmed = false` means enrollment is
 /// half done: the secret exists but no code has been verified yet.
 /// Only a confirmed device gates login.
-#[derive(Model, Debug, Clone)]
+#[derive(Model, Clone)]
 #[rustango(table = "rustango_admin_totp", managed = false)]
 #[allow(dead_code)]
 pub struct AdminTotp {
@@ -39,6 +39,23 @@ pub struct AdminTotp {
     /// gating login until a code for this one promotes it (#1756).
     #[rustango(max_length = 64)]
     pub pending_secret_base32: Option<String>,
+}
+
+/// The secrets are redacted (#1875).
+impl std::fmt::Debug for AdminTotp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminTotp")
+            .field("user_id", &self.user_id)
+            .field("secret_base32", &"<redacted>")
+            .field("confirmed", &self.confirmed)
+            .field("created_at", &self.created_at)
+            .field("last_used_step", &self.last_used_step)
+            .field(
+                "pending_secret_base32",
+                &self.pending_secret_base32.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl AdminTotp {
@@ -236,7 +253,17 @@ pub async fn confirmed_secret_checked(
         .values_list_flat("secret_base32")
         .fetch(pool)
         .await?;
-    Ok(secrets.first().and_then(|s| TotpSecret::from_base32(s)))
+    // A confirmed row that won't decode still gates: refuse, don't skip 2FA (#1875).
+    secrets
+        .first()
+        .map(|s| {
+            TotpSecret::from_base32(s).ok_or_else(|| {
+                crate::sql::ExecError::Driver(crate::sql::sqlx::Error::Decode(
+                    "rustango_admin_totp.secret_base32 is not valid base32".into(),
+                ))
+            })
+        })
+        .transpose()
 }
 
 /// What [`start_reenrollment`] did.

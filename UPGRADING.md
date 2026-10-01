@@ -173,6 +173,11 @@ check them before deploying. Existing hashes keep verifying at their own cost.
 
 A cookie logout now also ends that user's JWT refresh chains; clients must log in again.
 
+### `confirmed_secret_checked` errors on an undecodable secret (#1875)
+
+It returned `Ok(None)` (no second factor); it now returns `Err`. `Debug` of `TotpSecret`,
+`AdminTotp` and `Signer` no longer prints the secret.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
