@@ -1020,19 +1020,14 @@ async fn apply_system_chain<W: Write>(
     dir: &Path,
     w: &mut W,
 ) -> Result<usize, MigrateError> {
-    // `system/migrations/` is a sibling of the project's `migrations/`.
-    let project_root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
-        dir.parent().unwrap_or(dir)
-    } else {
-        dir
-    };
-    for scope in [
-        crate::core::ModelScope::Registry,
-        crate::core::ModelScope::Tenant,
-    ] {
-        let _ = crate::migrate::make::make_migrations_system(project_root, scope, None);
-    }
-    let system_dir = project_root.join("system").join("migrations");
+    let chain = crate::migrate::make::SystemChain::for_migrations_dir(
+        dir,
+        &[
+            crate::core::ModelScope::Registry,
+            crate::core::ModelScope::Tenant,
+        ],
+    );
+    let system_dir = chain.dir().to_path_buf();
     if !system_dir.is_dir() {
         return Ok(0);
     }
@@ -1096,9 +1091,7 @@ async fn apply_system_chain<W: Write>(
     };
     let run_dir = scratch.clone().unwrap_or_else(|| system_dir.clone());
 
-    let applied =
-        runner::migrate_pool_with_ledger_fake_initial(pool, &run_dir, runner::SYSTEM_LEDGER_TABLE)
-            .await;
+    let applied = runner::migrate_system_chain(pool, &chain, &run_dir, None).await;
     if let Some(p) = &scratch {
         let _ = std::fs::remove_dir_all(p);
     }
@@ -4862,6 +4855,8 @@ pub(crate) struct DeployAuditEnv {
     pub database_url: Option<String>,
     pub apex_domain: Option<String>,
     pub bind: Option<String>,
+    /// An admin was built without session auth (#1627).
+    pub ungated_admin: bool,
 }
 
 fn deploy_audit_env() -> DeployAuditEnv {
@@ -4871,6 +4866,10 @@ fn deploy_audit_env() -> DeployAuditEnv {
         database_url: std::env::var("DATABASE_URL").ok(),
         apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
         bind: std::env::var("RUSTANGO_BIND").ok(),
+        #[cfg(feature = "admin")]
+        ungated_admin: crate::admin::ungated_admin_built(),
+        #[cfg(not(feature = "admin"))]
+        ungated_admin: false,
     }
 }
 
@@ -4899,6 +4898,14 @@ pub struct DeployAuditFindings {
 /// payloads issued by `auth_routes::JwtAuth` (#81). Same key
 /// covers both surfaces.
 pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindings) {
+    if env.ungated_admin {
+        out.warnings.push(
+            "[admin] the admin router has no authentication — anyone can read and write \
+             every model. Call `admin::Builder::with_session_auth(secret)`, or gate the \
+             route yourself."
+                .into(),
+        );
+    }
     // RUSTANGO_ENV — production should be explicitly tagged.
     match env.rustango_env.as_deref() {
         Some("prod" | "production") => {
@@ -6575,7 +6582,51 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
             apex_domain: Some("app.example.com".into()),
             bind: Some("0.0.0.0:8080".into()),
+            ungated_admin: false,
         }
+    }
+
+    /// #1627 — an admin built without session auth is named.
+    #[test]
+    fn deploy_audit_warns_on_an_ungated_admin() {
+        let env = DeployAuditEnv {
+            ungated_admin: true,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("with_session_auth")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// The flag the audit reads is set by building an ungated admin, and
+    /// only by that: a gated or tenancy-gated one leaves it clear.
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    #[tokio::test]
+    async fn only_an_ungated_admin_reaches_the_deploy_audit() {
+        let _g = crate::admin::ungated_flag_lock().lock().await;
+        crate::admin::reset_ungated_admin_built();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let secret = crate::session::SessionSecret::from_bytes(vec![7; 32]);
+        let _gated = crate::admin::Builder::new(pool.clone())
+            .with_session_auth(secret)
+            .build();
+        // The public `tenant_mode` hides models; it gates nothing.
+        let gated_clear = !deploy_audit_env().ungated_admin;
+        let _open = crate::admin::Builder::new(pool.clone())
+            .tenant_mode()
+            .build();
+        let flagged = deploy_audit_env().ungated_admin;
+        crate::admin::reset_ungated_admin_built();
+        assert!(gated_clear, "a gated admin set the ungated flag");
+        assert!(
+            flagged,
+            "a `tenant_mode` admin without auth was not flagged"
+        );
     }
 
     fn run(env: &DeployAuditEnv) -> DeployAuditFindings {

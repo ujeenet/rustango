@@ -15,7 +15,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde_json::Value;
 
 use super::errors::AdminError;
-use super::helpers::chrome_context;
+use super::helpers::{chrome_context, ListQuery};
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::AppState;
@@ -104,6 +104,11 @@ impl AppState {
     }
 }
 
+/// The feed's mounted path: `audit_url` is relative to the admin prefix.
+fn audit_path(state: &AppState) -> String {
+    format!("{}{}", state.config.admin_prefix, state.config.audit_url)
+}
+
 fn audit_forbidden(action: &'static str) -> AdminError {
     AdminError::Forbidden {
         table: "rustango_audit_log".to_owned(),
@@ -157,6 +162,12 @@ pub(crate) async fn audit_log_view(
         }
     }
 
+    // Every feed link derives from this, prefix included (#1916).
+    let mut feed_query = ListQuery::new(audit_path(&state));
+    for (k, v) in &active_field_filters {
+        feed_query.push(*k, v.clone());
+    }
+
     // Count, page of rows and facet group-bys all go through the
     // helpers in `crate::audit`, which render SQL per dialect, so this
     // view works on any supported backend.
@@ -181,25 +192,11 @@ pub(crate) async fn audit_log_view(
             .iter()
             .map(|(raw, count)| {
                 let is_active = active_value.map(|v| v == raw).unwrap_or(false);
-                let mut params: Vec<(String, String)> = Vec::new();
-                for (k, v) in &active_field_filters {
-                    if *k == col {
-                        continue;
-                    }
-                    params.push(((*k).into(), v.clone()));
-                }
+                let mut toggle = feed_query.without(&[col]);
                 if !is_active {
-                    params.push((col.into(), raw.clone()));
+                    toggle = toggle.with(col, raw.clone());
                 }
-                let mut url = state.config.audit_url.clone();
-                if !params.is_empty() {
-                    url.push('?');
-                    let qs: Vec<String> = params
-                        .iter()
-                        .map(|(k, v)| format!("{}={}", url_encode_q(k), url_encode_q(v)))
-                        .collect();
-                    url.push_str(&qs.join("&"));
-                }
+                let url = toggle.url();
                 serde_json::json!({
                     "raw": raw.clone(),
                     "display": render::escape(raw),
@@ -229,18 +226,7 @@ pub(crate) async fn audit_log_view(
             values = active_first;
         }
         let show_all_url = if more_count > 0 {
-            let mut params: Vec<(String, String)> = Vec::new();
-            for (k, v) in &active_field_filters {
-                params.push(((*k).into(), v.clone()));
-            }
-            params.push(("facet_show_all".into(), col.into()));
-            let mut url = format!("{}?", state.config.audit_url);
-            let qs: Vec<String> = params
-                .iter()
-                .map(|(k, v)| format!("{}={}", url_encode_q(k), url_encode_q(v)))
-                .collect();
-            url.push_str(&qs.join("&"));
-            Some(url)
+            Some(feed_query.clone().with("facet_show_all", col).url())
         } else {
             None
         };
@@ -284,11 +270,7 @@ pub(crate) async fn audit_log_view(
         .collect();
 
     // Pager URL preserves the active facets.
-    let mut pager_extras = String::new();
-    for (k, v) in &active_field_filters {
-        use std::fmt::Write as _;
-        let _ = write!(pager_extras, "&{}={}", url_encode_q(k), url_encode_q(v));
-    }
+    let pager_extras = feed_query.suffix();
 
     let active_filters_ctx: Vec<Value> = active_field_filters
         .iter()
@@ -384,7 +366,7 @@ pub(crate) async fn audit_cleanup_submit(
         tracing::warn!(target: "rustango::admin::audit",
             error = %e, "audit_cleanup self-audit emit failed");
     }
-    Ok(Redirect::to(&state.config.audit_url).into_response())
+    Ok(Redirect::to(&audit_path(&state)).into_response())
 }
 
 /// Diff-shaped audit emit for admin UPDATE writes. Takes the row that

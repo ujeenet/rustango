@@ -102,6 +102,10 @@ impl Cache for ScopedCache {
         self.inner.set(&self.k(key), value, ttl).await
     }
 
+    async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        self.inner.set_forever(&self.k(key), value).await
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         self.inner.delete(&self.k(key)).await
     }
@@ -206,6 +210,22 @@ mod tests {
             "globex must not read acme's entry for the same logical key"
         );
         assert!(!globex.exists("stats").await.unwrap());
+    }
+
+    /// `set_forever` beats the inner default TTL, through the scope too.
+    #[tokio::test]
+    async fn set_forever_outlives_the_default_ttl() {
+        let inner: BoxedCache = Arc::new(InMemoryCache::with_default_ttl(
+            std::time::Duration::from_millis(1),
+        ));
+        let scoped = ScopedCache::for_tenant(inner.clone(), "acme");
+        inner.set_forever("bare", "1").await.unwrap();
+        scoped.set_forever("k", "1").await.unwrap();
+        inner.set("lapses", "1", None).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(inner.exists("bare").await.unwrap());
+        assert!(scoped.exists("k").await.unwrap());
+        assert!(!inner.exists("lapses").await.unwrap());
     }
 
     /// Scoped `clear` drops one tenant and leaves the others.

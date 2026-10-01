@@ -18,8 +18,9 @@ unterscheiden.
 > **Quelle:** `rustango::logging` (`setup`, `setup_for_env`, `Setup`,
 > `Rotation`, `DEFAULT_FILTER`) — das Modul ist ungegated, aber jeder Installer
 > braucht das Feature `runtime`. `Setup::from_settings` braucht zusätzlich
-> `config`. `rustango::access_log` und `rustango::tenant_log` brauchen `admin`
-> **oder** `tenancy`; `rustango::tracing_layer` braucht `admin`.
+> `config`. `rustango::access_log`, `rustango::tenant_log`,
+> `rustango::tracing_layer` und `rustango::request_id` brauchen `manage`,
+> `admin` **oder** `tenancy`.
 >
 > **Ausführbare Version:** die Settings und Defaults hier sind abgesichert durch
 > [`logging_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/logging_doc.rs)

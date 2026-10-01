@@ -465,7 +465,7 @@ pub mod cors;
 
 /// Token-bucket rate limiting middleware — [`rate_limit::RateLimitLayer`].
 /// Per-IP, per-header, or global. Returns 429 with `Retry-After` when exhausted.
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod rate_limit;
 
 /// Cache-backed rate limiting middleware — a fixed-window counter over the
@@ -654,14 +654,14 @@ pub mod secrets;
 
 /// HTTP access log middleware — one tracing event per request with
 /// method / path / status / duration / IP. See [`access_log::AccessLogLayer`].
-#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[cfg(feature = "_http_layers")]
 pub mod access_log;
 
 /// Ambient tenant identity for log lines — the per-request slot the
 /// resolver fills and the access log reads back. Without a resolver the
 /// slot stays empty and no tenant is logged. See [`tenant_log::record`] /
 /// [`tenant_log::current`].
-#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[cfg(feature = "_http_layers")]
 pub mod tenant_log;
 
 /// Test fixture loader — seed a database from JSON files.
@@ -685,11 +685,11 @@ pub mod text;
 /// Request ID middleware — assign per-request correlation IDs,
 /// honor inbound `X-Request-Id` for end-to-end propagation. See
 /// [`request_id::RequestIdLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod request_id;
 
 /// IP allowlist / blocklist middleware. See [`ip_filter::IpFilterLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod ip_filter;
 
 /// Host-header allowlist middleware — refuses a request whose `Host` is
@@ -720,7 +720,7 @@ pub mod request_timeout;
 /// `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP` or RFC 7239
 /// `Forwarded` and puts the client IP in the request extensions. See
 /// [`real_ip::RealIpLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod real_ip;
 
 /// Idempotency-key middleware (Stripe-shape) — replays a stored
@@ -788,7 +788,7 @@ pub mod metrics;
 /// `traceparent` header propagation. Add `tracing_opentelemetry::layer()`
 /// to your subscriber to get distributed tracing. See
 /// [`tracing_layer::TracingLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod tracing_layer;
 
 /// `Server-Timing` header middleware — surface per-request stage
@@ -808,7 +808,7 @@ pub mod webhook;
 pub mod webhook_delivery;
 
 #[cfg(any(
-    feature = "admin",
+    feature = "_http_layers",
     feature = "webhook-delivery",
     feature = "oauth2",
     all(feature = "notifications", feature = "http-client")

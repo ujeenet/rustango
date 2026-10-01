@@ -114,16 +114,8 @@ pub(crate) async fn apply_idempotent(
     pool: &Pool,
     snapshot: &super::SchemaSnapshot,
 ) -> Result<(), sqlx::Error> {
-    let schema = creation_schema(pool).await?;
     let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
-    let batch = super::diff::render_changes_split_in_schema(
-        &changes,
-        snapshot,
-        pool.dialect(),
-        schema.as_deref(),
-    )
-    .map_err(sqlx::Error::Protocol)?;
-    apply_batch(pool, &batch).await
+    apply_changes_idempotent(pool, snapshot, &changes).await
 }
 
 /// Add each `(table, column)` of `snapshot` that a table created by an
@@ -145,15 +137,45 @@ pub(crate) async fn add_columns_idempotent(
             column: (*column).to_owned(),
         })
         .collect();
+    apply_changes_idempotent(pool, snapshot, &changes).await
+}
+
+/// Render `changes` against `snapshot` and run them, tolerating objects
+/// that already exist.
+///
+/// # Errors
+/// A render failure, or any driver failure that is not "already exists".
+pub(crate) async fn apply_changes_idempotent(
+    pool: &Pool,
+    snapshot: &super::SchemaSnapshot,
+    changes: &[super::SchemaChange],
+) -> Result<(), sqlx::Error> {
     let schema = creation_schema(pool).await?;
     let batch = super::diff::render_changes_split_in_schema(
-        &changes,
+        changes,
         snapshot,
         pool.dialect(),
         schema.as_deref(),
     )
     .map_err(sqlx::Error::Protocol)?;
     apply_batch(pool, &batch).await
+}
+
+/// Column names `table` has in the schema new tables land in.
+///
+/// # Errors
+/// Driver failures from the catalog read.
+pub(crate) async fn live_columns(
+    pool: &Pool,
+    table: &str,
+) -> Result<std::collections::HashSet<String>, super::MigrateError> {
+    // MySQL reads `""` as `DATABASE()`; SQLite ignores the schema.
+    let schema = creation_schema(pool).await?.unwrap_or_default();
+    Ok(super::inspectdb::list_columns(pool, &schema, table)
+        .await?
+        .into_iter()
+        .map(|c| c.name)
+        .collect())
 }
 
 /// Where Postgres creates unqualified tables; `None` on backends
@@ -171,10 +193,120 @@ async fn creation_schema(pool: &Pool) -> Result<Option<String>, sqlx::Error> {
     }
 }
 
+/// Apply each group of `changes` on its own, FKs last, so one object that
+/// fails does not block the others. Returns what could not be applied.
+///
+/// # Errors
+/// Only the catalog read for the creation schema.
+pub(crate) async fn converge_groups(
+    pool: &Pool,
+    snapshot: &super::SchemaSnapshot,
+    groups: &[Vec<super::SchemaChange>],
+) -> Result<Vec<String>, sqlx::Error> {
+    use super::SchemaChange as SC;
+    let schema = creation_schema(pool).await?;
+    let render = |changes: &[SC], snap: &super::SchemaSnapshot| {
+        super::diff::render_changes_split_in_schema(
+            changes,
+            snap,
+            pool.dialect(),
+            schema.as_deref(),
+        )
+    };
+    let mut failed = Vec::new();
+    let mut fks = Vec::new();
+    for group in groups {
+        let label = match group.first() {
+            Some(SC::AddColumn { table, column }) => format!("column `{table}.{column}`"),
+            Some(SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. }) => {
+                format!("table `{t}`")
+            }
+            _ => continue,
+        };
+        if let Some(SC::AddColumn { table, column }) = group.first() {
+            let f = snapshot.table(table).and_then(|t| t.field(column));
+            if f.is_some_and(|f| !f.nullable && f.default.is_none() && !f.primary_key) {
+                failed.push(format!(
+                    "{label}: NOT NULL with no default, so rows have no value"
+                ));
+                continue;
+            }
+        }
+        let batch = match render(group, snapshot) {
+            Ok(b) => b,
+            Err(e) => {
+                failed.push(format!("{label}: {e}"));
+                continue;
+            }
+        };
+        let Err(e) = run_statements(pool, &batch.immediate).await else {
+            fks.push((label, batch.deferred_fks));
+            continue;
+        };
+        // SQLite refuses a non-constant DEFAULT on a table with rows.
+        let retried = match frozen_now_default(pool, snapshot, group) {
+            Some(snap) => match render(group, &snap) {
+                Ok(b) => run_statements(pool, &b.immediate).await.is_ok(),
+                Err(_) => false,
+            },
+            None => false,
+        };
+        if retried {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "{label} added with a fixed DEFAULT: SQLite can't add `now()` to a table with rows"
+            );
+        } else {
+            failed.push(format!("{label}: {e}"));
+        }
+    }
+    for (label, stmts) in fks {
+        if let Err(e) = run_statements(pool, &stmts).await {
+            failed.push(format!("{label}: {e}"));
+        }
+    }
+    Ok(failed)
+}
+
+/// `snapshot` with the `now()` default of the column `group` adds fixed to
+/// the current time, on SQLite only. The ORM binds these columns on insert.
+fn frozen_now_default(
+    pool: &Pool,
+    snapshot: &super::SchemaSnapshot,
+    group: &[super::SchemaChange],
+) -> Option<super::SchemaSnapshot> {
+    #[cfg(feature = "sqlite")]
+    if let (Pool::Sqlite(_), [super::SchemaChange::AddColumn { table, column }]) = (pool, group) {
+        let mut table = snapshot.table(table)?.clone();
+        let field = table.fields.iter_mut().find(|f| &f.column == column)?;
+        if !field
+            .default
+            .as_deref()
+            .is_some_and(crate::sql::is_now_expr)
+        {
+            return None;
+        }
+        let now = crate::sql::encode_datetime(chrono::Utc::now());
+        field.default = Some(format!("'{now}'"));
+        return Some(super::SchemaSnapshot {
+            tables: vec![table],
+            ..Default::default()
+        });
+    }
+    let _ = (pool, snapshot, group);
+    None
+}
+
 /// Run every statement in `batch`, tolerating objects that already exist.
 async fn apply_batch(pool: &Pool, batch: &super::RenderedBatch) -> Result<(), sqlx::Error> {
+    run_statements(pool, &batch.immediate).await?;
+    run_statements(pool, &batch.deferred_fks).await
+}
+
+/// Run `stmts` in order, tolerating objects that already exist.
+async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), sqlx::Error> {
     let dialect = pool.dialect().name();
-    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
+    for stmt in stmts {
         let stmt = idempotent(stmt, dialect);
         if let Err(e) = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await {
             if is_already_exists(&e, dialect, &stmt) {

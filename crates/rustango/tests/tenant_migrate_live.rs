@@ -423,3 +423,73 @@ async fn tenant_migrate_skips_inactive_orgs() {
     rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #1988 — the registry run fills a fresh dir first; every later schema
+/// tenant must still converge, so a table and column dropped in the 2nd
+/// come back. Runs in a database of its own, since it drops framework schema.
+#[tokio::test]
+async fn tenants_after_the_registry_restore_the_schema() {
+    let _g = live_lock().lock().await;
+    let Some(admin) = pool().await else {
+        return;
+    };
+    let base_url = std::env::var("DATABASE_URL").unwrap();
+    let db = unique("rustango_1988_tenants");
+    let (base, _) = base_url.rsplit_once('/').unwrap();
+    let url = format!("{base}/{db}");
+    sqlx::query(&format!("CREATE DATABASE {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let pg = sqlx::PgPool::connect(&url).await.unwrap();
+    let pools = TenantPools::new(pg.clone());
+    let boot = fresh_dir("1988_boot");
+    migrate_registry(&pools, &boot).await.unwrap();
+    for slug in ["t1", "t2", "t3"] {
+        let mut org = Org {
+            id: Auto::default(),
+            slug: slug.into(),
+            display_name: slug.into(),
+            storage_mode: StorageMode::Schema.as_str().into(),
+            backend_kind: "postgres".to_owned(),
+            database_url: None,
+            schema_name: Some(format!("sch_{slug}")),
+            host_pattern: None,
+            port: None,
+            path_prefix: None,
+            ..rustango::testkit::org()
+        };
+        org.insert(&pg).await.unwrap();
+    }
+    for label in ["1988_deploy1", "1988_deploy2"] {
+        let dir = fresh_dir(label).join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        migrate_registry(&pools, &dir).await.unwrap();
+        let report = migrate_tenants(&pools, &dir, &url).await.unwrap();
+        assert!(report.all_ok(), "{report:?}");
+        if label.ends_with('1') {
+            sqlx::query("DROP TABLE sch_t2.rustango_user_permissions CASCADE")
+                .execute(&pg)
+                .await
+                .unwrap();
+            sqlx::query("ALTER TABLE sch_t2.rustango_users DROP COLUMN password_changed_at")
+                .execute(&pg)
+                .await
+                .unwrap();
+        }
+    }
+    let table = table_exists_in_schema(&pg, "sch_t2", "rustango_user_permissions").await;
+    let (column,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'sch_t2' \
+         AND table_name = 'rustango_users' AND column_name = 'password_changed_at')",
+    )
+    .fetch_one(&pg)
+    .await
+    .unwrap();
+    pg.close().await;
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
+        .execute(&admin)
+        .await;
+    assert!(table, "the 2nd tenant's dropped table was skipped");
+    assert!(column, "the 2nd tenant's dropped column was skipped");
+}

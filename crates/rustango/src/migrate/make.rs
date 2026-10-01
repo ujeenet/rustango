@@ -287,6 +287,67 @@ pub fn make_migrations_system(
     Ok(Some(mig))
 }
 
+/// The framework's `system/migrations/` dir and where its files came from.
+///
+/// Built only by [`SystemChain::prepare`], so a tenant cannot re-probe a dir
+/// the registry or an earlier tenant filled and take it for shipped (#1988).
+#[derive(Debug, Clone)]
+pub(crate) struct SystemChain {
+    dir: std::path::PathBuf,
+    origin: super::runner::ChainOrigin,
+}
+
+impl SystemChain {
+    /// [`Self::prepare`] for the project whose `migrations/` dir is `dir`.
+    pub(crate) fn for_migrations_dir(dir: &Path, scopes: &[crate::core::ModelScope]) -> Self {
+        // A bare dir not named `migrations` keeps `system/` inside it.
+        let root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
+            dir.parent().unwrap_or(dir)
+        } else {
+            dir
+        };
+        Self::prepare(root, scopes)
+    }
+
+    /// Generate the chain for `scopes` from today's models. A dir that was
+    /// empty when this process first saw it stays `Regenerated`: its names
+    /// may already sit in a ledger for other content.
+    pub(crate) fn prepare(project_root: &Path, scopes: &[crate::core::ModelScope]) -> Self {
+        use super::runner::ChainOrigin;
+        static REGENERATED: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+        > = std::sync::OnceLock::new();
+        let dir = project_root.join("system").join("migrations");
+        // Held across probe and write, so a concurrent caller can't see half a dir.
+        let mut regenerated = REGENERATED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let shipped = file::list_dir(&dir).is_ok_and(|m| !m.is_empty());
+        for &scope in scopes {
+            let _ = make_migrations_system(project_root, scope, None);
+        }
+        let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        let origin = if !shipped {
+            regenerated.insert(key);
+            ChainOrigin::Regenerated
+        } else if regenerated.contains(&key) {
+            ChainOrigin::Regenerated
+        } else {
+            ChainOrigin::OnDisk
+        };
+        Self { dir, origin }
+    }
+
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub(super) fn origin(&self) -> super::runner::ChainOrigin {
+        self.origin
+    }
+}
+
 /// [`make_migrations`] with the current snapshot passed in, instead
 /// of read from the registry.
 ///

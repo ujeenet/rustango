@@ -1373,14 +1373,14 @@ async fn list_renders_fk_as_link_to_display_value() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_string(response).await;
 
-    // Each post row should link author_id to /admin_user/<id> with the
+    // Each post row should link author_id to <prefix>/admin_user/<id> with the
     // displayed alice/bob — not the raw integer.
     assert!(
-        body.contains(r#"<a href="/admin_user/1">alice</a>"#),
+        body.contains(r#"<a href="/__admin/admin_user/1">alice</a>"#),
         "post 10 should link to alice: {body}",
     );
     assert!(
-        body.contains(r#"<a href="/admin_user/2">bob</a>"#),
+        body.contains(r#"<a href="/__admin/admin_user/2">bob</a>"#),
         "post 11 should link to bob: {body}",
     );
     // Raw integer should NOT appear in the FK cell.
@@ -1415,7 +1415,7 @@ async fn detail_renders_fk_as_link_to_display_value() {
     // FK detail renderer wraps the `<a>` in newlines + indent inside `<dd>`;
     // assert the link form rather than the inline DOM shape.
     assert!(
-        body.contains(r#"<a href="/admin_user/1">alice</a>"#),
+        body.contains(r#"<a href="/__admin/admin_user/1">alice</a>"#),
         "detail should show alice link: {body}",
     );
 
@@ -1445,9 +1445,9 @@ async fn fk_falls_back_to_raw_when_target_hidden() {
         .await
         .unwrap();
     let body = body_string(response).await;
-    // No link to /admin_user
+    // No link to an admin_user row, under any prefix.
     assert!(
-        !body.contains(r#"href="/admin_user/"#),
+        !body.replace("&#x2F;", "/").contains("admin_user/"),
         "FK link leaked despite hidden target: {body}",
     );
     // Raw author_id renders.
@@ -1492,7 +1492,7 @@ async fn fk_falls_back_to_raw_when_target_row_missing() {
     let body = body_string(response).await;
     // Should render the raw 999 (no link), not crash and not show alice.
     assert!(
-        !body.contains(r#"<a href="/admin_user/999""#),
+        !body.replace("&#x2F;", "/").contains("admin_user/999"),
         "should not link to missing target: {body}",
     );
     assert!(body.contains(">999<"), "raw 999 should render: {body}");

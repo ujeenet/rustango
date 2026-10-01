@@ -194,42 +194,19 @@ pub struct TenantMigrationOutcome {
 /// chains never collide.
 pub(crate) const SYSTEM_LEDGER: &str = "__rustango_system_migrations__";
 
-/// Generate (from the current models, if not already on disk) and apply
-/// the framework's system-app migrations for `scope` against `pool`.
+/// Apply the framework's system-app migrations for `scope` from `chain`
+/// against `pool`, under [`SYSTEM_LEDGER`].
 ///
-/// This replaces the old hand-written `ensure_*` / bootstrap / ALTER-fixup
-/// DDL: the framework's own tables come from makemigrations-generated
-/// files (drift-free and feature-`#[cfg]`-aware) in
-/// `<project_root>/system/migrations/`, applied under [`SYSTEM_LEDGER`].
-/// Generation is a no-op once the files exist (committed, or generated on
-/// a previous run); a read-only tree simply means they were committed.
+/// The caller prepares `chain` once per run from the project's own
+/// `migrations/` dir, never from a scoped temp copy, so every tenant sees
+/// the committed `system/migrations/` and the same origin (#1988).
 async fn apply_system_migrations(
     pool: &crate::sql::Pool,
-    dir: &Path,
-    scope: crate::core::ModelScope,
-) -> Result<Vec<Migration>, TenancyError> {
-    apply_system_migrations_opts(pool, dir, scope, None).await
-}
-
-async fn apply_system_migrations_opts(
-    pool: &crate::sql::Pool,
-    dir: &Path,
+    chain: &crate::migrate::make::SystemChain,
     scope: crate::core::ModelScope,
     observer: Option<&dyn crate::migrate::MigrationObserver>,
 ) -> Result<Vec<Migration>, TenancyError> {
-    // `system/migrations/` is a sibling of the project's `migrations/`
-    // dir. When `dir` is literally `<root>/migrations`, the project root
-    // is its parent; otherwise (e.g. a bare test dir) keep `system/`
-    // contained inside `dir` rather than polluting its parent.
-    let project_root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
-        dir.parent().unwrap_or(dir)
-    } else {
-        dir
-    };
-    // Best-effort generate from the compiled models (Ok(None) when the
-    // on-disk system migrations already match the models).
-    let _ = crate::migrate::make_migrations_system(project_root, scope, None);
-    let system_dir = project_root.join("system").join("migrations");
+    let system_dir = chain.dir();
     if !system_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -245,39 +222,14 @@ async fn apply_system_migrations_opts(
     // pure-`CreateTable`-of-existing-tables migration as applied without
     // running it. Scoped to the framework's own tables; user migrations use
     // the plain runner.
-    let applied = match scoped_subset(&system_dir, migration_scope).await? {
-        ScopedDir::Owned(temp) => {
-            let r = apply_system_dir(pool, temp.path(), observer).await?;
-            drop(temp);
-            r
-        }
-        ScopedDir::Original => apply_system_dir(pool, &system_dir, observer).await?,
-    };
-    Ok(applied)
+    let scoped = scoped_subset(system_dir, migration_scope).await?;
+    let run_dir = scoped.path(system_dir);
+    Ok(crate::migrate::migrate_system_chain(pool, chain, run_dir, observer).await?)
 }
 
-/// Run the framework's own chain against `dir`, with or without an
-/// observer. Split out only so the two `ScopedDir` arms don't each carry
-/// the observer branch.
-async fn apply_system_dir(
-    pool: &crate::sql::Pool,
-    dir: &Path,
-    observer: Option<&dyn crate::migrate::MigrationObserver>,
-) -> Result<Vec<Migration>, TenancyError> {
-    Ok(match observer {
-        Some(observer) => {
-            crate::migrate::migrate_pool_with_ledger_fake_initial_with_progress(
-                pool,
-                dir,
-                SYSTEM_LEDGER,
-                observer,
-            )
-            .await?
-        }
-        None => {
-            crate::migrate::migrate_pool_with_ledger_fake_initial(pool, dir, SYSTEM_LEDGER).await?
-        }
-    })
+/// The tenant-scope system chain for the project whose migrations are `dir`.
+fn tenant_system_chain(dir: &Path) -> crate::migrate::make::SystemChain {
+    crate::migrate::make::SystemChain::for_migrations_dir(dir, &[crate::core::ModelScope::Tenant])
 }
 
 /// Apply registry-scoped pending migrations to the registry DB.
@@ -330,8 +282,13 @@ pub async fn migrate_registry_pool(
     // The framework's own registry tables (rustango_orgs, rustango_operators,
     // rustango_admin_users) come from makemigrations-generated system-app
     // migrations — no hand-written bootstrap/ensure/ALTER DDL.
-    applied
-        .extend(apply_system_migrations(registry, dir, crate::core::ModelScope::Registry).await?);
+    let chain = crate::migrate::make::SystemChain::for_migrations_dir(
+        dir,
+        &[crate::core::ModelScope::Registry],
+    );
+    applied.extend(
+        apply_system_migrations(registry, &chain, crate::core::ModelScope::Registry, None).await?,
+    );
     // (#89) Auto-seed the `rustango_content_types` registry-side
     // catalog — the operator console's audit log + permissions UI
     // consult it to resolve `entity_table` strings back to a stable
@@ -418,6 +375,7 @@ async fn migrate_tenants_opts(
         ScopedDir::Owned(temp) => temp.path().to_path_buf(),
         ScopedDir::Original => dir.to_path_buf(),
     };
+    let chain = tenant_system_chain(dir);
     let migrations_in_scope = rustango::migrate::file::list_dir(&scoped_path)
         .map(|m| m.len())
         .unwrap_or(0);
@@ -463,7 +421,8 @@ async fn migrate_tenants_opts(
                 total,
             });
         }
-        let outcome = run_for_one_tenant(pools, org, &scoped_path, registry_url, observer).await;
+        let outcome =
+            run_for_one_tenant(pools, org, &scoped_path, &chain, registry_url, observer).await;
         if let Some(observer) = observer {
             observer.on_event(TenantMigrationEvent::TenantFinished {
                 slug: org.slug.clone(),
@@ -589,6 +548,7 @@ where
         ScopedDir::Owned(temp) => temp.path().to_path_buf(),
         ScopedDir::Original => dir.to_path_buf(),
     };
+    let chain = tenant_system_chain(dir);
 
     // Schema-mode is PG-only by language, and only the PG runner knows
     // how to build a `search_path`-scoped pool for it. Route the same
@@ -606,11 +566,12 @@ where
                     org.slug
                 ))
             })?;
-        return run_for_one_tenant(pg_pools, org, &scoped_path, registry_url, observer).await;
+        return run_for_one_tenant(pg_pools, org, &scoped_path, &chain, registry_url, observer)
+            .await;
     }
     let _ = registry_url;
 
-    run_for_one_tenant_db(pools, org, &scoped_path, observer).await
+    run_for_one_tenant_db(pools, org, &scoped_path, &chain, observer).await
 }
 
 async fn migrate_tenants_db_opts<DB: Database>(
@@ -628,6 +589,7 @@ where
         ScopedDir::Owned(temp) => temp.path().to_path_buf(),
         ScopedDir::Original => dir.to_path_buf(),
     };
+    let chain = tenant_system_chain(dir);
 
     let registry_pool = pools.registry_pool();
     let orgs: Vec<Org> = Org::objects()
@@ -657,7 +619,7 @@ where
                 total,
             });
         }
-        let outcome = run_for_one_tenant_db(pools, org, &scoped_path, observer).await;
+        let outcome = run_for_one_tenant_db(pools, org, &scoped_path, &chain, observer).await;
         if let Some(observer) = observer {
             observer.on_event(TenantMigrationEvent::TenantFinished {
                 slug: org.slug.clone(),
@@ -701,6 +663,7 @@ async fn run_for_one_tenant_db<DB: Database>(
     pools: &TenantPools<DB>,
     org: &Org,
     dir: &Path,
+    chain: &crate::migrate::make::SystemChain,
     observer: Option<&dyn TenantMigrationObserver>,
 ) -> Result<Vec<Migration>, TenancyError>
 where
@@ -737,9 +700,9 @@ where
     // system-app migrations and MUST be applied BEFORE the tenant's user
     // migrations, which may FK into them (issue #1171).
     let system_progress = chain_observer(observer, &org.slug, Chain::System);
-    let mut applied = apply_system_migrations_opts(
+    let mut applied = apply_system_migrations(
         &inner_pool,
-        dir,
+        chain,
         crate::core::ModelScope::Tenant,
         system_progress
             .as_ref()
@@ -853,6 +816,7 @@ async fn run_for_one_tenant(
     pools: &TenantPools,
     org: &Org,
     dir: &Path,
+    chain: &crate::migrate::make::SystemChain,
     registry_url: &str,
     observer: Option<&dyn TenantMigrationObserver>,
 ) -> Result<Vec<Migration>, TenancyError> {
@@ -877,9 +841,9 @@ async fn run_for_one_tenant(
             // (issue #1171). Applying user migrations first breaks a fresh
             // tenant whose model references e.g. rustango_users.
             let dbpool: crate::sql::Pool = pool.clone().into();
-            let mut applied = apply_system_migrations_opts(
+            let mut applied = apply_system_migrations(
                 &dbpool,
-                dir,
+                chain,
                 crate::core::ModelScope::Tenant,
                 system_progress,
             )
@@ -910,9 +874,9 @@ async fn run_for_one_tenant(
             let tenant_pool = pools.pool_for_org(org).await?;
             // System-app migrations before user migrations (issue #1171).
             let dbpool: crate::sql::Pool = tenant_pool.pool().clone().into();
-            let mut applied = apply_system_migrations_opts(
+            let mut applied = apply_system_migrations(
                 &dbpool,
-                dir,
+                chain,
                 crate::core::ModelScope::Tenant,
                 system_progress,
             )

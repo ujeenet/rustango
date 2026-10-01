@@ -373,8 +373,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/{name} /usr/local/bin/{name}
 # Migrations and settings are read at run time, so they travel with the
-# binary rather than being baked into it.
+# binary rather than being baked into it. `system/` holds the framework's
+# own migrations: without it `migrate` skips framework schema changes.
 COPY migrations /app/migrations
+COPY system /app/system
 COPY config /app/config
 # Never root. The numeric id keeps the ownership stable if the image is
 # rebuilt on a host whose useradd picks a different one.
@@ -503,6 +505,7 @@ src/
   urls.rs         — pub fn api() -> Router aggregator
 
 migrations/       — JSON migration files (committed to git)
+system/migrations/ — the framework's own migrations (commit them too; the image ships them)
 ```
 
 Adding a new model is one struct in `models.rs`; the auto-admin sees
@@ -626,9 +629,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the unified dispatcher
 //! that handles `cargo run` (runserver) AND `cargo run -- migrate` /
 //! `makemigrations` / `startapp` / etc. from one binary. No
-//! `src/bin/manage.rs` needed. The auto-admin is not wired up for
-//! you: add an `admin_router(pool)` helper to `src/urls.rs` and nest
-//! it under `/admin` (see the getting-started guide, Step 11).
+//! `src/bin/manage.rs` needed. The auto-admin is at `/admin`, behind
+//! a login: `cargo run -- create-admin <username>` makes the account.
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
@@ -645,6 +647,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
+        // Built from the server's own pool, so other verbs need no database.
+        .nest_with(\"/admin\", urls::admin_router)
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready endpoints for load balancers
         // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
@@ -780,32 +784,20 @@ pub fn api() -> Router<()> {
             .to_owned()
         }
         Template::Fullstack => {
-            // #1210/#1211 — this used to also emit an `admin_router(pool)`
-            // helper. Nothing generated called it (the generated `main.rs`
-            // never nested it), so it was dead code — a warning in every
-            // fresh project — and it was the only generated line naming
-            // `PgPool`, hard-wiring Postgres into a project whose manifest
-            // offers sqlite and mysql.
-            //
-            // Removing it means a fullstack project has NO admin until the
-            // author adds one. There is no `Cli` auto-mount for the
-            // single-tenant admin (that exists only for `tenancy`), so
-            // getting-started Step 11 has to spell the helper out — see
-            // `examples/getting_started_blog/src/urls.rs`, which defines it
-            // by hand and is covered by `tests/admin_smoke.rs`.
+            // #1272 — the admin helper is generated again, and `main.rs`
+            // mounts it. It takes `rustango::sql::Pool`, so it names no
+            // driver (#1210), and it sits behind a login (#1627).
             "//! Project URL routing (template: fullstack — ORM + admin).
 //!
 //! `Router::new()` in `api()` is the auto-mount anchor —
 //! `manage startapp` inserts `.merge(crate::<name>::urls::api())`
 //! lines here.
-//!
-//! The admin is NOT wired up for you. Add an `admin_router(pool)` helper
-//! here and nest it under `/admin` from `main.rs` — getting-started
-//! Step 11 spells it out. Take `rustango::sql::Pool` so the helper names
-//! no driver and the project still builds on all three backends.
 
 use axum::routing::get;
 use axum::Router;
+use rustango::admin;
+use rustango::session::SessionSecret;
+use rustango::sql::Pool;
 
 use crate::views;
 
@@ -813,6 +805,15 @@ pub fn api() -> Router<()> {
     Router::new()
         .route(\"/\", get(views::index))
         .route(\"/healthz\", get(views::healthz))
+}
+
+/// The auto-admin, behind a login. Create the first account with
+/// `cargo run -- create-admin <username>`.
+pub fn admin_router(pool: Pool) -> Router {
+    admin::Builder::new(pool)
+        .admin_prefix(\"/admin\") // must match the `.nest(\"/admin\", …)` in main.rs
+        .with_session_auth(SessionSecret::from_env_or_random())
+        .build()
 }
 "
             .to_owned()
@@ -856,10 +857,9 @@ pub fn api() -> Router<()> {
     }
 }
 // The framework no longer ships hardcoded bootstrap migration JSON.
-// `cargo rustango new --template tenant` seeds an empty `system/
-// migrations/` folder; `cargo run -- makemigrations` generates the
-// framework's own tables from the compiled models, and
-// `cargo run -- migrate` applies them.
+// `cargo rustango new` seeds an empty `system/migrations/` folder;
+// `cargo run -- makemigrations` generates the framework's own tables
+// from the compiled models, and `cargo run -- migrate` applies them.
 
 // ---------------- Tiered settings files (#87) ----------------
 //

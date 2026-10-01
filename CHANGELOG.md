@@ -4,6 +4,67 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.13] — 2026-10-01
+
+### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)
+
+A bool facet showed `1`/`0`, linked `?flag=1` and never marked the active value on SQLite/MySQL.
+Edit-form and list cells now read a numeric bool as checked/unchecked, not empty.
+
+### Fixed — admin bulk actions post under the admin prefix (#1765)
+
+The list's action form no longer posts to `/{table}/__action`, which 404ed under a prefix.
+
+### Fixed — admin links keep the whole filter state and the admin prefix (#1916)
+
+Pager, facet, date and custom-filter links and the search form keep every active filter,
+the date drill and `count=skip`. Audit feed, FK cell, generic-FK and 403 sign-out links use the prefix.
+
+### Fixed — admin and `ListView` paging is stable; `orphans` keeps the last rows (#1917)
+
+Admin lists order by `admin.ordering`, else the model's `default_order`, and both they and
+`ListView` end on the PK. `Page::limit()` on an orphan-merged last page now covers every row.
+
+### Fixed — ViewSet `PATCH` validates only the sent fields (#1995)
+
+Field rules skip absent fields, and the cross-field `validate` hook sees the stored row with only the fields the update writes applied.
+
+### Fixed — `check_unique_together_pool` reports collisions on PostgreSQL (#1872)
+
+The probe now runs as an ORM `exists` count; its raw `SELECT 1` failed to decode on PG and hid the field error.
+
+### Fixed — feature flags no longer expire after an hour (#1956)
+
+`FeatureFlags` writes through the new `Cache::set_forever`, so `enable` / `disable` stick even on a cache with a default TTL. `FeatureFlags::ttl` opts in to expiry.
+
+### Fixed — `create-admin` no longer logs a PG ERROR on every run (#1642)
+
+It swallowed a plain `CREATE TABLE` failure; it now uses the shared idempotent ensure path.
+A live test counts server-rejected statements on a repeat ensure.
+
+### Fixed — the fullstack template mounts the admin again (#1272)
+
+`src/urls.rs` gets a driver-neutral `admin_router(pool)` behind a login, and `main.rs` mounts it with the new
+`Cli::nest_with("/admin", …)`, built from the server's own pool, so no other verb needs `DATABASE_URL` (#1216).
+
+### Fixed — `check --deploy` warns about an admin with no login (#1627)
+
+Building an admin without `with_session_auth` now raises an `[admin]` warning; `check` builds the `nest_with` routers to see it.
+`admin::Builder::new` now defaults `secure_cookies` from `session::secure_cookies()` (`[security].secure_cookies`, else the prod tier).
+The getting-started guide teaches the gated admin and `create-admin`.
+
+### Fixed — a deploy image no longer skips framework schema changes (#1988)
+
+The scaffolded `Dockerfile` now ships `system/`, and every template seeds it.
+A chain regenerated into an empty `system/` now converges by content: missing framework tables and columns are created.
+Every tenant converges too, not only the first, and tenants of a mixed-scope project use the committed `system/`.
+Converge adds one object at a time and lists what it cannot add; on SQLite a `now()` column gets a fixed default on a table with rows.
+
+### Fixed — the `api` template gets the request span, `X-Request-Id` and access log (#1514)
+
+They were gated on `admin`, so a `manage`-only build mounted none of them.
+They now need only `_http_layers`, which `manage` implies.
+
 ## [0.59.12] — 2026-10-01
 
 ### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)
