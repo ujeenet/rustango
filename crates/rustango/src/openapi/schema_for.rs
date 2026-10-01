@@ -168,6 +168,25 @@ impl<T: OpenApiSchema> OpenApiSchema for crate::sql::Auto<T> {
     }
 }
 
+// The PG column wrappers serialize as their inner JSON shape.
+impl<T: OpenApiSchema> OpenApiSchema for crate::sql::Array<T> {
+    fn openapi_schema() -> Schema {
+        Schema::array_of(T::openapi_schema())
+    }
+}
+
+impl OpenApiSchema for crate::sql::HStore {
+    fn openapi_schema() -> Schema {
+        BTreeMap::<String, Option<String>>::openapi_schema()
+    }
+}
+
+impl OpenApiSchema for crate::sql::Vector {
+    fn openapi_schema() -> Schema {
+        Vec::<f32>::openapi_schema()
+    }
+}
+
 impl<V: OpenApiSchema> OpenApiSchema for HashMap<String, V> {
     fn openapi_schema() -> Schema {
         let mut s = Schema::object();

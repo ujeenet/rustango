@@ -291,6 +291,7 @@ async fn session_operator_ends_on_a_same_second_password_change() {
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&reg).await.expect("seed operator");
 
@@ -382,6 +383,137 @@ async fn current_member_ends_on_a_same_second_password_change() {
         whoami_with(&app, relogin.split(';').next().unwrap()).await,
         "member:alice",
         "a login after the change must work"
+    );
+}
+
+/// `member_auth::logout` ends the member and tenant cookies from before
+/// it, and a login in the same second still works (#1855).
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn a_member_logout_ends_member_and_tenant_sessions() {
+    use rustango::sql::FetcherPool as _;
+    use rustango::tenancy::member_auth::{logout, mint_cookie, CurrentMember};
+    use rustango::tenancy::tenant_console::{
+        encode, PasswordFingerprint, TenantSessionPayload, COOKIE_NAME,
+    };
+
+    async fn both(SessionUser(u): SessionUser, CurrentMember(m): CurrentMember) -> String {
+        format!("{}|{}", u.is_some(), m.is_some())
+    }
+
+    let url = "sqlite:file:member_logout_1855?mode=memory&cache=shared";
+    let tenant = rustango::sql::Pool::connect(url).await.expect("tenant db");
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&tenant)
+        .await
+        .expect("users table");
+    let mut user = rustango::testkit::user();
+    user.insert_pool(&tenant).await.expect("seed user");
+    let uid = user.id.get().copied().unwrap();
+
+    let secret = rustango::tenancy::session::SessionSecret::from_bytes(
+        b"test_tenant_session_secret_32by!".to_vec(),
+    );
+    let app = app_with(
+        both,
+        sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap(),
+        Org {
+            database_url: Some(url.into()),
+            ..fake_sqlite_org()
+        },
+        secret.clone(),
+        rustango::tenancy::session::SessionSecret::from_bytes(
+            b"test_oper_session_secret____32b!".to_vec(),
+        ),
+    );
+    let tenant_session = TenantSessionPayload::new(
+        uid,
+        "acme",
+        3600,
+        PasswordFingerprint::of(&secret, &user.password_hash),
+    );
+    let member = mint_cookie(&secret, &user, "acme", 3600);
+    let cookies = format!(
+        "{COOKIE_NAME}={}; {}",
+        encode(&secret, &tenant_session),
+        member.split(';').next().unwrap()
+    );
+    assert_eq!(whoami_with(&app, &cookies).await, "true|true");
+
+    logout(&tenant, &user).await.expect("logout");
+    assert_eq!(
+        whoami_with(&app, &cookies).await,
+        "false|false",
+        "cookies from before logout must be refused"
+    );
+
+    let user = rustango::tenancy::User::objects()
+        .filter("id", uid)
+        .fetch(&tenant)
+        .await
+        .unwrap()
+        .remove(0);
+    let relogin = mint_cookie(&secret, &user, "acme", 3600);
+    assert_eq!(
+        whoami_with(&app, relogin.split(';').next().unwrap()).await,
+        "false|true",
+        "a member login right after logout must work"
+    );
+}
+
+/// `SessionOperator` refuses a session issued at or before the logout cut-off (#1855).
+#[tokio::test]
+async fn session_operator_ends_at_the_logout_cutoff() {
+    use rustango::extractors::SessionOperator;
+    use rustango::tenancy::session::{encode, PasswordFingerprint, SessionPayload, COOKIE_NAME};
+
+    async fn whoop(SessionOperator(op): SessionOperator) -> String {
+        op.map_or_else(|| "anon".to_owned(), |o| format!("op:{}", o.username))
+    }
+
+    let registry =
+        sqlx::SqlitePool::connect("sqlite:file:session_op_1855?mode=memory&cache=shared")
+            .await
+            .expect("registry pool");
+    let reg = rustango::sql::Pool::from(registry.clone());
+    rustango::testkit::create_tables_for::<rustango::tenancy::Operator>(&reg)
+        .await
+        .expect("operators table");
+    let mut op = rustango::tenancy::Operator {
+        id: rustango::sql::Auto::default(),
+        username: "root".into(),
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    op.insert_pool(&reg).await.expect("seed operator");
+    let op_secret = rustango::tenancy::session::SessionSecret::from_bytes(
+        b"test_oper_session_secret____32b!".to_vec(),
+    );
+    let app = app_with(
+        whoop,
+        registry,
+        fake_sqlite_org(),
+        rustango::tenancy::session::SessionSecret::from_bytes(
+            b"test_tenant_session_secret_32by!".to_vec(),
+        ),
+        op_secret.clone(),
+    );
+    let login = SessionPayload::new(
+        op.id.get().copied().unwrap(),
+        3600,
+        PasswordFingerprint::of(&op_secret, &op.password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&op_secret, &login));
+    assert_eq!(whoami_with(&app, &cookie).await, "op:root");
+
+    op.sessions_revoked_at = chrono::DateTime::from_timestamp(login.iat, 0);
+    op.save_pool(&reg).await.expect("log out");
+    assert_eq!(
+        whoami_with(&app, &cookie).await,
+        "anon",
+        "a session from the logout's own second must be refused"
     );
 }
 

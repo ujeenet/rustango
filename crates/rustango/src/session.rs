@@ -399,6 +399,74 @@ impl PasswordFingerprint {
     }
 }
 
+/// Column every session principal (tenant user, operator, admin user)
+/// stamps on logout; sessions issued at or before it are refused (#1855).
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub(crate) const SESSIONS_REVOKED_AT: &str = "sessions_revoked_at";
+
+/// `true` when a session minted with `pwf` at `iat` is still valid: same
+/// password hash, not before `password_changed_at`, after the last logout.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn session_survives(
+    secret: &SessionSecret,
+    pwf: &PasswordFingerprint,
+    iat: i64,
+    password_hash: &str,
+    password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    pwf.matches(secret, password_hash)
+        && password_changed_at.is_none_or(|ts| iat >= ts.timestamp())
+        && sessions_revoked_at.is_none_or(|ts| iat > ts.timestamp())
+}
+
+/// `iat` for a new session: strictly after the last logout, so a login in
+/// the logout's own second still validates.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn issued_at(sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>) -> i64 {
+    let now = chrono::Utc::now().timestamp();
+    sessions_revoked_at.map_or(now, |ts| now.max(ts.timestamp() + 1))
+}
+
+/// Logout cut-off: covers every session issued so far, the logged-out
+/// cookie included even when a faster-clock replica minted it.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn logout_cutoff(
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    cookie_iat: i64,
+) -> i64 {
+    issued_at(sessions_revoked_at).max(cookie_iat.saturating_add(1))
+}
+
+/// End every session of row `id` of `T`, on every device, at [`logout_cutoff`].
+/// `sessions_revoked_at` is the row's current value; the WHERE never moves it back.
+///
+/// # Errors
+/// [`crate::sql::ExecError`] from the update.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
+    pool: &crate::sql::Pool,
+    id: i64,
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    cookie_iat: i64,
+) -> Result<u64, crate::sql::ExecError> {
+    use crate::query::Q;
+    use crate::sql::UpdaterPool as _;
+    let cutoff =
+        chrono::DateTime::from_timestamp(logout_cutoff(sessions_revoked_at, cookie_iat), 0)
+            .unwrap_or_else(chrono::Utc::now);
+    crate::query::QuerySet::<T>::default()
+        .filter("id", id)
+        .where_(Q::is_null(SESSIONS_REVOKED_AT) | Q::lt(SESSIONS_REVOKED_AT, cutoff))
+        .update()
+        .set(SESSIONS_REVOKED_AT, cutoff)
+        .execute_pool(pool)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +478,32 @@ mod tests {
         let bare =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sign(&secret, b"$argon2id$h"));
         assert_ne!(PasswordFingerprint::of(&secret, "$argon2id$h").0, bare);
+    }
+
+    /// A logout ends sessions issued in its own second; the next login's
+    /// `iat` lands after the cut-off (#1855).
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn a_logout_cutoff_ends_older_sessions_but_not_the_next_login() {
+        let secret = SessionSecret::from_bytes(vec![7u8; 32]);
+        let pwf = PasswordFingerprint::of(&secret, "$h");
+        let now = chrono::Utc::now().timestamp();
+        let cut = chrono::DateTime::from_timestamp(now, 0);
+        assert!(session_survives(&secret, &pwf, now, "$h", None, None));
+        assert!(!session_survives(&secret, &pwf, now, "$h", None, cut));
+        let next = issued_at(cut);
+        assert!(next > now);
+        assert!(session_survives(&secret, &pwf, next, "$h", None, cut));
+    }
+
+    /// The cut-off covers a cookie minted ahead of this node's clock (#1855).
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn a_logout_cutoff_covers_a_cookie_from_a_faster_clock() {
+        let ahead = chrono::Utc::now().timestamp() + 100;
+        assert_eq!(logout_cutoff(None, ahead), ahead + 1);
+        let later = chrono::DateTime::from_timestamp(ahead + 50, 0);
+        assert_eq!(logout_cutoff(later, ahead), ahead + 51);
     }
 
     /// A short key is refused, not signed with. `sign` would accept

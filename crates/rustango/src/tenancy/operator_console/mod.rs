@@ -401,6 +401,12 @@ pub fn router_with_brand_storage(
 
 /// Handoff URL used by the constructors that do not take one.
 /// Same value as [`super::routes::RouteConfig`]'s default.
+/// A logged `500` whose body withholds the cause (#1955).
+fn server_error(context: &str, e: &dyn std::fmt::Display) -> Response<Body> {
+    let body = crate::error::server_error_body(context, e);
+    (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+}
+
 fn default_tenant_handoff_url() -> String {
     super::routes::RouteConfig::default().impersonation_handoff_url
 }
@@ -896,17 +902,10 @@ fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body>
                 detail.push_str(&s.to_string());
                 source = s.source();
             }
-            tracing::error!(
-                target: "rustango::tenancy::operator_console",
-                template,
-                error = %detail,
-                "operator console template failed to render"
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not render {template}: {detail}"),
+            server_error(
+                "operator_console::render",
+                &format!("could not render {template}: {detail}"),
             )
-                .into_response()
         }
     }
 }
@@ -957,13 +956,14 @@ async fn require_session(
             let Some(op) = rows.into_iter().next().filter(|o| o.active) else {
                 return redirect_to_login(&safe_next).into_response();
             };
-            // Drop sessions issued before the last password change.
-            if !session::survives_password_change(
+            // Drop sessions issued before the last password change or logout.
+            if !session::session_survives(
                 &state.session_secret,
                 &payload.pwf,
                 payload.iat,
                 &op.password_hash,
                 op.password_changed_at,
+                op.sessions_revoked_at,
             ) {
                 return redirect_to_login(&safe_next).into_response();
             }
@@ -1194,11 +1194,12 @@ async fn login_submit(
     };
     let oid = principal.id.get().copied().unwrap_or_default();
     attempt.succeeded().await;
-    let payload = SessionPayload::new(
+    let mut payload = SessionPayload::new(
         oid,
         SESSION_TTL_SECS,
         session::PasswordFingerprint::of(&state.session_secret, &principal.password_hash),
     );
+    payload.iat = crate::session::issued_at(principal.sessions_revoked_at);
     let cookie_value = session::encode(&state.session_secret, &payload);
     let cookie = Cookie::build((COOKIE_NAME, cookie_value))
         .path("/")
@@ -1238,6 +1239,24 @@ async fn logout(
     // operator_id. Receivers tolerate `None`.
     let oid = decode_operator_session(&headers, &state.session_secret);
     let meta = meta_from_parts(&extensions, &headers, Some("/logout"));
+    // End the operator's sessions everywhere, impersonation ones included.
+    let revoked = match live_operator_session(&state, &headers).await {
+        Ok(Some((op, iat))) => crate::session::revoke_sessions::<auth::Operator>(
+            &state.registry,
+            op.id.get().copied().unwrap_or_default(),
+            op.sessions_revoked_at,
+            iat,
+        )
+        .await
+        .map(drop),
+        Ok(None) => Ok(()),
+        // Never report a logout that did not happen.
+        Err(e) => Err(e),
+    };
+    if let Err(e) = revoked {
+        tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "logout revoke");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
+    }
     let clear = Cookie::build((COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
@@ -1260,6 +1279,37 @@ async fn logout(
     })
     .await;
     resp
+}
+
+/// The operator and cookie `iat` behind a still-valid session cookie, so a
+/// stale cookie cannot end the newer sessions. `Err` when the lookup fails.
+async fn live_operator_session(
+    state: &ConsoleState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(auth::Operator, i64)>, crate::sql::ExecError> {
+    let Some(payload) = crate::cookies::cookie_from_headers(headers, COOKIE_NAME)
+        .and_then(|val| session::decode(&state.session_secret, val).ok())
+    else {
+        return Ok(None);
+    };
+    let op = auth::Operator::objects()
+        .where_(auth::Operator::id.eq(payload.oid))
+        .fetch(&state.registry)
+        .await?
+        .into_iter()
+        .next();
+    Ok(op
+        .filter(|op| {
+            session::session_survives(
+                &state.session_secret,
+                &payload.pwf,
+                payload.iat,
+                &op.password_hash,
+                op.password_changed_at,
+                op.sessions_revoked_at,
+            )
+        })
+        .map(|op| (op, payload.iat)))
 }
 
 /// Best-effort: decode the operator session cookie to recover the
@@ -1322,8 +1372,8 @@ async fn change_password_submit(
     if form.new_password == form.current_password {
         return redir_err("New password must differ from the current password.");
     }
-    if form.new_password.chars().count() < 8 {
-        return redir_err("New password must be at least 8 characters.");
+    if let Err(e) = crate::password_validators::check_builtin_form_password(&form.new_password) {
+        return redir_err(&e.message);
     }
 
     let op_id = op.id.get().copied().unwrap_or(0);
@@ -1411,7 +1461,7 @@ async fn orgs_list(
     use crate::core::Model as _;
     let paged = match Paged::of_model(&state.registry, super::Org::SCHEMA, q.page).await {
         Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let rows: Vec<super::Org> = match super::Org::objects()
         .order_by(&[("slug", false)])
@@ -1421,7 +1471,7 @@ async fn orgs_list(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let view: Vec<_> = rows
         .into_iter()
@@ -1482,7 +1532,7 @@ async fn sso_shared_list(
             .await
         {
             Ok(r) => r,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+            Err(e) => return server_error("operator_console", &e),
         };
     rows.sort_by_key(|p| p.sort_order);
     let view: Vec<_> = rows
@@ -1532,11 +1582,7 @@ async fn sso_shared_create(
         updated_at: crate::sql::Auto::Unset,
     };
     if let Err(e) = row.insert_pool(&state.registry).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("create failed: {e}"),
-        )
-            .into_response();
+        return server_error("create failed", &e);
     }
     Redirect::to("/sso-shared").into_response()
 }
@@ -1577,11 +1623,7 @@ async fn sso_shared_set_email_link(
     {
         Ok(1) => Redirect::to("/sso-shared").into_response(),
         Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("update failed: {e}"),
-        )
-            .into_response(),
+        Err(e) => server_error("update failed", &e),
     }
 }
 
@@ -1660,7 +1702,7 @@ async fn org_edit_form(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let Some(org_row) = rows.into_iter().next() else {
         return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
@@ -1795,7 +1837,7 @@ async fn org_edit_submit(
         .await
     {
         Ok(rows) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let Some(existing_org) = existing_orgs.into_iter().next() else {
         return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
@@ -2126,10 +2168,7 @@ async fn serve_brand_asset(
             | branding::BrandError::InvalidSlug
             | branding::BrandError::InvalidFilename,
         ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => {
-            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "brand asset");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        Err(e) => server_error("operator_console::brand_asset", &e),
     }
 }
 
@@ -2207,12 +2246,13 @@ async fn org_impersonate(
     // Mint the short-lived URL handoff token. Includes a random
     // single-use `jti` and the slug, both checked at redemption.
     use super::impersonation_handoff as handoff;
-    let payload = handoff::HandoffPayload::new(
+    let mut payload = handoff::HandoffPayload::new(
         operator_id,
         slug.clone(),
         handoff::HANDOFF_TTL_SECS,
         handoff::PasswordFingerprint::of(&tenant_secret, &op.password_hash),
     );
+    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
     let token = handoff::mint(&tenant_secret, &payload);
 
     // Audit row on the operator side. The tenant admin writes its own

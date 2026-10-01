@@ -523,15 +523,54 @@ mod into_response {
 
     impl IntoResponse for RustangoError {
         fn into_response(self) -> Response {
+            // Lockout and busy keep their own `429` / `503` + `Retry-After`.
+            #[cfg(feature = "tenancy")]
+            if let RustangoError::Auth(crate::tenancy::auth_backends::AuthError::Refused(r)) = self
+            {
+                return r.into_response();
+            }
             map_to_api_error(self).into_response()
         }
     }
 
+    /// A server fault: logged, and its text withheld from the body.
+    fn server_fault(status: StatusCode, err: &RustangoError) -> ApiError {
+        let code = if status == StatusCode::SERVICE_UNAVAILABLE {
+            "service_unavailable"
+        } else {
+            "internal_error"
+        };
+        ApiError::new(status, code, super::server_error_body("RustangoError", err))
+    }
+
     /// Pick an HTTP status and JSON body for an error: 422 for
-    /// validation, 401 for auth, 400 for bad input, 500 for the rest.
+    /// validation, 401 for auth, 400 for bad input, 5xx for server faults.
     fn map_to_api_error(err: RustangoError) -> ApiError {
         let msg = err.to_string();
         match err {
+            // Server faults first, so a client arm below never shows their text.
+            #[cfg(feature = "tenancy")]
+            RustangoError::Auth(
+                crate::tenancy::auth_backends::AuthError::Database(_)
+                | crate::tenancy::auth_backends::AuthError::Exec(_),
+            ) => server_fault(StatusCode::INTERNAL_SERVER_ERROR, &err),
+            #[cfg(feature = "auth_flows")]
+            RustangoError::AuthFlow(crate::auth_flows::AuthFlowError::Database(_)) => {
+                server_fault(StatusCode::INTERNAL_SERVER_ERROR, &err)
+            }
+            #[cfg(feature = "tenancy")]
+            RustangoError::BulkAction(crate::bulk_actions::BulkActionError::Database(_)) => {
+                server_fault(StatusCode::INTERNAL_SERVER_ERROR, &err)
+            }
+            #[cfg(feature = "passwords")]
+            RustangoError::Password(crate::passwords::PasswordError::Busy) => {
+                server_fault(StatusCode::SERVICE_UNAVAILABLE, &err)
+            }
+            #[cfg(feature = "api_keys")]
+            RustangoError::ApiKey(crate::api_keys::ApiKeyError::Busy) => {
+                server_fault(StatusCode::SERVICE_UNAVAILABLE, &err)
+            }
+
             // Validation: 422
             #[cfg(feature = "forms")]
             RustangoError::Forms(_) => ApiError::validation(msg),
@@ -543,26 +582,121 @@ mod into_response {
             // Auth: 401
             #[cfg(feature = "tenancy")]
             RustangoError::Auth(_) => ApiError::unauthorized(msg),
-            #[cfg(feature = "tenancy")]
-            RustangoError::JwtIssue(_) => ApiError::unauthorized(msg),
-            #[cfg(feature = "passwords")]
-            RustangoError::Password(_) => ApiError::unauthorized(msg),
-            #[cfg(feature = "api_keys")]
-            RustangoError::ApiKey(_) => ApiError::unauthorized(msg),
 
             // Bad input: 400
-            RustangoError::Env(_) => ApiError::bad_request(msg),
             #[cfg(feature = "tenancy")]
             RustangoError::BulkAction(_) => ApiError::bad_request(msg),
             #[cfg(feature = "admin")]
             RustangoError::IpFilter(_) => ApiError::bad_request(msg),
 
-            // Server-side: 500
-            other => ApiError::new(
+            // Server-side: 500. Hashing, JWT issue and env errors are the server's.
+            other => server_fault(StatusCode::INTERNAL_SERVER_ERROR, &other),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A refused login keeps its own status and `Retry-After`, not a 401.
+        #[cfg(feature = "tenancy")]
+        #[test]
+        fn a_refused_login_keeps_its_status_and_retry_after() {
+            use crate::login_throttle::LoginRefused;
+            for (refused, status, retry) in [
+                (
+                    LoginRefused::Throttled {
+                        retry_after_secs: 7,
+                    },
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "7",
+                ),
+                (LoginRefused::Busy, StatusCode::SERVICE_UNAVAILABLE, "1"),
+            ] {
+                let err: RustangoError =
+                    crate::tenancy::auth_backends::AuthError::Refused(refused).into();
+                let resp = err.into_response();
+                assert_eq!(resp.status(), status, "{refused:?}");
+                let got = resp.headers().get(axum::http::header::RETRY_AFTER);
+                assert_eq!(
+                    got.and_then(|v| v.to_str().ok()),
+                    Some(retry),
+                    "{refused:?}"
+                );
+            }
+        }
+
+        /// Server faults are 5xx and withhold their text (#1955).
+        #[test]
+        fn server_faults_are_5xx_and_opaque() {
+            const LEAK: &str = "pg-prod-01.internal:5432 STRIPE_SECRET_KEY";
+            let mut cases: Vec<(RustangoError, StatusCode)> = vec![(
+                crate::env::EnvError::Missing("STRIPE_SECRET_KEY".into()).into(),
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                super::server_error_body("RustangoError", &other),
-            ),
+            )];
+            #[cfg(feature = "tenancy")]
+            cases.extend([
+                (
+                    crate::tenancy::auth_backends::AuthError::Database(sqlx::Error::Protocol(
+                        LEAK.into(),
+                    ))
+                    .into(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (
+                    crate::tenancy::auth_backends::AuthError::Exec(crate::sql::ExecError::Driver(
+                        sqlx::Error::Protocol(LEAK.into()),
+                    ))
+                    .into(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (
+                    crate::bulk_actions::BulkActionError::Database(LEAK.into()).into(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (
+                    crate::tenancy::jwt_lifecycle::JwtIssueError::ReservedClaim(LEAK.into()).into(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+            ]);
+            #[cfg(feature = "auth_flows")]
+            cases.push((
+                crate::auth_flows::AuthFlowError::Database(LEAK.into()).into(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+            #[cfg(feature = "passwords")]
+            cases.extend([
+                (
+                    crate::passwords::PasswordError::Hash(LEAK.into()).into(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (
+                    crate::passwords::PasswordError::Busy.into(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                ),
+            ]);
+            #[cfg(feature = "api_keys")]
+            cases.extend([
+                (
+                    crate::api_keys::ApiKeyError::Hash(LEAK.into()).into(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (
+                    crate::api_keys::ApiKeyError::Busy.into(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                ),
+            ]);
+            let _g = crate::error::test_env::lock();
+            crate::error::test_env::with(crate::error::DISCLOSE_ENV, None, || {
+                for (err, want) in cases {
+                    let what = format!("{err:?}");
+                    let api = map_to_api_error(err);
+                    assert_eq!(api.status, want, "{what}");
+                    for marker in ["pg-prod-01", "5432", "STRIPE_SECRET_KEY"] {
+                        assert!(!api.message.contains(marker), "{what}: {}", api.message);
+                    }
+                }
+            });
         }
     }
 }
@@ -669,12 +803,12 @@ mod tests {
 
     #[cfg(all(feature = "admin", feature = "tenancy"))]
     #[test]
-    fn into_response_maps_jwt_to_401() {
+    fn into_response_maps_jwt_to_500() {
         use axum::response::IntoResponse;
         let jwt_err = crate::tenancy::jwt_lifecycle::JwtIssueError::ReservedClaim("sub".into());
         let e: RustangoError = jwt_err.into();
         let r = e.into_response();
-        assert_eq!(r.status(), axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     /// A driver error of the shape sqlx actually produces.

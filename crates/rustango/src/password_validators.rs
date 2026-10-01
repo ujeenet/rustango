@@ -268,6 +268,14 @@ impl PasswordValidator for MinimumLengthValidator {
     }
 }
 
+/// Shortest password the built-in change-password and operator forms accept.
+pub const BUILTIN_FORM_MIN_LENGTH: usize = 8;
+
+/// The one length rule (in characters) for every built-in password form (#1874).
+pub fn check_builtin_form_password(password: &str) -> Result<(), ValidationError> {
+    MinimumLengthValidator::new(BUILTIN_FORM_MIN_LENGTH).validate(password, &UserAttributes::new())
+}
+
 // ------------------------------------------------------------------ MaximumLengthValidator
 
 /// Reject passwords longer than `max_length` characters. Argon2 has

@@ -49,11 +49,7 @@ async fn start(state: &ConsoleState, op: &auth::Operator, slug: Option<String>) 
         match store::open_migrate_run(&state.registry, slug.as_deref(), Some(&op.username)).await {
             Ok(r) => r,
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("could not open a run: {e}"),
-                )
-                    .into_response();
+                return super::server_error("could not open a run", &e);
             }
         };
     let run_id = run.id.get().copied().unwrap_or_default();

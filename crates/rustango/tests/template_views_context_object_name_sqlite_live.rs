@@ -148,10 +148,8 @@ async fn detail_view_lookup_field_unknown_column_returns_500() {
     let app = view.router("/posts", tera, pool);
     let (status, body) = body_of(app, "/posts/anything").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(
-        body.contains("not_a_real_field"),
-        "error body should name the offending field, got: {body}"
-    );
+    // The field name goes to the log; a public 500 body stays opaque (#1955).
+    assert_eq!(body, "internal server error");
 }
 
 #[tokio::test]

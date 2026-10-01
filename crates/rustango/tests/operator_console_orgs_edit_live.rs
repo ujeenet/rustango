@@ -84,6 +84,7 @@ async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
         active: true,
         created_at: now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert(&pool).await.unwrap();
 

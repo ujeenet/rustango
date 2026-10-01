@@ -942,7 +942,7 @@ pub struct InlineApplyOutcome {
 fn child_rows(query: SelectQuery, parts: Option<&Parts>) -> SelectQuery {
     match parts {
         Some(parts) => SelectQuery {
-            where_clause: RowScope::of(query.model.table, parts).constrain(query.where_clause),
+            where_clause: RowScope::of(query.model, parts).constrain(query.where_clause),
             ..query
         },
         None => query,
@@ -1005,7 +1005,7 @@ impl InlineTarget {
             pk,
             writable,
             scope,
-            rows: RowScope::of(child.table, parts),
+            rows: RowScope::of(child, parts),
         })
     }
 

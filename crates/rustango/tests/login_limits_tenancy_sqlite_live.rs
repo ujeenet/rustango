@@ -235,6 +235,7 @@ impl Env {
             active: true,
             created_at: chrono::Utc::now(),
             password_changed_at: None,
+            sessions_revoked_at: None,
         };
         op.insert_pool(&self.registry).await.expect("seed operator");
     }

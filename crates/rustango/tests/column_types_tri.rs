@@ -43,6 +43,16 @@ pub struct Session {
     pub label: String,
 }
 
+/// A DB-generated UUID PK; its DEFAULT must exist on every backend (#1987).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "coltypes_voucher", app = "column_types_tri")]
+pub struct Voucher {
+    #[rustango(auto_uuid)]
+    pub id: Auto<Uuid>,
+    #[rustango(max_length = 32)]
+    pub label: String,
+}
+
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "coltypes_key",
@@ -139,6 +149,23 @@ async fn auto_uuid_pk_round_trips(pool: &Pool) {
     );
 }
 
+async fn db_generated_uuid_pk_fills_on_every_backend(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Voucher>(pool).await;
+    let d = pool.dialect();
+    let insert = format!(
+        "INSERT INTO {} ({}) VALUES ('a'), ('b')",
+        d.quote_ident(Voucher::SCHEMA.table),
+        d.quote_ident("label")
+    );
+    rustango::sql::raw_execute_pool(pool, &insert, Vec::new())
+        .await
+        .expect("the DB fills the PK");
+    let rows: Vec<Voucher> = Voucher::objects().fetch(pool).await.expect("fetch");
+    let ids: std::collections::HashSet<Uuid> =
+        rows.iter().filter_map(|v| v.id.get().copied()).collect();
+    assert_eq!(ids.len(), 2, "{}: {ids:?}", d.name());
+}
+
 async fn uuid_fk_loads_through_select_related(pool: &Pool) {
     seed_tokens(pool).await;
     let mut grant = Grant {
@@ -231,6 +258,7 @@ tri_dialect_test! {
         uuid_cells_decode_as_json,
         uuid_columns_pluck,
         auto_uuid_pk_round_trips,
+        db_generated_uuid_pk_fills_on_every_backend,
         audit_diff_skips_an_unchanged_uuid,
     ],
 }

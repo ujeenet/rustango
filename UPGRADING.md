@@ -150,6 +150,84 @@ untouched.
 
 ## Unreleased
 
+## 0.59.14
+
+### `RustangoError` status changes (#1955)
+
+DB errors inside `Auth`/`AuthFlow`/`BulkAction`, `Env`, `JwtIssue` and hashing errors are now `500`; `Busy` is `503`.
+Their message is withheld unless `RUSTANGO_DISCLOSE_ERRORS` is set.
+
+### `/ready` drops each check's `error` field (#1840)
+
+Call `HealthRouter::show_errors()` to keep it on an endpoint only operators reach.
+
+### `CompressionLayer` skips streams and `206` (#1954)
+
+A body with no exact size hint (`Body::from_stream`) is now sent uncompressed instead of buffered.
+
+### ViewSet form bodies are validated (#1993)
+
+A form-urlencoded write that broke a serializer rule now gets the same `422` as JSON.
+
+### ViewSet ignores a renamed field's model column on write (#1994)
+
+With `#[serializer(source = "body")] content`, send `content`; a `body` key is now dropped.
+
+### A UUID-default column added to a filled SQLite table is nullable (#1987)
+
+SQLite can't add a `gen_random_uuid()` DEFAULT to a table with rows, so the column is backfilled and left nullable with no DEFAULT;
+the ORM binds the value on insert. MySQL's DEFAULT `UUID()` gives v1 UUIDs, not v4.
+
+### SQLite `now()` columns added to a filled table get a fixed default (#2017)
+
+SQLite can't add a `now()` DEFAULT to a table with rows, so the column's DEFAULT is the time of the migration.
+The ORM binds `auto_now_add` / `auto_now` on insert; raw `INSERT`s that omit the column get that fixed time.
+
+### `migrate` fails when the system chain can't be generated (#2014)
+
+`migrate`, `migrate-registry` and `migrate-tenants` now return the generation error instead of applying a stale
+`system/migrations/` chain. A read-only image must ship an up-to-date `system/migrations/`.
+
+### Tenant migrate verbs fail on a failed tenant (#1844)
+
+`migrate-tenants`, the combined `migrate` and `migrate --fake --all-tenants` return an error (non-zero exit)
+when any tenant failed, after printing the full report. Deploy scripts that relied on exit 0 now stop.
+
+### Tenant admin change-password needs 8 characters (#1874)
+
+A tenant user can no longer set a new password shorter than 8 characters (counted as characters, not bytes).
+
+### Admin hides soft-deleted rows (#1918)
+
+A `#[rustango(soft_delete)]` row no longer shows in the admin once deleted; its detail page is a 404.
+Use the list's "Show deleted rows" link (`?trashed=1`) to see and restore them. `trashed` is now a reserved list param.
+The trash list offers only `restore_selected`; a custom `list.html` posts `trashed=1` with the action to return there.
+
+### Admin facet and date counts follow the filters (#2004)
+
+Facet and date-strip counts now match the filtered list, not the whole table. The year strip lists at most
+the newest 200 years (`MAX_YEAR_BUCKETS`). `values()`/`aggregate()` dicts on PG/MySQL return `SqlValue::Date`/`DateTime`
+where they gave `Null`; code matching on `Null` or `String` for those cells must match the new variants.
+
+### Admin pre-signals and per-row bulk-action signals fire (#1928)
+
+Receivers on `admin_pre_save` / `admin_pre_delete` now run. `delete_selected` sends delete signals per row;
+`restore_selected` and custom actions send `admin_pre_save`/`admin_post_save` with `change = true` per row.
+A refused action, or `restore_selected` on a model without soft delete, sends none.
+
+### Natural PKs are form input on create (#1725)
+
+`CreateView` and `ModelForm::new` now render, require and insert a non-`Auto` PK field. A form that relied on it
+being dropped must `.exclude` it. New: `core::WriteKind` and `FieldSchema::accepts_input` / `is_rust_side_uuid`.
+
+### Logout ends a user's sessions on every device (#1855)
+
+`User`, `Operator` and `AdminUser` gain a nullable `sessions_revoked_at`; run `migrate` (struct literals need the field).
+Cookies are stateless, so logout ends all of that user's browser sessions, not only this one. Call
+`member_auth::logout(pool, &user)` instead of `clear_cookie()` alone. An impersonation logout leaves the operator signed in.
+`HandoffPayload` gains `iat` (struct literals need it). `authenticate_user` now reads through the ORM, so a tenant
+`rustango_users` missing a column errors instead of filling a default.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

@@ -5,8 +5,8 @@
 //! no server-side session table for v1. Trade-offs:
 //!
 //! * **No revocation list** — a cookie is valid until `exp`, unless the
-//!   operator is deactivated or changes password (the console checks
-//!   both on every request).
+//!   operator is deactivated, changes password or logs out. Logout stamps
+//!   `sessions_revoked_at`, which ends the operator's sessions on every device.
 //! * **Secret rotation invalidates all cookies** — a server restart
 //!   with auto-generated secret signs everyone out. With
 //!   `RUSTANGO_SESSION_SECRET` set in env, sessions survive restarts.
@@ -32,7 +32,7 @@ pub use crate::session::{PasswordFingerprint, SessionSecret, SessionSecretError}
 // `sign` re-exported at crate-internal visibility so existing
 // callers (`tenant_console`, `impersonation_handoff`) keep working
 // after the v0.45 move to `crate::session`.
-pub(crate) use crate::session::sign;
+pub(crate) use crate::session::{session_survives, sign};
 
 /// Default cookie name. Visible in browser devtools — namespaced so
 /// it doesn't collide with tenant cookies.
@@ -134,20 +134,6 @@ pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, Ses
 
 // `sign` moved to `crate::session` in v0.45 (#253) — `use` above.
 
-/// `true` when a session minted with `pwf` at `iat` is still valid for
-/// a principal whose password is now `password_hash`. The fingerprint
-/// is exact; the timestamp keeps a bare `password_changed_at` bump working.
-#[must_use]
-pub(crate) fn survives_password_change(
-    secret: &SessionSecret,
-    pwf: &PasswordFingerprint,
-    iat: i64,
-    password_hash: &str,
-    password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> bool {
-    pwf.matches(secret, password_hash) && password_changed_at.is_none_or(|ts| iat >= ts.timestamp())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,26 +196,29 @@ mod tests {
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
         let now = chrono::Utc::now();
         let pwf = PasswordFingerprint::of(&secret, "$old");
-        assert!(survives_password_change(
+        assert!(session_survives(
             &secret,
             &pwf,
             now.timestamp(),
             "$old",
-            Some(now)
+            Some(now),
+            None
         ));
-        assert!(!survives_password_change(
+        assert!(!session_survives(
             &secret,
             &pwf,
             now.timestamp(),
             "$new",
-            Some(now)
+            Some(now),
+            None
         ));
         // A cookie from before this field decodes empty and never matches.
-        assert!(!survives_password_change(
+        assert!(!session_survives(
             &secret,
             &fp(),
             now.timestamp(),
             "$old",
+            None,
             None
         ));
     }
@@ -241,14 +230,15 @@ mod tests {
         let pwf = PasswordFingerprint::of(&secret, "$h");
         let iat = 1_700_000_000;
         let at = |secs| chrono::DateTime::from_timestamp(secs, 0);
-        assert!(survives_password_change(&secret, &pwf, iat, "$h", None));
-        assert!(survives_password_change(&secret, &pwf, iat, "$h", at(iat)));
-        assert!(!survives_password_change(
+        assert!(session_survives(&secret, &pwf, iat, "$h", None, None));
+        assert!(session_survives(&secret, &pwf, iat, "$h", at(iat), None));
+        assert!(!session_survives(
             &secret,
             &pwf,
             iat,
             "$h",
-            at(iat + 1)
+            at(iat + 1),
+            None
         ));
     }
 }
