@@ -11,7 +11,7 @@ use rustango::core::{
     Assignment, Filter, Model as _, Op, QueryError, SqlValue, UpdateQuery, WhereExpr,
 };
 use rustango::forms::{ModelForm, ModelFormError};
-use rustango::sql::{Auto, ExecError, FetcherPool as _, Pool};
+use rustango::sql::{Auto, ExecError, FetcherPool as _, Pool, UpdaterPool as _};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
