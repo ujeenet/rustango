@@ -1,4 +1,4 @@
-//! Shared test fixtures, built once per test binary.
+//! Shared test fixtures, built once per test process.
 //!
 //! Build a fixture once and reuse it across the tests in a file. The
 //! [`setup_test_data!`] and [`setup_test_data_async!`] macros wrap a
@@ -27,9 +27,9 @@
 //!
 //! ## What to watch for
 //!
-//! - The fixture lives as long as the test binary. `cargo test` runs
-//!   each integration-test file in its own process, so tests in one
-//!   file share a fixture and tests in another do not.
+//! - The fixture lives as long as the process. `cargo test` runs a
+//!   test file in one process, so its tests share the fixture;
+//!   `cargo nextest` runs each test in its own, so each builds it.
 //! - Treat a fixture as read only. Nothing rolls back a change one
 //!   test makes to it, so the next test would see the change. Wrap
 //!   tests that write in [`crate::test_db::with_rollback`].
@@ -51,7 +51,7 @@
 /// }
 /// ```
 ///
-/// The body runs at most once per test binary. Later calls return a
+/// The body runs at most once per process. Later calls return a
 /// `&'static` reference to the same value.
 #[macro_export]
 macro_rules! setup_test_data {

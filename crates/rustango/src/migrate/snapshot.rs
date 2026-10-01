@@ -204,13 +204,6 @@ pub struct RelationSnapshot {
     pub on_delete: Option<String>,
 }
 
-/// Did the framework register this model, rather than a downstream
-/// crate? Decides which model owns a `rustango_*` table when a project
-/// overrides one. See [`SchemaSnapshot::from_registry_system_for_scope`].
-fn is_framework_model(e: &ModelEntry) -> bool {
-    e.module_path == "rustango" || e.module_path.starts_with("rustango::")
-}
-
 impl SchemaSnapshot {
     /// Capture every model registered in the binary's `inventory`.
     ///
@@ -307,7 +300,7 @@ impl SchemaSnapshot {
                 }
                 std::collections::btree_map::Entry::Occupied(mut slot) => {
                     let held = *slot.get();
-                    match (is_framework_model(held), is_framework_model(e)) {
+                    match (held.is_framework(), e.is_framework()) {
                         // Downstream model overrides the framework's own.
                         (true, false) => {
                             tracing::warn!(

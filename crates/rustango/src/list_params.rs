@@ -65,9 +65,8 @@ pub fn is_reserved_list_key(key: &str) -> bool {
 /// `-` means descending.
 ///
 /// A token is dropped, without error, when it is not in `allowlist`
-/// or when [`ModelSchema::field`] does not know it. Keep the
-/// allowlist non-empty so a client cannot sort by a column such as
-/// `password_hash`; an empty allowlist permits every known field.
+/// or when [`ModelSchema::field`] does not know it. An empty allowlist
+/// permits nothing, so a client cannot sort by `password_hash` (#1996).
 ///
 /// The result is empty when nothing survives, and the caller should
 /// then fall back to its default ordering.
@@ -85,7 +84,7 @@ pub fn parse_ordering(
             } else {
                 (part, false)
             };
-            if !allowlist.is_empty() && !allowlist.iter().any(|f| f == field_name) {
+            if !allowlist.iter().any(|f| f == field_name) {
                 return None;
             }
             schema
@@ -183,6 +182,22 @@ pub fn page_offset(page: i64, page_size: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty allow-list sorts on nothing, not on every column (#1996).
+    #[test]
+    fn parse_ordering_with_an_empty_allowlist_is_empty() {
+        static FIELDS: &[crate::core::FieldSchema] = &[crate::core::FieldSchema::new(
+            "secret",
+            "secret",
+            crate::core::FieldType::String,
+        )];
+        let mut schema = ModelSchema::new("lp_t", "lp_t");
+        schema.fields = FIELDS;
+        let schema: &'static ModelSchema = Box::leak(Box::new(schema));
+        assert!(parse_ordering("secret,-secret", &[], schema).is_empty());
+        let allowed = parse_ordering("-secret", &["secret".to_owned()], schema);
+        assert_eq!(allowed.len(), 1);
+    }
 
     #[test]
     fn page_offset_saturates_instead_of_wrapping() {

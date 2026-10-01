@@ -137,15 +137,14 @@ async fn login_handler(
     // 5-minute window — if the user takes longer to log in we issue a fresh flow.
     let cookie =
         format!("{FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300{secure}");
+    // Provider config can yield bytes a header rejects: a 500, not a panic (#1541).
+    let (Ok(cookie), Ok(location)) = (cookie.parse(), auth_url.parse()) else {
+        tracing::error!(target: "rustango::error", provider = %provider_name, "oauth2 login: authorize URL or cookie is not a valid header value");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::SET_COOKIE,
-        cookie.parse().expect("valid cookie header"),
-    );
-    headers.insert(
-        header::LOCATION,
-        auth_url.parse().expect("valid location header"),
-    );
+    headers.insert(header::SET_COOKIE, cookie);
+    headers.insert(header::LOCATION, location);
     (StatusCode::SEE_OTHER, headers).into_response()
 }
 

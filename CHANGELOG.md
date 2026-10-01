@@ -40,6 +40,120 @@ A confirmed TOTP row that is not base32 refuses the login instead of skipping 2F
 `AdminTotp` and `Signer` redact secrets in `Debug`; 10-digit HOTP no longer overflows; the hasher
 chain rehashes argon2id below today's cost (`PasswordHasher::needs_rehash`, `passwords::needs_rehash`).
 
+## [0.59.16] — 2026-10-01
+
+### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
+
+**Breaking:** under `with_user_perms`, a `register_admin_view!` write route now needs
+`{table}.change` (or its `perm = "…"`), else 403. The admin and `CreateView`/`UpdateView`
+percent-encode PKs in redirects, so a CR/LF no longer panics; a `/` in a `success_url`
+value becomes `%2F`.
+
+### Security — admin inlines hide secret fields (#1861)
+
+A child's `password`-widget field shows only set/not set on the detail page, renders empty on edit, and an empty one keeps the stored value.
+
+### Fixed — admin inlines: view hook per row, `max_num` on save, natural-PK inserts (#1717)
+
+Rows the child's `view` hook refuses are not shown; a save that adds rows past `max_num` is refused; a slot past `INITIAL_FORMS` inserts, so a typed natural PK works.
+
+### Security — admin list URL filters only on shown columns (#2031)
+
+`?<field>=` applies only to `list_filter`, displayed, FK or inline-parent columns, and never to a secret one, so a URL cannot probe a hidden value.
+
+### Fixed — the NULL facet lists the NULL rows (#2006)
+
+It links `?<field>__isnull=1`, which the list reads as `IS NULL`; `?<field>=` showed every row.
+
+### Security — FK facet labels respect the target's queryset hooks (#2029)
+
+A target row the hooks hide is shown by its key, not its display value.
+
+### Fixed — admin bulk actions cap the selected keys (#2049)
+
+More than 10,000 `_selected` keys is a 400, and FK facet labels load in chunks, so one `IN` list stays under every dialect's bind cap.
+
+### Fixed — the ViewSet list follows the model's `default_order` (#2047)
+
+With no `.ordering(..)`, the list uses `default_order`, as ListView and the admin do; the PK always breaks ties.
+
+### Fixed — the ViewSet honours `#[rustango(soft_delete)]` (#1998)
+
+`DELETE` stamps the soft-delete column instead of deleting the row, and list, retrieve, update and destroy hide soft-deleted rows.
+
+### Fixed — a duplicate unique value on a `CreateView` is a form error (#2033)
+
+The form re-renders with `422` and an error on the taken field (`__all__` when no single field is to blame), not a `500`, on `router` and `tenant_router`.
+
+### Security — an empty `?ordering=` allow-list permits nothing (#1996)
+
+`list_params::parse_ordering` with an empty allow-list drops every token, so a serializer that renders no model field no longer makes every column a sort key.
+`ViewSet::ordering_fields(&[])` makes nothing sortable.
+
+### Security — ViewSet bulk create is capped; the throttle map is bounded (#1999)
+
+A bulk create takes at most `max_bulk_create(n)` rows (default 1000, else `413`) and spends one `create` throttle unit per row.
+A rejected request charges no units; a bulk larger than the `create` throttle's `max` is a `413`.
+The throttle store sweeps ended windows once it holds 100k keys, so per-client keys no longer grow forever.
+
+### Security — ViewSet `QUERY` requests are throttled (#1997)
+
+`QUERY` spends the `list` throttle, the same budget as `GET`.
+
+### Fixed — a panicking handler is a logged 500, not a dropped connection (#1541)
+
+`Cli` and `server::Builder` catch handler panics: an opaque `text/plain` 500 with the request id, CORS and security headers, logged under `rustango::error`. The oauth2 login no longer panics on a bad header value.
+
+### Fixed — `EtagLayer` no longer blanks large or streamed bodies; method override answers 413 (#1866)
+
+`EtagLayer::default()` caps at 4 MiB like `new()`; a body over the cap or of unknown size passes through untouched. An over-limit `_method` form gets `413`, not an empty body.
+
+### Fixed — CORS sends `Vary: Origin` on refused origins and in any-origin mode (#1867)
+
+Only the always-`*` policy (any origin with credentials) leaves it out.
+
+### Fixed — flash cookie size, `q=0`, WebSocket size cap, event panics, encoded redact keys (#1957)
+
+Flash messages drop the oldest past 4000 bytes; `negotiate` honours `q=0` and range specificity; `WsHub::upgrade` caps frames before buffering.
+A panicking event subscriber no longer skips the rest; `pass%77ord=` is redacted in logs.
+
+### Fixed — tenant pool span leak, fragment-key collisions, SSE lag example (#1884)
+
+The pool-init span no longer stays entered across `.await`; fragment keys are length-prefixed; the SSE example keeps lagged clients.
+
+### Fixed — `TestClient` and `LiveServer` behave like a browser (#1958)
+
+The jar keeps `Path` and honours `Max-Age`/`Expires`; requests send `Host: testserver`, a same-origin `Origin` and a `127.0.0.1` peer; 307/308 keep the method; `logout()` reaches the server with the session and CSRF token.
+`LiveServer` serves with `ConnectInfo`; `TestResponse::header_all` returns repeated headers.
+301/302 rewrite only `POST`, `?query` and `../` locations resolve; `X-Forwarded-Proto: https` gives an `https://` Origin.
+
+### Fixed — test DB helpers work on MySQL and after a panic; fixtures load typed and atomic (#1959)
+
+`truncate_tables` runs in one transaction in any FK order on all three backends; `with_truncate_after` clears even when the body panics.
+A `Fixture` load types values from the table's model, rolls back on error and resets the PG sequence; `create_tables` is re-runnable.
+A custom user model sharing `rustango_users` with the built-in `User` is picked by its fields, not link order.
+
+### Security — page cache never stores or serves a page for an unresolved tenant (#2045)
+
+`CachePageLayer` bypasses the cache when no tenant resolves, so a route varying on an input the resolver ignored cannot leak one tenant's page to another.
+
+### Fixed — tenancy lifecycle: PG permission seeding, port-routed impersonation, webhook race, stale brand files (#1933)
+
+PG tenants seed `auth.access_admin` and extra permissions; impersonation lands on a port-routed org's own port; a webhook delivery that loses the idempotency race gets the existing run (200), not a 500; re-upload and purge delete old brand files.
+A logo of another type is removed only after the new path is saved (new `branding::prune_brand_asset`); CLI `purge-tenant` reaches only the default brand store and says so.
+
+### Fixed — audit: a no-op save writes no `update` row; a failed pre-read fails the save (#1907)
+
+On MySQL/SQLite the UPDATE could commit with no audit row when the BEFORE read failed.
+
+### Fixed — `DynamicForm`: multi-select keeps every value; lengths count characters; NaN refused; required checkbox enforced (#1895)
+
+New `bind_pairs` takes repeated keys from `<select multiple>`; `NaN`/`inf` no longer pass float bounds. A checkbox stays optional unless its schema says `"required": true`.
+
+### Fixed — `without_signals` silences `m2m_changed`; a repeat soft delete keeps its stamp; unread `Settings.secret_key` removed (#1929)
+
+A second `soft_delete` matches no row, so the prune clock and audit log stay put; the admin delete view and bulk delete/restore skip a row someone else already marked. The cookbook no longer says `delete()` soft-deletes.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

@@ -1019,7 +1019,7 @@ retention_days = 30
 }
 
 /// `config/prod_settings.toml` — production. Strict defaults; expects
-/// real values (DATABASE_URL, secret_key, etc.) supplied via env
+/// real values (DATABASE_URL, RUSTANGO_SESSION_SECRET, etc.) supplied via env
 /// vars or out-of-band secret management. The TOML purposefully
 /// leaves the database url commented — operators set `DATABASE_URL`,
 /// which is the variable every pool actually reads.

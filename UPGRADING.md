@@ -178,6 +178,100 @@ A cookie logout now also ends that user's JWT refresh chains; clients must log i
 It returned `Ok(None)` (no second factor); it now returns `Err`. `Debug` of `TotpSecret`,
 `AdminTotp` and `Signer` no longer prints the secret.
 
+## 0.59.16
+
+### Custom admin views need `change` for writes
+
+**Breaking:** under `with_user_perms`, grant `{table}.change`, or declare `perm = "…"` on
+`register_admin_view!`, for POST/PUT/PATCH/DELETE views. Without it only a declared `perm` is checked.
+`AdminCustomView` gains a `perm` field; struct literals must set it.
+
+### Admin list URL filters are allow-listed
+
+`?<field>=` is ignored unless the field is in `list_filter` or `list_display`, an FK, or an inline's parent column (#2031). Add the field to `list_filter` to keep a bookmarked filter.
+
+### `success_url` placeholders are percent-encoded
+
+`{pk}` and `{column}` values in a `CreateView`/`UpdateView` `success_url` are encoded as one path
+segment, so a `/` in the value becomes `%2F` (#1862).
+
+### Admin inlines enforce `max_num` and use `INITIAL_FORMS`
+
+A save that adds inline rows past `max_num` re-renders with an error; slots past `INITIAL_FORMS` are inserts (#1717).
+
+### The ViewSet list follows the model's `default_order` (#2047)
+
+With no `.ordering(..)` the list uses `default_order`, then the PK.
+
+### ViewSet `DELETE` soft-deletes a `#[rustango(soft_delete)]` model (#1998)
+
+It stamps the column; soft-deleted rows then read as `404` and leave the list.
+
+### `CreateView` answers a duplicate unique value with `422` and the form (#2033)
+
+A template must render `form.errors` (`__all__` for a row-level error) to show it.
+
+### `list_params::parse_ordering` with an empty allow-list sorts on nothing (#1996)
+
+Pass the sortable names explicitly; empty no longer means every field.
+`ViewSet::ordering_fields(&[])` now disables `?ordering=` instead of allowing the rendered fields.
+
+### ViewSet bulk create takes at most 1000 rows (#1999)
+
+More is a `413` (raise with `max_bulk_create(n)`); each row spends one `create` throttle unit.
+A bulk larger than the `create` throttle's `max` is a `413`; a throttled request no longer counts.
+
+### ViewSet `QUERY` shares the `list` throttle with `GET` (#1997)
+
+A client that sends both now spends one budget, not two.
+
+### Handler panics are caught (#1541)
+
+`Cli` and `server::Builder` turn a panic into a `text/plain` 500 with body `internal server error`, carrying CORS and the security headers; a panic hook you rely on still runs. A panic inside a streaming response body is not caught.
+
+### `EtagLayer::default()` caps at 4 MiB; streams are not tagged (#1866)
+
+The derived default had no cap. A body with no size hint (stream, SSE) or over the cap now passes through without an `ETag`.
+`MethodOverrideLayer` answers `413` to a form over `body_limit` instead of forwarding an empty POST.
+
+### CORS adds `Vary: Origin` more often (#1867)
+
+Refused origins and any-origin mode now send it, so shared caches key on `Origin`.
+A preflight that echoes the requested headers also varies on `Access-Control-Request-Headers` and `-Method`.
+
+### `negotiate` honours `q=0` and specificity; flash cookies are byte-capped (#1957)
+
+`negotiate` returns `None` for a type the client refused with `q=0`; a NaN or infinite q counts as the default. `messages::push` drops the oldest messages past `MAX_COOKIE_BYTES`, and truncates a newest message that alone is too long.
+Use `WsHub::upgrade(ws)` instead of `ws.on_upgrade(.. ws_handler ..)` so `max_message_bytes` applies before buffering.
+
+### Template fragment keys change (#1884)
+
+`make_template_fragment_key` hashes length-prefixed parts; cached fragments miss once after upgrade.
+
+### `TestClient` acts like a browser (#1958)
+
+`logout(Some(path))` no longer clears the jar first; only the server's `Set-Cookie` removes cookies. Requests now carry `Host: testserver`, `Origin` on unsafe methods and a `127.0.0.1` `ConnectInfo`.
+An empty `Set-Cookie` value is stored, not deleted; `TestResponse` has a new `header_map` field, so struct literals need it.
+Redirects follow Fetch: 301/302 turn only `POST` into `GET` (PUT/DELETE repeat); `Origin` is `https://` when the test sends `X-Forwarded-Proto: https`.
+
+### `truncate_tables` and `Fixture` loads are one transaction (#1959)
+
+A failing table or row rolls back the whole call. Fixture keys for a model table must be its fields, and values are typed from them.
+With two models on one table, the one whose fields cover the keys wins, then the project's own; a tie is an error.
+
+### Page cache skips requests with no resolved tenant (#2045)
+
+Apex or marketing routes that resolve no tenant are no longer cached. Set `CachePageLayer::tenant_agnostic(true)` on routes that are the same for everyone.
+
+### `DynamicForm` enforces required checkboxes (#1895)
+
+A `boolean` field marked `"required": true` (or `required: true` in Rust) must now be ticked. Checkboxes without it stay optional.
+
+### `Settings.secret_key` removed; repeat soft delete returns 0 (#1929)
+
+The field was never read; sessions use `RUSTANGO_SESSION_SECRET`. A key left in TOML is ignored.
+`soft_delete` on a deleted row, and `restore` on a live one, now return `0`.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

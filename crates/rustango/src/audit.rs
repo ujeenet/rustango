@@ -106,6 +106,28 @@ pub struct PendingEntry {
 }
 
 impl PendingEntry {
+    /// An `Update` entry holding the field diff, or `None` when nothing
+    /// changed, so a no-op save writes no audit row (#1907).
+    #[must_use]
+    pub fn update_diff(
+        entity_table: &'static str,
+        entity_pk: String,
+        before: &[(&str, Value)],
+        after: &[(&str, Value)],
+    ) -> Option<Self> {
+        let changes = diff_changes(before, after);
+        if changes.as_object().is_some_and(Map::is_empty) {
+            return None;
+        }
+        Some(Self {
+            entity_table,
+            entity_pk,
+            operation: AuditOp::Update,
+            source: current_source(),
+            changes,
+        })
+    }
+
     /// Replace `column`'s recorded value, only if the column is tracked.
     pub fn set_tracked(&mut self, column: &str, value: Value) {
         if let Some(slot) = self.changes.get_mut(column) {
@@ -1806,10 +1828,10 @@ where
             let pk_q = sqlx::query(&select_sql);
             let pk_q = crate::sql::bind_query(pk_q, pk_value);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
-                match pk_q.fetch_optional(&mut *tx).await {
-                    Ok(Some(row)) => Some(decode_before_pg(&row)),
-                    _ => None,
-                };
+                // A failed pre-read must not let the UPDATE commit unaudited.
+                pk_q.fetch_optional(&mut *tx)
+                    .await?
+                    .map(|row| decode_before_pg(&row));
             let mut wrapped = crate::sql::PoolTx::Postgres(tx);
             let _affected = finish_update_with_audit_diff(
                 &mut wrapped,
@@ -1833,10 +1855,10 @@ where
             let pk_q = sqlx::query(&select_sql);
             let pk_q = crate::sql::bind_query_my(pk_q, pk_value);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
-                match pk_q.fetch_optional(&mut *tx).await {
-                    Ok(Some(row)) => Some(decode_before_my(&row)),
-                    _ => None,
-                };
+                // A failed pre-read must not let the UPDATE commit unaudited.
+                pk_q.fetch_optional(&mut *tx)
+                    .await?
+                    .map(|row| decode_before_my(&row));
             let mut wrapped = crate::sql::PoolTx::Mysql(tx);
             let _affected = finish_update_with_audit_diff(
                 &mut wrapped,
@@ -1860,10 +1882,10 @@ where
             let pk_q = sqlx::query(&select_sql);
             let pk_q = crate::sql::bind_query_sqlite(pk_q, pk_value);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
-                match pk_q.fetch_optional(&mut *tx).await {
-                    Ok(Some(row)) => Some(decode_before_sqlite(&row)),
-                    _ => None,
-                };
+                // A failed pre-read must not let the UPDATE commit unaudited.
+                pk_q.fetch_optional(&mut *tx)
+                    .await?
+                    .map(|row| decode_before_sqlite(&row));
             let mut wrapped = crate::sql::PoolTx::Sqlite(tx);
             let _affected = finish_update_with_audit_diff(
                 &mut wrapped,
@@ -1892,14 +1914,10 @@ async fn finish_update_with_audit_diff(
 ) -> Result<u64, crate::sql::ExecError> {
     // Return rows-affected: 0 means the PK no longer exists.
     let _affected = crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params.clone()).await?;
-    if let Some(before) = before_pairs {
-        let entry = PendingEntry {
-            entity_table,
-            entity_pk: entity_pk.to_owned(),
-            operation: AuditOp::Update,
-            source: current_source(),
-            changes: diff_changes(&before, after_pairs),
-        };
+    let entry = before_pairs.and_then(|before| {
+        PendingEntry::update_diff(entity_table, entity_pk.to_owned(), &before, after_pairs)
+    });
+    if let Some(entry) = entry {
         emit_one_tx(tx, &entry).await?;
     }
     Ok(_affected)
