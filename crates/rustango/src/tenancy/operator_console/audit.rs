@@ -25,8 +25,7 @@
 
 use axum::body::Body;
 use axum::extract::{Query, State};
-use axum::http::{Response, StatusCode};
-use axum::response::IntoResponse;
+use axum::http::Response;
 use axum::Extension;
 use serde::Deserialize;
 use tera::Context;
@@ -63,11 +62,7 @@ pub(super) async fn audit_list(
     let total = match crate::audit::count(&state.registry, &filter).await {
         Ok(n) => n,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not count the audit log: {e}"),
-            )
-                .into_response();
+            return super::server_error("could not count the audit log", &e);
         }
     };
     let paged = Paged::from_total(total, q.page);
@@ -76,11 +71,7 @@ pub(super) async fn audit_list(
         match crate::audit::list(&state.registry, &filter, paged.limit, paged.offset).await {
             Ok(e) => e,
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("could not read the audit log: {e}"),
-                )
-                    .into_response();
+                return super::server_error("could not read the audit log", &e);
             }
         };
 

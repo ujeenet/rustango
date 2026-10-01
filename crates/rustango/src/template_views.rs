@@ -2962,9 +2962,10 @@ fn render(tera: &Tera, name: &str, ctx: &Context) -> Response {
     }
 }
 
+/// A logged `500`; the body withholds `msg`, which may carry driver text (#1955).
 fn template_error(msg: &str) -> Response {
-    tracing::warn!(target: "rustango::template_views", error = %msg, "template view error");
-    (StatusCode::INTERNAL_SERVER_ERROR, msg.to_owned()).into_response()
+    let body = crate::error::server_error_body("rustango::template_views", &msg);
+    (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
 }
 
 // ============================================================== TemplateView

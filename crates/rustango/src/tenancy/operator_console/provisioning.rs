@@ -407,21 +407,13 @@ pub(super) async fn provision_runs_index(
         {
             Ok(p) => p,
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("could not count the runs: {e}"),
-                )
-                    .into_response();
+                return super::server_error("could not count the runs", &e);
             }
         };
     let runs = match store::recent_runs(&state.registry, paged.limit, paged.offset).await {
         Ok(r) => r,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not read the run list: {e}"),
-            )
-                .into_response();
+            return super::server_error("could not read the run list", &e);
         }
     };
 
@@ -494,7 +486,7 @@ pub(super) async fn provision_run_view(
 ) -> Response<Body> {
     let Some(run) = (match store::run_by_id(&state.registry, run_id).await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return super::server_error("operator_console", &e),
     }) else {
         return (StatusCode::NOT_FOUND, format!("no run {run_id}")).into_response();
     };

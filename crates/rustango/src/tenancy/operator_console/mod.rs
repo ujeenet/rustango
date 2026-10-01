@@ -401,6 +401,12 @@ pub fn router_with_brand_storage(
 
 /// Handoff URL used by the constructors that do not take one.
 /// Same value as [`super::routes::RouteConfig`]'s default.
+/// A logged `500` whose body withholds the cause (#1955).
+fn server_error(context: &str, e: &dyn std::fmt::Display) -> Response<Body> {
+    let body = crate::error::server_error_body(context, e);
+    (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+}
+
 fn default_tenant_handoff_url() -> String {
     super::routes::RouteConfig::default().impersonation_handoff_url
 }
@@ -896,17 +902,10 @@ fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body>
                 detail.push_str(&s.to_string());
                 source = s.source();
             }
-            tracing::error!(
-                target: "rustango::tenancy::operator_console",
-                template,
-                error = %detail,
-                "operator console template failed to render"
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not render {template}: {detail}"),
+            server_error(
+                "operator_console::render",
+                &format!("could not render {template}: {detail}"),
             )
-                .into_response()
         }
     }
 }
@@ -1411,7 +1410,7 @@ async fn orgs_list(
     use crate::core::Model as _;
     let paged = match Paged::of_model(&state.registry, super::Org::SCHEMA, q.page).await {
         Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let rows: Vec<super::Org> = match super::Org::objects()
         .order_by(&[("slug", false)])
@@ -1421,7 +1420,7 @@ async fn orgs_list(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let view: Vec<_> = rows
         .into_iter()
@@ -1482,7 +1481,7 @@ async fn sso_shared_list(
             .await
         {
             Ok(r) => r,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+            Err(e) => return server_error("operator_console", &e),
         };
     rows.sort_by_key(|p| p.sort_order);
     let view: Vec<_> = rows
@@ -1532,11 +1531,7 @@ async fn sso_shared_create(
         updated_at: crate::sql::Auto::Unset,
     };
     if let Err(e) = row.insert_pool(&state.registry).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("create failed: {e}"),
-        )
-            .into_response();
+        return server_error("create failed", &e);
     }
     Redirect::to("/sso-shared").into_response()
 }
@@ -1577,11 +1572,7 @@ async fn sso_shared_set_email_link(
     {
         Ok(1) => Redirect::to("/sso-shared").into_response(),
         Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("update failed: {e}"),
-        )
-            .into_response(),
+        Err(e) => server_error("update failed", &e),
     }
 }
 
@@ -1660,7 +1651,7 @@ async fn org_edit_form(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let Some(org_row) = rows.into_iter().next() else {
         return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
@@ -1795,7 +1786,7 @@ async fn org_edit_submit(
         .await
     {
         Ok(rows) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let Some(existing_org) = existing_orgs.into_iter().next() else {
         return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
@@ -2126,10 +2117,7 @@ async fn serve_brand_asset(
             | branding::BrandError::InvalidSlug
             | branding::BrandError::InvalidFilename,
         ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => {
-            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "brand asset");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        Err(e) => server_error("operator_console::brand_asset", &e),
     }
 }
 

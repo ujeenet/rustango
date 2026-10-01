@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
 
-`RustangoError` DB, hashing, JWT-issue and env errors answer 500/503 with an opaque body; `get_object_or_404` and `render()` too.
+`RustangoError` DB, hashing, JWT-issue and env errors answer 500/503 with an opaque body; `get_object_or_404`, `render()`, template-view and operator-console 500s too.
 `file_response` strips every control character and always sends `Content-Disposition: attachment`.
 
 ### Fixed — public `/ready` no longer returns driver errors or probe targets (#1840)
