@@ -132,6 +132,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::messages` | Flash messages |
 | `rustango::migrate` | Migration runner |
 | `rustango::outbound` | Checked outbound calls (SSO, Slack, webhooks) |
+| `rustango::passkey` | Passkey challenges refused by the cache |
 | `rustango::rate_limit` | Rate limiting |
 | `rustango::request_timeout` | Per-request timeout |
 | `rustango::scheduler` | Cron / scheduled tasks |

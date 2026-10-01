@@ -30,10 +30,10 @@ pub mod verify;
 
 pub use ceremony::{
     authentication_options_json, generate_challenge, registration_options_json,
-    verify_authentication, verify_registration, RegistrationOutcome,
+    verify_authentication, verify_registration, AuthenticationOutcome, RegistrationOutcome,
 };
 pub use error::PasskeyError;
-pub use session::{open_challenge, seal_challenge};
+pub use session::{open_challenge, seal_challenge, CeremonyPurpose, CHALLENGE_TTL};
 
 use crate::sql::{Auto, Pool};
 use crate::Model;
@@ -152,9 +152,10 @@ pub async fn register(
     Ok(())
 }
 
-/// Advance the stored signature counter for a credential after a
-/// successful assertion (clone detection: the new count must exceed the
-/// stored one). No-op if the credential id is unknown.
+/// Advance the stored signature counter after a successful assertion.
+/// Writes only when `new_count` is above the stored count, so a racing
+/// or cloned assertion can't move it back (#1841). Returns `false` when
+/// nothing moved: an unknown credential, a lost race, or a zero counter.
 ///
 /// # Errors
 /// As the ORM update path ([`crate::sql::ExecError`]).
@@ -162,13 +163,14 @@ pub async fn update_sign_count(
     pool: &Pool,
     credential_id: &str,
     new_count: i64,
-) -> Result<(), crate::sql::ExecError> {
+) -> Result<bool, crate::sql::ExecError> {
     use crate::sql::UpdaterPool as _;
-    WebauthnCredential::objects()
+    let moved = WebauthnCredential::objects()
         .filter("credential_id", credential_id.to_owned())
+        .filter("sign_count__lt", new_count)
         .update()
         .set("sign_count", new_count)
         .execute_pool(pool)
         .await?;
-    Ok(())
+    Ok(moved > 0)
 }

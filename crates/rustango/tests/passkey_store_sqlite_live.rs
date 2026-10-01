@@ -65,9 +65,13 @@ async fn register_lookup_and_bump_sign_count() {
         .is_none());
 
     // Sign-count bump (clone/replay tracking) persists.
-    passkey::update_sign_count(&p, "cred-phone", 5)
+    assert!(passkey::update_sign_count(&p, "cred-phone", 5)
         .await
-        .unwrap();
+        .unwrap());
+    // A lower count (a clone, or a lost race) never moves it back (#1841).
+    assert!(!passkey::update_sign_count(&p, "cred-phone", 3)
+        .await
+        .unwrap());
     let bumped = passkey::by_credential_id(&p, "cred-phone")
         .await
         .unwrap()

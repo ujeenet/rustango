@@ -136,6 +136,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::messages` | Mensajes flash |
 | `rustango::migrate` | Ejecutor de migraciones |
 | `rustango::outbound` | Llamadas salientes verificadas (SSO, Slack, webhooks) |
+| `rustango::passkey` | Desafíos de passkey rechazados por el caché |
 | `rustango::rate_limit` | Limitación de tasa |
 | `rustango::request_timeout` | Timeout por petición |
 | `rustango::scheduler` | Cron / tareas programadas |

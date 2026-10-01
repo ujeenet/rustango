@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — passkey challenges expire and open once; counters can't reset (#1841)
+
+**Breaking:** a sealed challenge carries its ceremony and issue time, expires after 5 min
+and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused, and
+`update_sign_count` never moves the counter back. `verify_authentication` returns the UV flag.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

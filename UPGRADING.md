@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### Passkey challenge and counter API (#1841)
+
+**Breaking:** `seal_challenge` takes a `CeremonyPurpose`; `open_challenge` takes the same
+purpose and a cache, and is async. `verify_authentication` returns `AuthenticationOutcome`
+(`.sign_count`, `.user_verified`); `update_sign_count` returns `bool`. Tokens sealed before
+the upgrade no longer open. The `passkey` feature now enables `cache`.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
