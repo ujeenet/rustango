@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Admin list falls back to `default_order`; lists end on the PK (#1917)
+
+An admin list with no `admin(ordering)` now sorts by the model's `default_order` before the PK.
+`ListView` and admin `ORDER BY` gain a trailing PK column when the sort does not include it.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

@@ -375,20 +375,7 @@ pub(crate) async fn table_view(
         .await?
     };
     let joins = build_fk_joins(&state, model);
-    // Default ordering: PK ASC unless `admin.ordering` overrides.
-    let order_by: Vec<crate::core::OrderItem> = if admin_cfg.ordering.is_empty() {
-        Vec::new()
-    } else {
-        admin_cfg
-            .ordering
-            .iter()
-            .filter_map(|(name, desc)| {
-                model
-                    .field(name)
-                    .map(|f| crate::core::OrderItem::column(f.column, *desc))
-            })
-            .collect()
-    };
+    let order_by = list_order_by(model, &admin_cfg);
     // With the count skipped, fetch one extra row to detect "has
     // more" without counting the table. The extra row is trimmed
     // before rendering.
@@ -1441,6 +1428,29 @@ fn decode_bucket_sq_row(row: &sqlx::sqlite::SqliteRow) -> (i32, i64) {
     let bucket: i64 = row.try_get("bucket").unwrap_or(0);
     let count: i64 = row.try_get("bucket_count").unwrap_or(0);
     (bucket as i32, count)
+}
+
+/// `admin.ordering`, else the model's `default_order`, then the PK as a
+/// tiebreak so paging is stable (#1917).
+fn list_order_by(
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+) -> Vec<crate::core::OrderItem> {
+    let spec = if admin_cfg.ordering.is_empty() {
+        model.default_order
+    } else {
+        admin_cfg.ordering
+    };
+    let order = spec
+        .iter()
+        .filter_map(|(name, desc)| {
+            model
+                .field(name)
+                .or_else(|| model.field_by_column(name))
+                .map(|f| crate::core::OrderItem::column(f.column, *desc))
+        })
+        .collect();
+    model.with_pk_tiebreak(order)
 }
 
 // Where to send the user after a successful save. The add and change
@@ -2670,6 +2680,58 @@ mod tests {
         form.insert("_addanother".to_owned(), "1".to_owned());
         let url = post_save_redirect("/__admin", "post", "42", &form);
         assert_eq!(url, "/__admin/post/42");
+    }
+
+    fn order_cols(order: &[crate::core::OrderItem]) -> Vec<(&'static str, bool)> {
+        order
+            .iter()
+            .map(|o| (o.column_name().unwrap(), o.is_desc()))
+            .collect()
+    }
+
+    /// Admin ordering wins, then `default_order`, and the PK always
+    /// closes the order so ties page stably (#1917).
+    #[test]
+    fn list_order_falls_back_and_ends_on_the_pk() {
+        use crate::core::{AdminConfig, FieldSchema, FieldType, ModelSchema};
+        const FIELDS: &[FieldSchema] = &[
+            {
+                let mut f = FieldSchema::new("id", "id", FieldType::I64);
+                f.primary_key = true;
+                f
+            },
+            FieldSchema::new("rank", "rank", FieldType::I64),
+        ];
+        const BARE: &ModelSchema = &{
+            let mut s = ModelSchema::new("P", "p");
+            s.fields = FIELDS;
+            s
+        };
+        const DEFAULTED: &ModelSchema = &{
+            let mut s = ModelSchema::new("P", "p");
+            s.fields = FIELDS;
+            s.default_order = &[("rank", true)];
+            s
+        };
+        let none = AdminConfig::DEFAULT;
+        let by_rank = AdminConfig {
+            ordering: &[("rank", false)],
+            ..AdminConfig::DEFAULT
+        };
+        let by_pk = AdminConfig {
+            ordering: &[("id", true)],
+            ..AdminConfig::DEFAULT
+        };
+        assert_eq!(order_cols(&list_order_by(BARE, &none)), [("id", false)]);
+        assert_eq!(
+            order_cols(&list_order_by(DEFAULTED, &none)),
+            [("rank", true), ("id", false)]
+        );
+        assert_eq!(
+            order_cols(&list_order_by(DEFAULTED, &by_rank)),
+            [("rank", false), ("id", false)]
+        );
+        assert_eq!(order_cols(&list_order_by(BARE, &by_pk)), [("id", true)]);
     }
 
     #[test]

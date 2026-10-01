@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin and `ListView` paging is stable; `orphans` keeps the last rows (#1917)
+
+Admin lists order by `admin.ordering`, else the model's `default_order`, and both they and
+`ListView` end on the PK. `Page::limit()` on an orphan-merged last page now covers every row.
+
 ## [0.59.11] — 2026-09-30
 
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)

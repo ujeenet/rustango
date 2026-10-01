@@ -2166,19 +2166,13 @@ fn rerender_form(
 /// shape the SQL writer expects. Returns the original column name in
 /// the error string when it doesn't match any field.
 ///
-/// **Stable-pagination guarantee**: when `spec` is empty, falls back
-/// to `ORDER BY <pk> ASC` so paginated [`ListView`] doesn't return
-/// rows in arbitrary Postgres-internal order (which would make
-/// page 2 overlap page 1 between requests). Models without a PK
-/// still get an empty `ORDER BY` — there's no canonical column to
-/// pick — but the paginated views warn-log when that happens.
+/// **Stable-pagination guarantee**: the PK is appended as a final
+/// tiebreak (or is the whole order when `spec` is empty), so rows tied
+/// on the sort keys cannot repeat or vanish across pages.
 fn resolve_order_by(
     schema: &'static ModelSchema,
     spec: &[(String, bool)],
 ) -> Result<Vec<crate::core::OrderItem>, String> {
-    if spec.is_empty() {
-        return Ok(default_order_by(schema));
-    }
     let mut out = Vec::with_capacity(spec.len());
     for (name, desc) in spec {
         let field = schema
@@ -2193,24 +2187,7 @@ fn resolve_order_by(
             })?;
         out.push(crate::core::OrderItem::column(field.column, *desc));
     }
-    Ok(out)
-}
-
-/// PK-based fallback ordering for paginated views without an
-/// explicit `.order_by(...)`. Postgres doesn't guarantee any
-/// particular row order without `ORDER BY` — between two requests,
-/// the same query can return rows in different order, so page 2
-/// might have rows that already appeared on page 1. Defaulting to
-/// `<pk> ASC` is cheap (the PK is indexed) and deterministic.
-///
-/// Models without a primary key fall through to an empty clause —
-/// the application is on its own (and pagination on a PK-less model
-/// is unusual anyway).
-fn default_order_by(schema: &'static ModelSchema) -> Vec<crate::core::OrderItem> {
-    match schema.primary_key() {
-        Some(pk) => vec![crate::core::OrderItem::column(pk.column, false)],
-        None => Vec::new(),
-    }
+    Ok(schema.with_pk_tiebreak(out))
 }
 
 /// Resolve the active page size from the URL `?page_size=N` param,
@@ -2260,10 +2237,8 @@ fn resolve_active_order(
         };
         if ordering_fields.iter().any(|f| f == name) {
             if let Some(field) = schema.field(name) {
-                return Ok((
-                    vec![crate::core::OrderItem::column(field.column, desc)],
-                    raw.clone(),
-                ));
+                let order = vec![crate::core::OrderItem::column(field.column, desc)];
+                return Ok((schema.with_pk_tiebreak(order), raw.clone()));
             }
         }
         // Not in allowlist or unknown field — fall through to the
@@ -4105,9 +4080,10 @@ mod tests {
     fn resolve_order_by_accepts_field_or_column_name() {
         let s = schema_two_fields();
         let r = resolve_order_by(s, &[("title".into(), false)]).unwrap();
-        assert_eq!(r.len(), 1);
+        assert_eq!(r.len(), 2);
         assert_eq!(r[0].column_name(), Some("title"));
         assert!(!r[0].is_desc());
+        assert_eq!(r[1].column_name(), Some("id"), "PK tiebreak (#1917)");
     }
 
     /// Unknown field name surfaces a clear error string instead of
@@ -4382,7 +4358,7 @@ mod tests {
     /// pagination on PK-less models is unusual, and there's no
     /// canonical column to pick.
     #[test]
-    fn default_order_by_empty_when_no_pk() {
+    fn pk_tiebreak_empty_when_no_pk() {
         // Build a schema with no primary key.
         let no_pk: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
             name: "Audit",
@@ -4442,7 +4418,7 @@ mod tests {
             extra_permissions: &[],
             global_scopes: &[],
         }));
-        assert!(default_order_by(no_pk).is_empty());
+        assert!(resolve_order_by(no_pk, &[]).unwrap().is_empty());
     }
 
     /// `resolved_fields(None)` returns every scalar field.
@@ -5118,9 +5094,10 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("ordering".into(), "title".into());
         let (clauses, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
-        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses.len(), 2);
         assert_eq!(clauses[0].column_name(), Some("title"));
         assert!(!clauses[0].is_desc());
+        assert_eq!(clauses[1].column_name(), Some("id"), "PK tiebreak (#1917)");
         assert_eq!(active, "title");
     }
 
@@ -5145,8 +5122,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("ordering".into(), "id".into()); // not in allowlist
         let (_, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
-        // Builder default has no order_by, so `default_order_by`
-        // returns PK-ASC; `active` is empty (templates render no
+        // Builder default has no order_by, so the order is PK-ASC; `active` is empty (templates render no
         // "active sort" indicator since the user-requested sort
         // wasn't applied).
         assert_eq!(active, "");
