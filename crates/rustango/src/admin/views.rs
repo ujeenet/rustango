@@ -2661,6 +2661,7 @@ mod tests {
                 f
             },
             FieldSchema::new("rank", "rank", FieldType::I64),
+            FieldSchema::new("author", "author_id", FieldType::I64),
         ];
         const BARE: &ModelSchema = &{
             let mut s = ModelSchema::new("P", "p");
@@ -2692,6 +2693,15 @@ mod tests {
             [("rank", false), ("id", false)]
         );
         assert_eq!(order_cols(&list_order_by(BARE, &by_pk)), [("id", true)]);
+        // A spec naming the column, not the field, still sorts.
+        let by_column = AdminConfig {
+            ordering: &[("author_id", true)],
+            ..AdminConfig::DEFAULT
+        };
+        assert_eq!(
+            order_cols(&list_order_by(BARE, &by_column)),
+            [("author_id", true), ("id", false)]
+        );
     }
 
     #[test]

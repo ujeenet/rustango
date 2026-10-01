@@ -770,6 +770,23 @@ mod tests {
         assert!(render_value_json(&json!({ "flag": 1 }), &f).contains("yes"));
     }
 
+    /// Joined and JSON-read bool cells turn `1`/`0` into `true`/`false` (#1730).
+    #[test]
+    fn integer_bool_reads_as_a_bool_in_joined_and_json_cells() {
+        let f = field("flag", "flag", FieldType::Bool);
+        for (v, want) in [(json!(1), true), (json!(0), false), (json!(true), true)] {
+            let joined = json!({ "a__flag": v.clone() });
+            assert_eq!(
+                read_joined_value_as_html_json(&joined, "a", &f).as_deref(),
+                Some(if want { "true" } else { "false" })
+            );
+            assert_eq!(
+                read_value_as_json_from_json(&json!({ "flag": v }), &f),
+                json!(want)
+            );
+        }
+    }
+
     #[test]
     fn read_value_as_string_at_json_uses_custom_key() {
         let row = json!({ "facet_value": 7 });

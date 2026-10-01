@@ -1445,9 +1445,9 @@ async fn fk_falls_back_to_raw_when_target_hidden() {
         .await
         .unwrap();
     let body = body_string(response).await;
-    // No link to /admin_user
+    // No link to an admin_user row, under any prefix.
     assert!(
-        !body.contains(r#"href="/__admin/admin_user/"#),
+        !body.replace("&#x2F;", "/").contains("admin_user/"),
         "FK link leaked despite hidden target: {body}",
     );
     // Raw author_id renders.
@@ -1492,7 +1492,7 @@ async fn fk_falls_back_to_raw_when_target_row_missing() {
     let body = body_string(response).await;
     // Should render the raw 999 (no link), not crash and not show alice.
     assert!(
-        !body.contains(r#"<a href="/__admin/admin_user/999""#),
+        !body.replace("&#x2F;", "/").contains("admin_user/999"),
         "should not link to missing target: {body}",
     );
     assert!(body.contains(">999<"), "raw 999 should render: {body}");

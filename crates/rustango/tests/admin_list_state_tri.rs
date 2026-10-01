@@ -88,13 +88,21 @@ async fn seed_item(pool: &Pool, title: &str, flag: bool) -> Item {
     item
 }
 
-/// Every `href="…"` value on the page that points into the list.
+/// Every `href` (and `<option data-href>`) into the list in the page's
+/// main column, bare paths included. The sidebar's model link is skipped.
 fn list_links(body: &str) -> Vec<String> {
-    body.split("href=\"")
+    let main = body
+        .split_once(r#"<main class="content">"#)
+        .map_or(body, |(_, m)| m);
+    main.split("href=\"")
         .skip(1)
         .filter_map(|s| s.split('"').next())
+        .filter(|s| {
+            s.split('?')
+                .next()
+                .is_some_and(|p| p.ends_with("/adminls_item"))
+        })
         .map(str::to_owned)
-        .filter(|s| s.contains("/adminls_item?"))
         .collect()
 }
 
@@ -121,15 +129,18 @@ async fn equal_sort_keys_page_in_pk_order(pool: &Pool) {
 /// Pager, facet, date and custom-filter links keep every other filter
 /// and carry the mounted prefix.
 async fn links_keep_the_whole_filter_state(pool: &Pool) {
-    for t in ["a", "b", "c"] {
+    for t in ["it-a", "it-b", "it-c"] {
         seed(pool, t, true).await;
     }
     let body = get(
         pool,
-        "/adminls_item?rank=0&kind=low&year=2024&count=skip&q=",
+        "/adminls_item?rank=0&kind=low&year=2024&count=skip&q=it",
     )
     .await;
-    let links = list_links(&body);
+    // The "filtered by" clear link is the one link meant to drop everything.
+    let clear = format!(r#"<a href="{PREFIX}/adminls_item">clear</a>"#);
+    assert!(body.contains(&clear), "{body}");
+    let links = list_links(&body.replace(&clear, ""));
     assert!(!links.is_empty(), "{body}");
     let next = links
         .iter()
@@ -141,6 +152,7 @@ async fn links_keep_the_whole_filter_state(pool: &Pool) {
     for l in &links {
         assert!(l.starts_with(&format!("{PREFIX}/")), "unprefixed: {l}");
         assert!(l.contains("count=skip"), "drops count: {l}");
+        assert_eq!(l.matches("q=it").count(), 1, "q dropped or doubled: {l}");
         if !l.contains("year=") {
             // Only the date strip's "All" link may drop the date.
             assert!(l.contains("kind="), "drops date and kind: {l}");
@@ -162,13 +174,54 @@ async fn links_keep_the_whole_filter_state(pool: &Pool) {
         date_all.contains("kind=low") && date_all.contains("rank=0"),
         "{date_all}"
     );
-    assert!(
-        body.contains(&format!(r#"<a href="{PREFIX}/adminls_item">clear</a>"#)),
-        "{body}"
-    );
-    // The search form keeps the custom filter and the date as hidden inputs.
+    let kind_all = links
+        .iter()
+        .find(|l| !l.contains("kind=") && l.contains("rank=0"))
+        .unwrap_or_else(|| panic!("no custom-filter All link: {links:?}"));
+    assert!(kind_all.contains("year=2024"), "{kind_all}");
+    // The search form keeps the custom filter and the date as hidden
+    // inputs; `q` is its own visible input, never a hidden copy.
     assert!(body.contains(r#"name="kind" value="low""#), "{body}");
     assert!(body.contains(r#"name="year" value="2024""#), "{body}");
+    assert!(body.contains(r#"name="q" value="it""#), "{body}");
+    assert_eq!(body.matches(r#"name="q""#).count(), 1, "{body}");
+}
+
+/// The "+N more" facet link keeps the filter state, and the show-all
+/// page lists every value and keeps `facet_show_all` on its links.
+async fn facet_show_all_keeps_the_filter_state(pool: &Pool) {
+    for rank in 0..17 {
+        let mut item = seed_item(pool, &format!("it-{rank}"), true).await;
+        item.rank = rank;
+        item.save_pool(pool).await.expect("set rank");
+    }
+    let body = get(pool, "/adminls_item?flag=true&year=2024&count=skip&q=it").await;
+    assert!(!body.contains("rank=16"), "not truncated: {body}");
+    let links = list_links(&body);
+    let more = links
+        .iter()
+        .find(|l| l.contains("facet_show_all="))
+        .unwrap_or_else(|| panic!("no show-all link: {links:?}"));
+    for want in [
+        "facet_show_all=rank",
+        "flag=true",
+        "year=2024",
+        "count=skip",
+        "q=it",
+    ] {
+        assert!(more.contains(want), "show-all drops {want}: {more}");
+    }
+    let all = get(pool, more.strip_prefix(PREFIX).unwrap()).await;
+    assert!(
+        !all.contains(r#"class="facet-more""#),
+        "still truncated: {all}"
+    );
+    assert!(all.contains("rank=16"), "{all}");
+    let next = list_links(&all)
+        .into_iter()
+        .find(|l| l.contains("page=2"))
+        .unwrap_or_else(|| panic!("no next link: {all}"));
+    assert_eq!(next.matches("facet_show_all=rank").count(), 1, "{next}");
 }
 
 /// The bulk-action form posts under the prefix.
@@ -214,6 +267,7 @@ tri_dialect_test! {
     scenarios: [
         equal_sort_keys_page_in_pk_order,
         links_keep_the_whole_filter_state,
+        facet_show_all_keeps_the_filter_state,
         action_form_posts_under_the_prefix,
         edit_form_checks_a_true_bool,
         bool_facet_reads_true_and_toggles_off,
