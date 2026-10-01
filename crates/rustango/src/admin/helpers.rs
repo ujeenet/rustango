@@ -435,23 +435,71 @@ pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> V
     joins
 }
 
-/// Build a `&q=…&<field>=<v>…` tail for prev/next pager URLs so the
-/// active search and filters survive page navigation. Each value is
-/// percent-encoded via a tiny ASCII-safe escaper good enough for the
-/// admin's expected inputs.
-pub(crate) fn pager_suffix(q: Option<&str>, filters: &[(&'static str, String)]) -> String {
-    let mut out = String::new();
-    if let Some(qs) = q {
-        out.push_str("&q=");
-        out.push_str(&url_encode(qs));
+/// A list page's URL: its base path plus the filter state as query
+/// pairs. Every link on the page derives from one value, so a pager,
+/// facet or date link cannot keep a different subset (#1916).
+#[derive(Clone, Debug)]
+pub(crate) struct ListQuery {
+    base: String,
+    params: Vec<(String, String)>,
+}
+
+impl ListQuery {
+    /// `base` is the full path, admin prefix included.
+    pub(crate) fn new(base: String) -> Self {
+        Self {
+            base,
+            params: Vec::new(),
+        }
     }
-    for (k, v) in filters {
-        out.push('&');
-        out.push_str(k);
-        out.push('=');
-        out.push_str(&url_encode(v));
+
+    pub(crate) fn push(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.params.push((key.into(), value.into()));
     }
-    out
+
+    /// A copy without `keys`.
+    #[must_use]
+    pub(crate) fn without(&self, keys: &[&str]) -> Self {
+        Self {
+            base: self.base.clone(),
+            params: self
+                .params
+                .iter()
+                .filter(|(k, _)| !keys.contains(&k.as_str()))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// This query with `key=value` added.
+    #[must_use]
+    pub(crate) fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.push(key, value);
+        self
+    }
+
+    pub(crate) fn pairs(&self) -> &[(String, String)] {
+        &self.params
+    }
+
+    pub(crate) fn url(&self) -> String {
+        if self.params.is_empty() {
+            return self.base.clone();
+        }
+        format!("{}?{}", self.base, &self.suffix()[1..])
+    }
+
+    /// `&k=v…` for templates that write `?page=N` themselves.
+    pub(crate) fn suffix(&self) -> String {
+        let mut out = String::new();
+        for (k, v) in &self.params {
+            out.push('&');
+            out.push_str(&url_encode(k));
+            out.push('=');
+            out.push_str(&url_encode(v));
+        }
+        out
+    }
 }
 
 // #806 — was a byte-identical copy of `crate::url_codec::url_encode`;
@@ -503,6 +551,7 @@ pub(crate) fn render_cell_json(
     row: &serde_json::Value,
     field: &FieldSchema,
     fk_map: &FkMap,
+    admin_prefix: &str,
 ) -> String {
     if let Some(rel) = field.relation {
         let to = match rel {
@@ -514,7 +563,10 @@ pub(crate) fn render_cell_json(
         let raw_esc = render::escape(&raw_value);
         let to_esc = render::escape(to);
         return match fk_map.get(&(to.to_owned(), raw_value)) {
-            Some(display) => format!(r#"<a href="/{to_esc}/{raw_esc}">{display}</a>"#),
+            Some(display) => format!(
+                r#"<a href="{prefix}/{to_esc}/{raw_esc}">{display}</a>"#,
+                prefix = render::escape(admin_prefix),
+            ),
             None => raw_esc,
         };
     }
@@ -882,4 +934,37 @@ pub(crate) fn render_form_with_inlines_and_picker(
         inline_panels,
         gfk_picker_cts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::FieldType;
+
+    /// List and detail FK cells link under the mounted prefix (#1916).
+    #[test]
+    fn fk_cell_links_under_the_admin_prefix() {
+        let mut f = FieldSchema::new("author", "author_id", FieldType::I64);
+        f.relation = Some(Relation::Fk {
+            to: "author",
+            on: "id",
+        });
+        let row = serde_json::json!({ "author": 7 });
+        let mut fk_map = FkMap::new();
+        fk_map.insert(("author".into(), "7".into()), "Ann".into());
+        assert_eq!(
+            render_cell_json(&row, &f, &fk_map, "/adm"),
+            r#"<a href="/adm/author/7">Ann</a>"#
+        );
+    }
+
+    #[test]
+    fn list_query_drops_and_adds_keys() {
+        let mut q = ListQuery::new("/adm/t".into());
+        q.push("q", "a b");
+        q.push("year", "2024");
+        assert_eq!(q.url(), "/adm/t?q=a%20b&year=2024");
+        assert_eq!(q.without(&["q", "year"]).url(), "/adm/t");
+        assert_eq!(q.without(&["year"]).with("k", "v").suffix(), "&q=a%20b&k=v");
+    }
 }

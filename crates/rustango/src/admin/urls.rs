@@ -653,6 +653,7 @@ impl Builder {
                 } else {
                     format!("{admin_prefix}/login")
                 },
+                logout_path: format!("{admin_prefix}/logout"),
                 // The bare admin is superuser-only.
                 require_superuser: true,
                 // Pool for the per-request password-fingerprint

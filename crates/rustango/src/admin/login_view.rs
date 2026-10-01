@@ -853,6 +853,8 @@ async fn logout_submit(
 pub(crate) struct SessionGate {
     pub(crate) secret: Arc<AdminSessionSecret>,
     pub(crate) login_path: String,
+    /// The 403 page's sign-out target, under the admin prefix.
+    pub(crate) logout_path: String,
     /// When `true`, a non-superuser session gets a 403 page. On by
     /// default for the bare admin.
     pub(crate) require_superuser: bool,
@@ -896,7 +898,7 @@ pub(crate) async fn require_session(
         if gate.require_superuser && !session.is_superuser {
             // Render a 403 here instead of redirecting to /login. A
             // redirect would loop: login, 403, login again.
-            return forbidden_page(&session);
+            return forbidden_page(&session, &gate.logout_path);
         }
         request.extensions_mut().insert(session.clone());
         // Scope the task-local so `chrome_context`, deep in the render
@@ -915,8 +917,9 @@ pub(crate) async fn require_session(
 /// Minimal 403 page for a non-superuser session. Plain HTML with no
 /// chrome: rendering the chrome needs this same gate to have passed.
 /// The body offers a sign-out button.
-fn forbidden_page(session: &AdminSession) -> Response {
+fn forbidden_page(session: &AdminSession, logout_path: &str) -> Response {
     let username = crate::text::html_escape(&session.username);
+    let logout_path = crate::text::html_escape(logout_path);
     let body = format!(
         "<!doctype html>\
          <html><head><title>Forbidden</title>\
@@ -930,7 +933,7 @@ fn forbidden_page(session: &AdminSession) -> Response {
          <p class=\"meta\">Ask your administrator to grant superuser \
          status, or sign out below if this isn't the account you \
          intended to use.</p>\
-         <form method=\"post\" action=\"/logout\">\
+         <form method=\"post\" action=\"{logout_path}\">\
            <button type=\"submit\">Sign out</button>\
          </form>\
          </body></html>"
@@ -1079,5 +1082,26 @@ mod tests {
             .await
             .unwrap();
         assert!(std::str::from_utf8(&body).unwrap().contains("try again"));
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    /// The 403 page signs out under the admin prefix (#1916).
+    #[tokio::test]
+    async fn forbidden_page_signs_out_under_the_prefix() {
+        let session = AdminSession {
+            user_id: 1,
+            username: "u".into(),
+            is_superuser: false,
+        };
+        let res = forbidden_page(&session, "/adm/logout");
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains(r#"action="/adm/logout""#), "{body}");
     }
 }

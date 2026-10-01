@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin links keep the whole filter state and the admin prefix (#1916)
+
+Pager, facet, date and custom-filter links and the search form keep every active filter,
+the date drill and `count=skip`. Audit feed, FK cell, generic-FK and 403 sign-out links use the prefix.
+
 ### Fixed — admin and `ListView` paging is stable; `orphans` keeps the last rows (#1917)
 
 Admin lists order by `admin.ordering`, else the model's `default_order`, and both they and

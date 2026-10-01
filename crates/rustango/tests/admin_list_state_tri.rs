@@ -1,4 +1,5 @@
-//! Admin list paging order on every backend (#1917).
+//! Admin list paging order and filter-keeping links on every backend
+//! (#1917 #1916).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -21,7 +22,7 @@ const PREFIX: &str = "/adm";
     display = "title",
     admin(
         list_display = "title, flag",
-        list_filter = "flag",
+        list_filter = "rank, flag",
         list_per_page = 2,
         ordering = "rank",
         date_hierarchy = "made_on",
@@ -63,7 +64,10 @@ async fn get(pool: &Pool, uri: &str) -> String {
         .unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let body = String::from_utf8_lossy(&bytes).into_owned();
+    // Tera escapes `/` in `{{ admin_prefix }}`; undo it to read hrefs.
+    let body = String::from_utf8_lossy(&bytes)
+        .replace("&#x2F;", "/")
+        .replace("&amp;", "&");
     assert_eq!(status, StatusCode::OK, "{uri}: {body}");
     body
 }
@@ -82,6 +86,16 @@ async fn seed_item(pool: &Pool, title: &str, flag: bool) -> Item {
     };
     item.insert_pool(pool).await.expect("insert");
     item
+}
+
+/// Every `href="…"` value on the page that points into the list.
+fn list_links(body: &str) -> Vec<String> {
+    body.split("href=\"")
+        .skip(1)
+        .filter_map(|s| s.split('"').next())
+        .map(str::to_owned)
+        .filter(|s| s.contains("/adminls_item?"))
+        .collect()
 }
 
 /// Equal `rank`s tie; the PK breaks the tie, even after an UPDATE moved
@@ -104,9 +118,63 @@ async fn equal_sort_keys_page_in_pk_order(pool: &Pool) {
     );
 }
 
+/// Pager, facet, date and custom-filter links keep every other filter
+/// and carry the mounted prefix.
+async fn links_keep_the_whole_filter_state(pool: &Pool) {
+    for t in ["a", "b", "c"] {
+        seed(pool, t, true).await;
+    }
+    let body = get(
+        pool,
+        "/adminls_item?rank=0&kind=low&year=2024&count=skip&q=",
+    )
+    .await;
+    let links = list_links(&body);
+    assert!(!links.is_empty(), "{body}");
+    let next = links
+        .iter()
+        .find(|l| l.contains("page=2"))
+        .unwrap_or_else(|| panic!("no next link: {links:?}"));
+    for want in ["rank=0", "kind=low", "year=2024", "count=skip"] {
+        assert!(next.contains(want), "pager drops {want}: {next}");
+    }
+    for l in &links {
+        assert!(l.starts_with(&format!("{PREFIX}/")), "unprefixed: {l}");
+        assert!(l.contains("count=skip"), "drops count: {l}");
+        if !l.contains("year=") {
+            // Only the date strip's "All" link may drop the date.
+            assert!(l.contains("kind="), "drops date and kind: {l}");
+        }
+    }
+    let facet_off = links
+        .iter()
+        .find(|l| !l.contains("rank=") && l.contains("kind=low"))
+        .unwrap_or_else(|| panic!("no facet-clear link: {links:?}"));
+    assert!(
+        facet_off.contains("year=2024"),
+        "facet drops date: {facet_off}"
+    );
+    let date_all = links
+        .iter()
+        .find(|l| !l.contains("year="))
+        .unwrap_or_else(|| panic!("no date All link: {links:?}"));
+    assert!(
+        date_all.contains("kind=low") && date_all.contains("rank=0"),
+        "{date_all}"
+    );
+    assert!(
+        body.contains(&format!(r#"<a href="{PREFIX}/adminls_item">clear</a>"#)),
+        "{body}"
+    );
+    // The search form keeps the custom filter and the date as hidden inputs.
+    assert!(body.contains(r#"name="kind" value="low""#), "{body}");
+    assert!(body.contains(r#"name="year" value="2024""#), "{body}");
+}
+
 tri_dialect_test! {
     model: Item,
     scenarios: [
         equal_sort_keys_page_in_pk_order,
+        links_keep_the_whole_filter_state,
     ],
 }

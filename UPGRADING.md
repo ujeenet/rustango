@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Admin `list.html` gets `hidden_params` (#1916)
+
+A custom `list.html` should loop `hidden_params` (not `active_filters`) for the search form's
+hidden inputs, so a search keeps custom filters and the date drill.
+
 ### Admin list falls back to `default_order`; lists end on the PK (#1917)
 
 An admin list with no `admin(ordering)` now sorts by the model's `default_order` before the PK.
