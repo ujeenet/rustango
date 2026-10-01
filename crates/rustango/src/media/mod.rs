@@ -677,18 +677,19 @@ impl MediaManager {
         // Links first. `rustango_media_tag_links.media_id` has no
         // foreign key, so deleting the media row alone would leave
         // them behind, and `popular_tags` counts links.
+        // One transaction, so a failed row delete keeps its links (#1573).
         let unlink_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p}");
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &unlink_sql,
-            vec![crate::core::SqlValue::I64(id)],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
         let sql = format!("DELETE FROM rustango_media WHERE id = {p}");
-        crate::sql::raw_execute_pool(&self.pool, &sql, vec![crate::core::SqlValue::I64(id)])
+        let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
+        crate::sql::raw_execute_tx(&mut tx, &unlink_sql, vec![crate::core::SqlValue::I64(id)])
+            .await
+            .map_err(media_err_from_exec)?;
+        crate::sql::raw_execute_tx(&mut tx, &sql, vec![crate::core::SqlValue::I64(id)])
+            .await
+            .map_err(media_err_from_exec)?;
+        tx.commit().await?;
         Ok(())
     }
 

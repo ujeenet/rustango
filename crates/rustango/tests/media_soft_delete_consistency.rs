@@ -152,6 +152,24 @@ async fn purging_a_row_reclaims_its_tag_links() {
 }
 
 /// Deleting a collection must not leave its children dangling.
+/// #1573: `purge` keeps the row on error, so it must keep its links too.
+#[tokio::test]
+async fn a_failed_purge_keeps_the_tag_links() {
+    let (mgr, pool) = manager_with_pool().await;
+    let m = seed(&mgr, None).await;
+    mgr.tag(id_of(&m), &["kept"]).await.expect("tag");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TRIGGER fail_media_delete BEFORE DELETE ON rustango_media \
+         BEGIN SELECT RAISE(ABORT, 'simulated failure'); END",
+        Vec::new(),
+    )
+    .await
+    .expect("install trigger");
+    assert!(mgr.purge(&m).await.is_err(), "control: the purge must fail");
+    assert_eq!(use_count(&mgr, "kept").await, 1, "links gone, row kept");
+}
+
 #[tokio::test]
 async fn deleting_a_collection_takes_its_subtree_with_it() {
     let mgr = manager().await;
