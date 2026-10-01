@@ -163,6 +163,10 @@ untouched.
 
 Arabic, Hebrew and Slovenian now use those CLDR categories; add the forms to plural catalogs (a missing form falls back to `"other"`). `Locale::as_str` turns `_` into `-`.
 
+### `slugify` folds accented Latin letters (#2048)
+
+New slugs for accented titles change (`"Café"` → `"cafe"`, was `"caf"`); stored slugs are untouched. `unique_slug` falls back to `"untitled"`.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

@@ -22,6 +22,10 @@ Plural rules for ar, cs/sk, lt, ro, he and sl, and `pt-PT` 0 is plural; `Locale`
 
 A stray `\u{8}` in a title no longer breaks the whole document; `.with_guid(..)` emits `<guid isPermaLink="false">`.
 
+### Fixed — `slugify` keeps accented Latin letters; `unique_slug` never builds an empty slug (#2048)
+
+`"Café"` slugs to `"cafe"` (was `"caf"`); all-punctuation input gives `"untitled"`, `"untitled-2"` instead of `""`, `"-2"`.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
