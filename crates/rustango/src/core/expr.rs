@@ -226,6 +226,7 @@ pub enum Expr {
     /// MySQL, `json_extract(<source>, '$.k1.k2.k3')` on SQLite.
     /// `as_text = true` asks for the unwrapped text form; `false`
     /// keeps the JSON-typed form for further chaining.
+    /// With `as_text`, a JSON null reads as SQL NULL on every backend.
     JsonPath {
         source: Box<Expr>,
         path: Vec<JsonPathStep>,

@@ -33,7 +33,8 @@ fn year_lookup_emits_extract_year_eq() {
     let qs = Post::objects().filter("created__year", 2026_i64);
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(
-        stmt.sql.contains(r#"EXTRACT(YEAR FROM "created")"#),
+        stmt.sql
+            .contains(r#"EXTRACT(YEAR FROM ("created" AT TIME ZONE 'UTC'))"#),
         "PG year lookup: {}",
         stmt.sql
     );
@@ -80,7 +81,8 @@ fn year_lookup_supports_trailing_comparison() {
         let qs = Post::objects().filter(&format!("created__year__{suffix}"), 2026_i64);
         let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
         assert!(
-            stmt.sql.contains(r#"EXTRACT(YEAR FROM "created")"#),
+            stmt.sql
+                .contains(r#"EXTRACT(YEAR FROM ("created" AT TIME ZONE 'UTC'))"#),
             "year__{suffix} should still wrap LHS in EXTRACT: {}",
             stmt.sql
         );
@@ -108,8 +110,9 @@ fn other_extract_lookups_emit_correct_token_pg() {
         let qs = Post::objects().filter(&format!("created__{suffix}"), 1_i64);
         let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
         assert!(
-            stmt.sql
-                .contains(&format!(r#"EXTRACT({token} FROM "created")"#)),
+            stmt.sql.contains(&format!(
+                r#"EXTRACT({token} FROM ("created" AT TIME ZONE 'UTC'))"#
+            )),
             "PG __{suffix} should EXTRACT({token}): {}",
             stmt.sql
         );
@@ -124,7 +127,8 @@ fn week_day_lookup_emits_extract_dow_pg() {
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     // PG: EXTRACT(DOW FROM x) — already 0=Sun..6=Sat
     assert!(
-        stmt.sql.contains(r#"EXTRACT(DOW FROM "created")"#),
+        stmt.sql
+            .contains(r#"EXTRACT(DOW FROM ("created" AT TIME ZONE 'UTC'))"#),
         "PG week_day: {}",
         stmt.sql
     );
@@ -151,7 +155,7 @@ fn date_lookup_strips_time_component_pg() {
     let qs = Post::objects().filter("created__date", day);
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(
-        stmt.sql.contains(r#"DATE("created")"#),
+        stmt.sql.contains(r#"DATE(("created" AT TIME ZONE 'UTC'))"#),
         "PG date: {}",
         stmt.sql
     );
@@ -163,7 +167,7 @@ fn date_lookup_with_gte_pg() {
     let day = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
     let qs = Post::objects().filter("created__date__gte", day);
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
-    assert!(stmt.sql.contains(r#"DATE("created")"#));
+    assert!(stmt.sql.contains(r#"DATE(("created" AT TIME ZONE 'UTC'))"#));
     assert!(stmt.sql.contains(" >= $1"));
 }
 

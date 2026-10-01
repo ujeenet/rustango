@@ -98,7 +98,7 @@ type par dialecte, si bien que le même modèle fonctionne sur PostgreSQL, MySQL
 | `chrono::NaiveTime` | `TIME` | `TIME(6)` | `TEXT` |
 | `uuid::Uuid` | `UUID` | `CHAR(36)` | `TEXT` |
 | `serde_json::Value` | `JSONB` | `JSON` | `TEXT` |
-| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(38,10)` | `NUMERIC` |
+| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(65,28)` | `NUMERIC` |
 | `Vec<u8>` | `BYTEA` | `LONGBLOB` | `BLOB` |
 | `Option<T>` | `T NULL` | `T NULL` | `T` (nullable) |
 
@@ -123,7 +123,7 @@ pub struct Gadget {
 ```
 
 > **Précision décimale.** Le `NUMERIC` de PostgreSQL est à précision arbitraire ; MySQL utilise
-> `DECIMAL(38,10)` (38 chiffres, 10 décimales — l'ajustement portable le plus large) ; SQLite
+> `DECIMAL(65,28)` (toute valeur `rust_decimal` y tient) ; SQLite
 > utilise l'affinité `NUMERIC`. Utilisez `rust_decimal::Decimal` pour l'argent, jamais `f64`.
 
 ### Types spécifiques à PostgreSQL

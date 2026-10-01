@@ -144,6 +144,17 @@ impl Dialect for Sqlite {
         None
     }
 
+    /// A unique index: SQLite has no `ADD CONSTRAINT`, and refuses
+    /// `ADD COLUMN … UNIQUE`.
+    fn add_unique_constraint_sql(&self, table: &str, name: &str, column: &str) -> String {
+        format!(
+            "CREATE UNIQUE INDEX {} ON {} ({})",
+            self.quote_ident(name),
+            self.quote_ident(table),
+            self.quote_ident(column)
+        )
+    }
+
     /// `SQLITE_MAX_VARIABLE_NUMBER`, which is 32766 since SQLite 3.32
     /// and 999 before it. sqlx bundles a modern build. This is half
     /// Postgres' limit, so batches chunk at half the size.

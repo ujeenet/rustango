@@ -4088,14 +4088,26 @@ impl<T: Model> AggregateBuilder<T> {
                 .find(|(a, _)| a.as_ref() == name)
                 .map(|(_, e)| e.clone())
         };
+        // Dotted order columns, which a derived table must also project.
+        let order_join_cols: Vec<&'static str> = self
+            .order_by
+            .iter()
+            .map(|(c, _)| *c)
+            .filter(|c| c.contains('.'))
+            .collect();
         let order_by = self
             .order_by
             .into_iter()
-            .map(|(col, desc)| match alias_for(col) {
-                Some(agg) => {
+            .map(|(col, desc)| match (alias_for(col), col.split_once('.')) {
+                (Some(agg), _) => {
                     crate::core::OrderItem::expr(crate::core::Expr::Aggregate(Box::new(agg)), desc)
                 }
-                None => crate::core::OrderItem::column(col, desc),
+                // A dotted `alias.col` names a joined column.
+                (None, Some((alias, column))) => crate::core::OrderItem::expr(
+                    crate::core::Expr::AliasedColumn { alias, column },
+                    desc,
+                ),
+                (None, None) => crate::core::OrderItem::column(col, desc),
             })
             .collect();
 
@@ -4159,6 +4171,7 @@ impl<T: Model> AggregateBuilder<T> {
         };
         if let Some(select) = source.as_mut() {
             project_group_cols(model, select, &group_by)?;
+            project_group_cols(model, select, &order_join_cols)?;
         }
 
         Ok(AggregateQuery {

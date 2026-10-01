@@ -1311,6 +1311,9 @@ jobs:
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.
       - run: cargo test -p rustango --features mysql,testkit --test migrate_ddl_tri
+      # #1877–#1881 — makemigrations → migrate; MySQL auto-commits DDL, so a
+      # misordered drop cannot roll back.
+      - run: cargo test -p rustango --features mysql,testkit --test migrate_autodetect_tri
       # The media tag surface had no MySQL coverage at all — `media_live`
       # and `media_collections_tags_live` are PostgreSQL-typed and
       # `media_sqlite_live` is SQLite, so `tag`'s `INSERT IGNORE` branch

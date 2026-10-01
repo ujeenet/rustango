@@ -100,7 +100,7 @@ pro Dialekt ab, sodass dasselbe Modell auf PostgreSQL, MySQL und SQLite funktion
 | `chrono::NaiveTime` | `TIME` | `TIME(6)` | `TEXT` |
 | `uuid::Uuid` | `UUID` | `CHAR(36)` | `TEXT` |
 | `serde_json::Value` | `JSONB` | `JSON` | `TEXT` |
-| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(38,10)` | `NUMERIC` |
+| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(65,28)` | `NUMERIC` |
 | `Vec<u8>` | `BYTEA` | `LONGBLOB` | `BLOB` |
 | `Option<T>` | `T NULL` | `T NULL` | `T` (nullable) |
 
@@ -125,7 +125,7 @@ pub struct Gadget {
 ```
 
 > **Dezimalpräzision.** PostgreSQL `NUMERIC` ist beliebig genau; MySQL verwendet
-> `DECIMAL(38,10)` (38 Stellen, 10 Nachkommastellen — die breiteste portable Passung);
+> `DECIMAL(65,28)` (jeder `rust_decimal`-Wert passt);
 > SQLite verwendet `NUMERIC`-Affinität. Verwende `rust_decimal::Decimal` für Geld,
 > niemals `f64`.
 

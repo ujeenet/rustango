@@ -102,8 +102,8 @@ impl Dialect for MySql {
     /// cast to `SIGNED`, floats to `FLOAT` or `DOUBLE`, booleans to
     /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME`.
     ///
-    /// UUID, JSON and binary have no CAST target, so they return
-    /// `None`; cast a string-shaped value to `CHAR` yourself.
+    /// UUID has no CAST target, so it returns `None`; cast a
+    /// string-shaped value to `CHAR` yourself.
     fn cast_type(&self, ty: FieldType) -> Option<&'static str> {
         Some(match ty {
             FieldType::I16 | FieldType::I32 | FieldType::I64 => "SIGNED",
@@ -114,13 +114,12 @@ impl Dialect for MySql {
             FieldType::DateTime => "DATETIME",
             FieldType::Date => "DATE",
             FieldType::Time => "TIME",
-            FieldType::Decimal => "DECIMAL(38, 10)",
+            FieldType::Decimal => "DECIMAL(65, 28)",
             FieldType::Binary => "BINARY",
-            // MySQL has no `CAST AS JSON`; use `JSON_EXTRACT`. UUID
-            // has no target either, and the array, range and other
+            FieldType::Json => "JSON",
+            // UUID has no target, and the array, range and other
             // Postgres-only types have nothing to cast to.
             FieldType::Uuid
-            | FieldType::Json
             | FieldType::Array(_)
             | FieldType::Range(_)
             | FieldType::HStore
@@ -157,8 +156,9 @@ impl Dialect for MySql {
             FieldType::Uuid => "CHAR(36)".into(),
             FieldType::Json => "JSON".into(),
             // A bare `DECIMAL` is `(10, 0)`, which has no fraction.
-            // `(38, 10)` is the widest that fits `rust_decimal`.
-            FieldType::Decimal => "DECIMAL(38, 10)".into(),
+            // `rust_decimal` holds 29 integer and 28 fractional digits;
+            // `(65, 28)` stores all of them.
+            FieldType::Decimal => "DECIMAL(65, 28)".into(),
             // `BLOB` caps at 64 KiB, too small here; `LONGBLOB` at
             // 4 GiB.
             FieldType::Binary => "LONGBLOB".into(),
@@ -447,6 +447,13 @@ impl Dialect for MySql {
         if distinct {
             sql.push(')');
         }
+    }
+
+    /// Bound as text, a JSON value never equals a JSON column.
+    fn write_json_param(&self, sql: &mut String, placeholder: &str) {
+        sql.push_str("CAST(");
+        sql.push_str(placeholder);
+        sql.push_str(" AS JSON)");
     }
 
     fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
