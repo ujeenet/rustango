@@ -154,7 +154,7 @@ rustango::register_admin_inline!(
     child = "rowscope_flag",
     fk = "parent_id",
     fields = &["active", "maybe"],
-    extra = 2,
+    extra = 3,
 );
 
 async fn setup(pool: &Pool) {
@@ -485,6 +485,12 @@ async fn nullable_bool_round_trips_in_admin_form(pool: &Pool) {
     let (status, body) = post(pool, &uri, "parent_id=1&maybe=").await;
     assert!(status.is_redirection(), "{status}: {body}");
     assert_eq!(flags(pool).await, [(false, None)]);
+
+    // An absent nullable key is NULL too, not false.
+    post(pool, &uri, "parent_id=1&active=true&maybe=true").await;
+    let (status, body) = post(pool, &uri, "parent_id=1&active=true").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(flags(pool).await, [(true, None)]);
 }
 
 async fn nullable_bool_round_trips_in_inline(pool: &Pool) {
@@ -494,12 +500,15 @@ async fn nullable_bool_round_trips_in_inline(pool: &Pool) {
     };
     p.insert_pool(pool).await.expect("insert parent");
     let p = *p.id.get().expect("pk");
-    let form = "name=p&rowscope_flag-TOTAL_FORMS=2&rowscope_flag-INITIAL_FORMS=0\
+    let form = "name=p&rowscope_flag-TOTAL_FORMS=3&rowscope_flag-INITIAL_FORMS=0\
         &rowscope_flag-0-active=true&rowscope_flag-0-maybe=\
-        &rowscope_flag-1-maybe=false";
+        &rowscope_flag-1-maybe=false&rowscope_flag-2-active=true";
     let (status, body) = post(pool, &format!("/rowscope_fparent/{p}"), form).await;
     assert!(status.is_redirection(), "{status}: {body}");
-    assert_eq!(flags(pool).await, [(true, None), (false, Some(false))]);
+    assert_eq!(
+        flags(pool).await,
+        [(true, None), (false, Some(false)), (true, None)]
+    );
 }
 
 tri_dialect_test! {
