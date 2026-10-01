@@ -30,6 +30,10 @@ The presigned PUT signs the declared size, and `finalize_upload` reads the objec
 
 A second finalize no longer deletes a `Ready` row's object or flips `Failed` back; the update is `WHERE status = 'pending'`.
 
+### Security — direct-upload URLs are create-only
+
+`begin_upload` signs `If-None-Match: *`, so a replayed URL cannot swap a finalized object; `UploadTicket.headers` lists what to send.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

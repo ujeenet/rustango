@@ -109,16 +109,15 @@ pub trait Storage: Send + Sync + 'static {
     }
 
     /// A PUT URL that expires, so a browser can upload straight to
-    /// the backend. A `content_type` or `content_length` is signed, so
-    /// the browser must send matching headers.
+    /// the backend. Everything in `put` is signed, so the browser must
+    /// send [`PutConditions::headers`] and a body of the signed length.
     ///
     /// `None` on a backend that cannot sign.
     async fn presigned_put_url(
         &self,
         _key: &str,
         _ttl: std::time::Duration,
-        _content_type: Option<&str>,
-        _content_length: Option<u64>,
+        _put: &PutConditions,
     ) -> Option<String> {
         None
     }
@@ -147,6 +146,55 @@ impl ObjectMeta {
     #[must_use]
     pub fn new(size: u64, content_type: Option<String>) -> Self {
         Self { size, content_type }
+    }
+}
+
+/// What a presigned PUT signs. Built with the chained setters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PutConditions {
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    /// Sign `If-None-Match: *`: the URL creates the object, never replaces it.
+    pub create_only: bool,
+}
+
+impl PutConditions {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn content_type(mut self, ct: impl Into<String>) -> Self {
+        self.content_type = Some(ct.into());
+        self
+    }
+
+    #[must_use]
+    pub fn content_length(mut self, len: u64) -> Self {
+        self.content_length = Some(len);
+        self
+    }
+
+    #[must_use]
+    pub fn create_only(mut self) -> Self {
+        self.create_only = true;
+        self
+    }
+
+    /// The headers the client must send. `Content-Length` is left out:
+    /// the client sets it from the body.
+    #[must_use]
+    pub fn headers(&self) -> std::collections::BTreeMap<String, String> {
+        let mut h = std::collections::BTreeMap::new();
+        if let Some(ct) = &self.content_type {
+            h.insert("content-type".to_owned(), ct.clone());
+        }
+        if self.create_only {
+            h.insert("if-none-match".to_owned(), "*".to_owned());
+        }
+        h
     }
 }
 

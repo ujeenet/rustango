@@ -647,6 +647,10 @@ async fn router_begin_then_finalize_upload_via_axum() {
     let put = reqwest::Client::new()
         .put(&upload_url)
         .header("Content-Type", "image/png")
+        .header(
+            "If-None-Match",
+            v["headers"]["if-none-match"].as_str().unwrap(),
+        )
         .body(b"-router-payload-".to_vec())
         .send()
         .await

@@ -51,7 +51,7 @@
 //!
 //! | Method | Path                              | Purpose |
 //! |--------|-----------------------------------|---------|
-//! | POST   | `/uploads/begin`                  | Start a direct browser upload — returns `{media_id, upload_url, expires_at}`. |
+//! | POST   | `/uploads/begin`                  | Start a direct browser upload — returns `{media_id, upload_url, expires_at, headers}`. |
 //! | POST   | `/uploads/{id}/finalize`          | Confirm the storage object landed; flips the row Pending→Ready. |
 //! | GET    | `/media/{id}`                     | Single Media row + URL + presigned link. |
 //! | DELETE | `/media/{id}`                     | Soft-delete the Media row (storage preserved). |
@@ -1056,6 +1056,8 @@ struct UploadTicketBody {
     storage_key: String,
     /// The `Content-Type` header the PUT must carry.
     content_type: String,
+    /// Every header the PUT must carry.
+    headers: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1273,6 +1275,7 @@ async fn begin_upload_handler(
         disk: ticket.disk,
         storage_key: ticket.storage_key,
         content_type: ticket.content_type,
+        headers: ticket.headers,
     }))
 }
 

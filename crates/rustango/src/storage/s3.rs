@@ -57,7 +57,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use super::{validate_key, ObjectMeta, Storage, StorageError};
+use super::{validate_key, ObjectMeta, PutConditions, Storage, StorageError};
 
 /// How to reach the bucket.
 #[derive(Clone, Debug)]
@@ -291,8 +291,7 @@ impl S3Storage {
         method: &str,
         key: &str,
         ttl_secs: u64,
-        content_type: Option<&str>,
-        content_length: Option<u64>,
+        put: &PutConditions,
     ) -> Result<String, StorageError> {
         validate_key(key)?;
         // AWS caps the lifetime at 7 days.
@@ -307,18 +306,22 @@ impl S3Storage {
         let date_stamp = &amz_date[..8];
         let scope = format!("{date_stamp}/{}/s3/aws4_request", self.cfg.region);
         let credential = format!("{}/{scope}", self.cfg.access_key_id);
-        let content_type = canonical_header_value(content_type)?;
-        let content_type = content_type.as_deref();
+        let content_type = canonical_header_value(put.content_type.as_deref())?;
 
         // Always sign `host`. A PUT signs its content type and length
         // too, so S3 refuses a body of another size or type (#1851).
         let mut signed: Vec<(&str, String)> = vec![("host", host.clone())];
         if method == "PUT" {
             if let Some(ct) = content_type {
-                signed.push(("content-type", ct.to_owned()));
+                signed.push(("content-type", ct));
             }
-            if let Some(len) = content_length {
+            if let Some(len) = put.content_length {
                 signed.push(("content-length", len.to_string()));
+            }
+            // S3 and MinIO answer 412 when the key exists, so a replayed
+            // URL cannot swap a finalized object.
+            if put.create_only {
+                signed.push(("if-none-match", "*".to_owned()));
             }
         }
         signed.sort_by(|a, b| a.0.cmp(b.0));
@@ -437,7 +440,7 @@ impl Storage for S3Storage {
     }
 
     async fn presigned_get_url(&self, key: &str, ttl: std::time::Duration) -> Option<String> {
-        self.build_presigned_url("GET", key, ttl.as_secs(), None, None)
+        self.build_presigned_url("GET", key, ttl.as_secs(), &PutConditions::default())
             .ok()
     }
 
@@ -445,10 +448,9 @@ impl Storage for S3Storage {
         &self,
         key: &str,
         ttl: std::time::Duration,
-        content_type: Option<&str>,
-        content_length: Option<u64>,
+        put: &PutConditions,
     ) -> Option<String> {
-        self.build_presigned_url("PUT", key, ttl.as_secs(), content_type, content_length)
+        self.build_presigned_url("PUT", key, ttl.as_secs(), put)
             .ok()
     }
 
@@ -751,8 +753,7 @@ mod tests {
             .presigned_put_url(
                 "uploads/x.png",
                 std::time::Duration::from_secs(300),
-                Some("image/png"),
-                None,
+                &PutConditions::new().content_type("image/png"),
             )
             .await
             .unwrap();
@@ -772,13 +773,29 @@ mod tests {
             .presigned_put_url(
                 "u/x.png",
                 std::time::Duration::from_secs(300),
-                Some("image/png"),
-                Some(10),
+                &PutConditions::new()
+                    .content_type("image/png")
+                    .content_length(10),
             )
             .await
             .unwrap();
         assert!(
             url.contains("X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost"),
+            "got: {url}"
+        );
+    }
+
+    /// A create-only PUT signs `if-none-match`, so the URL cannot overwrite.
+    #[tokio::test]
+    async fn presigned_put_url_create_only_signs_if_none_match() {
+        let s = S3Storage::new(cfg());
+        let put = PutConditions::new().content_length(3).create_only();
+        let url = s
+            .presigned_put_url("u/x", std::time::Duration::from_secs(60), &put)
+            .await
+            .unwrap();
+        assert!(
+            url.contains("X-Amz-SignedHeaders=content-length%3Bhost%3Bif-none-match"),
             "got: {url}"
         );
     }
@@ -790,8 +807,7 @@ mod tests {
             .presigned_put_url(
                 "uploads/x.bin",
                 std::time::Duration::from_secs(300),
-                None,
-                None,
+                &PutConditions::new(),
             )
             .await
             .unwrap();
@@ -850,7 +866,11 @@ mod tests {
             .await
             .is_none());
         assert!(local
-            .presigned_put_url("x", std::time::Duration::from_secs(60), None, None)
+            .presigned_put_url(
+                "x",
+                std::time::Duration::from_secs(60),
+                &PutConditions::new()
+            )
             .await
             .is_none());
     }

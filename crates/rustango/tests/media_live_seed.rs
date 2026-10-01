@@ -111,6 +111,7 @@ async fn seed_media_rows_for_inspection() {
     let resp = reqwest::Client::new()
         .put(&ticket.upload_url)
         .header("Content-Type", "text/plain")
+        .header("If-None-Match", "*")
         .body("rustango media is first-class.".as_bytes().to_vec())
         .send()
         .await

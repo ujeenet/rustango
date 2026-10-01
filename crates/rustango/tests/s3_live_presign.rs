@@ -7,7 +7,7 @@
 //! Skipped silently when RUSTANGO_S3_TEST_KEY etc. aren't set.
 
 use rustango::storage::s3::{S3Config, S3Storage};
-use rustango::storage::Storage;
+use rustango::storage::{PutConditions, Storage};
 use std::time::Duration;
 
 fn maybe_storage() -> Option<S3Storage> {
@@ -37,7 +37,11 @@ async fn presigned_put_then_get_round_trip() {
 
     // 1. Server-side: generate a presigned PUT URL for the browser.
     let put_url = storage
-        .presigned_put_url(&key, Duration::from_secs(60), Some("image/png"), None)
+        .presigned_put_url(
+            &key,
+            Duration::from_secs(60),
+            &PutConditions::new().content_type("image/png"),
+        )
         .await
         .expect("PUT url");
     println!("[presign] PUT URL: {put_url}");
@@ -88,7 +92,11 @@ async fn presigned_put_rejects_wrong_content_type() {
     let key = format!("presign-reject/{}.bin", uuid::Uuid::new_v4());
     // Sign for image/png — but try to upload as text/plain.
     let put_url = storage
-        .presigned_put_url(&key, Duration::from_secs(60), Some("image/png"), None)
+        .presigned_put_url(
+            &key,
+            Duration::from_secs(60),
+            &PutConditions::new().content_type("image/png"),
+        )
         .await
         .expect("PUT url");
     let client = reqwest::Client::new();
@@ -160,7 +168,13 @@ async fn presigned_put_refuses_another_size_and_metadata_reports_the_object() {
         let (storage, key, client) = (&storage, &key, &client);
         async move {
             let url = storage
-                .presigned_put_url(key, Duration::from_secs(60), Some("image/png"), Some(10))
+                .presigned_put_url(
+                    key,
+                    Duration::from_secs(60),
+                    &PutConditions::new()
+                        .content_type("image/png")
+                        .content_length(10),
+                )
                 .await
                 .expect("PUT url");
             client
@@ -182,5 +196,36 @@ async fn presigned_put_refuses_another_size_and_metadata_reports_the_object() {
     let meta = storage.metadata(&key).await.expect("head").expect("object");
     assert_eq!(meta.size, 10);
     assert_eq!(meta.content_type.as_deref(), Some("image/png"));
+    storage.delete(&key).await.expect("delete");
+}
+
+/// A create-only URL lands once; a replay gets 412 and the object stays.
+#[tokio::test]
+async fn presigned_put_create_only_refuses_a_replay() {
+    let Some(storage) = maybe_storage() else {
+        eprintln!("skipping — set RUSTANGO_S3_TEST_KEY etc.");
+        return;
+    };
+    let key = format!("presign-once/{}.bin", uuid::Uuid::new_v4());
+    let put = PutConditions::new().create_only();
+    let url = storage
+        .presigned_put_url(&key, Duration::from_secs(60), &put)
+        .await
+        .expect("PUT url");
+    let send = |body: &'static [u8]| {
+        let mut req = reqwest::Client::new().put(&url).body(body);
+        for (k, v) in put.headers() {
+            req = req.header(k, v);
+        }
+        req.send()
+    };
+    let bare = reqwest::Client::new().put(&url).body(&b"bare"[..]).send();
+    assert!(
+        !bare.await.expect("PUT").status().is_success(),
+        "PUT without If-None-Match accepted"
+    );
+    assert!(send(b"first").await.expect("PUT").status().is_success());
+    assert_eq!(send(b"second").await.expect("PUT").status().as_u16(), 412);
+    assert_eq!(storage.load(&key).await.expect("load"), b"first");
     storage.delete(&key).await.expect("delete");
 }

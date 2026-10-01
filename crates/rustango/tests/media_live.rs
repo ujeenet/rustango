@@ -141,6 +141,7 @@ async fn begin_then_finalize_upload_flips_pending_to_ready() {
     let resp = reqwest::Client::new()
         .put(&ticket.upload_url)
         .header("Content-Type", "image/png")
+        .header("If-None-Match", "*")
         .body(payload.to_vec())
         .send()
         .await
@@ -204,6 +205,7 @@ async fn direct_upload_stores_a_safe_type_and_the_signed_size() {
         reqwest::Client::new()
             .put(&ticket.upload_url)
             .header("Content-Type", ct)
+            .header("If-None-Match", "*")
             .body(body)
             .send()
     };
@@ -222,6 +224,56 @@ async fn direct_upload_stores_a_safe_type_and_the_signed_size() {
         .await
         .expect("finalize");
     assert_eq!(m.status_enum(), Some(MediaStatus::Ready));
+    manager.purge(&m).await.expect("purge");
+}
+
+/// A replayed upload URL cannot swap the object after finalize.
+#[tokio::test]
+async fn upload_url_is_create_only() {
+    let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
+        return;
+    };
+    let intent = UploadIntent::new(DISK_NAME, "image/png", "a.png", 10);
+    let ticket = manager.begin_upload(intent).await.expect("begin");
+    assert_eq!(
+        ticket.headers.get("if-none-match").map(String::as_str),
+        Some("*")
+    );
+    let put = |body: &'static [u8], headers: bool| {
+        let mut req = reqwest::Client::new().put(&ticket.upload_url).body(body);
+        if headers {
+            for (k, v) in &ticket.headers {
+                req = req.header(k, v);
+            }
+        } else {
+            req = req.header("Content-Type", "image/png");
+        }
+        req.send()
+    };
+    let bare = put(b"ten-bytes!", false).await.expect("PUT");
+    assert!(
+        !bare.status().is_success(),
+        "PUT without If-None-Match accepted"
+    );
+    let first = put(b"ten-bytes!", true).await.expect("PUT");
+    assert!(
+        first.status().is_success(),
+        "PUT failed: {}",
+        first.status()
+    );
+    let m = manager
+        .finalize_upload(ticket.media_id)
+        .await
+        .expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Ready));
+    let replay = put(b"SWAPPED!!!", true).await.expect("PUT");
+    assert_eq!(
+        replay.status().as_u16(),
+        412,
+        "replayed PUT replaced the object"
+    );
+    assert_eq!(manager.load_bytes(&m).await.expect("load"), b"ten-bytes!");
     manager.purge(&m).await.expect("purge");
 }
 

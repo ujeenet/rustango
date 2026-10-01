@@ -341,7 +341,7 @@ async fn save_bytes_hands_a_safe_mime_to_storage() {
 #[derive(Default)]
 struct FakeBucket {
     files: std::sync::Mutex<std::collections::HashMap<String, (Vec<u8>, Option<String>)>>,
-    signed: std::sync::Mutex<Vec<(Option<String>, Option<u64>)>>,
+    signed: std::sync::Mutex<Vec<rustango::storage::PutConditions>>,
 }
 
 impl FakeBucket {
@@ -390,13 +390,9 @@ impl rustango::storage::Storage for FakeBucket {
         &self,
         key: &str,
         _ttl: std::time::Duration,
-        ct: Option<&str>,
-        len: Option<u64>,
+        put: &rustango::storage::PutConditions,
     ) -> Option<String> {
-        self.signed
-            .lock()
-            .unwrap()
-            .push((ct.map(str::to_owned), len));
+        self.signed.lock().unwrap().push(put.clone());
         Some(format!("mem://{key}"))
     }
     async fn metadata(
@@ -434,8 +430,15 @@ async fn begin_upload_signs_a_safe_type_and_the_declared_size() {
     let intent = rustango::media::UploadIntent::new("default", "image/svg+xml", "x.svg", 10);
     let ticket = mgr.begin_upload(intent).await.expect("begin");
     assert_eq!(ticket.content_type, "application/octet-stream");
-    let octet = Some("application/octet-stream".to_owned());
-    assert_eq!(*disk.signed.lock().unwrap(), vec![(octet, Some(10))]);
+    let want = rustango::storage::PutConditions::new()
+        .content_type("application/octet-stream")
+        .content_length(10)
+        .create_only();
+    assert_eq!(*disk.signed.lock().unwrap(), vec![want]);
+    assert_eq!(
+        ticket.headers.get("if-none-match").map(String::as_str),
+        Some("*")
+    );
     let neg = rustango::media::UploadIntent::new("default", "image/png", "x.png", -1);
     assert!(mgr.begin_upload(neg).await.is_err(), "negative size signed");
 }

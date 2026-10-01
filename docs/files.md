@@ -174,7 +174,9 @@ supports two upload flows:
   call.
 - **Direct-to-storage:** `manager.begin_upload(...)` returns a **presigned PUT**
   URL the browser uploads to directly (your server never proxies the bytes),
-  then you confirm the row.
+  then you confirm the row. The PUT must send every header in
+  `ticket.headers` (`Content-Type`, `If-None-Match: *`), so the bucket's CORS
+  rule must allow both. The URL can create the object once and never replace it.
 
 ```rust
 use rustango::media::{Media, MediaManager};

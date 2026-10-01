@@ -305,6 +305,10 @@ pub struct UploadTicket {
     /// (HTML, SVG, script) is signed as `application/octet-stream`.
     #[serde(default)]
     pub content_type: String,
+    /// Every header the PUT must carry, `content-type` and
+    /// `if-none-match` included.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 // =====================================================================
@@ -427,8 +431,13 @@ impl MediaManager {
         // Sign a safe type and the declared size: the bucket stores no
         // active MIME and refuses a bigger body (#2057, #1851).
         let content_type = stored_content_type(&intent.mime).to_owned();
+        // Create-only: a replayed URL cannot swap a finalized object.
+        let put = crate::storage::PutConditions::new()
+            .content_type(content_type.clone())
+            .content_length(size)
+            .create_only();
         let upload_url = storage
-            .presigned_put_url(&key, intent.ttl, Some(&content_type), Some(size))
+            .presigned_put_url(&key, intent.ttl, &put)
             .await
             .ok_or_else(|| {
                 MediaError::Other(format!(
@@ -469,6 +478,7 @@ impl MediaManager {
             disk: intent.disk,
             storage_key: key,
             content_type,
+            headers: put.headers(),
         })
     }
 
