@@ -125,7 +125,13 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
     }
     for model in models {
         for sql in ddl::create_constraints_sql_with_dialect(dialect, model) {
-            crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+            // A re-run finds the FK already there (#1959).
+            match crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await {
+                Err(e) if !crate::migrate::ensure::is_already_exists(&e, dialect.name(), &sql) => {
+                    return Err(e.into());
+                }
+                _ => {}
+            }
         }
     }
     for model in models {

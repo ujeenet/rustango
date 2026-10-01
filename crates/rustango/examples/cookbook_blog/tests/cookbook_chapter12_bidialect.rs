@@ -68,9 +68,8 @@ async fn cookbook_rating_round_trips_against_mysql() {
 
 // §12.140b — multi-Auto<T> model (Auto<i64> PK + auto_now_add
 // joined_at) used to error hard with "multi-column RETURNING" on
-// MySQL. v0.20 path: insert succeeds, first Auto fills from
-// LAST_INSERT_ID(); other Autos stay Unset; caller re-fetches by PK
-// to materialize the DB-defaulted timestamp.
+// MySQL. Now the insert succeeds, the PK fills from LAST_INSERT_ID()
+// and auto_now_add is filled by save.
 #[tokio::test]
 async fn mysql_multi_auto_inserts_then_refetches_for_remaining_fields() {
     let Some(p) = pool().await else { return };
@@ -87,13 +86,11 @@ async fn mysql_multi_auto_inserts_then_refetches_for_remaining_fields() {
     let id = match a.id { Auto::Set(v) => v, _ => panic!("PK Auto must be set") };
     assert!(id > 0);
 
-    // joined_at stayed Unset on MySQL (we don't follow-up-SELECT).
-    assert!(matches!(a.joined_at, Auto::Unset),
-        "MySQL multi-Auto path leaves trailing Auto fields Unset; got {:?}", a.joined_at);
+    // save now fills auto_now_add joined_at on MySQL too.
+    assert!(matches!(a.joined_at, Auto::Set(_)),
+        "save fills auto_now_add on MySQL; got {:?}", a.joined_at);
 
-    // Re-fetch by PK materializes joined_at via the regular FromRow
-    // path — the usual move when you need a server-set timestamp
-    // right after the save.
+    // Re-fetch by PK reads the same stored value.
     let rows: Vec<Author> = Author::objects()
         .filter_op("id", Op::Eq, id)
         .fetch(&p).await.unwrap();

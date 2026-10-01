@@ -52,8 +52,8 @@
 //! - **Keep CSRF protection on.** A form now picks the verb, so a
 //!   cross-site POST can reach a DELETE route. A rewritten request is
 //!   no safer than the POST it arrived as.
-//! - The form-field path reads the whole body into memory. For large
-//!   uploads, use the header instead.
+//! - The form-field path reads the whole body into memory. A form over
+//!   the limit gets `413`. For large uploads, use the header instead.
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -61,7 +61,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::body::{to_bytes, Body};
-use axum::http::{header, HeaderMap, Method, Request, Response};
+use axum::http::{header, HeaderMap, Method, Request, Response, StatusCode};
 use tower::Service;
 
 const DEFAULT_HEADER: &str = "x-http-method-override";
@@ -168,21 +168,28 @@ where
         let cfg = Arc::clone(&self.cfg);
         let mut inner = self.inner.clone();
         Box::pin(async move {
-            let req = maybe_rewrite(req, &cfg).await;
-            inner.call(req).await
+            match maybe_rewrite(req, &cfg).await {
+                Ok(req) => inner.call(req).await,
+                Err(refused) => Ok(refused),
+            }
         })
     }
 }
 
-async fn maybe_rewrite(req: Request<Body>, cfg: &MethodOverrideConfig) -> Request<Body> {
+/// `Err` is the response to send instead: the body was consumed and
+/// could not be read whole, so the handler must not see it empty (#1866).
+async fn maybe_rewrite(
+    req: Request<Body>,
+    cfg: &MethodOverrideConfig,
+) -> Result<Request<Body>, Response<Body>> {
     if req.method() != Method::POST {
-        return req;
+        return Ok(req);
     }
 
     // 1. Header: cheap, no body parse.
     if let Some(target) = header_method(req.headers(), cfg.header_name) {
         if cfg.allowed.contains(&target) {
-            return swap_method(req, target);
+            return Ok(swap_method(req, target));
         }
     }
 
@@ -191,23 +198,30 @@ async fn maybe_rewrite(req: Request<Body>, cfg: &MethodOverrideConfig) -> Reques
         let (parts, body) = req.into_parts();
         let bytes = match to_bytes(body, cfg.body_limit).await {
             Ok(b) => b,
-            Err(_) => {
-                // Body too large, or the stream broke. It is already
-                // consumed, so forward an empty one.
-                return Request::from_parts(parts, Body::empty());
+            Err(e) => {
+                let too_large = std::error::Error::source(&e)
+                    .is_some_and(|s| s.is::<http_body_util::LengthLimitError>());
+                let status = if too_large {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                let mut refused = Response::new(Body::empty());
+                *refused.status_mut() = status;
+                return Err(refused);
             }
         };
         if let Some(target) = form_method(&bytes, cfg.form_field) {
             if cfg.allowed.contains(&target) {
                 let mut parts = parts;
                 parts.method = target;
-                return Request::from_parts(parts, Body::from(bytes));
+                return Ok(Request::from_parts(parts, Body::from(bytes)));
             }
         }
-        return Request::from_parts(parts, Body::from(bytes));
+        return Ok(Request::from_parts(parts, Body::from(bytes)));
     }
 
-    req
+    Ok(req)
 }
 
 fn header_method(headers: &HeaderMap, name: &str) -> Option<Method> {
@@ -488,8 +502,9 @@ mod tests {
         assert_eq!(&bytes[..], b"get");
     }
 
+    /// An over-limit form used to reach the handler with an empty body (#1866).
     #[tokio::test]
-    async fn body_above_limit_passes_through_as_post() {
+    async fn body_above_limit_is_413_and_never_reaches_the_handler() {
         let p = StdArc::new(AtomicBool::new(false));
         let pc = p.clone();
         let r = Router::new().route(
@@ -513,10 +528,10 @@ mod tests {
             ))
             .unwrap();
         let resp = svc.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert!(
-            p.load(Ordering::SeqCst),
-            "body too large -> handler stays POST"
+            !p.load(Ordering::SeqCst),
+            "the handler ran on a consumed, empty body"
         );
     }
 

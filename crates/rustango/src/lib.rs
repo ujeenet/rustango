@@ -574,9 +574,8 @@ pub mod notifications;
 #[cfg(feature = "jobs")]
 pub mod jobs;
 
-/// `catch_unwind` for futures: job handlers and MCP tools must not
-/// unwind into their worker or transport.
-#[cfg(any(feature = "jobs", feature = "mcp"))]
+/// `catch_unwind` for futures: job handlers, MCP tools, event
+/// subscribers and HTTP handlers must not unwind into their caller.
 pub(crate) mod panic_guard;
 
 /// Pre-built auth flows — password reset, email verification, magic-link login.
@@ -1209,8 +1208,8 @@ pub mod test_assertions;
 pub mod test_filter;
 
 /// Shared test fixtures — the [`setup_test_data!`] /
-/// [`setup_test_data_async!`] macros build the fixture once per test
-/// binary instead of once per test.
+/// [`setup_test_data_async!`] macros build the fixture once per process
+/// (per file under `cargo test`, per test under nextest).
 pub mod test_data;
 
 /// Test factories — build model instances for tests without repeating

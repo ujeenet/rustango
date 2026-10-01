@@ -169,7 +169,7 @@ couverture.
 |---|---:|---|
 | *(aucune)* | 223 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
 | `DATABASE_URL` | 130 | Un serveur PostgreSQL joignable. |
-| `MYSQL_TEST_URL` | 61 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
+| `MYSQL_TEST_URL` | 62 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis joignable. |
 
 Une suite qui lit deux variables est comptée sous les deux ; la colonne ne

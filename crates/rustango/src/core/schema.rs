@@ -1377,7 +1377,7 @@ impl ModelSchema {
     /// `order` plus each primary-key column it lacks, ascending, so rows
     /// tied on the sort keys come back in the same order on every page.
     #[must_use]
-    #[cfg(any(feature = "admin", feature = "template_views"))]
+    #[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
     pub(crate) fn with_pk_tiebreak(
         &self,
         mut order: Vec<super::OrderItem>,
@@ -1523,6 +1523,13 @@ impl ModelEntry {
     ) -> Self {
         self.audited_create = create;
         self
+    }
+
+    /// Did the framework register this model, rather than a downstream
+    /// crate? A project model on a `rustango_*` table overrides the framework's.
+    #[must_use]
+    pub(crate) fn is_framework(&self) -> bool {
+        self.module_path == "rustango" || self.module_path.starts_with("rustango::")
     }
 
     /// The registered entry for `model`, matched by table and name.

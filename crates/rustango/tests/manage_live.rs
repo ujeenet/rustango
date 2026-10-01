@@ -360,6 +360,55 @@ async fn list_tenants_prints_all_orgs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Database-mode PG tenants seed the reserved codenames too (#1933).
+#[tokio::test]
+async fn migrate_tenants_seeds_reserved_perms_in_a_database_mode_tenant() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let tenant_db = "rustango_tenant_perm_test";
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {tenant_db} WITH (FORCE)"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE {tenant_db}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let tenant_url = sibling_database_url(&url, tenant_db);
+    let dir = fresh_dir("dbperm");
+    let pools = TenantPools::new(pool.clone());
+    let slug = unique("dbperm");
+    let create = [
+        "create-tenant",
+        &slug,
+        "--mode",
+        "database",
+        "--database-url",
+        &tenant_url,
+        "--no-migrate",
+    ];
+    run(&pools, &url, &dir, &create).await.1.unwrap();
+    let (out, res) = run(&pools, &url, &dir, &["migrate-tenants"]).await;
+    res.unwrap_or_else(|e| panic!("{e}: {out}"));
+
+    let tenant = sqlx::PgPool::connect(&tenant_url).await.unwrap();
+    let (seeded,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM rustango_permissions WHERE codename = 'auth.access_admin'",
+    )
+    .fetch_one(&tenant)
+    .await
+    .unwrap();
+    assert_eq!(seeded, 1, "database-mode tenant lacks auth.access_admin");
+    tenant.close().await;
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn unrecognized_subcommand_delegates_to_migrate_manage() {
     // `showmigrations` is a rustango_migrate verb, NOT tenancy. The
@@ -498,6 +547,18 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
     let marker_sql = format!(r#"CREATE TABLE "{slug}"."widget" (id INT)"#);
     sqlx::query(&marker_sql).execute(&pool).await.unwrap();
 
+    // Brand files in the default store go with the tenant (#1933).
+    let brand = tempfile::tempdir().unwrap();
+    std::env::set_var(
+        rustango::tenancy::branding::BRAND_STORAGE_ROOT_ENV,
+        brand.path(),
+    );
+    let brand_dir = brand.path().join(&slug);
+    std::fs::create_dir_all(&brand_dir).unwrap();
+    for f in ["logo.png", "favicon.ico"] {
+        std::fs::write(brand_dir.join(f), b"x").unwrap();
+    }
+
     let (out, res) = run(
         &pools,
         &url,
@@ -505,9 +566,14 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
         &["purge-tenant", &slug, "--confirm", &slug],
     )
     .await;
+    std::env::remove_var(rustango::tenancy::branding::BRAND_STORAGE_ROOT_ENV);
     res.unwrap();
     assert!(out.contains("purged"), "{out}");
     assert!(out.contains(&slug), "{out}");
+    for f in ["logo.png", "favicon.ico"] {
+        assert!(!brand_dir.join(f).exists(), "{f} survived the purge");
+    }
+    assert!(out.contains("custom brand store"), "{out}");
 
     // Schema gone (CASCADE took the marker table with it).
     let exists: bool = sqlx::query_as::<_, (bool,)>(

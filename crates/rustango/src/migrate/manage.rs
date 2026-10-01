@@ -3788,22 +3788,10 @@ async fn reset_sequences(
     pool: &Pool,
     schemas: &[&'static crate::core::ModelSchema],
 ) -> Result<(), MigrateError> {
-    use crate::core::FieldType as T;
     for schema in schemas {
-        let Some(pk) = schema.primary_key() else {
+        let Some((sql, binds)) = reset_sequence_stmt(pool.dialect(), schema) else {
             continue;
         };
-        if !pk.auto || !matches!(pk.ty, T::I16 | T::I32 | T::I64) {
-            continue;
-        }
-        let dialect = pool.dialect();
-        let Some(sql) = dialect.reset_sequence_sql(schema.table, pk.column) else {
-            continue;
-        };
-        let binds = vec![
-            crate::core::SqlValue::String(dialect.quote_ident(schema.table)),
-            crate::core::SqlValue::String(pk.column.to_owned()),
-        ];
         crate::sql::raw_execute_pool(pool, &sql, binds)
             .await
             .map_err(|e| {
@@ -3814,6 +3802,25 @@ async fn reset_sequences(
             })?;
     }
     Ok(())
+}
+
+/// The serial-counter reset for `schema`, with its binds; `None` when
+/// the PK is not an auto integer or the dialect needs none.
+pub(crate) fn reset_sequence_stmt(
+    dialect: &dyn crate::sql::Dialect,
+    schema: &crate::core::ModelSchema,
+) -> Option<(String, Vec<crate::core::SqlValue>)> {
+    use crate::core::FieldType as T;
+    let pk = schema.primary_key()?;
+    if !pk.auto || !matches!(pk.ty, T::I16 | T::I32 | T::I64) {
+        return None;
+    }
+    let sql = dialect.reset_sequence_sql(schema.table, pk.column)?;
+    let binds = vec![
+        crate::core::SqlValue::String(dialect.quote_ident(schema.table)),
+        crate::core::SqlValue::String(pk.column.to_owned()),
+    ];
+    Some((sql, binds))
 }
 
 /// Map a JSON value onto an [`crate::core::SqlValue`] using the target
@@ -3828,7 +3835,7 @@ async fn reset_sequences(
 /// - Binary: lowercase hex
 ///
 /// Object / Array JSON nodes always land as `SqlValue::Json`.
-fn json_to_sql_value(
+pub(crate) fn json_to_sql_value(
     v: &serde_json::Value,
     field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, String> {

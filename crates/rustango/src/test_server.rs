@@ -60,13 +60,18 @@ impl LiveServer {
             .expect("LiveServer: listener.local_addr()");
         let (tx, rx) = oneshot::channel::<()>();
         let join = tokio::spawn(async move {
-            axum::serve(listener, router.into_make_service())
-                .with_graceful_shutdown(async move {
-                    // Exit on the signal, or when the sender drops.
-                    let _ = rx.await;
-                })
-                .await
-                .ok();
+            // With ConnectInfo, as a real server runs: IP filters and
+            // per-IP limits read it (#1958).
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                // Exit on the signal, or when the sender drops.
+                let _ = rx.await;
+            })
+            .await
+            .ok();
         });
         Self {
             addr,
@@ -183,6 +188,31 @@ mod tests {
         let raw = String::from_utf8_lossy(&buf);
         assert!(raw.contains("HTTP/1.1 200"), "status line: {raw}");
         assert!(raw.contains("hello world"), "body: {raw}");
+        server.shutdown().await;
+    }
+
+    /// Handlers and IP layers see the real peer, not a missing extension.
+    #[tokio::test]
+    async fn handlers_see_the_peer_address() {
+        use axum::extract::ConnectInfo;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let app = Router::new().route(
+            "/ip",
+            get(|ConnectInfo(addr): ConnectInfo<SocketAddr>| async move { addr.ip().to_string() }),
+        );
+        let server = LiveServer::spawn(app).await;
+        let mut stream = TcpStream::connect(server.addr()).await.unwrap();
+        stream
+            .write_all(b"GET /ip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8_lossy(&buf);
+        assert!(raw.contains("HTTP/1.1 200"), "status line: {raw}");
+        assert!(raw.ends_with("127.0.0.1"), "body: {raw}");
         server.shutdown().await;
     }
 

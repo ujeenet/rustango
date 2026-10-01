@@ -320,6 +320,12 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     // provisioning path — no separate bootstrap step).
     assert!(table_exists_in_schema(&pool, &acme_schema, "rustango_users").await);
     assert!(table_exists_in_schema(&pool, &globex_schema, "rustango_users").await);
+    // Schema mode seeds the reserved codenames too, not just CRUD (#1933).
+    let sql = format!(
+        r#"SELECT COUNT(*) FROM "{acme_schema}".rustango_permissions WHERE codename = 'auth.access_admin'"#
+    );
+    let (seeded,): (i64,) = sqlx::query_as(&sql).fetch_one(&pool).await.unwrap();
+    assert_eq!(seeded, 1, "schema-mode tenant lacks auth.access_admin");
 
     // `items` table exists in both tenant schemas, NOT in public.
     assert!(table_exists_in_schema(&pool, &acme_schema, "items").await);

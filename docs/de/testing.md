@@ -168,7 +168,7 @@ gelaufen ist. Gut zu wissen, bevor du ein grünes Ergebnis als Abdeckung liest.
 |---|---:|---|
 | *(keine)* | 223 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
 | `DATABASE_URL` | 130 | Ein erreichbarer PostgreSQL-Server. |
-| `MYSQL_TEST_URL` | 61 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
+| `MYSQL_TEST_URL` | 62 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Ein erreichbares Redis. |
 
 Eine Suite, die zwei Variablen liest, wird unter beiden gezählt, die Spalte

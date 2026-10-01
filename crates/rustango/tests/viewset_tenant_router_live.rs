@@ -72,6 +72,17 @@ pub struct Widget {
     pub label: String,
 }
 
+/// A unique column, for the tenant CreateView duplicate (#2033).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "ten_vs_code")]
+#[allow(dead_code)]
+pub struct Code {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(unique, max_length = 16)]
+    pub code: String,
+}
+
 async fn fresh_widget_table(pool: &sqlx::PgPool) {
     sqlx::query(r#"DROP TABLE IF EXISTS ten_vs_widget CASCADE"#)
         .execute(pool)
@@ -108,6 +119,8 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
     fresh_widget_table(&pool).await;
+    rustango::testkit::matrix::fresh_table::<Code>(&rustango::sql::Pool::Postgres(pool.clone()))
+        .await;
 
     // Single tenant in database mode pointing at this same DB. This
     // avoids the schema-mode `SET search_path` setup the test would
@@ -156,25 +169,61 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
 /// Tenant template views on the same model, for the bad-URL-PK 404 (#1950).
 #[cfg(feature = "template_views")]
 fn template_views_router() -> axum::Router {
-    use rustango::template_views::{DeleteView, DetailView, UpdateView};
+    use rustango::template_views::{CreateView, DeleteView, DetailView, UpdateView};
     let mut t = tera::Tera::default();
     t.add_raw_template("page.html", "page").unwrap();
+    t.add_raw_template("form.html", "form {{ form.errors | json_encode() | safe }}")
+        .unwrap();
     let t = Arc::new(t);
-    DetailView::for_model(Widget::SCHEMA)
-        .template("page.html")
-        .tenant_router("/tv", t.clone())
+    CreateView::for_model(Code::SCHEMA)
+        .template("form.html")
+        .success_url("/codes")
+        .tenant_router("/codes", t.clone())
         .merge(
-            UpdateView::for_model(Widget::SCHEMA)
+            DetailView::for_model(Widget::SCHEMA)
                 .template("page.html")
-                .success_url("/tv")
-                .tenant_router("/tv", t.clone()),
+                .tenant_router("/tv", t.clone())
+                .merge(
+                    UpdateView::for_model(Widget::SCHEMA)
+                        .template("page.html")
+                        .success_url("/tv")
+                        .tenant_router("/tv", t.clone()),
+                )
+                .merge(
+                    DeleteView::for_model(Widget::SCHEMA)
+                        .template("page.html")
+                        .success_url("/tv")
+                        .tenant_router("/tv", t),
+                ),
         )
-        .merge(
-            DeleteView::for_model(Widget::SCHEMA)
-                .template("page.html")
-                .success_url("/tv")
-                .tenant_router("/tv", t),
-        )
+}
+
+/// A duplicate on the tenant CreateView is a form error, not a 500 (#2033).
+#[cfg(feature = "template_views")]
+#[tokio::test]
+async fn tenant_create_view_duplicate_is_a_form_error() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else { return };
+    let (slug, _pool, app) = fixture(pool).await;
+    let csrf = "ten-vs-csrf-token-ten-vs-csrf-token-ten-vs-x";
+    let post = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/codes/new")
+            .header("x-org", &slug)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, format!("rustango_csrf={csrf}"))
+            .body(Body::from(format!("_csrf={csrf}&code=rs")))
+            .unwrap()
+    };
+    let resp = app.clone().oneshot(post()).await.unwrap();
+    assert!(resp.status().is_redirection(), "first: {}", resp.status());
+    let resp = app.oneshot(post()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        body_string(resp).await,
+        r#"form {"code":"a row with this value already exists"}"#
+    );
 }
 
 /// A URL PK that is not an integer is a 404 on the tenant views, not a PG 500.
