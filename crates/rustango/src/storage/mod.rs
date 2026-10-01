@@ -153,7 +153,7 @@ impl ObjectMeta {
 /// `Arc<dyn Storage>` — the standard way to share a backend.
 pub type BoxedStorage = Arc<dyn Storage>;
 
-/// Reject a key that could escape the storage root: `..`, a leading
+/// Reject a key that could escape the storage root: a `..` segment, a leading
 /// `/` or `\`, a Windows drive prefix, or a null byte. Backends that
 /// store keys as given, such as S3, should still call it so keys stay
 /// consistent.
@@ -169,7 +169,8 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
             "key must be relative: {key}"
         )));
     }
-    if key.contains("..") {
+    // A whole `..` segment only: `report..final.pdf` is a file name (#1903).
+    if key.split(['/', '\\']).any(|seg| seg == "..") {
         return Err(StorageError::InvalidPath(format!(
             "key contains `..`: {key}"
         )));
@@ -399,6 +400,23 @@ mod tests {
             validate_key("safe/../bad"),
             Err(StorageError::InvalidPath(_))
         ));
+    }
+
+    /// #1903: dots inside a file name are not a path segment.
+    #[test]
+    fn validate_accepts_dots_inside_a_segment() {
+        for key in [
+            "report..final.pdf",
+            "a/..b/c",
+            "x/y../z",
+            "...",
+            "a/.hidden",
+        ] {
+            assert!(validate_key(key).is_ok(), "`{key}` must be accepted");
+        }
+        for key in ["..", "a/..", r"a\..\b", "a/../b"] {
+            assert!(validate_key(key).is_err(), "`{key}` must be rejected");
+        }
     }
 
     #[test]
