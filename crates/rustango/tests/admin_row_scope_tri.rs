@@ -95,6 +95,11 @@ fn not_hidden(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -
 }
 rustango::register_admin_object_permission!("rowscope_child", "view", not_hidden);
 
+fn not_out(_: &axum::http::request::Parts) -> Vec<Filter> {
+    vec![Filter::new("label", Op::Ne, SqlValue::String("out".into()))]
+}
+rustango::register_admin_queryset!("rowscope_child", not_out);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "rowscope_note").await;
@@ -319,6 +324,22 @@ async fn inline_post_refuses_hidden_children(pool: &Pool) {
     }
 }
 
+/// `max_num` counts the rows the queryset hook hides too.
+async fn inline_max_num_counts_hidden_rows(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a", p, "out", false).await;
+    seed_child(pool, "b", p, "two", false).await;
+    let form = "name=p&rowscope_child-TOTAL_FORMS=2&rowscope_child-INITIAL_FORMS=1\
+        &rowscope_child-0-code=b&rowscope_child-0-label=two\
+        &rowscope_child-1-code=c&rowscope_child-1-label=c&rowscope_child-1-secret=s";
+    let (status, body) = post(pool, &format!("/rowscope_parent/{p}"), form).await;
+    assert!(body.contains("at most 2 rows"), "{status}: {body}");
+    assert!(
+        child(pool, "c").await.is_none(),
+        "row past max_num was written"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -330,5 +351,6 @@ tri_dialect_test! {
         inline_duplicate_deletes_do_not_bypass_max_num,
         inline_secret_guess_is_no_oracle,
         inline_post_refuses_hidden_children,
+        inline_max_num_counts_hidden_rows,
     ],
 }

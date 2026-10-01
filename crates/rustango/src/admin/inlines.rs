@@ -1409,11 +1409,12 @@ async fn plan_target(
                 target.row_where(pk),
             )));
     }
-    // `max_num` caps the rows a POST that adds any may leave (#1717).
+    // `max_num` caps the rows a POST that adds any may leave (#1717):
+    // every row of the parent, not only those the hooks show.
     if let Some(max) = target.max_num.filter(|_| !out.inserts.is_empty()) {
         let count = crate::core::CountQuery {
             model: target.child,
-            where_clause: target.rows.constrain(target.scope.all_where()),
+            where_clause: target.scope.all_where(),
             search: None,
             source: None,
         };
