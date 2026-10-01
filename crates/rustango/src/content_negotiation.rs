@@ -78,7 +78,9 @@ fn parse_accept(header: &str) -> Vec<AcceptPref> {
             let mut q = 1000;
             for kv in parts {
                 if let Some(rest) = kv.strip_prefix("q=").or_else(|| kv.strip_prefix("Q=")) {
-                    if let Ok(parsed) = rest.trim().parse::<f32>() {
+                    // A non-finite q is as unusable as an unparsable one.
+                    if let Some(parsed) = rest.trim().parse::<f32>().ok().filter(|p| p.is_finite())
+                    {
                         q = (parsed.clamp(0.0, 1.0) * 1000.0).round() as u16;
                     }
                 }
@@ -206,6 +208,21 @@ mod tests {
             negotiate("text/*;q=0.1, text/html", &["text/plain", "text/html"]),
             Some("text/html"),
         );
+    }
+
+    /// A NaN or infinite q keeps the default q, like an unparsable one.
+    #[test]
+    fn non_finite_q_keeps_the_default() {
+        for q in ["NaN", "-inf", "inf"] {
+            assert_eq!(
+                negotiate(
+                    &format!("text/html;q=0.5, application/json;q={q}"),
+                    &["text/html", "application/json"]
+                ),
+                Some("application/json"),
+                "q={q}"
+            );
+        }
     }
 
     #[test]
