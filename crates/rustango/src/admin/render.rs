@@ -170,6 +170,7 @@ pub(crate) fn render_gfk_select(
 /// Call sites that have an [`AdminConfig`](crate::core::AdminConfig)
 /// in scope should use [`render_input_with_widget`] directly and pass
 /// the override (#359) so per-model `formfield_overrides` apply.
+#[cfg(any(test, feature = "tenancy"))]
 pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
     render_input_with_widget(field, value, pk_locked, None)
 }
