@@ -151,7 +151,6 @@ async fn purging_a_row_reclaims_its_tag_links() {
     );
 }
 
-/// Deleting a collection must not leave its children dangling.
 /// #1573: `purge` keeps the row on error, so it must keep its links too.
 #[tokio::test]
 async fn a_failed_purge_keeps_the_tag_links() {
@@ -170,6 +169,7 @@ async fn a_failed_purge_keeps_the_tag_links() {
     assert_eq!(use_count(&mgr, "kept").await, 1, "links gone, row kept");
 }
 
+/// Deleting a collection must not leave its children dangling.
 #[tokio::test]
 async fn deleting_a_collection_takes_its_subtree_with_it() {
     let mgr = manager().await;

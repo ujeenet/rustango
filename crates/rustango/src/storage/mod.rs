@@ -202,7 +202,8 @@ impl PutConditions {
 pub type BoxedStorage = Arc<dyn Storage>;
 
 /// Reject a key that could escape the storage root: a `..` segment, a leading
-/// `/` or `\`, a Windows drive prefix, or a null byte. Backends that
+/// `/` or `\`, a Windows drive prefix, or a null byte. Empty and `.`
+/// segments are refused too. Backends that
 /// store keys as given, such as S3, should still call it so keys stay
 /// consistent.
 ///
@@ -249,6 +250,15 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
         // drive's working directory, which is not ours either.
         return Err(StorageError::InvalidPath(format!(
             "key names a drive: {key}"
+        )));
+    }
+    // `a//b`, `./a` and `a/` name another file on disk than on S3.
+    if key
+        .split(['/', '\\'])
+        .any(|seg| seg.is_empty() || seg == ".")
+    {
+        return Err(StorageError::InvalidPath(format!(
+            "key has an empty or `.` segment: {key}"
         )));
     }
     Ok(())
@@ -472,6 +482,19 @@ mod tests {
             validate_key(""),
             Err(StorageError::InvalidPath(_))
         ));
+    }
+
+    #[test]
+    fn validate_rejects_empty_and_dot_segments() {
+        for bad in ["a//b", "./a", "a/./b", "a/", "a\\\\b", "."] {
+            assert!(
+                matches!(validate_key(bad), Err(StorageError::InvalidPath(_))),
+                "accepted {bad:?}"
+            );
+        }
+        for ok in [".hidden", "a.b/c.d", "a/..b", "a/b."] {
+            assert!(validate_key(ok).is_ok(), "rejected {ok:?}");
+        }
     }
 
     #[test]

@@ -50,6 +50,10 @@ A backend that rewrites the type's parameters no longer fails a good upload.
 
 `MediaManager::with_max_upload_bytes` sets it; the default is 100 MiB (`DEFAULT_MAX_UPLOAD_BYTES`).
 
+### Fixed — `validate_key` rejects empty and `.` segments
+
+`a//b`, `./a` and `a/` named a different file on disk than on S3.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
