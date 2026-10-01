@@ -823,7 +823,7 @@ impl<DB: Database> Builder<DB> {
                 let mut tenants = tenants.clone();
                 let apex = apex.clone();
                 async move {
-                    let on_apex = crate::tenancy::host_is_apex(req.headers(), &apex);
+                    let on_apex = crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex);
                     let response = if on_apex {
                         operator.as_service().oneshot(req).await
                     } else {
@@ -900,7 +900,7 @@ impl<DB: Database> Builder<DB> {
     }
 
     /// The standard chain, plus the opt-in header fallback.
-    fn resolver(&self) -> ChainResolver {
+    pub(crate) fn resolver(&self) -> ChainResolver {
         let chain = ChainResolver::standard(self.apex.clone());
         match &self.header_resolver {
             Some(h) => chain.push(h.clone()),
@@ -937,8 +937,7 @@ impl<DB: Database> Builder<DB> {
         let drain = self.drain_timeout;
         let app = self.into_router().await?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        // `PortResolver` reads this, never the client-sent URI port (#1856).
-        let app = app.layer(Extension(ListenerPort(listener.local_addr()?.port())));
+        let app = tag_listener_port(app, &listener)?;
         // v0.30.16 — `into_make_service_with_connect_info` is what
         // populates `ConnectInfo<SocketAddr>` in request extensions.
         // Without it, `access_log` (and any other middleware that
@@ -956,6 +955,11 @@ impl<DB: Database> Builder<DB> {
         .await?;
         Ok(())
     }
+}
+
+/// `PortResolver` reads this, never the client-sent URI port (#1856).
+fn tag_listener_port(app: Router, listener: &tokio::net::TcpListener) -> std::io::Result<Router> {
+    Ok(app.layer(Extension(ListenerPort(listener.local_addr()?.port()))))
 }
 
 /// Build the axum router that claims every URL the tenant admin
@@ -1087,6 +1091,82 @@ fn resolve_span_redact(
     explicit
         .or_else(|| access_log.map(|l| l.redact_query_params.clone()))
         .unwrap_or_else(crate::access_log::default_redact_params)
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) mod resolver_tests {
+    use super::*;
+    use crate::tenancy::{Org, OrgResolver as _};
+
+    /// A SQLite registry holding org `acme`, and its URL.
+    pub(crate) async fn registry() -> (tempfile::TempDir, sqlx::SqlitePool, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let sq = sqlx::SqlitePool::connect(&url).await.expect("connect");
+        let pool = crate::sql::Pool::Sqlite(sq.clone());
+        crate::testkit::create_tables_for::<Org>(&pool)
+            .await
+            .expect("orgs");
+        let mut org = Org {
+            slug: "acme".into(),
+            display_name: "acme".into(),
+            backend_kind: "sqlite".into(),
+            ..crate::testkit::org()
+        };
+        org.insert_pool(&pool).await.expect("insert org");
+        (tmp, sq, url)
+    }
+
+    /// The slug the builder's chain picks for `X-Org: acme` on an unknown host.
+    pub(crate) async fn x_org_pick(
+        b: &Builder<sqlx::Sqlite>,
+        sq: &sqlx::SqlitePool,
+    ) -> Option<String> {
+        let (parts, ()) = axum::http::Request::builder()
+            .uri("/")
+            .header("host", "shared.localhost")
+            .header("x-org", "acme")
+            .body(())
+            .unwrap()
+            .into_parts();
+        let pool = crate::sql::Pool::Sqlite(sq.clone());
+        b.resolver()
+            .resolve(&parts, &pool)
+            .await
+            .expect("resolve")
+            .map(|o| o.slug)
+    }
+
+    /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.
+    #[tokio::test]
+    async fn x_org_is_ignored_unless_opted_in() {
+        let (_tmp, sq, url) = registry().await;
+        let plain = Builder::<sqlx::Sqlite>::from_pool(sq.clone(), url.clone(), "localhost");
+        assert_eq!(x_org_pick(&plain, &sq).await, None);
+        let opted = Builder::<sqlx::Sqlite>::from_pool(sq.clone(), url, "localhost")
+            .header_resolver(HeaderResolver::default());
+        assert_eq!(x_org_pick(&opted, &sq).await.as_deref(), Some("acme"));
+    }
+
+    /// #1856 — handlers see the port the listener accepted on.
+    #[tokio::test]
+    async fn served_router_carries_the_listener_port() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = Router::new().route(
+            "/",
+            axum::routing::get(|p: Option<Extension<ListenerPort>>| async move {
+                p.map_or(String::new(), |Extension(ListenerPort(n))| n.to_string())
+            }),
+        );
+        let app = tag_listener_port(app, &listener).unwrap();
+        let resp = app
+            .oneshot(axum::http::Request::new(axum::body::Body::empty()))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        let want = listener.local_addr().unwrap().port().to_string();
+        assert_eq!(&body[..], want.as_bytes());
+    }
 }
 
 #[cfg(test)]

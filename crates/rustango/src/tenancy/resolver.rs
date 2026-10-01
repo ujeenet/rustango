@@ -700,10 +700,15 @@ impl OrgResolver for ChainResolver {
 
 // ---------------- helpers ----------------
 
-/// Pull the host name (no port, no scheme) from the request. Tries
-/// `Host` header first (universal), falls back to `parts.uri.host()`
-/// for clients that send absolute-form URIs.
+/// Whether the request's host is the apex, ignoring case like every
+/// other host comparison here (#1856).
+pub(crate) fn host_is_apex(headers: &http::HeaderMap, uri: &http::Uri, apex: &str) -> bool {
+    host_of(headers, uri).is_some_and(|h| h.eq_ignore_ascii_case(apex))
+}
+
 /// Pull the host name from the request, lowercased and without a port.
+/// Tries the `Host` header, then `uri.host()` (HTTP/2 `:authority`,
+/// absolute-form URIs).
 ///
 /// Case-folding is not cosmetic: hostnames are case-insensitive per RFC
 /// 4343, but the caches below are keyed on this string, and the string
@@ -712,23 +717,18 @@ impl OrgResolver for ChainResolver {
 /// so a few thousand case variants of a real host fill a bounded map with
 /// duplicates, evicting genuine entries and taking a write lock on the
 /// process-global cache each time.
-/// Whether the request's `Host` (port stripped) is the apex, ignoring
-/// case like every other host comparison here (#1856).
-pub(crate) fn host_is_apex(headers: &http::HeaderMap, apex: &str) -> bool {
-    headers
-        .get(http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| s.split(':').next().unwrap_or(s).eq_ignore_ascii_case(apex))
+fn host_from_parts(parts: &Parts) -> Option<String> {
+    host_of(&parts.headers, &parts.uri)
 }
 
-fn host_from_parts(parts: &Parts) -> Option<String> {
-    if let Some(value) = parts.headers.get(http::header::HOST) {
+fn host_of(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
+    if let Some(value) = headers.get(http::header::HOST) {
         if let Ok(s) = value.to_str() {
             // `Host` header may include `:port` — strip it.
             return Some(s.split(':').next().unwrap_or(s).to_ascii_lowercase());
         }
     }
-    parts.uri.host().map(str::to_ascii_lowercase)
+    uri.host().map(str::to_ascii_lowercase)
 }
 
 /// Fails fast while the registry itself is unreachable.
@@ -851,9 +851,14 @@ mod tests {
     fn apex_match_ignores_case_and_port() {
         let mut h = http::HeaderMap::new();
         h.insert(http::header::HOST, "APP.Test:8080".parse().unwrap());
-        assert!(host_is_apex(&h, "app.test"));
-        assert!(!host_is_apex(&h, "acme.app.test"));
-        assert!(!host_is_apex(&http::HeaderMap::new(), "app.test"));
+        let path: http::Uri = "/".parse().unwrap();
+        assert!(host_is_apex(&h, &path, "app.test"));
+        assert!(!host_is_apex(&h, &path, "acme.app.test"));
+        let none = http::HeaderMap::new();
+        assert!(!host_is_apex(&none, &path, "app.test"));
+        // HTTP/2 carries the host in `:authority`, not `Host`.
+        let h2: http::Uri = "https://app.test/x".parse().unwrap();
+        assert!(host_is_apex(&none, &h2, "app.test"));
     }
 
     #[test]

@@ -44,4 +44,13 @@ mod tests {
         assert_eq!(h.get_all(VARY).iter().count(), 1);
         assert_eq!(h[VARY], "Origin, cookie, Accept-Language");
     }
+
+    /// `Vary: *` already covers every header, so it stays as is.
+    #[test]
+    fn star_is_left_alone() {
+        let mut h = HeaderMap::new();
+        h.insert(VARY, HeaderValue::from_static("*"));
+        add_vary(&mut h, "Accept-Language");
+        assert_eq!(h[VARY], "*");
+    }
 }

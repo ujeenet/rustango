@@ -148,7 +148,7 @@ where
             let mut tenants = tenants.clone();
             let apex = apex.clone();
             async move {
-                let on_apex = super::resolver::host_is_apex(req.headers(), &apex);
+                let on_apex = super::resolver::host_is_apex(req.headers(), req.uri(), &apex);
                 let response: Response<Body> = if on_apex {
                     operator.as_service().oneshot(req).await
                 } else {

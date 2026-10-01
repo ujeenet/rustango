@@ -2100,6 +2100,24 @@ mod tests {
         assert!(inert_layer_settings(&s).is_empty());
     }
 
+    /// #1856 — `Cli::tenant_header` reaches the builder's resolver chain.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenant_header_reaches_the_builder() {
+        use crate::server::resolver_tests::{registry, x_org_pick};
+        let (_tmp, sq, url) = registry().await;
+        let builder = |cli: Cli| {
+            let b = crate::server::Builder::from_pool(sq.clone(), url.clone(), "localhost");
+            cli.tenancy_builder(b, None)
+        };
+        assert_eq!(x_org_pick(&builder(Cli::new()), &sq).await, None);
+        let cli = Cli::new().tenant_header(crate::tenancy::HeaderResolver::default());
+        assert_eq!(
+            x_org_pick(&builder(cli), &sq).await.as_deref(),
+            Some("acme")
+        );
+    }
+
     /// #1699, #1700 — what both tenancy paths hand the builder, checked
     /// by request: headers, Host allowlist outermost, HTTPS redirect with
     /// its proxy header and exempt paths.
