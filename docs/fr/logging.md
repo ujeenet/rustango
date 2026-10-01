@@ -18,9 +18,9 @@ comment distinguer le trafic d'un locataire de celui d'un autre.
 > **Source :** `rustango::logging` (`setup`, `setup_for_env`, `Setup`,
 > `Rotation`, `DEFAULT_FILTER`) — le module n'est pas derrière une feature, mais
 > chaque installateur requiert la feature `runtime`. `Setup::from_settings`
-> requiert en plus `config`. `rustango::access_log` et `rustango::tenant_log`
-> requièrent `admin` **ou** `tenancy` ; `rustango::tracing_layer` requiert
-> `admin`.
+> requiert en plus `config`. `rustango::access_log`, `rustango::tenant_log`,
+> `rustango::tracing_layer` et `rustango::request_id` requièrent `manage`,
+> `admin` **ou** `tenancy`.
 >
 > **Version exécutable :** les réglages et valeurs par défaut présentés ici sont
 > figés par

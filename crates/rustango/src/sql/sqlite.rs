@@ -85,6 +85,15 @@ pub(crate) fn encode_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
 pub(crate) const SQLITE_CANONICAL_GLOB: &str =
     "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00";
 
+/// `true` for a DEFAULT meaning "the current time", which SQLite renders
+/// as a non-constant expression.
+pub(crate) fn is_now_expr(expr: &str) -> bool {
+    matches!(
+        expr.trim(),
+        "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP"
+    )
+}
+
 /// The `SQLite` 3.35+ dialect. Stateless; construct with `Sqlite`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Sqlite;
@@ -182,11 +191,8 @@ impl Dialect for Sqlite {
     ///   ignored: SQLite takes a literal default on any column.
     fn translate_default_expr(&self, expr: &str, _ty: &str, _max_length: Option<u32>) -> String {
         let trimmed = expr.trim();
-        match trimmed {
-            "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {
-                return format!("(strftime('{SQLITE_DATETIME_FORMAT}','now'))");
-            }
-            _ => {}
+        if is_now_expr(trimmed) {
+            return format!("(strftime('{SQLITE_DATETIME_FORMAT}','now'))");
         }
         // Strip a Postgres `::<type>` cast, so `'[]'::jsonb` becomes
         // `'[]'`. `::` cannot appear inside a quoted literal, so

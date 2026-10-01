@@ -725,17 +725,12 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     write(root, "src/views.rs", templates::VIEWS_RS)?;
     write(root, "src/urls.rs", &templates::urls_rs(template))?;
 
-    // Tenant projects get an empty `system/migrations/` folder — the
-    // framework's own tables (`rustango_orgs`, `rustango_users`, roles/
-    // permissions, …) are NOT shipped as hardcoded bootstrap JSON.
-    // Instead the first `cargo run -- makemigrations` generates them
-    // into `system/migrations/` from the compiled models (reflecting the
-    // enabled feature flags), and `cargo run -- migrate` applies them —
-    // the same flow as any app migration. `.gitkeep` keeps the dir under
-    // version control until the migrations land.
-    if matches!(template, Template::Tenant) {
-        write(root, "system/migrations/.gitkeep", "")?;
-    }
+    // Every project gets an empty `system/migrations/` folder — the
+    // framework's own tables are NOT shipped as hardcoded bootstrap JSON.
+    // `makemigrations` generates them from the compiled models and they
+    // are committed like any app migration; the image copies the folder,
+    // so `.gitkeep` keeps it present until they land (#1988).
+    write(root, "system/migrations/.gitkeep", "")?;
 
     Ok(())
 }
@@ -939,6 +934,57 @@ mod tests {
             "Dockerfile.dev must set WORKDIR /app to match docker-compose.yml's bind \
              mount target, got `{body}`"
         );
+    }
+
+    /// #1272 — fullstack generates the admin helper and mounts it, names
+    /// no driver pool, and puts it behind a login (#1627).
+    #[test]
+    fn fullstack_mounts_a_gated_driver_neutral_admin() {
+        let urls = templates::urls_rs(Template::Fullstack);
+        let main = templates::main_rs(Template::Fullstack, "demo");
+        assert!(urls.contains("pub fn admin_router(pool: Pool)"), "{urls}");
+        assert!(urls.contains(".with_session_auth("), "{urls}");
+        assert!(
+            main.contains(".nest_with(\"/admin\", urls::admin_router)"),
+            "{main}"
+        );
+        // #1216: no verb may need DATABASE_URL before `Cli::run`.
+        assert!(!main.contains("DATABASE_URL"), "{main}");
+        for body in [&urls, &main] {
+            for driver in ["PgPool", "SqlitePool", "MySqlPool"] {
+                assert!(!body.contains(driver), "names {driver}: {body}");
+            }
+        }
+    }
+
+    /// #1988 — the image must carry `system/migrations/`, and every path
+    /// it copies must exist in a fresh project, or `docker build` fails.
+    #[test]
+    fn image_ships_system_migrations_on_every_template() {
+        for template in ["api", "fullstack", "tenant"] {
+            let root = std::env::temp_dir().join(format!(
+                "cargo_rustango_image_{template}_{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            let args = parse(&["demo", "--template", template]).expect("args");
+            write_project(&root, &args).expect("scaffold");
+            let image = fs::read_to_string(root.join("Dockerfile")).expect("Dockerfile");
+            let sources: Vec<&str> = image
+                .lines()
+                .filter_map(|l| l.strip_prefix("COPY "))
+                .filter(|l| !l.starts_with("--from") && !l.starts_with(". "))
+                .filter_map(|l| l.split_whitespace().next())
+                .collect();
+            for src in &sources {
+                assert!(root.join(src).exists(), "{template}: COPY {src} is missing");
+            }
+            assert!(
+                sources.contains(&"system"),
+                "{template}: the image drops system/migrations: {sources:?}"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 
     /// The deployable image is the one a generated project was missing:

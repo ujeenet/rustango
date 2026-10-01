@@ -237,3 +237,174 @@ async fn partial_state_creates_only_missing_tables_on_mysql() {
     let _ = std::fs::remove_dir_all(&dir);
     println!("MySQL partial-state reconcile OK");
 }
+
+/// #1988 on MySQL — a second dir regenerates a baseline the ledger
+/// already names; `migrate` must restore a dropped table and column.
+#[tokio::test]
+async fn migrate_from_a_dir_without_system_restores_the_schema_on_mysql() {
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("skipping — set MYSQL_TEST_URL");
+        return;
+    };
+    let admin = sqlx::MySqlPool::connect(&url).await.expect("connect mysql");
+    let db = format!("rustango_1988_{}", std::process::id());
+    let (base, _) = url.rsplit_once('/').unwrap();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let my = sqlx::MySqlPool::connect(&format!("{base}/{db}"))
+        .await
+        .unwrap();
+    let pool = Pool::Mysql(my.clone());
+    let root = std::env::temp_dir().join(format!("rustango_1988_my_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let migrate = |label: &str| {
+        let dir = root.join(label).join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = pool.clone();
+        async move {
+            let mut out = Vec::new();
+            migrate::manage::run_with_writer(&pool, &dir, ["migrate".to_owned()], &mut out).await
+        }
+    };
+    migrate("a").await.expect("first deploy");
+    sqlx::query("DROP TABLE rustango_user_permissions")
+        .execute(&my)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE rustango_users DROP COLUMN password_changed_at")
+        .execute(&my)
+        .await
+        .unwrap();
+
+    let result = migrate("b").await;
+    let row = sqlx::query(
+        "SELECT (SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_schema = DATABASE() AND table_name = 'rustango_user_permissions') AS t, \
+                (SELECT COUNT(*) FROM information_schema.columns \
+                 WHERE table_schema = DATABASE() AND table_name = 'rustango_users' \
+                 AND column_name = 'password_changed_at') AS c",
+    )
+    .fetch_one(&my)
+    .await
+    .unwrap();
+    let present: (i64, i64) = (row.get("t"), row.get("c"));
+    my.close().await;
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute(&admin)
+        .await;
+    let _ = std::fs::remove_dir_all(&root);
+    result.expect("a second dir migrates the same database");
+    assert_eq!(present, (1, 1), "the dropped table or column was skipped");
+}
+
+/// #1988 on MySQL — the registry run fills a fresh dir first; every later
+/// tenant must still converge, so a table and column dropped in the 2nd
+/// come back.
+#[tokio::test]
+async fn tenants_after_the_registry_restore_the_schema_on_mysql() {
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("skipping — set MYSQL_TEST_URL");
+        return;
+    };
+    let admin = sqlx::MySqlPool::connect(&url).await.expect("connect mysql");
+    let (base, _) = url.rsplit_once('/').unwrap();
+    let pid = std::process::id();
+    let names: Vec<String> = ["reg", "t1", "t2", "t3"]
+        .iter()
+        .map(|n| format!("rustango_1988t_{n}_{pid}"))
+        .collect();
+    for db in &names {
+        sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        sqlx::query(&format!("CREATE DATABASE {db}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    let reg = sqlx::MySqlPool::connect(&format!("{base}/{}", names[0]))
+        .await
+        .unwrap();
+    let pools = rustango::tenancy::TenantPools::new(reg.clone());
+    let registry = Pool::Mysql(reg);
+    let root = std::env::temp_dir().join(format!("rustango_1988t_my_{pid}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = |label: &str| {
+        let d = root.join(label).join("migrations");
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    };
+    rustango::tenancy::migrate_registry_pool(&registry, &dir("boot"))
+        .await
+        .unwrap();
+    for (slug, db) in ["t1", "t2", "t3"].iter().zip(&names[1..]) {
+        let mut org = rustango::tenancy::Org {
+            slug: (*slug).into(),
+            display_name: (*slug).into(),
+            storage_mode: "database".into(),
+            backend_kind: "mysql".into(),
+            database_url: Some(format!("{base}/{db}")),
+            ..rustango::testkit::org()
+        };
+        org.insert_pool(&registry).await.unwrap();
+    }
+    let t2 = sqlx::MySqlPool::connect(&format!("{base}/{}", names[2]))
+        .await
+        .unwrap();
+    let mut outcome = Ok(());
+    for label in ["deploy1", "deploy2"] {
+        let d = dir(label);
+        rustango::tenancy::migrate_registry_pool(&registry, &d)
+            .await
+            .unwrap();
+        let report = rustango::tenancy::migrate_tenants_db(&pools, &d, "")
+            .await
+            .unwrap();
+        if !report.all_ok() {
+            outcome = Err(format!("{report:?}"));
+            break;
+        }
+        if label == "deploy1" {
+            sqlx::query("DROP TABLE rustango_user_permissions")
+                .execute(&t2)
+                .await
+                .unwrap();
+            sqlx::query("ALTER TABLE rustango_users DROP COLUMN password_changed_at")
+                .execute(&t2)
+                .await
+                .unwrap();
+        }
+    }
+    let row = sqlx::query(
+        "SELECT (SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_schema = DATABASE() AND table_name = 'rustango_user_permissions') AS t, \
+                (SELECT COUNT(*) FROM information_schema.columns \
+                 WHERE table_schema = DATABASE() AND table_name = 'rustango_users' \
+                 AND column_name = 'password_changed_at') AS c",
+    )
+    .fetch_one(&t2)
+    .await
+    .unwrap();
+    let present: (i64, i64) = (row.get("t"), row.get("c"));
+    t2.close().await;
+    registry.close().await;
+    for db in &names {
+        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+            .execute(&admin)
+            .await;
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    outcome.expect("every tenant migrates");
+    assert_eq!(
+        present,
+        (1, 1),
+        "the 2nd tenant's dropped table or column was skipped"
+    );
+}

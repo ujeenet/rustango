@@ -497,3 +497,229 @@ async fn a_missing_renamed_field_is_reported_by_its_published_name() {
         "the error must not leak `body`, the model column `source` hides: {msg}"
     );
 }
+
+// ── #1995: PATCH validates only the sent fields, over the stored row ──
+
+fn patch(uri: &str, json: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::PATCH)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json.to_owned()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn patch_skips_validators_of_absent_fields() {
+    let app = router().await;
+    let resp = app
+        .clone()
+        .oneshot(post("/items", r#"{"name":"orig","slug":"o"}"#))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // `name` is absent: its validator must not see an empty default.
+    let resp = app
+        .clone()
+        .oneshot(patch("/items/1", r#"{"slug":"x"}"#))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = json_body(resp).await;
+    assert!(status.is_success(), "{status} {v}");
+    assert_eq!(
+        (v["name"].as_str(), v["slug"].as_str()),
+        (Some("orig"), Some("x"))
+    );
+
+    // A sent field is still checked.
+    let resp = app
+        .clone()
+        .oneshot(patch("/items/1", r#"{"name":"ab"}"#))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn patch_skips_declarative_constraints_of_absent_fields() {
+    let app = widget_router().await;
+    let (status, _) = post_widget(
+        &app,
+        r#"{"code":"ok","note":"abc","priority":2,"status":"live"}"#,
+    )
+    .await;
+    assert!(status.is_success());
+    // Absent `priority` used to read as 0 and fail `min = 1`.
+    let resp = app
+        .clone()
+        .oneshot(patch("/widgets/1", r#"{"note":"ab"}"#))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = json_body(resp).await;
+    assert!(status.is_success(), "{status} {v}");
+    assert_eq!(v["priority"], 2);
+}
+
+#[derive(Model, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[rustango(table = "vs_in_span")]
+#[rustango(app = "vs_in_app")]
+pub struct Span {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub lo: i64,
+    pub hi: i64,
+}
+
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = Span, validate = "ordered")]
+struct SpanSerializer {
+    pub lo: i64,
+    pub hi: i64,
+}
+
+impl SpanSerializer {
+    fn ordered(&self) -> Result<(), rustango::forms::FormErrors> {
+        let mut e = rustango::forms::FormErrors::default();
+        if self.lo > self.hi {
+            e.add_non_field(format!("lo {} > hi {}", self.lo, self.hi));
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+async fn span_router() -> axum::Router {
+    let sq = sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool");
+    sqlx::query(
+        "CREATE TABLE vs_in_span (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            lo INTEGER NOT NULL, hi INTEGER NOT NULL)",
+    )
+    .execute(&sq)
+    .await
+    .expect("create");
+    rustango::viewset::ViewSet::for_model(Span::SCHEMA)
+        .serializer::<SpanSerializer>()
+        .router_pool("/spans", Pool::Sqlite(sq))
+}
+
+#[tokio::test]
+async fn patch_cross_field_validator_sees_the_stored_row() {
+    let app = span_router().await;
+    let resp = app
+        .clone()
+        .oneshot(post("/spans", r#"{"lo":1,"hi":10}"#))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // Stored hi = 10, so lo = 5 is ordered; a default hi = 0 is not.
+    let resp = app
+        .clone()
+        .oneshot(patch("/spans/1", r#"{"lo":5}"#))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = json_body(resp).await;
+    assert!(status.is_success(), "{status} {v}");
+
+    // lo = 20 against the stored hi = 10 is refused, naming the stored value.
+    let resp = app
+        .clone()
+        .oneshot(patch("/spans/1", r#"{"lo":20}"#))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v = json_body(resp).await;
+    assert!(v.to_string().contains("lo 20 > hi 10"), "{v}");
+
+    // PUT keeps validating the whole body.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/spans/1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"lo":20,"hi":3}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[derive(Model, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[rustango(table = "vs_in_acct")]
+#[rustango(app = "vs_in_app")]
+pub struct Acct {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 50)]
+    pub name: String,
+    #[rustango(max_length = 50)]
+    pub secret: String,
+}
+
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = Acct)]
+struct AcctSerializer {
+    pub name: String,
+    /// Never rendered, so the stored row cannot fill it in.
+    #[serializer(write_only, validate = "long_secret")]
+    pub secret: String,
+}
+
+impl AcctSerializer {
+    fn long_secret(s: &String) -> Result<(), String> {
+        if s.len() < 8 {
+            return Err("secret too short".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn patch_skips_an_absent_write_only_field() {
+    let sq = sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool");
+    sqlx::query(
+        "CREATE TABLE vs_in_acct (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            name TEXT NOT NULL, secret TEXT NOT NULL)",
+    )
+    .execute(&sq)
+    .await
+    .expect("create");
+    let app = rustango::viewset::ViewSet::for_model(Acct::SCHEMA)
+        .serializer::<AcctSerializer>()
+        .router_pool("/accts", Pool::Sqlite(sq));
+    let resp = app
+        .clone()
+        .oneshot(post("/accts", r#"{"name":"a","secret":"longenough"}"#))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let resp = app
+        .clone()
+        .oneshot(patch("/accts/1", r#"{"name":"b"}"#))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = json_body(resp).await;
+    assert!(status.is_success(), "{status} {v}");
+
+    let resp = app
+        .clone()
+        .oneshot(patch("/accts/1", r#"{"secret":"short"}"#))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}

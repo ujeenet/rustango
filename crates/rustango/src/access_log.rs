@@ -230,29 +230,18 @@ pub(crate) fn mount_observability(
     access_log: Option<AccessLogLayer>,
     redact: Vec<String>,
 ) -> Router {
-    #[cfg(feature = "admin")]
-    {
-        use crate::request_id::RequestIdRouterExt as _;
-        // One arm, not two. The span used to fall back to the default
-        // list whenever the access log was off, so `[logging]
-        // access_log = false` silently narrowed an `[audit]` setting
-        // and a configured param was logged in clear text (#1610).
-        let span = crate::tracing_layer::TracingLayer::new().redact(redact);
-        let router = router.request_id(crate::request_id::RequestIdLayer::default());
-        let router = match access_log {
-            Some(l) => router.access_log(l),
-            None => router,
-        };
-        return router.layer(span);
-    }
-
-    // Without `admin` there is no span and no request id. The access
-    // log still mounts, because it carries `tenant` itself.
-    #[cfg(not(feature = "admin"))]
-    match access_log {
+    use crate::request_id::RequestIdRouterExt as _;
+    // One arm, not two. The span used to fall back to the default
+    // list whenever the access log was off, so `[logging]
+    // access_log = false` silently narrowed an `[audit]` setting
+    // and a configured param was logged in clear text (#1610).
+    let span = crate::tracing_layer::TracingLayer::new().redact(redact);
+    let router = router.request_id(crate::request_id::RequestIdLayer::default());
+    let router = match access_log {
         Some(l) => router.access_log(l),
         None => router,
-    }
+    };
+    router.layer(span)
 }
 
 /// Adds `.access_log(layer)` to a Router.
@@ -652,14 +641,12 @@ mod observability_mount_tests {
 
     /// Drive one request through `mount_observability` and return what
     /// a handler's own `tracing::info!` rendered.
-    #[cfg(feature = "admin")]
     async fn captured_handler_line(access_log: Option<AccessLogLayer>) -> (StatusCode, String) {
         captured_handler_line_redacting(access_log, default_redact_params()).await
     }
 
     /// As above, with an explicit span redact list — the thing that
     /// used to be unreachable when the access log was off (#1610).
-    #[cfg(feature = "admin")]
     async fn captured_handler_line_redacting(
         access_log: Option<AccessLogLayer>,
         redact: Vec<String>,
@@ -669,7 +656,6 @@ mod observability_mount_tests {
 
     /// As above for a specific URI, so a test can put a secret in the
     /// query string and assert it does not reach the span.
-    #[cfg(feature = "admin")]
     async fn captured_handler_line_for(
         uri: &str,
         access_log: Option<AccessLogLayer>,
@@ -711,7 +697,6 @@ mod observability_mount_tests {
     ///
     /// Asserts on the rendered span, not on the list: the list being
     /// right and the span not using it is the failure this exists for.
-    #[cfg(feature = "admin")]
     #[tokio::test]
     async fn the_span_honours_configured_redaction_with_the_log_off() {
         let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -742,7 +727,6 @@ mod observability_mount_tests {
     /// `[logging] access_log = false` must not take the **span** with
     /// it. The span is the thing to assert here: a source scan or an
     /// `X-Request-Id` check both pass while the span is missing.
-    #[cfg(feature = "admin")]
     #[tokio::test]
     async fn turning_off_the_access_log_keeps_the_request_span() {
         let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -762,7 +746,6 @@ mod observability_mount_tests {
     }
 
     /// The control: with a log configured, the span is there too.
-    #[cfg(feature = "admin")]
     #[tokio::test]
     async fn the_normal_path_mounts_the_span_as_well() {
         let _l = lock().lock().unwrap_or_else(|e| e.into_inner());

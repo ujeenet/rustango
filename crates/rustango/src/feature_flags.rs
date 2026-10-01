@@ -38,41 +38,35 @@
 //! - `flag:<name>:user:<user_id>` — per-user override
 //! - `flag:<name>:pct` — rollout percentage, 0..=100
 //!
-//! Entries get a 1 hour TTL by default, so a write reaches every replica
-//! within an hour even with no invalidation. Change it with
-//! [`FeatureFlags::ttl`].
+//! Entries never expire by default: flag state is durable. Opt in to
+//! expiry with [`FeatureFlags::ttl`]. Use a cache that does not evict.
 //!
 //! [`FeatureFlags::ttl`]: crate::feature_flags::FeatureFlags::ttl
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cache::BoxedCache;
 
 const KEY_PREFIX: &str = "flag";
-const DEFAULT_TTL_SECS: u64 = 3600;
 
 #[derive(Clone)]
 pub struct FeatureFlags {
     cache: BoxedCache,
-    ttl: Arc<Duration>,
+    /// `None` = never expire; a kill switch must not lapse on its own.
+    ttl: Option<Duration>,
 }
 
 impl FeatureFlags {
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
-        Self {
-            cache,
-            ttl: Arc::new(Duration::from_secs(DEFAULT_TTL_SECS)),
-        }
+        Self { cache, ttl: None }
     }
 
-    /// Set the per-entry TTL. A lower value spreads changes to other
-    /// replicas faster; a higher one costs less cache traffic. Default
-    /// is 1 hour.
+    /// Make every write expire after `ttl`; the flag then reads as never
+    /// set. Default: no expiry.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = Arc::new(ttl);
+        self.ttl = Some(ttl);
         self
     }
 
@@ -88,22 +82,24 @@ impl FeatureFlags {
         format!("{KEY_PREFIX}:{name}:pct")
     }
 
+    /// One write; `set_forever` so a backend default TTL cannot expire it.
+    async fn put(&self, key: &str, value: &str) {
+        let _ = match self.ttl {
+            Some(ttl) => self.cache.set(key, value, Some(ttl)).await,
+            None => self.cache.set_forever(key, value).await,
+        };
+    }
+
     /// Globally enable the flag for everyone.
     pub async fn enable(&self, name: &str) {
-        let _ = self
-            .cache
-            .set(&self.global_key(name), "on", Some(*self.ttl))
-            .await;
+        self.put(&self.global_key(name), "on").await;
     }
 
     /// Globally disable the flag. This beats any rollout percentage,
     /// but not a per-user override: to kill a flag for a user who has
     /// one, also call [`Self::disable_for_user`].
     pub async fn disable(&self, name: &str) {
-        let _ = self
-            .cache
-            .set(&self.global_key(name), "off", Some(*self.ttl))
-            .await;
+        self.put(&self.global_key(name), "off").await;
     }
 
     /// Drop the global state, the percentage and the overrides of the
@@ -122,27 +118,18 @@ impl FeatureFlags {
     /// every check.
     pub async fn set_percentage(&self, name: &str, percent: u8) {
         let p = percent.min(100);
-        let _ = self
-            .cache
-            .set(&self.pct_key(name), &p.to_string(), Some(*self.ttl))
-            .await;
+        self.put(&self.pct_key(name), &p.to_string()).await;
     }
 
     /// Turn the flag on for one user, whatever the global state says.
     /// Handy for QA and staff testing.
     pub async fn enable_for_user(&self, name: &str, user_id: &str) {
-        let _ = self
-            .cache
-            .set(&self.user_key(name, user_id), "on", Some(*self.ttl))
-            .await;
+        self.put(&self.user_key(name, user_id), "on").await;
     }
 
     /// Turn the flag off for one user.
     pub async fn disable_for_user(&self, name: &str, user_id: &str) {
-        let _ = self
-            .cache
-            .set(&self.user_key(name, user_id), "off", Some(*self.ttl))
-            .await;
+        self.put(&self.user_key(name, user_id), "off").await;
     }
 
     /// Read the global state only. Returns `false` when the flag is off
@@ -372,6 +359,79 @@ mod tests {
         assert!(!f.is_enabled_for("new", "alice").await);
         // Bob had no state, so clear had nothing to do for him.
         assert!(!f.is_enabled_for("new", "bob").await);
+    }
+
+    /// Records the TTL of every write, so a test sees what reaches the backend.
+    struct TtlSpy {
+        inner: InMemoryCache,
+        ttls: std::sync::Mutex<Vec<Option<Duration>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for TtlSpy {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.inner.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.ttls.lock().unwrap().push(ttl);
+            self.inner.set(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.inner.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.inner.exists(k).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+    }
+
+    async fn write_all(f: &FeatureFlags) {
+        f.enable("on").await;
+        f.disable("off").await;
+        f.set_percentage("pct", 100).await;
+        f.enable_for_user("u", "a").await;
+        f.disable_for_user("u", "b").await;
+    }
+
+    async fn all_set(f: &FeatureFlags) -> bool {
+        f.is_enabled("on").await
+            && f.cache.exists(&f.global_key("off")).await.unwrap()
+            && f.is_enabled_for("pct", "x").await
+            && f.is_enabled_for("u", "a").await
+            && f.cache.exists(&f.user_key("u", "b")).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn writes_outlive_a_backend_default_ttl() {
+        // #1956: a `None` write took the cache's default TTL, so a kill switch lapsed.
+        let cache: BoxedCache =
+            StdArc::new(InMemoryCache::with_default_ttl(Duration::from_millis(1)));
+        let f = FeatureFlags::new(cache);
+        write_all(&f).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(all_set(&f).await);
+    }
+
+    #[tokio::test]
+    async fn opt_in_ttl_reaches_every_write_and_expires() {
+        let spy = StdArc::new(TtlSpy {
+            inner: InMemoryCache::new(),
+            ttls: std::sync::Mutex::new(Vec::new()),
+        });
+        let ttl = Duration::from_millis(1);
+        let f = FeatureFlags::new(spy.clone()).ttl(ttl);
+        write_all(&f).await;
+        assert_eq!(spy.ttls.lock().unwrap().clone(), vec![Some(ttl); 5]);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!f.is_enabled("on").await);
+        assert!(!f.is_enabled_for("u", "a").await);
     }
 
     #[test]

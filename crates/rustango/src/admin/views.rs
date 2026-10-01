@@ -17,8 +17,8 @@ use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
-    is_secret_field, lookup_model, pager_suffix, primary_key_or_internal, render_cell_json,
-    render_form, render_secret_cell, resolve_model, resolve_model_and_pk, FormLayout,
+    is_secret_field, lookup_model, primary_key_or_internal, render_cell_json, render_form,
+    render_secret_cell, resolve_model, resolve_model_and_pk, FormLayout, ListQuery,
 };
 use super::queryset_hooks::RowScope;
 use super::render;
@@ -79,6 +79,7 @@ fn render_gfk_cell(
     row: &serde_json::Value,
     gr: &crate::core::GenericRelation,
     ct_map: &HashMap<i64, crate::contenttypes::ContentType>,
+    admin_prefix: &str,
 ) -> String {
     let ct_id = row
         .get(gr.ct_column)
@@ -99,7 +100,8 @@ fn render_gfk_cell(
     let table_esc = render::escape(&ct.table);
     let label_esc = render::escape(&label);
     format!(
-        r#"<a href="/{table}/{pk}">{label} #{pk}</a>"#,
+        r#"<a href="{prefix}/{table}/{pk}">{label} #{pk}</a>"#,
+        prefix = render::escape(admin_prefix),
         table = table_esc,
         pk = object_pk,
         label = label_esc,
@@ -292,6 +294,7 @@ pub(crate) async fn table_view(
         });
         active_field_filters.push((field.name, value.clone()));
     }
+    active_field_filters.sort();
 
     // Custom list filters: a named filter with its own choices. When
     // a filter's parameter is present in the URL, call its predicate
@@ -375,20 +378,7 @@ pub(crate) async fn table_view(
         .await?
     };
     let joins = build_fk_joins(&state, model);
-    // Default ordering: PK ASC unless `admin.ordering` overrides.
-    let order_by: Vec<crate::core::OrderItem> = if admin_cfg.ordering.is_empty() {
-        Vec::new()
-    } else {
-        admin_cfg
-            .ordering
-            .iter()
-            .filter_map(|(name, desc)| {
-                model
-                    .field(name)
-                    .map(|f| crate::core::OrderItem::column(f.column, *desc))
-            })
-            .collect()
-    };
+    let order_by = list_order_by(model, &admin_cfg);
     // With the count skipped, fetch one extra row to detect "has
     // more" without counting the table. The extra row is trimmed
     // before rendering.
@@ -608,9 +598,13 @@ pub(crate) async fn table_view(
                         DisplayItem::Field(f) if is_secret_field(&admin_cfg, f.name) => {
                             render_secret_cell(row, f)
                         }
-                        DisplayItem::Field(f) => render_cell_json(row, f, &fk_map),
+                        DisplayItem::Field(f) => {
+                            render_cell_json(row, f, &fk_map, &state.config.admin_prefix)
+                        }
                         DisplayItem::Computed(m) => (m.render)(row),
-                        DisplayItem::GenericFk(gr) => render_gfk_cell(row, gr, &gfk_ct_map),
+                        DisplayItem::GenericFk(gr) => {
+                            render_gfk_cell(row, gr, &gfk_ct_map, &state.config.admin_prefix)
+                        }
                         DisplayItem::JsonPath(f, key) => render_json_path_cell(row, f, key),
                     };
                     // A `link =` callable on a computed field wins
@@ -646,7 +640,29 @@ pub(crate) async fn table_view(
         .iter()
         .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
         .collect();
-    let pager_suffix_str = pager_suffix(q.as_deref(), &active_field_filters);
+    // The whole filter state; every link below derives from it (#1916).
+    let mut list_query = ListQuery::new(format!("{}/{}", state.config.admin_prefix, model.table));
+    if let Some(qv) = q.as_deref() {
+        list_query.push("q", qv);
+    }
+    for (k, v) in active_field_filters.iter().chain(&active_custom_filters) {
+        list_query.push(*k, v.clone());
+    }
+    if !admin_cfg.date_hierarchy.is_empty() {
+        push_date(&mut list_query, date_sel.year, date_sel.month, date_sel.day);
+    }
+    for key in ["count", "facet_show_all"] {
+        if let Some(v) = params.get(key).filter(|v| !v.is_empty()) {
+            list_query.push(key, v.clone());
+        }
+    }
+    let pager_suffix_str = list_query.suffix();
+    let hidden_params: Vec<serde_json::Value> = list_query
+        .without(&["q"])
+        .pairs()
+        .iter()
+        .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
+        .collect();
 
     // Facet filters. For each `admin.list_filter` field, query its
     // distinct values and counts for a right-rail card. Each link
@@ -659,7 +675,7 @@ pub(crate) async fn table_view(
         &scope,
         &admin_cfg,
         &active_field_filters,
-        q.as_deref(),
+        &list_query,
         show_all_facet,
     )
     .await?;
@@ -670,30 +686,11 @@ pub(crate) async fn table_view(
     let date_hierarchy_ctx: Option<serde_json::Value> = if admin_cfg.date_hierarchy.is_empty() {
         None
     } else {
-        compute_date_hierarchy(
-            &state,
-            model,
-            &admin_cfg,
-            date_sel,
-            q.as_deref(),
-            &active_field_filters,
-        )
-        .await?
+        compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query).await?
     };
 
     // Right-rail card per custom list filter: the filter title and
     // its clickable options, with the active value marked.
-    let admin_prefix = state.config.admin_prefix.as_str();
-    let preserved_params_for_custom: Vec<(String, String)> = {
-        let mut out = Vec::new();
-        if let Some(qv) = q.as_deref() {
-            out.push(("q".into(), qv.into()));
-        }
-        for (k, v) in &active_field_filters {
-            out.push(((*k).into(), v.clone()));
-        }
-        out
-    };
     let custom_filters_ctx: Vec<serde_json::Value> =
         crate::admin::list_filters::for_table(model.table)
             .map(|cf| {
@@ -701,25 +698,17 @@ pub(crate) async fn table_view(
                     .iter()
                     .find(|(k, _)| *k == cf.parameter_name)
                     .map(|(_, v)| v.as_str());
-                let mut params_clear = preserved_params_for_custom.clone();
-                // Keep the other custom filters' selections.
-                for (k, v) in &active_custom_filters {
-                    if *k != cf.parameter_name {
-                        params_clear.push(((*k).into(), v.clone()));
-                    }
-                }
-                let clear_url = build_query_url(admin_prefix, model.table, &params_clear);
+                let cleared = list_query.without(&[cf.parameter_name]);
+                let clear_url = cleared.url();
                 let values: Vec<serde_json::Value> = cf
                     .lookups
                     .iter()
                     .map(|(value, label)| {
-                        let mut p = params_clear.clone();
-                        p.push((cf.parameter_name.into(), (*value).into()));
                         serde_json::json!({
                             "value": value,
                             "label": label,
                             "active": active_value == Some(*value),
-                            "url": build_query_url(admin_prefix, model.table, &p),
+                            "url": cleared.clone().with(cf.parameter_name, *value).url(),
                         })
                     })
                     .collect();
@@ -769,6 +758,8 @@ pub(crate) async fn table_view(
         "actions_on_bottom": admin_cfg.actions_on_bottom,
         "q": q.unwrap_or_default(),
         "active_filters": active_filters_ctx,
+        // The filter state minus `q`, as the search form's hidden inputs.
+        "hidden_params": hidden_params,
         "facets": facets_ctx,
         "custom_filters": custom_filters_ctx,
         "date_hierarchy": date_hierarchy_ctx,
@@ -809,7 +800,7 @@ async fn compute_facets(
     scope: &RowScope,
     admin_cfg: &crate::core::AdminConfig,
     active_field_filters: &[(&'static str, String)],
-    q: Option<&str>,
+    list_query: &ListQuery,
     show_all_facet: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, AdminError> {
     if admin_cfg.list_filter.is_empty() {
@@ -881,9 +872,11 @@ async fn compute_facets(
                  ORDER BY facet_count DESC, {t}.{c}"
             )
         };
-        let facet_rows = fetch_facet_rows(&state.pool, &sql, &tail.params, fk_join.is_some())
-            .await
-            .map_err(|e| AdminError::Internal(e.to_string()))?;
+        let is_bool = field.ty == crate::core::FieldType::Bool;
+        let facet_rows =
+            fetch_facet_rows(&state.pool, &sql, &tail.params, fk_join.is_some(), is_bool)
+                .await
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
         let mut values = Vec::with_capacity(facet_rows.len());
         for (raw_value, display_text, count) in &facet_rows {
             // `raw_value` is already a string: the per-backend fetch
@@ -902,22 +895,12 @@ async fn compute_facets(
             let count: i64 = *count;
             let is_active = active_value.map(|v| v == raw).unwrap_or(false);
             // Toggle URL: drop this filter when it is active, else
-            // set it. Other active filters and `?q=` are kept.
-            let mut params: Vec<(String, String)> = Vec::new();
-            if let Some(qv) = q {
-                params.push(("q".into(), qv.into()));
-            }
-            for (k, v) in active_field_filters {
-                if *k == field.name {
-                    continue; // dropped (or replaced below)
-                }
-                params.push(((*k).into(), v.clone()));
-            }
+            // set it. The rest of the filter state is kept.
+            let mut toggle = list_query.without(&[field.name]);
             if !is_active {
-                params.push((field.name.into(), raw.clone()));
+                toggle = toggle.with(field.name, raw.clone());
             }
-            let toggle_url =
-                build_query_url(state.config.admin_prefix.as_str(), model.table, &params);
+            let toggle_url = toggle.url();
 
             values.push(serde_json::json!({
                 "raw": raw,
@@ -954,40 +937,19 @@ async fn compute_facets(
             // Keep the current filters and add
             // `facet_show_all=<field>`, which swaps the truncated
             // list for the full one.
-            let mut params: Vec<(String, String)> = Vec::new();
-            if let Some(qv) = q {
-                params.push(("q".into(), qv.into()));
-            }
-            for (k, v) in active_field_filters {
-                params.push(((*k).into(), v.clone()));
-            }
-            params.push(("facet_show_all".into(), field.name.into()));
-            Some(build_query_url(
-                state.config.admin_prefix.as_str(),
-                model.table,
-                &params,
-            ))
+            Some(
+                list_query
+                    .without(&["facet_show_all"])
+                    .with("facet_show_all", field.name)
+                    .url(),
+            )
         } else {
             None
         };
         // FK facets render as a `<select>`; this is the "All" option,
         // which removes the filter.
         let clear_url = if fk_join.is_some() {
-            let mut params: Vec<(String, String)> = Vec::new();
-            if let Some(qv) = q {
-                params.push(("q".into(), qv.into()));
-            }
-            for (k, v) in active_field_filters {
-                if *k == field.name {
-                    continue;
-                }
-                params.push(((*k).into(), v.clone()));
-            }
-            Some(build_query_url(
-                state.config.admin_prefix.as_str(),
-                model.table,
-                &params,
-            ))
+            Some(list_query.without(&[field.name]).url())
         } else {
             None
         };
@@ -1008,12 +970,13 @@ async fn compute_facets(
 /// Returns `(raw_value, display_text, count)` triples. The column
 /// value is stringified here so the caller stays backend-agnostic.
 /// Pass `expect_display = true` for the FK-joined facet, which also
-/// reads the joined display column.
+/// reads the joined display column, and `is_bool` for a bool column.
 async fn fetch_facet_rows(
     pool: &crate::sql::Pool,
     sql: &str,
     params: &[SqlValue],
     expect_display: bool,
+    is_bool: bool,
 ) -> Result<Vec<(String, Option<String>, i64)>, sqlx::Error> {
     // The fetch stays per-arm because sqlx's `Executor` is bound to
     // a concrete `Database`. Only the row decode is generic, so it
@@ -1028,7 +991,7 @@ async fn fetch_facet_rows(
             let rows = q.fetch_all(pg).await?;
             Ok(rows
                 .iter()
-                .map(|r| decode_facet_row(r, expect_display))
+                .map(|r| decode_facet_row(r, expect_display, is_bool))
                 .collect())
         }
         #[cfg(feature = "mysql")]
@@ -1040,7 +1003,7 @@ async fn fetch_facet_rows(
             let rows = q.fetch_all(my).await?;
             Ok(rows
                 .iter()
-                .map(|r| decode_facet_row(r, expect_display))
+                .map(|r| decode_facet_row(r, expect_display, is_bool))
                 .collect())
         }
         #[cfg(feature = "sqlite")]
@@ -1052,7 +1015,7 @@ async fn fetch_facet_rows(
             let rows = q.fetch_all(sq).await?;
             Ok(rows
                 .iter()
-                .map(|r| decode_facet_row(r, expect_display))
+                .map(|r| decode_facet_row(r, expect_display, is_bool))
                 .collect())
         }
     }
@@ -1061,7 +1024,11 @@ async fn fetch_facet_rows(
 /// Per-row decoder for [`fetch_facet_rows`], generic over the row
 /// type so every backend shares one loop. The bounds are those of
 /// [`stringify_facet_value`] plus the display and count decodes.
-fn decode_facet_row<'r, R>(row: &'r R, expect_display: bool) -> (String, Option<String>, i64)
+fn decode_facet_row<'r, R>(
+    row: &'r R,
+    expect_display: bool,
+    is_bool: bool,
+) -> (String, Option<String>, i64)
 where
     R: sqlx::Row,
     &'r str: sqlx::ColumnIndex<R>,
@@ -1071,7 +1038,7 @@ where
     Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
-    let raw = stringify_facet_value(row);
+    let raw = stringify_facet_value(row, is_bool);
     let display = if expect_display {
         row.try_get::<Option<String>, _>("facet_display")
             .ok()
@@ -1085,8 +1052,9 @@ where
 
 /// Decode the `facet_value` column: text first, then the numeric and
 /// boolean scalars facets commonly hit. Returns an empty string when
-/// no shape matches.
-fn stringify_facet_value<'r, R>(row: &'r R) -> String
+/// no shape matches. A bool column reads as bool first: SQLite and
+/// MySQL store it as `1`/`0`, which the text and integer reads keep (#1730).
+fn stringify_facet_value<'r, R>(row: &'r R, is_bool: bool) -> String
 where
     R: sqlx::Row,
     &'r str: sqlx::ColumnIndex<R>,
@@ -1095,6 +1063,11 @@ where
     Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
+    if is_bool {
+        if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
+            return b.to_string();
+        }
+    }
     if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
         return s;
     }
@@ -1124,8 +1097,7 @@ async fn compute_date_hierarchy(
     model: &'static crate::core::ModelSchema,
     admin_cfg: &crate::core::AdminConfig,
     sel: crate::admin::date_hierarchy::DateSelection,
-    q: Option<&str>,
-    active_field_filters: &[(&'static str, String)],
+    list_query: &ListQuery,
 ) -> Result<Option<serde_json::Value>, AdminError> {
     use crate::admin::date_hierarchy::{range, DrillLevel};
 
@@ -1141,30 +1113,11 @@ async fn compute_date_hierarchy(
     }
 
     // ---------- Breadcrumb -------------------------------------------------
-    let admin_prefix = state.config.admin_prefix.as_str();
-    let preserved: Vec<(String, String)> = {
-        let mut out = Vec::new();
-        if let Some(qv) = q {
-            out.push(("q".into(), qv.into()));
-        }
-        for (k, v) in active_field_filters {
-            out.push(((*k).into(), v.clone()));
-        }
-        out
-    };
-
+    let undated = list_query.without(&["year", "month", "day"]);
     let url_for = |year: Option<i32>, month: Option<u32>, day: Option<u32>| -> String {
-        let mut params = preserved.clone();
-        if let Some(y) = year {
-            params.push(("year".into(), y.to_string()));
-            if let Some(m) = month {
-                params.push(("month".into(), m.to_string()));
-                if let Some(d) = day {
-                    params.push(("day".into(), d.to_string()));
-                }
-            }
-        }
-        build_query_url(admin_prefix, model.table, &params)
+        let mut q = undated.clone();
+        push_date(&mut q, year, month, day);
+        q.url()
     };
 
     const MONTH_NAMES: &[&str] = &[
@@ -1443,6 +1396,29 @@ fn decode_bucket_sq_row(row: &sqlx::sqlite::SqliteRow) -> (i32, i64) {
     (bucket as i32, count)
 }
 
+/// `admin.ordering`, else the model's `default_order`, then the PK as a
+/// tiebreak so paging is stable (#1917).
+fn list_order_by(
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+) -> Vec<crate::core::OrderItem> {
+    let spec = if admin_cfg.ordering.is_empty() {
+        model.default_order
+    } else {
+        admin_cfg.ordering
+    };
+    let order = spec
+        .iter()
+        .filter_map(|(name, desc)| {
+            model
+                .field(name)
+                .or_else(|| model.field_by_column(name))
+                .map(|f| crate::core::OrderItem::column(f.column, *desc))
+        })
+        .collect();
+    model.with_pk_tiebreak(order)
+}
+
 // Where to send the user after a successful save. The add and change
 // forms ship three submit buttons, and the one that was pressed
 // arrives as a form key:
@@ -1466,24 +1442,18 @@ pub(crate) fn post_save_redirect(
     }
 }
 
-// Takes `admin_prefix` because the admin can be mounted anywhere;
-// hardcoding `/__admin` here 404s every facet and pager link.
-fn build_query_url(admin_prefix: &str, table: &str, params: &[(String, String)]) -> String {
-    if params.is_empty() {
-        format!("{admin_prefix}/{table}")
-    } else {
-        let qs: Vec<String> = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
-            .collect();
-        format!("{admin_prefix}/{table}?{}", qs.join("&"))
+/// `year[&month[&day]]`, each level only under its parent.
+fn push_date(q: &mut ListQuery, year: Option<i32>, month: Option<u32>, day: Option<u32>) {
+    if let Some(y) = year {
+        q.push("year", y.to_string());
+        if let Some(m) = month {
+            q.push("month", m.to_string());
+            if let Some(d) = day {
+                q.push("day", d.to_string());
+            }
+        }
     }
 }
-
-// The shared encoder: it covers the full RFC 3986 unreserved set.
-// A narrower local one leaves `/`, `@` and non-ASCII bytes raw,
-// which breaks facet values that contain them.
-use crate::url_codec::url_encode;
 
 // ============================================================== AUTOCOMPLETE
 //
@@ -1626,7 +1596,7 @@ pub(crate) async fn detail_view(
             let value = if is_secret_field(&detail_cfg, f.name) {
                 render_secret_cell(&row, f)
             } else {
-                render_cell_json(&row, f, &fk_map)
+                render_cell_json(&row, f, &fk_map, &state.config.admin_prefix)
             };
             serde_json::json!({ "label": f.display_label(), "value": value })
         })
@@ -2670,6 +2640,68 @@ mod tests {
         form.insert("_addanother".to_owned(), "1".to_owned());
         let url = post_save_redirect("/__admin", "post", "42", &form);
         assert_eq!(url, "/__admin/post/42");
+    }
+
+    fn order_cols(order: &[crate::core::OrderItem]) -> Vec<(&'static str, bool)> {
+        order
+            .iter()
+            .map(|o| (o.column_name().unwrap(), o.is_desc()))
+            .collect()
+    }
+
+    /// Admin ordering wins, then `default_order`, and the PK always
+    /// closes the order so ties page stably (#1917).
+    #[test]
+    fn list_order_falls_back_and_ends_on_the_pk() {
+        use crate::core::{AdminConfig, FieldSchema, FieldType, ModelSchema};
+        const FIELDS: &[FieldSchema] = &[
+            {
+                let mut f = FieldSchema::new("id", "id", FieldType::I64);
+                f.primary_key = true;
+                f
+            },
+            FieldSchema::new("rank", "rank", FieldType::I64),
+            FieldSchema::new("author", "author_id", FieldType::I64),
+        ];
+        const BARE: &ModelSchema = &{
+            let mut s = ModelSchema::new("P", "p");
+            s.fields = FIELDS;
+            s
+        };
+        const DEFAULTED: &ModelSchema = &{
+            let mut s = ModelSchema::new("P", "p");
+            s.fields = FIELDS;
+            s.default_order = &[("rank", true)];
+            s
+        };
+        let none = AdminConfig::DEFAULT;
+        let by_rank = AdminConfig {
+            ordering: &[("rank", false)],
+            ..AdminConfig::DEFAULT
+        };
+        let by_pk = AdminConfig {
+            ordering: &[("id", true)],
+            ..AdminConfig::DEFAULT
+        };
+        assert_eq!(order_cols(&list_order_by(BARE, &none)), [("id", false)]);
+        assert_eq!(
+            order_cols(&list_order_by(DEFAULTED, &none)),
+            [("rank", true), ("id", false)]
+        );
+        assert_eq!(
+            order_cols(&list_order_by(DEFAULTED, &by_rank)),
+            [("rank", false), ("id", false)]
+        );
+        assert_eq!(order_cols(&list_order_by(BARE, &by_pk)), [("id", true)]);
+        // A spec naming the column, not the field, still sorts.
+        let by_column = AdminConfig {
+            ordering: &[("author_id", true)],
+            ..AdminConfig::DEFAULT
+        };
+        assert_eq!(
+            order_cols(&list_order_by(BARE, &by_column)),
+            [("author_id", true), ("id", false)]
+        );
     }
 
     #[test]

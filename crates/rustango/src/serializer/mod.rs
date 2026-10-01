@@ -217,6 +217,17 @@ pub trait ModelSerializer: serde::Serialize + Sized {
         Err(errors)
     }
 
+    /// Validate a partial-update body against the `stored` row: field
+    /// rules run only on sent fields, the cross-field hook on the merge.
+    /// The macro writes this; the default validates `body` alone.
+    ///
+    /// # Errors
+    /// A `FormErrors` naming every field that failed to parse or validate.
+    fn validate_patch(stored: &Self::Model, body: &Value) -> Result<(), crate::forms::FormErrors> {
+        let _ = stored;
+        Self::from_writable_json(body)?.validate()
+    }
+
     /// Run the serializer's validators. The macro overrides this when
     /// the serializer declares any `validate = "..."`, on a field or
     /// on the container. By default it does nothing.
@@ -304,34 +315,22 @@ pub async fn check_unique_together_pool(
             });
         }
 
-        // SELECT 1 FROM table WHERE … LIMIT 1.
-        let dialect = pool.dialect();
-        let table_q = dialect.quote_ident(schema.table);
-        let mut clauses: Vec<String> = Vec::with_capacity(predicates.len());
-        let mut params: Vec<crate::core::SqlValue> = Vec::with_capacity(predicates.len());
-        for (i, pred) in predicates.iter().enumerate() {
-            let col = dialect.quote_ident(pred.column);
-            let op_str = match pred.op {
-                Op::Eq => "=",
-                Op::Ne => "<>",
-                _ => unreachable!("only Eq/Ne above"),
-            };
-            let placeholder = dialect.placeholder(i + 1);
-            clauses.push(format!("{col} {op_str} {placeholder}"));
-            params.push(pred.value.clone());
-        }
-        let where_sql = clauses.join(" AND ");
-        let sql = format!("SELECT 1 FROM {table_q} WHERE {where_sql} LIMIT 1");
-
-        // The value does not matter; any row at all is a collision.
-        let hits: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, params, pool)
+        // Through the ORM: a raw `SELECT 1` decoded as i64 failed on PG's INT4 (#1872).
+        let select =
+            crate::core::SelectQuery::new(schema).where_clause(crate::core::WhereExpr::And(
+                predicates
+                    .into_iter()
+                    .map(crate::core::WhereExpr::Predicate)
+                    .collect(),
+            ));
+        let hits = crate::sql::count_rows_pool(pool, &crate::core::CountQuery::exists(select))
             .await
             .map_err(|e| {
                 let mut errs = crate::forms::FormErrors::default();
                 errs.add_non_field(format!("unique_together check failed: {e}"));
                 errs
             })?;
-        if !hits.is_empty() {
+        if hits > 0 {
             errors.add_non_field(format!(
                 "The fields {} must be unique together.",
                 index.columns.join(", "),

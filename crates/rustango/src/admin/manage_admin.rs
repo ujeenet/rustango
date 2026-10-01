@@ -111,12 +111,10 @@ pub async fn create_admin_cmd<W: Write + Send>(
     // ---- ensure the table exists ---------------------------------
     // A first run on a fresh project should not need a manual
     // `bootstrap` call, so make sure `rustango_admin_users` is there.
-    use crate::migrate::ddl;
-    let dialect = pool.dialect();
-    let sql = ddl::create_table_sql_with_dialect(dialect, AdminUser::SCHEMA);
-    // Support for "IF NOT EXISTS" varies by driver, so just run it and
-    // ignore an "already exists" failure, which is harmless here.
-    let _ = crate::sql::raw_execute_pool(pool, &sql, vec![]).await;
+    // The shared ensure path: no ERROR in the PG log when the table is
+    // there, and a real failure is reported instead of swallowed (#1642).
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminUser::SCHEMA]);
+    crate::migrate::apply_idempotent(pool, &snapshot).await?;
 
     // ---- reject duplicate username -------------------------------
     use crate::core::{SelectQuery, SqlValue};

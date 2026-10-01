@@ -68,6 +68,29 @@ pub type AdminActionFn = Arc<
 /// allowlist; this registry only holds the callables.
 pub(crate) type AdminActionRegistry = HashMap<&'static str, HashMap<&'static str, AdminActionFn>>;
 
+/// Set once this process builds an admin without
+/// [`Builder::with_session_auth`]; read by `check --deploy` (#1627).
+static UNGATED_ADMIN_BUILT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `true` when this process built an admin anyone can read and write.
+pub(crate) fn ungated_admin_built() -> bool {
+    UNGATED_ADMIN_BUILT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Clear the flag. Callers hold [`ungated_flag_lock`].
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) fn reset_ungated_admin_built() {
+    UNGATED_ADMIN_BUILT.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Serialises the tests that read or write the process-wide flag.
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) fn ungated_flag_lock() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Mount the admin under any prefix using axum's nesting:
 /// `Router::new().nest("/admin", crate::admin::router(pool))`.
 ///
@@ -140,6 +163,9 @@ pub(crate) struct Config {
     /// cross-tenant data. `TenantAdminBuilder::build()` sets it.
     /// Single-tenant admins leave it false and see every model.
     pub(crate) tenant_mode: bool,
+    /// The tenancy layer gates every route around this admin, so
+    /// `check --deploy` must not call it ungated (#1627).
+    pub(crate) gated_upstream: bool,
     /// `Some(operator_id)` when the session is an operator
     /// impersonation. Drives the "you are impersonating" banner and
     /// tags audit entries. `None` for a normal login.
@@ -186,9 +212,9 @@ pub(crate) struct Config {
     /// [`Builder::with_session_auth`]. `None` means no session auth.
     pub(crate) session_secret: Option<crate::session::SessionSecret>,
     /// When true the admin session cookie carries `Secure`, so it is
-    /// sent over HTTPS only. `Builder::new` defaults to `false` for
-    /// local plain-HTTP work; `Builder::from_settings` defaults to
-    /// `true`. Set it with [`Builder::secure_cookies`].
+    /// sent over HTTPS only. `Builder::new` follows
+    /// [`crate::session::secure_cookies`]; `Builder::from_settings`
+    /// defaults to `true`. Set it with [`Builder::secure_cookies`].
     pub(crate) secure_cookies: bool,
 }
 
@@ -202,6 +228,8 @@ impl Builder {
         config.admin_prefix = "/__admin".to_owned();
         config.audit_url = "/__audit".to_owned();
         config.static_url = "/__static__".to_owned();
+        // The process policy: `[security].secure_cookies`, else the prod tier.
+        config.secure_cookies = crate::session::secure_cookies();
         Self { pool, config }
     }
 
@@ -285,8 +313,9 @@ impl Builder {
     }
 
     /// Set whether the admin session cookie carries `Secure`, which
-    /// makes it HTTPS-only. `Builder::new` defaults to `false`,
-    /// `from_settings` to `true`. Leave it `false` **only** for
+    /// makes it HTTPS-only. `Builder::new` follows
+    /// [`crate::session::secure_cookies`], `from_settings` defaults to
+    /// `true`. Leave it `false` **only** for
     /// local plain-HTTP work: a browser will not send a `Secure`
     /// cookie over HTTP.
     #[must_use]
@@ -480,6 +509,13 @@ impl Builder {
         self
     }
 
+    /// Mark this admin as gated by the tenancy layer around it.
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn gated_upstream(mut self) -> Self {
+        self.config.gated_upstream = true;
+        self
+    }
+
     /// Set the admin title shown in the sidebar header.
     /// Defaults to `"Rustango Admin"` when not set.
     pub fn title(mut self, title: impl Into<String>) -> Self {
@@ -599,6 +635,9 @@ impl Builder {
     }
 
     pub fn build(self) -> Router {
+        if self.config.session_secret.is_none() && !self.config.gated_upstream {
+            UNGATED_ADMIN_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let audit_path = self.config.audit_url.clone();
         let audit_cleanup_path = format!("{audit_path}/cleanup");
         let session_secret = self.config.session_secret.clone();
@@ -653,6 +692,7 @@ impl Builder {
                 } else {
                     format!("{admin_prefix}/login")
                 },
+                logout_path: format!("{admin_prefix}/logout"),
                 // The bare admin is superuser-only.
                 require_superuser: true,
                 // Pool for the per-request password-fingerprint
@@ -1073,13 +1113,16 @@ mod scope_filter_tests {
     }
 
     #[tokio::test]
-    async fn builder_new_defaults_secure_cookies_false() {
-        // The bare path stays plain, often local HTTP, until opted in.
-        let b = Builder::new(lazy_pg_pool());
+    async fn builder_new_follows_the_secure_cookie_policy() {
+        // The override is a `OnceLock` and nextest gives each test its own
+        // process; if something set it first, only assert on a secure policy.
+        let ours = crate::session::set_secure_cookies(true);
+        if ours || crate::session::secure_cookies() {
+            assert!(Builder::new(lazy_pg_pool()).config.secure_cookies);
+        }
+        // An explicit call still wins.
+        let b = Builder::new(lazy_pg_pool()).secure_cookies(false);
         assert!(!b.config.secure_cookies);
-        // Explicit opt-in flips it.
-        let b = Builder::new(lazy_pg_pool()).secure_cookies(true);
-        assert!(b.config.secure_cookies);
     }
 
     #[cfg(feature = "config")]

@@ -201,7 +201,7 @@ So `cargo run` starts the server, and `cargo run -- <verb>` runs migrations, gen
 How the templates differ inside `main.rs` / `urls.rs`:
 
 - **api** — no admin; `urls::api()` simply aggregates your own routes.
-- **fullstack** — same `urls.rs`, plus the admin feature compiled in. The admin is **not** wired up for you: nothing generated would call it, so the generator emits no `admin_router`. Add one yourself and nest it — [getting started, Step 11](getting-started.md#step-11-turn-on-the-auto-admin) spells it out. Take `rustango::sql::Pool` so the helper names no driver.
+- **fullstack** — same `urls.rs`, plus an `admin_router(pool)` helper that `main.rs` mounts with `Cli::nest_with("/admin", …)`, built from the server's pool. It takes `rustango::sql::Pool`, so it names no driver, and sits behind a login: create the account with `cargo run -- create-admin <username>` (see [getting started, Step 11](getting-started.md#step-11-turn-on-the-auto-admin)).
 - **tenant** — `main.rs` adds `.tenancy()`, serving the operator console at the apex domain and each tenant under its own subdomain. The framework's own tables are generated into a **`system/migrations/`** folder from the compiled models on the first `cargo run -- migrate` — no hand-shipped bootstrap JSON, so the very first migrate works with no extra setup.
 
 ### Layered configuration

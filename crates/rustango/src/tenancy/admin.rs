@@ -1532,6 +1532,8 @@ fn build_inner_admin_router(
     // directly) leave the flag off and see every model.
     let mut builder = crate::admin::Builder::new(pool)
         .tenant_mode()
+        // The tenancy session layer gates every route of this admin.
+        .gated_upstream()
         // v0.28.0 (#74) — pass the configurable admin prefix
         // through to the inner admin's chrome_context so
         // template hrefs resolve correctly under any mount.
@@ -1757,5 +1759,41 @@ mod sanitize_next_tests {
             sanitize_next_with_routes(Some(&routes.login_url), &routes),
             "/",
         );
+    }
+}
+
+/// #1627 — the tenant admin is gated by the tenancy session layer, so
+/// building it must not raise `check --deploy`'s ungated warning.
+#[cfg(all(test, feature = "sqlite"))]
+mod ungated_flag_tests {
+    #[tokio::test]
+    async fn the_tenant_admin_is_not_flagged_ungated() {
+        let _g = crate::admin::ungated_flag_lock().lock().await;
+        crate::admin::reset_ungated_admin_built();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let storage: super::BoxedStorage =
+            std::sync::Arc::new(crate::storage::InMemoryStorage::new());
+        let _admin = super::build_inner_admin_router(
+            pool,
+            &None,
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &crate::testkit::org(),
+            &storage,
+            None,
+            "/admin",
+            "/change-password",
+            "/logout",
+            "/audit",
+            "/static",
+        );
+        let flagged = crate::admin::ungated_admin_built();
+        crate::admin::reset_ungated_admin_built();
+        assert!(!flagged, "the tenancy-gated admin was flagged ungated");
     }
 }

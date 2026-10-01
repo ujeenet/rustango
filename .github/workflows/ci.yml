@@ -945,7 +945,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,config,email --test mail_admins_managers
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,admin --test admin_list_select_related_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test form_clean_methods
-      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,serializer --test unique_together_validator
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,serializer --test unique_together_validator_tri
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test m2m_through_model
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows --test password_reset_confirm
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,cache,config --test file_cache_backend
@@ -1052,6 +1052,7 @@ jobs:
             --test unique_when_sqlite_live \
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
+            --test viewset_serializer_patch_tri \
             --test inserted_pk_readback_tri \
             --test admin_totp_2fa_sqlite_live \
             --test admin_totp_2fa_e2e \
@@ -1285,6 +1286,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit,tenancy --test audit_view_writes_tri
       - run: cargo test -p rustango --features mysql,testkit --test admin_audit_scope_tri
       - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test admin_list_state_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_dialect_tri
@@ -1292,6 +1294,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,tenancy,serializer,testkit --test viewset_serializer_patch_tri
+      - run: cargo test -p rustango --features mysql,serializer,testkit --test unique_together_validator_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri

@@ -13276,7 +13276,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let attr_min = opt_i64(fi.attrs.min);
             let attr_max = opt_i64(fi.attrs.max);
             quote! {
-                {
+                if __sent(#fname) {
                     let __sf = <#model_path as #root::core::Model>::SCHEMA.field(#mname);
                     let __max_length: ::core::option::Option<usize> = #attr_max_len
                         .or_else(|| __sf.and_then(|__f| __f.max_length).map(|__n| __n as usize));
@@ -13309,8 +13309,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let method = fi.attrs.validate.as_ref()?;
             let method_ident = syn::Ident::new(method, ident.span());
             Some(quote! {
-                if let ::core::result::Result::Err(__e) = Self::#method_ident(&self.#ident) {
-                    __errors.add(#name_lit.to_owned(), __e);
+                if __sent(#name_lit) {
+                    if let ::core::result::Result::Err(__e) = Self::#method_ident(&self.#ident) {
+                        __errors.add(#name_lit.to_owned(), __e);
+                    }
                 }
             })
         })
@@ -13336,8 +13338,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let has_run_validations = has_validators || has_constraints;
     // Shared body: declarative field constraints first (length / range /
     // choices, serializer-attr-or-model), then per-field validators, then
-    // the cross-field hook.
-    let validate_body = quote! {
+    // the cross-field hook. Field rules run only where `__sent(name)` (#1995).
+    let checks = quote! {
         let mut __errors = #root::forms::FormErrors::default();
         #( #constraint_blocks )*
         #( #validator_calls )*
@@ -13347,6 +13349,15 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         } else {
             ::core::result::Result::Err(__errors)
         }
+    };
+    let validate_body = quote! {
+        let __sent = |_: &str| true;
+        #checks
+    };
+    // PATCH: only the keys the body carries.
+    let validate_patch_body = quote! {
+        let __sent = |__n: &str| __obj.is_some_and(|__o| __o.contains_key(__n));
+        #checks
     };
     // Inherent `validate(&self)` — kept for back-compat with direct
     // `serializer.validate()` calls that don't import `ModelSerializer`.
@@ -13521,6 +13532,46 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         })
         .collect();
+    // `validate_patch`: overlay each sent writable field on the stored row.
+    let patch_overlays: Vec<_> = fields_info
+        .iter()
+        .filter(is_writable)
+        .map(|fi| {
+            let ident = &fi.ident;
+            let fname = ident.to_string();
+            let ty = &fi.ty;
+            quote! {
+                if let ::core::option::Option::Some(__v) = __obj.and_then(|__o| __o.get(#fname)) {
+                    match #root::__serde_json::from_value::<#ty>(::core::clone::Clone::clone(__v)) {
+                        ::core::result::Result::Ok(__x) => __merged.#ident = __x,
+                        ::core::result::Result::Err(__e) => {
+                            __errors.add(#fname.to_owned(), __e.to_string());
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+    let patch_validate_call = if has_run_validations {
+        quote! { __merged.__rustango_validate_patch(__obj) }
+    } else {
+        quote! { let _ = &__merged; ::core::result::Result::Ok(()) }
+    };
+    let patch_validate_helper = if has_run_validations {
+        quote! {
+            impl #struct_name {
+                #[doc(hidden)]
+                fn __rustango_validate_patch(
+                    &self,
+                    __obj: ::core::option::Option<&#root::__serde_json::Map<::std::string::String, #root::__serde_json::Value>>,
+                ) -> ::core::result::Result<(), #root::forms::FormErrors> {
+                    #validate_patch_body
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     // OpenAPI: emit `impl OpenApiSchema` when our `openapi` feature is on.
     // Only includes fields shown in JSON output (skips write_only). For each
@@ -13603,8 +13654,25 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }
 
+            fn validate_patch(
+                __stored: &Self::Model,
+                __body: &#root::__serde_json::Value,
+            ) -> ::core::result::Result<(), #root::forms::FormErrors> {
+                let mut __errors = #root::forms::FormErrors::default();
+                let __obj = __body.as_object();
+                #[allow(unused_mut)]
+                let mut __merged = <Self as #root::serializer::ModelSerializer>::from_model(__stored);
+                #( #patch_overlays )*
+                if !__errors.is_empty() {
+                    return ::core::result::Result::Err(__errors);
+                }
+                #patch_validate_call
+            }
+
             #trait_validate_override
         }
+
+        #patch_validate_helper
 
         impl #root::__serde::Serialize for #struct_name {
             fn serialize<S>(&self, serializer: S)

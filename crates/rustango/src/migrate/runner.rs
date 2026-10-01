@@ -1517,7 +1517,15 @@ pub async fn migrate_pool_with_progress(
     dir: &Path,
     observer: &dyn MigrationObserver,
 ) -> Result<Vec<Migration>, MigrateError> {
-    migrate_pool_with_ledger_opts(pool, dir, LEDGER_TABLE, false, Some(observer)).await
+    migrate_pool_with_ledger_opts(
+        pool,
+        dir,
+        LEDGER_TABLE,
+        false,
+        ChainOrigin::OnDisk,
+        Some(observer),
+    )
+    .await
 }
 
 /// [`migrate_pool_with_ledger_fake_initial`] with progress reporting —
@@ -1532,7 +1540,8 @@ pub async fn migrate_pool_with_ledger_fake_initial_with_progress(
     ledger: &str,
     observer: &dyn MigrationObserver,
 ) -> Result<Vec<Migration>, MigrateError> {
-    migrate_pool_with_ledger_opts(pool, dir, ledger, true, Some(observer)).await
+    migrate_pool_with_ledger_opts(pool, dir, ledger, true, ChainOrigin::OnDisk, Some(observer))
+        .await
 }
 
 /// Apply every pending migration in `dir` against a custom-named
@@ -1549,7 +1558,7 @@ pub async fn migrate_pool_with_ledger(
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    migrate_pool_with_ledger_opts(pool, dir, ledger, false, None).await
+    migrate_pool_with_ledger_opts(pool, dir, ledger, false, ChainOrigin::OnDisk, None).await
 }
 
 /// Like [`migrate_pool_with_ledger`], but with **guarded fake-initial**
@@ -1581,7 +1590,33 @@ pub async fn migrate_pool_with_ledger_fake_initial(
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    migrate_pool_with_ledger_opts(pool, dir, ledger, true, None).await
+    migrate_pool_with_ledger_opts(pool, dir, ledger, true, ChainOrigin::OnDisk, None).await
+}
+
+/// Where a system chain's files came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChainOrigin {
+    /// Shipped with the binary: its names match the ledger.
+    OnDisk,
+    /// Written from today's models into an empty dir. Its names depend on
+    /// the features and version, so the ledger says nothing about it (#1988).
+    Regenerated,
+}
+
+/// Apply `chain`'s files in `run_dir` (its dir, or a filtered copy of it)
+/// under the system ledger.
+///
+/// # Errors
+/// As [`migrate_pool_with_ledger_fake_initial`], plus catalog reads and
+/// what a [`ChainOrigin::Regenerated`] chain could not converge.
+pub(crate) async fn migrate_system_chain(
+    pool: &crate::sql::Pool,
+    chain: &super::make::SystemChain,
+    run_dir: &Path,
+    observer: Option<&dyn MigrationObserver>,
+) -> Result<Vec<Migration>, MigrateError> {
+    let origin = chain.origin();
+    migrate_pool_with_ledger_opts(pool, run_dir, SYSTEM_LEDGER_TABLE, true, origin, observer).await
 }
 
 async fn migrate_pool_with_ledger_opts(
@@ -1589,12 +1624,34 @@ async fn migrate_pool_with_ledger_opts(
     dir: &Path,
     ledger: &str,
     fake_initial: bool,
+    origin: ChainOrigin,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, async {
         let all = file::list_dir(dir)?;
-        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
+        let mut applied = applied_set_pool_with_ledger(pool, ledger).await?;
+        if origin == ChainOrigin::Regenerated && !applied.is_empty() {
+            // Match the live schema, not the names, then record the chain.
+            let mut unfixed = Vec::new();
+            for mig in &all {
+                let failed = converge_regenerated(pool, mig).await?;
+                if failed.is_empty() {
+                    if applied.insert(mig.name.clone()) {
+                        fake_apply_pool(pool, mig, ledger).await?;
+                    }
+                } else {
+                    unfixed.extend(failed);
+                }
+            }
+            if !unfixed.is_empty() {
+                return Err(MigrateError::Validation(format!(
+                    "the framework schema is missing objects `migrate` cannot add; \
+                     add them by hand, then rerun `migrate`:\n  - {}",
+                    unfixed.join("\n  - ")
+                )));
+            }
+        }
         let pending = pending_migrations(all, &applied);
 
         let total = pending.len();
@@ -1935,6 +1992,53 @@ fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
         return None;
     }
     Some(tables)
+}
+
+/// Create what `mig` creates and the database lacks: missing tables with
+/// their indexes, and missing columns of tables already there. One object
+/// at a time, so one failure does not block the rest; returns the failures.
+async fn converge_regenerated(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+) -> Result<Vec<String>, MigrateError> {
+    use super::diff::SchemaChange as SC;
+    let mut groups: Vec<Vec<SC>> = Vec::new();
+    for op in &mig.forward {
+        let Operation::Schema(change) = op else {
+            continue;
+        };
+        let table = match change {
+            SC::CreateTable(t) => t,
+            SC::CreateM2MTable { through, .. } => through,
+            _ => continue,
+        };
+        if !table_exists_here(pool, table).await {
+            let indexes = mig.forward.iter().filter_map(|op| match op {
+                Operation::Schema(c @ SC::CreateIndex { table: t, .. }) if t == table => {
+                    Some(c.clone())
+                }
+                _ => None,
+            });
+            groups.push(std::iter::once(change.clone()).chain(indexes).collect());
+            continue;
+        }
+        let (SC::CreateTable(_), Some(snap)) = (change, mig.snapshot.table(table)) else {
+            continue;
+        };
+        let live = super::ensure::live_columns(pool, table).await?;
+        groups.extend(
+            snap.fields
+                .iter()
+                .filter(|f| !live.contains(&f.column))
+                .map(|f| {
+                    vec![SC::AddColumn {
+                        table: table.clone(),
+                        column: f.column.clone(),
+                    }]
+                }),
+        );
+    }
+    Ok(super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?)
 }
 
 /// How many of `tables` already exist in `pool`. Probes with
