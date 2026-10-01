@@ -185,22 +185,7 @@ pub async fn add_host(
     else {
         return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
-    // Is it some tenant's base host? The unique index cannot see
-    // `rustango_orgs.host_pattern`, and `SubdomainResolver` runs first,
-    // so a row added here would never win.
-    let base_clash: Vec<super::Org> = super::Org::objects()
-        .where_(super::Org::host_pattern.eq(Some(host.clone())))
-        .fetch(registry)
-        .await?;
-    if !base_clash.is_empty() {
-        return Err(HostError::Taken(host));
-    }
-    if !OrgHost::objects()
-        .where_(OrgHost::hostname.eq(host.clone()))
-        .fetch(registry)
-        .await?
-        .is_empty()
-    {
+    if host_claimed(registry, &host, None).await? {
         return Err(HostError::Taken(host));
     }
     let mut row = OrgHost {
@@ -213,6 +198,36 @@ pub async fn add_host(
     row.insert_pool(registry).await?;
     super::invalidate_host_cache();
     Ok(row)
+}
+
+/// Is `host` some tenant's base host or extra host, other than
+/// `except_org`'s base host? Every path that writes a host asks this, since
+/// a host two tenants claim routes by row order (#1931).
+///
+/// # Errors
+/// Driver / query failures.
+pub(crate) async fn host_claimed(
+    registry: &Pool,
+    host: &str,
+    except_org: Option<i64>,
+) -> Result<bool, crate::sql::ExecError> {
+    // The unique index on `rustango_org_hosts` cannot see
+    // `rustango_orgs.host_pattern`, so both tables are checked.
+    let base: Vec<super::Org> = super::Org::objects()
+        .where_(super::Org::host_pattern.eq(Some(host.to_owned())))
+        .fetch(registry)
+        .await?;
+    if base
+        .iter()
+        .any(|o| except_org.is_none() || o.id.get().copied() != except_org)
+    {
+        return Ok(true);
+    }
+    Ok(!OrgHost::objects()
+        .where_(OrgHost::hostname.eq(host.to_owned()))
+        .fetch(registry)
+        .await?
+        .is_empty())
 }
 
 /// Unbind an extra hostname.

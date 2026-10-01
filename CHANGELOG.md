@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `public` holds the registry and ends every tenant's `search_path`; provisioning and `create_tenant` now refuse it.
 
+### Fixed — tenant hosts are validated on every write path and cannot clash (#1931)
+
+The console edit form uses the CLI's validators; edit and provision refuse a host another tenant uses; the `<slug>.<APEX>` default is validated; the resolver orders by id.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

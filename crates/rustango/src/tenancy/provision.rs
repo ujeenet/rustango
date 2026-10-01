@@ -648,6 +648,23 @@ where
     };
     let request = &normalized;
 
+    if let Some(host) = &request.host_pattern {
+        match super::org_host::host_claimed(&registry, host, None).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return rep
+                    .fail(
+                        ProvisionStep::Validate,
+                        TenancyError::Validation(format!(
+                            "host `{host}` is already used by another tenant"
+                        )),
+                    )
+                    .await;
+            }
+            Err(e) => return rep.fail(ProvisionStep::Validate, e.into()).await,
+        }
+    }
+
     if request.mode == StorageMode::Database && request.database_url.is_none() {
         return rep
             .fail(
@@ -899,9 +916,13 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
     }
 
     let mut out = request.clone();
-    if let Some(pattern) = &request.host_pattern {
-        out.host_pattern = Some(validate_host_pattern(pattern)?);
-    }
+    // The `<slug>.<APEX>` default is filled in here so it is validated too.
+    let pattern = request.host_pattern.clone().or_else(|| {
+        std::env::var("RUSTANGO_APEX_DOMAIN")
+            .ok()
+            .map(|apex| format!("{}.{apex}", request.slug))
+    });
+    out.host_pattern = pattern.as_deref().map(validate_host_pattern).transpose()?;
     Ok(out)
 }
 
@@ -1177,11 +1198,6 @@ fn schema_name_for(request: &ProvisionRequest) -> Option<String> {
 
 /// The registry row for a validated request, slug-derived defaults
 /// filled in.
-///
-/// `host_pattern` is the interesting one: an unset pattern becomes
-/// `<slug>.<RUSTANGO_APEX_DOMAIN>` when that env var is set, and stays
-/// unset when it is not — a tenant with no host pattern simply does not
-/// resolve by subdomain.
 fn new_org_row(request: &ProvisionRequest, schema_name: Option<String>) -> Org {
     Org {
         id: Auto::default(),
@@ -1194,11 +1210,8 @@ fn new_org_row(request: &ProvisionRequest, schema_name: Option<String>) -> Org {
         backend_kind: request.backend.as_str().into(),
         database_url: request.database_url.clone(),
         schema_name,
-        host_pattern: request.host_pattern.clone().or_else(|| {
-            std::env::var("RUSTANGO_APEX_DOMAIN")
-                .ok()
-                .map(|apex| format!("{}.{apex}", request.slug))
-        }),
+        // `validate_fields` already filled in the `<slug>.<APEX>` default.
+        host_pattern: request.host_pattern.clone(),
         port: request.port,
         path_prefix: request.path_prefix.clone(),
         // Inactive until the schema is in place. The resolver already

@@ -154,6 +154,10 @@ untouched.
 
 Provisioning and `create_tenant` refuse a schema named `public` (#1868). Rename any such tenant's schema.
 
+### Tenant hosts must be unique
+
+Editing or provisioning a tenant with a host another tenant uses (base or extra) is refused (#1931). The console edit form now rejects a host with a port, a bad `path_prefix` or `port`.
+
 ## 0.59.16
 
 ### Custom admin views need `change` for writes

@@ -299,3 +299,32 @@ async fn an_unknown_tenant_is_named() {
         .expect_err("unknown");
     assert!(err.contains("nosuchtenant"), "{err}");
 }
+
+/// #1931: a host another tenant answers on, as its base or an extra
+/// host, would route by row order, so it is refused.
+#[tokio::test]
+async fn a_host_another_tenant_uses_is_refused() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.tenant("beta").await;
+    b.run(&["edit-tenant", "acme", "--host-pattern", "shop.example.com"])
+        .await
+        .expect("first claim");
+    b.run(&["add-host", "acme", "extra.example.com"])
+        .await
+        .expect("extra host");
+
+    for taken in ["SHOP.example.com", "extra.example.com"] {
+        let err = b
+            .run(&["edit-tenant", "beta", "--host-pattern", taken])
+            .await
+            .expect_err("claimed by acme");
+        assert!(err.contains("another tenant"), "{taken}: {err}");
+    }
+    assert!(b.org("beta").await.host_pattern.is_none());
+
+    // Re-saving a tenant's own host is not a clash.
+    b.run(&["edit-tenant", "acme", "--host-pattern", "shop.example.com"])
+        .await
+        .expect("own host");
+}

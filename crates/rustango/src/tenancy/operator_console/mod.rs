@@ -1786,8 +1786,8 @@ async fn org_edit_form(
 }
 
 /// `POST /orgs/{slug}/edit`: parse the form with
-/// [`crate::forms::collect_values`] and UPDATE only the columns it
-/// supplied.
+/// [`crate::forms::collect_values`] and write the columns it supplied
+/// through [`crate::tenancy::org_edit::apply_values`].
 ///
 /// Two side effects: changing `database_url` calls
 /// [`TenantPools::invalidate`] so the next request rebuilds the pool,
@@ -1829,65 +1829,14 @@ async fn org_edit_submit(
         return redirect_with_error(&slug, "no editable fields supplied");
     }
 
-    // Fetch existing for change detection (database_url rotation).
-    // ORM path so registry-backend stays plug-and-play.
-    let existing_orgs: Vec<super::Org> = match super::Org::objects()
-        .where_(super::Org::slug.eq(slug.clone()))
-        .fetch(&state.registry)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => return server_error("operator_console", &e),
-    };
-    let Some(existing_org) = existing_orgs.into_iter().next() else {
-        return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
-    };
-    let new_database_url = collected.iter().find_map(|(c, v)| {
-        if *c == DATABASE_URL_FIELD {
-            match v {
-                crate::core::SqlValue::String(s) => Some(s.clone()),
-                _ => None,
-            }
-        } else {
-            None
-        }
-    });
-    let database_url_changed = new_database_url
-        .as_deref()
-        .is_some_and(|new| existing_org.database_url.as_deref() != Some(new));
-
-    // Build the UPDATE through the ORM's `UpdateQuery` IR + run it
-    // via `update_pool` so the SQL gets compiled with the right
-    // dialect (PG `$N` / MySQL `?` / SQLite `?`) + identifier
-    // quoting. Replaces the prior hand-rolled `UPDATE "…" SET … = $N
-    // WHERE …` string which was PG-only.
-    let assignments: Vec<crate::core::Assignment> = collected
-        .iter()
-        .map(|(col, val)| crate::core::Assignment {
-            column: *col,
-            value: val.clone().into(),
-        })
-        .collect();
-    let update_q = crate::core::UpdateQuery {
-        model: super::Org::SCHEMA,
-        set: assignments,
-        where_clause: crate::core::WhereExpr::and_predicates(vec![crate::core::Filter {
-            column: "slug",
-            op: crate::core::Op::Eq,
-            value: crate::core::SqlValue::String(slug.clone()),
-        }]),
-    };
-    if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
-        return redirect_with_error(&slug, &format!("update failed: {e}"));
-    }
-
-    // Drop the cached `Org` before anything else acts on the write.
-    // Resolution serves from that cache now, so without this the pool
-    // is evicted and then immediately rebuilt from the stale row — the
-    // rotation this handler promises would report success while the
-    // next request reconnected with the old credential. `active =
-    // false` has the same shape: the tenant would keep serving.
-    super::invalidate_org_cache();
+    // The CLI's write path, so the console runs the same routing
+    // validators and host-clash check (#1931).
+    let applied =
+        match crate::tenancy::org_edit::apply_values(&state.registry, &slug, collected).await {
+            Ok(a) => a,
+            Err(e) => return redirect_with_error(&slug, &e.to_string()),
+        };
+    let database_url_changed = applied.database_url_rotated;
 
     if database_url_changed {
         pools.invalidate(&slug).await;
@@ -1904,15 +1853,11 @@ async fn org_edit_submit(
         "action".into(),
         serde_json::Value::String("org.edit".into()),
     );
-    let touched_cols: Vec<String> = collected
+    let touched_cols: Vec<&str> = applied
+        .touched
         .iter()
-        .filter_map(|(c, _)| {
-            if *c == DATABASE_URL_FIELD {
-                None
-            } else {
-                Some((*c).to_owned())
-            }
-        })
+        .copied()
+        .filter(|c| *c != DATABASE_URL_FIELD)
         .collect();
     detail.insert("fields".into(), serde_json::json!(touched_cols));
     if database_url_changed {

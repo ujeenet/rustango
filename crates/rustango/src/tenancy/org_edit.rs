@@ -99,12 +99,56 @@ pub struct Applied {
 /// [`TenancyError::Validation`] for a bad host pattern, port, or path
 /// prefix, or when the tenant does not exist; driver errors otherwise.
 pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Applied, TenancyError> {
+    use crate::core::SqlValue;
     if patch.is_empty() {
         return Err(TenancyError::Validation(
             "nothing to change — pass at least one field".into(),
         ));
     }
+    let mut values: Vec<(&'static str, SqlValue)> = Vec::new();
+    if let Some(v) = patch.display_name.as_deref() {
+        // NOT NULL, unlike the routing columns — an empty display name is
+        // the empty string; NULL would be a constraint violation.
+        values.push(("display_name", SqlValue::String(v.trim().to_owned())));
+    }
+    if let Some(v) = patch.host_pattern.as_deref() {
+        values.push(("host_pattern", SqlValue::String(v.to_owned())));
+    }
+    if let Some(v) = patch.path_prefix.as_deref() {
+        values.push(("path_prefix", SqlValue::String(v.to_owned())));
+    }
+    if let Some(v) = patch.port.as_deref() {
+        let p = if v.trim().is_empty() {
+            SqlValue::Null
+        } else {
+            SqlValue::I32(
+                v.trim()
+                    .parse::<i32>()
+                    .map_err(|_| TenancyError::Validation(format!("port `{v}` is not a number")))?,
+            )
+        };
+        values.push(("port", p));
+    }
+    if let Some(v) = patch.active {
+        values.push(("active", SqlValue::Bool(v)));
+    }
+    if let Some(v) = patch.database_url.as_deref() {
+        values.push(("database_url", SqlValue::String(v.to_owned())));
+    }
+    let mut applied = apply_values(registry, slug, values).await?;
+    applied.touched = patch.touched();
+    Ok(applied)
+}
 
+/// The one write path for an `Org` edit: the console's form values and
+/// [`apply`]'s patch both pass the routing validators and the host-clash
+/// check here (#1931).
+pub(crate) async fn apply_values(
+    registry: &Pool,
+    slug: &str,
+    values: Vec<(&'static str, crate::core::SqlValue)>,
+) -> Result<Applied, TenancyError> {
+    use crate::core::SqlValue;
     let existing = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
         .fetch(registry)
@@ -112,74 +156,54 @@ pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Appl
         .into_iter()
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
+    let existing_id = existing.id.get().copied().unwrap_or_default();
 
     // The same validators provisioning uses, so a value the console or
     // the CLI can set is a value `create-tenant` would have accepted.
+    let blank = |v: &SqlValue| match v {
+        SqlValue::Null => true,
+        SqlValue::String(s) => s.trim().is_empty(),
+        _ => false,
+    };
     let mut set: Vec<crate::core::Assignment> = Vec::new();
-    if let Some(v) = patch.display_name.as_deref() {
-        // NOT NULL, unlike the routing columns below — an empty display
-        // name is the empty string, and writing NULL would be a constraint
-        // violation rather than a clear.
-        set.push(assign(
-            "display_name",
-            crate::core::SqlValue::String(v.trim().to_owned()),
-        ));
-    }
-    if let Some(v) = patch.host_pattern.as_deref() {
-        // Returns the normalized (lowercased) form — store that, not what
-        // was typed, so it can match a `Host` header byte-for-byte.
-        let normalized = if v.trim().is_empty() {
-            None
-        } else {
-            Some(
-                crate::tenancy::provision::validate_host_pattern(v)
-                    .map_err(TenancyError::Validation)?,
-            )
+    let mut touched: Vec<&'static str> = Vec::new();
+    let mut database_url_rotated = false;
+    for (column, value) in values {
+        let value = match (column, value) {
+            // Blank keeps the current URL; it is a credential, never cleared here.
+            ("database_url", v) if blank(&v) => continue,
+            ("database_url", SqlValue::String(new)) => {
+                database_url_rotated = existing.database_url.as_deref() != Some(new.as_str());
+                SqlValue::String(new)
+            }
+            ("host_pattern" | "path_prefix", v) if blank(&v) => SqlValue::Null,
+            ("host_pattern", SqlValue::String(v)) => {
+                // Store the normalized form so it matches a `Host` header byte-for-byte.
+                let host = crate::tenancy::provision::validate_host_pattern(&v)
+                    .map_err(TenancyError::Validation)?;
+                if crate::tenancy::org_host::host_claimed(registry, &host, Some(existing_id))
+                    .await?
+                {
+                    return Err(TenancyError::Validation(format!(
+                        "host `{host}` is already used by another tenant"
+                    )));
+                }
+                SqlValue::String(host)
+            }
+            ("path_prefix", SqlValue::String(v)) => {
+                let v = v.trim().to_owned();
+                crate::tenancy::provision::validate_path_prefix(&v)
+                    .map_err(TenancyError::Validation)?;
+                SqlValue::String(v)
+            }
+            ("port", SqlValue::I32(n)) => {
+                crate::tenancy::provision::validate_port(n).map_err(TenancyError::Validation)?;
+                SqlValue::I32(n)
+            }
+            (_, v) => v,
         };
-        set.push(assign("host_pattern", string_or_null(normalized)));
-    }
-    if let Some(v) = patch.path_prefix.as_deref() {
-        let cleaned = if v.trim().is_empty() {
-            None
-        } else {
-            crate::tenancy::provision::validate_path_prefix(v).map_err(TenancyError::Validation)?;
-            Some(v.trim().to_owned())
-        };
-        set.push(assign("path_prefix", string_or_null(cleaned)));
-    }
-    if let Some(v) = patch.port.as_deref() {
-        let p = if v.trim().is_empty() {
-            None
-        } else {
-            let n = v
-                .trim()
-                .parse::<i32>()
-                .map_err(|_| TenancyError::Validation(format!("port `{v}` is not a number")))?;
-            crate::tenancy::provision::validate_port(n).map_err(TenancyError::Validation)?;
-            Some(n)
-        };
-        set.push(assign(
-            "port",
-            p.map_or(crate::core::SqlValue::Null, crate::core::SqlValue::I32),
-        ));
-    }
-    if let Some(v) = patch.active {
-        set.push(assign("active", crate::core::SqlValue::Bool(v)));
-    }
-    let database_url_rotated = patch
-        .database_url
-        .as_deref()
-        .filter(|u| !u.trim().is_empty())
-        .is_some_and(|new| existing.database_url.as_deref() != Some(new));
-    if let Some(v) = patch
-        .database_url
-        .as_deref()
-        .filter(|u| !u.trim().is_empty())
-    {
-        set.push(assign(
-            "database_url",
-            crate::core::SqlValue::String(v.to_owned()),
-        ));
+        touched.push(column);
+        set.push(assign(column, value));
     }
 
     if set.is_empty() {
@@ -203,7 +227,7 @@ pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Appl
     crate::tenancy::invalidate_org_cache();
 
     Ok(Applied {
-        touched: patch.touched(),
+        touched,
         database_url_rotated,
     })
 }
@@ -213,11 +237,6 @@ fn assign(column: &'static str, value: crate::core::SqlValue) -> crate::core::As
         column,
         value: value.into(),
     }
-}
-
-/// The nullable routing columns: absent means NULL, not "".
-fn string_or_null(v: Option<String>) -> crate::core::SqlValue {
-    v.map_or(crate::core::SqlValue::Null, crate::core::SqlValue::String)
 }
 
 #[cfg(test)]
@@ -245,16 +264,5 @@ mod tests {
             ..OrgPatch::default()
         };
         assert_eq!(p.touched(), vec!["display_name", "host_pattern", "active"]);
-    }
-
-    /// The routing columns are nullable, so clearing one means NULL — an
-    /// empty string there would be a value the resolver compares against.
-    #[test]
-    fn a_cleared_routing_column_becomes_null() {
-        assert!(matches!(string_or_null(None), crate::core::SqlValue::Null));
-        assert!(matches!(
-            string_or_null(Some("shop.test".into())),
-            crate::core::SqlValue::String(_)
-        ));
     }
 }
