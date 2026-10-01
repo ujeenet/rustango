@@ -194,5 +194,5 @@ async fn m2m_changed_fires_on_add() {
     assert_eq!(events.len(), 1, "expected one m2m_changed event");
     assert!(matches!(events[0].action, M2mAction::Add));
     assert_eq!(events[0].through, "gm2m_taggables");
-    assert_eq!(events[0].dst_pks, vec![42]);
+    assert_eq!(events[0].dst_pks, vec![rustango::core::SqlValue::I64(42)]);
 }

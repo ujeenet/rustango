@@ -2316,14 +2316,6 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                     }
                 });
             }
-            // Bulk: Auto fields appear only in the all-Set path,
-            // never in the Unset path (we drop them from `columns`).
-            out.bulk_columns_all.push(quote!(#column));
-            out.bulk_pushes_all.push(quote! {
-                _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
-                    ::core::clone::Clone::clone(&_row.#ident)
-                ));
-            });
             // …except the timestamp columns, which must appear in BOTH
             // paths (#1464). The path is chosen by the *first* Auto
             // field — in practice the PK — so a bulk insert of rows
@@ -2343,14 +2335,25 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             } else {
                 None
             };
-            if let Some(fill) = rust_fill {
-                out.bulk_columns_no_auto.push(quote!(#column));
-                out.bulk_pushes_no_auto.push(quote! {
+            // Bulk: Auto fields appear in the all-Set path. An unset filled
+            // field takes its fill there too, not NULL (#1950).
+            out.bulk_columns_all.push(quote!(#column));
+            if let Some(fill) = &rust_fill {
+                let push = quote! {
                     _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
                         match &_row.#ident {
                             #root::sql::Auto::Set(_v) => ::core::clone::Clone::clone(_v),
                             #root::sql::Auto::Unset => #fill,
                         }
+                    ));
+                };
+                out.bulk_columns_no_auto.push(quote!(#column));
+                out.bulk_pushes_no_auto.push(push.clone());
+                out.bulk_pushes_all.push(push);
+            } else {
+                out.bulk_pushes_all.push(quote! {
+                    _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&_row.#ident)
                     ));
                 });
             }
@@ -2364,18 +2367,21 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // Uniformity check: every row's Auto state must match the
             // first row's. Mixed Set/Unset within one bulk_insert is
             // rejected here so the column list stays consistent.
+            // A filled field may be unset on any row, so it is exempt.
             let ident_clone = ident.clone();
-            out.bulk_auto_uniformity.push(quote! {
-                for _r in rows.iter().skip(1) {
-                    if matches!(_r.#ident_clone, #root::sql::Auto::Unset) != _first_unset {
-                        return ::core::result::Result::Err(
-                            #root::sql::ExecError::Sql(
-                                #root::sql::SqlError::BulkAutoMixed
-                            )
-                        );
+            if rust_fill.is_none() {
+                out.bulk_auto_uniformity.push(quote! {
+                    for _r in rows.iter().skip(1) {
+                        if matches!(_r.#ident_clone, #root::sql::Auto::Unset) != _first_unset {
+                            return ::core::result::Result::Err(
+                                #root::sql::ExecError::Sql(
+                                    #root::sql::SqlError::BulkAutoMixed
+                                )
+                            );
+                        }
                     }
-                }
-            });
+                });
+            }
         } else {
             out.insert_pushes.push(quote! {
                 _columns.push(#column);
@@ -7411,9 +7417,12 @@ fn inherent_impl_tokens(
                 }
             }
         };
+        // The DB-filled `Auto` picks the path; Rust-filled ones fill per row (#1950).
         let first_auto_ident = fields
-            .first_auto_ident
+            .first_db_auto
             .as_ref()
+            .map(|(ident, _)| ident)
+            .or(fields.first_auto_ident.as_ref())
             .expect("has_auto implies first_auto_ident is Some");
         quote! {
             /// Bulk-insert `rows` in a single round-trip. Every row's

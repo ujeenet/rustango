@@ -1,4 +1,5 @@
-//! M2M managers on models with a String or Uuid PK bind the real key (#1926).
+//! M2M managers on models with a String or Uuid PK bind the real key (#1926),
+//! on the source and the destination side (#1950).
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -75,9 +76,38 @@ pub struct Note {
     pub id: Auto<i64>,
 }
 
+/// A source whose M2M target has a String PK.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "m2m1926_shelf",
+    app = "m2m1926",
+    m2m(
+        name = "labels",
+        to = "m2m1926_label",
+        through = "m2m1926_shelf_label",
+        src = "shelf_id",
+        dst = "label_code"
+    )
+)]
+pub struct Shelf {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(app = "m2m1926", table = "m2m1926_shelf_label")]
+pub struct ShelfLabel {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub shelf_id: i64,
+    #[rustango(max_length = 64)]
+    pub label_code: String,
+}
+
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<PostTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<DocTag>(pool).await;
+    rustango::testkit::matrix::fresh_table::<ShelfLabel>(pool).await;
 }
 
 fn post(slug: &str) -> Post {
@@ -149,11 +179,32 @@ async fn unsaved_source_is_refused(pool: &Pool) {
     assert_eq!(PostTag::objects().count(pool).await.expect("count"), 1);
 }
 
+/// String destination keys bind and read back as text (#1950).
+async fn string_destination_keys_round_trip(pool: &Pool) {
+    let (a, b) = (Shelf { id: 1 }, Shelf { id: 2 });
+    a.labels_m2m().add("rust", pool).await.expect("add");
+    b.labels_m2m().set(&["go", "zig"], pool).await.expect("set");
+    assert!(a
+        .labels_m2m()
+        .contains("rust", pool)
+        .await
+        .expect("contains"));
+    assert!(!a.labels_m2m().contains("go", pool).await.expect("contains"));
+    let mut got: Vec<String> = b.labels_m2m().all_as(pool).await.expect("all_as");
+    got.sort_unstable();
+    assert_eq!(got, ["go", "zig"]);
+    b.labels_m2m().remove("go", pool).await.expect("remove");
+    let got: Vec<String> = b.labels_m2m().all_as(pool).await.expect("all_as");
+    assert_eq!(got, ["zig"]);
+    assert_eq!(ShelfLabel::objects().count(pool).await.expect("count"), 2);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         string_pk_rows_stay_per_source,
         uuid_pk_rows_stay_per_source,
         unsaved_source_is_refused,
+        string_destination_keys_round_trip,
     ],
 }

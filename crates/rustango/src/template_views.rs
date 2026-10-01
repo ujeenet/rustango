@@ -86,6 +86,16 @@ use crate::core::{FieldSchema, Filter, ModelSchema, Op, SelectQuery, SqlValue, W
 use crate::sql::Pool;
 use crate::sql::{count_rows_pool, select_one_row_as_json, select_rows_as_json};
 
+/// [`coerce_pk`], returning `404` from the handler when the value does not parse.
+macro_rules! pk_or_404 {
+    ($field:expr, $raw:expr) => {
+        match $crate::template_views::coerce_pk($field, $raw) {
+            Some(v) => v,
+            None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        }
+    };
+}
+
 // ============================================================== ListView
 
 // ============================================================== Bulk actions
@@ -1027,7 +1037,7 @@ async fn handle_detail(
     };
     // #562 — use the `SelectQuery::by_pk` constructor instead of
     // spelling out the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk))
+    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
         .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
@@ -1164,7 +1174,7 @@ async fn handle_delete_confirm(
         ));
     };
     // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
         .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
@@ -1190,9 +1200,12 @@ async fn handle_delete_submit(
             state.vs.schema.table
         ));
     };
-    let delete_q =
-        crate::core::DeleteQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
-            .with_global_scopes();
+    let delete_q = crate::core::DeleteQuery::by_pk(
+        state.vs.schema,
+        pk_field.column,
+        pk_or_404!(pk_field, &pk),
+    )
+    .with_global_scopes();
     match crate::audit::delete(&state.pool, &delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
@@ -1517,6 +1530,29 @@ struct FormField {
     value: String,
 }
 
+/// Which form a CreateView / UpdateView renders and parses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormMode {
+    Create,
+    Update,
+}
+
+impl FormMode {
+    fn from_is_update(is_update: bool) -> Self {
+        if is_update {
+            Self::Update
+        } else {
+            Self::Create
+        }
+    }
+
+    /// Server-filled and generated fields are never edited; a client-set
+    /// PK is entered on create only, never changed on update (#1950).
+    fn edits(self, f: &FieldSchema) -> bool {
+        !f.auto && f.generated_as.is_none() && (self == Self::Create || !f.primary_key)
+    }
+}
+
 /// Walk the schema and produce the form-fields slice. Skips:
 /// - the primary key (CreateView lets the DB assign; UpdateView
 ///   pins it from the URL)
@@ -1526,6 +1562,7 @@ struct FormField {
 ///   needs picker UI; templates can render IDs as plain inputs in
 ///   the meantime — relation fields render with `ty = "i64"` etc.)
 fn form_fields(
+    mode: FormMode,
     schema: &'static ModelSchema,
     explicit: Option<&[String]>,
     values: &HashMap<String, String>,
@@ -1534,7 +1571,7 @@ fn form_fields(
         .fields
         .iter()
         .filter(|f| {
-            if f.primary_key || f.auto || f.generated_as.is_some() {
+            if !mode.edits(f) {
                 return false;
             }
             match explicit {
@@ -1817,38 +1854,12 @@ fn column_value_as_string(
     }
 }
 
-/// Coerce a URL-path PK string to the field's declared SQL type.
-/// Never returns `Null`, never
-/// allows empty strings (a `/{pk}` segment is always present).
-/// Used by DetailView / UpdateView / DeleteView to bind the
-/// `WHERE pk = $1` parameter without relying on Postgres'
-/// implicit string-to-int casts.
-///
-/// Returns the original `SqlValue::String(raw)` as a permissive
-/// fallback when:
-/// - Field type is not one of the integer / UUID variants we
-///   know how to parse from a URL string
-/// - Parsing fails (e.g. `i64` with non-numeric segment) — the
-///   resulting query will produce no rows / 404, which is the
-///   same effect as a typed-mismatch error and avoids leaking
-///   parse errors to the user
-fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> SqlValue {
-    use crate::core::FieldType as T;
-    match field.ty {
-        T::I16 | T::I32 | T::I64 => raw
-            .parse::<i64>()
-            .map(SqlValue::I64)
-            .unwrap_or_else(|_| SqlValue::String(raw.to_owned())),
-        T::Uuid => raw
-            .parse::<uuid::Uuid>()
-            .map(SqlValue::Uuid)
-            .unwrap_or_else(|_| SqlValue::String(raw.to_owned())),
-        // Strings are the natural representation; everything else
-        // (Bool / Float / DateTime / Date / Json) doesn't normally
-        // serve as a PK. Pass the raw string through and let
-        // Postgres' implicit cast handle it.
-        _ => SqlValue::String(raw.to_owned()),
-    }
+/// A URL-path PK (or lookup) value bound as the field's type, or `None`
+/// when it does not parse, so the caller 404s instead of a PG cast 500 (#1950).
+fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
+    crate::forms::parse_pk_string(field, raw)
+        .or_else(|_| crate::forms::parse_form_value(field, Some(raw)))
+        .ok()
 }
 
 async fn handle_create_get(
@@ -1856,7 +1867,12 @@ async fn handle_create_get(
     headers: axum::http::HeaderMap,
 ) -> Response {
     let mut ctx = Context::new();
-    let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
+    let fields = form_fields(
+        FormMode::Create,
+        state.schema,
+        state.fields.as_deref(),
+        &HashMap::new(),
+    );
     ctx.insert(
         "form",
         &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
@@ -1874,8 +1890,12 @@ async fn handle_create_post(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
-    let (mut columns, mut values, mut errors) =
-        parse_form(state.schema, state.fields.as_deref(), &form);
+    let (mut columns, mut values, mut errors) = parse_form(
+        FormMode::Create,
+        state.schema,
+        state.fields.as_deref(),
+        &form,
+    );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
@@ -1928,7 +1948,7 @@ async fn handle_update_get(
     };
     // #562 — `SelectQuery::by_pk` replaces the 11-field struct
     // literal.
-    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk))
+    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
         .with_global_scopes();
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
@@ -1948,7 +1968,12 @@ async fn handle_update_get(
         };
         values.insert(k, s);
     }
-    let fields = form_fields(state.schema, state.fields.as_deref(), &values);
+    let fields = form_fields(
+        FormMode::Update,
+        state.schema,
+        state.fields.as_deref(),
+        &values,
+    );
     let mut ctx = Context::new();
     ctx.insert(
         "form",
@@ -1976,7 +2001,12 @@ async fn handle_update_post(
             state.schema.table
         ));
     };
-    let (columns, values, mut errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    let (columns, values, mut errors) = parse_form(
+        FormMode::Update,
+        state.schema,
+        state.fields.as_deref(),
+        &form,
+    );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers);
@@ -1992,7 +2022,7 @@ async fn handle_update_post(
     let pk_match = WhereExpr::Predicate(Filter {
         column: pk_field.column,
         op: Op::Eq,
-        value: coerce_pk(pk_field, &pk),
+        value: pk_or_404!(pk_field, &pk),
     });
     let update_q =
         crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
@@ -2012,6 +2042,7 @@ async fn handle_update_post(
 /// here too — empty non-nullable fields surface as
 /// `"this field is required"`.
 fn parse_form(
+    mode: FormMode,
     schema: &'static ModelSchema,
     explicit: Option<&[String]>,
     submitted: &HashMap<String, String>,
@@ -2020,7 +2051,7 @@ fn parse_form(
     let mut values: Vec<SqlValue> = Vec::new();
     let mut errors: HashMap<String, String> = HashMap::new();
     for f in schema.fields {
-        if f.primary_key || f.auto || f.generated_as.is_some() {
+        if !mode.edits(f) {
             continue;
         }
         if let Some(names) = explicit {
@@ -2137,7 +2168,12 @@ fn rerender_form(
     is_update: bool,
     headers: &axum::http::HeaderMap,
 ) -> Response {
-    let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
+    let fields = form_fields(
+        FormMode::from_is_update(is_update),
+        state.schema,
+        state.fields.as_deref(),
+        submitted,
+    );
     let mut ctx = Context::new();
     ctx.insert(
         "form",
@@ -3538,7 +3574,7 @@ mod tenant {
                 Err(e) => return template_error(&e),
             };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk))
+        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
             .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
@@ -3577,7 +3613,7 @@ mod tenant {
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
         let select_q =
-            SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk))
+            SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
                 .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
@@ -3607,7 +3643,7 @@ mod tenant {
         let delete_q = crate::core::DeleteQuery::by_pk(
             state.vs.schema,
             pk_field.column,
-            coerce_pk(pk_field, &pk),
+            pk_or_404!(pk_field, &pk),
         )
         .with_global_scopes();
         match crate::audit::delete(t.pool(), &delete_q).await {
@@ -3639,7 +3675,12 @@ mod tenant {
         headers: axum::http::HeaderMap,
     ) -> Response {
         let mut ctx = Context::new();
-        let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
+        let fields = form_fields(
+            FormMode::Create,
+            state.schema,
+            state.fields.as_deref(),
+            &HashMap::new(),
+        );
         ctx.insert(
             "form",
             &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
@@ -3658,8 +3699,12 @@ mod tenant {
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
-        let (mut columns, mut values, mut errors) =
-            parse_form(state.schema, state.fields.as_deref(), &form);
+        let (mut columns, mut values, mut errors) = parse_form(
+            FormMode::Create,
+            state.schema,
+            state.fields.as_deref(),
+            &form,
+        );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
             return rerender_form_tenant(
@@ -3713,7 +3758,7 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk))
+        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
             .with_global_scopes();
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
@@ -3733,7 +3778,12 @@ mod tenant {
             };
             values.insert(k, s);
         }
-        let fields = form_fields(state.schema, state.fields.as_deref(), &values);
+        let fields = form_fields(
+            FormMode::Update,
+            state.schema,
+            state.fields.as_deref(),
+            &values,
+        );
         let mut ctx = Context::new();
         ctx.insert(
             "form",
@@ -3762,8 +3812,12 @@ mod tenant {
                 state.schema.table
             ));
         };
-        let (columns, values, mut errors) =
-            parse_form(state.schema, state.fields.as_deref(), &form);
+        let (columns, values, mut errors) = parse_form(
+            FormMode::Update,
+            state.schema,
+            state.fields.as_deref(),
+            &form,
+        );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
             return rerender_form_tenant(
@@ -3781,7 +3835,7 @@ mod tenant {
         let pk_match = WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
+            value: pk_or_404!(pk_field, &pk),
         });
         let update_q =
             crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
@@ -3802,7 +3856,12 @@ mod tenant {
         is_update: bool,
         headers: &axum::http::HeaderMap,
     ) -> Response {
-        let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
+        let fields = form_fields(
+            FormMode::from_is_update(is_update),
+            state.schema,
+            state.fields.as_deref(),
+            submitted,
+        );
         let mut ctx = Context::new();
         ctx.insert(
             "form",
@@ -4499,7 +4558,7 @@ mod tests {
     fn form_fields_skips_pk_and_auto() {
         let s = schema_two_fields();
         let values = HashMap::new();
-        let ff = form_fields(s, None, &values);
+        let ff = form_fields(FormMode::Update, s, None, &values);
         assert_eq!(ff.len(), 1);
         assert_eq!(ff[0].name, "title");
     }
@@ -4510,7 +4569,7 @@ mod tests {
         let s = schema_two_fields();
         let mut values = HashMap::new();
         values.insert("title".to_owned(), "Hello".to_owned());
-        let ff = form_fields(s, None, &values);
+        let ff = form_fields(FormMode::Update, s, None, &values);
         assert_eq!(ff[0].value, "Hello");
     }
 
@@ -4680,24 +4739,19 @@ mod tests {
     fn coerce_pk_integer_field() {
         let s = schema_two_fields();
         let pk = s.primary_key().unwrap();
-        match coerce_pk(pk, "42") {
+        match coerce_pk(pk, "42").unwrap() {
             SqlValue::I64(n) => assert_eq!(n, 42),
             other => panic!("expected I64, got {other:?}"),
         }
     }
 
-    /// `coerce_pk` falls back to `SqlValue::String` on parse
-    /// failure rather than panicking — the resulting query just
-    /// returns no rows / 404, same effect as a 400 but without
-    /// leaking parse errors.
+    /// A PK that does not parse is `None` (a 404), not a text bind
+    /// PostgreSQL rejects with a 500 (#1950).
     #[test]
-    fn coerce_pk_integer_field_fallback_on_garbage() {
+    fn coerce_pk_integer_field_rejects_garbage() {
         let s = schema_two_fields();
         let pk = s.primary_key().unwrap();
-        match coerce_pk(pk, "not-a-number") {
-            SqlValue::String(raw) => assert_eq!(raw, "not-a-number"),
-            other => panic!("expected fallback String, got {other:?}"),
-        }
+        assert!(coerce_pk(pk, "not-a-number").is_none());
     }
 
     /// `coerce_pk` for a UUID PK parses to `SqlValue::Uuid`.
@@ -4765,15 +4819,12 @@ mod tests {
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
-        match coerce_pk(pk, raw) {
+        match coerce_pk(pk, raw).unwrap() {
             SqlValue::Uuid(_) => {} // success — variant matches
             other => panic!("expected Uuid, got {other:?}"),
         }
-        // Garbage UUID falls back to String.
-        match coerce_pk(pk, "not-a-uuid") {
-            SqlValue::String(s) => assert_eq!(s, "not-a-uuid"),
-            other => panic!("expected fallback String, got {other:?}"),
-        }
+        // A garbage UUID is a 404, not a text bind (#1950).
+        assert!(coerce_pk(pk, "not-a-uuid").is_none());
     }
 
     /// A model whose PK is a client-set `String`.
@@ -4843,7 +4894,7 @@ mod tests {
     fn coerce_pk_string_field() {
         let str_schema = slug_schema();
         let pk = str_schema.primary_key().unwrap();
-        match coerce_pk(pk, "hello-world") {
+        match coerce_pk(pk, "hello-world").unwrap() {
             SqlValue::String(s) => assert_eq!(s, "hello-world"),
             other => panic!("expected String, got {other:?}"),
         }
@@ -4871,7 +4922,7 @@ mod tests {
     fn parse_form_flags_required_missing() {
         let s = schema_two_fields();
         let submitted = HashMap::new();
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(FormMode::Update, s, None, &submitted);
         assert!(cols.is_empty());
         assert!(vals.is_empty());
         assert_eq!(errors.len(), 1);
@@ -4885,7 +4936,7 @@ mod tests {
         let s = schema_two_fields();
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "Hello".to_owned());
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(FormMode::Update, s, None, &submitted);
         assert!(errors.is_empty());
         assert_eq!(cols, vec!["title"]);
         assert_eq!(vals.len(), 1);
@@ -4919,7 +4970,7 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "way too long".to_owned()); // 12 > 5
         submitted.insert("score".to_owned(), "50".to_owned());
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(FormMode::Update, s, None, &submitted);
         assert!(cols.is_empty() || !cols.contains(&"title"));
         assert!(
             vals.is_empty() || vals.len() == 1,
@@ -4941,7 +4992,7 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "ok".to_owned());
         submitted.insert("score".to_owned(), "150".to_owned()); // > 100
-        let (_, _, errors) = parse_form(s, None, &submitted);
+        let (_, _, errors) = parse_form(FormMode::Update, s, None, &submitted);
         let score_err = errors.get("score").expect("score error present");
         assert!(
             score_err.contains("100") && score_err.contains("150"),

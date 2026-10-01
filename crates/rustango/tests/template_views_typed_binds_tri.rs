@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::core::Model as _;
 use rustango::sql::{Auto, FetcherPool as _, ForeignKey, Pool};
-use rustango::template_views::{CreateView, ListView, UpdateView};
+use rustango::template_views::{CreateView, DetailView, ListView, UpdateView};
 use rustango::{tri_dialect_test, Model};
 use tera::Tera;
 use tower::ServiceExt as _;
@@ -65,6 +65,7 @@ fn app(pool: &Pool) -> axum::Router {
     t.add_raw_templates(vec![
         ("form.html", "form {{ errors | json_encode() }}"),
         ("list.html", "rows={{ object_list | length }}"),
+        ("detail.html", "event"),
         (
             "pins.html",
             r#"{% for r in object_list %}{{ r.tag_display | default(value="-") }};{% endfor %}"#,
@@ -87,6 +88,17 @@ fn app(pool: &Pool) -> axum::Router {
                 .template("list.html")
                 .filter_fields(&["author_id", "done", "token", "day", "note", "at"])
                 .router("/events", t.clone(), pool.clone()),
+        )
+        .merge(
+            DetailView::for_model(Event::SCHEMA)
+                .template("detail.html")
+                .router("/ev", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Tag::SCHEMA)
+                .template("form.html")
+                .success_url("/tags/{pk}")
+                .router("/tags", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Pin::SCHEMA)
@@ -197,11 +209,36 @@ async fn fk_display_binds_the_target_pk_type(pool: &Pool) {
     assert_eq!(body, "Rust;");
 }
 
+/// A URL PK that does not parse as the PK type is a 404, not a PG cast 500 (#1950).
+async fn garbage_url_pk_is_a_404(pool: &Pool) {
+    let (status, body) = send(pool, Method::GET, "/ev/not-a-number", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = send(
+        pool,
+        Method::POST,
+        "/events/abc/edit",
+        &form("2026-10-01", 1, true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+/// CreateView writes a client-set String PK instead of dropping it (#1950).
+async fn create_view_takes_a_client_set_pk(pool: &Pool) {
+    let (status, body) = send(pool, Method::POST, "/tags/new", "code=rs&name=Rust").await;
+    assert!(status.is_redirection(), "create: {status} {body}");
+    let tags: Vec<Tag> = Tag::objects().fetch(pool).await.expect("tags");
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].code, "rs");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         create_and_update_bind_typed_values,
         list_filters_bind_typed_values,
         fk_display_binds_the_target_pk_type,
+        garbage_url_pk_is_a_404,
+        create_view_takes_a_client_set_pk,
     ],
 }

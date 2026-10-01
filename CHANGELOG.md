@@ -3,6 +3,13 @@
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
 ## [Unreleased]
+
+### Fixed — template views, M2M and bulk writes on non-integer keys (#1950)
+
+A URL PK that does not parse as the PK type is a 404, not a PostgreSQL 500. `CreateView` takes a
+client-set PK. M2M managers take String / Uuid destination keys (`all_as::<K>()` reads them).
+A bulk insert with set PKs fills unset `auto_now` / `default_uuid_v7` fields instead of binding NULL.
+
 ### Fixed — list `__in` filters and huge page numbers (#1865)
 
 A ViewSet `?field__in=` list over 1000 values is a 400, not a driver 500. `?page=` past `i64` range

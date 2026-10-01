@@ -87,7 +87,7 @@ async fn m2m_full_lifecycle_on_sqlite() {
     assert_eq!(got, vec![100, 200, 300]);
 
     // Empty set wipes.
-    m.set(&[], &pool).await.expect("set empty");
+    m.set::<i64>(&[], &pool).await.expect("set empty");
     let got = m.all(&pool).await.expect("all after empty set");
     assert!(got.is_empty());
 

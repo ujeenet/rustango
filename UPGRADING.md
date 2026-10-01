@@ -149,6 +149,14 @@ untouched.
 ---
 
 ## Unreleased
+
+### M2M destination keys are `impl Into<SqlValue>` (#1950)
+
+`add` / `remove` / `contains` take any key and `set` any `&[K]`; integers still bind as `i64`.
+An empty `set(&[])` needs a type now: `set::<i64>(&[])`, or call `clear()`.
+**Breaking:** `M2mChangedContext::dst_pks` is `Vec<SqlValue>`. `CreateView` now renders and parses a
+non-`Auto` PK field. A bad URL PK in a template view is a 404.
+
 ### ViewSet `__in` lists cap at 1000 values (#1865)
 
 A longer `?field__in=` / `?field__not_in=` list is a 400. Split larger lookups into several requests.
