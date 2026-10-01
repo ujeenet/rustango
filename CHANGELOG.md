@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `check_unique_together_pool` reports collisions on PostgreSQL (#1872)
+
+The probe now runs as an ORM `exists` count; its raw `SELECT 1` failed to decode on PG and hid the field error.
+
 ### Fixed — feature flags no longer expire after an hour (#1956)
 
 `FeatureFlags` writes with no TTL, so `enable` / `disable` stick. `FeatureFlags::ttl` opts in to expiry.
