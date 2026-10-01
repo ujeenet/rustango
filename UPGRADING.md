@@ -164,6 +164,8 @@ purpose and a cache, and is async. `verify_authentication` returns `Authenticati
 (`.sign_count`, `.user_verified`); `update_sign_count` returns `SignCountUpdate`: refuse the
 login unless `.is_accepted()` (`Stale` is a clone or a lost race). Tokens sealed before
 the upgrade no longer open. The `passkey` feature now enables `cache`.
+A credential whose stored counter is non-zero and which now reports 0 (a reset or cloned
+authenticator) fails with `CounterRegression`. The user removes that passkey and registers it again.
 
 ### `[auth] argon2_*` now apply (#1728)
 
