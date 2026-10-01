@@ -902,8 +902,10 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
         let pool_for_handler = state.pool.clone();
 
         // A user without the view's perm gets 403 rather than the handler.
+        // The method default applies only under `with_user_perms`.
         let perm = view.required_perm();
-        let allowed = state.allows(table, perm);
+        let allowed =
+            (view.perm.is_none() && state.config.user_perms.is_none()) || state.allows(table, perm);
         let mounted_handler = move |req: Request| {
             let pool = pool_for_handler.clone();
             async move {
@@ -921,25 +923,25 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
         // Axum has no `MethodFilter` for the QUERY method, so it
         // goes through the `http_query` shim. Everything else maps
         // to a filter.
-        let route = if view.method.as_str() == "QUERY" {
+        let method = view.mount_method();
+        if method != view.method {
+            tracing::warn!(
+                target: "rustango::admin",
+                table = %view.table,
+                suffix = %view.suffix,
+                method = ?view.method,
+                "custom admin view declared with an unsupported HTTP method — defaulting to GET"
+            );
+        }
+        let route = if method.as_str() == "QUERY" {
             crate::http_query::query(mounted_handler)
         } else {
-            let method_filter = match view.method {
-                Method::GET => MethodFilter::GET,
+            let method_filter = match method {
                 Method::POST => MethodFilter::POST,
                 Method::PUT => MethodFilter::PUT,
                 Method::DELETE => MethodFilter::DELETE,
                 Method::PATCH => MethodFilter::PATCH,
-                ref other => {
-                    tracing::warn!(
-                        target: "rustango::admin",
-                        table = %view.table,
-                        suffix = %view.suffix,
-                        method = ?other,
-                        "custom admin view declared with an unsupported HTTP method — defaulting to GET"
-                    );
-                    MethodFilter::GET
-                }
+                _ => MethodFilter::GET,
             };
             on(method_filter, mounted_handler)
         };

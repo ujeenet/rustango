@@ -152,8 +152,9 @@ untouched.
 
 ### Custom admin views need `change` for writes
 
-**Breaking:** grant `{table}.change`, or declare `perm = "…"` on `register_admin_view!`, for
-POST/PUT/PATCH/DELETE views. `AdminCustomView` gains a `perm` field; struct literals must set it.
+**Breaking:** under `with_user_perms`, grant `{table}.change`, or declare `perm = "…"` on
+`register_admin_view!`, for POST/PUT/PATCH/DELETE views. Without it only a declared `perm` is checked.
+`AdminCustomView` gains a `perm` field; struct literals must set it.
 
 ### Admin list URL filters are allow-listed
 

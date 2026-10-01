@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
 
-**Breaking:** a `register_admin_view!` route other than GET/HEAD/QUERY now needs
+**Breaking:** under `with_user_perms`, a `register_admin_view!` write route now needs
 `{table}.change` (or its `perm = "…"`), else 403. The admin and `CreateView`/`UpdateView`
 percent-encode PKs in redirects, so a CR/LF no longer panics.
 

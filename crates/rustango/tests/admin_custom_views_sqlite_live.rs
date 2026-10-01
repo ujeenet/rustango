@@ -201,3 +201,36 @@ async fn custom_view_declares_its_codename() {
     let (status, body) = fetch(publisher, Method::POST, "/cv_post/publish").await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
 }
+
+/// A read-only admin without `with_user_perms` still runs a POST view.
+#[tokio::test]
+async fn read_only_admin_without_perms_runs_post_views() {
+    let pool = fresh_pool().await;
+    let app = rustango::admin::Builder::new(pool)
+        .admin_prefix("")
+        .read_only_all()
+        .build();
+    let (status, body) = fetch(app, Method::POST, "/cv_post/duplicate").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+}
+
+// Unsupported method: mounted as GET, so it needs `view`.
+rustango::register_admin_view!(
+    "cv_post",
+    "peek",
+    Method::OPTIONS,
+    "Peek",
+    |_pool, _req| async move {
+        use axum::response::IntoResponse;
+        (StatusCode::OK, "peeked").into_response()
+    },
+);
+
+/// A view declared with an unsupported method is a GET and needs `view`.
+#[tokio::test]
+async fn unsupported_method_view_needs_view() {
+    let pool = fresh_pool().await;
+    let view_only = app_with_perms(pool, &["cv_post.view"]);
+    let (status, body) = fetch(view_only, Method::GET, "/cv_post/peek").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}

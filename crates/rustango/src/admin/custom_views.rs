@@ -37,9 +37,9 @@
 //! configured, so the operator must be signed in to reach them.
 //!
 //! With `Builder::with_user_perms`, a view needs `{table}.view` for a
-//! GET, HEAD or QUERY and `{table}.change` for any other method; the
+//! GET or QUERY and `{table}.change` for POST, PUT, PATCH or DELETE; the
 //! rest get 403. A trailing `perm = "publish"` asks for
-//! `{table}.publish` instead.
+//! `{table}.publish` instead, with or without `with_user_perms`.
 
 use axum::http::Method;
 use axum::response::Response;
@@ -79,16 +79,26 @@ pub struct AdminCustomView {
     /// shape above.
     pub handler: CustomViewHandler,
     /// The action codename the user needs, as in `{table}.<perm>`.
-    /// `None` means `view` for a safe method and `change` otherwise.
+    /// `None` means `view` for a safe method and `change` for a write,
+    /// checked only under `Builder::with_user_perms`.
     pub perm: Option<&'static str>,
 }
 
 impl AdminCustomView {
-    /// The action this view needs: its declared `perm`, else by method.
+    /// The method the route answers on: an unsupported one mounts as GET.
+    #[must_use]
+    pub fn mount_method(&self) -> Method {
+        match self.method.as_str() {
+            "POST" | "PUT" | "PATCH" | "DELETE" | "QUERY" => self.method.clone(),
+            _ => Method::GET,
+        }
+    }
+
+    /// The action this view needs: its declared `perm`, else by the mounted method.
     #[must_use]
     pub fn required_perm(&self) -> &'static str {
-        self.perm.unwrap_or(match self.method.as_str() {
-            "GET" | "HEAD" | "QUERY" => "view",
+        self.perm.unwrap_or(match self.mount_method().as_str() {
+            "GET" | "QUERY" => "view",
             _ => "change",
         })
     }
