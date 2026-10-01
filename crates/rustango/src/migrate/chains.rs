@@ -139,6 +139,22 @@ fn created(m: &Migration) -> impl Iterator<Item = String> + '_ {
     })
 }
 
+/// Names of the indexes a step creates together with their table.
+fn indexes_made_with_table(steps: &[Migration]) -> BTreeSet<&str> {
+    let mut names = BTreeSet::new();
+    for m in steps {
+        let made: BTreeSet<String> = created(m).collect();
+        for c in schema_ops(m) {
+            if let SchemaChange::CreateIndex { name, table, .. } = c {
+                if made.contains(table) {
+                    names.insert(name.as_str());
+                }
+            }
+        }
+    }
+    names
+}
+
 fn touches(step: &Migration, table: &str) -> bool {
     schema_ops(step).any(|c| c.touches(table, &step.snapshot))
 }
@@ -260,8 +276,8 @@ impl Run<'_> {
         Ok(pass)
     }
 
-    /// After both chains: owned tables get the columns they still lack, and
-    /// framework tables the project created and later dropped are recreated.
+    /// After both chains: owned tables get the columns and later indexes they
+    /// still lack, and framework tables the project created and later dropped are recreated.
     async fn finish(&self, claimed: &BTreeSet<String>) -> Result<(), MigrateError> {
         let Some((wanted, _)) = self.wanted()? else {
             return Ok(());
@@ -289,6 +305,14 @@ impl Run<'_> {
             }
         }
         groups.extend(missing_columns(self.pool, snap, &live).await?);
+        // `without_tables` strips owned tables' indexes; add the ones a later step declares.
+        let with_table = indexes_made_with_table(&wanted);
+        groups.extend(
+            snap.indexes
+                .iter()
+                .filter(|i| live.contains(&i.table) && !with_table.contains(i.name.as_str()))
+                .map(|i| vec![super::diff::create_index(i)]),
+        );
         converge(self.pool, snap, groups).await
     }
 

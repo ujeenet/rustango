@@ -84,6 +84,37 @@ async fn has_column(pool: &Pool, table: &str, column: &str) -> bool {
     n == 1
 }
 
+async fn has_index(pool: &Pool, name: &str) -> bool {
+    let n: i64 = match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => rustango::sql::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1",
+        )
+        .bind(name)
+        .fetch_one(pg)
+        .await
+        .unwrap(),
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => rustango::sql::sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND index_name = ?",
+        )
+        .bind(name)
+        .fetch_one(my)
+        .await
+        .unwrap(),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => rustango::sql::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+        )
+        .bind(name)
+        .fetch_one(sq)
+        .await
+        .unwrap(),
+    };
+    n == 1
+}
+
 async fn has_table(pool: &Pool, table: &str) -> bool {
     rustango::sql::raw_execute_pool(
         pool,
@@ -253,6 +284,64 @@ async fn alter_after_add_on_owned(backend: Backend) {
     let dir = root.join("migrations");
     project_initial(&dir, current_table(table, None));
     manage_migrate(&pool, &dir).await.expect("first run");
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+/// Take `tables` and `index` out of the first tenant step; today's catch-up
+/// step then adds them back. Returns that step's debug-printed ops.
+fn age_tenant_chain(root: &Path, tables: &[String], index: Option<&str>) -> String {
+    let path = tenant_file(&root.join("system/migrations"));
+    let mut mig = read(&path);
+    let is_gone = |v: &Value| v.as_str().is_some_and(|t| tables.iter().any(|g| g == t));
+    let snap = &mut mig["snapshot"];
+    snap["tables"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|t| !is_gone(&t["name"]));
+    for key in ["indexes", "m2m_tables"] {
+        if let Some(list) = snap.get_mut(key).and_then(Value::as_array_mut) {
+            list.retain(|i| {
+                !is_gone(&i["table"])
+                    && !is_gone(&i["through"])
+                    && index.is_none_or(|n| i["name"] != n)
+            });
+        }
+    }
+    mig["forward"].as_array_mut().unwrap().retain(|op| {
+        let s = &op["schema"];
+        !(is_gone(&s["CreateTable"])
+            || is_gone(&s["CreateIndex"]["table"])
+            || is_gone(&s["CreateM2MTable"]["through"])
+            || index.is_some_and(|n| s["CreateIndex"]["name"] == n))
+    });
+    std::fs::write(&path, mig.to_string()).unwrap();
+    let step = rustango::migrate::make_migrations_system(root, ModelScope::Tenant, None)
+        .unwrap()
+        .expect("the catch-up step");
+    format!("{:?}", step.forward)
+}
+
+/// A later system step's index on a project-owned table is created.
+async fn later_index_on_owned(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "index").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let first = read(&tenant_file(&root.join("system/migrations")));
+    let idx = first["snapshot"]["indexes"][0].clone();
+    let (table, index) = (
+        idx["table"].as_str().unwrap(),
+        idx["name"].as_str().unwrap(),
+    );
+    let ops = age_tenant_chain(&root, &[], Some(index));
+    assert!(ops.contains(index), "{ops}");
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, None));
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_index(&pool, index).await, "{table}.{index} missing");
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
@@ -598,4 +687,5 @@ per_backend!(
     alter_after_add_on_owned,
     owned_table_dropped_later,
     not_null_column_on_empty_table,
+    later_index_on_owned,
 );

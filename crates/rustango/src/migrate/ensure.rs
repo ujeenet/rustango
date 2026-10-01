@@ -221,6 +221,7 @@ pub(crate) async fn converge_groups(
             Some(SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. }) => {
                 format!("table `{t}`")
             }
+            Some(SC::CreateIndex { name, .. }) => format!("index `{name}`"),
             _ => continue,
         };
         let mut no_rows = false;
