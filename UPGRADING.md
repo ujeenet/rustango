@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `with_rollback` hands the closure an `AtomicTx`
+
+**Breaking:** write `insert_tx(&mut *tx.lock().await?, &q)` where you passed `tx` (#1761). A nested `atomic()` on the same pool is now a savepoint.
+
 ### Admin edits need the audit table
 
 An admin edit writes its audit row in the UPDATE's transaction, so a missing `rustango_audit_log` table now fails the edit (#2060). `manage migrate` creates it.

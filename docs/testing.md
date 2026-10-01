@@ -140,7 +140,7 @@ use rustango::test_db::with_rollback;
 #[tokio::test]
 async fn creating_a_post_persists_it() {
     with_rollback(&pool, |tx| Box::pin(async move {
-        // ... insert + assert against `tx` ...
+        // ... insert + assert against `&mut *tx.lock().await?` ...
         // everything here is rolled back when the closure returns
         Ok(())
     })).await.unwrap();
@@ -148,8 +148,9 @@ async fn creating_a_post_persists_it() {
 ```
 
 The `Box::pin` is required, not stylistic: the bound is
-`for<'tx> FnOnce(&'tx mut PoolTx<'_>) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
-which is how the closure gets to borrow `tx` across its own await points. The
+`for<'tx> FnOnce(&'tx AtomicTx) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
+which is how the closure gets to borrow `tx` across its own await points. An
+`atomic()` on the same pool inside the closure is a savepoint and rolls back too. The
 closure returns `Result<T, ExecError>`, and so does `with_rollback` — the
 rollback happens either way, so the `unwrap` is about your assertions, not
 about cleanup.

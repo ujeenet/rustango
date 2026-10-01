@@ -6,7 +6,7 @@
 use rustango::core::Model as _;
 use rustango::fixtures::{Fixture, FixtureError};
 use rustango::sql::{Auto, CounterPool as _, ExecError, FetcherPool as _, ForeignKey, Pool};
-use rustango::test_db::{truncate_tables, with_truncate_after};
+use rustango::test_db::{truncate_tables, with_rollback, with_truncate_after};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -235,9 +235,37 @@ async fn create_tables_is_re_runnable(pool: &Pool) {
         .expect("second create_tables");
 }
 
+/// An `atomic()` inside `with_rollback` is a savepoint of it, so its
+/// insert is undone too (#1761).
+async fn with_rollback_undoes_a_nested_atomic(pool: &Pool) {
+    let insert =
+        rustango::core::InsertQuery::new(Parent::SCHEMA, vec!["name"], vec!["nested".into()]);
+    let inner = pool.clone();
+    let seen = with_rollback(pool, move |_tx| {
+        Box::pin(async move {
+            rustango::sql::atomic(&inner, move |tx| {
+                Box::pin(
+                    async move { rustango::sql::insert_tx(&mut *tx.lock().await?, &insert).await },
+                )
+            })
+            .await?;
+            Ok(7)
+        })
+    })
+    .await
+    .expect("with_rollback");
+    assert_eq!(seen, 7);
+    assert_eq!(
+        Parent::objects().count(pool).await.unwrap(),
+        0,
+        "nested atomic committed"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        with_rollback_undoes_a_nested_atomic,
         truncate_clears_parent_listed_before_child,
         truncate_after_clears_on_ok_and_err,
         truncate_after_clears_when_body_panics,

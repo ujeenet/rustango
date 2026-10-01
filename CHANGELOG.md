@@ -16,6 +16,10 @@ The diff entry is written in the UPDATE's transaction; if it fails, the edit is 
 
 `assert_cookie_set` fails on a deleting `Set-Cookie`, `assert_messages` on a cookie that does not verify, and a nested `assert_num_queries` counts toward the outer one.
 
+### Fixed — an `atomic()` inside `with_rollback` is rolled back too (#1761)
+
+**Breaking:** the `with_rollback` closure gets an `AtomicTx`; lock it per statement.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

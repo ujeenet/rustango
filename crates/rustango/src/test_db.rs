@@ -31,10 +31,11 @@
 //!     with_rollback(&pool, |tx| Box::pin(async move {
 //!         // Inserts here are visible to assertions inside the
 //!         // closure, but rolled back when it returns.
-//!         insert_tx(tx, &article_q("First")).await?;
-//!         insert_tx(tx, &article_q("Second")).await?;
+//!         let mut tx = tx.lock().await?;
+//!         insert_tx(&mut tx, &article_q("First")).await?;
+//!         insert_tx(&mut tx, &article_q("Second")).await?;
 //!
-//!         let count = count_tx::<Article>(tx).await?;
+//!         let count = count_tx::<Article>(&mut tx).await?;
 //!         assert_eq!(count, 2);
 //!         Ok(())
 //!     })).await.unwrap();
@@ -47,7 +48,9 @@
 //!
 //! [`crate::sql::atomic`] commits on `Ok`. A test wants the rollback
 //! every time, so [`with_rollback`] rolls back instead and still
-//! hands back the closure's value.
+//! hands back the closure's value. It is an `atomic` block otherwise:
+//! the closure gets the same [`AtomicTx`], and an `atomic()` on the same
+//! pool inside it runs in a savepoint that rolls back with it.
 //!
 //! ## Limits
 //!
@@ -57,19 +60,20 @@
 //!   a suite-wide `tokio::Mutex` when a test touches global state.
 //! - `on_commit` callbacks never fire under `with_rollback`, by
 //!   design, and any the closure registered are cleared.
-//! - Nested calls act as savepoints. An outer rollback throws away
-//!   inner work even if the inner call committed.
+//! - Nested calls and nested `atomic()` blocks on the same pool act as
+//!   savepoints. The outer rollback throws away their work too.
 
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::sql::{
-    raw_execute_tx, transaction_pool, write_transaction_pool, ExecError, Pool, PoolTx,
-};
+use crate::sql::{raw_execute_tx, write_transaction_pool, AtomicTx, ExecError, Pool};
 
 /// Run `f` in a transaction that ALWAYS rolls back when the closure
 /// returns, on `Ok` and on `Err` alike. The rollback happens after
 /// the closure's value is captured, so you get that value back.
+///
+/// The closure gets an [`AtomicTx`]: lock it per statement. An `atomic()`
+/// on `pool` inside it is a savepoint of this transaction (#1761).
 ///
 /// An `Err` from the closure passes straight through. An `Ok` turns
 /// into an error only if the rollback itself fails.
@@ -80,19 +84,10 @@ use crate::sql::{
 pub async fn with_rollback<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
-        &'tx mut PoolTx<'_>,
+        &'tx AtomicTx,
     ) -> Pin<Box<dyn Future<Output = Result<T, ExecError>> + Send + 'tx>>,
 {
-    let mut tx = transaction_pool(pool).await?;
-    let result = f(&mut tx).await;
-    // Always roll back. A failed rollback becomes the error only
-    // when the closure succeeded; otherwise its error wins.
-    let rollback = tx.rollback().await;
-    match (result, rollback) {
-        (Ok(v), Ok(())) => Ok(v),
-        (Ok(_), Err(e)) => Err(ExecError::Driver(e)),
-        (Err(e), _) => Err(e),
-    }
+    crate::sql::rolled_back(pool, f).await
 }
 
 /// [`with_rollback`] with the `Box::pin(async move { … })` wrapper
@@ -100,7 +95,7 @@ where
 ///
 /// ```ignore
 /// rustango::with_rollback!(&pool, |tx| {
-///     insert_tx(tx, &q).await?;
+///     insert_tx(&mut *tx.lock().await?, &q).await?;
 ///     // ... assertions ...
 ///     Ok(())
 /// }).await
@@ -245,7 +240,7 @@ mod tests {
                 let _r: Result<i32, _> =
                     with_rollback(pool, |_tx| Box::pin(async move { Ok(42) })).await;
                 let _r2: Result<i32, _> = crate::with_rollback!(pool, |tx| {
-                    let _: &mut crate::sql::PoolTx<'_> = tx;
+                    let _: &crate::sql::AtomicTx = tx;
                     Ok(42)
                 })
                 .await;
