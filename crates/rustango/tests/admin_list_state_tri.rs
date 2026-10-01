@@ -1,5 +1,5 @@
-//! Admin list paging order and filter-keeping links on every backend
-//! (#1917 #1916).
+//! Admin list paging order, filter-keeping links and the mounted prefix on
+//! every backend (#1917 #1916 #1765).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -171,10 +171,21 @@ async fn links_keep_the_whole_filter_state(pool: &Pool) {
     assert!(body.contains(r#"name="year" value="2024""#), "{body}");
 }
 
+/// The bulk-action form posts under the prefix.
+async fn action_form_posts_under_the_prefix(pool: &Pool) {
+    seed(pool, "x", true).await;
+    let body = get(pool, "/adminls_item?rank=0").await;
+    assert!(
+        body.contains(&format!(r#"action="{PREFIX}/adminls_item/__action""#)),
+        "{body}"
+    );
+}
+
 tri_dialect_test! {
     model: Item,
     scenarios: [
         equal_sort_keys_page_in_pk_order,
         links_keep_the_whole_filter_state,
+        action_form_posts_under_the_prefix,
     ],
 }

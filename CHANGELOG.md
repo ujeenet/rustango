@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin bulk actions post under the admin prefix (#1765)
+
+The list's action form no longer posts to `/{table}/__action`, which 404ed under a prefix.
+
 ### Fixed — admin links keep the whole filter state and the admin prefix (#1916)
 
 Pager, facet, date and custom-filter links and the search form keep every active filter,
