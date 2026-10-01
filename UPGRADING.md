@@ -150,6 +150,12 @@ untouched.
 
 ## Unreleased
 
+### Logout ends a user's sessions on every device (#1855)
+
+`User`, `Operator` and `AdminUser` gain a nullable `sessions_revoked_at`; run `migrate` (struct literals need the field).
+Cookies are stateless, so logout ends all of that user's browser sessions, not only this one. Call
+`member_auth::logout(pool, &user)` instead of `clear_cookie()` alone. An impersonation logout leaves the operator signed in.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

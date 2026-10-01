@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — logout revokes signed sessions server-side (#1855)
+
+Logout on the tenant admin, operator console and bare admin stamps a new `sessions_revoked_at` column, and every
+session check refuses cookies issued at or before it; `member_auth::logout` does the same for members.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

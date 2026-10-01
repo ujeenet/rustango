@@ -509,6 +509,26 @@ where
                 &parts.headers,
                 Some(routes.logout_url.as_str()),
             );
+            // End the user's sessions everywhere. An impersonation logout
+            // leaves the operator's console session alone.
+            if let SessionCheck::Authenticated {
+                user_id,
+                impersonated_by: None,
+                sessions_revoked_at,
+                ..
+            } = validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool()).await
+            {
+                if let Err(e) = crate::session::revoke_sessions::<super::auth::User>(
+                    &pool,
+                    user_id,
+                    sessions_revoked_at,
+                )
+                .await
+                {
+                    warn!(target: "rustango::tenancy::admin", slug = %org.slug, error = %e, "logout revoke failed");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
+                }
+            }
             send_user_logged_out(UserLoggedOutContext {
                 source: "tenant_admin",
                 user_id: uid,
@@ -537,6 +557,7 @@ where
                 user_id,
                 username,
                 impersonated_by: imp_by,
+                ..
             } => {
                 session_user_id = Some(user_id);
                 session_username = Some(username);
@@ -704,6 +725,8 @@ enum SessionCheck {
         /// flow (#78). Drives the impersonation banner +
         /// audit-log `source` shape.
         impersonated_by: Option<i64>,
+        /// The tenant user's cut-off, for logout (#1855). `None` when impersonating.
+        sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     Anonymous,
     Error(String),
@@ -769,12 +792,13 @@ async fn validate_session(
         return match ops.into_iter().next() {
             Some(op)
                 if op.active
-                    && super::session::survives_password_change(
+                    && super::session::session_survives(
                         &cfg.secret,
                         &payload.pwf,
                         payload.iat,
                         &op.password_hash,
                         op.password_changed_at,
+                        op.sessions_revoked_at,
                     ) =>
             {
                 SessionCheck::Authenticated {
@@ -782,9 +806,10 @@ async fn validate_session(
                     user_id: 0,
                     username: String::new(),
                     impersonated_by: Some(operator_id),
+                    sessions_revoked_at: None,
                 }
             }
-            // Operator gone, deactivated or password changed → drop it.
+            // Operator gone, deactivated, changed password or logged out → drop it.
             _ => SessionCheck::Anonymous,
         };
     }
@@ -813,13 +838,14 @@ async fn validate_session(
     if !user.active {
         return SessionCheck::Anonymous;
     }
-    // Invalidate sessions minted before the latest password change.
-    if !super::session::survives_password_change(
+    // Invalidate sessions minted before the latest password change or logout.
+    if !super::session::session_survives(
         &cfg.secret,
         &payload.pwf,
         payload.iat,
         &user.password_hash,
         user.password_changed_at,
+        user.sessions_revoked_at,
     ) {
         return SessionCheck::Anonymous;
     }
@@ -828,6 +854,7 @@ async fn validate_session(
         user_id: payload.uid,
         username: user.username.clone(),
         impersonated_by: None,
+        sessions_revoked_at: user.sessions_revoked_at,
     }
 }
 
@@ -1092,12 +1119,13 @@ async fn login_submit(
     attempt.succeeded().await;
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
-    let payload = TenantSessionPayload::new(
+    let mut payload = TenantSessionPayload::new(
         uid,
         &org.slug,
         ttl_secs,
         super::session::PasswordFingerprint::of(&cfg.secret, &user.password_hash),
     );
+    payload.iat = crate::session::issued_at(user.sessions_revoked_at);
     let cookie_value = tenant_console::encode(&cfg.secret, &payload);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")

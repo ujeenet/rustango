@@ -342,12 +342,13 @@ pub(super) async fn tenant_sso_callback(
     // Mint the tenant session — same shape as a password login.
     let ttl = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
-    let payload = TenantSessionPayload::new(
+    let mut payload = TenantSessionPayload::new(
         uid,
         &org.slug,
         ttl,
         super::session::PasswordFingerprint::of(secret, &user.password_hash),
     );
+    payload.iat = crate::session::issued_at(user.sessions_revoked_at);
     let cookie_value = tenant_console::encode(secret, &payload);
     let session_cookie = format!(
         "{}={cookie_value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{}",

@@ -172,6 +172,7 @@ async fn boot_with(permissions: bool) -> Env {
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&registry).await.unwrap();
 

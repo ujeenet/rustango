@@ -274,6 +274,7 @@ pub(super) async fn operator_create(
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     if let Err(e) = row.insert_pool(&state.registry).await {
         return back_err(&state, &op, &format!("Could not create the operator: {e}")).await;

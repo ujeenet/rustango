@@ -399,6 +399,62 @@ impl PasswordFingerprint {
     }
 }
 
+/// Column every session principal (tenant user, operator, admin user)
+/// stamps on logout; sessions issued at or before it are refused (#1855).
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub(crate) const SESSIONS_REVOKED_AT: &str = "sessions_revoked_at";
+
+/// `true` when a session minted with `pwf` at `iat` is still valid: same
+/// password hash, not before `password_changed_at`, after the last logout.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn session_survives(
+    secret: &SessionSecret,
+    pwf: &PasswordFingerprint,
+    iat: i64,
+    password_hash: &str,
+    password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    pwf.matches(secret, password_hash)
+        && password_changed_at.is_none_or(|ts| iat >= ts.timestamp())
+        && sessions_revoked_at.is_none_or(|ts| iat > ts.timestamp())
+}
+
+/// `iat` for a new session: strictly after the last logout, so a login in
+/// the logout's own second still validates.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn issued_at(sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>) -> i64 {
+    let now = chrono::Utc::now().timestamp();
+    sessions_revoked_at.map_or(now, |ts| now.max(ts.timestamp() + 1))
+}
+
+/// End every session of row `id` of `T`, on every device. `sessions_revoked_at`
+/// is the row's current value; the cut-off is the `iat` a login now would get,
+/// so it covers every session issued so far. The WHERE never moves it back.
+///
+/// # Errors
+/// [`crate::sql::ExecError`] from the update.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
+    pool: &crate::sql::Pool,
+    id: i64,
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<u64, crate::sql::ExecError> {
+    use crate::query::Q;
+    use crate::sql::UpdaterPool as _;
+    let cutoff = chrono::DateTime::from_timestamp(issued_at(sessions_revoked_at), 0)
+        .unwrap_or_else(chrono::Utc::now);
+    crate::query::QuerySet::<T>::default()
+        .filter("id", id)
+        .where_(Q::is_null(SESSIONS_REVOKED_AT) | Q::lt(SESSIONS_REVOKED_AT, cutoff))
+        .update()
+        .set(SESSIONS_REVOKED_AT, cutoff)
+        .execute_pool(pool)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +466,22 @@ mod tests {
         let bare =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sign(&secret, b"$argon2id$h"));
         assert_ne!(PasswordFingerprint::of(&secret, "$argon2id$h").0, bare);
+    }
+
+    /// A logout ends sessions issued in its own second; the next login's
+    /// `iat` lands after the cut-off (#1855).
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn a_logout_cutoff_ends_older_sessions_but_not_the_next_login() {
+        let secret = SessionSecret::from_bytes(vec![7u8; 32]);
+        let pwf = PasswordFingerprint::of(&secret, "$h");
+        let now = chrono::Utc::now().timestamp();
+        let cut = chrono::DateTime::from_timestamp(now, 0);
+        assert!(session_survives(&secret, &pwf, now, "$h", None, None));
+        assert!(!session_survives(&secret, &pwf, now, "$h", None, cut));
+        let next = issued_at(cut);
+        assert!(next > now);
+        assert!(session_survives(&secret, &pwf, next, "$h", None, cut));
     }
 
     /// A short key is refused, not signed with. `sign` would accept

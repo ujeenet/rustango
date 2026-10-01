@@ -243,7 +243,9 @@ pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) ->
         .copied()
         .expect("mint_cookie needs a saved user row");
     let pwf = PasswordFingerprint::of(secret, &user.password_hash);
-    let value = encode(secret, &MemberSessionPayload::new(uid, slug, ttl, pwf));
+    let mut payload = MemberSessionPayload::new(uid, slug, ttl, pwf);
+    payload.iat = crate::session::issued_at(user.sessions_revoked_at);
+    let value = encode(secret, &payload);
     format!(
         "{MEMBER_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={ttl}{s}",
         s = secure_suffix(),
@@ -251,9 +253,22 @@ pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) ->
 }
 
 /// Build a `Set-Cookie` value that expires the member session (logout).
+/// Only clears this browser; [`logout`] also ends the other sessions.
 #[must_use]
 pub fn clear_cookie() -> String {
     format!("{MEMBER_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
+}
+
+/// Log `user` out on every device and return the [`clear_cookie`] value.
+/// Pass the row [`CurrentMember`] just loaded from the tenant `pool`.
+///
+/// # Errors
+/// [`crate::sql::ExecError`] when the cut-off cannot be stored.
+pub async fn logout(pool: &crate::sql::Pool, user: &User) -> Result<String, crate::sql::ExecError> {
+    if let Some(&id) = user.id.get() {
+        crate::session::revoke_sessions::<User>(pool, id, user.sessions_revoked_at).await?;
+    }
+    Ok(clear_cookie())
 }
 
 // ===================================================================
@@ -311,14 +326,15 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
 
         let user = users.into_iter().next().filter(|u| u.active);
         // Reject a session minted before the user's last password
-        // change (parity with `SessionUser`).
+        // change or logout (parity with `SessionUser`).
         let user = user.filter(|u| {
-            crate::tenancy::session::survives_password_change(
+            crate::tenancy::session::session_survives(
                 keys.session,
                 &payload.pwf,
                 payload.iat,
                 &u.password_hash,
                 u.password_changed_at,
+                u.sessions_revoked_at,
             )
         });
         Ok(CurrentMember(user))
@@ -813,6 +829,7 @@ async fn provision_member(
             created_at: chrono::Utc::now(),
             data: data.clone(),
             password_changed_at: None,
+            sessions_revoked_at: None,
         };
 
         // The user and its link commit together, or neither does.

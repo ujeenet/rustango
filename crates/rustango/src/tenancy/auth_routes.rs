@@ -660,12 +660,14 @@ async fn refresh_in(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let still_valid = users.into_iter().next().is_some_and(|u| {
             u.active
-                && crate::tenancy::session::survives_password_change(
+                // Refresh chains have their own revocation; cookie logout leaves them.
+                && crate::tenancy::session::session_survives(
                     &auth.0.pwf_secret,
                     &session.pwf,
                     session.sat,
                     &u.password_hash,
                     u.password_changed_at,
+                    None,
                 )
         });
         if !still_valid {

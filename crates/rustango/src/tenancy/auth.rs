@@ -73,6 +73,9 @@ pub struct Operator {
     /// rejected by `validate_session`. `None` for accounts that
     /// haven't rotated since v0.28.4 — those sessions stay valid.
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Stamped on logout: sessions issued at or before it are refused, on
+    /// every device (#1855).
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Per-tenant user. Lives in the tenant's storage (schema or
@@ -86,7 +89,7 @@ pub struct Operator {
         list_display = "username, is_superuser, active, created_at",
         search_fields = "username",
         ordering = "username",
-        readonly_fields = "created_at, password_changed_at",
+        readonly_fields = "created_at, password_changed_at, sessions_revoked_at",
         formfield_overrides = "password_hash: password",
     )
 )]
@@ -131,6 +134,9 @@ pub struct User {
     /// rotated since v0.28.4 — those sessions stay valid until
     /// they expire normally.
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Stamped on logout: sessions issued at or before it are refused, on
+    /// every device (#1855).
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // The admin form's password is hashed here; a change also stamps
@@ -308,6 +314,10 @@ pub async fn authenticate_user(
             .unwrap_or_else(|_| serde_json::json!({})),
         password_changed_at: row
             .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("password_changed_at")
+            .ok()
+            .flatten(),
+        sessions_revoked_at: row
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("sessions_revoked_at")
             .ok()
             .flatten(),
     };
