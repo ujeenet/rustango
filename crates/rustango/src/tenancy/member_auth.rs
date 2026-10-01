@@ -431,19 +431,19 @@ struct CallbackParams {
 pub(crate) fn external_base(parts: &Parts) -> String {
     let headers = &parts.headers;
     let first = |v: &str| v.split(',').next().unwrap_or(v).trim().to_owned();
-    let forwarded = |name: &str| {
-        from_trusted_proxy(parts)
-            .then(|| headers.get(name).and_then(|v| v.to_str().ok()))
-            .flatten()
-    };
+    let forwarded =
+        |name: &str| crate::real_ip::trusted_forwarded(headers, &parts.extensions, name);
 
-    let proto = forwarded("x-forwarded-proto")
-        .map(first)
-        .filter(|s| !s.is_empty());
+    let proto = forwarded("x-forwarded-proto").map(str::to_owned);
 
     let host = forwarded("x-forwarded-host")
-        .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()))
-        .map(first)
+        .map(str::to_owned)
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(first)
+        })
         .unwrap_or_else(|| "localhost".to_owned());
 
     let scheme = proto.unwrap_or_else(|| {
@@ -457,14 +457,6 @@ pub(crate) fn external_base(parts: &Parts) -> String {
     });
 
     format!("{scheme}://{host}")
-}
-
-/// The peer is a trusted proxy: `RealIpLayer` set a `TrustedRealIp`.
-fn from_trusted_proxy(parts: &Parts) -> bool {
-    parts
-        .extensions
-        .get::<crate::real_ip::TrustedRealIp>()
-        .is_some()
 }
 
 /// The absolute callback URL for a slug — must match at begin + callback.

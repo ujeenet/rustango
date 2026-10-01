@@ -155,7 +155,9 @@ untouched.
 **Breaking:** a GitHub login now also calls `/user/emails` (needs the `user:email` scope or
 the app's email permission); a failed call fails the login. Facebook emails are never
 verified, so email linking skips them. Behind a proxy, name it in `RealIpLayer::trust_proxies`
-or member SSO builds `redirect_uri` from `Host`.
+or member SSO builds `redirect_uri` from `Host`. Tenant SSO, admin SSO and the MCP discovery URLs
+read `X-Forwarded-Proto` only from such a proxy too, else assume `https`. A proxy counts as trusted
+only when it also sends the configured client-IP header (`X-Forwarded-For` by default).
 
 ### Passkey challenge and counter API (#1841)
 

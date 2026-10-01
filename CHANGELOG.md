@@ -8,7 +8,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** the GitHub preset takes `email_verified` from `/user/emails` and Facebook
 never vouches for an email. Member SSO honours `X-Forwarded-Host`/`-Proto` only from a
-proxy named in `RealIpLayer::trust_proxies`. New `OAuth2Provider::with_emails_url`.
+proxy named in `RealIpLayer::trust_proxies`, and so do tenant and admin SSO and MCP for
+`X-Forwarded-Proto`. New `OAuth2Provider::with_emails_url`.
 
 ### Security — passkey challenges expire and open once; counters can't reset (#1841)
 
