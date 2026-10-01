@@ -128,6 +128,12 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/labels", t.clone(), pool.clone()),
         )
         .merge(
+            CreateView::for_model(Label::SCHEMA)
+                .template("form.html")
+                .success_url("/labels/{id}")
+                .router("/rlabels", t.clone(), pool.clone()),
+        )
+        .merge(
             CreateView::for_model(Tag::SCHEMA)
                 .template("form.html")
                 .success_url("/tags")
@@ -311,6 +317,14 @@ async fn a_duplicate_create_is_a_form_error(pool: &Pool) {
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
         "natural pk: {body}"
+    );
+    assert!(body.contains(r#""code":"a row with this value"#), "{body}");
+    // The RETURNING path (`{id}` in `success_url`) maps it the same way.
+    let (status, body) = send(pool, Method::POST, "/rlabels/new", "code=rs").await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "returning: {body}"
     );
     assert!(body.contains(r#""code":"a row with this value"#), "{body}");
 }

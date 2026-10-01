@@ -4086,3 +4086,31 @@ mod typed_perms_tests {
         assert_eq!(vs.perms.destroy, vec!["vs_typed_perm_post.delete"]);
     }
 }
+
+#[cfg(test)]
+mod default_order_tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+    use crate::sql::Dialect as _;
+
+    static FIELDS: &[FieldSchema] = &[
+        FieldSchema {
+            primary_key: true,
+            ..FieldSchema::new("id", "id", FieldType::I64)
+        },
+        FieldSchema::new("title", "title", FieldType::String),
+    ];
+
+    /// No `.ordering(..)`: `default_order`, then the PK as a tiebreak (#2047).
+    #[test]
+    fn the_list_orders_by_default_order_then_the_pk() {
+        let mut schema = ModelSchema::new("vs_do", "vs_do");
+        schema.fields = FIELDS;
+        schema.default_order = &[("title", true)];
+        let schema: &'static ModelSchema = Box::leak(Box::new(schema));
+        let mut q = SelectQuery::new(schema);
+        q.order_by = schema.with_pk_tiebreak(default_order_by(&ViewSet::for_model(schema)));
+        let sql = crate::sql::Sqlite.compile_select(&q).unwrap().sql;
+        assert!(sql.ends_with(r#"ORDER BY "title" DESC, "id""#), "{sql}");
+    }
+}
