@@ -722,6 +722,8 @@ pub async fn send_many(mailer: &dyn Mailer, emails: &[Email]) -> Result<usize, M
 /// # Errors
 /// Forwarded from the mailer's `send` call. Returns `Ok(count)` on
 /// success — `count` is the number of recipients the message went to.
+/// All recipients share one message: over SMTP one refused address
+/// fails the send for every one of them.
 #[cfg(feature = "config")]
 pub async fn mail_admins(
     mailer: &dyn Mailer,

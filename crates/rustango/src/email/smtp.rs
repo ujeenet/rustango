@@ -101,6 +101,9 @@ impl TlsMode {
 
 /// Production SMTP mailer.
 ///
+/// One message is one SMTP transaction: if the server refuses any
+/// recipient, lettre aborts it and nobody gets the message.
+///
 /// ```ignore
 /// use rustango::email::smtp::{SmtpMailer, TlsMode};
 ///
