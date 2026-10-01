@@ -160,6 +160,32 @@ async fn db_pk_is_read_back_beside_a_rust_filled_auto(pool: &Pool) {
     assert_eq!(stored[0].id.get(), Some(&id));
 }
 
+/// A set PK beside an unset `auto_now_add` stamps the clock, not NULL (#1950).
+async fn pg_bulk_insert_set_pk_fills_unset_timestamps(pool: &Pool) {
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = pool {
+        let ticket = |id: i64| Ticket {
+            created_at: Auto::Unset,
+            id: Auto::Set(id),
+            name: format!("t{id}"),
+        };
+        // One row sets its own stamp: a mixed set/unset batch keeps it.
+        let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("ts");
+        let mut rows = vec![ticket(10), ticket(11), ticket(12)];
+        rows[2].created_at = Auto::Set(at);
+        Ticket::bulk_insert(&mut rows, pg)
+            .await
+            .expect("bulk_insert");
+        let mut stored = Ticket::objects().fetch(pool).await.expect("fetch");
+        stored.sort_by_key(|t| *t.id.get().expect("id"));
+        let ids: Vec<i64> = stored.iter().map(|t| *t.id.get().unwrap()).collect();
+        assert_eq!(ids, [10, 11, 12], "the given ids are stored");
+        assert!(stored.iter().all(|t| t.created_at.get().is_some()));
+        assert_eq!(stored[2].created_at.get(), Some(&at));
+    }
+    let _ = pool;
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -167,5 +193,6 @@ tri_dialect_test! {
         bulk_writes_fill_the_pk,
         pg_bulk_insert_writes_ids_back,
         db_pk_is_read_back_beside_a_rust_filled_auto,
+        pg_bulk_insert_set_pk_fills_unset_timestamps,
     ],
 }

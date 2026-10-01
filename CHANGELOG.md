@@ -31,6 +31,33 @@ Responses vary on `Accept-Language` (and `Cookie` when the cookie is read); a ba
 `Storage::save_with_content_type` (media passes its MIME); `exists` errs on anything but 2xx/404; `<bucket>.<endpoint-host>` when `path_style = false`.
 The signed content type is SigV4-normalized and CR/LF is refused; media stores active MIMEs as `application/octet-stream`.
 
+### Fixed — template views, M2M and bulk writes on non-integer keys (#1950)
+
+A template-view URL PK that does not parse as the PK type is a 404, not a PostgreSQL 500.
+M2M managers take String / Uuid destination keys (`all_as::<K>()` reads them, a Uuid on MySQL and
+SQLite too); a key that doesn't fit the junction column converts or is a `TypeMismatch`, not a PG 500.
+A bulk insert with set PKs fills unset `auto_now` / `default_uuid_v7` fields instead of binding NULL.
+
+### Fixed — list `__in` filters and huge page numbers (#1865)
+
+A ViewSet `?field__in=` list over 1000 values, or lists over the dialect's bind limit together, is a
+400, not a driver 500. `?page=` past `i64` range
+is an empty page in the ViewSet, `ListView`, admin and `paginate` instead of a negative OFFSET.
+
+### Fixed — `ListView` uses the model's `default_order` (#2005)
+
+With no builder `order_by`, `ListView` sorts by `default_order` before the PK, like the admin.
+
+### Fixed — `column = "..."` on a `ForeignKey` field compiles (#1936)
+
+The derive used the SQL column as the Rust field name for `select_related` and prefetch.
+
+### Fixed — `truncate_html` on a bare `&`, `slugify` on non-ASCII, pagination links (#1919)
+
+A bare `&` is plain text, so `AT&T …` truncates and a later `;` keeps tags closed. `slugify` of
+all-non-ASCII text returns `slugify_unicode` instead of `""`. Page links no longer double-encode, and
+a bare key like `?x%26page%3D9` stays encoded instead of adding a second `page`.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)

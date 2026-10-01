@@ -127,12 +127,8 @@ pub(crate) async fn audit_log_view(
     let reader = state
         .audit_reader()
         .ok_or_else(|| audit_forbidden("view"))?;
-    let page = params
-        .get("page")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(1)
-        .max(1);
-    let offset = (page - 1) * AUDIT_PAGE_SIZE;
+    let page = crate::list_params::parse_page(&params);
+    let offset = crate::list_params::page_offset(page, AUDIT_PAGE_SIZE);
 
     // Collect the active filters into an `AuditFilter` for the listing
     // helpers in `crate::audit`. `entity_pk` is filterable (it drives
