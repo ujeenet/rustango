@@ -23,6 +23,18 @@ the date drill and `count=skip`. Audit feed, FK cell, generic-FK and 403 sign-ou
 Admin lists order by `admin.ordering`, else the model's `default_order`, and both they and
 `ListView` end on the PK. `Page::limit()` on an orphan-merged last page now covers every row.
 
+### Fixed — ViewSet `PATCH` validates only the sent fields (#1995)
+
+Field rules skip absent fields, and the cross-field `validate` hook sees the stored row with only the fields the update writes applied.
+
+### Fixed — `check_unique_together_pool` reports collisions on PostgreSQL (#1872)
+
+The probe now runs as an ORM `exists` count; its raw `SELECT 1` failed to decode on PG and hid the field error.
+
+### Fixed — feature flags no longer expire after an hour (#1956)
+
+`FeatureFlags` writes through the new `Cache::set_forever`, so `enable` / `disable` stick even on a cache with a default TTL. `FeatureFlags::ttl` opts in to expiry.
+
 ## [0.59.12] — 2026-10-01
 
 ### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)

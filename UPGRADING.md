@@ -160,6 +160,16 @@ hidden inputs, so a search keeps custom filters and the date drill.
 An admin list with no `admin(ordering)` now sorts by the model's `default_order` before the PK.
 `ListView` and admin `ORDER BY` gain a trailing PK column when the sort does not include it.
 
+### ViewSet `PATCH` validates over the stored row (#1995)
+
+A serializer `PATCH` now loads the row once before the update. `ModelSerializer` gains a defaulted
+`validate_patch`; a hand-written impl keeps the old body-only check unless it overrides it.
+
+### Feature flags never expire by default (#1956)
+
+Flag writes no longer carry a 1 hour TTL. To keep the old expiry, call `.ttl(Duration::from_secs(3600))`.
+They go through the new defaulted `Cache::set_forever`; a custom cache that wraps another must forward it.
+
 ## 0.59.12
 
 ### Edited constraints now migrate (#1881)

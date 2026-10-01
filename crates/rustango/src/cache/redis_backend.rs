@@ -87,6 +87,13 @@ impl Cache for RedisCache {
         }
     }
 
+    async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        let mut conn = self.conn.clone();
+        conn.set::<_, _, ()>(key, value)
+            .await
+            .map_err(|e| CacheError::Connection(e.to_string()))
+    }
+
     /// Atomic set-if-absent via `SET key value NX [EX secs]`. `NX`
     /// makes the server do the test-and-set in one round trip, which
     /// is what makes `DistributedLock` safe across replicas. Returns
