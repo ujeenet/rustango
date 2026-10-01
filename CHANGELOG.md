@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the ViewSet list follows the model's `default_order` (#2047)
+
+With no `.ordering(..)`, the list uses `default_order`, as ListView and the admin do; the PK always breaks ties.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

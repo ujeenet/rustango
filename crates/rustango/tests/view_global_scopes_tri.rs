@@ -1,5 +1,6 @@
 //! `ViewSet` and the template views apply the model's global scopes:
 //! a row every `QuerySet` hides is not listed, counted, read or written (#1746).
+//! The ViewSet list follows `default_order` (#2047).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -71,6 +72,14 @@ pub struct Pet {
     pub owner_id: ForeignKey<Owner, i64>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "order2047_rank", app = "scope1746", default_order = "-rank")]
+pub struct Ranked {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub rank: i64,
+}
+
 const CSRF: &str = "scope1746-csrf-token-scope1746-csrf-token-x";
 
 async fn setup(pool: &Pool) {
@@ -78,6 +87,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Owner>(pool).await;
     rustango::testkit::matrix::fresh_table::<Pet>(pool).await;
     rustango::testkit::matrix::fresh_table::<Note>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Ranked>(pool).await;
 }
 
 /// A custom bulk action that writes unscoped, so only the PK narrowing
@@ -184,6 +194,7 @@ fn app(pool: &Pool) -> axum::Router {
                 .search_fields(&["name"])
                 .router_pool("/api/owners", pool.clone()),
         )
+        .merge(ViewSet::for_model(Ranked::SCHEMA).router_pool("/api/ranked", pool.clone()))
         .merge(
             DetailView::for_model(Note::SCHEMA)
                 .template("detail.html")
@@ -530,6 +541,39 @@ async fn search_narrows_an_or_scope(pool: &Pool) {
     }
 }
 
+/// The list follows the model's `default_order`, ties broken by the PK (#2047).
+async fn viewset_lists_in_default_order(pool: &Pool) {
+    // Explicit PKs, inserted out of order, so a tie shows the tiebreak.
+    for (id, rank) in [(4, 1), (3, 2), (2, 1), (1, 3)] {
+        let mut r = Ranked {
+            id: Auto::Set(id),
+            rank,
+        };
+        r.insert_pool(pool).await.expect("seed ranked");
+    }
+    let (status, body) = get(pool, "/api/ranked").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<i64> = json(&body)["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![1, 3, 2, 4], "{body}");
+    let (_, body) = get(pool, "/api/ranked?ordering=rank").await;
+    let ids: Vec<i64> = json(&body)["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![2, 4, 3, 1],
+        "?ordering= with the tiebreak: {body}"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -545,5 +589,6 @@ tri_dialect_test! {
         template_writes_on_visible_rows_work,
         fk_display_skips_scoped_out_targets,
         search_narrows_an_or_scope,
+        viewset_lists_in_default_order,
     ],
 }

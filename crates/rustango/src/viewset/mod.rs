@@ -973,6 +973,7 @@ impl ViewSet {
     }
 
     /// Default ordering for list responses. `(field, true)` = descending.
+    /// Unset, the model's `default_order` applies; the PK always breaks ties.
     pub fn ordering(mut self, ordering: &[(&str, bool)]) -> Self {
         self.default_ordering = ordering.iter().map(|&(f, d)| (f.to_owned(), d)).collect();
         self
@@ -2171,20 +2172,9 @@ async fn run_list(
         .get("ordering")
         .map(|raw| crate::list_params::parse_ordering(raw, &ordering_allowlist, state.vs.schema))
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| {
-            state
-                .vs
-                .default_ordering
-                .iter()
-                .filter_map(|(name, desc)| {
-                    state
-                        .vs
-                        .schema
-                        .field(name)
-                        .map(|f| crate::core::OrderItem::column(f.column, *desc))
-                })
-                .collect()
-        });
+        .unwrap_or_else(|| default_order_by(&state.vs));
+    // The PK breaks ties so rows cannot repeat or vanish across pages (#2047).
+    let order_by = state.vs.schema.with_pk_tiebreak(order_by);
 
     let fields = state.effective_fields();
 
@@ -2286,6 +2276,29 @@ async fn run_list(
             }))
         }
     }
+}
+
+/// `.ordering(..)`, else the model's `default_order`, as ListView and the admin do (#2047).
+fn default_order_by(vs: &ViewSet) -> Vec<crate::core::OrderItem> {
+    let schema = vs.schema;
+    let builder: Vec<(&str, bool)> = vs
+        .default_ordering
+        .iter()
+        .map(|(n, d)| (n.as_str(), *d))
+        .collect();
+    let spec = if builder.is_empty() {
+        schema.default_order
+    } else {
+        &builder[..]
+    };
+    spec.iter()
+        .filter_map(|(name, desc)| {
+            schema
+                .field(name)
+                .or_else(|| schema.field_by_column(name))
+                .map(|f| crate::core::OrderItem::column(f.column, *desc))
+        })
+        .collect()
 }
 
 /// RFC 10008 QUERY on the collection: the same filtered, paginated

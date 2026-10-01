@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### The ViewSet list follows the model's `default_order` (#2047)
+
+With no `.ordering(..)` the list uses `default_order`, then the PK.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

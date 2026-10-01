@@ -601,7 +601,8 @@ Supported lookups: `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contains`,
 **Ordering** — `?ordering=field,-other` (`-` = DESC). Any field the response
 shows (with a serializer, the fields it renders) is sortable unless you set
 `.ordering_fields([...])` to restrict it. Without a param, the
-`ordering` default applies. They all compose.
+`ordering` default applies, else the model's `default_order`; the primary
+key always breaks ties. They all compose.
 
 ---
 
