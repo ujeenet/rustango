@@ -69,7 +69,8 @@ pub struct S3Config {
     pub access_key_id: String,
     pub secret_access_key: String,
     /// `false` puts the bucket in the host:
-    /// `https://<bucket>.s3.<region>.amazonaws.com/<key>`. `true`
+    /// `https://<bucket>.s3.<region>.amazonaws.com/<key>`, or
+    /// `https://<bucket>.<endpoint-host>/<key>` with an `endpoint`. `true`
     /// puts it in the path: `https://<endpoint>/<bucket>/<key>`.
     /// AWS wants the first, R2 and MinIO the second.
     pub path_style: bool,
@@ -116,7 +117,17 @@ impl S3Storage {
     fn host(&self) -> String {
         if let Some(ep) = &self.cfg.endpoint {
             let no_scheme = strip_scheme(ep);
-            no_scheme.split('/').next().unwrap_or(no_scheme).to_owned()
+            let authority = no_scheme.split('/').next().unwrap_or(no_scheme);
+            let bucket = &self.cfg.bucket;
+            // Virtual-hosted on a custom endpoint: the bucket goes in the
+            // host, unless the endpoint already names it (#1904).
+            let named =
+                authority == bucket.as_str() || authority.starts_with(&format!("{bucket}."));
+            if self.cfg.path_style || named {
+                authority.to_owned()
+            } else {
+                format!("{bucket}.{authority}")
+            }
         } else if self.cfg.path_style {
             format!("s3.{}.amazonaws.com", self.cfg.region)
         } else {
@@ -169,6 +180,7 @@ impl S3Storage {
         method: &str,
         key: &str,
         body: &[u8],
+        content_type: Option<&str>,
     ) -> Result<reqwest::Response, StorageError> {
         validate_key(key)?;
         let url = self.full_url(key);
@@ -182,10 +194,18 @@ impl S3Storage {
         let date_stamp = &amz_date[..8];
         let payload_hash = sha256_hex(body);
 
-        // Canonical headers: lowercase, sorted by name.
-        let canonical_headers =
-            format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
-        let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+        // Canonical headers: lowercase, sorted by name. A content type
+        // is signed too, so S3 stores the one we sent (#1904).
+        let content_type = content_type.map(str::trim).filter(|c| !c.is_empty());
+        let ct_line = content_type.map_or(String::new(), |c| format!("content-type:{c}\n"));
+        let canonical_headers = format!(
+            "{ct_line}host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
+        );
+        let signed_headers = if content_type.is_some() {
+            "content-type;host;x-amz-content-sha256;x-amz-date"
+        } else {
+            "host;x-amz-content-sha256;x-amz-date"
+        };
 
         let canonical_request =
             format!("{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
@@ -218,6 +238,9 @@ impl S3Storage {
             .header("x-amz-content-sha256", &payload_hash)
             .header("x-amz-date", &amz_date)
             .header("authorization", auth);
+        if let Some(ct) = content_type {
+            req = req.header("content-type", ct);
+        }
         if !body.is_empty() {
             req = req.body(body.to_vec());
         }
@@ -316,7 +339,16 @@ impl S3Storage {
 #[async_trait]
 impl Storage for S3Storage {
     async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError> {
-        let resp = self.signed_request("PUT", key, data).await?;
+        self.save_with_content_type(key, data, None).await
+    }
+
+    async fn save_with_content_type(
+        &self,
+        key: &str,
+        data: &[u8],
+        content_type: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let resp = self.signed_request("PUT", key, data, content_type).await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -328,7 +360,7 @@ impl Storage for S3Storage {
     }
 
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        let resp = self.signed_request("GET", key, b"").await?;
+        let resp = self.signed_request("GET", key, b"", None).await?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(StorageError::NotFound(key.to_owned()));
@@ -347,7 +379,7 @@ impl Storage for S3Storage {
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        let resp = self.signed_request("DELETE", key, b"").await?;
+        let resp = self.signed_request("DELETE", key, b"", None).await?;
         let status = resp.status();
         // S3 returns 204 on success. Treat 404 as done, as
         // LocalStorage does.
@@ -361,8 +393,16 @@ impl Storage for S3Storage {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
-        let resp = self.signed_request("HEAD", key, b"").await?;
-        Ok(resp.status().is_success())
+        let resp = self.signed_request("HEAD", key, b"", None).await?;
+        let status = resp.status();
+        // Only a 404 means absent; a 403 or 503 must not read as "gone" (#1904).
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if status.is_success() {
+            return Ok(true);
+        }
+        Err(StorageError::Io(format!("S3 HEAD {key} -> {status}")))
     }
 
     fn url(&self, key: &str) -> Option<String> {
@@ -520,6 +560,7 @@ mod tests {
     #[test]
     fn host_custom_endpoint_strips_scheme() {
         let mut c = cfg();
+        c.path_style = true;
         c.endpoint = Some("https://abc.r2.cloudflarestorage.com/".into());
         let s = S3Storage::new(c);
         assert_eq!(s.host(), "abc.r2.cloudflarestorage.com");
@@ -528,6 +569,7 @@ mod tests {
     #[test]
     fn host_http_endpoint_recognized() {
         let mut c = cfg();
+        c.path_style = true;
         c.endpoint = Some("http://localhost:9000".into());
         let s = S3Storage::new(c);
         assert_eq!(s.host(), "localhost:9000");
@@ -780,5 +822,105 @@ mod tests {
             url.ends_with(&signed_path),
             "url {url} must end with signed path {signed_path}",
         );
+    }
+
+    // -------- request shape against a local mock (#1904) --------
+
+    /// Answer one request with `status`; yields the raw request head.
+    async fn mock(status: u16) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .unwrap_or(buf.len());
+            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+            // Drain the body, so closing does not reset the connection.
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            while buf.len() < end + 4 + len {
+                let n = sock.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let reply =
+                format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            sock.write_all(reply.as_bytes()).await.unwrap();
+            head
+        });
+        (endpoint, task)
+    }
+
+    fn mock_storage(endpoint: String) -> S3Storage {
+        S3Storage::new(S3Config {
+            endpoint: Some(endpoint),
+            path_style: true,
+            ..cfg()
+        })
+    }
+
+    #[tokio::test]
+    async fn save_with_content_type_sends_and_signs_it() {
+        let (ep, req) = mock(200).await;
+        mock_storage(ep)
+            .save_with_content_type("a.png", b"png", Some("image/png"))
+            .await
+            .unwrap();
+        let head = req.await.unwrap();
+        assert!(head.contains("\r\ncontent-type: image/png"), "{head}");
+        assert!(
+            head.contains("signedheaders=content-type;host;x-amz-content-sha256;x-amz-date"),
+            "{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exists_is_false_only_on_404() {
+        let (ep, _req) = mock(404).await;
+        assert!(!mock_storage(ep).exists("a.png").await.unwrap());
+        let (ep, _req) = mock(200).await;
+        assert!(mock_storage(ep).exists("a.png").await.unwrap());
+        for status in [403, 503] {
+            let (ep, _req) = mock(status).await;
+            assert!(
+                mock_storage(ep).exists("a.png").await.is_err(),
+                "{status} read as a plain answer"
+            );
+        }
+    }
+
+    #[test]
+    fn virtual_hosted_custom_endpoint_puts_the_bucket_in_the_host() {
+        let s = S3Storage::new(S3Config {
+            endpoint: Some("https://abc.r2.cloudflarestorage.com".into()),
+            ..cfg()
+        });
+        assert_eq!(
+            s.full_url("a.png"),
+            "https://examplebucket.abc.r2.cloudflarestorage.com/a.png"
+        );
+        // An endpoint that already names the bucket is left alone.
+        let s = S3Storage::new(S3Config {
+            endpoint: Some("https://examplebucket.s3.us-east-1.amazonaws.com".into()),
+            ..cfg()
+        });
+        assert_eq!(s.host(), "examplebucket.s3.us-east-1.amazonaws.com");
     }
 }

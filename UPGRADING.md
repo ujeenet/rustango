@@ -155,6 +155,14 @@ untouched.
 A request is resolved by host only. To keep header routing, add `HeaderResolver::default().allow_only([...])` via `Builder::header_resolver`, `Cli::tenant_header` or `ChainResolver::push`.
 `PortResolver` matches the `ListenerPort` extension that `Builder::serve` inserts; add it yourself if you serve another way.
 
+### S3 with an `endpoint` and `path_style = false` puts the bucket in the host (#1904)
+
+Requests go to `<bucket>.<endpoint-host>`; set `path_style = true` for MinIO-style URLs. `exists` now errors on a 403/503.
+
+### `Storage` gains `save_with_content_type` (#1904)
+
+A provided method; a `Storage` impl with its own method of that name must rename it.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)

@@ -378,7 +378,9 @@ impl MediaManager {
         let storage = self.resolve_disk(&opts.disk)?;
         let key = build_key(&opts.key_prefix, &opts.original_filename);
         let size_bytes = opts.bytes.len() as i64;
-        storage.save(&key, &opts.bytes).await?;
+        storage
+            .save_with_content_type(&key, &opts.bytes, Some(&opts.mime))
+            .await?;
         self.insert_row(InsertRow {
             disk: opts.disk,
             storage_key: key,

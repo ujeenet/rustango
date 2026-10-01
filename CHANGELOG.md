@@ -21,6 +21,10 @@ Resolve and open run in `spawn_blocking`, the root is canonicalized once, and bo
 
 Responses vary on `Accept-Language` (and `Cookie` when the cookie is read); a bad `format=` is a render error.
 
+### Fixed — S3 stores the content type, `exists()` surfaces errors, virtual-hosted endpoints keep the bucket (#1904)
+
+`Storage::save_with_content_type` (media passes its MIME); `exists` errs on anything but 2xx/404; `<bucket>.<endpoint-host>` when `path_style = false`.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
