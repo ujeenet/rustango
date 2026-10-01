@@ -65,13 +65,22 @@ async fn register_lookup_and_bump_sign_count() {
         .is_none());
 
     // Sign-count bump (clone/replay tracking) persists.
-    assert!(passkey::update_sign_count(&p, "cred-phone", 5)
-        .await
-        .unwrap());
-    // A lower count (a clone, or a lost race) never moves it back (#1841).
-    assert!(!passkey::update_sign_count(&p, "cred-phone", 3)
-        .await
-        .unwrap());
+    use passkey::SignCountUpdate;
+    let up = |c: &'static str, n| {
+        let p = p.clone();
+        async move { passkey::update_sign_count(&p, c, n).await.unwrap() }
+    };
+    // Counterless authenticator: 0 then 0 is fine.
+    assert_eq!(up("cred-phone", 0).await, SignCountUpdate::NoCounter);
+    assert_eq!(up("cred-phone", 5).await, SignCountUpdate::Advanced);
+    // Two assertions with the same counter: the second lost the race.
+    assert_eq!(up("cred-phone", 5).await, SignCountUpdate::Stale);
+    // A lower count (a clone) never moves it back (#1841).
+    assert_eq!(up("cred-phone", 3).await, SignCountUpdate::Stale);
+    assert_eq!(up("cred-phone", 0).await, SignCountUpdate::Stale);
+    assert!(!SignCountUpdate::Stale.is_accepted());
+    assert_eq!(up("nope", 9).await, SignCountUpdate::Unknown);
+    assert!(!SignCountUpdate::Unknown.is_accepted());
     let bumped = passkey::by_credential_id(&p, "cred-phone")
         .await
         .unwrap()

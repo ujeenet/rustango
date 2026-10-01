@@ -161,7 +161,8 @@ or member SSO builds `redirect_uri` from `Host`.
 
 **Breaking:** `seal_challenge` takes a `CeremonyPurpose`; `open_challenge` takes the same
 purpose and a cache, and is async. `verify_authentication` returns `AuthenticationOutcome`
-(`.sign_count`, `.user_verified`); `update_sign_count` returns `bool`. Tokens sealed before
+(`.sign_count`, `.user_verified`); `update_sign_count` returns `SignCountUpdate`: refuse the
+login unless `.is_accepted()` (`Stale` is a clone or a lost race). Tokens sealed before
 the upgrade no longer open. The `passkey` feature now enables `cache`.
 
 ### `[auth] argon2_*` now apply (#1728)

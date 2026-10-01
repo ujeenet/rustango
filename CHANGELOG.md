@@ -14,7 +14,8 @@ proxy named in `RealIpLayer::trust_proxies`. New `OAuth2Provider::with_emails_ur
 
 **Breaking:** a sealed challenge carries its ceremony and issue time, expires after 5 min
 and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused, and
-`update_sign_count` never moves the counter back. `verify_authentication` returns the UV flag.
+`update_sign_count` never moves the counter back and returns a `#[must_use]` `SignCountUpdate`.
+`verify_authentication` returns the UV flag.
 
 ### Security — `[auth] argon2_*` set the cost of new password hashes (#1728)
 
