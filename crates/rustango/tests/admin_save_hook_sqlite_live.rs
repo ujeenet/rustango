@@ -1,7 +1,8 @@
 //! Issue #365 — admin `save_model` / `delete_model` hooks.
 //!
 //! Verifies that admin signals fire on create / update / delete with
-//! the right context.
+//! the right context, pre hooks included, in registration order and per
+//! bulk-action row (#1928).
 
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "tenancy"))]
 
@@ -10,15 +11,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::signals::admin::{
-    clear_all, connect_admin_post_delete, connect_admin_post_save, AdminDeleteContext,
-    AdminSaveContext,
+    clear_all, connect_admin_post_delete, connect_admin_post_save, connect_admin_pre_delete,
+    connect_admin_pre_save, AdminDeleteContext, AdminSaveContext,
 };
 use rustango::sql::Pool;
 use rustango::Model;
 use tower::ServiceExt;
 
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "sh_post")]
+#[rustango(table = "sh_post", admin(actions = "delete_selected"))]
 #[allow(dead_code)]
 pub struct ShPost {
     #[rustango(primary_key)]
@@ -205,5 +206,96 @@ async fn post_delete_fires_on_delete() {
     assert_eq!(captured[0].table, "sh_post");
     assert_eq!(captured[0].pk, "1");
 
+    clear_all();
+}
+
+async fn post_form(app: &axum::Router, uri: &str, body: &str) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Pre hooks run before the write, and receivers run in registration order.
+#[tokio::test]
+async fn pre_save_runs_first_and_receivers_keep_their_order() {
+    let _guard = signal_lock().lock().await;
+    clear_all();
+    let pool = build_pool().await;
+    let app = build_app(pool.clone());
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    for n in 0..16 {
+        let (log, pool) = (log.clone(), pool.clone());
+        connect_admin_pre_save(move |_ctx| {
+            let (log, pool) = (log.clone(), pool.clone());
+            async move {
+                let rows: Vec<ShPost> = rustango::sql::FetcherPool::fetch(ShPost::objects(), &pool)
+                    .await
+                    .unwrap();
+                log.lock().unwrap().push(format!("pre{n}:{}", rows.len()));
+            }
+        });
+    }
+    let post_log = log.clone();
+    connect_admin_post_save(move |_ctx| {
+        let log = post_log.clone();
+        async move { log.lock().unwrap().push("post".into()) }
+    });
+
+    let status = post_form(&app, "/sh_post", "title=First").await;
+    assert!(
+        status.is_redirection() || status == StatusCode::OK,
+        "{status}"
+    );
+    let mut want: Vec<String> = (0..16).map(|n| format!("pre{n}:0")).collect();
+    want.push("post".into());
+    assert_eq!(*log.lock().unwrap(), want);
+    clear_all();
+}
+
+/// `delete_selected` sends a pre and post delete for every row it removes.
+#[tokio::test]
+async fn delete_selected_sends_per_row_delete_signals() {
+    let _guard = signal_lock().lock().await;
+    clear_all();
+    let pool = build_pool().await;
+    let app = build_app(pool.clone());
+    for t in ["a", "b", "c"] {
+        post_form(&app, "/sh_post", &format!("title={t}")).await;
+    }
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let pre_log = log.clone();
+    connect_admin_pre_delete(move |ctx: AdminDeleteContext| {
+        let log = pre_log.clone();
+        async move { log.lock().unwrap().push(format!("pre {}", ctx.pk)) }
+    });
+    let post_log = log.clone();
+    connect_admin_post_delete(move |ctx: AdminDeleteContext| {
+        let log = post_log.clone();
+        async move { log.lock().unwrap().push(format!("post {}", ctx.pk)) }
+    });
+
+    let status = post_form(
+        &app,
+        "/sh_post/__action",
+        "action=delete_selected&_selected=1&_selected=2",
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}");
+    assert_eq!(*log.lock().unwrap(), ["pre 1", "pre 2", "post 1", "post 2"]);
+
+    log.lock().unwrap().clear();
+    post_form(&app, "/sh_post/3/delete", "").await;
+    assert_eq!(*log.lock().unwrap(), ["pre 3", "post 3"]);
     clear_all();
 }

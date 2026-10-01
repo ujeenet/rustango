@@ -19,6 +19,11 @@ column set. `?trashed=1` lists them, and `restore_selected` acts only on them.
 Counts are within the list's filters, search and row scope; a facet ignores its own filter, as in Django.
 Both now run through the ORM. Dict rows (`values()`, `aggregate()`) decode date and timestamp cells on PG/MySQL instead of `NULL`.
 
+### Fixed — admin signals: pre hooks fire, in order, and bulk actions send them (#1928)
+
+`admin_pre_save` / `admin_pre_delete` now run before the write, receivers run in registration order,
+and bulk actions send one signal per row: delete for `delete_selected`, save (`change = true`) for the rest.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

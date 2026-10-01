@@ -1777,6 +1777,18 @@ pub(crate) async fn create_submit(
         returning: vec![pk_field.column],
         on_conflict: None,
     };
+    // A server-assigned key is not known yet, so `pk` is empty then.
+    let typed_pk = if pk_field.auto {
+        String::new()
+    } else {
+        form.get(pk_field.name).cloned().unwrap_or_default()
+    };
+    crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
+        table: model.table,
+        pk: typed_pk,
+        change: false,
+    })
+    .await;
     let written = match crate::sql::insert_returning_pool(&state.pool, &query).await {
         Ok(returning) => crate::sql::inserted_pk(&query, &returning, pk_field),
         Err(e) => Err(e),
@@ -2092,6 +2104,12 @@ pub(crate) async fn update_submit(
             value: pk_value,
         }),
     };
+    crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
+        table: model.table,
+        pk: pk_raw.clone(),
+        change: true,
+    })
+    .await;
     if let Err(e) = crate::sql::update_pool(&state.pool, &query).await {
         let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
         return Ok(Html(html).into_response());
@@ -2168,6 +2186,11 @@ pub(crate) async fn delete_submit(
         crate::audit::AuditOp::Delete
     };
 
+    crate::signals::admin::send_admin_pre_delete(crate::signals::admin::AdminDeleteContext {
+        table: model.table,
+        pk: pk_raw.clone(),
+    })
+    .await;
     if let Some(col) = model.soft_delete_column {
         crate::sql::update_pool(
             &state.pool,
@@ -2360,6 +2383,14 @@ pub(crate) async fn action_submit(
         crate::audit::AuditOp::Update
     };
 
+    // Per-row admin signals: delete for `delete_selected`, an edit for every other action.
+    let row_pks: Vec<String> = before_rows
+        .iter()
+        .map(|row| render::read_value_as_string_json(row, pk_field).unwrap_or_default())
+        .collect();
+    let is_delete = action == "delete_selected";
+    send_row_signals(model.table, &row_pks, is_delete, true).await;
+
     if action == "delete_selected" {
         if !state.can_delete(model.table) {
             return Err(AdminError::ReadOnly {
@@ -2478,8 +2509,37 @@ pub(crate) async fn action_submit(
             );
         }
     }
+    send_row_signals(model.table, &row_pks, is_delete, false).await;
 
     Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
+}
+
+/// One admin pre/post signal per row of a bulk action, in row order (#1928).
+async fn send_row_signals(table: &'static str, pks: &[String], is_delete: bool, pre: bool) {
+    use crate::signals::admin::{self as sig, AdminDeleteContext, AdminSaveContext};
+    for pk in pks {
+        let pk = pk.clone();
+        match (is_delete, pre) {
+            (true, true) => sig::send_admin_pre_delete(AdminDeleteContext { table, pk }).await,
+            (true, false) => sig::send_admin_post_delete(AdminDeleteContext { table, pk }).await,
+            (false, true) => {
+                sig::send_admin_pre_save(AdminSaveContext {
+                    table,
+                    pk,
+                    change: true,
+                })
+                .await;
+            }
+            (false, false) => {
+                sig::send_admin_post_save(AdminSaveContext {
+                    table,
+                    pk,
+                    change: true,
+                })
+                .await;
+            }
+        }
+    }
 }
 
 /// The object-permission hooks a bulk action must pass on every row. A custom

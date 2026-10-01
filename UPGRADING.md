@@ -164,6 +164,11 @@ Use the list's "Show deleted rows" link (`?trashed=1`) to see and restore them. 
 Facet and date-strip counts now match the filtered list, not the whole table. The year strip lists at most
 the newest 200 years. `values()`/`aggregate()` dicts on PG/MySQL return `SqlValue::Date`/`DateTime` where they gave `Null`.
 
+### Admin pre-signals and per-row bulk-action signals fire (#1928)
+
+Receivers on `admin_pre_save` / `admin_pre_delete` now run. `delete_selected` sends delete signals per row;
+`restore_selected` and custom actions send `admin_pre_save`/`admin_post_save` with `change = true` per row.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)
