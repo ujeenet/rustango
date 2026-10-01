@@ -381,7 +381,8 @@ pub enum MailError {
     BadHeader(String),
     #[error("transport error: {0}")]
     Transport(String),
-    /// The server refused the message for good (an SMTP 5xx).
+    /// The server refused the message or a recipient for good (SMTP
+    /// 550–555). Auth and connect failures stay [`Self::Transport`].
     #[error("rejected: {0}")]
     Rejected(String),
     /// The `[mail]` settings cannot build the backend they ask for.

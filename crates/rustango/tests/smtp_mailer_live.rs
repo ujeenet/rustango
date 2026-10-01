@@ -30,6 +30,14 @@ async fn spawn_mock() -> (u16, oneshot::Receiver<String>) {
 
 /// [`spawn_mock`] whose `RCPT TO` reply is `rcpt_reply`.
 async fn spawn_mock_with(rcpt_reply: &'static [u8]) -> (u16, oneshot::Receiver<String>) {
+    spawn_mock_full(b"250 mock.test\r\n", rcpt_reply).await
+}
+
+/// [`spawn_mock_with`] that also sets the EHLO reply; `AUTH` gets a 535.
+async fn spawn_mock_full(
+    ehlo_reply: &'static [u8],
+    rcpt_reply: &'static [u8],
+) -> (u16, oneshot::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = oneshot::channel();
@@ -64,9 +72,14 @@ async fn spawn_mock_with(rcpt_reply: &'static [u8]) -> (u16, oneshot::Receiver<S
 
             let upper = line.to_ascii_uppercase();
             if upper.starts_with("EHLO") || upper.starts_with("HELO") {
-                // Single-line EHLO so lettre doesn't think we
-                // advertise STARTTLS / AUTH.
-                write.write_all(b"250 mock.test\r\n").await.unwrap();
+                // Single-line EHLO by default, so lettre doesn't
+                // think we advertise STARTTLS / AUTH.
+                write.write_all(ehlo_reply).await.unwrap();
+            } else if upper.starts_with("AUTH") {
+                write
+                    .write_all(b"535 5.7.8 Authentication failed\r\n")
+                    .await
+                    .unwrap();
             } else if upper.starts_with("MAIL FROM") {
                 write.write_all(b"250 Ok\r\n").await.unwrap();
             } else if upper.starts_with("RCPT TO") {
@@ -331,4 +344,31 @@ async fn only_a_transient_smtp_refusal_is_retryable() {
             .expect_err("the server refused");
         assert_eq!(err.is_retryable(), retryable, "{err}");
     }
+}
+
+/// A bad password is a config fault, not a refused message: retryable.
+#[tokio::test]
+async fn an_smtp_auth_failure_is_not_a_rejection() {
+    let (port, _rx) =
+        spawn_mock_full(b"250-mock.test\r\n250 AUTH PLAIN LOGIN\r\n", b"250 Ok\r\n").await;
+    let mailer = SmtpMailer::builder("127.0.0.1")
+        .port(port)
+        .tls(TlsMode::None)
+        .credentials("app", "wrong")
+        .build()
+        .expect("build ok");
+    let email = Email::new()
+        .from("noreply@example.com")
+        .to("alice@example.com")
+        .subject("s")
+        .body("b");
+    let err = tokio::time::timeout(Duration::from_secs(5), mailer.send(&email))
+        .await
+        .expect("send within timeout")
+        .expect_err("auth refused");
+    assert!(
+        matches!(err, rustango::email::MailError::Transport(_)),
+        "{err}"
+    );
+    assert!(err.to_string().contains("535"), "{err}");
 }

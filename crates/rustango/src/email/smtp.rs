@@ -336,15 +336,23 @@ impl Mailer for SmtpMailer {
             .multipart(body_part)
             .map_err(|e| MailError::InvalidMessage(format!("message build: {e}")))?;
 
-        self.transport.send(message).await.map_err(|e| {
-            // A 5xx is the server's final answer; retrying cannot help (#1948).
-            if e.is_permanent() {
-                MailError::Rejected(format!("smtp send: {e}"))
-            } else {
-                MailError::Transport(format!("smtp send: {e}"))
-            }
-        })?;
+        self.transport.send(message).await.map_err(send_error)?;
         Ok(())
+    }
+}
+
+/// Only a refusal of the message itself is final. lettre does not say
+/// which stage failed, so the RCPT/DATA refusal codes stand in for it:
+/// an auth 535/530 is a config fault worth retrying once it is fixed.
+fn send_error(e: lettre::transport::smtp::Error) -> MailError {
+    let refused = e.is_permanent()
+        && e.status()
+            .map(u16::from)
+            .is_some_and(|c| (550..=555).contains(&c));
+    if refused {
+        MailError::Rejected(format!("smtp send: {e}"))
+    } else {
+        MailError::Transport(format!("smtp send: {e}"))
     }
 }
 
