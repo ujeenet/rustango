@@ -720,13 +720,9 @@ async fn handle_list(
     extra: Option<axum::Extension<ExtraContext>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let page: i64 = params
-        .get("page")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(1)
-        .max(1);
+    let page = crate::list_params::parse_page(&params);
     let page_size = resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-    let offset = (page - 1) * page_size;
+    let offset = crate::list_params::page_offset(page, page_size);
 
     let (order_by, active_ordering) = match resolve_active_order(
         state.vs.schema,
@@ -3327,14 +3323,10 @@ mod tenant {
         Query(params): Query<HashMap<String, String>>,
         t: Tenant,
     ) -> Response {
-        let page: i64 = params
-            .get("page")
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(1)
-            .max(1);
+        let page = crate::list_params::parse_page(&params);
         let page_size =
             super::resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-        let offset = (page - 1) * page_size;
+        let offset = crate::list_params::page_offset(page, page_size);
 
         let (order_by, active_ordering) = match super::resolve_active_order(
             state.vs.schema,

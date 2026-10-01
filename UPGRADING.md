@@ -149,6 +149,10 @@ untouched.
 ---
 
 ## Unreleased
+### ViewSet `__in` lists cap at 1000 values (#1865)
+
+A longer `?field__in=` / `?field__not_in=` list is a 400. Split larger lookups into several requests.
+
 ### `ListView` falls back to `default_order` (#2005)
 
 A `ListView` with no `order_by` now sorts by the model's `default_order`, then the PK.

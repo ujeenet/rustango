@@ -3,6 +3,11 @@
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
 ## [Unreleased]
+### Fixed — list `__in` filters and huge page numbers (#1865)
+
+A ViewSet `?field__in=` list over 1000 values is a 400, not a driver 500. `?page=` past `i64` range
+is an empty page in the ViewSet, `ListView`, admin and `paginate` instead of a negative OFFSET.
+
 ### Fixed — `ListView` uses the model's `default_order` (#2005)
 
 With no builder `order_by`, `ListView` sorts by `default_order` before the PK, like the admin.

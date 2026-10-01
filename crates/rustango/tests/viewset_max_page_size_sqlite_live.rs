@@ -132,3 +132,34 @@ async fn default_page_size_is_clamped_to_the_ceiling() {
     let n = count_returned(app, "/notes").await;
     assert_eq!(n, 50, "the default must be clamped by the ceiling as well");
 }
+
+async fn status_of(app: axum::Router, uri: &str) -> StatusCode {
+    app.oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+/// `?page=i64::MAX` is an empty page, not a wrapped negative OFFSET (#1865).
+#[tokio::test]
+async fn huge_page_number_is_an_empty_page() {
+    let app = ViewSet::for_model(Note::SCHEMA)
+        .page_size(20)
+        .router_pool("/notes", pool_with_rows().await);
+    let n = count_returned(app, &format!("/notes?page={}", i64::MAX)).await;
+    assert_eq!(n, 0);
+}
+
+/// An `__in` list over the cap is a 400; one at the cap still runs (#1865).
+#[tokio::test]
+async fn in_list_over_the_cap_is_a_400() {
+    let cap = rustango::list_params::MAX_IN_VALUES;
+    let ids = |n: usize| (1..=n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let app = ViewSet::for_model(Note::SCHEMA)
+        .filter_fields(&["id"])
+        .router_pool("/notes", pool_with_rows().await);
+    let at_cap = status_of(app.clone(), &format!("/notes?id__in={}", ids(cap))).await;
+    assert_eq!(at_cap, StatusCode::OK);
+    let over = status_of(app, &format!("/notes?id__in={}", ids(cap + 1))).await;
+    assert_eq!(over, StatusCode::BAD_REQUEST);
+}

@@ -1119,7 +1119,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         let total = <crate::query::QuerySet<T> as ::core::clone::Clone>::clone(&self)
             .count(pool)
             .await?;
-        let offset = if page > 1 { (page - 1) * per_page } else { 0 };
+        let offset = crate::list_params::page_offset(page, per_page);
         let rows = self
             .ordered_or_by_pk()
             .limit(per_page)

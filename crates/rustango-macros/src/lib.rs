@@ -5714,7 +5714,7 @@ fn inherent_impl_tokens(
                 #root::sql::ExecError,
             > {
                 use #root::sql::FetcherPool as _;
-                let _offset = if page > 1 { (page - 1) * per_page } else { 0 };
+                let _offset = #root::list_params::page_offset(page, per_page);
                 #root::query::QuerySet::<Self>::default()
                     .limit(per_page)
                     .offset(_offset)

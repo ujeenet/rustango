@@ -1905,7 +1905,7 @@ fn build_lookup_filter(
     field: &'static crate::core::FieldSchema,
     lookup: Option<&str>,
     raw: &str,
-) -> Option<WhereExpr> {
+) -> Result<Option<WhereExpr>, crate::list_params::InListTooLong> {
     let column = field.column;
     let predicate =
         |op: Op, value: SqlValue| Some(WhereExpr::Predicate(Filter { column, op, value }));
@@ -1933,20 +1933,18 @@ fn build_lookup_filter(
         _ => None,
     };
     if let Some(op) = binary_op {
-        return parse_form_value(field, Some(raw))
+        return Ok(parse_form_value(field, Some(raw))
             .ok()
-            .and_then(|v| predicate(op, v));
+            .and_then(|v| predicate(op, v)));
     }
-    match lookup.unwrap_or("exact") {
+    Ok(match lookup.unwrap_or("exact") {
         "in" | "not_in" => {
-            let parts: Vec<SqlValue> = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+            let parts: Vec<SqlValue> = crate::list_params::split_in_list(raw)?
+                .into_iter()
                 .filter_map(|s| parse_form_value(field, Some(s)).ok())
                 .collect();
             if parts.is_empty() {
-                return None;
+                return Ok(None);
             }
             let op = if lookup == Some("not_in") {
                 Op::NotIn
@@ -1969,7 +1967,7 @@ fn build_lookup_filter(
             predicate(Op::IsNull, SqlValue::Bool(is_null))
         }
         _ => None, // unknown lookup → silently ignore
-    }
+    })
 }
 
 // ------------------------------------------------------------------ Handlers
@@ -2032,8 +2030,10 @@ async fn run_list(
         let Some(field) = state.vs.schema.field(field_name) else {
             continue;
         };
-        if let Some(predicate) = build_lookup_filter(field, lookup, raw_val) {
-            filters.push(predicate);
+        match build_lookup_filter(field, lookup, raw_val) {
+            Ok(Some(predicate)) => filters.push(predicate),
+            Ok(None) => {}
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
         }
     }
 
@@ -2105,12 +2105,8 @@ async fn run_list(
 
     match &state.vs.pagination {
         PaginationStyle::PageNumber => {
-            let page: i64 = params
-                .get("page")
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(1)
-                .max(1);
-            let offset = (page - 1) * page_size;
+            let page = crate::list_params::parse_page(&params);
+            let offset = crate::list_params::page_offset(page, page_size);
 
             // Struct-update over `SelectQuery::new` for the
             // paginated list query.
@@ -3580,14 +3576,22 @@ mod lookup_tests {
 
     #[test]
     fn no_lookup_means_eq() {
-        let f = extract_pred(build_lookup_filter(int_field(), None, "42").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(int_field(), None, "42")
+                .unwrap()
+                .unwrap(),
+        );
         assert_eq!(f.op, Op::Eq);
         assert!(matches!(f.value, SqlValue::I64(42)));
     }
 
     #[test]
     fn explicit_exact_means_eq() {
-        let f = extract_pred(build_lookup_filter(int_field(), Some("exact"), "42").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(int_field(), Some("exact"), "42")
+                .unwrap()
+                .unwrap(),
+        );
         assert_eq!(f.op, Op::Eq);
     }
 
@@ -3600,14 +3604,22 @@ mod lookup_tests {
             ("lte", Op::Lte),
             ("ne", Op::Ne),
         ] {
-            let f = extract_pred(build_lookup_filter(int_field(), Some(lk), "10").unwrap());
+            let f = extract_pred(
+                build_lookup_filter(int_field(), Some(lk), "10")
+                    .unwrap()
+                    .unwrap(),
+            );
             assert_eq!(f.op, expected, "lookup {lk}");
         }
     }
 
     #[test]
     fn in_lookup_parses_csv() {
-        let f = extract_pred(build_lookup_filter(int_field(), Some("in"), "1,2,3").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(int_field(), Some("in"), "1,2,3")
+                .unwrap()
+                .unwrap(),
+        );
         assert_eq!(f.op, Op::In);
         match f.value {
             SqlValue::List(v) => assert_eq!(v.len(), 3),
@@ -3617,13 +3629,21 @@ mod lookup_tests {
 
     #[test]
     fn not_in_lookup_parses_csv() {
-        let f = extract_pred(build_lookup_filter(int_field(), Some("not_in"), "1,2").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(int_field(), Some("not_in"), "1,2")
+                .unwrap()
+                .unwrap(),
+        );
         assert_eq!(f.op, Op::NotIn);
     }
 
     #[test]
     fn in_lookup_drops_empty_entries() {
-        let f = extract_pred(build_lookup_filter(int_field(), Some("in"), "1,,2,").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(int_field(), Some("in"), "1,,2,")
+                .unwrap()
+                .unwrap(),
+        );
         match f.value {
             SqlValue::List(v) => assert_eq!(v.len(), 2),
             _ => panic!("expected List"),
@@ -3632,55 +3652,77 @@ mod lookup_tests {
 
     #[test]
     fn contains_wraps_with_percents_and_uses_like() {
-        let f =
-            extract_pred(build_lookup_filter(string_field(), Some("contains"), "hello").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(string_field(), Some("contains"), "hello")
+                .unwrap()
+                .unwrap(),
+        );
         assert_eq!(f.op, Op::LikeEscaped);
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hello%"));
     }
 
     #[test]
     fn icontains_uses_ilike() {
-        let f = extract_pred(build_lookup_filter(string_field(), Some("icontains"), "hi").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(string_field(), Some("icontains"), "hi")
+                .unwrap()
+                .unwrap(),
+        );
         assert_eq!(f.op, Op::ILikeEscaped);
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hi%"));
     }
 
     #[test]
     fn startswith_only_trailing_percent() {
-        let f =
-            extract_pred(build_lookup_filter(string_field(), Some("startswith"), "pre").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(string_field(), Some("startswith"), "pre")
+                .unwrap()
+                .unwrap(),
+        );
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "pre%"));
     }
 
     #[test]
     fn endswith_only_leading_percent() {
-        let f = extract_pred(build_lookup_filter(string_field(), Some("endswith"), "fix").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(string_field(), Some("endswith"), "fix")
+                .unwrap()
+                .unwrap(),
+        );
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "%fix"));
     }
 
     #[test]
     fn isnull_true() {
-        let f = extract_pred(build_lookup_filter(string_field(), Some("isnull"), "true").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(string_field(), Some("isnull"), "true")
+                .unwrap()
+                .unwrap(),
+        );
         assert_eq!(f.op, Op::IsNull);
         assert!(matches!(f.value, SqlValue::Bool(true)));
     }
 
     #[test]
     fn isnull_false() {
-        let f = extract_pred(build_lookup_filter(string_field(), Some("isnull"), "false").unwrap());
+        let f = extract_pred(
+            build_lookup_filter(string_field(), Some("isnull"), "false")
+                .unwrap()
+                .unwrap(),
+        );
         assert!(matches!(f.value, SqlValue::Bool(false)));
     }
 
     #[test]
     fn unknown_lookup_returns_none() {
         let r = build_lookup_filter(int_field(), Some("frobulate"), "x");
-        assert!(r.is_none());
+        assert!(r.unwrap().is_none());
     }
 
     #[test]
     fn parse_failure_returns_none() {
         let r = build_lookup_filter(int_field(), Some("gt"), "not-a-number");
-        assert!(r.is_none());
+        assert!(r.unwrap().is_none());
     }
 }
 

@@ -11,6 +11,8 @@
 //!   filters.
 //! * [`parse_ordering`] — splits `?ordering=col,-col2`.
 //! * [`clamp_page_size`] — resolves `?page_size=N`.
+//! * [`parse_page`] / [`page_offset`] — `?page=N` and its overflow-safe offset.
+//! * [`split_in_list`] — a `__in` value, capped at [`MAX_IN_VALUES`].
 //!
 //! Each layer still builds its own WHERE clause, because viewset
 //! supports a richer filter syntax than the CBV.
@@ -19,6 +21,10 @@
 //! [`is_reserved_list_key`]: crate::list_params::is_reserved_list_key
 //! [`parse_ordering`]: crate::list_params::parse_ordering
 //! [`clamp_page_size`]: crate::list_params::clamp_page_size
+//! [`parse_page`]: crate::list_params::parse_page
+//! [`page_offset`]: crate::list_params::page_offset
+//! [`split_in_list`]: crate::list_params::split_in_list
+//! [`MAX_IN_VALUES`]: crate::list_params::MAX_IN_VALUES
 
 use std::collections::HashMap;
 
@@ -101,9 +107,96 @@ pub fn clamp_page_size(default: i64, max: i64, params: &HashMap<String, String>)
         .map_or(default, |n| n.min(max))
 }
 
+/// Most values one `?field__in=` list may carry. Far under every
+/// dialect's bind limit, so a long list is a 400, not a driver error (#1865).
+pub const MAX_IN_VALUES: usize = 1000;
+
+/// A `__in` list longer than [`MAX_IN_VALUES`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InListTooLong;
+
+impl std::fmt::Display for InListTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "an `__in` filter takes at most {MAX_IN_VALUES} values")
+    }
+}
+
+/// Split a comma-separated `__in` value, dropping empty entries.
+/// Stops reading past the cap, so a 2 MB body is not split in full.
+///
+/// # Errors
+/// [`InListTooLong`] when more than [`MAX_IN_VALUES`] entries remain.
+pub fn split_in_list(raw: &str) -> Result<Vec<&str>, InListTooLong> {
+    let parts: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .take(MAX_IN_VALUES + 1)
+        .collect();
+    if parts.len() > MAX_IN_VALUES {
+        return Err(InListTooLong);
+    }
+    Ok(parts)
+}
+
+/// `?page=N`, 1-based. Missing, garbage, zero or negative gives page 1.
+#[must_use]
+pub fn parse_page(params: &HashMap<String, String>) -> i64 {
+    params
+        .get("page")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// Row offset of 1-based `page`. Saturates, so a huge page is an
+/// empty page rather than a wrapped negative OFFSET (#1865).
+#[must_use]
+pub fn page_offset(page: i64, page_size: i64) -> i64 {
+    page.max(1)
+        .saturating_sub(1)
+        .saturating_mul(page_size.max(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_offset_saturates_instead_of_wrapping() {
+        assert_eq!(page_offset(1, 20), 0);
+        assert_eq!(page_offset(3, 20), 40);
+        assert_eq!(page_offset(i64::MAX, 50), i64::MAX);
+        assert_eq!(page_offset(i64::MIN, 50), 0);
+    }
+
+    #[test]
+    fn parse_page_clamps_to_one() {
+        let mut p = HashMap::new();
+        assert_eq!(parse_page(&p), 1);
+        p.insert("page".into(), "-4".into());
+        assert_eq!(parse_page(&p), 1);
+        p.insert("page".into(), i64::MAX.to_string());
+        assert_eq!(parse_page(&p), i64::MAX);
+    }
+
+    #[test]
+    fn in_list_cap_is_under_every_dialect_bind_limit() {
+        use crate::sql::Dialect as _;
+        assert!(MAX_IN_VALUES < crate::sql::Postgres.max_bind_params());
+        assert!(MAX_IN_VALUES < crate::sql::MySql.max_bind_params());
+        assert!(MAX_IN_VALUES < crate::sql::Sqlite.max_bind_params());
+    }
+
+    #[test]
+    fn split_in_list_caps_values() {
+        let ok = vec!["1"; MAX_IN_VALUES].join(",");
+        assert_eq!(split_in_list(&ok).unwrap().len(), MAX_IN_VALUES);
+        let long = vec!["1"; MAX_IN_VALUES + 1].join(",");
+        assert_eq!(split_in_list(&long), Err(InListTooLong));
+        assert_eq!(split_in_list("1,,2, ").unwrap(), ["1", "2"]);
+    }
 
     #[test]
     fn reserved_keys_match_documented_set() {
