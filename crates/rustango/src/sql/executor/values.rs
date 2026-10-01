@@ -46,6 +46,8 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
         SqlValue::Decimal(v)
     } else if let Ok(v) = row.try_get::<uuid::Uuid, _>(i) {
         SqlValue::Uuid(v)
+    } else if let Some(v) = chrono_cell(row, i) {
+        v
     } else if let Ok(v) = row.try_get::<String, _>(i) {
         SqlValue::String(v)
     } else if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
@@ -110,12 +112,35 @@ fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize, is_uuid: bool) -> 
         // `DECIMAL`, which a `SUM` over an integer column returns.
         // Neither the i64 nor the f64 probe decodes it.
         SqlValue::Decimal(v)
+    } else if let Some(v) = chrono_cell(row, i) {
+        v
     } else if let Ok(v) = row.try_get::<String, _>(i) {
         SqlValue::String(v)
     } else if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
         SqlValue::Binary(v)
     } else {
         SqlValue::Null
+    }
+}
+
+/// A date or timestamp cell, which the other probes leave as `Null` (#2004).
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn chrono_cell<'r, R>(row: &'r R, i: usize) -> Option<SqlValue>
+where
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    chrono::DateTime<chrono::Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    chrono::NaiveDateTime: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    chrono::NaiveDate: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    if let Ok(v) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(i) {
+        Some(SqlValue::DateTime(v))
+    } else if let Ok(v) = row.try_get::<chrono::NaiveDateTime, _>(i) {
+        Some(SqlValue::DateTime(v.and_utc()))
+    } else {
+        row.try_get::<chrono::NaiveDate, _>(i)
+            .ok()
+            .map(SqlValue::Date)
     }
 }
 

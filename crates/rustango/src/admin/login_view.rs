@@ -345,6 +345,7 @@ async fn login_submit(
             is_superuser,
         },
         &auth_hash,
+        sessions_revoked_at(&row).unwrap_or_default(),
     );
     let cookie = format!(
         "{name}={val}; Path=/; HttpOnly; SameSite=Lax{secure}",
@@ -408,13 +409,8 @@ async fn change_password_submit(
         ))
         .into_response();
     }
-    if form.new_password.len() < 8 {
-        return Html(render_change_password_form(
-            &state,
-            None,
-            Some("New password must be at least 8 characters."),
-        ))
-        .into_response();
+    if let Err(e) = crate::password_validators::check_builtin_form_password(&form.new_password) {
+        return Html(render_change_password_form(&state, None, Some(&e.message))).into_response();
     }
 
     // Load the row by the session's user_id, so the current password
@@ -525,6 +521,7 @@ async fn change_password_submit(
                 is_superuser: session.is_superuser,
             },
             &auth_hash,
+            sessions_revoked_at(&row).unwrap_or_default(),
         );
         let cookie = format!(
             "{name}={val}; Path=/; HttpOnly; SameSite=Lax{secure}",
@@ -808,18 +805,39 @@ async fn logout_submit(
     use crate::signals::auth::{meta_from_parts, send_user_logged_out, UserLoggedOutContext};
     let meta = meta_from_parts(&extensions, &headers, Some("/logout"));
 
-    // Best-effort decode, so the signal carries the user id and
-    // username when the cookie is still valid.
-    let (user_id, username) = state
-        .config
-        .session_secret
-        .as_ref()
-        .and_then(|secret| {
-            let val = crate::cookies::cookie_from_headers(&headers, SESSION_COOKIE)?;
-            let sess = session::decode(secret, val)?;
-            Some((Some(sess.user_id), Some(sess.username)))
-        })
-        .unwrap_or((None, None));
+    let decoded = state.config.session_secret.as_ref().and_then(|secret| {
+        let val = crate::cookies::cookie_from_headers(&headers, SESSION_COOKIE)?;
+        Some((secret, session::decode_full(secret, val)?))
+    });
+    // Best-effort, so the signal carries the user id and username when
+    // the cookie is still valid.
+    let (user_id, username) = decoded.as_ref().map_or((None, None), |(_, (s, _))| {
+        (Some(s.user_id), Some(s.username.clone()))
+    });
+    // End the user's sessions everywhere; only a live cookie may (#1855).
+    if let Some((secret, (sess, auth))) = &decoded {
+        let revoked = match live_check(&state.pool, secret, sess.user_id, auth).await {
+            GateCheck::Live {
+                sessions_revoked_at,
+                ..
+            } => crate::session::revoke_sessions::<AdminUser>(
+                &state.pool,
+                sess.user_id,
+                sessions_revoked_at,
+                auth.iat,
+            )
+            .await
+            .map(drop)
+            .map_err(|e| e.to_string()),
+            GateCheck::Reject => Ok(()),
+            // Never report a logout that did not happen.
+            GateCheck::DbError => Err("session lookup failed".to_owned()),
+        };
+        if let Err(e) = revoked {
+            tracing::warn!(target: "rustango::admin", error = %e, "logout revoke failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
+        }
+    }
 
     let cookie = format!(
         "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}",
@@ -879,17 +897,17 @@ pub(crate) async fn require_session(
         return next.run(request).await;
     }
 
-    if let Some((mut session, cookie_auth_hash)) = read_session_cookie(&request, &gate.secret) {
+    if let Some((mut session, cookie_auth)) = read_session_cookie(&request, &gate.secret) {
         // One lookup per request re-reads the user's live state. It
         // rejects cookies minted before a password change, and re-reads
         // `active` and `is_superuser` from the database instead of
         // trusting the cookie. A deactivated or demoted admin loses
         // access at once, not at cookie expiry.
-        match gate_live_check(&gate, session.user_id, &cookie_auth_hash).await {
-            // Password changed / user deleted / deactivated → force re-login.
+        match live_check(&gate.pool, &gate.secret, session.user_id, &cookie_auth).await {
+            // Password changed / logged out / user deleted / deactivated → force re-login.
             GateCheck::Reject => return Redirect::to(&gate.login_path).into_response(),
             // Row found + fingerprint matches: trust the LIVE flag.
-            GateCheck::Live { is_superuser } => session.is_superuser = is_superuser,
+            GateCheck::Live { is_superuser, .. } => session.is_superuser = is_superuser,
             // Transient DB error: fail open on the fingerprint and
             // active checks (the cookie HMAC and expiry still bound the
             // session) and keep the cookie's `is_superuser`.
@@ -946,42 +964,70 @@ fn forbidden_page(session: &AdminSession, logout_path: &str) -> Response {
 fn read_session_cookie(
     req: &Request<Body>,
     secret: &AdminSessionSecret,
-) -> Option<(AdminSession, crate::session::PasswordFingerprint)> {
+) -> Option<(AdminSession, session::CookieAuth)> {
     let val = crate::cookies::cookie_from_headers(req.headers(), SESSION_COOKIE)?;
     session::decode_full(secret, val)
 }
 
 /// Outcome of the gate's per-request liveness lookup.
 enum GateCheck {
-    /// Row found and the password fingerprint matches. Carries the live
-    /// `is_superuser`, so the gate does not trust the cookie's copy.
-    Live { is_superuser: bool },
-    /// Force a re-login: password changed, user deleted, or account
-    /// deactivated.
+    /// Row found and the session survives. Carries the live `is_superuser`,
+    /// so the gate does not trust the cookie's copy, and the logout cut-off.
+    Live {
+        is_superuser: bool,
+        sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// Force a re-login: password changed, logged out, user deleted, or
+    /// account deactivated.
     Reject,
     /// Transient DB error. The caller fails open on the live checks; the
     /// cookie HMAC and expiry still bound the session.
     DbError,
 }
 
+/// The row's logout cut-off; `Err` when it is set but unreadable.
+fn sessions_revoked_at(
+    row: &serde_json::Value,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, ()> {
+    match row.get(crate::session::SESSIONS_REVOKED_AT) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| Some(d.with_timezone(&chrono::Utc)))
+            .ok_or(()),
+    }
+}
+
 /// Re-read the user's live state in one lookup: the password
-/// fingerprint, which rejects cookies minted before a password change,
-/// plus live `active` and `is_superuser`.
-async fn gate_live_check(
-    gate: &SessionGate,
+/// fingerprint and logout cut-off, which reject cookies minted before a
+/// password change or logout, plus live `active` and `is_superuser`.
+async fn live_check(
+    pool: &crate::sql::Pool,
+    secret: &AdminSessionSecret,
     user_id: i64,
-    cookie_auth_hash: &crate::session::PasswordFingerprint,
+    cookie: &session::CookieAuth,
 ) -> GateCheck {
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let select = SelectQuery::by_pk(AdminUser::SCHEMA, "id", SqlValue::I64(user_id));
-    match crate::sql::select_one_row_as_json(&gate.pool, &select, &fields).await {
+    match crate::sql::select_one_row_as_json(pool, &select, &fields).await {
         Ok(Some(row)) => {
             let current = row
                 .get("password_hash")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            if !cookie_auth_hash.matches(&gate.secret, current) {
-                return GateCheck::Reject; // password changed since login
+            let Ok(revoked_at) = sessions_revoked_at(&row) else {
+                return GateCheck::Reject;
+            };
+            if !crate::session::session_survives(
+                secret,
+                &cookie.auth_hash,
+                cookie.iat,
+                current,
+                None,
+                revoked_at,
+            ) {
+                return GateCheck::Reject; // password changed or logged out since login
             }
             // `active` defaults to true, as in the login check, so a
             // missing or null column does not lock everyone out. A real
@@ -994,7 +1040,10 @@ async fn gate_live_check(
                 .get("is_superuser")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            GateCheck::Live { is_superuser }
+            GateCheck::Live {
+                is_superuser,
+                sessions_revoked_at: revoked_at,
+            }
         }
         Ok(None) => GateCheck::Reject, // user deleted
         Err(_) => GateCheck::DbError,

@@ -202,6 +202,30 @@ impl FieldSchema {
     pub fn is_auto_timestamp(&self) -> bool {
         self.auto && !self.primary_key && matches!(self.ty, FieldType::DateTime)
     }
+
+    /// An `Auto<Uuid>` the writer must fill Rust-side (`default_uuid_v7`).
+    /// Inferred: `auto_uuid` always carries a `gen_random_uuid()` default.
+    #[must_use]
+    pub fn is_rust_side_uuid(&self) -> bool {
+        self.auto && matches!(self.ty, FieldType::Uuid) && self.default.is_none()
+    }
+
+    /// Whether a form or request body may set this column in `kind`
+    /// (#1725). A natural PK is input on insert, never on update.
+    #[must_use]
+    pub fn accepts_input(&self, kind: WriteKind) -> bool {
+        !self.auto
+            && self.generated_as.is_none()
+            && !(self.primary_key && kind == WriteKind::Update)
+    }
+}
+
+/// Which statement a schema-driven writer is building.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WriteKind {
+    Insert,
+    Update,
 }
 
 /// Static description of a relation to another model.

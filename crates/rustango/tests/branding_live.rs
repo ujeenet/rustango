@@ -110,6 +110,7 @@ async fn upload_then_serve_round_trip() {
         active: true,
         created_at: now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert(&pool).await.unwrap();
 

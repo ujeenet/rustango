@@ -38,7 +38,7 @@
 
 use axum::body::Body;
 use axum::extract::{Form, Path, Query, State};
-use axum::http::{header, Response, StatusCode};
+use axum::http::{header, Response};
 use axum::response::{IntoResponse, Redirect};
 use axum::Extension;
 use serde::Deserialize;
@@ -54,11 +54,6 @@ use crate::tenancy::operators as ops;
 /// The column's limit. A longer username is truncated by some backends
 /// and rejected by others; neither is a good way to find out.
 const USERNAME_MAX: usize = 64;
-
-/// Matches the console's own change-password rule, so the two places
-/// that set an operator password cannot disagree about what is
-/// acceptable.
-const PASSWORD_MIN: usize = 8;
 
 #[derive(Deserialize)]
 pub(super) struct OperatorsQuery {
@@ -136,7 +131,7 @@ async fn page(
         match super::Paged::of_model(&state.registry, auth::Operator::SCHEMA, requested_page).await
         {
             Ok(p) => p,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => return super::server_error("operator_console", &e),
         };
     let rows: Vec<auth::Operator> = match auth::Operator::objects()
         .order_by(&[("username", false)])
@@ -147,11 +142,7 @@ async fn page(
     {
         Ok(r) => r,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not read the operator list: {e}"),
-            )
-                .into_response();
+            return super::server_error("could not read the operator list", &e);
         }
     };
     let me = id_of(op);
@@ -168,7 +159,7 @@ async fn page(
     .await
     {
         Ok(n) => usize::try_from(n).unwrap_or(usize::MAX),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return super::server_error("operator_console", &e),
     };
 
     let view: Vec<_> = rows
@@ -274,6 +265,7 @@ pub(super) async fn operator_create(
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     if let Err(e) = row.insert_pool(&state.registry).await {
         return back_err(&state, &op, &format!("Could not create the operator: {e}")).await;
@@ -393,11 +385,7 @@ fn chosen_password(generate: bool, typed: &str, confirm: &str) -> Result<String,
     if typed != confirm {
         return Err("The password and its confirmation did not match.".into());
     }
-    if typed.chars().count() < PASSWORD_MIN {
-        return Err(format!(
-            "A password must be at least {PASSWORD_MIN} characters."
-        ));
-    }
+    crate::password_validators::check_builtin_form_password(typed).map_err(|e| e.message)?;
     Ok(typed.to_owned())
 }
 
@@ -498,12 +486,5 @@ mod tests {
             chosen_password(false, "longenough", "longenough").as_deref(),
             Ok("longenough")
         );
-    }
-
-    /// The console's own change-password form refuses anything under 8,
-    /// and two places that set the same field must not disagree.
-    #[test]
-    fn the_minimum_matches_the_change_password_form() {
-        assert_eq!(PASSWORD_MIN, 8);
     }
 }

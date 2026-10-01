@@ -62,7 +62,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::{to_bytes, Body, Bytes};
+use axum::body::{to_bytes, Body};
 use axum::extract::{OriginalUri, Request};
 use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HOST, SET_COOKIE};
 use axum::http::request::Parts;
@@ -74,7 +74,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::api_errors::ApiError;
-use crate::body_limit::over_cap;
+use crate::body_limit::{collect_capped, over_cap};
 use crate::cache::BoxedCache;
 
 const DEFAULT_HEADER: &str = "idempotency-key";
@@ -443,47 +443,6 @@ fn replay(stored: StoredResponse, request_sha256: &str) -> Response<Body> {
         return key_reused();
     }
     rebuild(stored)
-}
-
-/// Read a body up to `cap`. `Ok(Err(body))` gives back the whole body when it is larger.
-async fn collect_capped(mut body: Body, cap: usize) -> Result<Result<Bytes, Body>, axum::Error> {
-    use http_body_util::BodyExt;
-    let mut buf = Vec::new();
-    while let Some(frame) = body.frame().await {
-        let Ok(data) = frame?.into_data() else {
-            continue;
-        };
-        if buf.len() + data.len() > cap {
-            buf.extend_from_slice(&data);
-            return Ok(Err(Body::new(Prefixed {
-                head: Some(Bytes::from(buf)),
-                rest: body,
-            })));
-        }
-        buf.extend_from_slice(&data);
-    }
-    Ok(Ok(Bytes::from(buf)))
-}
-
-/// The bytes already read, then the rest of the stream.
-struct Prefixed {
-    head: Option<Bytes>,
-    rest: Body,
-}
-
-impl http_body::Body for Prefixed {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, axum::Error>>> {
-        if let Some(head) = self.head.take() {
-            return std::task::Poll::Ready(Some(Ok(http_body::Frame::data(head))));
-        }
-        std::pin::Pin::new(&mut self.rest).poll_frame(cx)
-    }
 }
 
 fn key_reused() -> Response<Body> {
@@ -1533,8 +1492,8 @@ mod tests {
 
     #[tokio::test]
     async fn capped_collect_gives_back_every_frame() {
-        let whole = Body::new(Prefixed {
-            head: Some(Bytes::from_static(b"abc")),
+        let whole = Body::new(crate::body_limit::Prefixed {
+            head: Some(axum::body::Bytes::from_static(b"abc")),
             rest: Body::from("defgh"),
         });
         let Ok(Err(back)) = collect_capped(whole, 4).await else {

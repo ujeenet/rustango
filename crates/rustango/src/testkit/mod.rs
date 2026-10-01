@@ -228,6 +228,7 @@ pub fn user() -> crate::tenancy::User {
         created_at: chrono::Utc::now(),
         data: serde_json::json!({}),
         password_changed_at: None,
+        sessions_revoked_at: None,
     }
 }
 
@@ -247,6 +248,7 @@ pub fn admin_user() -> crate::admin::AdminUser {
         is_superuser: true,
         active: true,
         created_at: chrono::Utc::now(),
+        sessions_revoked_at: None,
     }
 }
 

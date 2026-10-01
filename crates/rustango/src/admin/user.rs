@@ -26,7 +26,7 @@ use crate::Model;
         list_display = "username, is_superuser, active, created_at",
         search_fields = "username",
         ordering = "username",
-        readonly_fields = "created_at",
+        readonly_fields = "created_at, sessions_revoked_at",
         formfield_overrides = "password_hash: password",
     )
 )]
@@ -57,6 +57,9 @@ pub struct AdminUser {
     #[rustango(default = "true")]
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Stamped on logout: sessions issued at or before it are refused, on
+    /// every device (#1855).
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // The admin form's password is hashed here, off the runtime.
@@ -108,6 +111,7 @@ impl AdminUser {
             is_superuser,
             active: true,
             created_at: chrono::Utc::now(),
+            sessions_revoked_at: None,
         })
     }
 }

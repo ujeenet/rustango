@@ -84,7 +84,7 @@ impl IntoResponse for ShortcutError {
             Self::NotFound { message } => (StatusCode::NOT_FOUND, message).into_response(),
             Self::Database(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("database error: {e}"),
+                crate::error::server_error_body("shortcuts::get_object", &e),
             )
                 .into_response(),
         }
@@ -174,8 +174,8 @@ where
 
 /// Render a Tera template into an HTML response.
 ///
-/// A render failure returns `500 Internal Server Error` with the Tera
-/// error in the body. For a nicer error page, render your own error
+/// A render failure returns `500 Internal Server Error`; the Tera error
+/// is logged, not sent. For a nicer error page, render your own error
 /// template with this same helper.
 ///
 /// ```ignore
@@ -187,11 +187,11 @@ where
 pub fn render(tera: &tera::Tera, name: &str, ctx: &tera::Context) -> Response {
     match tera.render(name, ctx) {
         Ok(body) => axum::response::Html(body).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("template `{name}` failed: {e}"),
-        )
-            .into_response(),
+        Err(e) => {
+            let e = format!("template `{name}` failed: {e:?}");
+            let body = crate::error::server_error_body("shortcuts::render", &e);
+            (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+        }
     }
 }
 
@@ -649,9 +649,10 @@ pub fn unprocessable_entity(message: impl Into<String>) -> Response {
 /// ```
 ///
 /// `filename` is cleaned so it cannot inject extra
-/// `Content-Disposition` directives: `"`, CR and LF each become `_`.
-/// Non-ASCII characters are kept, which modern browsers handle. If you
-/// need the RFC 5987 `filename*` form, build the header yourself.
+/// `Content-Disposition` directives: `"`, `\` and control characters
+/// each become `_`. Non-ASCII characters are kept. If the header still
+/// cannot be built, a bare `attachment` is sent. If you need the
+/// RFC 5987 `filename*` form, build the header yourself.
 #[must_use]
 pub fn file_response(
     content: impl Into<axum::body::Bytes>,
@@ -667,20 +668,27 @@ pub fn file_response(
     let ct = HeaderValue::from_str(content_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     res.headers_mut().insert(header::CONTENT_TYPE, ct);
+    // Always set: without it a browser renders the body inline.
     let cd = format!(r#"attachment; filename="{safe_filename}""#);
-    if let Ok(v) = HeaderValue::from_str(&cd) {
-        res.headers_mut().insert(header::CONTENT_DISPOSITION, v);
-    }
+    let cd = HeaderValue::from_bytes(cd.as_bytes())
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment"));
+    res.headers_mut().insert(header::CONTENT_DISPOSITION, cd);
     res
 }
 
 /// Replace with `_` the characters that would let a filename forge extra
-/// `Content-Disposition` directives: `"` escapes the `filename="..."`
-/// quoting, and CR or LF would split the header.
+/// `Content-Disposition` directives (`"`, `\\`), break the header (controls)
+/// or disguise the extension (bidi overrides such as U+202E).
 fn sanitize_attachment_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {
-            '"' | '\r' | '\n' => '_',
+            '"' | '\\' => '_',
+            c if c.is_control() => '_',
+            '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => '_',
             other => other,
         })
         .collect()
@@ -1075,6 +1083,66 @@ mod tests {
             .to_owned();
         assert!(!cd.contains('\r'));
         assert!(!cd.contains('\n'));
+    }
+
+    /// Any filename still downloads: no control char or non-ASCII drops the header (#1955).
+    #[tokio::test]
+    async fn file_response_always_sends_attachment() {
+        for name in [
+            "a\u{1}b.html",
+            "tab\there.html",
+            "del\u{7f}.html",
+            "résumé.pdf",
+        ] {
+            let res = file_response(b"<script>".to_vec(), name, "text/html");
+            let cd = res
+                .headers()
+                .get(axum::http::header::CONTENT_DISPOSITION)
+                .unwrap_or_else(|| panic!("{name:?}: no Content-Disposition"));
+            assert!(cd.as_bytes().starts_with(b"attachment"), "{name:?}");
+            assert!(!cd.as_bytes().iter().any(u8::is_ascii_control), "{name:?}");
+        }
+    }
+
+    /// A bidi override cannot disguise the saved file's extension.
+    #[test]
+    fn attachment_filename_drops_bidi_overrides() {
+        for c in ['\u{202e}', '\u{2066}', '\u{200f}', '\u{061c}'] {
+            let name = format!("invoice{c}fdp.exe");
+            assert_eq!(sanitize_attachment_filename(&name), "invoice_fdp.exe");
+        }
+    }
+
+    /// 500 bodies withhold driver and template text (#1955).
+    #[tokio::test]
+    async fn server_errors_withhold_their_cause() {
+        let mut tera = tera::Tera::default();
+        tera.add_raw_template("t.html", "{{ secret_var_xyz | nofilter }}")
+            .unwrap();
+        let (db, tpl) = {
+            let _g = crate::error::test_env::lock();
+            let mut out = None;
+            crate::error::test_env::with(crate::error::DISCLOSE_ENV, None, || {
+                let exec = ExecError::Sql(crate::sql::SqlError::EmptyInList);
+                out = Some((
+                    ShortcutError::Database(exec).into_response(),
+                    render(&tera, "t.html", &tera::Context::new()),
+                ));
+            });
+            out.unwrap()
+        };
+        for (res, marker) in [(db, "`IN`"), (tpl, "t.html")] {
+            assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let body = String::from_utf8_lossy(&body);
+            assert!(!body.contains(marker), "{body}");
+            assert!(
+                !body.contains("nofilter") && !body.contains("database"),
+                "{body}"
+            );
+        }
     }
 
     #[tokio::test]

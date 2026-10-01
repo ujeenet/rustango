@@ -145,7 +145,7 @@ impl TestClient {
         ttl_secs: i64,
     ) -> &Self {
         use crate::tenancy::tenant_console;
-        let payload = tenant_console::TenantSessionPayload::new(
+        let mut payload = tenant_console::TenantSessionPayload::new(
             user.id
                 .get()
                 .copied()
@@ -154,6 +154,7 @@ impl TestClient {
             ttl_secs,
             tenant_console::PasswordFingerprint::of(secret, &user.password_hash),
         );
+        payload.iat = crate::session::issued_at(user.sessions_revoked_at);
         let cookie = tenant_console::encode(secret, &payload);
         self.set_cookie(tenant_console::COOKIE_NAME, cookie);
         self
@@ -177,7 +178,7 @@ impl TestClient {
         ttl_secs: i64,
     ) -> &Self {
         use crate::tenancy::session;
-        let payload = session::SessionPayload::new(
+        let mut payload = session::SessionPayload::new(
             operator
                 .id
                 .get()
@@ -186,6 +187,7 @@ impl TestClient {
             ttl_secs,
             session::PasswordFingerprint::of(secret, &operator.password_hash),
         );
+        payload.iat = crate::session::issued_at(operator.sessions_revoked_at);
         let cookie = session::encode(secret, &payload);
         self.set_cookie(session::COOKIE_NAME, cookie);
         self
@@ -1154,6 +1156,7 @@ mod tests {
             active: true,
             created_at: chrono::Utc::now(),
             password_changed_at: None,
+            sessions_revoked_at: None,
         };
         c.force_login_operator(&secret, &op, 3600);
 
