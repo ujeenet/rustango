@@ -1927,7 +1927,7 @@ async fn create_insert(
     let result = if insert_q.returning.is_empty() {
         crate::sql::insert_pool(pool, &insert_q)
             .await
-            .map(|()| success_url.to_owned())
+            .map(|()| Ok(success_url.to_owned()))
     } else {
         crate::sql::insert_returning_pool(pool, &insert_q)
             .await
