@@ -1018,7 +1018,6 @@ impl Cli {
     /// added after `layer` is called will not have the middleware
     /// added"). The builder takes this layer and applies it to the
     /// outermost router instead, where every branch inherits it.
-    #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn access_log_layer(&self) -> Option<crate::access_log::AccessLogLayer> {
         self.access_log_enabled()
             .then(|| self.configured_access_log())
@@ -1030,7 +1029,6 @@ impl Cli {
     /// Separate from [`Self::access_log_layer`] because the span needs
     /// the same redact list even when the log is off, and building it
     /// a second way is how the two drifted apart (#1610).
-    #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn configured_access_log(&self) -> crate::access_log::AccessLogLayer {
         let log_layer = crate::access_log::AccessLogLayer::default();
         #[cfg(feature = "config")]
@@ -1046,7 +1044,6 @@ impl Cli {
     /// Taken from the configured access log rather than recomputed, so
     /// `[audit] redact_query_params` reaches the span even with
     /// `[logging] access_log = false` (#1610).
-    #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn span_redact_params(&self) -> Vec<String> {
         self.configured_access_log().redact_query_params
     }
@@ -1081,36 +1078,18 @@ impl Cli {
     /// correlation — which is exactly the "logs arrive as loose traces"
     /// symptom.
     ///
-    /// # Feature gates
-    ///
-    /// `access_log` needs `admin` **or** `tenancy`; `tracing_layer` and
-    /// `request_id` need `admin`. A build with neither — `sqlite,manage`
-    /// is the one CI checks — has no layers to mount, and this returns
-    /// the router untouched.
-    ///
-    /// The gate is on the *body*, not the function, so every caller
-    /// keeps one shape and no call site grows a `#[cfg]`. Leaving it off
-    /// entirely is what broke `feature_combos (sqlite,manage)` and
-    /// `(postgres,manage)`: the mount referenced modules that were
-    /// configured out, so the crate did not compile at all on those
-    /// combinations.
-    #[allow(unused_variables, clippy::needless_pass_by_value)]
+    /// All three layers need `_http_layers`, which `manage` implies, so
+    /// the `api` template's build gets them too (#1514).
     fn mount_observability(&self, api: Router) -> Router {
         // Delegates: the mount itself lives in one place, shared with
         // `server::Builder`. The two used to carry near-verbatim copies
         // of the same three ordering rules and had already drifted into
         // opposite relative order.
-        #[cfg(any(feature = "admin", feature = "tenancy"))]
-        {
-            return crate::access_log::mount_observability(
-                api,
-                self.access_log_layer(),
-                self.span_redact_params(),
-            );
-        }
-
-        #[cfg(not(any(feature = "admin", feature = "tenancy")))]
-        api
+        crate::access_log::mount_observability(
+            api,
+            self.access_log_layer(),
+            self.span_redact_params(),
+        )
     }
 
     /// `[logging] access_log = false` turns the request log off.
@@ -1119,11 +1098,6 @@ impl Cli {
     /// debug, and the previous default — off unless you found the right
     /// builder call — was not a decision anyone made on purpose.
     ///
-    /// Gated to match its only caller. Once `mount_observability`'s body
-    /// became conditional, this was dead code on a build with neither
-    /// feature — and `feature_combos` compiles with `-D warnings`, so
-    /// dead code is a build failure there rather than a lint.
-    #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn access_log_enabled(&self) -> bool {
         #[cfg(feature = "config")]
         {
@@ -2547,5 +2521,32 @@ mod assemble_app_tests {
         assert!(ok.headers().contains_key("x-frame-options"));
         let bad = send("evil.example").await.expect("request");
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+/// #1514 — the request id reaches a build without `admin` (the `api`
+/// template's `manage` alone), not only the batteries ones.
+#[cfg(all(test, feature = "sqlite", feature = "manage"))]
+mod observability_without_admin_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn assembled_app_sends_x_request_id() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let api = Router::new().route("/x", axum::routing::get(|| async { "ok" }));
+        let app = Cli::new().api(api).assemble_app(pool);
+        let res = app
+            .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+            .await
+            .expect("request");
+        assert!(
+            res.headers().contains_key("x-request-id"),
+            "no X-Request-Id on the assembled router: observability is gated off"
+        );
     }
 }

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `manage`-only builds log requests (#1514)
+
+A build without `admin` (the `api` template) now sends `X-Request-Id` and writes
+`rustango::access_log` lines. Turn the log off with `[logging] access_log = false`.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the `api` template gets the request span, `X-Request-Id` and access log (#1514)
+
+They were gated on `admin`, so a `manage`-only build mounted none of them.
+They now need only `_http_layers`, which `manage` implies.
+
 ## [0.59.11] — 2026-09-30
 
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)
