@@ -362,7 +362,8 @@ Three more registration macros hook into a model's admin pages:
   mounts an extra page/action at `/<prefix>/posts/duplicate`. The handler is an
   async `fn(Pool, Request) -> Response`. (Reserved suffixes like `new`,
   `__action`, `__autocomplete`, `{pk}`, `{pk}/edit`, `{pk}/delete` are skipped
-  with a warning.)
+  with a warning.) Under `with_user_perms` a GET needs `{table}.view` and any
+  other method `{table}.change`; add `perm = "publish"` to require `{table}.publish`.
 - **Queryset scoping** —
   `register_admin_queryset!("posts", hook)` where `hook: fn(&Parts) -> Vec<Filter>`
   narrows what a request can see (e.g. only the current user's rows). Multiple

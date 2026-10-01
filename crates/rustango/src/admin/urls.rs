@@ -829,6 +829,23 @@ impl AppState {
         true
     }
 
+    /// `true` when the user holds `{table}.<perm>`: `view`, `change`,
+    /// `add` and `delete` follow the flags above; any other codename
+    /// needs the perm itself.
+    pub(crate) fn allows(&self, table: &str, perm: &str) -> bool {
+        match perm {
+            "view" => self.is_visible(table),
+            "change" => !self.is_read_only(table),
+            "add" => self.can_add(table),
+            "delete" => self.can_delete(table),
+            other => self
+                .config
+                .user_perms
+                .as_ref()
+                .is_none_or(|perms| perms.contains(&format!("{table}.{other}"))),
+        }
+    }
+
     /// Look up a registered action handler. Returns `None` for the
     /// built-in `delete_selected`, which the caller handles itself,
     /// and for any unregistered name.
@@ -849,6 +866,7 @@ impl AppState {
 fn mount_custom_views(mut router: Router, state: AppState) -> Router {
     use axum::extract::Request;
     use axum::http::Method;
+    use axum::response::IntoResponse as _;
     use axum::routing::on;
     use axum::routing::MethodFilter;
 
@@ -883,9 +901,21 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
         // inside the closure, so the loop can keep using `state`.
         let pool_for_handler = state.pool.clone();
 
+        // A user without the view's perm gets 403 rather than the handler.
+        let perm = view.required_perm();
+        let allowed = state.allows(table, perm);
         let mounted_handler = move |req: Request| {
             let pool = pool_for_handler.clone();
-            async move { handler(pool, req).await }
+            async move {
+                if !allowed {
+                    return AdminError::Forbidden {
+                        table: table.to_owned(),
+                        action: perm,
+                    }
+                    .into_response();
+                }
+                handler(pool, req).await
+            }
         };
 
         // Axum has no `MethodFilter` for the QUERY method, so it

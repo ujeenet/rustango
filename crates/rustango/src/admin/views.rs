@@ -599,11 +599,12 @@ pub(crate) async fn table_view(
             // A detail URL needs a pk. Rows without one keep plain
             // cell content.
             // A trashed row has no detail page.
-            let detail_href = pk.as_deref().filter(|_| !trashed).map(|pk_str| {
+            let detail_href = (!pk_raw.is_empty() && !trashed).then(|| {
                 format!(
-                    "{prefix}/{table}/{pk_str}",
+                    "{prefix}/{table}/{pk}",
                     prefix = state.config.admin_prefix,
                     table = model.table,
+                    pk = crate::url_codec::url_encode(&pk_raw),
                 )
             });
             let cells: Vec<String> = display_items
@@ -1358,7 +1359,9 @@ pub(crate) fn post_save_redirect(
     form: &HashMap<String, String>,
 ) -> String {
     if form.contains_key("_continue") {
-        format!("{admin_prefix}/{table}/{pk_value}")
+        // Encoded: a raw CR/LF in a string PK panics `Redirect::to`.
+        let pk = crate::url_codec::url_encode(pk_value);
+        format!("{admin_prefix}/{table}/{pk}")
     } else if form.contains_key("_addanother") {
         // `/new`, not `/add` — that is the route `urls.rs` mounts.
         format!("{admin_prefix}/{table}/{CREATE_SEGMENT}")

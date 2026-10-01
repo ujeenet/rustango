@@ -156,3 +156,48 @@ async fn unmounted_verb_returns_405() {
     let (status, _) = fetch(build_app(pool), Method::PATCH, "/cv_post/duplicate").await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 }
+
+rustango::register_admin_view!(
+    "cv_post",
+    "publish",
+    Method::POST,
+    "Publish",
+    |_pool, _req| async move {
+        use axum::response::IntoResponse;
+        (StatusCode::ACCEPTED, "published").into_response()
+    },
+    perm = "publish",
+);
+
+fn app_with_perms(pool: Pool, perms: &[&str]) -> axum::Router {
+    rustango::admin::Builder::new(pool)
+        .admin_prefix("")
+        .with_user_perms(perms.iter().map(|p| (*p).to_owned()))
+        .build()
+}
+
+/// A view-only user may GET a custom view but not POST one (#1862).
+#[tokio::test]
+async fn custom_post_view_needs_change() {
+    let pool = fresh_pool().await;
+    let view_only = || app_with_perms(pool.clone(), &["cv_post.view"]);
+    let (status, _) = fetch(view_only(), Method::GET, "/cv_post/duplicate").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = fetch(view_only(), Method::POST, "/cv_post/duplicate").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let editor = app_with_perms(pool.clone(), &["cv_post.view", "cv_post.change"]);
+    let (status, _) = fetch(editor, Method::POST, "/cv_post/duplicate").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+}
+
+/// `perm = "publish"` requires `cv_post.publish`, not `change`.
+#[tokio::test]
+async fn custom_view_declares_its_codename() {
+    let pool = fresh_pool().await;
+    let editor = app_with_perms(pool.clone(), &["cv_post.view", "cv_post.change"]);
+    let (status, _) = fetch(editor, Method::POST, "/cv_post/publish").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let publisher = app_with_perms(pool, &["cv_post.view", "cv_post.publish"]);
+    let (status, body) = fetch(publisher, Method::POST, "/cv_post/publish").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+}

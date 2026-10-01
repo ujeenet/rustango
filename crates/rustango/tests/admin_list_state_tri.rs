@@ -43,6 +43,21 @@ pub struct Item {
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "adminls_slug", admin(list_display = "title"))]
+#[allow(dead_code)]
+pub struct Slugged {
+    #[rustango(primary_key, max_length = 32)]
+    pub slug: String,
+    #[rustango(max_length = 64)]
+    pub title: String,
+}
+
+async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Slugged>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Item>(pool).await;
+}
+
 fn kind_filters(value: &str) -> Vec<Filter> {
     match value {
         "low" => vec![Filter::new("rank", Op::Eq, SqlValue::I64(0))],
@@ -377,8 +392,26 @@ async fn facet_and_date_counts_follow_the_filters(pool: &Pool) {
     );
 }
 
+/// A CR/LF in a string PK is percent-encoded into the redirect, not a panic (#1862).
+async fn string_pk_redirect_is_encoded(pool: &Pool) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("{PREFIX}/adminls_slug"))
+        .header("content-type", "application/x-www-form-urlencoded");
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix(PREFIX)
+        .build();
+    let body = Body::from("slug=a%0D%0Ab%2Fc&title=t&_continue=1");
+    let res = app.oneshot(req.body(body).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let to = res.headers()["location"].to_str().unwrap().to_owned();
+    assert_eq!(to, format!("{PREFIX}/adminls_slug/a%0D%0Ab%2Fc"));
+    // The encoded segment routes back to the row (404 otherwise).
+    get(pool, &to).await;
+}
+
 tri_dialect_test! {
-    model: Item,
+    setup: setup,
     scenarios: [
         equal_sort_keys_page_in_pk_order,
         links_keep_the_whole_filter_state,
@@ -388,5 +421,6 @@ tri_dialect_test! {
         bool_facet_reads_true_and_toggles_off,
         soft_deleted_rows_leave_the_list,
         facet_and_date_counts_follow_the_filters,
+        string_pk_redirect_is_encoded,
     ],
 }

@@ -1613,7 +1613,8 @@ fn substitute_pk(template: &str, pk: &str) -> String {
     if !template.contains("{pk}") {
         return template.to_owned();
     }
-    template.replace("{pk}", pk)
+    // Encoded as a path segment: a raw CR/LF panics `Redirect::to`.
+    template.replace("{pk}", &crate::url_codec::url_encode(pk))
 }
 
 /// Substitute every `{column}` placeholder in a `success_url`
@@ -1683,7 +1684,7 @@ fn interpolate_success_url(
                 column.column
             )
         })?;
-        out = out.replace(&format!("{{{name}}}"), &v);
+        out = out.replace(&format!("{{{name}}}"), &crate::url_codec::url_encode(&v));
     }
     Ok(out)
 }
@@ -4668,6 +4669,13 @@ mod tests {
             substitute_pk("/posts/{pk}/edit", "abc-123"),
             "/posts/abc-123/edit"
         );
+    }
+
+    #[test]
+    fn substitute_pk_percent_encodes_the_segment() {
+        // A raw CR/LF would panic `Redirect::to`.
+        assert_eq!(substitute_pk("/p/{pk}", "a\r\nb/c"), "/p/a%0D%0Ab%2Fc");
+        let _ = axum::response::Redirect::to(&substitute_pk("/p/{pk}", "a\nb"));
     }
 
     #[test]

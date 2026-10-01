@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Custom admin views need `change` for writes
+
+**Breaking:** grant `{table}.change`, or declare `perm = "…"` on `register_admin_view!`, for
+POST/PUT/PATCH/DELETE views. `AdminCustomView` gains a `perm` field; struct literals must set it.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
