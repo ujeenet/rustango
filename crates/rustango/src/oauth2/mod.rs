@@ -196,6 +196,8 @@ pub struct OAuth2Provider {
     /// Custom mapper. Defaults to [`default_user_mapper`] (works for OIDC
     /// providers where userinfo follows OIDC claims spec).
     pub user_mapper: UserMapper,
+    /// Fetched after userinfo into `raw["emails"]` (GitHub `/user/emails`).
+    emails_url: Option<String>,
     client_config: Option<ClientConfig>,
     http: EgressCache,
 }
@@ -210,6 +212,7 @@ impl std::fmt::Debug for OAuth2Provider {
             .field("auth_url", &self.auth_url)
             .field("token_url", &self.token_url)
             .field("userinfo_url", &self.userinfo_url)
+            .field("emails_url", &self.emails_url)
             .field("scopes", &self.scopes)
             .field("use_pkce", &self.use_pkce)
             .field("client_config", &self.client_config.is_some())
@@ -241,6 +244,7 @@ impl OAuth2Provider {
             extra_auth_params: Vec::new(),
             use_pkce: true,
             user_mapper: Arc::new(default_user_mapper),
+            emails_url: None,
             client_config: None,
             http: EgressCache::default(),
         }
@@ -249,6 +253,14 @@ impl OAuth2Provider {
     #[must_use]
     pub fn with_userinfo_url(mut self, url: impl Into<String>) -> Self {
         self.userinfo_url = Some(url.into());
+        self
+    }
+
+    /// Also GET `url` with the access token and put the JSON in
+    /// `raw["emails"]`, for a mapper that reads the verified flag there.
+    #[must_use]
+    pub fn with_emails_url(mut self, url: impl Into<String>) -> Self {
+        self.emails_url = Some(url.into());
         self
     }
 
@@ -479,7 +491,20 @@ impl OAuth2Provider {
             .header("Accept", "application/json")
             .send()
             .await?;
-        let raw: serde_json::Value = decode_or_error(resp).await?;
+        let mut raw: serde_json::Value = decode_or_error(resp).await?;
+        if let Some(url) = self.emails_url.as_deref() {
+            let resp = self
+                .checked(url, reqwest::Method::GET, policy)
+                .await?
+                .bearer_auth(&tokens.access_token)
+                .header("Accept", "application/json")
+                .send()
+                .await?;
+            let emails: serde_json::Value = decode_or_error(resp).await?;
+            if let Some(obj) = raw.as_object_mut() {
+                obj.insert("emails".to_owned(), emails);
+            }
+        }
 
         let user = (self.user_mapper)(&self.name, raw, &tokens)?;
         Ok((user, tokens))
@@ -906,6 +931,38 @@ mod tests {
         let p = OAuth2Provider::new("t", "c", "s", "https://app/cb", "", format!("{base}/token"))
             .with_userinfo_url(format!("{base}/userinfo"));
         (p, peers)
+    }
+
+    /// The GitHub preset reads the verified flag from `/user/emails` (#1842).
+    #[tokio::test]
+    async fn github_flow_fetches_user_emails() {
+        let app = axum::Router::new()
+            .route(
+                "/token",
+                axum::routing::post(|| async { r#"{"access_token":"t"}"# }),
+            )
+            .route(
+                "/user",
+                axum::routing::get(|| async { r#"{"id":7,"email":"pub@example.com"}"# }),
+            )
+            .route(
+                "/user/emails",
+                axum::routing::get(|| async {
+                    r#"[{"email":"pub@example.com","primary":true,"verified":true}]"#
+                }),
+            );
+        let base = serve(app).await;
+        let mut p = providers::github("c", "s", "https://app/cb")
+            .with_userinfo_url(format!("{base}/user"))
+            .with_emails_url(format!("{base}/user/emails"));
+        p.token_url = format!("{base}/token");
+        let (_, flow) = p.begin();
+        let (user, _) = p
+            .complete_with(&flow, "code", &flow.state, &loopback())
+            .await
+            .unwrap();
+        assert_eq!(user.email.as_deref(), Some("pub@example.com"));
+        assert!(user.email_verified);
     }
 
     /// Token and userinfo calls reuse one pooled connection (#1792).

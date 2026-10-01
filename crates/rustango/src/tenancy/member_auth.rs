@@ -419,9 +419,9 @@ struct CallbackParams {
     next: Option<String>,
 }
 
-/// Best-effort external scheme+host for building absolute redirect URIs,
-/// honoring `X-Forwarded-Proto` and `X-Forwarded-Host` (behind a proxy /
-/// load balancer) and falling back to the request scheme + `Host`.
+/// Best-effort external scheme+host for building absolute redirect URIs:
+/// the request scheme + `Host`. `X-Forwarded-Proto` / `X-Forwarded-Host`
+/// count only from a proxy named in `RealIpLayer::trust_proxies` (#1842).
 /// Default scheme is `https` for non-local hosts, `http` for
 /// `localhost` / `127.` so local plain-HTTP dev works.
 ///
@@ -431,16 +431,17 @@ struct CallbackParams {
 pub(crate) fn external_base(parts: &Parts) -> String {
     let headers = &parts.headers;
     let first = |v: &str| v.split(',').next().unwrap_or(v).trim().to_owned();
+    let forwarded = |name: &str| {
+        from_trusted_proxy(parts)
+            .then(|| headers.get(name).and_then(|v| v.to_str().ok()))
+            .flatten()
+    };
 
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
+    let proto = forwarded("x-forwarded-proto")
         .map(first)
         .filter(|s| !s.is_empty());
 
-    let host = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
+    let host = forwarded("x-forwarded-host")
         .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()))
         .map(first)
         .unwrap_or_else(|| "localhost".to_owned());
@@ -456,6 +457,14 @@ pub(crate) fn external_base(parts: &Parts) -> String {
     });
 
     format!("{scheme}://{host}")
+}
+
+/// The peer is a trusted proxy: `RealIpLayer` set a `TrustedRealIp`.
+fn from_trusted_proxy(parts: &Parts) -> bool {
+    parts
+        .extensions
+        .get::<crate::real_ip::TrustedRealIp>()
+        .is_some()
 }
 
 /// The absolute callback URL for a slug — must match at begin + callback.
@@ -1072,13 +1081,27 @@ mod tests {
         b.body(()).unwrap().into_parts().0
     }
 
+    /// A client can't pick the `redirect_uri` host with forwarded headers (#1842).
     #[test]
-    fn external_base_honors_forwarded_headers() {
+    fn external_base_ignores_forwarded_headers_from_an_untrusted_peer() {
         let parts = parts_with(&[
+            ("x-forwarded-proto", "http"),
+            ("x-forwarded-host", "evil.example.com"),
+            ("host", "gym.example.com"),
+        ]);
+        assert_eq!(external_base(&parts), "https://gym.example.com");
+    }
+
+    #[test]
+    fn external_base_honors_forwarded_headers_from_a_trusted_proxy() {
+        let mut parts = parts_with(&[
             ("x-forwarded-proto", "https"),
             ("x-forwarded-host", "g.example.com"),
             ("host", "internal:8080"),
         ]);
+        parts
+            .extensions
+            .insert(crate::real_ip::TrustedRealIp([203, 0, 113, 9].into()));
         assert_eq!(external_base(&parts), "https://g.example.com");
     }
 

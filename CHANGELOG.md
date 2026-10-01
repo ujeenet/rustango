@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — GitHub email verification is read, member `redirect_uri` ignores spoofed hosts (#1842)
+
+**Breaking:** the GitHub preset takes `email_verified` from `/user/emails` and Facebook
+never vouches for an email. Member SSO honours `X-Forwarded-Host`/`-Proto` only from a
+proxy named in `RealIpLayer::trust_proxies`. New `OAuth2Provider::with_emails_url`.
+
 ### Security — passkey challenges expire and open once; counters can't reset (#1841)
 
 **Breaking:** a sealed challenge carries its ceremony and issue time, expires after 5 min

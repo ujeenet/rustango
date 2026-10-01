@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+### SSO email verification and forwarded hosts (#1842)
+
+**Breaking:** a GitHub login now also calls `/user/emails` (needs the `user:email` scope or
+the app's email permission); a failed call fails the login. Facebook emails are never
+verified, so email linking skips them. Behind a proxy, name it in `RealIpLayer::trust_proxies`
+or member SSO builds `redirect_uri` from `Host`.
+
 ### Passkey challenge and counter API (#1841)
 
 **Breaking:** `seal_challenge` takes a `CeremonyPurpose`; `open_challenge` takes the same

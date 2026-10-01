@@ -87,8 +87,8 @@ pub fn microsoft_for_tenant(
 // trust your TLS-protected token endpoint).
 
 // --------------------------------------------------------------------- github
-// Pure OAuth2 — no /userinfo, uses /user. Email is private by default; we
-// fetch `/user/emails` separately when the primary email isn't on /user.
+// Pure OAuth2 — no /userinfo, uses /user. `/user` carries no verified flag,
+// so the flow also fetches `/user/emails` into `raw["emails"]` (#1842).
 
 #[must_use]
 pub fn github(
@@ -105,6 +105,7 @@ pub fn github(
         "https://github.com/login/oauth/access_token",
     )
     .with_userinfo_url("https://api.github.com/user")
+    .with_emails_url("https://api.github.com/user/emails")
     .with_scopes(["read:user", "user:email"])
     .with_user_mapper(Arc::new(github_mapper))
 }
@@ -119,7 +120,26 @@ fn github_mapper(
         .and_then(serde_json::Value::as_i64)
         .ok_or(OAuthError::MissingField("id"))?
         .to_string();
-    let email = raw.get("email").and_then(|v| v.as_str()).map(str::to_owned);
+    // Only `/user/emails` says whether an address is verified.
+    let emails = raw.get("emails").and_then(serde_json::Value::as_array);
+    let verified =
+        |e: &serde_json::Value| e.get("verified") == Some(&serde_json::Value::Bool(true));
+    let primary = emails
+        .and_then(|l| {
+            l.iter()
+                .find(|e| verified(e) && e.get("primary") == Some(&serde_json::Value::Bool(true)))
+        })
+        .and_then(|e| e.get("email"))
+        .and_then(|v| v.as_str());
+    let email = primary
+        .or_else(|| raw.get("email").and_then(|v| v.as_str()))
+        .map(str::to_owned);
+    let email_verified = email.as_deref().is_some_and(|addr| {
+        emails.is_some_and(|l| {
+            l.iter()
+                .any(|e| verified(e) && e.get("email").and_then(|v| v.as_str()) == Some(addr))
+        })
+    });
     let name = raw
         .get("name")
         .and_then(|v| v.as_str())
@@ -132,9 +152,7 @@ fn github_mapper(
     Ok(NormalizedUser {
         provider: provider.to_owned(),
         provider_user_id: id,
-        // GitHub doesn't return `email_verified`; if email comes back from
-        // /user it's a verified primary — assume verified, false otherwise.
-        email_verified: email.is_some(),
+        email_verified,
         email,
         name,
         avatar_url,
@@ -283,7 +301,8 @@ fn facebook_mapper(
     Ok(NormalizedUser {
         provider: provider.to_owned(),
         provider_user_id: id,
-        email_verified: email.is_some(),
+        // The Graph API has no verified flag, so never vouch for it (#1842).
+        email_verified: false,
         email,
         name,
         avatar_url,
@@ -374,8 +393,61 @@ mod tests {
         let u = github_mapper("github", raw, &tokens).unwrap();
         assert_eq!(u.provider_user_id, "583231");
         assert_eq!(u.email.as_deref(), Some("octocat@github.com"));
-        assert!(u.email_verified);
+        // /user alone says nothing about verification (#1842).
+        assert!(!u.email_verified);
         assert_eq!(u.name.as_deref(), Some("The Octocat"));
+    }
+
+    fn no_tokens() -> TokenResponse {
+        TokenResponse {
+            access_token: "x".into(),
+            refresh_token: None,
+            expires_in: None,
+            token_type: None,
+            id_token: None,
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn github_mapper_reads_verified_from_user_emails() {
+        let raw = serde_json::json!({
+            "id": 1_i64,
+            "email": "public@example.com",
+            "emails": [
+                {"email": "public@example.com", "primary": false, "verified": false},
+                {"email": "primary@example.com", "primary": true, "verified": true},
+            ],
+        });
+        let u = github_mapper("github", raw, &no_tokens()).unwrap();
+        assert_eq!(u.email.as_deref(), Some("primary@example.com"));
+        assert!(u.email_verified);
+
+        // An unverified primary is not upgraded by anything else.
+        let raw = serde_json::json!({
+            "id": 1_i64,
+            "email": "victim@example.com",
+            "emails": [{"email": "victim@example.com", "primary": true, "verified": false}],
+        });
+        let u = github_mapper("github", raw, &no_tokens()).unwrap();
+        assert_eq!(u.email.as_deref(), Some("victim@example.com"));
+        assert!(!u.email_verified);
+    }
+
+    #[test]
+    fn facebook_email_is_not_assumed_verified() {
+        let raw = serde_json::json!({"id": "1", "email": "alice@fb.com"});
+        let u = facebook_mapper("facebook", raw, &no_tokens()).unwrap();
+        assert!(!u.email_verified);
+    }
+
+    #[test]
+    fn github_preset_fetches_user_emails() {
+        let p = github("cid", "csec", "https://app.test/cb");
+        assert_eq!(
+            p.emails_url.as_deref(),
+            Some("https://api.github.com/user/emails")
+        );
     }
 
     #[test]
