@@ -228,7 +228,9 @@ async fn apply_system_migrations(
 }
 
 /// The tenant-scope system chain for the project whose migrations are `dir`.
-fn tenant_system_chain(dir: &Path) -> crate::migrate::make::SystemChain {
+fn tenant_system_chain(
+    dir: &Path,
+) -> Result<crate::migrate::make::SystemChain, crate::migrate::MigrateError> {
     crate::migrate::make::SystemChain::for_migrations_dir(dir, &[crate::core::ModelScope::Tenant])
 }
 
@@ -285,7 +287,7 @@ pub async fn migrate_registry_pool(
     let chain = crate::migrate::make::SystemChain::for_migrations_dir(
         dir,
         &[crate::core::ModelScope::Registry],
-    );
+    )?;
     applied.extend(
         apply_system_migrations(registry, &chain, crate::core::ModelScope::Registry, None).await?,
     );
@@ -375,7 +377,7 @@ async fn migrate_tenants_opts(
         ScopedDir::Owned(temp) => temp.path().to_path_buf(),
         ScopedDir::Original => dir.to_path_buf(),
     };
-    let chain = tenant_system_chain(dir);
+    let chain = tenant_system_chain(dir)?;
     let migrations_in_scope = rustango::migrate::file::list_dir(&scoped_path)
         .map(|m| m.len())
         .unwrap_or(0);
@@ -548,7 +550,7 @@ where
         ScopedDir::Owned(temp) => temp.path().to_path_buf(),
         ScopedDir::Original => dir.to_path_buf(),
     };
-    let chain = tenant_system_chain(dir);
+    let chain = tenant_system_chain(dir)?;
 
     // Schema-mode is PG-only by language, and only the PG runner knows
     // how to build a `search_path`-scoped pool for it. Route the same
@@ -589,7 +591,7 @@ where
         ScopedDir::Owned(temp) => temp.path().to_path_buf(),
         ScopedDir::Original => dir.to_path_buf(),
     };
-    let chain = tenant_system_chain(dir);
+    let chain = tenant_system_chain(dir)?;
 
     let registry_pool = pools.registry_pool();
     let orgs: Vec<Org> = Org::objects()

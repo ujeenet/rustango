@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `migrate` fails when the system chain can't be generated (#2014)
+
+`migrate`, `migrate-registry` and `migrate-tenants` now return the generation error instead of applying a stale
+`system/migrations/` chain. A read-only image must ship an up-to-date `system/migrations/`.
+
 ### Tenant migrate verbs fail on a failed tenant (#1844)
 
 `migrate-tenants`, the combined `migrate` and `migrate --fake --all-tenants` return an error (non-zero exit)

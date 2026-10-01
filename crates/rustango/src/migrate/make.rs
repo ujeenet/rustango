@@ -299,7 +299,13 @@ pub(crate) struct SystemChain {
 
 impl SystemChain {
     /// [`Self::prepare`] for the project whose `migrations/` dir is `dir`.
-    pub(crate) fn for_migrations_dir(dir: &Path, scopes: &[crate::core::ModelScope]) -> Self {
+    ///
+    /// # Errors
+    /// As [`Self::prepare`].
+    pub(crate) fn for_migrations_dir(
+        dir: &Path,
+        scopes: &[crate::core::ModelScope],
+    ) -> Result<Self, MigrateError> {
         // A bare dir not named `migrations` keeps `system/` inside it.
         let root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
             dir.parent().unwrap_or(dir)
@@ -312,7 +318,13 @@ impl SystemChain {
     /// Generate the chain for `scopes` from today's models. A dir that was
     /// empty when this process first saw it stays `Regenerated`: its names
     /// may already sit in a ledger for other content.
-    pub(crate) fn prepare(project_root: &Path, scopes: &[crate::core::ModelScope]) -> Self {
+    ///
+    /// # Errors
+    /// A generation error, so `migrate` never applies a stale chain (#2014).
+    pub(crate) fn prepare(
+        project_root: &Path,
+        scopes: &[crate::core::ModelScope],
+    ) -> Result<Self, MigrateError> {
         use super::runner::ChainOrigin;
         static REGENERATED: std::sync::OnceLock<
             std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
@@ -324,9 +336,9 @@ impl SystemChain {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let shipped = file::list_dir(&dir).is_ok_and(|m| !m.is_empty());
-        for &scope in scopes {
-            let _ = make_migrations_system(project_root, scope, None);
-        }
+        let generated = scopes
+            .iter()
+            .try_for_each(|&scope| make_migrations_system(project_root, scope, None).map(drop));
         let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
         let origin = if !shipped {
             regenerated.insert(key);
@@ -336,7 +348,9 @@ impl SystemChain {
         } else {
             ChainOrigin::OnDisk
         };
-        Self { dir, origin }
+        // After the origin is recorded: a half-written dir is still regenerated.
+        generated?;
+        Ok(Self { dir, origin })
     }
 
     pub(crate) fn dir(&self) -> &Path {

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a system-migration generation error fails `migrate` (#2014)
+
+An unsupported framework field change (or an unwritable `system/migrations/`) was dropped, and `migrate` applied the stale chain.
+
 ### Fixed — tenant migration failures exit non-zero; ledger bootstrap takes the migrate lock (#1844)
 
 `migrate-tenants`, `migrate` and `migrate --fake --all-tenants` now fail when any tenant failed.
