@@ -30,6 +30,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 /// dropped connection (#1541). Mount it inside the request-id and
 /// access-log layers so both see the 500, and inside CORS and the
 /// security headers so the 500 carries them.
+/// A panic inside a streaming body, after the headers are sent, is not caught.
 #[cfg(any(feature = "manage", feature = "tenancy"))]
 #[must_use]
 pub(crate) fn catch_panics(router: axum::Router) -> axum::Router {
