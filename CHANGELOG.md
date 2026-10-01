@@ -30,6 +30,10 @@ A JWT login stamps its session start after the last logout.
 
 The error is logged; the form shows a fixed message.
 
+### Security — the OAuth2 callback 502 no longer echoes upstream error text (#1847)
+
+The IdP body or transport error is logged; the browser gets a fixed message.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

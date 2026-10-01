@@ -211,8 +211,13 @@ async fn callback_handler(
                 .into_response()
         }
         Err(e) => {
+            // `e` can carry the IdP body or upstream addresses: log it only (#1847).
             tracing::warn!(error = %e, provider = %provider_name, "oauth2 callback failed");
-            return (StatusCode::BAD_GATEWAY, format!("auth failed: {e}")).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                "authentication failed at the identity provider",
+            )
+                .into_response();
         }
     };
 
@@ -376,6 +381,57 @@ mod tests {
         assert!(std::str::from_utf8(&body)
             .unwrap()
             .contains("invalid flow cookie"));
+    }
+
+    /// #1847 — an upstream failure's text (here a blocked address) stays out of the 502.
+    #[tokio::test]
+    async fn callback_upstream_error_is_not_echoed() {
+        let registry = OAuth2Registry::new();
+        let mut p = providers::google("cid", "csec", "https://app/cb");
+        p.token_url = "https://10.9.8.7/token".into();
+        registry.register("acme", p);
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/acme/google/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let loc = login
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let state = loc
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        let set = login.headers().get(header::SET_COOKIE).unwrap();
+        let pair = set.to_str().unwrap().split(';').next().unwrap().to_owned();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/auth/acme/google/callback?code=abc&state={state}"))
+                    .header(header::COOKIE, pair)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert_eq!(body, "authentication failed at the identity provider");
     }
 
     /// The cookie set by `/login` is read back and opened on callback: a
