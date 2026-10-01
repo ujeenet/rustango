@@ -63,7 +63,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::sql::{raw_execute_pool, transaction_pool, ExecError, Pool, PoolTx};
+use crate::sql::{
+    raw_execute_tx, transaction_pool, write_transaction_pool, ExecError, Pool, PoolTx,
+};
 
 /// Run `f` in a transaction that ALWAYS rolls back when the closure
 /// returns, on `Ok` and on `Err` alike. The rollback happens after
@@ -110,15 +112,13 @@ macro_rules! with_rollback {
     }};
 }
 
-/// Run `f`, then clear `tables` whatever the result. This is the
+/// Run `f`, then clear `tables` whatever the result, even when `f`
+/// panics (the panic is re-raised after the clear). This is the
 /// `TransactionTestCase` shape: the closure's writes commit, so
 /// signals, `on_commit` hooks and commit triggers all fire, and the
 /// teardown leaves the tables clean for the next test.
 ///
-/// Like `manage flush`, the method depends on the dialect:
-/// - **Postgres**: one `TRUNCATE TABLE … RESTART IDENTITY CASCADE`.
-/// - **MySQL / SQLite**: `DELETE FROM "<table>"` per table, in the
-///   given order. Sequences are not reset.
+/// The clear is [`truncate_tables`]: one transaction, any table order.
 ///
 /// The closure's value comes back unchanged. A failed truncate
 /// becomes the error only when the closure succeeded, so a noisy
@@ -161,57 +161,50 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, ExecError>> + Send,
 {
-    let result = f().await;
+    // Catch a panic in the body so the clear still runs (#1959).
+    let mut body = Box::pin(async move { f().await });
+    let result = std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Ready(v)) => std::task::Poll::Ready(Ok(v)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(panic) => std::task::Poll::Ready(Err(panic)),
+        }
+    })
+    .await;
     let truncate = truncate_tables(pool, tables).await;
     match (result, truncate) {
-        (Ok(v), Ok(())) => Ok(v),
-        (Ok(_), Err(e)) => Err(e),
-        (Err(e), _) => Err(e),
+        (Err(panic), _) => std::panic::resume_unwind(panic),
+        (Ok(Ok(v)), Ok(())) => Ok(v),
+        (Ok(Ok(_)), Err(e)) => Err(e),
+        (Ok(Err(e)), _) => Err(e),
     }
 }
 
-/// Clear every table in `tables`. Public so fixtures and manual
-/// teardown can reuse it outside [`with_truncate_after`].
-///
-/// Postgres gets one `TRUNCATE`; MySQL and SQLite get a
-/// `DELETE FROM` per table. The per-table path does not stop at the
-/// first failure, so the rest are still cleared.
+/// Clear every table in `tables`, in one transaction, in any order.
+/// Public so fixtures and manual teardown can reuse it outside
+/// [`with_truncate_after`]. The statements come from
+/// [`crate::sql::Dialect::clear_tables_sql`]:
+/// - **Postgres**: `TRUNCATE … RESTART IDENTITY CASCADE`; ids restart
+///   and referencing tables are cleared too.
+/// - **MySQL**: `DELETE` with FK checks off for that statement; ids
+///   keep counting and rows in unlisted tables that point here stay.
+/// - **SQLite**: `DELETE` with FK checks deferred to `COMMIT`, which
+///   fails if an unlisted table still points at a cleared row.
 ///
 /// An empty slice does nothing.
 ///
 /// # Errors
-/// - The first driver error. Later ones are dropped.
+/// The first driver error; the whole clear is then rolled back.
 pub async fn truncate_tables(pool: &Pool, tables: &[&str]) -> Result<(), ExecError> {
     if tables.is_empty() {
         return Ok(());
     }
-    let dialect = pool.dialect().name();
-    if dialect == "postgres" {
-        let quoted: Vec<String> = tables
-            .iter()
-            .map(|t| format!(r#""{}""#, t.replace('"', r#""""#)))
-            .collect();
-        let sql = format!(
-            "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
-            quoted.join(", "),
-        );
-        raw_execute_pool(pool, &sql, Vec::new()).await?;
-        Ok(())
-    } else {
-        let mut first_err: Option<ExecError> = None;
-        for table in tables {
-            let sql = format!(r#"DELETE FROM "{}""#, table.replace('"', r#""""#));
-            if let Err(e) = raw_execute_pool(pool, &sql, Vec::new()).await {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+    let mut tx = write_transaction_pool(pool).await?;
+    for sql in pool.dialect().clear_tables_sql(tables) {
+        raw_execute_tx(&mut tx, &sql, Vec::new()).await?;
     }
+    tx.commit().await.map_err(ExecError::Driver)?;
+    Ok(())
 }
 
 /// [`with_truncate_after`] in the same macro shape as

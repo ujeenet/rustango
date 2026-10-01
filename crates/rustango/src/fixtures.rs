@@ -19,9 +19,9 @@
 //! ## How it works
 //!
 //! A fixture is an array of JSON objects. Each object becomes one
-//! `INSERT INTO <table> (col, ...) VALUES (...)`. Column names come from
-//! the object keys and are checked; values are bound as parameters, so
-//! there is no SQL injection.
+//! `INSERT INTO <table> (col, ...) VALUES (...)`, all in one transaction.
+//! When a registered model owns the table, keys must be its fields and
+//! values are typed from them; values are always bound as parameters.
 //!
 //! Fixtures load in the order you register them, so load parent tables
 //! before child tables to satisfy foreign keys.
@@ -33,7 +33,7 @@ use serde_json::Value;
 
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
-use crate::sql::Pool;
+use crate::sql::{Pool, PoolTx};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FixtureError {
@@ -119,19 +119,36 @@ impl Fixture {
         Ok(self)
     }
 
-    /// Insert every row into `table` on any supported backend.
-    /// Placeholders and quoting come from the pool's dialect.
+    /// Insert every row into `table` on any supported backend, in one
+    /// transaction. When a registered model owns `table`, values are
+    /// typed from its fields and its id sequence is moved past the
+    /// loaded ids; other tables bind JSON scalars as-is.
     ///
     /// # Errors
-    /// [`FixtureError::Database`] on driver-level failures.
+    /// [`FixtureError::Format`] for a key the model has no field for or
+    /// a value of the wrong type; [`FixtureError::Database`] on driver
+    /// failures. Nothing is inserted on error.
     pub async fn load_into_pool(&self, table: &str, pool: &Pool) -> Result<usize, FixtureError> {
+        load_all_pool(&[(table, self)], pool).await
+    }
+
+    async fn load_tx(&self, table: &str, tx: &mut PoolTx<'_>) -> Result<usize, FixtureError> {
         validate_ident(table)?;
-        let mut count = 0;
+        let schema = model_for_table(table);
         for row in &self.rows {
-            insert_row_pool(pool, table, row).await?;
-            count += 1;
+            match schema {
+                Some(schema) => insert_typed_row(tx, schema, row, &self.name).await?,
+                None => insert_row_raw(tx, table, row).await?,
+            }
         }
-        Ok(count)
+        if let Some((sql, binds)) =
+            schema.and_then(|s| crate::migrate::manage::reset_sequence_stmt(tx.dialect(), s))
+        {
+            crate::sql::raw_execute_tx(tx, &sql, binds)
+                .await
+                .map_err(|e| FixtureError::Database(e.to_string()))?;
+        }
+        Ok(self.rows.len())
     }
 
     /// PG-typed back-compat shim around [`Self::load_into_pool`].
@@ -145,8 +162,8 @@ impl Fixture {
     }
 }
 
-/// Load several fixtures in order on any supported backend. Stops at
-/// the first error.
+/// Load several fixtures in order on any supported backend, in one
+/// transaction: the first error rolls every fixture back.
 ///
 /// # Errors
 /// First fixture error encountered.
@@ -154,10 +171,15 @@ pub async fn load_all_pool(
     fixtures: &[(&str, &Fixture)],
     pool: &Pool,
 ) -> Result<usize, FixtureError> {
+    let db = |e: crate::sql::ExecError| FixtureError::Database(e.to_string());
+    let mut tx = crate::sql::write_transaction_pool(pool).await.map_err(db)?;
     let mut total = 0;
     for (table, fixture) in fixtures {
-        total += fixture.load_into_pool(table, pool).await?;
+        total += fixture.load_tx(table, &mut tx).await?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| db(crate::sql::ExecError::Driver(e)))?;
     Ok(total)
 }
 
@@ -170,8 +192,53 @@ pub async fn load_all(fixtures: &[(&str, &Fixture)], pool: &PgPool) -> Result<us
     load_all_pool(fixtures, &Pool::Postgres(pool.clone())).await
 }
 
-async fn insert_row_pool(
-    pool: &Pool,
+/// The registered model whose table is `table`, if any.
+fn model_for_table(table: &str) -> Option<&'static crate::core::ModelSchema> {
+    inventory::iter::<crate::core::ModelEntry>()
+        .map(|e| e.schema)
+        .find(|s| s.table == table)
+}
+
+/// One row through the ORM insert, each value typed by its field.
+async fn insert_typed_row(
+    tx: &mut PoolTx<'_>,
+    schema: &'static crate::core::ModelSchema,
+    row: &serde_json::Map<String, Value>,
+    fixture: &str,
+) -> Result<(), FixtureError> {
+    let bad = |detail: String| FixtureError::Format {
+        file: fixture.to_owned(),
+        detail,
+    };
+    if row.is_empty() {
+        return Err(bad("row has no columns".into()));
+    }
+    let mut columns = Vec::with_capacity(row.len());
+    let mut values = Vec::with_capacity(row.len());
+    for (key, raw) in row {
+        let field = schema
+            .scalar_fields()
+            .find(|f| f.name == key || f.column == key)
+            .ok_or_else(|| bad(format!("`{}` has no field `{key}`", schema.table)))?;
+        let value = crate::migrate::manage::json_to_sql_value(raw, field)
+            .map_err(|e| bad(format!("field `{key}`: {e}")))?;
+        columns.push(field.column);
+        values.push(value);
+    }
+    let query = crate::core::InsertQuery {
+        model: schema,
+        columns,
+        values,
+        returning: vec![],
+        on_conflict: None,
+    };
+    crate::sql::insert_tx(tx, &query)
+        .await
+        .map_err(|e| FixtureError::Database(e.to_string()))
+}
+
+async fn insert_row_raw(
+    tx: &mut PoolTx<'_>,
     table: &str,
     row: &serde_json::Map<String, Value>,
 ) -> Result<(), FixtureError> {
@@ -185,7 +252,7 @@ async fn insert_row_pool(
     for col in &columns {
         validate_ident(col)?;
     }
-    let dialect = pool.dialect();
+    let dialect = tx.dialect();
     let cols_sql: Vec<String> = columns.iter().map(|c| dialect.quote_ident(c)).collect();
     let placeholders: Vec<String> = (1..=columns.len())
         .map(|i| dialect.placeholder(i))
@@ -196,13 +263,11 @@ async fn insert_row_pool(
         cols_sql.join(", "),
         placeholders.join(", "),
     );
-    // One `SqlValue` per row value; `raw_execute_pool` binds them
-    // through the executor's per-backend macros.
     let binds: Vec<crate::core::SqlValue> = columns
         .iter()
         .map(|col| value_to_sqlvalue(&row[col.as_str()]))
         .collect();
-    crate::sql::raw_execute_pool(pool, &sql, binds)
+    crate::sql::raw_execute_tx(tx, &sql, binds)
         .await
         .map_err(|e| FixtureError::Database(e.to_string()))?;
     Ok(())

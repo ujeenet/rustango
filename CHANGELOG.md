@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — test DB helpers work on MySQL and after a panic; fixtures load typed and atomic (#1959)
+
+`truncate_tables` runs in one transaction in any FK order on all three backends; `with_truncate_after` clears even when the body panics.
+A `Fixture` load types values from the table's model, rolls back on error and resets the PG sequence; `create_tables` is re-runnable.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)

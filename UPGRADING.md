@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `truncate_tables` and `Fixture` loads are one transaction (#1959)
+
+A failing table or row rolls back the whole call. Fixture keys for a model table must be its fields, and values are typed from them.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)

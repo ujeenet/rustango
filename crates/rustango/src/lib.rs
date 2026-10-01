@@ -1205,8 +1205,8 @@ pub mod test_assertions;
 pub mod test_filter;
 
 /// Shared test fixtures — the [`setup_test_data!`] /
-/// [`setup_test_data_async!`] macros build the fixture once per test
-/// binary instead of once per test.
+/// [`setup_test_data_async!`] macros build the fixture once per process
+/// (per file under `cargo test`, per test under nextest).
 pub mod test_data;
 
 /// Test factories — build model instances for tests without repeating
