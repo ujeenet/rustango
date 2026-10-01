@@ -1901,16 +1901,53 @@ async fn handle_create_post(
                 Ok(url) => url,
                 Err(e) => return template_error(&e),
             },
-            Err(e) => return template_error(&format!("insert row: {e}")),
+            Err(e) => return insert_failed(&state, &form, &insert_q, &e, &headers).await,
         }
     } else {
         if let Err(e) = crate::sql::insert_pool(&state.pool, &insert_q).await {
-            return template_error(&format!("insert row: {e}"));
+            return insert_failed(&state, &form, &insert_q, &e, &headers).await;
         }
         state.success_url.clone()
     };
     axum::response::Redirect::to(&target_url).into_response()
 }
+
+/// A duplicate unique value re-renders the form with an error on the taken
+/// field (#2033); any other failed INSERT stays an opaque 500.
+async fn insert_failed(
+    state: &FormViewState,
+    form: &HashMap<String, String>,
+    insert_q: &crate::core::InsertQuery,
+    e: &crate::sql::ExecError,
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    if !e.is_unique_violation() {
+        return template_error(&format!("insert row: {e}"));
+    }
+    let mut errors = HashMap::new();
+    let unique = insert_q
+        .columns
+        .iter()
+        .zip(&insert_q.values)
+        .filter_map(|(col, v)| Some((state.schema.field_by_column(col)?, v)))
+        .filter(|(f, _)| f.unique || f.primary_key);
+    for (field, value) in unique {
+        let taken = crate::core::CountQuery::new(
+            state.schema,
+            WhereExpr::Predicate(Filter::new(field.column, Op::Eq, value.clone())),
+        );
+        if count_rows_pool(&state.pool, &taken).await.unwrap_or(0) > 0 {
+            errors.insert(field.name.to_owned(), DUPLICATE_VALUE.to_owned());
+        }
+    }
+    // A composite UNIQUE, or a row gone since: no single field to blame.
+    if errors.is_empty() {
+        errors.insert("__all__".to_owned(), DUPLICATE_VALUE.to_owned());
+    }
+    rerender_form(state, form, &errors, /*is_update=*/ false, headers)
+}
+
+const DUPLICATE_VALUE: &str = "a row with this value already exists";
 
 async fn handle_update_get(
     State(state): State<Arc<FormViewState>>,

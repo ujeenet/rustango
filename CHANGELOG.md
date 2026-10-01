@@ -12,6 +12,10 @@ With no `.ordering(..)`, the list uses `default_order`, as ListView and the admi
 
 `DELETE` stamps the soft-delete column instead of deleting the row, and list, retrieve, update and destroy hide soft-deleted rows.
 
+### Fixed — a duplicate unique value on a `CreateView` is a form error (#2033)
+
+The form re-renders with `422` and an error on the taken field (`__all__` when no single field is to blame), not a `500`.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

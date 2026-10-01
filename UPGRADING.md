@@ -158,6 +158,10 @@ With no `.ordering(..)` the list uses `default_order`, then the PK.
 
 It stamps the column; soft-deleted rows then read as `404` and leave the list.
 
+### `CreateView` answers a duplicate unique value with `422` and the form (#2033)
+
+A template must render `form.errors` (`__all__` for a row-level error) to show it.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
