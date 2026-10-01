@@ -9,7 +9,8 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::migrate::{
-    make_migrations_from, migrate_pool_with_ledger, unapply_pool_with_ledger, SchemaSnapshot,
+    make_migrations_from, migrate_pool_with_ledger, unapply_pool_with_ledger, Migration, Operation,
+    SchemaChange, SchemaSnapshot,
 };
 use rustango::sql::{raw_execute_pool, Pool};
 use rustango::testkit::matrix::drop_table;
@@ -67,12 +68,39 @@ impl Chain {
 
     /// `makemigrations` against `current`, then `migrate`; the new name.
     async fn step(&self, pool: &Pool, current: Value) -> Result<String, String> {
-        let mig = make_migrations_from(self.dir.path(), &snap(current), None)
+        self.step_with(pool, current, true).await
+    }
+
+    /// As [`Self::step`], with the new migration's `atomic` set.
+    async fn step_with(&self, pool: &Pool, current: Value, atomic: bool) -> Result<String, String> {
+        let mut mig = make_migrations_from(self.dir.path(), &snap(current), None)
             .map_err(|e| e.to_string())?
             .expect("the snapshot changed, so a migration is written");
+        if !atomic {
+            mig.atomic = false;
+            self.write(&mig);
+        }
+        self.migrate(pool).await.map(|()| mig.name)
+    }
+
+    /// Write `mig` into the chain, as a hand edit would.
+    fn write(&self, mig: &Migration) {
+        let path = self.dir.path().join(format!("{}.json", mig.name));
+        rustango::migrate::file::write(&path, mig).expect("write migration");
+    }
+
+    /// The chain's newest migration.
+    fn head(&self) -> Migration {
+        rustango::migrate::file::list_dir(self.dir.path())
+            .expect("list")
+            .pop()
+            .expect("a migration")
+    }
+
+    async fn migrate(&self, pool: &Pool) -> Result<(), String> {
         migrate_pool_with_ledger(pool, self.dir.path(), &self.ledger)
             .await
-            .map(|_| mig.name)
+            .map(|_| ())
             .map_err(|e| e.to_string())
     }
 
@@ -253,8 +281,16 @@ async fn fk_column_drops(pool: &Pool) {
 /// A `now()` column added to a table with rows, forward and by unapply.
 /// SQLite refuses a non-constant DEFAULT there (#2017).
 async fn now_column_adds_to_a_filled_table(pool: &Pool) {
-    let t = "mad_nw_item";
-    let chain = Chain::new(pool, "nw", &[t]).await;
+    now_column_adds(pool, "mad_nw_item", true).await;
+}
+
+/// As above through the non-atomic runners.
+async fn now_column_adds_without_a_transaction(pool: &Pool) {
+    now_column_adds(pool, "mad_nwn_item", false).await;
+}
+
+async fn now_column_adds(pool: &Pool, t: &str, atomic: bool) {
+    let chain = Chain::new(pool, t, &[t]).await;
     let stamp = col(
         "created_at",
         "datetime",
@@ -268,11 +304,15 @@ async fn now_column_adds_to_a_filled_table(pool: &Pool) {
         .await
         .unwrap();
     chain
-        .step(pool, json!({"tables": [table(t, vec![id(), stamp])]}))
+        .step_with(
+            pool,
+            json!({"tables": [table(t, vec![id(), stamp])]}),
+            atomic,
+        )
         .await
         .expect("AddColumn with now() on a table with rows");
     let dropped = chain
-        .step(pool, json!({"tables": [table(t, vec![id()])]}))
+        .step_with(pool, json!({"tables": [table(t, vec![id()])]}), atomic)
         .await
         .expect("DropColumn");
     chain
@@ -291,6 +331,111 @@ async fn now_column_adds_to_a_filled_table(pool: &Pool) {
         .await
         .unwrap();
     assert_eq!(nulls, vec![(0,)], "every row has a timestamp");
+}
+
+/// A UUID column with a DB DEFAULT, added to a table with rows and to an
+/// empty one. MySQL refused it on both (1674), SQLite on the first.
+async fn uuid_column_adds_to_a_filled_table(pool: &Pool) {
+    let (full, empty) = ("mad_uu_full", "mad_uu_empty");
+    let chain = Chain::new(pool, "uu", &[full, empty]).await;
+    let token = col(
+        "token",
+        "uuid",
+        json!({"nullable": false, "default": "gen_random_uuid()"}),
+    );
+    let tables = |f: Vec<Value>| json!({"tables": [table(full, f.clone()), table(empty, f)]});
+    chain.step(pool, tables(vec![id()])).await.expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1), (2)", &[full, "id"])
+        .await
+        .unwrap();
+    chain
+        .step(pool, tables(vec![id(), token]))
+        .await
+        .expect("AddColumn with a UUID DEFAULT");
+    for t in [full, empty] {
+        exec(pool, "INSERT INTO {} ({}) VALUES (3)", &[t, "id"])
+            .await
+            .expect("the column has a default, or is nullable");
+    }
+    let count = |t: &str| {
+        q(
+            pool,
+            "SELECT COUNT(DISTINCT {}), COUNT(*) FROM {}",
+            &["token", t],
+        )
+    };
+    let full_ids: Vec<(i64, i64)> = rustango::sql::raw_query_pool(&count(full), Vec::new(), pool)
+        .await
+        .unwrap();
+    let filled = by_dialect! { pool,
+        postgres => 3, because "ADD COLUMN fills each row; the DEFAULT stays",
+        mysql => 3, because "rows backfilled, then the DEFAULT set by MODIFY",
+        sqlite => 2, because "rows backfilled; no DEFAULT can be added to a filled table",
+    };
+    assert_eq!(full_ids, vec![(filled.value, 3)], "{}", filled.why);
+    let empty_ids: Vec<(i64, i64)> = rustango::sql::raw_query_pool(&count(empty), Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(empty_ids, vec![(1, 1)], "the DEFAULT fills an insert");
+}
+
+/// The FK of a column dropped after a rename: MySQL looked for the
+/// constraint under the new column's name (1091).
+async fn renamed_fk_column_drops(pool: &Pool) {
+    let (a, b) = ("mad_rn_author", "mad_rn_book");
+    let chain = Chain::new(pool, "rn", &[b, a]).await;
+    let with = |fields: Vec<Value>| json!({"tables": [table(a, vec![id()]), table(b, fields)]});
+    chain
+        .step(pool, with(vec![id(), col("author_id", "i64", fk(a))]))
+        .await
+        .expect("initial");
+    let head = chain.head();
+    chain.write(&Migration {
+        name: "0002_rename".into(),
+        prev: Some(head.name),
+        forward: vec![Operation::Schema(SchemaChange::RenameColumn {
+            table: b.into(),
+            old_column: "author_id".into(),
+            new_column: "writer_id".into(),
+        })],
+        snapshot: snap(with(vec![id(), col("writer_id", "i64", fk(a))])),
+        ..head
+    });
+    chain.migrate(pool).await.expect("RenameColumn");
+    chain
+        .step(pool, with(vec![id()]))
+        .await
+        .expect("the renamed FK column drops");
+}
+
+/// An FK named with 64 bytes, as releases before 0.59.12 wrote it on
+/// MySQL; the drop looked for the 63-byte name (1091).
+async fn long_named_fk_column_drops(pool: &Pool) {
+    let (a, b) = ("mad_ln_author", "mad_ln_book");
+    let long = "w".repeat(64 - b.len() - "__fkey".len());
+    let chain = Chain::new(pool, "ln", &[b, a]).await;
+    let with = |fields: Vec<Value>| json!({"tables": [table(a, vec![id()]), table(b, fields)]});
+    chain
+        .step(pool, with(vec![id(), col(&long, "i64", fk(a))]))
+        .await
+        .expect("initial");
+    if pool.dialect().name() == "mysql" {
+        let short = rustango::migrate::ddl::fk_constraint_name(b, &long);
+        let full = format!("{b}_{long}_fkey");
+        assert_eq!(full.len(), 64);
+        for sql in [
+            format!("ALTER TABLE {b} DROP FOREIGN KEY {short}"),
+            format!(
+                "ALTER TABLE {b} ADD CONSTRAINT {full} FOREIGN KEY ({long}) REFERENCES {a} (id)"
+            ),
+        ] {
+            raw_execute_pool(pool, &sql, Vec::new()).await.unwrap();
+        }
+    }
+    chain
+        .step(pool, with(vec![id()]))
+        .await
+        .expect("the long-named FK column drops");
 }
 
 /// A NOT NULL FK column with a default, added to a table with rows.
@@ -848,6 +993,10 @@ tri_dialect_test!(
         add_column_keeps_fk_and_unique,
         fk_column_drops,
         now_column_adds_to_a_filled_table,
+        now_column_adds_without_a_transaction,
+        uuid_column_adds_to_a_filled_table,
+        renamed_fk_column_drops,
+        long_named_fk_column_drops,
         add_fk_column_with_default_to_filled_table,
         long_fk_names_apply,
         column_drops_after_its_index_and_check,

@@ -732,18 +732,7 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, None, current, dialect, None)
-}
-
-/// As [`render_changes_split_with_dialect`], with the schema `before` the
-/// changes too: a dropped FK column's constraint goes first (#1981).
-pub(crate) fn render_changes_between(
-    changes: &[SchemaChange],
-    before: &SchemaSnapshot,
-    current: &SchemaSnapshot,
-    dialect: &dyn crate::sql::Dialect,
-) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, Some(before), current, dialect, None)
+    render_changes_split_inner(changes, current, dialect, None)
 }
 
 /// As [`render_changes_split_with_dialect`], but every FK target is
@@ -755,7 +744,7 @@ pub(crate) fn render_changes_split_in_schema(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, None, current, dialect, schema)
+    render_changes_split_inner(changes, current, dialect, schema)
 }
 
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
@@ -862,7 +851,6 @@ impl UniqueNames {
 
 fn render_changes_split_inner(
     changes: &[SchemaChange],
-    before: Option<&SchemaSnapshot>,
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
@@ -903,16 +891,6 @@ fn render_changes_split_inner(
                         dialect.quote_ident(&name)
                     ));
                 }
-                // MySQL refuses to drop a column its FK uses (1828).
-                let had_fk = before
-                    .and_then(|b| b.table(table))
-                    .and_then(|t| t.field(column))
-                    .is_some_and(|f| f.fk.is_some());
-                if had_fk && !dialect.inline_fks_in_create_table() {
-                    let name = super::ddl::fk_constraint_name(table, column);
-                    out.immediate
-                        .extend(dialect.drop_foreign_key_sql(table, &name));
-                }
                 out.immediate.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     dialect.quote_ident(table),
@@ -944,7 +922,13 @@ fn render_changes_split_inner(
                          right fix for any table that has production data.",
                     ));
                 }
-                out.immediate.push(add_column_sql(table, f, dialect));
+                // MySQL with a binlog refuses `ADD COLUMN … DEFAULT (UUID())` (1674).
+                if dialect.name() == "mysql" && is_uuid_default(f) {
+                    out.immediate
+                        .extend(add_column_backfilled(table, f, dialect));
+                } else {
+                    out.immediate.push(add_column_sql(table, f, dialect));
+                }
                 if f.fk.is_some()
                     && dialect.inline_fks_in_create_table()
                     && inline_fk_on_add_column(f, dialect).is_none()
@@ -1002,16 +986,8 @@ fn render_changes_split_inner(
                 // Option<T> → T with a default: fill the NULLs first, or
                 // SET NOT NULL fails on them (#1881).
                 let field = current.table(table).and_then(|t| t.field(column));
-                if let Some((f, expr)) = field
-                    .filter(|_| !*nullable)
-                    .and_then(|f| f.default.as_ref().map(|d| (f, d)))
-                {
-                    let value = render_column_default(expr, &f.ty, f.max_length, dialect);
-                    out.immediate.push(format!(
-                        "UPDATE {t} SET {c} = {value} WHERE {c} IS NULL",
-                        t = dialect.quote_ident(table),
-                        c = dialect.quote_ident(column),
-                    ));
+                if let Some(f) = field.filter(|f| !*nullable && f.default.is_some()) {
+                    out.immediate.push(fill_nulls_sql(table, f, dialect));
                 }
                 let action = if *nullable {
                     "DROP NOT NULL"
@@ -1693,6 +1669,61 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         sql.push_str(&inline_references(rel, dialect));
     }
     sql
+}
+
+/// `true` for a column whose DEFAULT is a random UUID (`gen_random_uuid()`).
+pub(crate) fn is_uuid_default(f: &FieldSnapshot) -> bool {
+    f.default.as_deref().is_some_and(crate::sql::is_uuid_expr)
+}
+
+/// `f` added nullable with no DEFAULT, a fresh UUID per row, then the
+/// DEFAULT and NOT NULL set by `MODIFY` (MySQL only).
+fn add_column_backfilled(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Vec<String> {
+    let bare = FieldSnapshot {
+        default: None,
+        nullable: true,
+        ..f.clone()
+    };
+    let value = render_column_default(
+        f.default.as_deref().unwrap_or_default(),
+        &f.ty,
+        f.max_length,
+        dialect,
+    );
+    let null = if f.nullable { "" } else { " NOT NULL" };
+    vec![
+        add_column_sql(table, &bare, dialect),
+        fill_nulls_sql(table, f, dialect),
+        format!(
+            "ALTER TABLE {} MODIFY COLUMN {} {} DEFAULT {value}{null}",
+            dialect.quote_ident(table),
+            dialect.quote_ident(&f.column),
+            sql_type_with_dialect(f, dialect)
+        ),
+    ]
+}
+
+/// `UPDATE` setting each NULL `f` to its DEFAULT, evaluated per row.
+pub(crate) fn fill_nulls_sql(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> String {
+    let value = render_column_default(
+        f.default.as_deref().unwrap_or_default(),
+        &f.ty,
+        f.max_length,
+        dialect,
+    );
+    format!(
+        "UPDATE {t} SET {c} = {value} WHERE {c} IS NULL",
+        t = dialect.quote_ident(table),
+        c = dialect.quote_ident(&f.column),
+    )
 }
 
 /// SQLite's inline FK for `ADD COLUMN`. With `foreign_keys=ON` SQLite

@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### A UUID-default column added to a filled SQLite table is nullable (#1987)
+
+SQLite can't add a `gen_random_uuid()` DEFAULT to a table with rows, so the column is backfilled and left nullable with no DEFAULT;
+the ORM binds the value on insert. MySQL's DEFAULT `UUID()` gives v1 UUIDs, not v4.
+
 ### SQLite `now()` columns added to a filled table get a fixed default (#2017)
 
 SQLite can't add a `now()` DEFAULT to a table with rows, so the column's DEFAULT is the time of the migration.

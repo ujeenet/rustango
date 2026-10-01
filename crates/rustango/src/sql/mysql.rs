@@ -296,6 +296,15 @@ impl Dialect for MySql {
         ))
     }
 
+    /// `CAST AS CHAR`: information_schema columns decode as binary otherwise.
+    fn foreign_key_names_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(CONSTRAINT_NAME AS CHAR) FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? \
+             AND REFERENCED_TABLE_NAME IS NOT NULL",
+        )
+    }
+
     /// MySQL has no `ON CONFLICT`, so this writes
     /// `ON DUPLICATE KEY UPDATE <col> = <col>`: a no-op assignment
     /// that satisfies its need for at least one. Any of the conflict

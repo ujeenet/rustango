@@ -330,6 +330,12 @@ pub trait Dialect: Send + Sync {
         )
     }
 
+    /// Query for the names of the FKs on one column, binding `(table,
+    /// column)`. `Some` where `DROP COLUMN` keeps them (MySQL, 1828).
+    fn foreign_key_names_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Statement that moves `table.column`'s serial counter past the rows
     /// already there, binding `(quoted table, column)` in that order.
     /// `None` where the counter follows explicit ids by itself (MySQL,

@@ -532,9 +532,19 @@ async fn migrate_fails_when_the_system_chain_cannot_be_generated() {
     manage_migrate(&pool, dir.clone())
         .await
         .expect("first deploy");
-    // A `min` on a committed column: no op can move a live table there.
-    let sys = tmp.path().join("deploy/system/migrations");
-    let last = rustango::migrate::file::list_dir(&sys)
+    poison_users_username(&tmp.path().join("deploy/system/migrations"));
+
+    let err = manage_migrate(&pool, dir)
+        .await
+        .expect_err("a generation error must fail migrate")
+        .to_string();
+    assert!(err.contains("rustango_users.username"), "{err}");
+}
+
+/// A `min` on the committed `rustango_users.username`: no op can move a
+/// live table there, so generating the tenant chain fails.
+fn poison_users_username(sys: &std::path::Path) {
+    let last = rustango::migrate::file::list_dir(sys)
         .unwrap()
         .into_iter()
         .rev()
@@ -558,10 +568,38 @@ async fn migrate_fails_when_the_system_chain_cannot_be_generated() {
         .expect("rustango_users.username");
     field["min"] = serde_json::json!(7);
     std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+}
 
-    let err = manage_migrate(&pool, dir)
+/// #2014 on the tenant runner: a chain that can't be generated fails it.
+#[tokio::test]
+async fn migrate_tenants_fails_when_the_system_chain_cannot_be_generated() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("app");
+    let dir = root.join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg_url = format!("sqlite:{}?mode=rwc", tmp.path().join("reg.db").display());
+    let reg = rustango::sql::sqlx::SqlitePool::connect(&reg_url)
         .await
-        .expect_err("a generation error must fail migrate")
+        .unwrap();
+    let pools = rustango::tenancy::TenantPools::new(reg.clone());
+    let registry = Pool::Sqlite(reg);
+    rustango::tenancy::migrate_registry_pool(&registry, &dir)
+        .await
+        .expect("registry");
+    sqlite_org(tmp.path(), "t1")
+        .insert_pool(&registry)
+        .await
+        .unwrap();
+    let report = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")
+        .await
+        .unwrap();
+    assert!(report.all_ok(), "{report:?}");
+
+    poison_users_username(&root.join("system/migrations"));
+    let err = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")
+        .await
+        .expect_err("a generation error must fail migrate-tenants")
         .to_string();
     assert!(err.contains("rustango_users.username"), "{err}");
 }

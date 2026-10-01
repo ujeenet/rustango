@@ -244,20 +244,13 @@ pub(crate) async fn converge_groups(
             continue;
         };
         // SQLite refuses a non-constant DEFAULT on a table with rows.
-        let retried = match frozen_now_default(pool.dialect(), snapshot, group) {
-            Some(snap) => match render(group, &snap) {
-                Ok(b) => run_statements(pool, &b.immediate).await.is_ok(),
-                Err(_) => false,
-            },
-            None => false,
-        };
-        if retried {
-            tracing::warn!(
-                target: "rustango::migrate",
-                "{label} added with a fixed DEFAULT: SQLite can't add `now()` to a table with rows"
-            );
-        } else {
-            failed.push(format!("{label}: {e}"));
+        let retry = filled_table_retry(pool.dialect(), snapshot, group, |s| render(group, s))
+            .filter(|_| is_non_constant_default(&e));
+        match retry {
+            Some(Ok(r)) if run_statements(pool, &r.batch.immediate).await.is_ok() => {
+                tracing::warn!(target: "rustango::migrate", "{label}: {}", r.warning);
+            }
+            _ => failed.push(format!("{label}: {e}")),
         }
     }
     for (label, stmts) in fks {
@@ -268,33 +261,59 @@ pub(crate) async fn converge_groups(
     Ok(failed)
 }
 
-/// `snapshot` with the `now()` default of the column `group` adds fixed to
-/// the current time, on SQLite only. The ORM binds these columns on insert.
-pub(super) fn frozen_now_default(
+/// SQLite's error for a non-constant DEFAULT added to a table with rows.
+pub(super) fn is_non_constant_default(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .is_some_and(|d| d.message().contains("non-constant default"))
+}
+
+/// A rendering of a SQLite AddColumn its non-constant DEFAULT refused.
+pub(super) struct FilledTableRetry {
+    pub(super) batch: super::diff::RenderedBatch,
+    pub(super) warning: &'static str,
+}
+
+/// The AddColumn of `group` for a SQLite table with rows (#2017): `now()`
+/// frozen to the current time, or a UUID column added without its DEFAULT
+/// and backfilled per row. The ORM binds both columns on insert.
+pub(super) fn filled_table_retry(
     dialect: &dyn crate::sql::Dialect,
     snapshot: &super::SchemaSnapshot,
     group: &[super::SchemaChange],
-) -> Option<super::SchemaSnapshot> {
+    render: impl Fn(&super::SchemaSnapshot) -> Result<super::diff::RenderedBatch, String>,
+) -> Option<Result<FilledTableRetry, String>> {
     #[cfg(feature = "sqlite")]
     if let ("sqlite", [super::SchemaChange::AddColumn { table, column }]) = (dialect.name(), group)
     {
-        let mut table = snapshot.table(table)?.clone();
-        let field = table.fields.iter_mut().find(|f| &f.column == column)?;
-        if !field
+        let mut t = snapshot.table(table)?.clone();
+        let field = t.fields.iter_mut().find(|f| &f.column == column)?;
+        let mut backfill = None;
+        let warning = if field
             .default
             .as_deref()
             .is_some_and(crate::sql::is_now_expr)
         {
+            let now = crate::sql::encode_datetime(chrono::Utc::now());
+            field.default = Some(format!("'{now}'"));
+            "added with a fixed DEFAULT: SQLite can't add `now()` to a table with rows"
+        } else if super::diff::is_uuid_default(field) {
+            backfill = Some(super::diff::fill_nulls_sql(table, field, dialect));
+            field.default = None;
+            field.nullable = true;
+            "added nullable with no DEFAULT: SQLite can't add a UUID DEFAULT to a table with rows"
+        } else {
             return None;
-        }
-        let now = crate::sql::encode_datetime(chrono::Utc::now());
-        field.default = Some(format!("'{now}'"));
-        return Some(super::SchemaSnapshot {
-            tables: vec![table],
+        };
+        let snap = super::SchemaSnapshot {
+            tables: vec![t],
             ..Default::default()
-        });
+        };
+        return Some(render(&snap).map(|mut batch| {
+            batch.immediate.extend(backfill);
+            FilledTableRetry { batch, warning }
+        }));
     }
-    let _ = (dialect, snapshot, group);
+    let _ = (dialect, snapshot, group, render);
     None
 }
 
@@ -325,6 +344,24 @@ async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), sqlx::Error
 #[cfg(test)]
 mod tests {
     use super::{idempotent, is_mysql_duplicate};
+
+    /// Only the refused non-constant DEFAULT is retried, not any error.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn only_a_non_constant_default_is_retried() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for sql in [
+            "CREATE TABLE t (id INTEGER PRIMARY KEY)",
+            "INSERT INTO t VALUES (1)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let run = |sql| sqlx::query(sql).execute(&pool);
+        let refused = run("ALTER TABLE t ADD COLUMN c BLOB DEFAULT (randomblob(16))").await;
+        assert!(super::is_non_constant_default(&refused.unwrap_err()));
+        let other = run("ALTER TABLE t ADD COLUMN id BLOB DEFAULT (randomblob(16))").await;
+        assert!(!super::is_non_constant_default(&other.unwrap_err()));
+    }
 
     #[test]
     fn create_table_gains_if_not_exists_on_postgres() {

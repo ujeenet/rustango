@@ -4,13 +4,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a UUID-default column adds on MySQL and SQLite (#1987)
+
+`AddColumn` with `gen_random_uuid()` adds the column bare, fills each row, then sets the DEFAULT (MySQL refused with 1674).
+
 ### Fixed — SQLite adds a `now()` column to a table with rows (#2017)
 
 `migrate` and unapply retry a refused `AddColumn` with the time frozen, as the system-chain converge does.
 
 ### Fixed — MySQL drops an FK column, forward and on unapply (#1981)
 
-`DropColumn` of an FK column drops its constraint first (MySQL refused with 1828). New export `migrate::unapply_pool_with_ledger`.
+`DropColumn` of an FK column drops its constraint first, found by column so renames and 64-byte names work (MySQL refused with 1828). New export `migrate::unapply_pool_with_ledger`.
 
 ### Fixed — `auto_uuid` tables create on MySQL and SQLite (#1987)
 
@@ -23,7 +27,7 @@ An unsupported framework field change (or an unwritable `system/migrations/`) wa
 ### Fixed — tenant migration failures exit non-zero; ledger bootstrap takes the migrate lock (#1844)
 
 `migrate-tenants`, `migrate` and `migrate --fake --all-tenants` now fail when any tenant failed.
-The ledger `CREATE TABLE` runs under the migrate lock, so concurrent PG replicas no longer hit 23505.
+The ledger `CREATE TABLE` runs under the migrate lock (the legacy `PgPool` runner too), so concurrent PG replicas no longer hit 23505.
 
 ## [0.59.13] — 2026-10-01
 
