@@ -165,7 +165,7 @@ impl ThrottleRule {
 /// throttle in front.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ViewSetThrottle {
-    /// Throttle for `GET /` (list).
+    /// Throttle for `GET /` and `QUERY /` (list), one shared budget.
     pub list: Option<ThrottleRule>,
     /// Throttle for `GET /{pk}` (retrieve).
     pub retrieve: Option<ThrottleRule>,
@@ -2395,8 +2395,9 @@ async fn handle_query(
     req: axum::extract::Request,
 ) -> Response {
     // `enter` reads only `parts`, so the body is still unconsumed
-    // and the params can be parsed from it here.
-    let (parts, body, acq) = match enter(&state, req, &state.vs.perms.list, "query").await {
+    // and the params can be parsed from it here. QUERY spends the list
+    // throttle: it returns the same rows as GET (#1997).
+    let (parts, body, acq) = match enter(&state, req, &state.vs.perms.list, "list").await {
         Ok(x) => x,
         Err(resp) => return resp,
     };

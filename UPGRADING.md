@@ -170,6 +170,10 @@ Pass the sortable names explicitly; empty no longer means every field.
 
 More is a `413` (raise with `max_bulk_create(n)`); each row spends one `create` throttle unit.
 
+### ViewSet `QUERY` shares the `list` throttle with `GET` (#1997)
+
+A client that sends both now spends one budget, not two.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

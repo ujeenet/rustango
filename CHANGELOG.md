@@ -25,6 +25,10 @@ The form re-renders with `422` and an error on the taken field (`__all__` when n
 A bulk create takes at most `max_bulk_create(n)` rows (default 1000, else `413`) and spends one `create` throttle unit per row.
 The throttle store sweeps ended windows once it holds 100k keys, so per-client keys no longer grow forever.
 
+### Security — ViewSet `QUERY` requests are throttled (#1997)
+
+`QUERY` spends the `list` throttle, the same budget as `GET`.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

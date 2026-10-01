@@ -577,7 +577,7 @@ Every method on `ViewSet::for_model(SCHEMA)` (each returns `Self`):
 | `limit_offset_pagination()` | `?limit=&offset=` windowing. |
 | `pagination(PaginationStyle::…)` | Set the style explicitly. |
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
-| `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits. |
+| `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
 | `router(prefix, pgpool)` | Mount (Postgres, static pool). |
 | `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |

@@ -216,6 +216,17 @@ fn send(method: Method, ip: &str, body: &str) -> Request<Body> {
     req
 }
 
+/// QUERY returns the list, so it spends the list budget (#1997).
+#[cfg(feature = "admin")]
+#[tokio::test]
+async fn query_spends_the_list_throttle() {
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    let query = || send(Method::from_bytes(b"QUERY").unwrap(), "8.8.4.4", "{}");
+    assert_eq!(status(&app, get(Some("8.8.4.4"))).await, StatusCode::OK);
+    assert_eq!(status(&app, query()).await, StatusCode::OK);
+    assert_eq!(status(&app, query()).await, StatusCode::TOO_MANY_REQUESTS);
+}
+
 /// A bulk create spends one unit per row (#1999).
 #[tokio::test]
 async fn bulk_create_spends_one_unit_per_row() {
