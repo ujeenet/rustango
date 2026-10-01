@@ -385,6 +385,59 @@ async fn two_simultaneous_deliveries_create_one_tenant() {
     assert_eq!(runs.len(), 1, "one event, one run: {runs:?}");
 }
 
+/// The race, forced: a trigger opens a twin run under the same key
+/// between this delivery's idempotency check and its insert (#1933).
+#[tokio::test]
+async fn a_delivery_that_loses_the_key_race_gets_the_twin_run() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let registry = b.pools.registry_pool();
+    let slug = unique("twin");
+    // A failed run makes the handler release its key, then insert.
+    let old = store::open_run(
+        &registry,
+        &slug,
+        "database",
+        "sqlite",
+        None,
+        None,
+        Some("evt-twin"),
+    )
+    .await
+    .unwrap();
+    let old_id = old.id.get().copied().unwrap();
+    store::finish_run(&registry, old_id, store::RunState::Failed, Some("pod died"))
+        .await
+        .unwrap();
+    let trigger = r#"CREATE TRIGGER twin AFTER UPDATE OF idempotency_key ON rustango_provisioning_runs
+        WHEN OLD.idempotency_key = 'evt-twin' AND NEW.idempotency_key IS NULL
+        BEGIN
+            INSERT INTO rustango_provisioning_runs
+                (kind, slug, state, storage_mode, backend_kind, idempotency_key, started_at)
+            VALUES (OLD.kind, OLD.slug, 'running', OLD.storage_mode, OLD.backend_kind,
+                'evt-twin', OLD.started_at);
+        END"#;
+    rustango::sql::raw_execute_pool(&registry, trigger, Vec::new())
+        .await
+        .expect("trigger");
+
+    let body = body_for(&slug, "evt-twin", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the race loser must be a duplicate"
+    );
+    let json = json_of(resp).await;
+    let twin = store::run_by_idempotency_key(&registry, "evt-twin")
+        .await
+        .unwrap()
+        .expect("twin run");
+    assert_eq!(json["duplicate"], serde_json::json!(true));
+    assert_eq!(json["run_id"].as_i64(), twin.id.get().copied());
+}
+
 /// The security decision, end to end: a caller-supplied `database_url`
 /// is **refused**, not silently ignored.
 #[tokio::test]

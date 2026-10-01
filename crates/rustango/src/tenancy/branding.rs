@@ -207,9 +207,24 @@ pub async fn save_brand_asset(
     let filename = format!("{}.{ext}", kind.stem());
     let key = storage_key(slug, &filename)?;
     storage.save(&key, bytes).await?;
-    // A different extension would leave the old file served (#1933).
-    delete_stem(slug, kind, Some(ext), storage).await?;
     Ok(filename)
+}
+
+/// Delete the `kind` files other than `kept` (a [`save_brand_asset`] result).
+/// Call it only after the `Org` column names `kept`, or the old path dangles (#1933).
+///
+/// # Errors
+/// [`BrandError::InvalidSlug`] or a storage failure.
+pub async fn prune_brand_asset(
+    slug: &str,
+    kind: BrandAssetKind,
+    kept: &str,
+    storage: &BoxedStorage,
+) -> Result<(), BrandError> {
+    let keep_ext = std::path::Path::new(kept)
+        .extension()
+        .and_then(|e| e.to_str());
+    delete_stem(slug, kind, keep_ext, storage).await
 }
 
 /// Delete every saved brand asset for `slug`. Called when a tenant is purged.
@@ -402,7 +417,10 @@ mod tests {
         save_brand_asset("acme", logo, b"p", Some("image/png"), &storage)
             .await
             .unwrap();
-        save_brand_asset("acme", logo, b"w", Some("image/webp"), &storage)
+        let kept = save_brand_asset("acme", logo, b"w", Some("image/webp"), &storage)
+            .await
+            .unwrap();
+        prune_brand_asset("acme", logo, &kept, &storage)
             .await
             .unwrap();
         assert!(
@@ -414,13 +432,15 @@ mod tests {
         assert!(load_brand_asset("acme", "logo.webp", &storage)
             .await
             .is_ok());
+        let fav = BrandAssetKind::Favicon;
+        save_brand_asset("acme", fav, b"i", Some("image/x-icon"), &storage)
+            .await
+            .unwrap();
         delete_brand_assets("acme", &storage).await.unwrap();
-        assert!(
-            load_brand_asset("acme", "logo.webp", &storage)
-                .await
-                .is_err(),
-            "purge kept the logo"
-        );
+        for f in ["logo.webp", "favicon.ico"] {
+            let gone = load_brand_asset("acme", f, &storage).await.is_err();
+            assert!(gone, "purge kept {f}");
+        }
     }
 
     #[test]

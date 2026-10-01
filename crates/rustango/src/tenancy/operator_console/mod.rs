@@ -2035,7 +2035,7 @@ async fn org_edit_branding(
     Extension(op): Extension<auth::Operator>,
     mut mp: Multipart,
 ) -> Response<Body> {
-    let mut updates: Vec<(&'static str, Option<String>)> = Vec::new();
+    let mut updates: Vec<(BrandAssetKind, &'static str, String)> = Vec::new();
     while let Ok(Some(field)) = mp.next_field().await {
         let name = field.name().map(str::to_owned);
         let kind = match name.as_deref() {
@@ -2066,7 +2066,7 @@ async fn org_edit_branding(
                     BrandAssetKind::Logo => "logo_path",
                     BrandAssetKind::Favicon => "favicon_path",
                 };
-                updates.push((column, Some(filename)));
+                updates.push((kind, column, filename));
             }
             Err(branding::BrandError::TooLarge { actual, max }) => {
                 return redirect_with_error(
@@ -2092,13 +2092,9 @@ async fn org_edit_branding(
     use crate::core::Model as _;
     let assignments: Vec<crate::core::Assignment> = updates
         .iter()
-        .map(|(col, v)| crate::core::Assignment {
+        .map(|(_, col, v)| crate::core::Assignment {
             column: *col,
-            value: v
-                .as_ref()
-                .map(|s| crate::core::SqlValue::String(s.clone()))
-                .unwrap_or(crate::core::SqlValue::Null)
-                .into(),
+            value: crate::core::SqlValue::String(v.clone()).into(),
         })
         .collect();
     let update_q = crate::core::UpdateQuery {
@@ -2113,6 +2109,13 @@ async fn org_edit_branding(
     if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
         return redirect_with_error(&slug, &format!("update failed: {e}"));
     }
+    // Only now does no column name the old file (#1933).
+    for (kind, _, kept) in &updates {
+        if let Err(e) = branding::prune_brand_asset(&slug, *kind, kept, &state.brand_storage).await
+        {
+            tracing::warn!(slug = %slug, error = %e, "stale brand file not deleted");
+        }
+    }
     // Branding lives on the `Org` row that resolution caches, so an
     // upload without this leaves the previous logo rendering until the
     // entry expires.
@@ -2125,7 +2128,7 @@ async fn org_edit_branding(
     let operator_id = op.id.get().copied().unwrap_or(0);
     let assets: Vec<String> = updates
         .iter()
-        .map(|(col, _)| match *col {
+        .map(|(_, col, _)| match *col {
             "logo_path" => "logo".to_owned(),
             "favicon_path" => "favicon".to_owned(),
             other => other.to_owned(),
