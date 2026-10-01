@@ -516,6 +516,9 @@ caught by validation or by the database.
 > returned `400 bulk entry 5`, and named none of the rows it had created.
 > Constraint violations are exactly the class validation cannot decide up front.
 
+A batch holds at most 1000 rows (`max_bulk_create(n)`; more is a `413`),
+and each row spends one `create` throttle unit.
+
 On a `#[rustango(soft_delete)]` model, `DELETE` stamps the column instead of
 deleting, and every action treats a soft-deleted row as gone.
 
@@ -566,6 +569,7 @@ Every method on `ViewSet::for_model(SCHEMA)` (each returns `Self`):
 | `ordering_fields(&["…"])` | Whitelist which fields `?ordering=` may use. |
 | `page_size(n)` | Default page size (≤ 100). |
 | `max_page_size(n)` | Raise or lower the client cap itself (default 100). |
+| `max_bulk_create(n)` | Most rows one bulk create may carry (default 1000). |
 | `pk_param(name)` | Rename the path parameter used for detail routes. |
 | `read_only()` | GET-only. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates (the latter on tenancy). |

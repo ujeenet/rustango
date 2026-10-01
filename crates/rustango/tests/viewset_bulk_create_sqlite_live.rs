@@ -158,3 +158,19 @@ async fn bulk_entry_that_is_not_an_object_returns_400() {
         "error message should call out the bad shape, got: {msg}"
     );
 }
+
+/// A bulk over `max_bulk_create` is a `413` and writes nothing (#1999).
+#[tokio::test]
+async fn bulk_over_the_row_cap_is_413() {
+    let pool = fresh_pool().await;
+    let app = ViewSet::for_model(Widget::SCHEMA)
+        .max_bulk_create(2)
+        .router_pool("/widgets", pool.clone());
+    let three =
+        r#"[{"label":"a","priority":1},{"label":"b","priority":2},{"label":"c","priority":3}]"#;
+    let (status, body) = post_json(app.clone(), three).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    let two = r#"[{"label":"a","priority":1},{"label":"b","priority":2}]"#;
+    let (status, body) = post_json(app, two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}

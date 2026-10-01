@@ -202,3 +202,27 @@ async fn trusted_clients_behind_one_proxy_get_their_own_buckets() {
     );
     assert_eq!(status(&app, via_proxy("7.7.7.2")).await, StatusCode::OK);
 }
+
+/// A request from `ip` with `method` and a JSON `body`.
+fn send(method: Method, ip: &str, body: &str) -> Request<Body> {
+    let mut req = Request::builder()
+        .method(method)
+        .uri("/posts")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let addr: SocketAddr = format!("{ip}:4000").parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
+}
+
+/// A bulk create spends one unit per row (#1999).
+#[tokio::test]
+async fn bulk_create_spends_one_unit_per_row() {
+    let app = router(ViewSetThrottle::all(3, 60)).await;
+    let bulk = r#"[{"title":"a"},{"title":"b"},{"title":"c"}]"#;
+    let resp = app.clone().oneshot(send(Method::POST, "8.8.8.8", bulk));
+    assert_eq!(resp.await.unwrap().status(), StatusCode::CREATED);
+    let one = send(Method::POST, "8.8.8.8", r#"{"title":"d"}"#);
+    assert_eq!(status(&app, one).await, StatusCode::TOO_MANY_REQUESTS);
+}

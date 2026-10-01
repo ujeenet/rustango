@@ -166,6 +166,10 @@ A template must render `form.errors` (`__all__` for a row-level error) to show i
 
 Pass the sortable names explicitly; empty no longer means every field.
 
+### ViewSet bulk create takes at most 1000 rows (#1999)
+
+More is a `413` (raise with `max_bulk_create(n)`); each row spends one `create` throttle unit.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

@@ -20,6 +20,11 @@ The form re-renders with `422` and an error on the taken field (`__all__` when n
 
 `list_params::parse_ordering` with an empty allow-list drops every token, so a serializer that renders no model field no longer makes every column a sort key.
 
+### Security — ViewSet bulk create is capped; the throttle map is bounded (#1999)
+
+A bulk create takes at most `max_bulk_create(n)` rows (default 1000, else `413`) and spends one `create` throttle unit per row.
+The throttle store sweeps ended windows once it holds 100k keys, so per-client keys no longer grow forever.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
