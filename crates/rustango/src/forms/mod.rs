@@ -997,7 +997,8 @@ fn bool_true() -> bool {
 /// ```
 pub struct DynamicForm {
     fields: Vec<DynamicField>,
-    data: Option<HashMap<String, String>>,
+    /// Every submitted value per key; a `<select multiple>` repeats its key.
+    data: Option<HashMap<String, Vec<String>>>,
 }
 
 impl DynamicForm {
@@ -1016,7 +1017,36 @@ impl DynamicForm {
     }
 
     /// Bind a form payload (typically from `axum::Form<HashMap<...>>`).
+    ///
+    /// A map holds one value per key, so a `MultiSelect` value here is
+    /// comma-separated. Use [`Self::bind_pairs`] for `<select multiple>`.
     pub fn bind(&mut self, data: HashMap<String, String>) {
+        let multi = |name: &str| {
+            self.fields
+                .iter()
+                .any(|f| f.name == name && f.field_type == DynamicFieldType::MultiSelect)
+        };
+        let data = data
+            .into_iter()
+            .map(|(k, v)| {
+                let values = if multi(&k) {
+                    v.split(',').map(|p| p.trim().to_owned()).collect()
+                } else {
+                    vec![v]
+                };
+                (k, values)
+            })
+            .collect();
+        self.data = Some(data);
+    }
+
+    /// Bind a payload that may repeat keys (`axum::Form<Vec<(String, String)>>`).
+    /// Each repeat is one `MultiSelect` value; other fields keep the last.
+    pub fn bind_pairs(&mut self, pairs: impl IntoIterator<Item = (String, String)>) {
+        let mut data: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in pairs {
+            data.entry(k).or_default().push(v);
+        }
         self.data = Some(data);
     }
 
@@ -1035,19 +1065,18 @@ impl DynamicForm {
         };
 
         for field in &self.fields {
-            let raw = data.get(&field.name).map(String::as_str);
-
-            match raw {
-                None | Some("")
-                    if field.required && field.field_type != DynamicFieldType::Boolean =>
-                {
-                    errors.add(&field.name, "This field is required.");
-                    continue;
-                }
-                _ => {}
+            let values = data.get(&field.name).map_or(&[][..], Vec::as_slice);
+            let raw_str = values.last().map_or("", String::as_str);
+            // A required checkbox must be ticked.
+            let missing = match field.field_type {
+                DynamicFieldType::Boolean => !is_truthy(raw_str),
+                DynamicFieldType::MultiSelect => values.iter().all(String::is_empty),
+                _ => raw_str.is_empty(),
+            };
+            if field.required && missing {
+                errors.add(&field.name, "This field is required.");
+                continue;
             }
-
-            let raw_str = raw.unwrap_or("");
 
             match field.field_type {
                 DynamicFieldType::Integer => {
@@ -1077,8 +1106,9 @@ impl DynamicForm {
                 }
                 DynamicFieldType::Float => {
                     if !raw_str.is_empty() {
-                        match raw_str.parse::<f64>() {
-                            Ok(n) => {
+                        // NaN and inf pass every bound and serialize as null.
+                        match raw_str.parse::<f64>().ok().filter(|n| n.is_finite()) {
+                            Some(n) => {
                                 if let Some(min) = field.min {
                                     if n < min {
                                         errors.add(
@@ -1096,7 +1126,7 @@ impl DynamicForm {
                                     }
                                 }
                             }
-                            Err(_) => errors.add(&field.name, "Enter a number."),
+                            None => errors.add(&field.name, "Enter a number."),
                         }
                     }
                 }
@@ -1104,8 +1134,9 @@ impl DynamicForm {
                 | DynamicFieldType::Textarea
                 | DynamicFieldType::Email
                 | DynamicFieldType::Url => {
+                    let len = raw_str.chars().count();
                     if let Some(max) = field.max_length {
-                        if raw_str.len() > max {
+                        if len > max {
                             errors.add(
                                 &field.name,
                                 format!("Ensure this value has at most {max} characters."),
@@ -1113,7 +1144,7 @@ impl DynamicForm {
                         }
                     }
                     if let Some(min) = field.min_length {
-                        if !raw_str.is_empty() && raw_str.len() < min {
+                        if !raw_str.is_empty() && len < min {
                             errors.add(
                                 &field.name,
                                 format!("Ensure this value has at least {min} characters."),
@@ -1132,8 +1163,7 @@ impl DynamicForm {
                     }
                 }
                 DynamicFieldType::MultiSelect => {
-                    // multi-select values are comma-separated
-                    for part in raw_str.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    for part in values.iter().filter(|s| !s.is_empty()) {
                         if !field.choices.iter().any(|(v, _)| v == part) {
                             errors.add(&field.name, format!("'{part}' is not a valid choice."));
                         }
@@ -1184,10 +1214,12 @@ impl DynamicForm {
         if !errors.is_empty() {
             return Err(errors);
         }
-        let data = self.data.as_ref().map_or_else(HashMap::new, Clone::clone);
+        let empty = HashMap::new();
+        let data = self.data.as_ref().unwrap_or(&empty);
         let mut out = HashMap::new();
         for field in &self.fields {
-            let raw = data.get(&field.name).map(String::as_str).unwrap_or("");
+            let values = data.get(&field.name).map_or(&[][..], Vec::as_slice);
+            let raw = values.last().map_or("", String::as_str);
             let value = match field.field_type {
                 DynamicFieldType::Integer => {
                     if raw.is_empty() {
@@ -1204,14 +1236,10 @@ impl DynamicForm {
                         serde_json::json!(raw.parse::<f64>().unwrap_or(0.0))
                     }
                 }
-                DynamicFieldType::Boolean => serde_json::Value::Bool(!matches!(
-                    raw.to_ascii_lowercase().as_str(),
-                    "" | "false" | "0" | "off" | "no"
-                )),
+                DynamicFieldType::Boolean => serde_json::Value::Bool(is_truthy(raw)),
                 DynamicFieldType::MultiSelect => {
-                    let parts: Vec<serde_json::Value> = raw
-                        .split(',')
-                        .map(str::trim)
+                    let parts: Vec<serde_json::Value> = values
+                        .iter()
                         .filter(|s| !s.is_empty())
                         .map(|s| serde_json::Value::String(s.to_owned()))
                         .collect();
@@ -1228,6 +1256,61 @@ impl DynamicForm {
             out.insert(field.name.clone(), value);
         }
         Ok(out)
+    }
+}
+
+/// A checkbox value that counts as ticked.
+fn is_truthy(raw: &str) -> bool {
+    !matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "" | "false" | "0" | "off" | "no"
+    )
+}
+
+#[cfg(test)]
+mod dynamic_form_tests {
+    use super::*;
+
+    fn form(schema: serde_json::Value) -> DynamicForm {
+        DynamicForm::from_json(schema).unwrap()
+    }
+
+    #[test]
+    fn multi_select_keeps_every_repeated_value() {
+        let mut f = form(
+            serde_json::json!([{"name": "tags", "field_type": "multi_select",
+            "choices": [["a", "A"], ["b", "B"], ["x,y", "XY"]]}]),
+        );
+        f.bind_pairs([("tags", "a"), ("tags", "x,y")].map(|(k, v)| (k.into(), v.into())));
+        assert_eq!(
+            f.cleaned_data().unwrap()["tags"],
+            serde_json::json!(["a", "x,y"])
+        );
+    }
+
+    #[test]
+    fn text_length_counts_characters() {
+        let mut f = form(serde_json::json!([{"name": "t", "field_type": "text", "max_length": 3}]));
+        f.bind(HashMap::from([("t".into(), "ééé".into())]));
+        assert!(f.is_valid(), "{:?}", f.errors());
+    }
+
+    #[test]
+    fn non_finite_floats_are_refused() {
+        let mut f = form(serde_json::json!([{"name": "n", "field_type": "float", "max": 5.0}]));
+        for bad in ["NaN", "inf", "-inf"] {
+            f.bind(HashMap::from([("n".into(), bad.into())]));
+            assert!(!f.is_valid(), "{bad} accepted");
+        }
+    }
+
+    #[test]
+    fn a_required_checkbox_must_be_ticked() {
+        let mut f = form(serde_json::json!([{"name": "ok", "field_type": "boolean"}]));
+        f.bind(HashMap::new());
+        assert!(!f.is_valid());
+        f.bind(HashMap::from([("ok".into(), "on".into())]));
+        assert!(f.is_valid());
     }
 }
 

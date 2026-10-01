@@ -16,6 +16,10 @@ PG tenants seed `auth.access_admin` and extra permissions; impersonation lands o
 
 On MySQL/SQLite the UPDATE could commit with no audit row when the BEFORE read failed.
 
+### Fixed — `DynamicForm`: multi-select keeps every value; lengths count characters; NaN refused; required checkbox enforced (#1895)
+
+New `bind_pairs` takes repeated keys from `<select multiple>`; `NaN`/`inf` no longer pass float bounds.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)

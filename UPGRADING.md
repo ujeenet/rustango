@@ -154,6 +154,10 @@ untouched.
 
 Apex or marketing routes that resolve no tenant are no longer cached. Set `CachePageLayer::tenant_agnostic(true)` on routes that are the same for everyone.
 
+### `DynamicForm` enforces required checkboxes (#1895)
+
+A `boolean` field is `required` by default and must now be ticked. Set `"required": false` on optional checkboxes.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)
