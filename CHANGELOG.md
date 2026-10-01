@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — humanize and number rounding (#1896)
+
+`naturaltime`/`timesince` read 360–364 days as "12 months", not "0 years"; KRW shows `₩`, CLP `$`, and unknown codes no longer leak memory.
+`floatformat`, `format_number` and `format_currency` round halves up (`0.125` → `0.13`, `2.5` → `3`) and never print `-0`.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

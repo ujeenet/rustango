@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Number filters round halves up (#1896)
+
+`floatformat`, `numberformat::format`, `format_number` and `format_currency` round half away from zero on the shortest decimal form, so `2.5` gives `3` (was `2`).
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
