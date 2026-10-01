@@ -940,14 +940,15 @@ pub enum DynamicFieldType {
 
 /// One field descriptor in a [`DynamicForm`].
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(from = "DynamicFieldRepr")]
 pub struct DynamicField {
     /// Field name — used as the form input name and the cleaned-data key.
     pub name: String,
     /// Human-readable label shown next to the input.
-    #[serde(default)]
     pub label: String,
     pub field_type: DynamicFieldType,
-    #[serde(default = "bool_true")]
+    /// Defaults to `true` in a JSON schema, except `boolean`: an unticked
+    /// box is a valid answer unless the schema says `"required": true`.
     pub required: bool,
     pub max_length: Option<usize>,
     pub min_length: Option<usize>,
@@ -955,15 +956,46 @@ pub struct DynamicField {
     pub max: Option<f64>,
     /// `[(value, display_label)]` pairs — required for `Select` /
     /// `MultiSelect` fields.
-    #[serde(default)]
     pub choices: Vec<(String, String)>,
     /// Help text shown below the input.
-    #[serde(default)]
     pub help_text: String,
 }
 
-fn bool_true() -> bool {
-    true
+#[derive(serde::Deserialize)]
+struct DynamicFieldRepr {
+    name: String,
+    #[serde(default)]
+    label: String,
+    field_type: DynamicFieldType,
+    required: Option<bool>,
+    max_length: Option<usize>,
+    min_length: Option<usize>,
+    min: Option<f64>,
+    max: Option<f64>,
+    #[serde(default)]
+    choices: Vec<(String, String)>,
+    #[serde(default)]
+    help_text: String,
+}
+
+impl From<DynamicFieldRepr> for DynamicField {
+    fn from(r: DynamicFieldRepr) -> Self {
+        let required = r
+            .required
+            .unwrap_or(r.field_type != DynamicFieldType::Boolean);
+        Self {
+            name: r.name,
+            label: r.label,
+            field_type: r.field_type,
+            required,
+            max_length: r.max_length,
+            min_length: r.min_length,
+            min: r.min,
+            max: r.max,
+            choices: r.choices,
+            help_text: r.help_text,
+        }
+    }
 }
 
 /// Runtime JSON-schema driven form.
@@ -1293,6 +1325,29 @@ mod dynamic_form_tests {
         let mut f = form(serde_json::json!([{"name": "t", "field_type": "text", "max_length": 3}]));
         f.bind(HashMap::from([("t".into(), "ééé".into())]));
         assert!(f.is_valid(), "{:?}", f.errors());
+        // Two bytes, one character.
+        let mut f = form(serde_json::json!([{"name": "t", "field_type": "text", "min_length": 2}]));
+        f.bind(HashMap::from([("t".into(), "é".into())]));
+        assert!(!f.is_valid(), "min_length counted bytes");
+    }
+
+    #[test]
+    fn bind_splits_a_multi_select_on_commas() {
+        let mut f = form(
+            serde_json::json!([{"name": "tags", "field_type": "multi_select",
+            "choices": [["a", "A"], ["b", "B"]]}, {"name": "t", "field_type": "text"}]),
+        );
+        f.bind(HashMap::from([
+            ("tags".into(), "a, b".into()),
+            ("t".into(), "x,y".into()),
+        ]));
+        let data = f.cleaned_data().unwrap();
+        assert_eq!(data["tags"], serde_json::json!(["a", "b"]));
+        assert_eq!(
+            data["t"],
+            serde_json::json!("x,y"),
+            "only multi-select splits"
+        );
     }
 
     #[test]
@@ -1306,11 +1361,27 @@ mod dynamic_form_tests {
 
     #[test]
     fn a_required_checkbox_must_be_ticked() {
-        let mut f = form(serde_json::json!([{"name": "ok", "field_type": "boolean"}]));
+        let schema = serde_json::json!([{"name": "ok", "field_type": "boolean", "required": true}]);
+        let mut f = form(schema);
         f.bind(HashMap::new());
         assert!(!f.is_valid());
         f.bind(HashMap::from([("ok".into(), "on".into())]));
         assert!(f.is_valid());
+    }
+
+    #[test]
+    fn a_checkbox_is_optional_by_default() {
+        let mut f = form(serde_json::json!([
+            {"name": "ok", "field_type": "boolean"},
+            {"name": "t", "field_type": "text"},
+        ]));
+        f.bind(HashMap::from([("t".into(), "x".into())]));
+        assert!(f.is_valid(), "{:?}", f.errors());
+        f.bind(HashMap::new());
+        assert!(
+            !f.errors().get("t").is_empty(),
+            "text stays required by default"
+        );
     }
 }
 

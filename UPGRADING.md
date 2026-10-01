@@ -156,7 +156,7 @@ Apex or marketing routes that resolve no tenant are no longer cached. Set `Cache
 
 ### `DynamicForm` enforces required checkboxes (#1895)
 
-A `boolean` field is `required` by default and must now be ticked. Set `"required": false` on optional checkboxes.
+A `boolean` field marked `"required": true` (or `required: true` in Rust) must now be ticked. Checkboxes without it stay optional.
 
 ### `Settings.secret_key` removed; repeat soft delete returns 0 (#1929)
 
