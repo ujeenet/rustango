@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### `runserver` auto-migrate and the registry run apply the system chain first (#2056)
+
+`runserver` now applies the system chain like `manage migrate`. `migrate_registry` applies it before the project's registry migrations, not after.
+
+### Framework tables a project's own migrations create get new columns (#2052)
+
+`migrate` adds missing framework columns to them on every run; a NOT NULL column without a default on a table with rows fails until added by hand.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)

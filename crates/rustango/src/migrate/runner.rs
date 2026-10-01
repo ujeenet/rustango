@@ -2064,7 +2064,7 @@ async fn count_existing_tables(pool: &crate::sql::Pool, tables: &[String]) -> us
 /// * Postgres — `information_schema.tables` filtered to `current_schema()`
 /// * MySQL — filtered to `DATABASE()` (a schema is a database here)
 /// * SQLite — `sqlite_master`, which is inherently per-connection
-async fn table_exists_here(pool: &crate::sql::Pool, table: &str) -> bool {
+pub(crate) async fn table_exists_here(pool: &crate::sql::Pool, table: &str) -> bool {
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => sqlx::query_scalar::<_, i64>(

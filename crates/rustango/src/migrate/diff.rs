@@ -212,12 +212,14 @@ pub enum SchemaChange {
 }
 
 impl SchemaChange {
-    /// Whether this change reads or writes `table`, FK targets included.
-    pub(crate) fn touches(&self, table: &str) -> bool {
+    /// The table this change writes.
+    pub(crate) fn table(&self) -> &str {
         match self {
             Self::CreateTable(t)
             | Self::DropTable(t)
             | Self::DropM2MTable { through: t }
+            | Self::CreateM2MTable { through: t, .. }
+            | Self::RenameTable { old_name: t, .. }
             | Self::AddColumn { table: t, .. }
             | Self::DropColumn { table: t, .. }
             | Self::AlterColumnType { table: t, .. }
@@ -232,16 +234,33 @@ impl SchemaChange {
             | Self::DropCheckConstraint { table: t, .. }
             | Self::AddExclusionConstraint { table: t, .. }
             | Self::DropExclusionConstraint { table: t, .. }
-            | Self::DropCompositeFk { table: t, .. } => t == table,
-            Self::RenameTable { old_name, new_name } => old_name == table || new_name == table,
-            Self::CreateM2MTable {
-                through,
-                src_table,
-                dst_table,
-                ..
-            } => [through, src_table, dst_table].iter().any(|t| *t == table),
-            Self::AddCompositeFk { table: t, to, .. } => t == table || to == table,
+            | Self::AddCompositeFk { table: t, .. }
+            | Self::DropCompositeFk { table: t, .. } => t,
         }
+    }
+
+    /// Whether this change writes `table` or adds an FK to it. FK targets
+    /// live in `snapshot`, the migration's after-state.
+    pub(crate) fn touches(&self, table: &str, snapshot: &super::SchemaSnapshot) -> bool {
+        let fk_to = |f: &FieldSnapshot| f.fk.as_ref().is_some_and(|r| r.to == table);
+        self.table() == table
+            || match self {
+                Self::RenameTable { new_name, .. } => new_name == table,
+                Self::CreateM2MTable {
+                    src_table,
+                    dst_table,
+                    ..
+                } => src_table == table || dst_table == table,
+                Self::AddCompositeFk { to, .. } => to == table,
+                Self::CreateTable(t) => snapshot.table(t).is_some_and(|s| {
+                    s.fields.iter().any(fk_to) || s.composite_fks.iter().any(|c| c.to == table)
+                }),
+                Self::AddColumn { table: t, column } => snapshot
+                    .table(t)
+                    .and_then(|s| s.field(column))
+                    .is_some_and(fk_to),
+                _ => false,
+            }
     }
 }
 

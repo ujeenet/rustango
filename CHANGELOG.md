@@ -8,6 +8,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 A system step that alters a table the project's own `0001` creates (a pre-system-chain scaffold) now waits for that migration; it failed with `relation does not exist`.
 
+### Fixed — `runserver` auto-migrate applies the framework's system chain (#2056)
+
+It ran only the project chain, so tables and columns like `sessions_revoked_at` were missing and logins failed.
+
+### Fixed — system and project chains apply in one safe order everywhere (#2055, #2052)
+
+A system step that FKs a project-created framework table waits for it on PG/MySQL; such tables get the framework's newer columns, on the tenancy runners too.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)

@@ -47,6 +47,17 @@ type ShutdownFn = Box<dyn FnOnce() -> ShutdownFut + Send>;
 /// A router built from the serving pool. See [`Cli::nest_with`].
 type NestFn = Box<dyn FnOnce(crate::sql::Pool) -> Router + Send>;
 
+/// `runserver`'s auto-migrate: the same chains as `manage migrate` (#2056).
+async fn auto_migrate(
+    pool: &crate::sql::Pool,
+    dir: &std::path::Path,
+) -> Result<(), crate::migrate::MigrateError> {
+    crate::migrate::manage::migrate_with_framework(pool, dir, &mut std::io::stderr(), || {
+        crate::migrate::migrate_pool(pool, dir)
+    })
+    .await
+}
+
 /// Run the [`Cli::on_shutdown`] hook, if one was registered.
 async fn run_shutdown_hook(hook: Option<ShutdownFn>) {
     if let Some(hook) = hook {
@@ -1175,7 +1186,7 @@ impl Cli {
                 "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
             })?;
             let pool = crate::sql::Pool::connect(&url).await?;
-            let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
+            auto_migrate(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed.take() {
                 // The seed hook's error is now `Send + Sync` (so a seed can
                 // hold an error across an `.await` without the future losing
@@ -1223,7 +1234,7 @@ impl Cli {
                 // necessary setup here rather than restructure the
                 // `#[cfg]` blocks at the top of the fn.
                 let pool = crate::sql::Pool::connect(&url).await?;
-                let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
+                auto_migrate(&pool, &self.migrations_dir).await?;
                 if let Some(seed) = self.seed.take() {
                     seed(&pool)
                         .await
@@ -1248,7 +1259,15 @@ impl Cli {
                 return Ok(());
             }
             let pool = crate::sql::Pool::connect_postgres(&url).await?;
-            let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
+            // The PG runner fires the migrate signals; keep it for the project chain.
+            let dir = &self.migrations_dir;
+            crate::migrate::manage::migrate_with_framework(
+                &crate::sql::Pool::from(pool.clone()),
+                dir,
+                &mut std::io::stderr(),
+                || crate::migrate::migrate(&pool, dir),
+            )
+            .await?;
             if let Some(seed) = self.seed.take() {
                 seed(&crate::sql::Pool::from(pool.clone()))
                     .await
@@ -1826,6 +1845,24 @@ fn routes_from_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `runserver`'s auto-migrate applies the system chain, like `manage migrate` (#2056).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn auto_migrate_applies_the_system_chain() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        auto_migrate(&pool, &dir).await.expect("auto-migrate");
+        let applied: i64 =
+            crate::sql::sqlx::query_scalar("SELECT COUNT(*) FROM __rustango_system_migrations__")
+                .fetch_one(pool.as_sqlite().unwrap())
+                .await
+                .expect("system ledger");
+        assert!(applied > 0, "no system migration applied");
+    }
 
     /// `with_tenant_pools` reaches a SQLite tenancy verb (#1914): cap 0
     /// skips the one tenant; the default config would warm it.
