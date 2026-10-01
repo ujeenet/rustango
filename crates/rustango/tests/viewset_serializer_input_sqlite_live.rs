@@ -723,3 +723,56 @@ async fn patch_skips_an_absent_write_only_field() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+fn form(method: Method, uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+/// A form-urlencoded body runs the same serializer checks as JSON (#1993).
+#[tokio::test]
+async fn form_body_runs_serializer_validation() {
+    let app = widget_router().await;
+    for (body, field) in [
+        ("code=ok&note=toolong&priority=1&status=draft", "note"),
+        ("code=ok&note=ok&priority=9&status=draft", "priority"),
+        ("code=ok&note=ok&priority=1&status=bogus", "status"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(form(Method::POST, "/widgets", body))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let v = json_body(resp).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {v}");
+        assert!(v["details"][field].is_array(), "{body}: {v}");
+    }
+    // A valid form still parses its typed fields and creates the row.
+    let resp = app
+        .clone()
+        .oneshot(form(
+            Method::POST,
+            "/widgets",
+            "code=ok&note=ok&priority=2&status=live",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    for method in [Method::PUT, Method::PATCH] {
+        let resp = app
+            .clone()
+            .oneshot(form(
+                method.clone(),
+                "/widgets/1",
+                "code=ok&note=ok&priority=7&status=live",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{method}");
+    }
+}

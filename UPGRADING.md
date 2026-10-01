@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### ViewSet form bodies are validated (#1993)
+
+A form-urlencoded write that broke a serializer rule now gets the same `422` as JSON.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

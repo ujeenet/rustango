@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ViewSet form-urlencoded bodies run serializer validation (#1993)
+
+A form body is typed by its model fields and checked like JSON; it no longer skips `validate`, lengths, ranges and choices.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)

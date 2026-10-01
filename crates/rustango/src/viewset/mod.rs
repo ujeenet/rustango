@@ -1552,14 +1552,62 @@ fn public_form_error(state: &ViewSetState, e: FormError) -> FormError {
     }
 }
 
-/// Run the serializer's input validation on a JSON body, when one is set.
-fn serializer_validate(state: &ViewSetState, json: Option<&Value>) -> Result<(), Response> {
-    if let (Some(bridge), Some(body)) = (&state.vs.serializer, json) {
+/// Run the serializer's input validation on the body.
+fn serializer_validate(state: &ViewSetState, json: &Value) -> Result<(), Response> {
+    if let Some(bridge) = &state.vs.serializer {
         bridge
-            .validate_body(body)
+            .validate_body(json)
             .map_err(|errs| json_form_errors(&errs))?;
     }
     Ok(())
+}
+
+/// The body the serializer validates: the JSON as sent, or a form
+/// typed by its model fields, so a form cannot skip validation (#1993).
+fn write_json(state: &ViewSetState, form: &HashMap<String, String>, json: Option<Value>) -> Value {
+    if let Some(json) = json {
+        return json;
+    }
+    let bridge = state.vs.serializer.as_ref();
+    let model_name = |key: &str| -> Option<&'static str> {
+        let Some(b) = bridge else {
+            return state.vs.schema.field(key).map(|f| f.name);
+        };
+        b.writable_field_names()
+            .iter()
+            .zip(b.writable_model_fields())
+            .find(|(n, _)| **n == key)
+            .map(|(_, m)| *m)
+    };
+    let typed = |key: &str, raw: &String| {
+        // Unparseable stays a string, so the serializer reports it.
+        model_name(key)
+            .and_then(|m| state.vs.schema.field(m))
+            .and_then(|f| parse_form_value(f, Some(raw)).ok())
+            .and_then(sql_value_json)
+            .unwrap_or_else(|| Value::String(raw.clone()))
+    };
+    Value::Object(form.iter().map(|(k, v)| (k.clone(), typed(k, v))).collect())
+}
+
+fn sql_value_json(v: SqlValue) -> Option<Value> {
+    match v {
+        SqlValue::Null => Some(Value::Null),
+        SqlValue::I16(n) => Some(n.into()),
+        SqlValue::I32(n) => Some(n.into()),
+        SqlValue::I64(n) => Some(n.into()),
+        SqlValue::F32(n) => serde_json::to_value(n).ok(),
+        SqlValue::F64(n) => serde_json::to_value(n).ok(),
+        SqlValue::Bool(b) => Some(b.into()),
+        SqlValue::String(s) => Some(s.into()),
+        SqlValue::Json(j) => Some(j),
+        SqlValue::DateTime(d) => serde_json::to_value(d).ok(),
+        SqlValue::Date(d) => serde_json::to_value(d).ok(),
+        SqlValue::Time(t) => serde_json::to_value(t).ok(),
+        SqlValue::Uuid(u) => serde_json::to_value(u).ok(),
+        SqlValue::Decimal(d) => serde_json::to_value(d).ok(),
+        _ => None,
+    }
 }
 
 /// The fields one write request may set, decided once (#1845).
@@ -2657,10 +2705,25 @@ async fn handle_create(
 
     match create_body {
         CreateBody::Single(form, json) => {
-            let body = (&form, json.as_ref());
-            create_one(&state, &mut acq, &write_set, body, pk_field, &scope).await
+            let json = write_json(&state, &form, json);
+            create_one(
+                &state,
+                &mut acq,
+                &write_set,
+                (&form, &json),
+                pk_field,
+                &scope,
+            )
+            .await
         }
         CreateBody::Bulk(rows) => {
+            let rows: Vec<_> = rows
+                .into_iter()
+                .map(|(form, json)| {
+                    let json = write_json(&state, &form, json);
+                    (form, json)
+                })
+                .collect();
             create_many(&state, &mut acq, &write_set, &rows, pk_field, &scope).await
         }
     }
@@ -2725,7 +2788,7 @@ async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     write_set: &WriteSet,
-    (form, json): (&HashMap<String, String>, Option<&Value>),
+    (form, json): (&HashMap<String, String>, &Value),
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
 ) -> Response {
@@ -2767,7 +2830,7 @@ async fn create_many(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     write_set: &WriteSet,
-    rows: &[(HashMap<String, String>, Option<Value>)],
+    rows: &[(HashMap<String, String>, Value)],
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
 ) -> Response {
@@ -2780,7 +2843,7 @@ async fn create_many(
     // INSERTs committed: validate the whole list before any save.
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
-        if let Err(resp) = serializer_validate(state, json.as_ref()) {
+        if let Err(resp) = serializer_validate(state, json) {
             return resp;
         }
         let renamed = serializer_input_renamed_form(state, row);
@@ -2920,19 +2983,20 @@ async fn update_inner(
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
+    let json = write_json(&state, &form, json);
 
     // PATCH checks only the sent fields, over the stored row (#1995).
-    let validated = match (&state.vs.serializer, json.as_ref()) {
-        (Some(bridge), Some(body)) if partial => {
+    let validated = match &state.vs.serializer {
+        Some(bridge) if partial => {
             let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val.clone());
             q.where_clause = narrow(q.where_clause, scope.clone());
-            let body = write_set.patch_body(bridge.as_ref(), body);
+            let body = write_set.patch_body(bridge.as_ref(), &json);
             match bridge.validate_patch(&mut acq, &q, &body).await {
                 Ok(r) => r.map_err(|errs| json_form_errors(&errs)),
                 Err(e) => return json_server_error("viewset::update::validate", &e),
             }
         }
-        _ => serializer_validate(&state, json.as_ref()),
+        _ => serializer_validate(&state, &json),
     };
     if let Err(resp) = validated {
         return resp;
