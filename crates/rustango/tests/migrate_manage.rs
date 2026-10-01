@@ -105,6 +105,15 @@ async fn delete_ledger_entry(pool: &rustango::sql::Pool, name: &str) {
         .await;
 }
 
+/// Each test's fresh dir has no `system/migrations/`, which `migrate`
+/// refuses against a ledger other tests filled (#1988). Forget that chain.
+async fn forget_system_chain(pool: &rustango::sql::Pool) {
+    let pg = pool.as_postgres().expect("test pool is postgres");
+    let _ = sqlx::query("DELETE FROM __rustango_system_migrations__")
+        .execute(pg)
+        .await;
+}
+
 fn args(cmd: &[&str]) -> Vec<String> {
     cmd.iter().map(|s| (*s).to_string()).collect()
 }
@@ -456,6 +465,7 @@ async fn migrate_subcommand_applies_pending() {
     drop_table(&pool, &table).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
+    forget_system_chain(&pool).await;
     manage::run(&pool, &dir, args(&["migrate"])).await.unwrap();
 
     let exists: bool = sqlx::query(
@@ -586,6 +596,7 @@ async fn downgrade_subcommand_steps_back_one_by_default() {
         drop_table(&pool, t).await;
     }
 
+    forget_system_chain(&pool).await;
     manage::run(&pool, &dir, args(&["migrate"])).await.unwrap();
     // Default `downgrade` (no arg) → 1 step.
     manage::run(&pool, &dir, args(&["downgrade"]))
@@ -748,6 +759,7 @@ async fn run_with_writer_captures_migrate_output() {
     delete_ledger_entry(&pool, &mig_name).await;
 
     let mut buf: Vec<u8> = Vec::new();
+    forget_system_chain(&pool).await;
     manage::run_with_writer(&pool, &dir, args(&["migrate"]), &mut buf)
         .await
         .unwrap();
