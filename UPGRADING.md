@@ -150,6 +150,33 @@ untouched.
 
 ## Unreleased
 
+### Edited constraints now migrate (#1881)
+
+**Breaking:** the next `makemigrations` picks up CHECK, EXCLUDE, composite FK and M2M edits it
+ignored before. An edited M2M is dropped and recreated, so its rows are lost: copy them first.
+
+### Shrinking `max_length` no longer truncates (#1878)
+
+**Breaking:** on PostgreSQL the migration now fails when a value is longer than the new length.
+Shorten those values first.
+
+### Drop order in new migrations (#1879)
+
+Only newly written files use it. An unapplied file that drops a column before its index,
+or a parent table before its child, still fails on SQLite and MySQL: regenerate it.
+
+### `AddColumn` adds the FK and UNIQUE (#1877)
+
+**Breaking:** a migration that adds a `ForeignKey` or `unique` column now creates the constraint,
+so it fails on rows that break it. Columns added by earlier migrations still lack it.
+SQLite leaves out the FK of a column with a default (it refuses one on a table with rows) and warns.
+
+### UNIQUE constraints are named (#1880)
+
+`CREATE TABLE` writes `CONSTRAINT <table>_<column>_key UNIQUE (<column>)`; PG names do not change.
+**Breaking** on MySQL: new tables name the unique index `<table>_<column>_key`, not after the column.
+Two UNIQUE columns that map to one name (`a_b.c`, `a.b_c`) now fail to render: rename one.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

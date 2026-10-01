@@ -4,6 +4,31 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)
+
+Same-name edits migrate as Drop + Add, and `Option<T>` → `T` with a default fills NULLs before `SET NOT NULL`.
+A junction, CHECK, EXCLUDE or index name shared by two models now resolves in a fixed order, not `inventory` order.
+
+### Fixed — a `max_length` change no longer undoes a type change (#1878)
+
+Shrinking a length on PostgreSQL now refuses over longer values instead of truncating them.
+
+### Fixed — migrations drop dependents first (#1879)
+
+Indexes, checks, composite FKs and M2M junctions drop before their columns and tables,
+and tables child first; SQLite and MySQL refused the old order.
+
+### Fixed — `AddColumn` keeps the field's FK and UNIQUE (#1877)
+
+As `CREATE TABLE` does; SQLite gets inline `REFERENCES` and a unique index.
+On SQLite a column with a default skips the FK and warns: SQLite refuses it on a table with rows.
+
+### Fixed — removing `unique` works for long table and column names (#1880)
+
+Every UNIQUE is named by one 63-byte helper (PG's rule), so the drop finds it.
+FK names are cut to 63 bytes, as PG already stored them, so MySQL no longer refuses long ones (1059).
+Two columns whose names shorten to one UNIQUE name are refused with an error.
+
 ## [0.59.11] — 2026-09-30
 
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)
