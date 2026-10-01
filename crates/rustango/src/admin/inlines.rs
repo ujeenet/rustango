@@ -1140,8 +1140,9 @@ enum InlineWrite {
 /// Check every submitted inline row (FK and generic) against the child
 /// table's admin gates and build its write. Writes nothing.
 ///
-/// A row per FormSet slot: empty PK with content → INSERT, PK with the
-/// DELETE box → DELETE, PK without it → UPDATE. A row whose values fail
+/// A row per FormSet slot: a slot past `INITIAL_FORMS` (or, without it, an
+/// empty PK) with content → INSERT; an existing row with the DELETE box →
+/// DELETE, without it → UPDATE. A row whose values fail
 /// to parse is counted in `failed` and skipped.
 ///
 /// An unchanged existing row is skipped: no gate, no write. Deleting a
