@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.16
+
 ### Custom admin views need `change` for writes
 
 **Breaking:** under `with_user_perms`, grant `{table}.change`, or declare `perm = "…"` on

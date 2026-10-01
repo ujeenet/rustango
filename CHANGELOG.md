@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.16] — 2026-10-01
+
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
 
 **Breaking:** under `with_user_perms`, a `register_admin_view!` write route now needs
