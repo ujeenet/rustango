@@ -499,25 +499,29 @@ You should see your new post id and the rows read back. Restore `src/main.rs` to
 
 ## Step 11: Turn on the auto-admin
 
-**Rustango** ships a generated admin UI for your models — browse, search and edit rows with no code of your own. Building it is two small steps: a helper that turns a pool into an admin router, and one `.nest(...)` call to mount it.
+**Rustango** ships a generated admin UI for your models — browse, search and edit rows with no code of your own. The fullstack scaffold already wires it: a helper in `src/urls.rs` turns a pool into an admin router, and `src/main.rs` nests it under `/admin`.
 
-Add the helper to `src/urls.rs` yourself — the scaffolder does not generate it, because nothing it generates would call it. The `admin_prefix` must match the path you'll nest it under in the next step (`/admin`) so the admin's own links and form actions resolve:
+The helper puts the admin behind a login. The `admin_prefix` must match the path it is nested under (`/admin`) so the admin's own links and form actions resolve:
 
 ```rust
 use rustango::admin;
+use rustango::session::SessionSecret;
 use rustango::sql::Pool;
 
 pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
-        .admin_prefix("/admin") // must match the `.nest("/admin", …)` below
+        .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
+        .with_session_auth(SessionSecret::from_env_or_random())
         .build()
 }
 ```
 
+> **Keep `.with_session_auth(...)`.** Without it the admin has no login: anyone who can reach `/admin` can read, edit and delete every model. `check --deploy` warns when an admin is built without it (see [admin.md](admin.md)).
+
 `Builder::new` takes any backend's pool, so this helper names no driver and works on all three.
 
-Then connect a pool in `src/main.rs` and nest the admin into the API router before handing it to the `Cli`. Keep the `mod blog;` line from Step 7 — that's what registers your `Post` model with the admin:
+`src/main.rs` hands the helper to the `Cli`, which builds the admin from the pool it serves with, so verbs like `makemigrations` still run without a database. Keep the `mod blog;` line from Step 7 — that's what registers your `Post` model with the admin:
 
 ```rust
 mod blog;
@@ -528,16 +532,19 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::Pool::connect(&std::env::var("DATABASE_URL")?).await?;
-
-    let api = urls::api().nest("/admin", urls::admin_router(pool));
-
     rustango::manage::Cli::new()
-        .api(api)
+        .api(urls::api())
+        .nest_with("/admin", urls::admin_router)
         .with_health() // /health + /ready endpoints
         .run()
         .await
 }
+```
+
+Create the account you will log in with (it prompts for a password):
+
+```bash
+cargo run -- create-admin alice --superuser
 ```
 
 `Cli::new()...run()` is the same unified dispatcher the scaffolder generated — it still serves every `cargo run -- <verb>`; you've only enriched the router it serves at runserver time.
@@ -548,7 +555,7 @@ Run it:
 cargo run
 ```
 
-Open <http://localhost:8080/admin> (no trailing slash). You'll see the admin home with a `posts` link. Click it to see your draft post in the list, click the post to open its edit form, and save. The audit-trail tab records every write.
+Open <http://localhost:8080/admin> (no trailing slash) and log in as `alice`. You'll see the admin home with a `posts` link. Click it to see your draft post in the list, click the post to open its edit form, and save. The audit-trail tab records every write.
 
 ---
 
@@ -863,7 +870,7 @@ export RUSTANGO_ENV=prod
 export DATABASE_URL=postgres://prod-host/myblog
 export RUSTANGO_SESSION_SECRET=$(openssl rand -base64 32)
 
-# 2. Run migrations
+# 2. Run migrations (ship `migrations/` AND `system/migrations/` with the binary)
 cargo run --release -- migrate
 
 # 3. Audit

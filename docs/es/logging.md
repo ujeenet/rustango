@@ -17,8 +17,9 @@ cómo distinguir el tráfico de un inquilino del de otro.
 > **Fuente:** `rustango::logging` (`setup`, `setup_for_env`, `Setup`,
 > `Rotation`, `DEFAULT_FILTER`) — el módulo no está tras una feature, pero todo
 > instalador necesita la feature `runtime`. `Setup::from_settings` necesita
-> además `config`. `rustango::access_log` y `rustango::tenant_log` necesitan
-> `admin` **o** `tenancy`; `rustango::tracing_layer` necesita `admin`.
+> además `config`. `rustango::access_log`, `rustango::tenant_log`,
+> `rustango::tracing_layer` y `rustango::request_id` necesitan `manage`,
+> `admin` **o** `tenancy`.
 >
 > **Versión ejecutable:** los ajustes y valores por defecto de aquí están
 > fijados por

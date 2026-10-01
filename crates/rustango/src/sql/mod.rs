@@ -161,6 +161,8 @@ pub use postgres::Postgres;
 /// caller is the `SQLite` bind path, which needs the driver linked.
 #[cfg(feature = "sqlite")]
 pub(crate) use sqlite::encode_datetime;
+#[cfg(feature = "sqlite")]
+pub(crate) use sqlite::is_now_expr;
 pub use sqlite::Sqlite;
 /// The sweep's "already canonical?" shape test. Gated with its only
 /// reader, which needs a live `SQLite` pool.

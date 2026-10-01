@@ -254,7 +254,7 @@ async fn list_tables(
     not(any(feature = "postgres", feature = "mysql")),
     allow(unused_variables)
 )]
-async fn list_columns(
+pub(super) async fn list_columns(
     pool: &Pool,
     schema: &str,
     table: &str,

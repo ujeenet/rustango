@@ -170,6 +170,28 @@ A serializer `PATCH` now loads the row once before the update. `ModelSerializer`
 Flag writes no longer carry a 1 hour TTL. To keep the old expiry, call `.ttl(Duration::from_secs(3600))`.
 They go through the new defaulted `Cache::set_forever`; a custom cache that wraps another must forward it.
 
+### `check --deploy` flags an ungated admin (#1627)
+
+An app that builds `admin::router(pool)` or a `Builder` without `with_session_auth`
+now gets an `[admin]` warning. Add the login, or ignore it if you gate the route yourself.
+`tenant_mode()` alone no longer silences it.
+
+### `admin::Builder::new` cookies follow the secure-cookie policy
+
+They are `Secure` on the prod tier or when `[security].secure_cookies` is on, and under `manage` it
+defaults to on. So a dev config without it gets `Secure` cookies and login fails over plain HTTP:
+add `[security] secure_cookies = false` to `config/dev.toml`, or call `.secure_cookies(false)`.
+
+### Commit and ship `system/migrations/` (#1988)
+
+Without it, `migrate` regenerates the chain and checks the live schema instead of the ledger,
+for the registry and every tenant. Commit it and add `COPY system /app/system` to an existing `Dockerfile`.
+
+### `manage`-only builds log requests (#1514)
+
+A build without `admin` (the `api` template) now sends `X-Request-Id` and writes
+`rustango::access_log` lines. Turn the log off with `[logging] access_log = false`.
+
 ## 0.59.12
 
 ### Edited constraints now migrate (#1881)

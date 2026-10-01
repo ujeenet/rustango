@@ -17,8 +17,8 @@ tenant's traffic from another's.
 > **Source:** `rustango::logging` (`setup`, `setup_for_env`, `Setup`,
 > `Rotation`, `DEFAULT_FILTER`) — the module is ungated, but every installer
 > needs the `runtime` feature. `Setup::from_settings` also needs `config`.
-> `rustango::access_log` and `rustango::tenant_log` need `admin` **or**
-> `tenancy`; `rustango::tracing_layer` needs `admin`.
+> `rustango::access_log`, `rustango::tenant_log`, `rustango::tracing_layer`
+> and `rustango::request_id` need `manage`, `admin` or `tenancy`.
 >
 > **Runnable version:** the settings and defaults here are pinned by
 > [`logging_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/logging_doc.rs)
