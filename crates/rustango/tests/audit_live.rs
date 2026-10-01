@@ -689,18 +689,20 @@ fn audit_source_token_is_stable() {
 /// Rolled-back transactions in `db` once none of its backends remain:
 /// a backend flushes its stats on exit, before it leaves `pg_stat_activity`.
 async fn settled_rollbacks(admin: &sqlx::PgPool, db: &str) -> i64 {
+    let mut live: i64 = -1;
     for _ in 0..100 {
-        let live: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = $1")
-                .bind(db)
-                .fetch_one(admin)
-                .await
-                .expect("activity");
+        live = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = $1")
+            .bind(db)
+            .fetch_one(admin)
+            .await
+            .expect("activity");
         if live == 0 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    // Unflushed stats would read low and pass the test for nothing.
+    assert_eq!(live, 0, "{db} still has backends after 5 s");
     sqlx::query("SELECT pg_stat_clear_snapshot()")
         .execute(admin)
         .await
