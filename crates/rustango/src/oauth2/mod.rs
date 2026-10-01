@@ -500,9 +500,16 @@ impl OAuth2Provider {
                 .header("Accept", "application/json")
                 .send()
                 .await?;
-            let emails: serde_json::Value = decode_or_error(resp).await?;
-            if let Some(obj) = raw.as_object_mut() {
-                obj.insert("emails".to_owned(), emails);
+            // No `user:email` grant (403) or endpoint (404): no verified email, not a failure.
+            let denied = matches!(
+                resp.status(),
+                reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND
+            );
+            if !denied {
+                let emails: serde_json::Value = decode_or_error(resp).await?;
+                if let Some(obj) = raw.as_object_mut() {
+                    obj.insert("emails".to_owned(), emails);
+                }
             }
         }
 
@@ -963,6 +970,42 @@ mod tests {
             .unwrap();
         assert_eq!(user.email.as_deref(), Some("pub@example.com"));
         assert!(user.email_verified);
+    }
+
+    /// `/user/emails` refused (no `user:email` grant): the login goes on
+    /// with an unverified email instead of a 502.
+    #[tokio::test]
+    async fn github_emails_403_or_404_means_unverified() {
+        for status in [
+            axum::http::StatusCode::FORBIDDEN,
+            axum::http::StatusCode::NOT_FOUND,
+        ] {
+            let app = axum::Router::new()
+                .route(
+                    "/token",
+                    axum::routing::post(|| async { r#"{"access_token":"t"}"# }),
+                )
+                .route(
+                    "/user",
+                    axum::routing::get(|| async { r#"{"id":7,"email":"pub@example.com"}"# }),
+                )
+                .route(
+                    "/user/emails",
+                    axum::routing::get(move || async move { (status, "denied") }),
+                );
+            let base = serve(app).await;
+            let mut p = providers::github("c", "s", "https://app/cb")
+                .with_userinfo_url(format!("{base}/user"))
+                .with_emails_url(format!("{base}/user/emails"));
+            p.token_url = format!("{base}/token");
+            let (_, flow) = p.begin();
+            let (user, _) = p
+                .complete_with(&flow, "code", &flow.state, &loopback())
+                .await
+                .unwrap();
+            assert_eq!(user.email.as_deref(), Some("pub@example.com"));
+            assert!(!user.email_verified, "{status}");
+        }
     }
 
     /// Token and userinfo calls reuse one pooled connection (#1792).
