@@ -483,3 +483,42 @@ async fn save_bytes_removes_the_object_when_the_row_insert_fails() {
     assert!(mgr.save_bytes(opts).await.is_err());
     assert!(disk.files.lock().unwrap().is_empty(), "object left behind");
 }
+
+/// A Ready row: a second finalize must not delete its object.
+#[tokio::test]
+async fn finalize_on_a_ready_row_is_a_no_op() {
+    use rustango::media::{MediaStatus, UploadIntent};
+    let (mgr, disk, _) = bucket_manager().await;
+    let t = mgr
+        .begin_upload(UploadIntent::new("default", "image/png", "a.png", 10))
+        .await
+        .expect("begin");
+    disk.put(&t.storage_key, b"0123456789", "image/png");
+    let m = mgr.finalize_upload(t.media_id).await.expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Ready));
+    // A Change-only caller swaps in a mismatched body and re-finalizes.
+    disk.put(&t.storage_key, b"too long for the row", "image/png");
+    let again = mgr.finalize_upload(t.media_id).await.expect("refinalize");
+    assert_eq!(again.status_enum(), Some(MediaStatus::Ready));
+    let stored = mgr.get(t.media_id).await.unwrap().unwrap();
+    assert_eq!(stored.status_enum(), Some(MediaStatus::Ready));
+    assert!(disk.has(&t.storage_key), "a Ready row lost its object");
+}
+
+/// A Failed row stays Failed, even once a matching object lands.
+#[tokio::test]
+async fn finalize_on_a_failed_row_stays_failed() {
+    use rustango::media::{MediaStatus, UploadIntent};
+    let (mgr, disk, _) = bucket_manager().await;
+    let t = mgr
+        .begin_upload(UploadIntent::new("default", "image/png", "a.png", 10))
+        .await
+        .expect("begin");
+    let m = mgr.finalize_upload(t.media_id).await.expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Failed), "no object yet");
+    disk.put(&t.storage_key, b"0123456789", "image/png");
+    let again = mgr.finalize_upload(t.media_id).await.expect("refinalize");
+    assert_eq!(again.status_enum(), Some(MediaStatus::Failed));
+    let stored = mgr.get(t.media_id).await.unwrap().unwrap();
+    assert_eq!(stored.status_enum(), Some(MediaStatus::Failed));
+}

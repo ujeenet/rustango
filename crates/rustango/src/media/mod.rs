@@ -70,6 +70,7 @@ use serde_json::Value;
 #[cfg(feature = "postgres")]
 use sqlx::PgPool;
 
+use crate::core::Column as _;
 use crate::sql::Auto;
 use crate::storage::{StorageError, StorageRegistry};
 
@@ -475,7 +476,7 @@ impl MediaManager {
     /// `Pending` to `Ready`. It must have the size the row declared and,
     /// where the backend stores one, the signed type. Otherwise the row
     /// flips to `Failed` and a mismatched object is deleted. Returns the
-    /// row either way.
+    /// row either way; a row that is not `Pending` is returned untouched.
     ///
     /// # Errors
     /// `Db` if the row is missing or the update fails. `Storage` for
@@ -486,35 +487,38 @@ impl MediaManager {
             .get(media_id)
             .await?
             .ok_or_else(|| MediaError::Other(format!("media {media_id} not found")))?;
+        // Only a Pending row is finalized: a Ready or Failed one keeps its
+        // object and its status, whoever calls this.
+        if media.status_enum() != Some(MediaStatus::Pending) {
+            return Ok(media);
+        }
         let storage = self.resolve_disk(&media.disk)?;
         // The backend's word, never the client's: the declared size and
         // type are what the PUT was signed for (#1851).
-        let new_status = match storage.metadata(&media.storage_key).await? {
-            Some(meta) if upload_matches(&meta, &media) => MediaStatus::Ready,
-            Some(_) => {
-                let _ = storage.delete(&media.storage_key).await;
-                MediaStatus::Failed
-            }
-            None => MediaStatus::Failed,
+        let (new_status, mismatched) = match storage.metadata(&media.storage_key).await? {
+            Some(meta) if upload_matches(&meta, &media) => (MediaStatus::Ready, false),
+            Some(_) => (MediaStatus::Failed, true),
+            None => (MediaStatus::Failed, false),
         };
-        let d = self.pool.dialect();
-        let sql = format!(
-            "UPDATE rustango_media SET status = {p1} WHERE id = {p2}",
-            p1 = d.placeholder(1),
-            p2 = d.placeholder(2),
-        );
-        // `raw_execute_pool` handles the bind and dispatch for every
-        // backend, so there is no per-dialect `match pool` here.
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &sql,
-            vec![
-                crate::core::SqlValue::String(new_status.as_str().to_owned()),
-                crate::core::SqlValue::I64(media_id),
-            ],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        use crate::sql::UpdaterPool as _;
+        let changed = Media::objects()
+            .where_(Media::id.eq(media_id))
+            .where_(Media::status.eq(MediaStatus::Pending.as_str().to_owned()))
+            .update()
+            .set("status", new_status.as_str())
+            .execute_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        if changed != 1 {
+            // A concurrent finalize won; report the row as it now is.
+            return self
+                .get(media_id)
+                .await?
+                .ok_or_else(|| MediaError::Other(format!("media {media_id} not found")));
+        }
+        if mismatched {
+            let _ = storage.delete(&media.storage_key).await;
+        }
         let mut updated = media;
         updated.status = new_status.as_str().to_owned();
         Ok(updated)

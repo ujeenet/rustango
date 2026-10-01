@@ -26,6 +26,10 @@ The presigned PUT signs the declared size, and `finalize_upload` reads the objec
 
 ### Fixed — `purge` deletes links and row in one transaction; `MediaPerms::from_manager` (#1573)
 
+### Security — `finalize_upload` only changes a `Pending` row
+
+A second finalize no longer deletes a `Ready` row's object or flips `Failed` back; the update is `WHERE status = 'pending'`.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
