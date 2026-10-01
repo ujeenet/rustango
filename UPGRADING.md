@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.15
+
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
 
 A request is resolved by host only. To keep header routing, add `HeaderResolver::default().allow_only([...])` via `Builder::header_resolver`, `Cli::tenant_header` or `ChainResolver::push`.
