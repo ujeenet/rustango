@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — page cache never stores or serves a page for an unresolved tenant (#2045)
+
+`CachePageLayer` bypasses the cache when no tenant resolves, so a route varying on an input the resolver ignored cannot leak one tenant's page to another.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)

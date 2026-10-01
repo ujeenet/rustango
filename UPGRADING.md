@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Page cache skips requests with no resolved tenant (#2045)
+
+Apex or marketing routes that resolve no tenant are no longer cached. Set `CachePageLayer::tenant_agnostic(true)` on routes that are the same for everyone.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)

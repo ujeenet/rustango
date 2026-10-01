@@ -60,8 +60,9 @@
 //!   layer resolves the request's tenant and puts it in the key, so a
 //!   tenant picked by a header never gets another tenant's page. Mount
 //!   the layer inside the tenancy layer (any router passed to the
-//!   server builder is). Where no tenant context is present it does
-//!   not cache, unless [`CachePageLayer::tenant_agnostic`] is set. A
+//!   server builder is). Where no tenant context is present, or no
+//!   tenant resolves, it does not cache, unless
+//!   [`CachePageLayer::tenant_agnostic`] is set. A
 //!   CDN in front must still vary on the tenant header itself.
 //!
 //! [`CachePageLayer`]: crate::cache_page::CachePageLayer
@@ -447,10 +448,10 @@ const X_CACHE_STATUS: HeaderName = HeaderName::from_static("x-cache-status");
 /// The tenant a page is cached for.
 #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
 enum PageTenant {
-    /// No tenant: tenancy is off, or the resolver matched none.
+    /// No tenant: tenancy is off, or the route is tenant-agnostic.
     NoTenant,
     Slug(String),
-    /// No tenant context, or resolution failed: never share a page.
+    /// No tenant context, no match, or resolution failed: never share a page.
     Unknown,
 }
 
@@ -465,7 +466,8 @@ async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
     let (parts, body) = req.into_parts();
     let tenant = match crate::tenancy::middleware::request_org(&parts, &parts.extensions).await {
         Some(Ok(Some(org))) => PageTenant::Slug(org.slug),
-        Some(Ok(None)) => PageTenant::NoTenant,
+        // The route may still vary on an input the resolver ignored (#2045).
+        Some(Ok(None)) => PageTenant::Unknown,
         Some(Err(e)) => {
             tracing::warn!(target: "rustango::cache_page", error = %e, "tenant resolution failed; not caching");
             PageTenant::Unknown
@@ -531,7 +533,7 @@ fn compute_cache_key(
         })
         .unwrap_or("");
     write_lp(&mut k, host);
-    // Slugs are never empty, so "" means "no tenant".
+    // Slugs are never empty, so "" means "tenant-agnostic".
     write_lp(&mut k, tenant.unwrap_or(""));
     for name in vary_on {
         let v = req

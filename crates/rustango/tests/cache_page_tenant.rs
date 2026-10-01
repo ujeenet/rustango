@@ -189,15 +189,20 @@ async fn resolver_error_is_not_cached() {
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
 
-/// No matching tenant is still cacheable, under "no tenant".
+/// No matching tenant is never cached: the page may vary on an input
+/// the resolver ignored (#2045).
 #[tokio::test]
-async fn no_matching_tenant_is_cached() {
+async fn unresolved_tenant_gets_no_cached_page() {
     let hits = Arc::new(AtomicU32::new(0));
     let resolver = ChainResolver::new().push(TestResolver(Arc::new(AtomicU32::new(0))));
     let app = app_with(hits.clone(), context_with(resolver).await);
-    get_with(&app, None).await;
-    get_with(&app, None).await;
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(fetch(&app, "acme").await, "acme");
+    assert_eq!(
+        fetch(&app, "globex").await,
+        "globex",
+        "globex got acme's page"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
 
 /// A `TenantSlug` already on the request is used; the resolver is not asked.
