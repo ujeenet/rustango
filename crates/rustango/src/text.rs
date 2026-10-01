@@ -158,7 +158,8 @@ pub fn html_escape(s: &str) -> String {
 }
 
 /// Append `s` to `out` with the five XML characters escaped (`&apos;`
-/// for `'`), for feeds and sitemaps.
+/// for `'`), for feeds and sitemaps. Chars XML 1.0 forbids (C0 controls
+/// other than tab/LF/CR, U+FFFE, U+FFFF) are dropped: no escape is legal.
 pub(crate) fn xml_escape_into(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
@@ -167,6 +168,8 @@ pub(crate) fn xml_escape_into(out: &mut String, s: &str) {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            '\t' | '\n' | '\r' => out.push(c),
+            '\u{0}'..='\u{1F}' | '\u{FFFE}' | '\u{FFFF}' => {}
             _ => out.push(c),
         }
     }
@@ -2595,6 +2598,13 @@ mod tests {
     }
 
     /// Atom writes this into a double-quoted `href`, so every arm matters.
+    #[test]
+    fn xml_escape_into_drops_chars_xml_forbids() {
+        let mut out = String::new();
+        xml_escape_into(&mut out, "a\u{8}b\u{0}c\td\ne\u{FFFF}");
+        assert_eq!(out, "abc\td\ne");
+    }
+
     #[test]
     fn xml_escape_into_covers_all_five() {
         let mut out = String::new();

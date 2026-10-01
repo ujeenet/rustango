@@ -18,6 +18,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 Plural rules for ar, cs/sk, lt, ro, he and sl, and `pt-PT` 0 is plural; `Locale` treats `_` as `-` so `pt_BR.json` serves `pt-BR`.
 `negotiate_language` skips `q=0`; placeholders fill in one pass, so a value is never re-substituted and Tera arg order no longer matters.
 
+### Fixed — feeds and sitemaps drop XML-illegal control chars; custom guids are not permalinks (#1925)
+
+A stray `\u{8}` in a title no longer breaks the whole document; `.with_guid(..)` emits `<guid isPermaLink="false">`.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
