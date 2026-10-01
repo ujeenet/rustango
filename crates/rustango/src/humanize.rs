@@ -220,7 +220,8 @@ pub fn format_number(value: f64, locale: &str, decimals: Option<usize>) -> Strin
     let fmt = locale_number_fmt(locale);
     let s = match decimals {
         Some(d) => crate::numberformat::round_half_up(value, d),
-        None => format!("{value}"),
+        // `-0.0 == 0.0`, so this prints "0", never "-0".
+        None => format!("{}", if value == 0.0 { 0.0 } else { value }),
     };
     let negative = s.starts_with('-');
     let body = if negative { &s[1..] } else { &s };

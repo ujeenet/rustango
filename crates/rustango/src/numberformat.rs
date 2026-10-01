@@ -56,7 +56,8 @@ pub fn format(
         Some(p) => round_half_up(value, p),
         // `Display` for f64 gives the shortest round-trip form, so
         // "5" stays "5" and nothing is padded.
-        None => format!("{value}"),
+        // `-0.0 == 0.0`, so this prints "0", never "-0".
+        None => format!("{}", if value == 0.0 { 0.0 } else { value }),
     };
     let negative = signed.starts_with('-');
     let formatted = signed.trim_start_matches('-').to_owned();
@@ -423,5 +424,6 @@ mod tests {
         assert_eq!(floatformat(-0.4, 0), "0");
         assert_eq!(floatformat(9.995, 2), "10.00");
         assert_eq!(format(-0.001, ".", Some(2), 0, ""), "0.00");
+        assert_eq!(format(-0.0, ".", None, 0, ""), "0");
     }
 }
