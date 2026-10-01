@@ -744,8 +744,8 @@ enum SessionCheck {
         /// duration of the inner-router dispatch so any audited
         /// write picks up the user-attribution automatically.
         user_id: i64,
-        /// Username of the authenticated user (empty for an
-        /// operator-impersonation session, which has no tenant user).
+        /// Username of the authenticated user (`operator:<username>` for
+        /// an operator-impersonation session, which has no tenant user).
         /// Threaded into the inner admin's chrome session so the
         /// sidebar renders "Signed in as <username>" + Logout.
         username: String,
@@ -835,7 +835,8 @@ async fn validate_session(
                 SessionCheck::Authenticated {
                     is_superuser: true,
                     user_id: 0,
-                    username: String::new(),
+                    // Names the operator in `updated_by` and the sidebar (#1939).
+                    username: format!("operator:{}", op.username),
                     impersonated_by: Some(operator_id),
                     sessions_revoked_at: None,
                     iat: payload.iat,

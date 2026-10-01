@@ -20,6 +20,10 @@ The console edit form uses the CLI's validators; edit and provision refuse a hos
 
 The tenant admin serves login, admin and handoff under the org's `path_prefix`; the console's handoff URL carries it.
 
+### Fixed — admin audit and impersonation attribution (#1939)
+
+The update diff no longer records a skipped readonly/hidden value as "after"; impersonation sessions are named `operator:<username>`, so `updated_by` is never empty.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

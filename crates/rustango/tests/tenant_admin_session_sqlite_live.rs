@@ -327,10 +327,20 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
     let redeemed = env.get(handoff, "").await;
     let imp_cookie = first(&redeemed, "set-cookie");
     assert!(imp_cookie.starts_with(COOKIE_NAME), "got {imp_cookie}");
+    let index = env.get("/__admin/", &imp_cookie).await;
     assert_eq!(
-        env.get("/__admin/", &imp_cookie).await.status(),
+        index.status(),
         StatusCode::OK,
         "the impersonation session works before the change"
+    );
+    // The session names the operator, so `updated_by` is never empty (#1939).
+    let html = axum::body::to_bytes(index.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains(&format!("operator:{}", op.username)),
+        "the sidebar should name the operator"
     );
 
     // A reset: new hash, stamped now.

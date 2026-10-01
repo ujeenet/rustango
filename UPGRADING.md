@@ -158,6 +158,10 @@ Provisioning and `create_tenant` refuse a schema named `public` (#1868). Rename 
 
 Editing or provisioning a tenant with a host another tenant uses (base or extra) is refused (#1931). The console edit form now rejects a host with a port, a bad `path_prefix` or `port`.
 
+### Impersonation username
+
+An impersonation session's username is `operator:<username>`, not empty (#1939).
+
 ## 0.59.16
 
 ### Custom admin views need `change` for writes
