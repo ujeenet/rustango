@@ -260,15 +260,16 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
 ///
 /// Empty string + nullable field → `SqlValue::Null`.
 /// Empty string + required field → `FormError::Missing`.
-/// Bool fields treat absent key as `false` (unchecked checkbox).
+/// An absent key is `false` for a NOT NULL Bool (unchecked checkbox)
+/// and `NULL` for a nullable one.
 ///
 /// # Errors
 /// As [`parse_pk_string`], plus [`FormError::Missing`].
 pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlValue, FormError> {
     let Some(raw) = raw else {
         return Ok(match field.ty {
-            FieldType::Bool => SqlValue::Bool(false),
             _ if field.nullable => SqlValue::Null,
+            FieldType::Bool => SqlValue::Bool(false),
             _ => {
                 return Err(FormError::Missing {
                     field: field.name.to_owned(),
@@ -1635,6 +1636,28 @@ mod model_form_tests {
             .position(|c| *c == "body")
             .and_then(|i| mf.values().get(i));
         assert!(matches!(body_value, Some(crate::core::SqlValue::Null)));
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_flags")]
+    #[allow(dead_code)]
+    pub struct Flags {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        pub on: bool,
+        pub maybe: Option<bool>,
+    }
+
+    #[test]
+    fn absent_nullable_bool_is_null_not_false() {
+        let mf =
+            ModelFormFor::<Flags>::from_json(&serde_json::json!({ "maybe": null })).expect("valid");
+        let get = |col: &str| {
+            let i = mf.columns().iter().position(|c| *c == col).unwrap();
+            mf.values()[i].clone()
+        };
+        assert_eq!(get("on"), crate::core::SqlValue::Bool(false));
+        assert_eq!(get("maybe"), crate::core::SqlValue::Null);
     }
 
     #[test]

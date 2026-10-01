@@ -7,7 +7,8 @@
 //! * Units are year, month, week, day, hour and minute. A year is
 //!   365 days and a month is 30 days. Seconds are never shown.
 //! * `depth` is how many units to print. `2` gives
-//!   `"4 days, 6 hours"`, `1` gives `"4 days"`.
+//!   `"4 days, 6 hours"`, `1` gives `"4 days"`. Units are adjacent: a zero
+//!   unit ends the list, so a year and three days reads `"1 year"`.
 //! * A delta that is zero, negative or under a minute gives
 //!   `"0 minutes"`.
 //!
@@ -72,14 +73,13 @@ fn build(seconds: i64, depth: usize) -> String {
             }
             continue;
         }
-        if parts.len() >= depth {
+        // Units stay adjacent: stop at the first empty one ("1 year", not "1 year, 3 days").
+        if parts.len() >= depth || remaining < *size {
             break;
         }
-        if remaining >= *size {
-            let n = remaining / size;
-            remaining -= n * size;
-            parts.push(format_unit(n, name));
-        }
+        let n = remaining / size;
+        remaining -= n * size;
+        parts.push(format_unit(n, name));
     }
     if parts.is_empty() {
         // Less than a minute.
@@ -141,11 +141,12 @@ mod tests {
     }
 
     #[test]
-    fn timesince_skips_zero_intermediate_unit() {
-        // Empty buckets between year and hour are skipped.
+    fn timesince_stops_at_the_first_zero_unit() {
         let now = t(2026, 6, 5, 12, 0, 0);
-        let past = now - Duration::seconds(YEAR + 5 * HOUR);
-        assert_eq!(timesince(past, Some(now), 2), "1 year, 5 hours");
+        let past = now - Duration::seconds(YEAR + 3 * DAY);
+        assert_eq!(timesince(past, Some(now), 2), "1 year");
+        let past = now - Duration::seconds(YEAR + MONTH + 3 * DAY);
+        assert_eq!(timesince(past, Some(now), 2), "1 year, 1 month");
     }
 
     #[test]
@@ -205,8 +206,8 @@ mod tests {
     #[test]
     fn timesince_months_bucket() {
         let now = t(2026, 6, 5, 12, 0, 0);
-        let past = now - Duration::seconds(2 * MONTH + 5 * DAY);
-        assert_eq!(timesince(past, Some(now), 2), "2 months, 5 days");
+        let past = now - Duration::seconds(2 * MONTH + WEEK + 5 * DAY);
+        assert_eq!(timesince(past, Some(now), 2), "2 months, 1 week");
     }
 
     #[test]

@@ -154,6 +154,11 @@ untouched.
 
 `floatformat`, `numberformat::format`, `format_number` and `format_currency` round half away from zero on the shortest decimal form, so `2.5` gives `3` (was `2`).
 
+### Stricter email, nullable bools and `timesince` (#1897)
+
+`validate_email` no longer trims: `" a@b.com"` fails, so trim before saving. A missing nullable `Option<bool>` form or JSON key saves `NULL`, not `false`.
+`timesince(.., depth)` drops units after an empty one: a year and three days is `"1 year"`.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)

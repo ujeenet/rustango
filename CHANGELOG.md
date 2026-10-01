@@ -9,6 +9,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 `naturaltime`/`timesince` read 360–364 days as "12 months", not "0 years"; KRW shows `₩`, CLP `$`, and unknown codes no longer leak memory.
 `floatformat`, `format_number` and `format_currency` round halves up (`0.125` → `0.13`, `2.5` → `3`) and never print `-0`.
 
+### Fixed — email, IRI, nullable-bool and timesince parsing (#1897)
+
+`validate_email` rejects whitespace, control chars and over-long addresses; `uri_to_iri` keeps `%25`; an absent nullable bool is `NULL` (admin shows a Yes/No/Unknown select); `timesince` stops at the first zero unit.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
