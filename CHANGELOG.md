@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The diff entry is written in the UPDATE's transaction; if it fails, the edit is not saved.
 
+### Fixed — test assertions that passed when they should fail (#1960)
+
+`assert_cookie_set` fails on a deleting `Set-Cookie`, `assert_messages` on a cookie that does not verify, and a nested `assert_num_queries` counts toward the outer one.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

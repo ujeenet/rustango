@@ -266,7 +266,12 @@ pub fn assert_messages(res: &Response, secret: &[u8], expected: &[(&str, &str)])
         axum::http::HeaderValue::from_str(&format!("{MESSAGES_COOKIE}={raw}"))
             .expect("cookie value is header-safe (just produced it)"),
     );
-    let (msgs, _) = crate::messages::drain(secret, &headers);
+    // `drain` hands back no clearing cookie when the signature fails (#1960).
+    let (msgs, clear) = crate::messages::drain(secret, &headers);
+    assert!(
+        clear.is_some(),
+        "assert_messages: the `{MESSAGES_COOKIE}` cookie does not verify with this secret"
+    );
 
     if expected.is_empty() {
         assert!(
@@ -455,18 +460,27 @@ pub async fn assert_contains_count(res: Response, fragment: &str, count: usize) 
 /// assert_cookie_set(&res, "session", Some("abc123"));  // present with exact value
 /// ```
 ///
+/// The last `Set-Cookie` for `name` wins, as in a browser; one that
+/// deletes the cookie (`Max-Age=0`, a past `Expires`) fails.
+///
 /// Panics with every `Set-Cookie` header when the name is missing or
 /// the value differs.
 #[cfg(feature = "_axum")]
 pub fn assert_cookie_set(res: &Response, name: &str, expected_value: Option<&str>) {
     let mut matches: Vec<String> = Vec::new();
+    let mut deleted = false;
     for v in res.headers().get_all(axum::http::header::SET_COOKIE).iter() {
         let Ok(s) = v.to_str() else { continue };
         let first = s.split(';').next().unwrap_or("");
         if let Some(val) = first.trim().strip_prefix(&format!("{name}=")) {
             matches.push(val.to_owned());
+            deleted = deletes_cookie(s);
         }
     }
+    assert!(
+        !deleted,
+        "assert_cookie_set: the last `Set-Cookie` for `{name}` deletes it: {matches:?}"
+    );
     if matches.is_empty() {
         let all_cookies: Vec<String> = res
             .headers()
@@ -481,13 +495,32 @@ pub fn assert_cookie_set(res: &Response, name: &str, expected_value: Option<&str
         );
     }
     if let Some(expected) = expected_value {
-        let any_match = matches.iter().any(|v| v == expected);
         assert!(
-            any_match,
+            matches.last().is_some_and(|v| v == expected),
             "assert_cookie_set: `{name}` was set, but its value didn't match. \
              Expected `{expected}`, got: {matches:?}"
         );
     }
+}
+
+/// `true` when a `Set-Cookie` value removes its cookie: `Max-Age` <= 0,
+/// or no `Max-Age` and an `Expires` in the past.
+#[cfg(feature = "_axum")]
+fn deletes_cookie(set_cookie: &str) -> bool {
+    let attr = |key: &str| {
+        set_cookie
+            .split(';')
+            .skip(1)
+            .filter_map(|a| a.split_once('='))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.trim().to_owned())
+    };
+    if let Some(max_age) = attr("max-age") {
+        return max_age.parse::<i64>().is_ok_and(|n| n <= 0);
+    }
+    attr("expires")
+        .and_then(|v| chrono::DateTime::parse_from_rfc2822(&v).ok())
+        .is_some_and(|t| t < chrono::Utc::now())
 }
 
 /// Opposite of [`assert_cookie_set`]: panics if a cookie called
@@ -690,6 +723,19 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_messages(&res, SECRET, &[("error", "Something broke.")]);
+    }
+
+    /// A cookie signed with another secret is not "no messages" (#1960).
+    #[cfg(all(feature = "template_views", feature = "_signing"))]
+    #[test]
+    #[should_panic(expected = "does not verify")]
+    fn assert_messages_panics_on_a_bad_signature() {
+        let cookie = crate::messages::success(b"other-secret", &axum::http::HeaderMap::new(), "x");
+        let res = Response::builder()
+            .header(header::SET_COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_messages(&res, b"test-secret", &[]);
     }
 
     // -------- assert_header --------
@@ -897,6 +943,27 @@ mod tests {
         let res = cookie_response(&["csrftoken=tok; Path=/", "session=abc; Path=/; HttpOnly"]);
         assert_cookie_set(&res, "csrftoken", Some("tok"));
         assert_cookie_set(&res, "session", Some("abc"));
+    }
+
+    #[test]
+    #[should_panic(expected = "deletes it")]
+    fn assert_cookie_set_panics_on_a_max_age_deletion() {
+        let res = cookie_response(&["session=; Path=/; Max-Age=0"]);
+        assert_cookie_set(&res, "session", None);
+    }
+
+    #[test]
+    #[should_panic(expected = "deletes it")]
+    fn assert_cookie_set_panics_on_a_past_expires() {
+        let res = cookie_response(&["session=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT"]);
+        assert_cookie_set(&res, "session", None);
+    }
+
+    #[test]
+    fn assert_cookie_set_accepts_a_future_max_age() {
+        let res =
+            cookie_response(&["session=x; Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT"]);
+        assert_cookie_set(&res, "session", Some("x"));
     }
 
     #[test]
