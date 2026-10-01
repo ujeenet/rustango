@@ -102,16 +102,16 @@ where
 #[must_use]
 pub fn make_template_fragment_key(fragment_name: &str, vary_on: &[&str]) -> String {
     use sha2::{Digest, Sha256};
-    let mut joined = String::with_capacity(64);
-    for (i, part) in vary_on.iter().enumerate() {
-        if i > 0 {
-            joined.push(':');
-        }
-        joined.push_str(part);
+    // Length-prefixed, not `:`-joined: `["a:b","c"]` and `["a","b:c"]`
+    // must not share a key (#1884).
+    let mut hasher = Sha256::new();
+    for part in vary_on {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
     }
     // SHA-256 cut to 32 hex chars: a short key, and no extra
     // dependency for a weaker hash.
-    let digest = Sha256::digest(joined.as_bytes());
+    let digest = hasher.finalize();
     let hex: String = digest.iter().take(16).fold(String::new(), |mut s, b| {
         use std::fmt::Write as _;
         let _ = write!(s, "{b:02x}");
@@ -128,6 +128,14 @@ mod fragment_key_tests {
     fn key_includes_template_cache_prefix_and_fragment_name() {
         let k = make_template_fragment_key("sidebar", &[]);
         assert!(k.starts_with("template.cache.sidebar."));
+    }
+
+    #[test]
+    fn a_separator_inside_a_value_cannot_collide() {
+        assert_ne!(
+            make_template_fragment_key("f", &["a:b", "c"]),
+            make_template_fragment_key("f", &["a", "b:c"]),
+        );
     }
 
     #[test]

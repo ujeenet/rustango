@@ -21,6 +21,10 @@ Only the always-`*` policy (any origin with credentials) leaves it out.
 Flash messages drop the oldest past 4000 bytes; `negotiate` honours `q=0` and range specificity; `WsHub::upgrade` caps frames before buffering.
 A panicking event subscriber no longer skips the rest; `pass%77ord=` is redacted in logs.
 
+### Fixed — tenant pool span leak, fragment-key collisions, SSE lag example (#1884)
+
+The pool-init span no longer stays entered across `.await`; fragment keys are length-prefixed; the SSE example keeps lagged clients.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

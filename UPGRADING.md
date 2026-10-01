@@ -168,6 +168,10 @@ Refused origins and any-origin mode now send it, so shared caches key on `Origin
 `negotiate` returns `None` for a type the client refused with `q=0`. `messages::push` drops the oldest messages past `MAX_COOKIE_BYTES`.
 Use `WsHub::upgrade(ws)` instead of `ws.on_upgrade(.. ws_handler ..)` so `max_message_bytes` applies before buffering.
 
+### Template fragment keys change (#1884)
+
+`make_template_fragment_key` hashes length-prefixed parts; cached fragments miss once after upgrade.
+
 ## 0.59.15
 
 ### The standard tenant chain drops the `X-Org` fallback (#1856)
