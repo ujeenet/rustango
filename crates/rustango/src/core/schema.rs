@@ -1525,6 +1525,13 @@ impl ModelEntry {
         self
     }
 
+    /// Did the framework register this model, rather than a downstream
+    /// crate? A project model on a `rustango_*` table overrides the framework's.
+    #[must_use]
+    pub(crate) fn is_framework(&self) -> bool {
+        self.module_path == "rustango" || self.module_path.starts_with("rustango::")
+    }
+
     /// The registered entry for `model`, matched by table and name.
     #[must_use]
     pub fn for_schema(model: &ModelSchema) -> Option<&'static Self> {
