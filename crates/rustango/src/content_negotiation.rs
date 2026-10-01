@@ -24,10 +24,11 @@
 /// `"application/json,text/html;q=0.9,*/*;q=0.5"`. `available` is
 /// what your handler can produce, best first.
 ///
-/// The rules: a higher `q` wins; at the same `q` an exact type beats
+/// Each type takes the `q` of the most specific range that matches it
+/// (RFC 9110 §12.5.1), whatever the header order; `q=0` means "not
+/// acceptable". A higher `q` wins; at the same `q` an exact match beats
 /// a wildcard; after that the order of `available` decides. Returns
-/// `None` when `available` is empty or nothing the client asked for
-/// is on offer.
+/// `None` when `available` is empty or nothing on offer is acceptable.
 #[must_use]
 pub fn negotiate<'a, S: AsRef<str>>(accept: &str, available: &'a [S]) -> Option<&'a str> {
     if available.is_empty() {
@@ -39,33 +40,32 @@ pub fn negotiate<'a, S: AsRef<str>>(accept: &str, available: &'a [S]) -> Option<
     }
 
     let prefs = parse_accept(accept);
-    let mut best: Option<(usize, f32)> = None; // (server index, score)
-
+    // (server index, q in thousandths, specificity); `>` keeps the first on ties.
+    let mut best: Option<(usize, u16, u8)> = None;
     for (idx, srv) in available.iter().enumerate() {
-        let srv_str = srv.as_ref();
-        for pref in &prefs {
-            let score = match_score(pref, srv_str);
-            if let Some(s) = score {
-                let beats = match best {
-                    None => true,
-                    Some((_, prev_score)) => s > prev_score,
-                };
-                if beats {
-                    best = Some((idx, s));
-                }
-                break; // first match only, so `available` order decides ties
-            }
+        let Some((q, spec)) = prefs
+            .iter()
+            .filter_map(|p| specificity(p, srv.as_ref()).map(|spec| (p.q, spec)))
+            .max_by_key(|&(_, spec)| spec)
+        else {
+            continue;
+        };
+        if q == 0 {
+            continue;
+        }
+        if best.is_none_or(|(_, bq, bs)| (q, spec) > (bq, bs)) {
+            best = Some((idx, q, spec));
         }
     }
-
-    best.map(|(idx, _)| available[idx].as_ref())
+    best.map(|(idx, _, _)| available[idx].as_ref())
 }
 
 #[derive(Debug, Clone)]
 struct AcceptPref {
     type_: String,
     subtype: String,
-    q: f32,
+    /// `q` in thousandths, the precision RFC 9110 allows.
+    q: u16,
 }
 
 fn parse_accept(header: &str) -> Vec<AcceptPref> {
@@ -75,11 +75,11 @@ fn parse_accept(header: &str) -> Vec<AcceptPref> {
             let mut parts = raw.split(';').map(str::trim);
             let media = parts.next()?;
             let (type_, subtype) = media.split_once('/')?;
-            let mut q = 1.0;
+            let mut q = 1000;
             for kv in parts {
-                if let Some(rest) = kv.strip_prefix("q=") {
-                    if let Ok(parsed) = rest.parse::<f32>() {
-                        q = parsed;
+                if let Some(rest) = kv.strip_prefix("q=").or_else(|| kv.strip_prefix("Q=")) {
+                    if let Ok(parsed) = rest.trim().parse::<f32>() {
+                        q = (parsed.clamp(0.0, 1.0) * 1000.0).round() as u16;
                     }
                 }
             }
@@ -92,27 +92,20 @@ fn parse_accept(header: &str) -> Vec<AcceptPref> {
         .collect()
 }
 
-/// The match score, or `None` when `pref` does not match `srv_type`.
-fn match_score(pref: &AcceptPref, srv_type: &str) -> Option<f32> {
+/// How specific `pref` is for `srv_type` (2 exact, 1 `type/*`, 0
+/// `*/*`), or `None` when it does not match.
+fn specificity(pref: &AcceptPref, srv_type: &str) -> Option<u8> {
     let (s_type, s_subtype) = srv_type.split_once('/')?;
-    let s_type = s_type.to_ascii_lowercase();
-    let s_subtype = s_subtype.to_ascii_lowercase();
-
-    let type_matches = pref.type_ == "*" || pref.type_ == s_type;
-    let subtype_matches = pref.subtype == "*" || pref.subtype == s_subtype;
-
-    if type_matches && subtype_matches {
-        // A small bonus for exact matches, so `text/html` beats
-        // `*/*` at the same q.
-        let exact_bonus = match (pref.type_ == "*", pref.subtype == "*") {
-            (false, false) => 0.0001, // most specific
-            (false, true) => 0.00005,
-            _ => 0.0,
-        };
-        Some(pref.q + exact_bonus)
-    } else {
-        None
+    let type_matches = pref.type_ == "*" || pref.type_.eq_ignore_ascii_case(s_type);
+    let subtype_matches = pref.subtype == "*" || pref.subtype.eq_ignore_ascii_case(s_subtype);
+    if !(type_matches && subtype_matches) {
+        return None;
     }
+    Some(match (pref.type_ == "*", pref.subtype == "*") {
+        (false, false) => 2,
+        (false, true) => 1,
+        _ => 0,
+    })
 }
 
 #[cfg(test)]
@@ -190,6 +183,27 @@ mod tests {
         // We list JSON first, but the browser asks for HTML at q=1.
         assert_eq!(
             negotiate(header, &["application/json", "text/html"]),
+            Some("text/html"),
+        );
+    }
+
+    /// `q=0` refuses a type, and the most specific range sets its q,
+    /// not the first one listed (#1957).
+    #[test]
+    fn q_zero_refuses_and_specificity_beats_header_order() {
+        assert_eq!(
+            negotiate("application/json;q=0", &["application/json"]),
+            None
+        );
+        assert_eq!(
+            negotiate(
+                "*/*, application/json;q=0",
+                &["application/json", "text/html"]
+            ),
+            Some("text/html"),
+        );
+        assert_eq!(
+            negotiate("text/*;q=0.1, text/html", &["text/plain", "text/html"]),
             Some("text/html"),
         );
     }

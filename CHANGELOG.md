@@ -16,6 +16,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Only the always-`*` policy (any origin with credentials) leaves it out.
 
+### Fixed — flash cookie size, `q=0`, WebSocket size cap, event panics, encoded redact keys (#1957)
+
+Flash messages drop the oldest past 4000 bytes; `negotiate` honours `q=0` and range specificity; `WsHub::upgrade` caps frames before buffering.
+A panicking event subscriber no longer skips the rest; `pass%77ord=` is redacted in logs.
+
 ## [0.59.15] — 2026-10-01
 
 ### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)

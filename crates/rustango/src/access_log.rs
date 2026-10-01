@@ -432,9 +432,14 @@ pub(crate) fn default_redact_params() -> Vec<String> {
 /// fields, so a raw span value would put the secrets back on the line
 /// this function just cleaned.
 pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+    // Decode the key: `pass%77ord=` is `password=` to the handler (#1957).
+    let hidden = |k: &str| {
+        let key = crate::url_codec::url_decode(k);
+        redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
+    };
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
-            Some((k, _)) if redact_keys.iter().any(|r| r.eq_ignore_ascii_case(k)) => {
+            Some((k, _)) if hidden(k) => {
                 format!("{k}=[redacted]")
             }
             _ => pair.to_owned(),
@@ -564,6 +569,12 @@ mod tests {
     fn redact_query_is_case_insensitive_on_keys() {
         let r = redact_query("PASSWORD=x", &["password".to_owned()]);
         assert_eq!(r, "PASSWORD=[redacted]");
+    }
+
+    #[test]
+    fn redact_query_matches_percent_encoded_keys() {
+        let r = redact_query("pass%77ord=hunter2&x=1", &["password".to_owned()]);
+        assert_eq!(r, "pass%77ord=[redacted]&x=1");
     }
 
     #[test]
