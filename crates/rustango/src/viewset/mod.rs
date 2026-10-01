@@ -1245,6 +1245,8 @@ const MAX_THROTTLE_KEYS: usize = 100_000;
 #[derive(Clone, Copy, Debug)]
 struct ThrottleWindow {
     count: u32,
+    /// The rule's `max`, so eviction compares spend across actions.
+    max: u32,
     start: Instant,
     window: std::time::Duration,
 }
@@ -1252,6 +1254,11 @@ struct ThrottleWindow {
 impl ThrottleWindow {
     fn ended(&self, now: Instant) -> bool {
         now.duration_since(self.start) >= self.window
+    }
+
+    /// The spent share of `max`, as a fixed-point fraction.
+    fn spent(&self) -> u64 {
+        (u64::from(self.count) << 32) / u64::from(self.max.max(1))
     }
 }
 
@@ -1282,6 +1289,7 @@ impl ThrottleStore {
         }
         let fresh = ThrottleWindow {
             count: 0,
+            max: rule.max,
             start: now,
             window: std::time::Duration::from_secs(rule.window_secs),
         };
@@ -1299,7 +1307,8 @@ impl ThrottleStore {
     }
 
     /// Drop ended windows, which act like absent ones; if every window is
-    /// still live, drop the emptiest eighth, the cheapest to lose (#1999).
+    /// still live, drop the eighth with the least spent share of `max`,
+    /// the cheapest to lose (#1999).
     fn make_room(&self, windows: &mut HashMap<String, ThrottleWindow>, now: Instant) {
         if windows.len() < self.cap {
             return;
@@ -1308,10 +1317,12 @@ impl ThrottleStore {
         if windows.len() < self.cap {
             return;
         }
-        let mut by_count: Vec<(u32, String)> =
-            windows.iter().map(|(k, w)| (w.count, k.clone())).collect();
-        by_count.sort_unstable_by_key(|(n, _)| *n);
-        for (_, k) in by_count.into_iter().take((self.cap / 8).max(1)) {
+        let mut by_spent: Vec<(u64, String)> = windows
+            .iter()
+            .map(|(k, w)| (w.spent(), k.clone()))
+            .collect();
+        by_spent.sort_unstable_by_key(|(n, _)| *n);
+        for (_, k) in by_spent.into_iter().take((self.cap / 8).max(1)) {
             windows.remove(&k);
         }
     }
@@ -3556,6 +3567,26 @@ mod throttle_store_tests {
             store.spend("spent".into(), rule, 1, now).is_err(),
             "no reset"
         );
+    }
+
+    /// Eviction ranks by the spent share of each rule's `max`, not raw counts.
+    #[test]
+    fn a_full_store_evicts_the_least_spent_share() {
+        let store = ThrottleStore::new(4);
+        let now = Instant::now();
+        store
+            .spend("big".into(), ThrottleRule::new(100, 60), 10, now)
+            .unwrap();
+        for n in 0..3 {
+            let rule = ThrottleRule::new(2, 60);
+            store.spend(format!("s{n}"), rule, 1, now).unwrap();
+        }
+        store
+            .spend("new".into(), ThrottleRule::new(2, 60), 1, now)
+            .unwrap();
+        let windows = store.windows.lock().unwrap();
+        assert!(!windows.contains_key("big"), "10% spent is the cheapest");
+        assert!((0..3).all(|n| windows.contains_key(&format!("s{n}"))));
     }
 
     /// A rejected spend charges nothing (#1999 review).
