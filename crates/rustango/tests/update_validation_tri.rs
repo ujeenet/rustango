@@ -34,8 +34,33 @@ pub struct Note {
     pub status: String,
 }
 
+/// Same table as [`Contact`] minus the validator: stands in for a row
+/// written before `validate_email` stopped trimming (#1897).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "val1897_contact", app = "val1893")]
+pub struct LegacyContact {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 100)]
+    pub email: String,
+    #[rustango(max_length = 50)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "val1897_contact", app = "val1893")]
+pub struct Contact {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 100, validators = "email")]
+    pub email: String,
+    #[rustango(max_length = 50)]
+    pub name: String,
+}
+
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Post>(pool).await;
+    rustango::testkit::matrix::fresh_table::<LegacyContact>(pool).await;
     rustango::testkit::matrix::fresh_table::<Note>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
@@ -121,9 +146,47 @@ async fn model_form_reports_field_errors(pool: &Pool) {
     assert_eq!(stored_status(pool).await, "draft");
 }
 
+/// `save` writes every column, so a stored untrimmed email blocks an
+/// unrelated edit; a narrow `update().set(..)` and the trim cleanup do not.
+async fn legacy_email_blocks_save_until_trimmed(pool: &Pool) {
+    let mut legacy = LegacyContact {
+        id: Auto::Unset,
+        email: " a@b.com".into(),
+        name: "old".into(),
+    };
+    legacy.save_pool(pool).await.expect("seed legacy row");
+
+    let mut c = Contact::objects().fetch(pool).await.expect("fetch")[0].clone();
+    c.name = "new".into();
+    let err = c
+        .save_pool(pool)
+        .await
+        .expect_err("untrimmed email blocks save");
+    assert!(
+        matches!(err, ExecError::Query(QueryError::ValidatorFailed { .. })),
+        "{err:?}"
+    );
+
+    let n = Contact::objects()
+        .update()
+        .set("name", "renamed")
+        .execute_pool(pool)
+        .await
+        .expect("SET of another column is not blocked");
+    assert_eq!(n, 1);
+
+    let mut c = Contact::objects().fetch(pool).await.expect("fetch")[0].clone();
+    c.email = c.email.trim().to_owned();
+    c.save_pool(pool).await.expect("trimmed row saves");
+    let stored = Contact::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(stored[0].email, "a@b.com");
+    assert_eq!(stored[0].name, "renamed");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        legacy_email_blocks_save_until_trimmed,
         update_pool_and_tx_check_choices,
         save_pool_update_checks_fields,
         model_form_reports_field_errors,
