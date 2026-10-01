@@ -5,7 +5,7 @@
 //! `--dry-run` that migrated, a `migrate <target>` that put tenant tables
 //! in the registry, a flag taken as a username.
 
-use rustango::migrate::{file, Migration, MigrationScope, Operation, SchemaChange};
+use rustango::migrate::{file, DataOp, Migration, MigrationScope, Operation, SchemaChange};
 use rustango::sql::sqlx;
 use rustango::tenancy::TenantPools;
 
@@ -221,4 +221,26 @@ async fn set_host_enabled_reads_the_enabled_value_as_a_value() {
         .await
         .expect("--enabled false");
     assert!(out.contains("parked"), "{out}");
+}
+
+/// A failed tenant fails the verb, so a deploy stops on it (#1844).
+#[tokio::test]
+async fn a_failed_tenant_fails_the_tenant_verbs() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    let mut bad = migration("0003_bad", "ten_t", MigrationScope::Tenant);
+    bad.forward = vec![Operation::Data(DataOp {
+        sql: "INSERT INTO no_such_table VALUES (1)".into(),
+        reverse_sql: None,
+        reversible: false,
+    })];
+    file::write(&b.migrations.path().join("0003_bad.json"), &bad).unwrap();
+    for args in [
+        &["migrate-tenants"][..],
+        &["migrate"],
+        &["migrate", "--fake", "9999_none", "--all-tenants"],
+    ] {
+        let err = b.run(args).await.expect_err(&args.join(" "));
+        assert!(err.contains("1 of 1 tenant(s) failed"), "{args:?}: {err}");
+    }
 }

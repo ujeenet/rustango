@@ -1419,6 +1419,12 @@ pub async fn ensure_ledger_pool_with_ledger(
     pool: &crate::sql::Pool,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    with_migrate_lock_pool(pool, ledger, async { Ok(()) }).await
+}
+
+/// The ledger `CREATE TABLE IF NOT EXISTS`. Only under the migrate lock:
+/// concurrent PG creators collide on `pg_type` (23505) (#1844).
+async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
     // Was a three-arm match on the dialect name with a hand-written
     // type + DEFAULT each, whose SQLite arm carried a copy of #1464's
     // canonical `strftime`. `Dialect` answers both halves now, so the
@@ -1481,12 +1487,8 @@ pub async fn applied_set_pool_with_ledger(
 /// Skips files already recorded in the ledger. Returns the migrations
 /// that were newly applied.
 ///
-/// **Concurrency caveat (batch 12):** no advisory lock yet — peers
-/// running `migrate_pool` against the same DB simultaneously can both
-/// pass the `applied_set` check and try to apply the same file. The
-/// ledger PRIMARY KEY constraint catches the second writer's INSERT
-/// and rolls its transaction back, but you'll see noisy errors. Lock
-/// dispatch lands in batch 13.
+/// Concurrent runs are serialized by the migrate lock (`pg_advisory_lock`
+/// / `GET_LOCK`), ledger bootstrap included; SQLite relies on its file lock.
 ///
 /// # Errors
 /// As [`migrate`].
@@ -1627,8 +1629,7 @@ async fn migrate_pool_with_ledger_opts(
     origin: ChainOrigin,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_pool_with_ledger(pool, ledger).await?;
-    with_migrate_lock_pool(pool, async {
+    with_migrate_lock_pool(pool, ledger, async {
         let all = file::list_dir(dir)?;
         let mut applied = applied_set_pool_with_ledger(pool, ledger).await?;
         if origin == ChainOrigin::Regenerated && !applied.is_empty() {
@@ -2177,10 +2178,20 @@ async fn fake_apply_pool(
 /// The lock is acquired on a checked-out connection and held until
 /// `body` returns; release happens on the same connection so MySQL's
 /// connection-scoped `GET_LOCK` semantics work correctly.
-async fn with_migrate_lock_pool<F, R>(pool: &crate::sql::Pool, body: F) -> Result<R, MigrateError>
+///
+/// `ledger` is created under the lock before `body` runs (#1844).
+async fn with_migrate_lock_pool<F, R>(
+    pool: &crate::sql::Pool,
+    ledger: &str,
+    body: F,
+) -> Result<R, MigrateError>
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
+    let body = async {
+        create_ledger_locked(pool, ledger).await?;
+        body.await
+    };
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -2520,8 +2531,7 @@ pub async fn migrate_to_pool_with_ledger(
     target: &str,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_pool_with_ledger(pool, ledger).await?;
-    with_migrate_lock_pool(pool, async {
+    with_migrate_lock_pool(pool, ledger, async {
         let all = file::list_dir(dir)?;
         let applied = applied_set_pool_with_ledger(pool, ledger).await?;
 
@@ -2613,8 +2623,7 @@ pub async fn downgrade_pool_with_ledger(
     if steps == 0 {
         return Ok(Vec::new());
     }
-    ensure_ledger_pool_with_ledger(pool, ledger).await?;
-    with_migrate_lock_pool(pool, async {
+    with_migrate_lock_pool(pool, ledger, async {
         let all = file::list_dir(dir)?;
         let applied = applied_set_pool_with_ledger(pool, ledger).await?;
 
@@ -2665,8 +2674,7 @@ pub async fn unapply_pool_with_ledger(
     name: &str,
     ledger: &str,
 ) -> Result<Migration, MigrateError> {
-    ensure_ledger_pool_with_ledger(pool, ledger).await?;
-    with_migrate_lock_pool(pool, async {
+    with_migrate_lock_pool(pool, ledger, async {
         check_is_head_pool(pool, dir, name, ledger).await?;
         unapply_locked_pool(pool, dir, name, ledger).await
     })
@@ -2692,8 +2700,7 @@ async fn unapply_force_pool_with_ledger(
     name: &str,
     ledger: &str,
 ) -> Result<Migration, MigrateError> {
-    ensure_ledger_pool_with_ledger(pool, ledger).await?;
-    with_migrate_lock_pool(pool, unapply_locked_pool(pool, dir, name, ledger)).await
+    with_migrate_lock_pool(pool, ledger, unapply_locked_pool(pool, dir, name, ledger)).await
 }
 
 /// Compute the SQL `migrate_pool(pool, dir)` would execute, without
@@ -2992,8 +2999,7 @@ async fn migrate_embedded_pool_with_ledger(
     embedded: &[(&str, &str)],
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_pool_with_ledger(pool, ledger).await?;
-    with_migrate_lock_pool(pool, async {
+    with_migrate_lock_pool(pool, ledger, async {
         let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
         for (name, json) in embedded {
             let mig = file::parse(json)?;

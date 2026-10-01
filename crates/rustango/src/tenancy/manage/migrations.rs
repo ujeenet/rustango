@@ -170,7 +170,17 @@ fn write_tenant_report<W: Write>(
             writeln!(w, "  ✓ {}: {} migration(s)", o.slug, o.applied.len())?;
         }
     }
-    Ok(())
+    tenant_failures(report.failure_count(), report.tenants.len())
+}
+
+/// A non-zero exit for any failed tenant, so a deploy can't go on half-migrated (#1844).
+fn tenant_failures(failed: usize, total: usize) -> Result<(), TenancyError> {
+    if failed == 0 {
+        return Ok(());
+    }
+    Err(TenancyError::Validation(format!(
+        "{failed} of {total} tenant(s) failed; see the report above"
+    )))
 }
 
 // ---------- migrate-registry ----------
@@ -346,8 +356,7 @@ where
     )
     .await?;
     let w = progress.into_inner();
-    write_tenant_report(w, &report)?;
-    Ok(())
+    write_tenant_report(w, &report)
 }
 
 /// Run the single-tenant `migrate` runner with `args` against the registry,
@@ -502,7 +511,7 @@ where
         "stamped {} tenant(s); {failures} failure(s).",
         orgs.len()
     )?;
-    Ok(())
+    tenant_failures(failures, orgs.len())
 }
 
 /// Which migration chain a `--fake` targets.

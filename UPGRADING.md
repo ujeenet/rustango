@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Tenant migrate verbs fail on a failed tenant (#1844)
+
+`migrate-tenants`, the combined `migrate` and `migrate --fake --all-tenants` return an error (non-zero exit)
+when any tenant failed, after printing the full report. Deploy scripts that relied on exit 0 now stop.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

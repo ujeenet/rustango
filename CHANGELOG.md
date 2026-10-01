@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenant migration failures exit non-zero; ledger bootstrap takes the migrate lock (#1844)
+
+`migrate-tenants`, `migrate` and `migrate --fake --all-tenants` now fail when any tenant failed.
+The ledger `CREATE TABLE` runs under the migrate lock, so concurrent PG replicas no longer hit 23505.
+
 ## [0.59.13] — 2026-10-01
 
 ### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)
