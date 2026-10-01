@@ -57,7 +57,7 @@ pub struct SchemaSnapshot {
 }
 
 /// Snapshot of one Postgres `EXCLUDE` constraint.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct ExclusionSnapshot {
     pub name: String,
     pub table: String,
@@ -69,7 +69,7 @@ pub struct ExclusionSnapshot {
 }
 
 /// Snapshot of one table-level CHECK constraint.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct CheckSnapshot {
     pub name: String,
     pub table: String,
@@ -77,7 +77,7 @@ pub struct CheckSnapshot {
 }
 
 /// Snapshot of one `CREATE INDEX` declaration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct IndexSnapshot {
     pub name: String,
     pub table: String,
@@ -103,7 +103,7 @@ fn default_index_method() -> String {
 }
 
 /// Snapshot of one many-to-many junction table.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct M2MTableSnapshot {
     /// Junction table name, such as `"post_tags"`.
     pub through: String,
@@ -638,73 +638,94 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
     }
 }
 
+/// Sort by name and keep one entry per name: the smallest definition,
+/// not the first in `inventory` order, which a rebuild can change. The
+/// diff compares whole definitions, so a flipping winner meant a Drop +
+/// Create every run, and for a junction table, lost rows.
+fn dedup_by_name<T: PartialOrd + std::fmt::Debug>(
+    mut out: Vec<T>,
+    kind: &str,
+    name: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    out.sort_by(|a, b| {
+        name(a)
+            .cmp(name(b))
+            .then_with(|| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    out.dedup_by(|later, kept| {
+        if name(later) != name(kept) {
+            return false;
+        }
+        if *later != *kept {
+            tracing::warn!(
+                target: "rustango::migrate",
+                name = %name(kept),
+                kept = ?kept,
+                ignored = ?later,
+                "two models declare {kind} `{}` differently; using the first in sort order",
+                name(kept),
+            );
+        }
+        true
+    });
+    out
+}
+
 /// Collect all CHECK constraint descriptors, deduplicating by name.
 fn collect_checks<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<CheckSnapshot> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<CheckSnapshot> = Vec::new();
     for schema in schemas {
         for c in schema.check_constraints {
-            if seen.insert(c.name) {
-                out.push(CheckSnapshot {
-                    name: c.name.to_owned(),
-                    table: schema.table.to_owned(),
-                    expr: c.expr.to_owned(),
-                });
-            }
+            out.push(CheckSnapshot {
+                name: c.name.to_owned(),
+                table: schema.table.to_owned(),
+                expr: c.expr.to_owned(),
+            });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    dedup_by_name(out, "CHECK", |c| &c.name)
 }
 
 /// Collect all PG `EXCLUDE` constraints, deduplicated by name.
 /// Mirrors [`collect_checks`].
 fn collect_excludes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<ExclusionSnapshot> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<ExclusionSnapshot> = Vec::new();
     for schema in schemas {
         for x in schema.exclusion_constraints {
-            if seen.insert(x.name) {
-                out.push(ExclusionSnapshot {
-                    name: x.name.to_owned(),
-                    table: schema.table.to_owned(),
-                    using: x.using.to_owned(),
-                    elements: x
-                        .elements
-                        .iter()
-                        .map(|(c, o)| ((*c).to_owned(), (*o).to_owned()))
-                        .collect(),
-                    where_clause: x.where_clause.map(str::to_owned),
-                });
-            }
+            out.push(ExclusionSnapshot {
+                name: x.name.to_owned(),
+                table: schema.table.to_owned(),
+                using: x.using.to_owned(),
+                elements: x
+                    .elements
+                    .iter()
+                    .map(|(c, o)| ((*c).to_owned(), (*o).to_owned()))
+                    .collect(),
+                where_clause: x.where_clause.map(str::to_owned),
+            });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    dedup_by_name(out, "EXCLUDE", |x| &x.name)
 }
 
 /// Collect all `CREATE INDEX` declarations, deduplicated by name and
 /// sorted so the output is stable.
 fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<IndexSnapshot> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<IndexSnapshot> = Vec::new();
     for schema in schemas {
         for idx in schema.indexes {
-            if seen.insert(idx.name) {
-                out.push(IndexSnapshot {
-                    name: idx.name.to_owned(),
-                    table: schema.table.to_owned(),
-                    columns: idx.columns.iter().map(|&c| c.to_owned()).collect(),
-                    unique: idx.unique,
-                    method: idx.method.as_str().to_owned(),
-                    where_clause: idx.where_clause.map(str::to_owned),
-                    include: idx.include.iter().map(|&c| c.to_owned()).collect(),
-                });
-            }
+            out.push(IndexSnapshot {
+                name: idx.name.to_owned(),
+                table: schema.table.to_owned(),
+                columns: idx.columns.iter().map(|&c| c.to_owned()).collect(),
+                unique: idx.unique,
+                method: idx.method.as_str().to_owned(),
+                where_clause: idx.where_clause.map(str::to_owned),
+                include: idx.include.iter().map(|&c| c.to_owned()).collect(),
+            });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    dedup_by_name(out, "index", |i| &i.name)
 }
 
 /// Collect all M2M junction tables, deduplicated by `through` name
@@ -716,26 +737,19 @@ fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<In
 /// accessor still works, because it uses the table name rather than
 /// the snapshot.
 fn collect_m2m_tables<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<M2MTableSnapshot> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<M2MTableSnapshot> = Vec::new();
     for schema in schemas {
-        for rel in schema.m2m {
-            if !rel.auto_create {
-                continue;
-            }
-            if seen.insert(rel.through) {
-                out.push(M2MTableSnapshot {
-                    through: rel.through.to_owned(),
-                    src_table: schema.table.to_owned(),
-                    src_col: rel.src_col.to_owned(),
-                    dst_table: rel.to.to_owned(),
-                    dst_col: rel.dst_col.to_owned(),
-                });
-            }
+        for rel in schema.m2m.iter().filter(|r| r.auto_create) {
+            out.push(M2MTableSnapshot {
+                through: rel.through.to_owned(),
+                src_table: schema.table.to_owned(),
+                src_col: rel.src_col.to_owned(),
+                dst_table: rel.to.to_owned(),
+                dst_col: rel.dst_col.to_owned(),
+            });
         }
     }
-    out.sort_by(|a, b| a.through.cmp(&b.through));
-    out
+    dedup_by_name(out, "M2M junction", |m| &m.through)
 }
 
 #[cfg(test)]
@@ -999,6 +1013,46 @@ mod composite_fk_snapshot_tests {
         assert!(
             !json.contains("composite_fks"),
             "empty composite_fks should not appear in JSON; got: {json}"
+        );
+    }
+
+    /// Two models sharing a junction, CHECK, EXCLUDE or index name give
+    /// the same snapshot in either `inventory` order.
+    #[test]
+    fn shared_names_do_not_depend_on_model_order() {
+        use crate::core::{CheckConstraint, ExclusionConstraint, IndexSchema, M2MRelation};
+        const M2M: &[M2MRelation] = &[M2MRelation::new(
+            "tags",
+            "tag",
+            "shared_tags",
+            "post_id",
+            "tag_id",
+        )];
+        const CK: &[CheckConstraint] = &[CheckConstraint::new("shared_ck", "id > 0")];
+        const EX: &[ExclusionConstraint] = &[ExclusionConstraint::new(
+            "shared_ex",
+            "gist",
+            &[("id", "=")],
+        )];
+        const IX: &[IndexSchema] = &[IndexSchema::new("shared_ix", &["id"])];
+        const fn model(name: &'static str, table: &'static str) -> ModelSchema {
+            let mut s = ModelSchema::new(name, table);
+            s.m2m = M2M;
+            s.check_constraints = CK;
+            s.exclusion_constraints = EX;
+            s.indexes = IX;
+            s
+        }
+        static POST: ModelSchema = model("Post", "post");
+        static NOTE: ModelSchema = model("Note", "note");
+        let a = SchemaSnapshot::from_models(&[&POST, &NOTE]);
+        let b = SchemaSnapshot::from_models(&[&NOTE, &POST]);
+        assert_eq!(a, b);
+        assert_eq!(a.m2m_tables.len(), 1);
+        assert_eq!(a.m2m_tables[0].src_table, "note");
+        assert_eq!(
+            (a.checks.len(), a.excludes.len(), a.indexes.len()),
+            (1, 1, 1)
         );
     }
 }

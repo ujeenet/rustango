@@ -360,6 +360,143 @@ async fn grouped_aggregate_join_column_distinct(pool: &Pool) {
     );
 }
 
+/// Per-author book counts over a DISTINCT join, as `(name, n)` rows.
+fn names(rows: Vec<std::collections::HashMap<String, SqlValue>>) -> Vec<(SqlValue, SqlValue)> {
+    rows.into_iter()
+        .map(|r| (r["a__name"].clone(), r["n"].clone()))
+        .collect()
+}
+
+/// #1975: `having` on a joined column named the alias the derived rows hid.
+async fn grouped_aggregate_join_column_having(pool: &Pool) {
+    let ada = rustango::core::TypedExpr::from_where_expr(col_filter("a", "name", Op::Eq, "Ada"));
+    let rows = Book::objects()
+        .join(author_join())
+        .distinct()
+        .values(&["a.name"])
+        .annotate("n", AggregateExpr::Count(None))
+        .having(ada)
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(rows),
+        [(SqlValue::String("Ada".into()), SqlValue::I64(2))]
+    );
+}
+
+/// #1975: `order_by` on a joined column, with and without a derived table.
+async fn grouped_aggregate_join_column_order_by(pool: &Pool) {
+    for distinct in [false, true] {
+        let mut qs = Book::objects().join(author_join());
+        if distinct {
+            qs = qs.distinct();
+        }
+        let rows = qs
+            .values(&["a.name"])
+            .annotate("n", AggregateExpr::Count(None))
+            .order_by(&[("a.name", true)])
+            .fetch(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            names(rows),
+            [
+                (SqlValue::String("Bob".into()), SqlValue::I64(1)),
+                (SqlValue::String("Ada".into()), SqlValue::I64(2))
+            ],
+            "distinct = {distinct}"
+        );
+    }
+}
+
+/// #1975: ordering by a joined column that is not grouped needs it in
+/// the derived rows. Only SQLite accepts that ungrouped ORDER BY.
+async fn grouped_aggregate_order_by_ungrouped_join_column(pool: &Pool) {
+    let rows = Book::objects()
+        .join(author_join())
+        .distinct()
+        .values(&["a.name"])
+        .annotate("n", AggregateExpr::Count(None))
+        .order_by(&[("a.id", true)])
+        .fetch(pool)
+        .await;
+    if pool.backend_name() != "sqlite" {
+        // Rejected for the grouping, not for a column the rows lack.
+        let err = rows.unwrap_err().to_string();
+        assert!(err.contains("GROUP BY"), "{err}");
+        return;
+    }
+    assert_eq!(
+        names(rows.unwrap()),
+        [
+            (SqlValue::String("Bob".into()), SqlValue::I64(1)),
+            (SqlValue::String("Ada".into()), SqlValue::I64(2))
+        ]
+    );
+}
+
+/// A subquery in `having` keeps its own `a` alias, not the derived one.
+async fn grouped_aggregate_having_subquery_alias(pool: &Pool) {
+    let self_join = Join {
+        target: Author::SCHEMA,
+        alias: "a",
+        kind: JoinKind::Inner,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("a", "id"),
+            op: Op::Eq,
+            rhs: aliased("occ_author", "id"),
+        },
+        project: vec![],
+    };
+    let bob = Author::objects()
+        .join(self_join)
+        .where_raw(col_filter("a", "name", Op::Eq, "Bob"))
+        .compile()
+        .unwrap();
+    let rows = Book::objects()
+        .join(author_join())
+        .distinct()
+        .values(&["a.name"])
+        .annotate("n", AggregateExpr::Count(None))
+        .having(rustango::core::TypedExpr::from_where_expr(
+            rustango::core::subquery::exists(bob),
+        ))
+        .order_by(&[("a.name", false)])
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(rows).len(),
+        2,
+        "an uncorrelated EXISTS keeps every group"
+    );
+}
+
+/// #1900: only integer division becomes MySQL `DIV`.
+async fn float_division_keeps_fraction(pool: &Pool) {
+    use rustango::core::{BinOp, Expr};
+    use rustango::sql::UpdaterPool as _;
+    let half = Expr::BinOp {
+        left: Box::new(Expr::Column("price")),
+        op: BinOp::Div,
+        right: Box::new(Expr::Literal(SqlValue::I64(2))),
+    };
+    Book::objects()
+        .filter("id", 1_i64)
+        .update()
+        .set_expr("price", half)
+        .execute_pool(pool)
+        .await
+        .expect("update");
+    let back = Book::objects()
+        .filter("id", 1_i64)
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert!((back[0].price - 5.375).abs() < 1e-9, "{}", back[0].price);
+}
+
 /// A union's branches cannot grow a joined column, so that is refused.
 #[test]
 fn union_group_by_join_column_is_refused() {
@@ -542,6 +679,11 @@ tri_dialect_test! {
         grouped_aggregate_join_limit,
         grouped_aggregate_join_alias_filter,
         grouped_aggregate_join_column_distinct,
+        grouped_aggregate_join_column_having,
+        grouped_aggregate_join_column_order_by,
+        grouped_aggregate_having_subquery_alias,
+        grouped_aggregate_order_by_ungrouped_join_column,
+        float_division_keeps_fraction,
         bulk_insert_rolls_back_every_batch,
         bulk_insert_joins_outer_atomic,
     ],
@@ -582,8 +724,75 @@ mod decimal {
         );
     }
 
+    /// #1899: MySQL's `DECIMAL(38, 10)` rounded 15 fractional digits away.
+    async fn decimal_keeps_its_fraction(pool: &Pool) {
+        let v: Decimal = "0.123456789012345".parse().unwrap();
+        Ledger { id: 1, amount: v }
+            .insert_pool(pool)
+            .await
+            .expect("seed ledger");
+        let n = Ledger::objects().filter("amount", v).count(pool).await;
+        assert_eq!(n.unwrap(), 1, "a stored decimal must equal itself");
+        let back = Ledger::objects().fetch(pool).await.unwrap();
+        assert_eq!(back[0].amount, v);
+    }
+
+    /// Scale 28: `rust_decimal`'s full fraction survives a store and a
+    /// MySQL `CAST(.. AS DECIMAL)`.
+    async fn decimal_keeps_28_fractional_digits(pool: &Pool) {
+        use rustango::core::{Expr, FieldType};
+        let v: Decimal = "0.1234567890123456789012345678".parse().unwrap();
+        Ledger { id: 1, amount: v }
+            .insert_pool(pool)
+            .await
+            .expect("seed ledger");
+        let back = Ledger::objects().fetch(pool).await.unwrap();
+        assert_eq!(back[0].amount, v);
+        let cast = WhereExpr::ExprCompare {
+            lhs: Expr::Cast {
+                expr: Box::new(Expr::Column("amount")),
+                ty: FieldType::Decimal,
+            },
+            op: Op::Eq,
+            rhs: Expr::Literal(SqlValue::Decimal(v)),
+        };
+        let n = Ledger::objects().where_raw(cast).count(pool).await;
+        assert_eq!(n.unwrap(), 1, "the cast keeps every digit");
+    }
+
+    /// #1900: only integer division becomes MySQL `DIV`.
+    async fn decimal_division_keeps_fraction(pool: &Pool) {
+        use rustango::core::{BinOp, Expr};
+        use rustango::sql::UpdaterPool as _;
+        Ledger {
+            id: 1,
+            amount: "1".parse().unwrap(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed ledger");
+        let quarter = Expr::BinOp {
+            left: Box::new(Expr::Column("amount")),
+            op: BinOp::Div,
+            right: Box::new(Expr::Literal(SqlValue::I64(4))),
+        };
+        Ledger::objects()
+            .update()
+            .set_expr("amount", quarter)
+            .execute_pool(pool)
+            .await
+            .expect("update");
+        let back = Ledger::objects().fetch(pool).await.unwrap();
+        assert_eq!(back[0].amount, "0.25".parse::<Decimal>().unwrap());
+    }
+
     tri_dialect_test! {
         model: Ledger,
-        scenarios: [sum_keeps_decimal_exact],
+        scenarios: [
+            sum_keeps_decimal_exact,
+            decimal_keeps_its_fraction,
+            decimal_keeps_28_fractional_digits,
+            decimal_division_keeps_fraction,
+        ],
     }
 }

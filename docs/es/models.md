@@ -102,7 +102,7 @@ SQLite:
 | `chrono::NaiveTime` | `TIME` | `TIME(6)` | `TEXT` |
 | `uuid::Uuid` | `UUID` | `CHAR(36)` | `TEXT` |
 | `serde_json::Value` | `JSONB` | `JSON` | `TEXT` |
-| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(38,10)` | `NUMERIC` |
+| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(65,28)` | `NUMERIC` |
 | `Vec<u8>` | `BYTEA` | `LONGBLOB` | `BLOB` |
 | `Option<T>` | `T NULL` | `T NULL` | `T` (nullable) |
 
@@ -127,7 +127,7 @@ pub struct Gadget {
 ```
 
 > **Precisión decimal.** El `NUMERIC` de PostgreSQL es de precisión arbitraria; MySQL usa
-> `DECIMAL(38,10)` (38 dígitos, 10 fraccionarios — el ajuste portable más amplio); SQLite
+> `DECIMAL(65,28)` (cabe cualquier valor `rust_decimal`); SQLite
 > usa afinidad `NUMERIC`. Usa `rust_decimal::Decimal` para dinero, nunca `f64`.
 
 ### Tipos exclusivos de PostgreSQL
