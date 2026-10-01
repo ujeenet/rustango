@@ -776,3 +776,73 @@ async fn form_body_runs_serializer_validation() {
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{method}");
     }
 }
+
+fn json_req(method: Method, uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+/// #1994: the model column behind a `source` rename is not writable,
+/// by JSON or form, on POST, PUT or PATCH.
+#[tokio::test]
+async fn a_renamed_fields_model_column_is_not_writable() {
+    type Make = fn(Method, &str, &str) -> Request<Body>;
+    let encodings: [(&str, Make, [&str; 3]); 2] = [
+        (
+            "json",
+            json_req,
+            [
+                r#"{"title":"t","content":"ok","body":"evil"}"#,
+                r#"{"title":"t","body":"evil"}"#,
+                r#"{"body":"evil"}"#,
+            ],
+        ),
+        (
+            "form",
+            form,
+            [
+                "title=t&content=ok&body=evil",
+                "title=t&body=evil",
+                "body=evil",
+            ],
+        ),
+    ];
+    for (enc, make, [both, column_only, patch_column]) in encodings {
+        let app = doc_router().await;
+        let send = |m: Method, uri: &str, b: &str| app.clone().oneshot(make(m, uri, b));
+        // The column key loses to the published name, or counts as absent.
+        let resp = send(Method::POST, "/docs", both).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "{enc}");
+        assert_eq!(json_body(resp).await["content"], "ok", "{enc} POST");
+        let resp = send(Method::POST, "/docs", column_only).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{enc} POST");
+
+        for method in [Method::PUT, Method::PATCH] {
+            let resp = send(method.clone(), "/docs/1", both).await.unwrap();
+            let status = resp.status();
+            let v = json_body(resp).await;
+            assert_eq!(status, StatusCode::OK, "{enc} {method}: {v}");
+            assert_eq!(v["content"], "ok", "{enc} {method}");
+        }
+        let resp = send(Method::PUT, "/docs/1", column_only).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{enc} PUT");
+        let resp = send(Method::PATCH, "/docs/1", patch_column).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{enc} PATCH");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/docs/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["content"], "ok", "{enc}: stored");
+    }
+}

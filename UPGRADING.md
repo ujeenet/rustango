@@ -167,6 +167,10 @@ A body with no exact size hint (`Body::from_stream`) is now sent uncompressed in
 
 A form-urlencoded write that broke a serializer rule now gets the same `422` as JSON.
 
+### ViewSet ignores a renamed field's model column on write (#1994)
+
+With `#[serializer(source = "body")] content`, send `content`; a `body` key is now dropped.
+
 ## 0.59.13
 
 ### Admin `list.html` gets `hidden_params` (#1916)

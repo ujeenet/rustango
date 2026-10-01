@@ -20,6 +20,11 @@ Bodies over `max_body_bytes`, without a known size, or `206` pass through whole;
 ### Fixed — ViewSet form-urlencoded bodies run serializer validation (#1993)
 
 A form body is typed by its model fields and checked like JSON; it no longer skips `validate`, lengths, ranges and choices.
+`Array`, `HStore` and `Vector` implement `OpenApiSchema`, so a serializer can carry them with `openapi` on.
+
+### Fixed — a ViewSet `source` rename no longer lets the model column be written (#1994)
+
+The model key behind a renamed field is dropped from JSON and form bodies before the write.
 
 ## [0.59.13] — 2026-10-01
 

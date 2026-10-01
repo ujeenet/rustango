@@ -1479,6 +1479,9 @@ fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
 /// `#[serializer(source = "body")]`, and the persist step, which reads
 /// model columns, still finds the value.
 ///
+/// The model-column key of a renamed field is dropped: the serializer
+/// never validated it, so it must not reach the write (#1994).
+///
 /// Returns `None` when nothing needs renaming, which is the common
 /// case and costs no allocation.
 fn serializer_input_renamed_form(
@@ -1486,25 +1489,28 @@ fn serializer_input_renamed_form(
     form: &HashMap<String, String>,
 ) -> Option<HashMap<String, String>> {
     let bridge = state.vs.serializer.as_ref()?;
+    let names = bridge.writable_field_names();
     // The two lists are parallel: JSON keys and model columns. They
     // differ only at `source` renames.
-    let renames: Vec<(&'static str, &'static str)> = bridge
-        .writable_field_names()
+    let renames: Vec<(&'static str, &'static str)> = names
         .iter()
         .zip(bridge.writable_model_fields().iter())
-        .filter(|(name, col)| name != col && form.contains_key(**name))
+        .filter(|(name, col)| name != col)
+        .filter(|(name, col)| form.contains_key(**name) || form.contains_key(**col))
         .map(|(name, col)| (*name, *col))
         .collect();
     if renames.is_empty() {
         return None;
     }
-    let mut out = form.clone();
-    for (name, col) in renames {
-        if let Some(v) = out.remove(name) {
-            // Do not clobber a model-column key the client also sent.
-            out.entry(col.to_owned()).or_insert(v);
-        }
-    }
+    let out = form
+        .iter()
+        .filter_map(|(k, v)| match renames.iter().find(|(n, _)| n == k) {
+            Some((_, col)) => Some(((*col).to_owned(), v.clone())),
+            // A hidden column, unless another field publishes that name.
+            None if renames.iter().any(|(_, c)| c == k) && !names.contains(&k.as_str()) => None,
+            None => Some((k.clone(), v.clone())),
+        })
+        .collect();
     Some(out)
 }
 
@@ -1568,11 +1574,11 @@ fn write_json(state: &ViewSetState, form: &HashMap<String, String>, json: Option
     if let Some(json) = json {
         return json;
     }
-    let bridge = state.vs.serializer.as_ref();
+    // Only a serializer reads this body.
+    let Some(b) = state.vs.serializer.as_ref() else {
+        return Value::Null;
+    };
     let model_name = |key: &str| -> Option<&'static str> {
-        let Some(b) = bridge else {
-            return state.vs.schema.field(key).map(|f| f.name);
-        };
         b.writable_field_names()
             .iter()
             .zip(b.writable_model_fields())
@@ -1590,6 +1596,7 @@ fn write_json(state: &ViewSetState, form: &HashMap<String, String>, json: Option
     Value::Object(form.iter().map(|(k, v)| (k.clone(), typed(k, v))).collect())
 }
 
+/// A parsed form value in the JSON shape its serializer field reads.
 fn sql_value_json(v: SqlValue) -> Option<Value> {
     match v {
         SqlValue::Null => Some(Value::Null),
@@ -1599,14 +1606,29 @@ fn sql_value_json(v: SqlValue) -> Option<Value> {
         SqlValue::F32(n) => serde_json::to_value(n).ok(),
         SqlValue::F64(n) => serde_json::to_value(n).ok(),
         SqlValue::Bool(b) => Some(b.into()),
-        SqlValue::String(s) => Some(s.into()),
+        SqlValue::String(s) | SqlValue::RangeLiteral(s) => Some(s.into()),
         SqlValue::Json(j) => Some(j),
         SqlValue::DateTime(d) => serde_json::to_value(d).ok(),
         SqlValue::Date(d) => serde_json::to_value(d).ok(),
         SqlValue::Time(t) => serde_json::to_value(t).ok(),
         SqlValue::Uuid(u) => serde_json::to_value(u).ok(),
         SqlValue::Decimal(d) => serde_json::to_value(d).ok(),
-        _ => None,
+        SqlValue::Binary(bytes) => serde_json::to_value(bytes).ok(),
+        SqlValue::Vector(v) => serde_json::to_value(v).ok(),
+        SqlValue::HStore(pairs) => Some(Value::Object(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (k, v.map_or(Value::Null, Value::String)))
+                .collect(),
+        )),
+        SqlValue::Array(items) | SqlValue::List(items) => items
+            .into_iter()
+            .map(sql_value_json)
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        SqlValue::Geometry { x, y, srid } => {
+            Some(serde_json::json!({"x": x, "y": y, "srid": srid}))
+        }
     }
 }
 
