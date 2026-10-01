@@ -2,8 +2,8 @@
 //! `Content-Type`, `Cache-Control` and `Last-Modified`, and answer 304
 //! to `If-Modified-Since`.
 //!
-//! Add [`crate::etag::EtagLayer`] to revalidate on a body hash as well
-//! as on the timestamp.
+//! Each file gets a strong `ETag` from its size and mtime, which
+//! [`crate::etag::EtagLayer`] keeps, so `If-Range` resumes match it.
 //!
 //! ## Quick start
 //!
@@ -149,15 +149,23 @@ pub fn static_router(files: StaticFiles) -> Router {
         .route("/{*path}", get(serve))
         .with_state(Arc::new(Mount {
             files,
-            root: std::sync::RwLock::new(root),
+            root: std::sync::RwLock::new(root.map(|r| (r, std::time::Instant::now()))),
         }))
 }
 
-/// A mount plus its canonical root, resolved once rather than per request (#1531).
+/// A mount plus its canonical root, cached rather than resolved per request (#1531).
 struct Mount {
     files: StaticFiles,
-    root: std::sync::RwLock<Option<PathBuf>>,
+    root: std::sync::RwLock<Option<(PathBuf, std::time::Instant)>>,
 }
+
+/// How long a cached root is trusted before it is resolved again, so a
+/// re-pointed root symlink cannot keep serving the old target's tree.
+const ROOT_TTL: Duration = if cfg!(test) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(1)
+};
 
 /// An open file, checked to be a regular file under the root.
 struct Opened {
@@ -165,6 +173,12 @@ struct Opened {
     file: std::fs::File,
     len: u64,
     mtime: Option<u64>,
+}
+
+/// Strong validator from size and mtime, so a `206` and its `200` share it.
+/// No mtime, no validator: size alone can't tell two versions apart.
+fn file_etag(len: u64, mtime: Option<u64>) -> Option<String> {
+    mtime.map(|m| format!("\"{m:x}-{len:x}\""))
 }
 
 async fn serve(
@@ -187,18 +201,26 @@ async fn serve(
         mtime,
     } = opened;
 
-    if let Some(secs) = mtime {
+    let etag = file_etag(len, mtime);
+    let etag = etag.as_deref();
+    // `If-None-Match` wins over `If-Modified-Since` (RFC 9110 §13.1.3).
+    if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
+        let inm = inm.to_str().unwrap_or("");
+        if etag.is_some_and(|e| crate::etag::if_none_match(inm, e)) {
+            return not_modified(mtime, etag, &files.cache_control);
+        }
+    } else if let Some(secs) = mtime {
         if let Some(ims) = headers.get(header::IF_MODIFIED_SINCE) {
             if let Some(client_secs) = parse_http_date(ims.to_str().unwrap_or("")) {
                 if secs <= client_secs {
-                    return not_modified(secs, &files.cache_control);
+                    return not_modified(mtime, etag, &files.cache_control);
                 }
             }
         }
     }
 
     let last_modified = mtime.map(format_http_date);
-    let range = match requested_range(&headers, last_modified.as_deref(), len) {
+    let range = match requested_range(&headers, etag, last_modified.as_deref(), len) {
         Ok(r) => r,
         Err(()) => return range_not_satisfiable(len),
     };
@@ -259,6 +281,9 @@ async fn serve(
     if let Some(v) = last_modified.and_then(|s| HeaderValue::from_str(&s).ok()) {
         h.insert(header::LAST_MODIFIED, v);
     }
+    if let Some(v) = etag.and_then(|e| HeaderValue::from_str(e).ok()) {
+        h.insert(header::ETAG, v);
+    }
     resp
 }
 
@@ -310,9 +335,11 @@ fn open_file(mount: &Mount, rel: &str) -> Option<Opened> {
 /// The single `Range: bytes=` span to serve, as `(start, count)`.
 ///
 /// `Ok(None)` serves the whole file: no header, several ranges, a
-/// stale `If-Range`, or a unit we don't know. `Err` is a 416.
+/// stale `If-Range`, a malformed spec, or a unit we don't know. `Err`
+/// is a 416: a valid range that starts past the end.
 fn requested_range(
     headers: &HeaderMap,
+    etag: Option<&str>,
     last_modified: Option<&str>,
     len: u64,
 ) -> Result<Option<(u64, u64)>, ()> {
@@ -320,7 +347,14 @@ fn requested_range(
         return Ok(None);
     };
     if let Some(if_range) = headers.get(header::IF_RANGE) {
-        if Some(if_range.to_str().unwrap_or_default()) != last_modified {
+        let v = if_range.to_str().unwrap_or_default().trim();
+        // An entity tag compares strongly, so a weak one never matches.
+        let fresh = if v.starts_with('"') || v.starts_with("W/") {
+            Some(v) == etag
+        } else {
+            Some(v) == last_modified
+        };
+        if !fresh {
             return Ok(None);
         }
     }
@@ -337,23 +371,33 @@ fn requested_range(
         ("", "") => return Ok(None),
         // `bytes=-N`: the last N bytes.
         ("", n) => {
-            let n: u64 = n.parse().map_err(|_| ())?;
+            // Malformed specs are ignored, not refused (RFC 9110 §14.2).
+            let Ok(n) = n.parse::<u64>() else {
+                return Ok(None);
+            };
             if n == 0 || len == 0 {
                 return Err(());
             }
             (len.saturating_sub(n), len - 1)
         }
         (a, b) => {
-            let start: u64 = a.parse().map_err(|_| ())?;
-            let end = if b.is_empty() {
-                len.saturating_sub(1)
-            } else {
-                b.parse::<u64>().map_err(|_| ())?.min(len.saturating_sub(1))
+            let (Ok(start), Ok(last)) = (
+                a.parse::<u64>(),
+                if b.is_empty() {
+                    Ok(u64::MAX)
+                } else {
+                    b.parse::<u64>()
+                },
+            ) else {
+                return Ok(None);
             };
-            if start >= len || end < start {
+            if last < start {
+                return Ok(None);
+            }
+            if start >= len {
                 return Err(());
             }
-            (start, end)
+            (start, last.min(len - 1))
         }
     };
     Ok(Some((start, end - start + 1)))
@@ -404,18 +448,16 @@ fn resolve_path(mount: &Mount, rel: &str) -> Option<PathBuf> {
     if files.canonicalize {
         let canon = std::fs::canonicalize(&joined).ok()?;
         let cached = mount.root.read().ok().and_then(|r| r.clone());
-        if cached.as_ref().is_some_and(|root| canon.starts_with(root)) {
+        if cached.is_some_and(|(root, at)| at.elapsed() < ROOT_TTL && canon.starts_with(root)) {
             return Some(canon);
         }
-        // A root missing at startup, or a re-pointed root symlink: resolve it again.
-        let root_canon = std::fs::canonicalize(&files.root).ok()?;
-        if !canon.starts_with(&root_canon) {
-            return None;
-        }
+        // Stale, missing, or a re-pointed root symlink: resolve it again.
+        // A root that no longer resolves serves nothing.
+        let root_canon = std::fs::canonicalize(&files.root).ok();
         if let Ok(mut w) = mount.root.write() {
-            *w = Some(root_canon);
+            *w = root_canon.clone().map(|r| (r, std::time::Instant::now()));
         }
-        return Some(canon);
+        return canon.starts_with(root_canon?).then_some(canon);
     }
     Some(joined)
 }
@@ -428,7 +470,7 @@ fn not_found() -> Response {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
-fn not_modified(mtime_secs: u64, cache_control: &str) -> Response {
+fn not_modified(mtime: Option<u64>, etag: Option<&str>, cache_control: &str) -> Response {
     let mut resp = Response::builder()
         .status(StatusCode::NOT_MODIFIED)
         .body(Body::empty())
@@ -439,8 +481,11 @@ fn not_modified(mtime_secs: u64, cache_control: &str) -> Response {
             h.insert(header::CACHE_CONTROL, v);
         }
     }
-    if let Ok(v) = HeaderValue::from_str(&format_http_date(mtime_secs)) {
+    if let Some(v) = mtime.and_then(|s| HeaderValue::from_str(&format_http_date(s)).ok()) {
         h.insert(header::LAST_MODIFIED, v);
+    }
+    if let Some(v) = etag.and_then(|e| HeaderValue::from_str(e).ok()) {
+        h.insert(header::ETAG, v);
     }
     resp
 }
@@ -874,6 +919,80 @@ mod tests {
         assert_eq!(r.headers()[header::CONTENT_RANGE], "bytes */10");
         // Several ranges: the whole file is a valid answer.
         assert_eq!(ranged(server(&dir), "bytes=0-1,4-5").await.status(), 200);
+        // Malformed specs are ignored, not refused (RFC 9110 §14.2).
+        for spec in ["bytes=abc-", "bytes=5-3", "bytes=-x", "bytes=1-y"] {
+            assert_eq!(ranged(server(&dir), spec).await.status(), 200, "{spec}");
+        }
+    }
+
+    async fn if_range(app: Router, validator: &str) -> Response {
+        let req = Request::builder()
+            .uri("/r.txt")
+            .header(header::RANGE, "bytes=2-4")
+            .header(header::IF_RANGE, validator)
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    /// `If-Range` resumes on the file's strong ETag or its Last-Modified,
+    /// also behind `EtagLayer`, and a changed validator gets the whole file.
+    #[tokio::test]
+    async fn if_range_matches_etag_or_last_modified() {
+        use crate::etag::{EtagLayer, EtagRouterExt as _};
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "r.txt", b"0123456789");
+        let app = server(&dir).etag(EtagLayer::new());
+        let full = get(app.clone(), "/r.txt").await;
+        let etag = full.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let lm = full.headers()[header::LAST_MODIFIED]
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        let r = if_range(app.clone(), &etag).await;
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        // The 206 names the whole file, not a hash of the slice.
+        assert_eq!(r.headers()[header::ETAG], etag.as_str());
+        assert_eq!(if_range(app.clone(), &lm).await.status(), 206);
+
+        let weak = format!("W/{etag}");
+        for stale in ["\"other\"", weak.as_str(), "Thu, 01 Jan 1970 00:00:00 GMT"] {
+            let r = if_range(app.clone(), stale).await;
+            assert_eq!(r.status(), StatusCode::OK, "{stale}");
+            assert_eq!(r.headers()[header::CONTENT_LENGTH], "10");
+        }
+
+        let req = Request::builder()
+            .uri("/r.txt")
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(req).await.unwrap().status(), 304);
+    }
+
+    /// The cached root expires, so a root re-pointed to a subdirectory
+    /// stops serving symlinks into the old target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repointed_root_drops_the_old_tree() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "a/secret.txt", b"s");
+        write_file(&dir, "a/pub/x.txt", b"x");
+        std::os::unix::fs::symlink(
+            dir.path().join("a/secret.txt"),
+            dir.path().join("a/pub/leak"),
+        )
+        .unwrap();
+        let cur = dir.path().join("current");
+        std::os::unix::fs::symlink(dir.path().join("a"), &cur).unwrap();
+        let app = static_router(StaticFiles::new(&cur));
+        assert_eq!(get(app.clone(), "/secret.txt").await.status(), 200);
+        std::fs::remove_file(&cur).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("a/pub"), &cur).unwrap();
+        tokio::time::sleep(ROOT_TTL * 2).await;
+        assert_eq!(get(app.clone(), "/x.txt").await.status(), 200);
+        assert_eq!(get(app, "/leak").await.status(), 404);
     }
 
     #[test]

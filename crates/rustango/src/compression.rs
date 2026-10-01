@@ -41,7 +41,8 @@ use std::sync::Arc;
 
 use axum::body::{Body, HttpBody as _};
 use axum::http::header::{
-    ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
+    ACCEPT_ENCODING, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
+    ETAG,
 };
 use axum::http::{HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
@@ -212,6 +213,17 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
         HeaderValue::from_static(encoding.header_value()),
     );
     parts.headers.remove(CONTENT_LENGTH);
+    // Byte ranges and a strong ETag name the raw bytes, not this encoding.
+    parts.headers.remove(ACCEPT_RANGES);
+    if let Some(weak) = parts
+        .headers
+        .get(ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|e| !e.starts_with("W/"))
+        .and_then(|e| HeaderValue::from_str(&format!("W/{e}")).ok())
+    {
+        parts.headers.insert(ETAG, weak);
+    }
     ensure_vary_in_place(&mut parts.headers);
     Response::from_parts(parts, Body::from(compressed))
 }
@@ -770,6 +782,34 @@ mod tests {
         assert!(resp.headers().get(CONTENT_ENCODING).is_none());
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         assert_eq!(bytes.len(), 4096);
+    }
+
+    /// A compressed body can't be resumed by raw byte offset or `If-Range`.
+    #[tokio::test]
+    async fn compressed_drops_accept_ranges_and_weakens_etag() {
+        let app = Router::new()
+            .route(
+                "/f",
+                get(|| async {
+                    (
+                        [
+                            (CONTENT_TYPE, "text/plain"),
+                            (ACCEPT_RANGES, "bytes"),
+                            (ETAG, "\"abc\""),
+                        ],
+                        "z".repeat(4096),
+                    )
+                        .into_response()
+                }),
+            )
+            .compression(CompressionLayer::default());
+        let resp = req(app.clone(), Some("gzip"), "/f").await;
+        assert_eq!(resp.headers()[CONTENT_ENCODING], "gzip");
+        assert!(resp.headers().get(ACCEPT_RANGES).is_none());
+        assert_eq!(resp.headers()[ETAG], "W/\"abc\"");
+        let raw = req(app, None, "/f").await;
+        assert_eq!(raw.headers()[ACCEPT_RANGES], "bytes");
+        assert_eq!(raw.headers()[ETAG], "\"abc\"");
     }
 
     #[test]
