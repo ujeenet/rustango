@@ -6640,7 +6640,11 @@ fn inherent_impl_tokens(
                         ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
                             ::core::option::Option::Some(::std::vec![ #( #before_pairs ),* ])
                         }
-                        _ => ::core::option::Option::None,
+                        ::core::result::Result::Ok(::core::option::Option::None) => ::core::option::Option::None,
+                        // A failed pre-read must not let the UPDATE run unaudited (#1907).
+                        ::core::result::Result::Err(e) => {
+                            return ::core::result::Result::Err(::core::convert::From::from(e));
+                        }
                     };
             };
             let post = quote! {
@@ -6648,17 +6652,16 @@ fn inherent_impl_tokens(
                     let _audit_after:
                         ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                         ::std::vec![ #( #after_pairs ),* ];
-                    let _audit_entry = #root::audit::PendingEntry {
-                        entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                        entity_pk: #pk_str,
-                        operation: #root::audit::AuditOp::Update,
-                        source: #root::audit::current_source(),
-                        changes: #root::audit::diff_changes(
+                    if let ::core::option::Option::Some(_audit_entry) =
+                        #root::audit::PendingEntry::update_diff(
+                            <Self as #root::core::Model>::SCHEMA.table,
+                            #pk_str,
                             &_audit_before,
                             &_audit_after,
-                        ),
-                    };
-                    #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                        )
+                    {
+                        #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                    }
                 }
             };
             (pre, post)

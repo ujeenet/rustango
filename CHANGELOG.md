@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 PG tenants seed `auth.access_admin` and extra permissions; impersonation lands on a port-routed org's own port; a webhook delivery that loses the idempotency race gets the existing run (200), not a 500; re-upload and purge delete old brand files.
 
+### Fixed — audit: a no-op save writes no `update` row; a failed pre-read fails the save (#1907)
+
+On MySQL/SQLite the UPDATE could commit with no audit row when the BEFORE read failed.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
