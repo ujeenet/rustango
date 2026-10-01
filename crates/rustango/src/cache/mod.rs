@@ -92,6 +92,12 @@ pub trait Cache: Send + Sync + 'static {
     /// `ttl = None` means "no expiry" (store indefinitely).
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError>;
 
+    /// Store `value` with no expiry, even on a backend built with a
+    /// default TTL. Wrapping caches must forward it.
+    async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        self.set(key, value, None).await
+    }
+
     /// Remove `key` from the cache. No-op if absent.
     async fn delete(&self, key: &str) -> Result<(), CacheError>;
 
@@ -637,6 +643,27 @@ impl InMemoryCache {
         Some(Instant::now() + effective)
     }
 
+    /// Store `value` expiring at `expires_at` (`None` = never).
+    async fn insert(&self, key: &str, value: &str, expires_at: Option<Instant>) {
+        let size = key.len() + value.len();
+        let tick = self.next_tick();
+        let mut store = self.inner.write().await;
+        if let Some(old) = store.map.remove(key) {
+            store.used_bytes = store.used_bytes.saturating_sub(old.size);
+        }
+        store.used_bytes += size;
+        store.map.insert(
+            key.to_owned(),
+            CacheEntry {
+                value: value.to_owned(),
+                expires_at,
+                last_used: AtomicU64::new(tick),
+                size,
+            },
+        );
+        self.evict_locked(&mut store);
+    }
+
     fn next_tick(&self) -> u64 {
         self.tick.fetch_add(1, Ordering::Relaxed)
     }
@@ -709,24 +736,12 @@ impl Cache for InMemoryCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
-        let expires_at = self.resolve_ttl(ttl);
-        let size = key.len() + value.len();
-        let tick = self.next_tick();
-        let mut store = self.inner.write().await;
-        if let Some(old) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(old.size);
-        }
-        store.used_bytes += size;
-        store.map.insert(
-            key.to_owned(),
-            CacheEntry {
-                value: value.to_owned(),
-                expires_at,
-                last_used: AtomicU64::new(tick),
-                size,
-            },
-        );
-        self.evict_locked(&mut store);
+        self.insert(key, value, self.resolve_ttl(ttl)).await;
+        Ok(())
+    }
+
+    async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        self.insert(key, value, None).await;
         Ok(())
     }
 

@@ -158,6 +158,7 @@ A serializer `PATCH` now loads the row once before the update. `ModelSerializer`
 ### Feature flags never expire by default (#1956)
 
 Flag writes no longer carry a 1 hour TTL. To keep the old expiry, call `.ttl(Duration::from_secs(3600))`.
+They go through the new defaulted `Cache::set_forever`; a custom cache that wraps another must forward it.
 
 ## 0.59.12
 
