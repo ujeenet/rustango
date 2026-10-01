@@ -52,11 +52,12 @@
 //! - Creating or listing buckets.
 //! - Server-side encryption with your own keys (SSE-C).
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use super::{validate_key, Storage, StorageError};
+use super::{validate_key, ObjectMeta, Storage, StorageError};
 
 /// How to reach the bucket.
 #[derive(Clone, Debug)]
@@ -263,6 +264,7 @@ impl S3Storage {
         key: &str,
         ttl_secs: u64,
         content_type: Option<&str>,
+        content_length: Option<u64>,
     ) -> Result<String, StorageError> {
         validate_key(key)?;
         // AWS caps the lifetime at 7 days.
@@ -280,14 +282,19 @@ impl S3Storage {
         let content_type = canonical_header_value(content_type)?;
         let content_type = content_type.as_deref();
 
-        // Always sign `host`. A PUT with a content type signs that
-        // too, so the browser must send the same value.
-        let mut signed_headers_vec = vec!["host"];
-        if method == "PUT" && content_type.is_some() {
-            signed_headers_vec.push("content-type");
+        // Always sign `host`. A PUT signs its content type and length
+        // too, so S3 refuses a body of another size or type (#1851).
+        let mut signed: Vec<(&str, String)> = vec![("host", host.clone())];
+        if method == "PUT" {
+            if let Some(ct) = content_type {
+                signed.push(("content-type", ct.to_owned()));
+            }
+            if let Some(len) = content_length {
+                signed.push(("content-length", len.to_string()));
+            }
         }
-        signed_headers_vec.sort();
-        let signed_headers = signed_headers_vec.join(";");
+        signed.sort_by(|a, b| a.0.cmp(b.0));
+        let signed_headers = signed.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(";");
 
         // The canonical query string sorts these by name.
         let mut query: Vec<(String, String)> = vec![
@@ -306,13 +313,7 @@ impl S3Storage {
             .collect::<Vec<_>>()
             .join("&");
 
-        let canonical_headers = match (method, content_type) {
-            ("PUT", Some(ct)) => {
-                // More than one header must be in alphabetical order.
-                format!("content-type:{ct}\nhost:{host}\n")
-            }
-            _ => format!("host:{host}\n"),
-        };
+        let canonical_headers: String = signed.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
 
         let payload_hash = "UNSIGNED-PAYLOAD";
 
@@ -413,7 +414,7 @@ impl Storage for S3Storage {
     }
 
     async fn presigned_get_url(&self, key: &str, ttl: std::time::Duration) -> Option<String> {
-        self.build_presigned_url("GET", key, ttl.as_secs(), None)
+        self.build_presigned_url("GET", key, ttl.as_secs(), None, None)
             .ok()
     }
 
@@ -422,9 +423,35 @@ impl Storage for S3Storage {
         key: &str,
         ttl: std::time::Duration,
         content_type: Option<&str>,
+        content_length: Option<u64>,
     ) -> Option<String> {
-        self.build_presigned_url("PUT", key, ttl.as_secs(), content_type)
+        self.build_presigned_url("PUT", key, ttl.as_secs(), content_type, content_length)
             .ok()
+    }
+
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        let resp = self.signed_request("HEAD", key, b"", None).await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(StorageError::Io(format!("S3 HEAD {key} -> {status}")));
+        }
+        // The header, not `content_length()`: a HEAD body is empty.
+        let header = |name| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let size = header(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .ok_or_else(|| StorageError::Io(format!("S3 HEAD {key}: no Content-Length")))?;
+        Ok(Some(ObjectMeta::new(
+            size,
+            header(reqwest::header::CONTENT_TYPE),
+        )))
     }
 }
 
@@ -702,6 +729,7 @@ mod tests {
                 "uploads/x.png",
                 std::time::Duration::from_secs(300),
                 Some("image/png"),
+                None,
             )
             .await
             .unwrap();
@@ -713,11 +741,35 @@ mod tests {
         );
     }
 
+    /// #1851: the declared size is signed, so S3 refuses any other body.
+    #[tokio::test]
+    async fn presigned_put_url_signs_the_content_length() {
+        let s = S3Storage::new(cfg());
+        let url = s
+            .presigned_put_url(
+                "u/x.png",
+                std::time::Duration::from_secs(300),
+                Some("image/png"),
+                Some(10),
+            )
+            .await
+            .unwrap();
+        assert!(
+            url.contains("X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost"),
+            "got: {url}"
+        );
+    }
+
     #[tokio::test]
     async fn presigned_put_url_without_content_type_only_signs_host() {
         let s = S3Storage::new(cfg());
         let url = s
-            .presigned_put_url("uploads/x.bin", std::time::Duration::from_secs(300), None)
+            .presigned_put_url(
+                "uploads/x.bin",
+                std::time::Duration::from_secs(300),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(url.contains("X-Amz-SignedHeaders=host"));
@@ -761,7 +813,7 @@ mod tests {
             .await
             .is_none());
         assert!(local
-            .presigned_put_url("x", std::time::Duration::from_secs(60), None)
+            .presigned_put_url("x", std::time::Duration::from_secs(60), None, None)
             .await
             .is_none());
     }

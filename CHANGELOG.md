@@ -4,6 +4,28 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — direct uploads are checked against the bucket, not the client (#1851)
+
+The presigned PUT signs the declared size, and `finalize_upload` reads the object's real size and type with
+`Storage::metadata`; a mismatch is deleted and the row marked `Failed`.
+
+### Security — direct uploads never store an active MIME (#2057)
+
+`begin_upload` signs `text/html`, SVG, XML and script types as `application/octet-stream`; `UploadTicket.content_type` says what to send.
+
+### Fixed — storage keys may contain `..` inside a name (#1903)
+
+`validate_key` rejects `..` only as a whole path segment, so `report..final.pdf` uploads again.
+
+### Fixed — no orphan or torn upload files (#1905)
+
+`save_bytes` deletes the object when the row insert fails; `LocalStorage` writes via temp file + rename;
+`save_uploads` removes earlier files on any error; random key prefixes are UUIDs.
+
+### Fixed — S3 presigning derives the SigV4 key once per date (#1570)
+
+### Fixed — `purge` deletes links and row in one transaction; `MediaPerms::from_manager` (#1573)
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)

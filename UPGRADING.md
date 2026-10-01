@@ -150,6 +150,16 @@ untouched.
 
 ## Unreleased
 
+### Direct media uploads
+
+**Breaking:** `Storage::presigned_put_url` takes a `content_length: Option<u64>`, and a backend that presigns PUTs
+must implement the new `Storage::metadata`, or `finalize_upload` errors. `UploadTicket` gains `content_type`;
+the browser must send that header and exactly `size_bytes` bytes.
+
+### `save_uploads` keeps nothing on error
+
+Any error now deletes the files the request already saved, not only `TooManyFiles`. Random key prefixes are UUIDs, not nanos.
+
 ## 0.59.16
 
 ### Custom admin views need `change` for writes

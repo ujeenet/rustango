@@ -109,8 +109,8 @@ pub trait Storage: Send + Sync + 'static {
     }
 
     /// A PUT URL that expires, so a browser can upload straight to
-    /// the backend. With a `content_type`, the signature is tied to
-    /// it and the browser must send a matching header.
+    /// the backend. A `content_type` or `content_length` is signed, so
+    /// the browser must send matching headers.
     ///
     /// `None` on a backend that cannot sign.
     async fn presigned_put_url(
@@ -118,8 +118,35 @@ pub trait Storage: Send + Sync + 'static {
         _key: &str,
         _ttl: std::time::Duration,
         _content_type: Option<&str>,
+        _content_length: Option<u64>,
     ) -> Option<String> {
         None
+    }
+
+    /// What the backend holds at `key`, or `None` when nothing is there.
+    ///
+    /// The default is an error, so a backend that cannot report this
+    /// never lets a direct upload be confirmed on trust (#1851).
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        Err(StorageError::Io(format!(
+            "this backend cannot report object metadata (key `{key}`)"
+        )))
+    }
+}
+
+/// Size and stored type of an object, as the backend reports them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ObjectMeta {
+    pub size: u64,
+    /// `None` on a backend that stores no type, such as `LocalStorage`.
+    pub content_type: Option<String>,
+}
+
+impl ObjectMeta {
+    #[must_use]
+    pub fn new(size: u64, content_type: Option<String>) -> Self {
+        Self { size, content_type }
     }
 }
 
@@ -255,6 +282,16 @@ impl Storage for LocalStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?)
     }
 
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        validate_key(key)?;
+        match tokio::fs::metadata(self.full_path(key)).await {
+            Ok(m) if m.is_file() => Ok(Some(ObjectMeta::new(m.len(), None))),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::Io(e.to_string())),
+        }
+    }
+
     fn url(&self, key: &str) -> Option<String> {
         let base = self.base_url.as_ref()?;
         Some(format!("{}/{}", base.trim_end_matches('/'), key))
@@ -315,6 +352,16 @@ impl Storage for InMemoryStorage {
             .lock()
             .expect("storage mutex poisoned")
             .contains_key(key))
+    }
+
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        validate_key(key)?;
+        Ok(self
+            .files
+            .lock()
+            .expect("storage mutex poisoned")
+            .get(key)
+            .map(|v| ObjectMeta::new(v.len() as u64, None)))
     }
 
     fn url(&self, _key: &str) -> Option<String> {

@@ -300,6 +300,10 @@ pub struct UploadTicket {
     /// Echoed back so the caller can confirm what they signed for.
     pub disk: String,
     pub storage_key: String,
+    /// The `Content-Type` the browser must send. An active type
+    /// (HTML, SVG, script) is signed as `application/octet-stream`.
+    #[serde(default)]
+    pub content_type: String,
 }
 
 // =====================================================================
@@ -409,9 +413,15 @@ impl MediaManager {
     /// URLs.
     pub async fn begin_upload(&self, intent: UploadIntent) -> Result<UploadTicket, MediaError> {
         let storage = self.resolve_disk(&intent.disk)?;
+        let size = u64::try_from(intent.size_bytes).map_err(|_| {
+            MediaError::Other(format!("negative size_bytes: {}", intent.size_bytes))
+        })?;
         let key = build_key(&intent.key_prefix, &intent.original_filename);
+        // Sign a safe type and the declared size: the bucket stores no
+        // active MIME and refuses a bigger body (#2057, #1851).
+        let content_type = stored_content_type(&intent.mime).to_owned();
         let upload_url = storage
-            .presigned_put_url(&key, intent.ttl, Some(&intent.mime))
+            .presigned_put_url(&key, intent.ttl, Some(&content_type), Some(size))
             .await
             .ok_or_else(|| {
                 MediaError::Other(format!(
@@ -451,27 +461,35 @@ impl MediaManager {
             expires_at,
             disk: intent.disk,
             storage_key: key,
+            content_type,
         })
     }
 
-    /// Check the storage object exists for `media_id` and flip the row
-    /// from `Pending` to `Ready`. If it is not there, flip to `Failed`
-    /// so a purge sweep can clean it up. Returns the row either way.
+    /// Check the storage object for `media_id` and flip the row from
+    /// `Pending` to `Ready`. It must have the size the row declared and,
+    /// where the backend stores one, the signed type. Otherwise the row
+    /// flips to `Failed` and a mismatched object is deleted. Returns the
+    /// row either way.
     ///
     /// # Errors
     /// `Db` if the row is missing or the update fails. `Storage` for
-    /// transport failures during the `exists` check.
+    /// transport failures, or a backend that cannot report
+    /// [`crate::storage::ObjectMeta`].
     pub async fn finalize_upload(&self, media_id: i64) -> Result<Media, MediaError> {
         let media = self
             .get(media_id)
             .await?
             .ok_or_else(|| MediaError::Other(format!("media {media_id} not found")))?;
         let storage = self.resolve_disk(&media.disk)?;
-        let exists = storage.exists(&media.storage_key).await?;
-        let new_status = if exists {
-            MediaStatus::Ready
-        } else {
-            MediaStatus::Failed
+        // The backend's word, never the client's: the declared size and
+        // type are what the PUT was signed for (#1851).
+        let new_status = match storage.metadata(&media.storage_key).await? {
+            Some(meta) if upload_matches(&meta, &media) => MediaStatus::Ready,
+            Some(_) => {
+                let _ = storage.delete(&media.storage_key).await;
+                MediaStatus::Failed
+            }
+            None => MediaStatus::Failed,
         };
         let d = self.pool.dialect();
         let sql = format!(
@@ -1676,6 +1694,21 @@ fn stored_content_type(mime: &str) -> &str {
     } else {
         "application/octet-stream"
     }
+}
+
+/// Whether a direct upload landed as signed: the declared size and,
+/// when the backend stores a type, the safe type for the row's MIME.
+fn upload_matches(meta: &crate::storage::ObjectMeta, media: &Media) -> bool {
+    let norm = |t: &str| {
+        t.split_whitespace()
+            .collect::<String>()
+            .to_ascii_lowercase()
+    };
+    u64::try_from(media.size_bytes) == Ok(meta.size)
+        && meta
+            .content_type
+            .as_deref()
+            .is_none_or(|t| norm(t) == norm(stored_content_type(&media.mime)))
 }
 
 /// Build a storage key: `<prefix>/<uuid>-<sanitized filename>`.

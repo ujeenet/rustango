@@ -37,7 +37,7 @@ async fn presigned_put_then_get_round_trip() {
 
     // 1. Server-side: generate a presigned PUT URL for the browser.
     let put_url = storage
-        .presigned_put_url(&key, Duration::from_secs(60), Some("image/png"))
+        .presigned_put_url(&key, Duration::from_secs(60), Some("image/png"), None)
         .await
         .expect("PUT url");
     println!("[presign] PUT URL: {put_url}");
@@ -88,7 +88,7 @@ async fn presigned_put_rejects_wrong_content_type() {
     let key = format!("presign-reject/{}.bin", uuid::Uuid::new_v4());
     // Sign for image/png — but try to upload as text/plain.
     let put_url = storage
-        .presigned_put_url(&key, Duration::from_secs(60), Some("image/png"))
+        .presigned_put_url(&key, Duration::from_secs(60), Some("image/png"), None)
         .await
         .expect("PUT url");
     let client = reqwest::Client::new();
@@ -144,4 +144,43 @@ async fn presigned_get_rejects_after_ttl_expires() {
 
     // Cleanup.
     storage.delete(&key).await.ok();
+}
+
+/// #1851: a signed length caps the PUT, and `metadata` reports the
+/// object's real size and type.
+#[tokio::test]
+async fn presigned_put_refuses_another_size_and_metadata_reports_the_object() {
+    let Some(storage) = maybe_storage() else {
+        eprintln!("skipping — set RUSTANGO_S3_TEST_KEY etc.");
+        return;
+    };
+    let key = format!("presign-size/{}.png", uuid::Uuid::new_v4());
+    let client = reqwest::Client::new();
+    let put = |body: &'static [u8]| {
+        let (storage, key, client) = (&storage, &key, &client);
+        async move {
+            let url = storage
+                .presigned_put_url(key, Duration::from_secs(60), Some("image/png"), Some(10))
+                .await
+                .expect("PUT url");
+            client
+                .put(&url)
+                .header("Content-Type", "image/png")
+                .body(body.to_vec())
+                .send()
+                .await
+                .expect("PUT request")
+                .status()
+        }
+    };
+    assert!(
+        !put(b"twenty-bytes-of-body").await.is_success(),
+        "oversized PUT accepted"
+    );
+    assert_eq!(storage.metadata(&key).await.expect("head"), None);
+    assert!(put(b"ten-bytes!").await.is_success());
+    let meta = storage.metadata(&key).await.expect("head").expect("object");
+    assert_eq!(meta.size, 10);
+    assert_eq!(meta.content_type.as_deref(), Some("image/png"));
+    storage.delete(&key).await.expect("delete");
 }

@@ -98,7 +98,7 @@ async fn seed_media_rows_for_inspection() {
         key_prefix: "media-seed/direct".into(),
         mime: "text/plain".into(),
         original_filename: "manifesto.txt".into(),
-        size_bytes: 27,
+        size_bytes: 30,
         uploaded_by_id: Some(3),
         collection_id: None,
         ttl: Duration::from_secs(60),

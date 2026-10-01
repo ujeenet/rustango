@@ -124,7 +124,7 @@ async fn begin_then_finalize_upload_flips_pending_to_ready() {
         key_prefix: "media-live/direct".into(),
         mime: "image/png".into(),
         original_filename: "direct.png".into(),
-        size_bytes: 100,
+        size_bytes: 23,
         uploaded_by_id: Some(7),
         collection_id: None,
         ttl: Duration::from_secs(60),
@@ -186,6 +186,43 @@ async fn finalize_marks_failed_when_object_never_uploaded() {
         finalized.status_enum()
     );
     manager.purge(&finalized).await.ok();
+}
+
+/// #2057 / #1851: an active MIME is signed as octet-stream, and a body
+/// of another size or type never reaches the bucket.
+#[tokio::test]
+async fn direct_upload_stores_a_safe_type_and_the_signed_size() {
+    let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
+        return;
+    };
+    let payload = b"<script>alert(1)</script>";
+    let intent = UploadIntent::new(DISK_NAME, "text/html", "x.html", payload.len() as i64);
+    let ticket = manager.begin_upload(intent).await.expect("begin");
+    assert_eq!(ticket.content_type, "application/octet-stream");
+    let put = |ct: &'static str, body: Vec<u8>| {
+        reqwest::Client::new()
+            .put(&ticket.upload_url)
+            .header("Content-Type", ct)
+            .body(body)
+            .send()
+    };
+    let html = put("text/html", payload.to_vec()).await.expect("PUT");
+    assert!(!html.status().is_success(), "text/html PUT accepted");
+    let big = put("application/octet-stream", vec![b'x'; 4096])
+        .await
+        .expect("PUT");
+    assert!(!big.status().is_success(), "oversized PUT accepted");
+    let ok = put("application/octet-stream", payload.to_vec())
+        .await
+        .expect("PUT");
+    assert!(ok.status().is_success(), "PUT failed: {}", ok.status());
+    let m = manager
+        .finalize_upload(ticket.media_id)
+        .await
+        .expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Ready));
+    manager.purge(&m).await.expect("purge");
 }
 
 #[tokio::test]

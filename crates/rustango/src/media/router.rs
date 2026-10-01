@@ -1045,6 +1045,8 @@ struct UploadTicketBody {
     expires_at: chrono::DateTime<chrono::Utc>,
     disk: String,
     storage_key: String,
+    /// The `Content-Type` header the PUT must carry.
+    content_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1261,6 +1263,7 @@ async fn begin_upload_handler(
         expires_at: ticket.expires_at,
         disk: ticket.disk,
         storage_key: ticket.storage_key,
+        content_type: ticket.content_type,
     }))
 }
 
