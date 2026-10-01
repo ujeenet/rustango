@@ -1815,6 +1815,17 @@ mod model_form_tests {
     }
 
     #[test]
+    fn parse_absent_nullable_bool_is_null() {
+        let mf = ModelFormFor::<Flags>::parse(&HashMap::new()).expect("valid");
+        let get = |col: &str| {
+            let i = mf.columns().iter().position(|c| *c == col).unwrap();
+            mf.values()[i].clone()
+        };
+        assert_eq!(get("on"), crate::core::SqlValue::Bool(false));
+        assert_eq!(get("maybe"), crate::core::SqlValue::Null);
+    }
+
+    #[test]
     fn into_update_query_filters_on_pk() {
         let mut p: HashMap<String, String> = HashMap::new();
         p.insert("title".into(), "edited".into());
