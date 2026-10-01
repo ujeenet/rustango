@@ -677,12 +677,18 @@ pub fn file_response(
 }
 
 /// Replace with `_` the characters that would let a filename forge extra
-/// `Content-Disposition` directives (`"`, `\\`) or break the header (controls).
+/// `Content-Disposition` directives (`"`, `\\`), break the header (controls)
+/// or disguise the extension (bidi overrides such as U+202E).
 fn sanitize_attachment_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {
             '"' | '\\' => '_',
             c if c.is_control() => '_',
+            '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => '_',
             other => other,
         })
         .collect()
@@ -1095,6 +1101,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name:?}: no Content-Disposition"));
             assert!(cd.as_bytes().starts_with(b"attachment"), "{name:?}");
             assert!(!cd.as_bytes().iter().any(u8::is_ascii_control), "{name:?}");
+        }
+    }
+
+    /// A bidi override cannot disguise the saved file's extension.
+    #[test]
+    fn attachment_filename_drops_bidi_overrides() {
+        for c in ['\u{202e}', '\u{2066}', '\u{200f}', '\u{061c}'] {
+            let name = format!("invoice{c}fdp.exe");
+            assert_eq!(sanitize_attachment_filename(&name), "invoice_fdp.exe");
         }
     }
 

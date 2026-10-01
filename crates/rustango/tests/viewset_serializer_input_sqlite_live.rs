@@ -775,6 +775,22 @@ async fn form_body_runs_serializer_validation() {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{method}");
     }
+    // A valid form PUT and PATCH save their typed values.
+    for (method, body, priority) in [
+        (Method::PUT, "code=ok&note=put&priority=3&status=live", 3),
+        (Method::PATCH, "priority=1", 1),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(form(method.clone(), "/widgets/1", body))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let v = json_body(resp).await;
+        assert_eq!(status, StatusCode::OK, "{method}: {v}");
+        assert_eq!(v["priority"], priority, "{method}: {v}");
+        assert_eq!(v["note"], "put", "{method}: {v}");
+    }
 }
 
 fn json_req(method: Method, uri: &str, body: &str) -> Request<Body> {

@@ -704,6 +704,62 @@ mod tests {
         }
     }
 
+    /// A small stream is sent live and whole, not buffered to compress it (#1954).
+    #[tokio::test]
+    async fn a_small_stream_passes_through_uncompressed() {
+        let app = Router::new()
+            .route(
+                "/stream",
+                get(|| async {
+                    let body = Body::new(crate::body_limit::Prefixed {
+                        head: Some("y".repeat(2048).into()),
+                        rest: Body::from("y".repeat(2048)),
+                    });
+                    ([(CONTENT_TYPE, "application/x-ndjson")], body).into_response()
+                }),
+            )
+            .compression(CompressionLayer::default());
+        let resp = req(app, Some("gzip"), "/stream").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(CONTENT_ENCODING).is_none());
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(bytes.len(), 4096);
+    }
+
+    /// Sized like a small body, then fails mid-read.
+    struct Failing;
+
+    impl http_body::Body for Failing {
+        type Data = axum::body::Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(Some(Err(std::io::Error::other("upstream reset"))))
+        }
+
+        fn size_hint(&self) -> http_body::SizeHint {
+            http_body::SizeHint::with_exact(4096)
+        }
+    }
+
+    /// A body that fails while buffered is a `500`, never an empty `200`.
+    #[tokio::test]
+    async fn a_failing_body_is_a_500() {
+        let app = Router::new()
+            .route(
+                "/fail",
+                get(|| async {
+                    ([(CONTENT_TYPE, "text/plain")], Body::new(Failing)).into_response()
+                }),
+            )
+            .compression(CompressionLayer::default());
+        let resp = req(app, Some("gzip"), "/fail").await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     /// A `206` is left alone: compressing it breaks `Content-Range` (#1954).
     #[tokio::test]
     async fn partial_content_is_not_compressed() {

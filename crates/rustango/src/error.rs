@@ -554,10 +554,6 @@ mod into_response {
                 crate::tenancy::auth_backends::AuthError::Database(_)
                 | crate::tenancy::auth_backends::AuthError::Exec(_),
             ) => server_fault(StatusCode::INTERNAL_SERVER_ERROR, &err),
-            #[cfg(feature = "tenancy")]
-            RustangoError::Auth(crate::tenancy::auth_backends::AuthError::Refused(
-                crate::login_throttle::LoginRefused::Busy,
-            )) => server_fault(StatusCode::SERVICE_UNAVAILABLE, &err),
             #[cfg(feature = "auth_flows")]
             RustangoError::AuthFlow(crate::auth_flows::AuthFlowError::Database(_)) => {
                 server_fault(StatusCode::INTERNAL_SERVER_ERROR, &err)
@@ -602,6 +598,34 @@ mod into_response {
     mod tests {
         use super::*;
 
+        /// A refused login keeps its own status and `Retry-After`, not a 401.
+        #[cfg(feature = "tenancy")]
+        #[test]
+        fn a_refused_login_keeps_its_status_and_retry_after() {
+            use crate::login_throttle::LoginRefused;
+            for (refused, status, retry) in [
+                (
+                    LoginRefused::Throttled {
+                        retry_after_secs: 7,
+                    },
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "7",
+                ),
+                (LoginRefused::Busy, StatusCode::SERVICE_UNAVAILABLE, "1"),
+            ] {
+                let err: RustangoError =
+                    crate::tenancy::auth_backends::AuthError::Refused(refused).into();
+                let resp = err.into_response();
+                assert_eq!(resp.status(), status, "{refused:?}");
+                let got = resp.headers().get(axum::http::header::RETRY_AFTER);
+                assert_eq!(
+                    got.and_then(|v| v.to_str().ok()),
+                    Some(retry),
+                    "{refused:?}"
+                );
+            }
+        }
+
         /// Server faults are 5xx and withhold their text (#1955).
         #[test]
         fn server_faults_are_5xx_and_opaque() {
@@ -615,6 +639,13 @@ mod into_response {
                 (
                     crate::tenancy::auth_backends::AuthError::Database(sqlx::Error::Protocol(
                         LEAK.into(),
+                    ))
+                    .into(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (
+                    crate::tenancy::auth_backends::AuthError::Exec(crate::sql::ExecError::Driver(
+                        sqlx::Error::Protocol(LEAK.into()),
                     ))
                     .into(),
                     StatusCode::INTERNAL_SERVER_ERROR,
