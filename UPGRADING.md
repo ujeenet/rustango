@@ -150,6 +150,46 @@ untouched.
 
 ## Unreleased
 
+## 0.59.15
+
+### The standard tenant chain drops the `X-Org` fallback (#1856)
+
+A request is resolved by host only. To keep header routing, add `HeaderResolver::default().allow_only([...])` via `Builder::header_resolver`, `Cli::tenant_header` or `ChainResolver::push`.
+`PortResolver` matches the `ListenerPort` extension that `Builder::serve` inserts; add it yourself if you serve another way.
+
+### S3 with an `endpoint` and `path_style = false` puts the bucket in the host (#1904)
+
+Requests go to `<bucket>.<endpoint-host>`; set `path_style = true` for MinIO-style URLs. `exists` now errors on a 403/503.
+
+### `Storage` gains `save_with_content_type` (#1904)
+
+A provided method; a `Storage` impl with its own method of that name must rename it.
+`MediaManager::save_bytes` stores HTML, XML, SVG, JS and malformed MIMEs as `application/octet-stream`; the row keeps the declared type.
+
+### Static files send an `ETag`; `EtagLayer` keeps an existing one (#1531)
+
+`EtagLayer` no longer rehashes a response that already has an `ETag`, nor tags a `206`. A compressed response gets a weak ETag and no `Accept-Ranges`.
+
+### M2M destination keys are `impl Into<SqlValue>` (#1950)
+
+`add` / `remove` / `contains` take any key and `set` any `&[K]`; integers still bind as `i64`.
+An empty `set(&[])` needs a type now: `set::<i64>(&[])`, or call `clear()`. `all_as::<K>()` takes a
+`FlatScalar` key. A key the junction column can't hold is an `ExecError::Query(TypeMismatch)`.
+**Breaking:** `M2mChangedContext::dst_pks` is `Vec<SqlValue>`. A bad URL PK in a template view is a 404.
+
+### ViewSet `__in` lists cap at 1000 values (#1865)
+
+A longer `?field__in=` / `?field__not_in=` list is a 400, as are lists summing past the dialect's bind
+limit (less 1000). `InListTooLong` is an enum. Split larger lookups into several requests.
+
+### `ListView` falls back to `default_order` (#2005)
+
+A `ListView` with no `order_by` now sorts by the model's `default_order`, then the PK.
+
+### `slugify` keeps non-ASCII-only text (#1919)
+
+`slugify("Привет мир")` is `"привет-мир"`, not `""`. Mixed text still drops non-ASCII letters.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)

@@ -11,13 +11,13 @@
 //!         M2mAction::Add => tracing::info!(
 //!             through = ctx.through,
 //!             src = ?ctx.src_pk,
-//!             dst = ctx.dst_pks[0],
+//!             dst = ?ctx.dst_pks[0],
 //!             "m2m add"
 //!         ),
 //!         M2mAction::Remove => tracing::info!(
 //!             through = ctx.through,
 //!             src = ?ctx.src_pk,
-//!             dst = ctx.dst_pks[0],
+//!             dst = ?ctx.dst_pks[0],
 //!             "m2m remove"
 //!         ),
 //!         M2mAction::Set => tracing::info!(
@@ -87,9 +87,9 @@ pub struct M2mChangedContext {
     pub dst_col: &'static str,
     /// Primary key of the source row that changed, as bound (#1926).
     pub src_pk: crate::core::SqlValue,
-    /// The destination keys involved. One id for `Add` and
-    /// `Remove`, the new set for `Set`, and empty for `Clear`.
-    pub dst_pks: Vec<i64>,
+    /// The destination keys involved, as bound (#1950). One id for `Add`
+    /// and `Remove`, the new set for `Set`, and empty for `Clear`.
+    pub dst_pks: Vec<crate::core::SqlValue>,
 }
 
 // ---------------------------------------------------------------- Internal storage

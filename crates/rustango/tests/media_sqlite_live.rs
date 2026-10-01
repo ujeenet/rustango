@@ -254,3 +254,84 @@ async fn tag_lifecycle_on_sqlite() {
         }
     }
 }
+
+/// Records the content type each `save_with_content_type` hands the backend.
+#[derive(Default)]
+struct RecordsType(InMemoryStorage, std::sync::Mutex<Vec<Option<String>>>);
+
+#[rustango::storage::async_trait]
+impl rustango::storage::Storage for RecordsType {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<(), rustango::storage::StorageError> {
+        self.save_with_content_type(key, data, None).await
+    }
+    async fn save_with_content_type(
+        &self,
+        key: &str,
+        data: &[u8],
+        content_type: Option<&str>,
+    ) -> Result<(), rustango::storage::StorageError> {
+        self.1.lock().unwrap().push(content_type.map(str::to_owned));
+        self.0.save(key, data).await
+    }
+    async fn load(&self, key: &str) -> Result<Vec<u8>, rustango::storage::StorageError> {
+        self.0.load(key).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), rustango::storage::StorageError> {
+        self.0.delete(key).await
+    }
+    async fn exists(&self, key: &str) -> Result<bool, rustango::storage::StorageError> {
+        self.0.exists(key).await
+    }
+    fn url(&self, key: &str) -> Option<String> {
+        self.0.url(key)
+    }
+}
+
+/// #1904 — the MIME reaches storage, but a client-declared active type
+/// (it would run on the bucket origin) is stored as octet-stream.
+#[tokio::test]
+async fn save_bytes_hands_a_safe_mime_to_storage() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite connect");
+    let pool = Pool::Sqlite(pool);
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate");
+    let disk = Arc::new(RecordsType::default());
+    let registry = StorageRegistry::new()
+        .set("default", disk.clone())
+        .with_default("default");
+    let mgr = MediaManager::new_pool(pool, registry);
+    let mimes = [
+        "image/png",
+        "text/html",
+        "image/svg+xml",
+        "Application/XHTML+XML",
+        "text/javascript; charset=utf-8",
+        "application/unknown",
+        "nonsense",
+    ];
+    for mime in mimes {
+        let media = mgr
+            .save_bytes(SaveOpts {
+                disk: "default".into(),
+                key_prefix: "u/".into(),
+                bytes: b"<script>alert(1)</script>".to_vec(),
+                mime: mime.into(),
+                original_filename: "f.bin".into(),
+                uploaded_by_id: None,
+                collection_id: None,
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .expect("save_bytes");
+        assert_eq!(media.mime, mime, "the row keeps the declared type");
+    }
+    let octet = Some("application/octet-stream".to_owned());
+    let mut want = vec![Some("image/png".to_owned())];
+    want.extend(std::iter::repeat_n(octet, mimes.len() - 1));
+    assert_eq!(*disk.1.lock().unwrap(), want);
+}

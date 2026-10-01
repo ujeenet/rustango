@@ -603,3 +603,62 @@ async fn migrate_tenants_fails_when_the_system_chain_cannot_be_generated() {
         .to_string();
     assert!(err.contains("rustango_users.username"), "{err}");
 }
+
+/// A project whose own `0001` creates `rustango_admin_users` (pre-system-chain
+/// scaffold) plus an older system chain: the system `AddColumn` on that table
+/// must wait for the project chain on a fresh database.
+#[cfg(feature = "admin")]
+#[tokio::test]
+async fn legacy_project_table_gets_the_later_system_column_on_a_fresh_db() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let sys = root.join("system/migrations");
+    for scope in [ModelScope::Registry, ModelScope::Tenant] {
+        rustango::migrate::make_migrations_system(root, scope, None).unwrap();
+    }
+    // Age the tenant chain: its admin_users predates `sessions_revoked_at`.
+    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
+    let tenant = std::fs::read_dir(&sys)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| !std::fs::read_to_string(p).unwrap().contains("\"scope\""))
+        .expect("tenant file");
+    let mut mig: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&tenant).unwrap()).unwrap();
+    let tables = mig["snapshot"]["tables"].as_array_mut().unwrap();
+    let old = tables.iter_mut().find(|t| t["name"] == table).unwrap();
+    old["fields"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|f| f["column"] != column);
+    let old = old.clone();
+    std::fs::write(&tenant, mig.to_string()).unwrap();
+    let step = rustango::migrate::make_migrations_system(root, ModelScope::Tenant, None)
+        .unwrap()
+        .expect("the AddColumn step");
+    assert!(format!("{:?}", step.forward).contains(column));
+    // The project's own initial creates the old table.
+    let project = serde_json::json!({
+        "name": "0001_initial",
+        "created_at": "2026-01-01T00:00:00Z",
+        "prev": null,
+        "snapshot": { "tables": [old] },
+        "forward": [{ "schema": { "CreateTable": table } }],
+    });
+    std::fs::create_dir_all(root.join("migrations")).unwrap();
+    std::fs::write(
+        root.join("migrations/0001_initial.json"),
+        project.to_string(),
+    )
+    .unwrap();
+
+    let url = format!("sqlite:{}?mode=rwc", root.join("db.sqlite").display());
+    let pool = rustango::sql::Pool::connect(&url).await.unwrap();
+    manage_migrate(&pool, root.join("migrations"))
+        .await
+        .expect("fresh database migrates");
+    assert!(has_column(&pool, table, column).await);
+    manage_migrate(&pool, root.join("migrations"))
+        .await
+        .expect("second run is a no-op");
+}

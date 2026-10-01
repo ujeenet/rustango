@@ -1927,6 +1927,7 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
+pub(crate) use values::fetch_flat_raw;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,

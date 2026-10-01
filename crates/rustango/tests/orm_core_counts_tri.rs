@@ -37,6 +37,17 @@ pub struct Book {
     pub pages: i64,
 }
 
+/// An FK whose SQL column differs from its field name (#1936).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "occ_rbook")]
+#[allow(dead_code)]
+pub struct RenamedFkBook {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(column = "writer_id")]
+    pub writer: ForeignKey<Author>,
+}
+
 /// Ten columns, so a bind-limited batch is a few thousand rows.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "occ_wide")]
@@ -88,6 +99,7 @@ pub struct ShelfBook {
 /// Shelf 1 holds books 1 and 2.
 async fn seeded(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Book::SCHEMA.table).await;
+    rustango::testkit::matrix::drop_table(pool, RenamedFkBook::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Author>(pool).await;
     rustango::testkit::matrix::fresh_table::<Book>(pool).await;
     rustango::testkit::matrix::fresh_table::<Wide>(pool).await;
@@ -124,6 +136,55 @@ async fn seeded(pool: &Pool) {
         .await
         .expect("seed book");
     }
+}
+
+/// A renamed FK column loads through select_related, prefetch and the reverse helper (#1936).
+async fn renamed_fk_column_loads_on_every_path(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<RenamedFkBook>(pool).await;
+    for (id, writer) in [(1, 1), (2, 2), (3, 1)] {
+        RenamedFkBook {
+            id,
+            writer: ForeignKey::unloaded(writer),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed rbook");
+    }
+    let rows: Vec<RenamedFkBook> = RenamedFkBook::objects()
+        .select_related("writer")
+        .order_by(&[("id", false)])
+        .fetch(pool)
+        .await
+        .expect("select_related");
+    let names: Vec<_> = rows
+        .iter()
+        .map(|b| b.writer.value().map(|a| a.name.clone()))
+        .collect();
+    assert_eq!(
+        names,
+        [Some("Ada".into()), Some("Bob".into()), Some("Ada".into())]
+    );
+
+    let grouped = rustango::sql::fetch_with_prefetch_pool::<Author, RenamedFkBook>(
+        Author::objects().order_by(&[("id", false)]),
+        "writer",
+        pool,
+    )
+    .await
+    .expect("prefetch");
+    let counts: Vec<usize> = grouped.iter().map(|(_, kids)| kids.len()).collect();
+    assert_eq!(counts, [2, 1]);
+
+    let ada = Author::objects()
+        .filter("id", 1_i64)
+        .fetch(pool)
+        .await
+        .expect("ada");
+    let books = ada[0]
+        .renamed_fk_book_set_pool(pool)
+        .await
+        .expect("reverse");
+    assert_eq!(books.len(), 2);
 }
 
 async fn none_counts_nothing(pool: &Pool) {
@@ -666,6 +727,7 @@ fn deep_self_fk_path_is_refused_per_query() {
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
+        renamed_fk_column_loads_on_every_path,
         none_counts_nothing,
         count_honours_limit_and_offset,
         count_honours_compound,

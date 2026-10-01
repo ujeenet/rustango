@@ -1029,10 +1029,9 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        // FK field's Rust ident matches its SQL column name in v0.8
-        // (no `column = "..."` rename ships on FK fields).
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1134,8 +1133,9 @@ fn load_related_impl_my_tokens(
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1202,8 +1202,9 @@ fn load_related_impl_sqlite_tokens(
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1264,8 +1265,9 @@ fn load_related_impl_sqlite_tokens(
 fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         if rel.pk_kind == DetectedKind::I64 {
             // i64 FK — return the stored PK so prefetch_related can
             // group children by it. Nullable variant unwraps via
@@ -1302,8 +1304,9 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     // opt OUT of the legacy i64 method (it returns None) but opt IN
     // here.
     let value_arms = fk_relations.iter().map(|rel| {
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         if rel.nullable {
             quote! {
                 #fk_col => self.#field_ident
@@ -1392,7 +1395,8 @@ fn reverse_helper_tokens(
         let pg_method_ident = syn::Ident::new(&pg_suffix, child_ident.span());
         let pool_method_ident = syn::Ident::new(&pool_suffix, child_ident.span());
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
+        let fk_name = rel.field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let doc = format!(
             "Fetch every `{child_ident}` whose `{fk_col}` foreign key points at this row. \
              Single SQL query — `SELECT … FROM <{child_ident} table> WHERE {fk_col} = $1` — \
@@ -2098,9 +2102,9 @@ struct FkRelation {
     /// Inner type of `ForeignKey<T, K>` — the parent model. The reverse
     /// helper is emitted as `impl <ParentType> { … }`.
     parent_type: Type,
-    /// SQL column name on the child table for this FK (e.g. `"author"`).
-    /// Used in the generated `WHERE <fk_column> = $1` clause.
-    fk_column: String,
+    /// Rust field ident of the FK. Its name is the key for select_related,
+    /// prefetch and filters; the SQL column may differ (#1936).
+    field_ident: syn::Ident,
     /// `K`'s underlying scalar kind — drives the `match SqlValue { … }`
     /// arm emitted by [`load_related_impl_tokens`]. `I64` for the
     /// default `ForeignKey<T>` (no explicit K); other kinds when the
@@ -2166,7 +2170,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         if let Some(parent_ty) = info.fk_inner.clone() {
             out.fk_relations.push(FkRelation {
                 parent_type: parent_ty,
-                fk_column: info.column.clone(),
+                field_ident: info.ident.clone(),
                 pk_kind: info.fk_pk_kind,
                 nullable: info.nullable,
                 related_name: info.related_name.clone(),
@@ -2312,14 +2316,6 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                     }
                 });
             }
-            // Bulk: Auto fields appear only in the all-Set path,
-            // never in the Unset path (we drop them from `columns`).
-            out.bulk_columns_all.push(quote!(#column));
-            out.bulk_pushes_all.push(quote! {
-                _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
-                    ::core::clone::Clone::clone(&_row.#ident)
-                ));
-            });
             // …except the timestamp columns, which must appear in BOTH
             // paths (#1464). The path is chosen by the *first* Auto
             // field — in practice the PK — so a bulk insert of rows
@@ -2339,14 +2335,25 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             } else {
                 None
             };
-            if let Some(fill) = rust_fill {
-                out.bulk_columns_no_auto.push(quote!(#column));
-                out.bulk_pushes_no_auto.push(quote! {
+            // Bulk: Auto fields appear in the all-Set path. An unset filled
+            // field takes its fill there too, not NULL (#1950).
+            out.bulk_columns_all.push(quote!(#column));
+            if let Some(fill) = &rust_fill {
+                let push = quote! {
                     _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
                         match &_row.#ident {
                             #root::sql::Auto::Set(_v) => ::core::clone::Clone::clone(_v),
                             #root::sql::Auto::Unset => #fill,
                         }
+                    ));
+                };
+                out.bulk_columns_no_auto.push(quote!(#column));
+                out.bulk_pushes_no_auto.push(push.clone());
+                out.bulk_pushes_all.push(push);
+            } else {
+                out.bulk_pushes_all.push(quote! {
+                    _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&_row.#ident)
                     ));
                 });
             }
@@ -2360,18 +2367,21 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // Uniformity check: every row's Auto state must match the
             // first row's. Mixed Set/Unset within one bulk_insert is
             // rejected here so the column list stays consistent.
+            // A filled field may be unset on any row, so it is exempt.
             let ident_clone = ident.clone();
-            out.bulk_auto_uniformity.push(quote! {
-                for _r in rows.iter().skip(1) {
-                    if matches!(_r.#ident_clone, #root::sql::Auto::Unset) != _first_unset {
-                        return ::core::result::Result::Err(
-                            #root::sql::ExecError::Sql(
-                                #root::sql::SqlError::BulkAutoMixed
-                            )
-                        );
+            if rust_fill.is_none() {
+                out.bulk_auto_uniformity.push(quote! {
+                    for _r in rows.iter().skip(1) {
+                        if matches!(_r.#ident_clone, #root::sql::Auto::Unset) != _first_unset {
+                            return ::core::result::Result::Err(
+                                #root::sql::ExecError::Sql(
+                                    #root::sql::SqlError::BulkAutoMixed
+                                )
+                            );
+                        }
                     }
-                }
-            });
+                });
+            }
         } else {
             out.insert_pushes.push(quote! {
                 _columns.push(#column);
@@ -5710,7 +5720,7 @@ fn inherent_impl_tokens(
                 #root::sql::ExecError,
             > {
                 use #root::sql::FetcherPool as _;
-                let _offset = if page > 1 { (page - 1) * per_page } else { 0 };
+                let _offset = #root::list_params::page_offset(page, per_page);
                 #root::query::QuerySet::<Self>::default()
                     .limit(per_page)
                     .offset(_offset)
@@ -7407,9 +7417,12 @@ fn inherent_impl_tokens(
                 }
             }
         };
+        // The DB-filled `Auto` picks the path; Rust-filled ones fill per row (#1950).
         let first_auto_ident = fields
-            .first_auto_ident
+            .first_db_auto
             .as_ref()
+            .map(|(ident, _)| ident)
+            .or(fields.first_auto_ident.as_ref())
             .expect("has_auto implies first_auto_ident is Some");
         quote! {
             /// Bulk-insert `rows` in a single round-trip. Every row's
