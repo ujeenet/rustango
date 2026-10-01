@@ -150,6 +150,24 @@ untouched.
 
 ## Unreleased
 
+### The standard tenant chain drops the `X-Org` fallback (#1856)
+
+A request is resolved by host only. To keep header routing, add `HeaderResolver::default().allow_only([...])` via `Builder::header_resolver`, `Cli::tenant_header` or `ChainResolver::push`.
+`PortResolver` matches the `ListenerPort` extension that `Builder::serve` inserts; add it yourself if you serve another way.
+
+### S3 with an `endpoint` and `path_style = false` puts the bucket in the host (#1904)
+
+Requests go to `<bucket>.<endpoint-host>`; set `path_style = true` for MinIO-style URLs. `exists` now errors on a 403/503.
+
+### `Storage` gains `save_with_content_type` (#1904)
+
+A provided method; a `Storage` impl with its own method of that name must rename it.
+`MediaManager::save_bytes` stores HTML, XML, SVG, JS and malformed MIMEs as `application/octet-stream`; the row keeps the declared type.
+
+### Static files send an `ETag`; `EtagLayer` keeps an existing one (#1531)
+
+`EtagLayer` no longer rehashes a response that already has an `ETag`, nor tags a `206`. A compressed response gets a weak ETag and no `Accept-Ranges`.
+
 ## 0.59.14
 
 ### `RustangoError` status changes (#1955)

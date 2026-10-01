@@ -476,7 +476,7 @@ pub mod rate_limit_cache;
 
 /// Health check endpoints — `/health` (liveness) + `/ready` (readiness).
 /// See [`health::health_router`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod health;
 
 /// Email backends — [`email::Mailer`] trait + console/in-memory/null backends.
@@ -869,7 +869,7 @@ pub mod signed_url;
 /// First-run welcome page — confidence signal that rustango is wired up.
 /// Mount under `/` while bootstrapping; replace once you have content.
 /// See [`welcome::welcome_router`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod welcome;
 
 /// Debug profiling panel at `/__debug__/` — Telescope/Debug-Toolbar-shape.
@@ -1102,6 +1102,10 @@ pub mod dates;
 /// as password reset tokens, magic links and signed cookies.
 #[cfg(feature = "_signing")]
 pub mod signing;
+
+/// `Vary` header merging for the response layers.
+#[cfg(all(feature = "_axum", feature = "_tower"))]
+pub(crate) mod vary;
 
 /// `Set-Cookie` builder — `Cookie::new(name, value)
 /// .path("/").max_age(secs).http_only().secure().same_site(...).build()`

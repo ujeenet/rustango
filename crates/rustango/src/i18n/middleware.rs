@@ -219,8 +219,17 @@ where
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
         let picked = self.middleware.pick(&req);
         req.extensions_mut().insert(ActiveLocale(picked));
+        let by_cookie = self.middleware.config.cookie_name.is_some();
         let fut = self.inner.call(req);
-        Box::pin(fut)
+        // The locale came from these headers, so a shared cache must key on them (#1924).
+        Box::pin(async move {
+            let mut resp = fut.await?;
+            crate::vary::add_vary(resp.headers_mut(), "Accept-Language");
+            if by_cookie {
+                crate::vary::add_vary(resp.headers_mut(), "Cookie");
+            }
+            Ok(resp)
+        })
     }
 }
 
@@ -237,6 +246,30 @@ mod tests {
             b = b.header(axum::http::header::COOKIE, c);
         }
         b.body(Body::empty()).unwrap()
+    }
+
+    /// #1924 — the response names the headers the locale was picked from.
+    #[tokio::test]
+    async fn response_varies_on_accept_language_and_cookie() {
+        use tower::{Layer as _, ServiceExt as _};
+        let svc = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, std::convert::Infallible>(Response::new(Body::empty()))
+        });
+        let mw = LocaleMiddleware::new(&["en", "fr"]);
+        let resp = mw
+            .layer(svc)
+            .oneshot(req("/", Some("fr"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["vary"], "Accept-Language, Cookie");
+
+        let mw = LocaleMiddleware::new(&["en", "fr"]).cookie_name(None);
+        let resp = mw
+            .layer(svc)
+            .oneshot(req("/", Some("fr"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["vary"], "Accept-Language");
     }
 
     // ---- #429 RTL convenience on the extractor ----

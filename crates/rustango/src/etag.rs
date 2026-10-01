@@ -20,7 +20,8 @@
 //!    `304 Not Modified` with no body, keeping the caching headers a
 //!    200 would have sent (RFC 7232 §4.1).
 //!
-//! Non-2xx responses pass through.
+//! Non-2xx and `206` responses pass through. A response that already
+//! has an `ETag` keeps it and is not buffered.
 //!
 //! ## When to use
 //!
@@ -92,8 +93,15 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
     let response = next.run(req).await;
     let (parts, body) = response.into_parts();
 
-    // Only 2xx responses get an ETag.
-    if !parts.status.is_success() {
+    // Only 2xx responses get an ETag; a 206 body is a slice, not the representation.
+    if !parts.status.is_success() || parts.status == StatusCode::PARTIAL_CONTENT {
+        return Response::from_parts(parts, body);
+    }
+    // The handler's own validator wins (static files): no rehash, no buffering.
+    if let Some(etag) = parts.headers.get(ETAG).and_then(|v| v.to_str().ok()) {
+        if client_etag.is_some_and(|c| if_none_match(&c, etag)) {
+            return not_modified(&Response::from_parts(parts, Body::empty()));
+        }
         return Response::from_parts(parts, body);
     }
 
@@ -117,41 +125,44 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
         response.headers_mut().insert(ETAG, v);
     }
 
-    if let Some(client) = client_etag {
-        // `If-None-Match` is a list of etags, or `*` for any. A
-        // conditional GET uses weak comparison (RFC 7232 §3.2).
-        let ours = normalize_etag(&etag);
-        let matched = client.trim() == "*"
-            || client
-                .split(',')
-                .any(|candidate| normalize_etag(candidate) == ours);
-        if matched {
-            // Drop the body but keep the caching headers a 200 would
-            // have sent (RFC 7232 §4.1). Without `Cache-Control` and
-            // `Vary` a cache downstream picks the wrong freshness or
-            // the wrong vary key.
-            let mut not_modified = Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .body(Body::empty())
-                .unwrap();
-            let carry = [
-                ETAG,
-                axum::http::header::CACHE_CONTROL,
-                axum::http::header::VARY,
-                axum::http::header::EXPIRES,
-                axum::http::header::CONTENT_LOCATION,
-                axum::http::header::DATE,
-            ];
-            for (k, v) in response.headers() {
-                if carry.contains(k) {
-                    not_modified.headers_mut().insert(k.clone(), v.clone());
-                }
-            }
-            return not_modified;
-        }
+    if client_etag.is_some_and(|c| if_none_match(&c, &etag)) {
+        return not_modified(&response);
     }
 
     response
+}
+
+/// Whether an `If-None-Match` value — a list of etags, or `*` — matches
+/// `etag`. A conditional GET uses weak comparison (RFC 7232 §3.2).
+pub(crate) fn if_none_match(client: &str, etag: &str) -> bool {
+    let ours = normalize_etag(etag);
+    client.trim() == "*"
+        || client
+            .split(',')
+            .any(|candidate| normalize_etag(candidate) == ours)
+}
+
+/// Drop the body but keep the caching headers a 200 would have sent
+/// (RFC 7232 §4.1), so a downstream cache keeps freshness and vary key.
+fn not_modified(response: &Response<Body>) -> Response<Body> {
+    let mut not_modified = Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .body(Body::empty())
+        .unwrap();
+    let carry = [
+        ETAG,
+        axum::http::header::CACHE_CONTROL,
+        axum::http::header::VARY,
+        axum::http::header::EXPIRES,
+        axum::http::header::CONTENT_LOCATION,
+        axum::http::header::DATE,
+    ];
+    for (k, v) in response.headers() {
+        if carry.contains(k) {
+            not_modified.headers_mut().insert(k.clone(), v.clone());
+        }
+    }
+    not_modified
 }
 
 /// ETag for `bytes`: base64 of a 64-bit FNV-1a hash plus the length.

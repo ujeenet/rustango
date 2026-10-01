@@ -8,6 +8,29 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 A system step that alters a table the project's own `0001` creates (a pre-system-chain scaffold) now waits for that migration; it failed with `relation does not exist`.
 
+### Security — the default tenant chain no longer trusts `X-Org` (#1856)
+
+`ChainResolver::standard` and `server::Builder` resolve by host only; opt in with `Builder::header_resolver` / `Cli::tenant_header`.
+`PortResolver` reads the listener port (`ListenerPort`), not the client URI; the apex check ignores case and reads HTTP/2 `:authority`.
+
+### Fixed — `Cli::with_welcome()` / `with_health()` work on manage-only builds (#2013)
+
+Both are gated on `_http_layers` instead of `admin`, so the `api` template's `/` and `/health` mount.
+
+### Fixed — static files stream off the async workers and honour `Range` (#1531)
+
+Resolve and open run in `spawn_blocking`, the root is canonicalized once, and bodies stream; a single byte range gets a `206`.
+`If-Range` matches the file's strong `ETag` or `Last-Modified`; a malformed `Range` gets a `200`; the cached root expires after a second.
+
+### Fixed — `LocaleMiddleware` sends `Vary`; `localtime` no longer panics (#1924)
+
+Responses vary on `Accept-Language` (and `Cookie` when the cookie is read); a bad `format=` is a render error.
+
+### Fixed — S3 stores the content type, `exists()` surfaces errors, virtual-hosted endpoints keep the bucket (#1904)
+
+`Storage::save_with_content_type` (media passes its MIME); `exists` errs on anything but 2xx/404; `<bucket>.<endpoint-host>` when `path_style = false`.
+The signed content type is SigV4-normalized and CR/LF is refused; media stores active MIMEs as `application/octet-stream`.
+
 ## [0.59.14] — 2026-10-01
 
 ### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
