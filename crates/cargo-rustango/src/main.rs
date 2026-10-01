@@ -936,6 +936,22 @@ mod tests {
         );
     }
 
+    /// #1272 — fullstack generates the admin helper and mounts it, names
+    /// no driver pool, and puts it behind a login (#1627).
+    #[test]
+    fn fullstack_mounts_a_gated_driver_neutral_admin() {
+        let urls = templates::urls_rs(Template::Fullstack);
+        let main = templates::main_rs(Template::Fullstack, "demo");
+        assert!(urls.contains("pub fn admin_router(pool: Pool)"), "{urls}");
+        assert!(urls.contains(".with_session_auth("), "{urls}");
+        assert!(main.contains("urls::admin_router(pool)"), "{main}");
+        for body in [&urls, &main] {
+            for driver in ["PgPool", "SqlitePool", "MySqlPool"] {
+                assert!(!body.contains(driver), "names {driver}: {body}");
+            }
+        }
+    }
+
     /// #1988 — the image must carry `system/migrations/`, and every path
     /// it copies must exist in a fresh project, or `docker build` fails.
     #[test]

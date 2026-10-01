@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the fullstack template mounts the admin again (#1272)
+
+`src/urls.rs` gets a driver-neutral `admin_router(pool)` behind a login, and `main.rs` nests it at `/admin`.
+
 ### Fixed — `check --deploy` warns about an admin with no login (#1627)
 
 Building an admin without `with_session_auth` now raises an `[admin]` warning.
