@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use axum::body::{Body, HttpBody as _};
 use axum::http::header::{
-    ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, VARY,
+    ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
 };
 use axum::http::{HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
@@ -387,28 +387,14 @@ fn ensure_vary(mut response: Response<Body>) -> Response<Body> {
 fn ensure_vary_in_place(headers: &mut axum::http::HeaderMap) {
     // Vary on Accept-Encoding so caches keep compressed and
     // uncompressed responses apart.
-    let needs_append = match headers.get(VARY).and_then(|v| v.to_str().ok()) {
-        Some(existing) => !existing
-            .split(',')
-            .any(|t| t.trim().eq_ignore_ascii_case("accept-encoding")),
-        None => true,
-    };
-    if !needs_append {
-        return;
-    }
-    let new_value = match headers.get(VARY).and_then(|v| v.to_str().ok()) {
-        Some(existing) => format!("{existing}, Accept-Encoding"),
-        None => "Accept-Encoding".to_owned(),
-    };
-    if let Ok(v) = HeaderValue::from_str(&new_value) {
-        headers.insert(VARY, v);
-    }
+    crate::vary::add_vary(headers, "Accept-Encoding");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+    use axum::http::header::VARY;
     use axum::response::IntoResponse;
     use axum::routing::get;
     use flate2::read::{DeflateDecoder, GzDecoder};

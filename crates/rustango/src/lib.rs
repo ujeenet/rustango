@@ -1103,6 +1103,10 @@ pub mod dates;
 #[cfg(feature = "_signing")]
 pub mod signing;
 
+/// `Vary` header merging for the response layers.
+#[cfg(all(feature = "_axum", feature = "_tower"))]
+pub(crate) mod vary;
+
 /// `Set-Cookie` builder — `Cookie::new(name, value)
 /// .path("/").max_age(secs).http_only().secure().same_site(...).build()`
 /// returns an axum-ready `HeaderValue`. Use it instead of writing cookie
