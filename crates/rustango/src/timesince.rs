@@ -181,11 +181,12 @@ mod tests {
     fn timesince_depth_clamps_high() {
         let now = t(2026, 6, 5, 12, 0, 0);
         let past = now
-            - Duration::seconds(2 * YEAR + 3 * MONTH + 4 * WEEK + 5 * DAY + 6 * HOUR + 7 * MINUTE);
+            - Duration::seconds(2 * YEAR + 3 * MONTH + 2 * WEEK + 5 * DAY + 6 * HOUR + 7 * MINUTE);
         // depth=99 clamps to 6, the number of units.
-        let s = timesince(past, Some(now), 99);
-        assert!(s.contains("year"));
-        assert!(s.contains("hour") || s.contains("minute"));
+        assert_eq!(
+            timesince(past, Some(now), 99),
+            "2 years, 3 months, 2 weeks, 5 days, 6 hours, 7 minutes"
+        );
     }
 
     #[test]
