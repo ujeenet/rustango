@@ -332,7 +332,7 @@ totp = ["dep:hmac", "dep:sha1", "dep:sha2", "_rand"]
 # (no extra deps). The ceremony layer adds pure-Rust CBOR (`ciborium`) +
 # ES256 (`p256`) when it lands — keeping the all-RustCrypto, no-C-dep
 # stack (vs `webauthn-rs` → openssl).
-passkey = ["_rand", "dep:base64", "dep:sha2", "dep:ciborium", "dep:p256"]
+passkey = ["_rand", "cache", "dep:base64", "dep:hmac", "dep:sha2", "dep:ciborium", "dep:p256"]
 
 # Webhook signature verification (`rustango::webhook`) — HMAC-SHA256
 # constant-time verification for inbound webhooks (Stripe, GitHub, etc.).

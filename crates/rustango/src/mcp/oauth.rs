@@ -58,9 +58,15 @@ pub fn authorization_server_metadata(issuer: &str, token_endpoint: &str) -> Valu
 /// authorization server points back under that same prefix.
 pub(crate) async fn well_known_protected_resource(
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
 ) -> Response {
-    let base = super::auth::mount_base(&headers, &uri, "/.well-known/oauth-protected-resource");
+    let base = super::auth::mount_base(
+        &headers,
+        &extensions,
+        &uri,
+        "/.well-known/oauth-protected-resource",
+    );
     Json(protected_resource_metadata(
         &base,
         &format!("{base}/.well-known/oauth-authorization-server"),
@@ -72,9 +78,15 @@ pub(crate) async fn well_known_protected_resource(
 /// follow the real mount prefix.
 pub(crate) async fn well_known_authorization_server(
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
 ) -> Response {
-    let base = super::auth::mount_base(&headers, &uri, "/.well-known/oauth-authorization-server");
+    let base = super::auth::mount_base(
+        &headers,
+        &extensions,
+        &uri,
+        "/.well-known/oauth-authorization-server",
+    );
     Json(authorization_server_metadata(
         &base,
         &format!("{base}/oauth/token"),

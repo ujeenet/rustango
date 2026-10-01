@@ -4,6 +4,47 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — GitHub email verification is read, member `redirect_uri` ignores spoofed hosts (#1842)
+
+**Breaking:** the GitHub preset takes `email_verified` from `/user/emails` and Facebook
+never vouches for an email. Member SSO honours `X-Forwarded-Host`/`-Proto` only from a
+proxy named in `RealIpLayer::trust_proxies`, and so do tenant and admin SSO and MCP for
+`X-Forwarded-Proto`. New `OAuth2Provider::with_emails_url`; a 403 or 404 from it means no
+verified email, not a failed login.
+
+### Security — passkey challenges expire and open once; counters can't reset (#1841)
+
+**Breaking:** a sealed challenge carries its ceremony and issue time, expires after 5 min
+and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused, and
+`update_sign_count` never moves the counter back and returns a `#[must_use]` `SignCountUpdate`.
+`verify_authentication` returns the UV flag. `open_challenge` warns once on a process-local cache.
+
+### Security — `[auth] argon2_*` set the cost of new password hashes (#1728)
+
+The keys were read by nothing. New `passwords::Argon2Params`, `configure_argon2` and
+`argon2_params`; an invalid combination keeps the default and logs an error. Built-in logins
+store a fresh hash when the old one is weaker (`passwords::upgrade_stored_hash`).
+
+### Security — a logout ends JWT refresh chains (#2036)
+
+`/refresh` checks `sessions_revoked_at`, so a chain started before a logout stops rotating.
+A JWT login stamps its session start after the last logout.
+
+### Security — tenant `change_password` keeps hasher errors out of the redirect URL (#2021)
+
+The error is logged; the form shows a fixed message.
+
+### Security — the OAuth2 callback 502 no longer echoes upstream error text (#1847)
+
+The IdP body or transport error is logged; the browser gets a fixed message.
+
+### Security — credential hardening: undecodable TOTP secret, redacted Debug, HOTP digits, argon2 rehash (#1875)
+
+A confirmed TOTP row that is not base32, or decodes to under 10 bytes, refuses the login instead
+of skipping 2FA; the lenient `totp_store::confirmed_secret` is deprecated. `TotpSecret`,
+`AdminTotp` and `Signer` redact secrets in `Debug`; 10-digit HOTP no longer overflows; the hasher
+chain rehashes argon2id below today's cost (`PasswordHasher::needs_rehash`, `passwords::needs_rehash`).
+
 ### Fixed — `runserver` auto-migrate applies the framework's system chain (#2056)
 
 It ran only the project chain, so tables and columns like `sessions_revoked_at` were missing and logins failed.

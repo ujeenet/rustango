@@ -150,6 +150,46 @@ untouched.
 
 ## Unreleased
 
+### SSO email verification and forwarded hosts (#1842)
+
+**Breaking:** a GitHub login now also calls `/user/emails` (needs the `user:email` scope or
+the app's email permission); a 403 or 404 there means no verified email, any other failure
+fails the login. Facebook emails are never
+verified, so email linking skips them. Behind a proxy, name it in `RealIpLayer::trust_proxies`
+or member SSO builds `redirect_uri` from `Host`. Tenant SSO, admin SSO and the MCP discovery URLs
+read `X-Forwarded-Proto` only from such a proxy too, else assume `https`. A proxy counts as trusted
+only when it also sends the configured client-IP header (`X-Forwarded-For` by default).
+
+### Passkey challenge and counter API (#1841)
+
+**Breaking:** `seal_challenge` takes a `CeremonyPurpose`; `open_challenge` takes the same
+purpose and a cache, and is async. `verify_authentication` returns `AuthenticationOutcome`
+(`.sign_count`, `.user_verified`); `update_sign_count` returns `SignCountUpdate`: refuse the
+login unless `.is_accepted()` (`Stale` is a clone or a lost race). Tokens sealed before
+the upgrade no longer open. The `passkey` feature now enables `cache`.
+A credential whose stored counter is non-zero and which now reports 0 (a reset or cloned
+authenticator) fails with `CounterRegression`. The user removes that passkey and registers it again.
+
+### `[auth] argon2_*` now apply (#1728)
+
+New hashes use `argon2_memory_kib` / `argon2_iterations` / `argon2_parallelism` when set;
+check them before deploying. Existing hashes keep verifying at their own cost.
+Built-in logins store a new hash when the old one is weaker, which also ends that
+user's other sessions. Until every user logs in once, login time differs between old-cost
+and unknown accounts, which tells an attacker which accounts exist. Custom login code can
+call `passwords::upgrade_stored_hash`.
+
+### JWT refresh honours logout (#2036)
+
+A cookie logout now also ends that user's JWT refresh chains; clients must log in again.
+
+### `confirmed_secret_checked` errors on an undecodable secret (#1875)
+
+It returned `Ok(None)` (no second factor); it now returns `Err`, also for a secret under 10 bytes
+(`TotpSecret::from_base32` refuses those). `confirmed_secret` is deprecated: a read error looks like
+no device, so use `confirmed_secret_checked`. `Debug` of `TotpSecret`,
+`AdminTotp` and `Signer` no longer prints the secret.
+
 ### `runserver` auto-migrate and the registry run apply the system chain first (#2056)
 
 `runserver` now applies the system chain like `manage migrate`. `migrate_registry` applies it before the project's registry migrations, not after.

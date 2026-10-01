@@ -42,7 +42,7 @@ pub enum PasswordError {
     Busy,
 }
 
-/// Hash a password with argon2id. Returns a standard PHC string.
+/// Hash a password with argon2id at [`argon2_params`]. Returns a standard PHC string.
 ///
 /// argon2id is deliberately slow and memory-hungry, and every hash
 /// gets a fresh random salt, so a stolen table cannot be attacked with
@@ -52,11 +52,15 @@ pub enum PasswordError {
 /// # Errors
 /// [`PasswordError::Hash`] on argon2 failures.
 pub fn hash(password: &str) -> Result<String, PasswordError> {
+    hash_with(argon2_params(), password)
+}
+
+fn hash_with(params: Argon2Params, password: &str) -> Result<String, PasswordError> {
     use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
-    use argon2::Argon2;
 
     let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
+    params
+        .hasher()
         .hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
         .map_err(|e| PasswordError::Hash(e.to_string()))
@@ -79,18 +83,103 @@ pub fn verify(password: &str, stored_hash: &str) -> Result<bool, PasswordError> 
         .is_ok())
 }
 
-/// A valid argon2id hash of a fixed throwaway password, built once on
-/// first use at the same cost as a real stored hash. Backs
+/// A valid argon2id hash of a fixed throwaway password at the current
+/// [`argon2_params`] cost, like a real stored hash. Backs
 /// [`verify_dummy`].
 fn dummy_hash() -> &'static str {
-    use std::sync::OnceLock;
-    static DUMMY: OnceLock<String> = OnceLock::new();
-    DUMMY
-        .get_or_init(|| {
-            hash("rustango-timing-equalization-dummy")
-                .expect("argon2id hashing of a fixed dummy input cannot fail")
+    dummy_hash_for(argon2_params())
+}
+
+fn dummy_hash_for(params: Argon2Params) -> &'static str {
+    use std::sync::{PoisonError, RwLock};
+    // Rebuilt when the cost changes, so an unknown user costs what a real one does.
+    static DUMMY: RwLock<Option<(Argon2Params, &'static str)>> = RwLock::new(None);
+    if let Some((p, h)) = *DUMMY.read().unwrap_or_else(PoisonError::into_inner) {
+        if p == params {
+            return h;
+        }
+    }
+    let h: &'static str = hash_with(params, "rustango-timing-equalization-dummy")
+        .expect("argon2id hashing of a fixed dummy input cannot fail")
+        .leak();
+    *DUMMY.write().unwrap_or_else(PoisonError::into_inner) = Some((params, h));
+    h
+}
+
+/// Argon2id cost for new hashes. Only a valid combination can be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2Params {
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+}
+
+impl Argon2Params {
+    /// The argon2 crate default: m=19456 KiB, t=2, p=1 (OWASP floor).
+    pub const DEFAULT: Self = Self {
+        memory_kib: argon2::Params::DEFAULT_M_COST,
+        iterations: argon2::Params::DEFAULT_T_COST,
+        parallelism: argon2::Params::DEFAULT_P_COST,
+    };
+
+    /// # Errors
+    /// [`PasswordError::Hash`] when argon2 rejects the combination.
+    pub fn new(memory_kib: u32, iterations: u32, parallelism: u32) -> Result<Self, PasswordError> {
+        argon2::Params::new(memory_kib, iterations, parallelism, None)
+            .map_err(|e| PasswordError::Hash(e.to_string()))?;
+        Ok(Self {
+            memory_kib,
+            iterations,
+            parallelism,
         })
-        .as_str()
+    }
+
+    #[must_use]
+    pub fn memory_kib(&self) -> u32 {
+        self.memory_kib
+    }
+
+    #[must_use]
+    pub fn iterations(&self) -> u32 {
+        self.iterations
+    }
+
+    #[must_use]
+    pub fn parallelism(&self) -> u32 {
+        self.parallelism
+    }
+
+    fn hasher(self) -> argon2::Argon2<'static> {
+        let params = argon2::Params::new(self.memory_kib, self.iterations, self.parallelism, None)
+            .expect("validated in Argon2Params::new");
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+    }
+}
+
+impl Default for Argon2Params {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+static ARGON2: crate::boot_slot::BootSlot<Argon2Params> = crate::boot_slot::BootSlot::new();
+
+/// Set the argon2id cost for new hashes. Call at boot. It replaces the
+/// `[auth] argon2_*` values; `false` if an earlier call won.
+pub fn configure_argon2(params: Argon2Params) -> bool {
+    ARGON2.set_explicit(params)
+}
+
+/// The `[auth] argon2_*` values; `false` if app code already set them.
+#[cfg(feature = "config")]
+pub(crate) fn configure_argon2_from_settings(params: Argon2Params) -> bool {
+    ARGON2.set_from_settings(params)
+}
+
+/// The argon2id cost [`hash`] uses now.
+#[must_use]
+pub fn argon2_params() -> Argon2Params {
+    *ARGON2.get(|| Argon2Params::DEFAULT)
 }
 
 /// Do one verification's worth of work and throw the result away.
@@ -101,6 +190,24 @@ fn dummy_hash() -> &'static str {
 /// attacker which accounts exist.
 pub fn verify_dummy(password: &str) {
     let _ = verify(password, dummy_hash());
+}
+
+/// `true` when `stored` is not argon2id v19 at least as strong as
+/// [`argon2_params`] on every axis, so a login should store a new hash.
+#[must_use]
+pub fn needs_rehash(stored: &str) -> bool {
+    let Ok(parsed) = argon2::password_hash::PasswordHash::new(stored) else {
+        return true;
+    };
+    let Ok(p) = argon2::Params::try_from(&parsed) else {
+        return true;
+    };
+    let want = argon2_params();
+    parsed.algorithm != argon2::Algorithm::Argon2id.ident()
+        || parsed.version != Some(argon2::Version::V0x13.into())
+        || p.m_cost() < want.memory_kib
+        || p.t_cost() < want.iterations
+        || p.p_cost() < want.parallelism
 }
 
 // ------------------------------------------------------------------ Async variants
@@ -132,6 +239,77 @@ pub async fn verify_async(password: &str, stored_hash: &str) -> Result<bool, Pas
 pub async fn verify_dummy_async(password: &str) -> Result<(), PasswordError> {
     let password = password.to_owned();
     off_runtime(move || verify_dummy(&password)).await
+}
+
+/// A fresh hash of `password` when `stored` is below today's cost. Call
+/// only after a successful verify; `None` when current or busy.
+pub async fn rehash_async(password: &str, stored: &str) -> Option<String> {
+    if !needs_rehash(stored) {
+        return None;
+    }
+    hash_async(password).await.ok()
+}
+
+/// After a successful login on `model` row `id`, store a fresh hash when
+/// `stored` is weak. Returns the hash now in force; a concurrent change wins.
+pub async fn upgrade_stored_hash(
+    pool: &crate::sql::Pool,
+    model: &'static crate::core::ModelSchema,
+    id: i64,
+    password: &str,
+    stored: &str,
+) -> String {
+    let Some(new) = rehash_async(password, stored).await else {
+        return stored.to_owned();
+    };
+    let applied = crate::sql::update_pool(pool, &rehash_update(model, id, stored, &new)).await;
+    rehash_applied(applied, model, id, stored, new)
+}
+
+/// `UPDATE model SET password_hash = new WHERE id = ? AND password_hash = old`.
+pub(crate) fn rehash_update(
+    model: &'static crate::core::ModelSchema,
+    id: i64,
+    old: &str,
+    new: &str,
+) -> crate::core::UpdateQuery {
+    use crate::core::{Assignment, Expr, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
+    let eq = |column, value| {
+        WhereExpr::Predicate(Filter {
+            column,
+            op: Op::Eq,
+            value,
+        })
+    };
+    UpdateQuery {
+        model,
+        set: vec![Assignment {
+            column: "password_hash",
+            value: Expr::Literal(SqlValue::String(new.to_owned())),
+        }],
+        where_clause: WhereExpr::And(vec![
+            eq("id", SqlValue::I64(id)),
+            eq("password_hash", SqlValue::String(old.to_owned())),
+        ]),
+    }
+}
+
+/// The hash in force after running [`rehash_update`].
+pub(crate) fn rehash_applied<E: std::fmt::Display>(
+    applied: Result<u64, E>,
+    model: &'static crate::core::ModelSchema,
+    id: i64,
+    stored: &str,
+    new: String,
+) -> String {
+    match applied {
+        Ok(1) => new,
+        Ok(_) => stored.to_owned(),
+        Err(e) => {
+            tracing::warn!(target: "rustango::passwords", table = model.table, id, error = %e, "cannot store the upgraded password hash");
+            stored.to_owned()
+        }
+    }
 }
 
 /// Default for how long a hash job waits for a free slot.
@@ -411,6 +589,16 @@ mod tests {
         let (r, n) = ticks_while(verify_dummy_async("nobody")).await;
         assert!(r.is_ok());
         assert!(n >= 2, "verify_dummy_async stalled the runtime ({n} ticks)");
+    }
+
+    /// A cost change rebuilds the dummy hash at the new cost.
+    #[test]
+    fn dummy_hash_follows_the_cost() {
+        let a = Argon2Params::new(8, 1, 1).unwrap();
+        let b = Argon2Params::new(16, 1, 1).unwrap();
+        assert!(dummy_hash_for(a).contains("$m=8,t=1,p=1$"));
+        assert!(dummy_hash_for(b).contains("$m=16,t=1,p=1$"));
+        assert!(dummy_hash_for(a).contains("$m=8,t=1,p=1$"));
     }
 
     #[tokio::test]

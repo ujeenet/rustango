@@ -88,8 +88,7 @@ pub fn verify_registration(
 }
 
 /// Verify an authentication (assertion) response (WebAuthn §7.2).
-/// Returns the new signature counter to persist via
-/// [`super::update_sign_count`].
+/// Returns the new signature counter and the UV flag.
 ///
 /// # Errors
 /// The matching [`PasskeyError`] for whichever check fails (including
@@ -104,7 +103,7 @@ pub fn verify_authentication(
     client_data_json: &[u8],
     authenticator_data: &[u8],
     signature_der: &[u8],
-) -> Result<i64, PasskeyError> {
+) -> Result<AuthenticationOutcome, PasskeyError> {
     verify::parse_and_verify_client_data(
         client_data_json,
         "webauthn.get",
@@ -122,12 +121,27 @@ pub fn verify_authentication(
         client_data_json,
         signature_der,
     )?;
-    // Clone/replay detection: a non-zero counter must strictly advance.
+    // WebAuthn §7.2 step 21: once either count is non-zero it must advance,
+    // so a clone can't reset a stored counter to 0.
     let new = i64::from(ad.sign_count);
-    if new != 0 && stored_sign_count != 0 && new <= stored_sign_count {
+    if (new != 0 || stored_sign_count != 0) && new <= stored_sign_count {
         return Err(PasskeyError::CounterRegression);
     }
-    Ok(new)
+    Ok(AuthenticationOutcome {
+        sign_count: new,
+        user_verified: ad.user_verified(),
+    })
+}
+
+/// What a verified assertion yields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AuthenticationOutcome {
+    /// New signature counter; persist via [`super::update_sign_count`].
+    pub sign_count: i64,
+    /// The UV flag: the user passed a PIN or biometric, not just a touch.
+    /// Refuse when your policy needs user verification.
+    pub user_verified: bool,
 }
 
 /// `PublicKeyCredentialCreationOptions` JSON for
@@ -342,11 +356,16 @@ mod tests {
             sig.to_der().as_bytes(),
         )
         .unwrap();
-        assert_eq!(new_count, 2);
+        assert_eq!(new_count.sign_count, 2);
+        assert!(!new_count.user_verified);
     }
 
-    #[test]
-    fn counter_regression_is_rejected() {
+    /// Sign an assertion with `flags` and `count`, verify it against `stored`.
+    fn assert_with(
+        flags: u8,
+        count: u32,
+        stored: i64,
+    ) -> Result<AuthenticationOutcome, PasskeyError> {
         let rp_id = "example.com";
         let origins = vec!["https://example.com".to_owned()];
         let sk = SigningKey::random(&mut os_rng());
@@ -355,8 +374,8 @@ mod tests {
         let challenge = generate_challenge();
         let mut ad = Vec::new();
         ad.extend_from_slice(&rp_hash(rp_id));
-        ad.push(0b0000_0001);
-        ad.extend_from_slice(&3u32.to_be_bytes()); // count 3
+        ad.push(flags);
+        ad.extend_from_slice(&count.to_be_bytes());
         let client = client_data("webauthn.get", &challenge, "https://example.com");
         let mut signed = ad.clone();
         let mut h = Sha256::new();
@@ -364,18 +383,37 @@ mod tests {
         signed.extend_from_slice(&h.finalize());
         let sig: Signature = sk.sign(&signed);
 
-        // Stored count 5 > presented 3 → regression rejected.
-        let r = verify_authentication(
+        verify_authentication(
             &challenge,
             rp_id,
             &origins,
             &cose,
-            5,
+            stored,
             &client,
             &ad,
             sig.to_der().as_bytes(),
-        );
+        )
+    }
+
+    #[test]
+    fn counter_regression_is_rejected() {
+        // Stored count 5 > presented 3 → regression rejected.
+        let r = assert_with(0b0000_0001, 3, 5);
         assert!(matches!(r, Err(PasskeyError::CounterRegression)));
+    }
+
+    #[test]
+    fn clone_resetting_counter_to_zero_is_rejected() {
+        let r = assert_with(0b0000_0001, 0, 5);
+        assert!(matches!(r, Err(PasskeyError::CounterRegression)));
+        // An authenticator with no counter (0 → 0) still works.
+        assert_eq!(assert_with(0b0000_0001, 0, 0).unwrap().sign_count, 0);
+    }
+
+    #[test]
+    fn user_verified_flag_is_returned() {
+        assert!(assert_with(0b0000_0101, 1, 0).unwrap().user_verified);
+        assert!(!assert_with(0b0000_0001, 1, 0).unwrap().user_verified);
     }
 
     #[test]

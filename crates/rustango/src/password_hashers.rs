@@ -129,6 +129,12 @@ pub trait PasswordHasher: Send + Sync {
     /// `true` if this hasher produced `stored`. Usually a match on the
     /// leading marker (`"$argon2id$"`, `"$2b$"`, `"pbkdf2_sha256$"`).
     fn identify(&self, stored: &str) -> bool;
+
+    /// `true` when `stored` is this hasher's format but weaker than what
+    /// [`Self::hash`] writes now. Default `false`.
+    fn needs_rehash(&self, _stored: &str) -> bool {
+        false
+    }
 }
 
 // ------------------------------------------------------------------ PasswordHasherChain
@@ -185,8 +191,8 @@ impl PasswordHasherChain {
         if !hasher.verify(password, stored)? {
             return Ok(VerifyOutcome::Mismatch);
         }
-        // Matched. Rehash unless it was the preferred hasher.
-        let needs_rehash = if idx == 0 {
+        // Matched. Rehash unless it was the preferred hasher at today's cost.
+        let needs_rehash = if idx == 0 && !hasher.needs_rehash(stored) {
             None
         } else {
             // The preferred hasher mints the upgrade.
@@ -260,6 +266,9 @@ impl PasswordHasher for Argon2idHasher {
     }
     fn identify(&self, stored: &str) -> bool {
         stored.starts_with("$argon2id$")
+    }
+    fn needs_rehash(&self, stored: &str) -> bool {
+        crate::passwords::needs_rehash(stored)
     }
 }
 
@@ -461,6 +470,27 @@ mod tests {
         // The new hash verifies through the chain too.
         let re = chain.verify("hunter2", &new_hash).unwrap();
         assert_eq!(re, VerifyOutcome::Match { needs_rehash: None });
+    }
+
+    /// #1875 — an argon2id hash below today's cost is upgraded on login.
+    #[cfg(feature = "passwords")]
+    #[test]
+    fn chain_rehashes_weaker_argon2id() {
+        use argon2::password_hash::{rand_core::OsRng, PasswordHasher as _, SaltString};
+        let weak = argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(8_192, 1, 1, None).unwrap(),
+        )
+        .hash_password(b"hunter2", &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+        let chain = PasswordHasherChain::new().with(Box::new(Argon2idHasher));
+        let outcome = chain.verify("hunter2", &weak).unwrap();
+        let new_hash = outcome.rehash().expect("weaker cost is rehashed");
+        assert!(!crate::passwords::needs_rehash(new_hash));
+        let again = chain.verify("hunter2", new_hash).unwrap();
+        assert_eq!(again, VerifyOutcome::Match { needs_rehash: None });
     }
 
     #[cfg(feature = "passwords")]

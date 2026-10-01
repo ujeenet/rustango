@@ -72,6 +72,18 @@ pub enum HeaderStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrustedRealIp(pub IpAddr);
 
+/// The first value of forwarding header `name`, only when the peer is a
+/// trusted proxy (a [`TrustedRealIp`] is set); any client can send it.
+pub(crate) fn trusted_forwarded<'a>(
+    headers: &'a axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+    name: &str,
+) -> Option<&'a str> {
+    extensions.get::<TrustedRealIp>()?;
+    let v = headers.get(name)?.to_str().ok()?;
+    Some(v.split(',').next().unwrap_or(v).trim()).filter(|s| !s.is_empty())
+}
+
 #[derive(Clone, Debug)]
 pub struct RealIpLayer {
     pub strategy: HeaderStrategy,

@@ -26,9 +26,19 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The shortest secret [`TotpSecret::from_base32`] accepts: 80 bits.
+pub const MIN_SECRET_BYTES: usize = 10;
+
 /// A TOTP shared secret (raw bytes). Store base32-encoded on the user row.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TotpSecret(pub Vec<u8>);
+
+/// Redacted: a logged secret is a second factor given away (#1875).
+impl std::fmt::Debug for TotpSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TotpSecret(<redacted>)")
+    }
+}
 
 impl TotpSecret {
     /// Generate a 20-byte random secret, the RFC 4226 minimum.
@@ -54,10 +64,13 @@ impl TotpSecret {
     }
 
     /// Decode a base32-encoded secret string (with or without padding).
-    /// Returns `None` for invalid base32.
+    /// Returns `None` for invalid base32 or a secret under
+    /// [`MIN_SECRET_BYTES`], so an empty column can't become a guessable key.
     #[must_use]
     pub fn from_base32(s: &str) -> Option<Self> {
-        base32_decode(s).map(Self)
+        base32_decode(s)
+            .filter(|b| b.len() >= MIN_SECRET_BYTES)
+            .map(Self)
     }
 }
 
@@ -177,8 +190,9 @@ fn hotp(secret: &[u8], counter: u64, digits: u32) -> String {
         | (hash[offset + 2] as u32) << 8
         | (hash[offset + 3] as u32);
 
-    let modulo = 10u32.pow(digits.min(10));
-    let value = bin_code % modulo;
+    // u64: 10^10 overflows u32 (#1875).
+    let modulo = 10u64.pow(digits.min(10));
+    let value = u64::from(bin_code) % modulo;
     format!("{:0width$}", value, width = digits as usize)
 }
 
@@ -265,6 +279,13 @@ mod tests {
     }
 
     #[test]
+    fn ten_digits_do_not_overflow_and_debug_is_redacted() {
+        let s = TotpSecret(b"12345678901234567890".to_vec());
+        assert_eq!(generate_at(&s, 59, 30, 10).len(), 10);
+        assert_eq!(format!("{s:?}"), "TotpSecret(<redacted>)");
+    }
+
+    #[test]
     fn generate_returns_correct_digit_count() {
         let s = TotpSecret::generate();
         for digits in [6, 7, 8] {
@@ -336,6 +357,14 @@ mod tests {
         let encoded = s1.to_base32();
         let s2 = TotpSecret::from_base32(&encoded).unwrap();
         assert_eq!(s1.0, s2.0);
+    }
+
+    #[test]
+    fn from_base32_refuses_a_short_or_empty_secret() {
+        assert!(TotpSecret::from_base32("").is_none());
+        // 9 bytes, then 10.
+        assert!(TotpSecret::from_base32(&base32_encode(&[7; 9])).is_none());
+        assert!(TotpSecret::from_base32(&base32_encode(&[7; 10])).is_some());
     }
 
     #[test]
