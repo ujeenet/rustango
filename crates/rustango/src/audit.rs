@@ -694,12 +694,51 @@ pub async fn emit_one_pool(
 }
 
 /// Codename a non-superuser needs to read the admin audit feed. Rows
-/// are still limited to tables they hold `{table}.view` on.
-pub const VIEW_CODENAME: &str = "audit.view";
+/// are still limited to tables they hold `{table}.view` on. Not a CRUD
+/// action, so no table's `{table}.view` grants it (#1979).
+pub const VIEW_CODENAME: &str = "rustango_audit_log.view_feed";
 
 /// Codename a non-superuser needs to run the admin audit cleanup.
 /// Cleanup spans every table, whatever `{table}.view` the user holds.
-pub const DELETE_CODENAME: &str = "audit.delete";
+pub const DELETE_CODENAME: &str = "rustango_audit_log.clean_feed";
+
+/// A permission on the admin audit feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuditPerm {
+    /// [`VIEW_CODENAME`].
+    View,
+    /// [`DELETE_CODENAME`].
+    Delete,
+}
+
+impl AuditPerm {
+    /// The codename that grants it.
+    #[must_use]
+    pub fn codename(self) -> &'static str {
+        match self {
+            Self::View => VIEW_CODENAME,
+            Self::Delete => DELETE_CODENAME,
+        }
+    }
+
+    /// The pre-#1979 name, a model table `audit`'s own CRUD codename.
+    fn legacy_codename(self) -> &'static str {
+        match self {
+            Self::View => "audit.view",
+            Self::Delete => "audit.delete",
+        }
+    }
+
+    /// `true` when `perms` grants it. The legacy name counts only while
+    /// no model uses table `audit`.
+    #[must_use]
+    pub fn granted_by(self, perms: &std::collections::HashSet<String>) -> bool {
+        perms.contains(self.codename())
+            || (perms.contains(self.legacy_codename())
+                && crate::core::ModelEntry::for_table("audit").is_none())
+    }
+}
 
 /// Filter for the admin's audit-log activity feed. Every field is
 /// optional; `None` means the column is not constrained. [`list`] and

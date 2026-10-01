@@ -71,17 +71,11 @@ fn cast_emits_dialect_specific_type_token() {
 }
 
 #[test]
-fn cast_to_json_errors_on_mysql() {
+fn cast_to_json_on_mysql() {
     let e = funcs::cast(F("name"), FieldType::Json);
-    // MySQL has no `CAST AS JSON` form — must error.
-    let err = my(&e).unwrap_err();
-    assert!(matches!(
-        err,
-        SqlError::OpNotSupportedInDialect {
-            dialect: "mysql",
-            ..
-        }
-    ));
+    // MySQL 5.7+ has `CAST(x AS JSON)` (#1898).
+    let sql = my(&e).unwrap();
+    assert!(sql.contains("CAST(`name` AS JSON)"), "{sql}");
 }
 
 // ---------- LPad / RPad ----------

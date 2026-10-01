@@ -159,6 +159,65 @@ A serializer `PATCH` now loads the row once before the update. `ModelSerializer`
 
 Flag writes no longer carry a 1 hour TTL. To keep the old expiry, call `.ttl(Duration::from_secs(3600))`.
 
+## 0.59.12
+
+### Edited constraints now migrate (#1881)
+
+**Breaking:** the next `makemigrations` picks up CHECK, EXCLUDE, composite FK and M2M edits it
+ignored before. An edited M2M is dropped and recreated, so its rows are lost: copy them first.
+
+### Shrinking `max_length` no longer truncates (#1878)
+
+**Breaking:** on PostgreSQL the migration now fails when a value is longer than the new length.
+Shorten those values first.
+
+### Drop order in new migrations (#1879)
+
+Only newly written files use it. An unapplied file that drops a column before its index,
+or a parent table before its child, still fails on SQLite and MySQL: regenerate it.
+
+### `AddColumn` adds the FK and UNIQUE (#1877)
+
+**Breaking:** a migration that adds a `ForeignKey` or `unique` column now creates the constraint,
+so it fails on rows that break it. Columns added by earlier migrations still lack it.
+SQLite leaves out the FK of a column with a default (it refuses one on a table with rows) and warns.
+
+### UNIQUE constraints are named (#1880)
+
+`CREATE TABLE` writes `CONSTRAINT <table>_<column>_key UNIQUE (<column>)`; PG names do not change.
+**Breaking** on MySQL: new tables name the unique index `<table>_<column>_key`, not after the column.
+Two UNIQUE columns that map to one name (`a_b.c`, `a.b_c`) now fail to render: rename one.
+
+### Integer division and PostgreSQL date lookups (#1900)
+
+On MySQL, `F("n") / 2` over integers now truncates (7 / 2 = 3), as on PostgreSQL and SQLite.
+On PostgreSQL, `__date`/`__hour`/… and `trunc_*` on a `DateTime` column use UTC even after `SET TIME ZONE`.
+
+### MySQL `Decimal` columns are `DECIMAL(65, 28)` (#1899)
+
+New tables get the wider type; existing `DECIMAL(38, 10)` columns keep rounding past 10 places.
+Widen them with `ALTER TABLE t MODIFY c DECIMAL(65, 28)`. SQLite still keeps ~15 significant digits.
+Read-back values carry 28 decimal places (`1.5000…`); call `Decimal::normalize()` before display.
+
+### JSON comparisons match across backends (#1898)
+
+SQLite `as_text` JSON paths now yield text: compare them to `'1'` / `'true'`, not to `1`.
+SQLite still formats some values unlike PostgreSQL: `1.50` is `'1.5'`, `1e2` is `'100.0'`, big integers lose digits, objects have no spaces.
+On MySQL, `as_text` of a JSON null is now SQL NULL, not `'null'`.
+
+### Audit feed codenames are `rustango_audit_log.view_feed` / `.clean_feed` (#1979)
+
+Grant these instead of `audit.view` / `audit.delete`. The old names are ignored once a model uses table `audit`.
+
+### `InlineFormPanel` gains `more_rows_filter` (#1977)
+
+A struct literal needs the new field. Panels past the formset cap show only the first rows.
+
+### MySQL refuses an INSERT whose DB-default PK is not an integer (#1978)
+
+`insert_returning_pool` returns `GeneratedPkUnreadable` before writing; it used to insert, then fail.
+Submit the PK (or use `default_uuid_v7`) for such models on MySQL.
+
 ## 0.59.11
 
 ### Relation `SUM` decodes by column type (#1944)

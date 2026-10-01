@@ -4,10 +4,10 @@
 //! and junction tables, plus column type, nullability, default,
 //! length and uniqueness changes.
 //!
-//! **Statement order is a contract.** `CREATE TABLE` comes before
-//! `ADD COLUMN`, so a new column can reference a new table. `DROP
-//! COLUMN` comes before `DROP TABLE` for the same reason. FK
-//! constraints for new tables come last.
+//! **Statement order is a contract.** Indexes, constraints and junction
+//! tables drop before the columns and tables they hang off. `CREATE
+//! TABLE` comes before `ADD COLUMN`, so a new column can reference a new
+//! table. Tables drop child first. FK constraints for new tables come last.
 //!
 //! `ADD COLUMN ... NOT NULL` only works when the field has a
 //! `default`, which backfills the existing rows. Without one it is
@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use super::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
+use super::snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
 
 fn default_index_method_diff() -> String {
     "btree".to_owned()
@@ -213,8 +213,11 @@ pub enum SchemaChange {
 
 /// Compute the ordered list of changes from `prev` to `current`.
 ///
-/// **The order is a contract:** create tables, add columns, alter
-/// columns, drop columns, drop tables.
+/// **The order is a contract:** drop what hangs off a table or column
+/// (indexes, checks, excludes, composite FKs, then M2M junctions), create
+/// tables, add columns, alter columns, drop columns, drop tables child
+/// first, then create the dependents. MySQL commits each DDL statement, so
+/// a drop that fails after its column or table went cannot roll back (#1879).
 ///
 /// Renames are **never** emitted: a snapshot diff cannot tell a
 /// rename from a drop plus an add. Write those by hand with
@@ -224,6 +227,86 @@ pub enum SchemaChange {
 #[must_use]
 pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<SchemaChange> {
     let mut changes = Vec::new();
+    // Created after the tables and columns; the drop halves of changed
+    // objects go in the first phase with the other drops.
+    let mut creates = Vec::new();
+    // Recreated composite FKs go last, after the unique index they reference.
+    let mut fk_creates = Vec::new();
+
+    // Dropped or edited composite FKs on tables that stay, before the
+    // unique index they reference; a dropped table takes its own. An edit
+    // that keeps the name is a Drop + Add, like an index (#1881).
+    for pt in &prev.tables {
+        let Some(ct) = current.table(&pt.name) else {
+            continue;
+        };
+        for pf in &pt.composite_fks {
+            let now = ct.composite_fks.iter().find(|c| c.name == pf.name);
+            if now == Some(pf) {
+                continue;
+            }
+            changes.push(SchemaChange::DropCompositeFk {
+                table: pt.name.clone(),
+                name: pf.name.clone(),
+            });
+            fk_creates.extend(now.map(|c| add_composite_fk(&ct.name, c)));
+        }
+    }
+    // Dropped and changed indexes. A changed one (same name, new shape)
+    // lowers to a Drop + Create pair, or the database keeps the old one.
+    for idx in &prev.indexes {
+        let changed = current.index(&idx.name).map(|c| {
+            (c.columns != idx.columns
+                || c.unique != idx.unique
+                || c.table != idx.table
+                || c.method != idx.method
+                || c.where_clause != idx.where_clause
+                || c.include != idx.include)
+                .then_some(c)
+        });
+        if matches!(changed, None | Some(Some(_))) {
+            // `idx.table`: an index that moved tables is dropped where it is now.
+            changes.push(SchemaChange::DropIndex {
+                name: idx.name.clone(),
+                table: idx.table.clone(),
+            });
+        }
+        if let Some(Some(c)) = changed {
+            creates.push(create_index(c));
+        }
+    }
+    // Dropped or edited CHECK constraints.
+    for c in &prev.checks {
+        let now = current.check(&c.name);
+        if now != Some(c) {
+            changes.push(SchemaChange::DropCheckConstraint {
+                name: c.name.clone(),
+                table: c.table.clone(),
+            });
+            creates.extend(now.map(add_check));
+        }
+    }
+    // Dropped or edited PG EXCLUDE constraints.
+    for x in &prev.excludes {
+        let now = current.excludes.iter().find(|c| c.name == x.name);
+        if now != Some(x) {
+            changes.push(SchemaChange::DropExclusionConstraint {
+                name: x.name.clone(),
+                table: x.table.clone(),
+            });
+            creates.extend(now.map(add_exclude));
+        }
+    }
+    // Dropped or edited M2M junctions, before the tables they reference.
+    for mt in &prev.m2m_tables {
+        let now = current.m2m_table(&mt.through);
+        if now != Some(mt) {
+            changes.push(SchemaChange::DropM2MTable {
+                through: mt.through.clone(),
+            });
+            creates.extend(now.map(create_m2m));
+        }
+    }
 
     // New tables.
     for t in &current.tables {
@@ -272,188 +355,34 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
-    // Objects that hang off a table must be dropped **before** the
-    // table itself.
-    //
-    // Order, never suppression. `DropTable` first then `DropIndex`
-    // fails on MySQL: the table drop commits at once, the index drop
-    // then errors, and the ledger row is never written, so the
-    // re-run cannot recover.
-    //
-    // Dropping the index only from the op list is worse. `invert`
-    // would then produce a bare `CreateTable`, which renders no
-    // index DDL, so a rollback would quietly restore the table
-    // without its indexes, UNIQUE ones included.
-    //
-    // Dropping the dependent first works on every dialect, because
-    // the table is still there. `invert` walks the list backwards,
-    // so `[DropIndex, DropTable]` inverts to
-    // `[CreateTable, CreateIndex]`: the right order, for free.
-    //
-    // Dropped indexes: in prev, not in current.
-    for idx in &prev.indexes {
-        if current.index(&idx.name).is_none() {
-            changes.push(SchemaChange::DropIndex {
-                name: idx.name.clone(),
-                table: idx.table.clone(),
-            });
-        }
+    // Dropped tables, each before the tables it references.
+    for name in dropped_tables_child_first(prev, current) {
+        changes.push(SchemaChange::DropTable(name.to_owned()));
     }
-    // Dropped CHECK constraints, before the table, for the same
-    // reason as indexes.
-    for c in &prev.checks {
-        if current.check(&c.name).is_none() {
-            changes.push(SchemaChange::DropCheckConstraint {
-                name: c.name.clone(),
-                table: c.table.clone(),
-            });
-        }
-    }
-    // Dropped PG EXCLUDE constraints. Compared by name, because
-    // `SchemaSnapshot` has no accessor for excludes.
-    let current_exclude_names: std::collections::HashSet<&str> =
-        current.excludes.iter().map(|x| x.name.as_str()).collect();
-    for x in &prev.excludes {
-        if !current_exclude_names.contains(x.name.as_str()) {
-            changes.push(SchemaChange::DropExclusionConstraint {
-                name: x.name.clone(),
-                table: x.table.clone(),
-            });
-        }
-    }
-    // Dropped tables — after everything that hangs off them.
-    for pt in &prev.tables {
-        if current.table(&pt.name).is_none() {
-            changes.push(SchemaChange::DropTable(pt.name.clone()));
-        }
-    }
-    // New indexes — present in current, absent from prev.
+
+    // New indexes, then the recreated halves of changed objects.
     for idx in &current.indexes {
         if prev.index(&idx.name).is_none() {
-            changes.push(SchemaChange::CreateIndex {
-                name: idx.name.clone(),
-                table: idx.table.clone(),
-                columns: idx.columns.clone(),
-                unique: idx.unique,
-                method: idx.method.clone(),
-                where_clause: idx.where_clause.clone(),
-                include: idx.include.clone(),
-            });
+            changes.push(create_index(idx));
         }
     }
-    // Changed indexes — same name in both, but columns / table /
-    // unique flag differ. Without this branch, a model edit that
-    // tweaks an index in place (without renaming it) would land a
-    // silently-stale index in the database. The diff lowers each
-    // such change to a Drop + Create pair so the new shape is
-    // applied atomically.
-    for idx in &current.indexes {
-        if let Some(prev_idx) = prev.index(&idx.name) {
-            if prev_idx.columns != idx.columns
-                || prev_idx.unique != idx.unique
-                || prev_idx.table != idx.table
-                || prev_idx.method != idx.method
-                || prev_idx.where_clause != idx.where_clause
-            {
-                changes.push(SchemaChange::DropIndex {
-                    // `prev_idx.table`, not `idx.table`: one of the
-                    // conditions above is `prev_idx.table != idx.table`,
-                    // so this branch covers an index that **moved
-                    // tables**. The DROP has to name the table it is
-                    // still on; the CreateIndex below names the new one.
-                    name: idx.name.clone(),
-                    table: prev_idx.table.clone(),
-                });
-                changes.push(SchemaChange::CreateIndex {
-                    name: idx.name.clone(),
-                    table: idx.table.clone(),
-                    columns: idx.columns.clone(),
-                    unique: idx.unique,
-                    method: idx.method.clone(),
-                    where_clause: idx.where_clause.clone(),
-                    include: idx.include.clone(),
-                });
-            }
-        }
-    }
-    // Also detect include-only changes so a fresh covering set
-    // re-emits as Drop + Create.
-    for idx in &current.indexes {
-        if let Some(prev_idx) = prev.index(&idx.name) {
-            if prev_idx.columns == idx.columns
-                && prev_idx.unique == idx.unique
-                && prev_idx.table == idx.table
-                && prev_idx.method == idx.method
-                && prev_idx.where_clause == idx.where_clause
-                && prev_idx.include != idx.include
-            {
-                changes.push(SchemaChange::DropIndex {
-                    name: idx.name.clone(),
-                    // Equal to `idx.table` here — the condition above
-                    // requires it — but read from `prev_idx` so both
-                    // drop-and-recreate branches say the same thing:
-                    // a DROP names the table the index is on *now*.
-                    table: prev_idx.table.clone(),
-                });
-                changes.push(SchemaChange::CreateIndex {
-                    name: idx.name.clone(),
-                    table: idx.table.clone(),
-                    columns: idx.columns.clone(),
-                    unique: idx.unique,
-                    method: idx.method.clone(),
-                    where_clause: idx.where_clause.clone(),
-                    include: idx.include.clone(),
-                });
-            }
-        }
-    }
+    changes.append(&mut creates);
     // New CHECK constraints.
     for c in &current.checks {
         if prev.check(&c.name).is_none() {
-            changes.push(SchemaChange::AddCheckConstraint {
-                name: c.name.clone(),
-                table: c.table.clone(),
-                expr: c.expr.clone(),
-            });
+            changes.push(add_check(c));
         }
     }
-    // New PG EXCLUDE constraints (issue #319). Dropped EXCLUDEs surface
-    // only when the constraint name disappears from the model — the
-    // migration writer emits a `DropExclusionConstraint`. Same posture
-    // as CHECK: we never rewrite an existing constraint, only add and
-    // drop. To change one, operator drops + re-adds via the next
-    // makemigrations cycle.
-    let prev_exclude_names: std::collections::HashSet<&str> =
-        prev.excludes.iter().map(|x| x.name.as_str()).collect();
+    // New PG EXCLUDE constraints (issue #319).
     for x in &current.excludes {
-        if !prev_exclude_names.contains(x.name.as_str()) {
-            changes.push(SchemaChange::AddExclusionConstraint {
-                name: x.name.clone(),
-                table: x.table.clone(),
-                using: x.using.clone(),
-                elements: x.elements.clone(),
-                where_clause: x.where_clause.clone(),
-            });
+        if !prev.excludes.iter().any(|p| p.name == x.name) {
+            changes.push(add_exclude(x));
         }
     }
     // New M2M junction tables.
     for mt in &current.m2m_tables {
         if prev.m2m_table(&mt.through).is_none() {
-            changes.push(SchemaChange::CreateM2MTable {
-                through: mt.through.clone(),
-                src_table: mt.src_table.clone(),
-                src_col: mt.src_col.clone(),
-                dst_table: mt.dst_table.clone(),
-                dst_col: mt.dst_col.clone(),
-            });
-        }
-    }
-    // Dropped M2M junction tables.
-    for mt in &prev.m2m_tables {
-        if current.m2m_table(&mt.through).is_none() {
-            changes.push(SchemaChange::DropM2MTable {
-                through: mt.through.clone(),
-            });
+            changes.push(create_m2m(mt));
         }
     }
     // New composite FK constraints (added on existing tables, or on
@@ -466,32 +395,92 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             .unwrap_or(&[]);
         for cf in &ct.composite_fks {
             if !prev_fks.iter().any(|p| p.name == cf.name) {
-                changes.push(SchemaChange::AddCompositeFk {
-                    table: ct.name.clone(),
-                    name: cf.name.clone(),
-                    to: cf.to.clone(),
-                    from: cf.from.clone(),
-                    on: cf.on.clone(),
-                });
+                changes.push(add_composite_fk(&ct.name, cf));
             }
         }
     }
-    // Dropped composite FK constraints (still-present tables only —
-    // a `DropTable` already cascades the constraint).
-    for pt in &prev.tables {
-        let Some(ct) = current.table(&pt.name) else {
-            continue;
-        };
-        for pf in &pt.composite_fks {
-            if !ct.composite_fks.iter().any(|c| c.name == pf.name) {
-                changes.push(SchemaChange::DropCompositeFk {
-                    table: pt.name.clone(),
-                    name: pf.name.clone(),
-                });
-            }
-        }
-    }
+    changes.append(&mut fk_creates);
     changes
+}
+
+fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
+    SchemaChange::CreateIndex {
+        name: idx.name.clone(),
+        table: idx.table.clone(),
+        columns: idx.columns.clone(),
+        unique: idx.unique,
+        method: idx.method.clone(),
+        where_clause: idx.where_clause.clone(),
+        include: idx.include.clone(),
+    }
+}
+
+fn add_check(c: &super::snapshot::CheckSnapshot) -> SchemaChange {
+    SchemaChange::AddCheckConstraint {
+        name: c.name.clone(),
+        table: c.table.clone(),
+        expr: c.expr.clone(),
+    }
+}
+
+fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
+    SchemaChange::AddExclusionConstraint {
+        name: x.name.clone(),
+        table: x.table.clone(),
+        using: x.using.clone(),
+        elements: x.elements.clone(),
+        where_clause: x.where_clause.clone(),
+    }
+}
+
+fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
+    SchemaChange::CreateM2MTable {
+        through: mt.through.clone(),
+        src_table: mt.src_table.clone(),
+        src_col: mt.src_col.clone(),
+        dst_table: mt.dst_table.clone(),
+        dst_col: mt.dst_col.clone(),
+    }
+}
+
+fn add_composite_fk(table: &str, cf: &super::snapshot::CompositeFkSnapshot) -> SchemaChange {
+    SchemaChange::AddCompositeFk {
+        table: table.to_owned(),
+        name: cf.name.clone(),
+        to: cf.to.clone(),
+        from: cf.from.clone(),
+        on: cf.on.clone(),
+    }
+}
+
+/// Tables in `prev` but not `current`, each before any it references.
+/// A cycle falls back to name order.
+fn dropped_tables_child_first<'a>(
+    prev: &'a SchemaSnapshot,
+    current: &SchemaSnapshot,
+) -> Vec<&'a str> {
+    let references = |t: &TableSnapshot, target: &str| {
+        t.name != target
+            && (t
+                .fields
+                .iter()
+                .any(|f| f.fk.as_ref().is_some_and(|r| r.to == target))
+                || t.composite_fks.iter().any(|c| c.to == target))
+    };
+    let mut left: Vec<&TableSnapshot> = prev
+        .tables
+        .iter()
+        .filter(|t| current.table(&t.name).is_none())
+        .collect();
+    let mut out = Vec::with_capacity(left.len());
+    while !left.is_empty() {
+        let i = left
+            .iter()
+            .position(|t| !left.iter().any(|o| references(o, &t.name)))
+            .unwrap_or(0);
+        out.push(left.remove(i).name.as_str());
+    }
+    out
 }
 
 fn push_alter_changes(
@@ -500,6 +489,20 @@ fn push_alter_changes(
     cf: &FieldSnapshot,
     out: &mut Vec<SchemaChange>,
 ) {
+    // `AlterColumnType` to a string renders TEXT and a length change
+    // renders VARCHAR/TEXT, so the length change goes on the string side:
+    // before the type when leaving a string, after it when entering one.
+    // Run the other way it undid the type change (#1878).
+    let max_length = (pf.max_length != cf.max_length).then(|| SchemaChange::AlterColumnMaxLength {
+        table: table.to_owned(),
+        column: cf.column.clone(),
+        from: pf.max_length,
+        to: cf.max_length,
+    });
+    let leaving_string = pf.ty != cf.ty && cf.ty != "string";
+    if leaving_string {
+        out.extend(max_length.clone());
+    }
     if pf.ty != cf.ty {
         out.push(SchemaChange::AlterColumnType {
             table: table.to_owned(),
@@ -507,6 +510,9 @@ fn push_alter_changes(
             from: pf.ty.clone(),
             to: cf.ty.clone(),
         });
+    }
+    if !leaving_string {
+        out.extend(max_length);
     }
     if pf.nullable != cf.nullable {
         out.push(SchemaChange::AlterColumnNullable {
@@ -521,14 +527,6 @@ fn push_alter_changes(
             column: cf.column.clone(),
             from: pf.default.clone(),
             to: cf.default.clone(),
-        });
-    }
-    if pf.max_length != cf.max_length {
-        out.push(SchemaChange::AlterColumnMaxLength {
-            table: table.to_owned(),
-            column: cf.column.clone(),
-            from: pf.max_length,
-            to: cf.max_length,
         });
     }
     if pf.unique != cf.unique {
@@ -796,6 +794,61 @@ fn guard_alter_column_dialect(
     ))
 }
 
+/// Who holds each UNIQUE name in `current`. Two columns that shorten to
+/// one name are refused: PG would reject the second, and SQLite's
+/// `DROP INDEX` for one would drop the other's.
+struct UniqueNames {
+    holders: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl UniqueNames {
+    fn new(current: &SchemaSnapshot) -> Self {
+        let mut holders: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for t in &current.tables {
+            for f in t
+                .fields
+                .iter()
+                .filter(|f| f.unique && !f.primary_key && f.generated_as.is_none())
+            {
+                holders
+                    .entry(super::ddl::unique_constraint_name(&t.name, &f.column))
+                    .or_default()
+                    .push(format!("`{}.{}`", t.name, f.column));
+            }
+        }
+        for idx in &current.indexes {
+            holders
+                .entry(idx.name.clone())
+                .or_default()
+                .push(format!("index `{}`", idx.name));
+        }
+        Self { holders }
+    }
+
+    /// The UNIQUE name for `table.column`, unless something else holds it.
+    fn get(&self, table: &str, column: &str) -> Result<String, String> {
+        let name = super::ddl::unique_constraint_name(table, column);
+        let me = format!("`{table}.{column}`");
+        let others: Vec<&str> = self
+            .holders
+            .get(&name)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|h| *h != me)
+            .collect();
+        if others.is_empty() {
+            return Ok(name);
+        }
+        Err(format!(
+            "the UNIQUE on {me} is named `{name}`, which {} also uses; \
+             rename a table or column, or declare one as a named unique index",
+            others.join(", ")
+        ))
+    }
+}
+
 fn render_changes_split_inner(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
@@ -803,12 +856,20 @@ fn render_changes_split_inner(
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
+    let unique_names = UniqueNames::new(current);
     for change in changes {
         match change {
             SchemaChange::CreateTable(name) => {
                 let table = current.table(name).ok_or_else(|| {
                     format!("CreateTable for `{name}` but no snapshot entry for it")
                 })?;
+                for f in table
+                    .fields
+                    .iter()
+                    .filter(|f| f.unique && !f.primary_key && f.generated_as.is_none())
+                {
+                    unique_names.get(name, &f.column)?;
+                }
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
                 if !dialect.inline_fks_in_create_table() {
@@ -817,6 +878,19 @@ fn render_changes_split_inner(
                 }
             }
             SchemaChange::DropColumn { table, column } => {
+                // SQLite refuses to drop an indexed column; AddColumn's
+                // unique index is the one this renderer creates (#1877).
+                // Skipped when another column now holds the name.
+                if let Some(name) = unique_names
+                    .get(table, column)
+                    .ok()
+                    .filter(|_| dialect.name() == "sqlite")
+                {
+                    out.immediate.push(format!(
+                        "DROP INDEX IF EXISTS {}",
+                        dialect.quote_ident(&name)
+                    ));
+                }
                 out.immediate.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     dialect.quote_ident(table),
@@ -849,6 +923,29 @@ fn render_changes_split_inner(
                     ));
                 }
                 out.immediate.push(add_column_sql(table, f, dialect));
+                if f.fk.is_some()
+                    && dialect.inline_fks_in_create_table()
+                    && inline_fk_on_add_column(f, dialect).is_none()
+                {
+                    out.warnings.push(format!(
+                        "`{table}.{column}` is added without its FOREIGN KEY: SQLite refuses \
+                         REFERENCES with a non-NULL default on a table with rows. Rebuild \
+                         the table by hand to add it (#559)."
+                    ));
+                }
+                // CREATE TABLE's UNIQUE and FK, which a bare ADD COLUMN lacks (#1877).
+                if f.unique && !f.primary_key {
+                    let name = unique_names.get(table, column)?;
+                    out.immediate
+                        .push(dialect.add_unique_constraint_sql(table, &name, column));
+                }
+                if let Some(rel) =
+                    f.fk.as_ref()
+                        .filter(|_| !dialect.inline_fks_in_create_table())
+                {
+                    out.deferred_fks
+                        .push(field_fk_sql(table, column, rel, dialect, schema));
+                }
             }
             SchemaChange::DropTable(name) => {
                 // CASCADE is Postgres-only — MySQL's parser rejects the
@@ -880,6 +977,20 @@ fn render_changes_split_inner(
                 nullable,
             } => {
                 guard_alter_column_dialect(dialect, "AlterColumnNullable", table, column)?;
+                // Option<T> → T with a default: fill the NULLs first, or
+                // SET NOT NULL fails on them (#1881).
+                let field = current.table(table).and_then(|t| t.field(column));
+                if let Some((f, expr)) = field
+                    .filter(|_| !*nullable)
+                    .and_then(|f| f.default.as_ref().map(|d| (f, d)))
+                {
+                    let value = render_column_default(expr, &f.ty, f.max_length, dialect);
+                    out.immediate.push(format!(
+                        "UPDATE {t} SET {c} = {value} WHERE {c} IS NULL",
+                        t = dialect.quote_ident(table),
+                        c = dialect.quote_ident(column),
+                    ));
+                }
                 let action = if *nullable {
                     "DROP NOT NULL"
                 } else {
@@ -931,8 +1042,10 @@ fn render_changes_split_inner(
                     Some(n) => format!("VARCHAR({n})"),
                     None => "TEXT".into(),
                 };
+                // No `USING`: a `::VARCHAR(n)` cast truncates, and without
+                // it PG refuses to shrink over longer values (#1878).
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to}"#,
                 ));
             }
             SchemaChange::AlterColumnUnique {
@@ -941,13 +1054,15 @@ fn render_changes_split_inner(
                 unique,
             } => {
                 guard_alter_column_dialect(dialect, "AlterColumnUnique", table, column)?;
+                let name = unique_names.get(table, column)?;
                 if *unique {
-                    out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_key" UNIQUE ("{column}")"#,
-                    ));
+                    out.immediate
+                        .push(dialect.add_unique_constraint_sql(table, &name, column));
                 } else {
                     out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" DROP CONSTRAINT "{table}_{column}_key""#,
+                        "ALTER TABLE {} DROP CONSTRAINT {}",
+                        dialect.quote_ident(table),
+                        dialect.quote_ident(&name),
                     ));
                 }
             }
@@ -1195,8 +1310,10 @@ fn render_changes_split_inner(
                 let q_src_table = fk_target(dialect, schema, src_table);
                 let q_dst_table = fk_target(dialect, schema, dst_table);
                 let q_id = dialect.quote_ident("id");
-                let q_src_fk = dialect.quote_ident(&format!("{through}_{src_col}_fkey"));
-                let q_dst_fk = dialect.quote_ident(&format!("{through}_{dst_col}_fkey"));
+                let q_src_fk =
+                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
+                let q_dst_fk =
+                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
@@ -1376,16 +1493,6 @@ fn create_table_sql_from_snapshot_with_dialect(
         if f.primary_key && !serial_pk_inline {
             sql.push_str(" PRIMARY KEY");
         }
-        // Per-column UNIQUE constraint from #[rustango(unique)]. Without
-        // this clause the snapshot's `unique: true` flag was honoured by
-        // the diff path (AlterColumnUnique) but silently dropped when a
-        // CreateTable rendered the initial DDL — surfaced live by the
-        // cookbook /authors/new playwright session, where two Authors
-        // with the same email INSERT-ed cleanly despite the model
-        // declaring `#[rustango(unique)]`.
-        if f.unique && !f.primary_key {
-            sql.push_str(" UNIQUE");
-        }
         if f.min.is_some() || f.max.is_some() {
             sql.push_str(" CHECK (");
             let mut wrote = false;
@@ -1414,18 +1521,15 @@ fn create_table_sql_from_snapshot_with_dialect(
         // FK graphs resolve across the whole migration batch.
         if dialect.inline_fks_in_create_table() {
             if let Some(rel) = &f.fk {
-                let _ = write!(
-                    sql,
-                    " REFERENCES {} ({})",
-                    dialect.quote_ident(&rel.to),
-                    dialect.quote_ident(&rel.on),
-                );
-                // #1549 — the declared action, or the constraint lands as
-                // NO ACTION and a declared cascade becomes a refusal.
-                if let Some(action) = &rel.on_delete {
-                    let _ = write!(sql, " ON DELETE {action}");
-                }
+                sql.push_str(&inline_references(rel, dialect));
             }
+        }
+    }
+    // Named, table-level: `AlterColumnUnique` drops it by this name (#1880).
+    for f in &t.fields {
+        if f.unique && !f.primary_key && f.generated_as.is_none() {
+            sql.push_str(", ");
+            sql.push_str(&super::ddl::unique_clause(dialect, &t.name, &f.column));
         }
     }
     if dialect.inline_fks_in_create_table() {
@@ -1455,22 +1559,8 @@ fn constraints_sql_from_snapshot(
         .fields
         .iter()
         .filter_map(|f| {
-            f.fk.as_ref().map(|rel| {
-                let constraint = format!("{}_{}_fkey", t.name, f.column);
-                let mut s = format!(
-                    "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-                    dialect.quote_ident(&constraint),
-                    dialect.quote_ident(&f.column),
-                    fk_target(dialect, schema, &rel.to),
-                    dialect.quote_ident(&rel.on),
-                );
-                // #1549 — this is the path system migrations take, and
-                // it was silently dropping the declared action.
-                if let Some(action) = &rel.on_delete {
-                    let _ = write!(s, " ON DELETE {action}");
-                }
-                s
-            })
+            f.fk.as_ref()
+                .map(|rel| field_fk_sql(&t.name, &f.column, rel, dialect, schema))
         })
         .collect();
     for cf in &t.composite_fks {
@@ -1485,6 +1575,45 @@ fn constraints_sql_from_snapshot(
         ));
     }
     out
+}
+
+/// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
+fn inline_references(rel: &RelationSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    let mut s = format!(
+        " REFERENCES {} ({})",
+        dialect.quote_ident(&rel.to),
+        dialect.quote_ident(&rel.on),
+    );
+    // #1549 — the declared action, or the constraint lands as
+    // NO ACTION and a declared cascade becomes a refusal.
+    if let Some(action) = &rel.on_delete {
+        let _ = write!(s, " ON DELETE {action}");
+    }
+    s
+}
+
+/// `ALTER TABLE … ADD CONSTRAINT <table>_<column>_fkey FOREIGN KEY …`.
+fn field_fk_sql(
+    table: &str,
+    column: &str,
+    rel: &RelationSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> String {
+    let mut s = format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        dialect.quote_ident(table),
+        dialect.quote_ident(&super::ddl::fk_constraint_name(table, column)),
+        dialect.quote_ident(column),
+        fk_target(dialect, schema, &rel.to),
+        dialect.quote_ident(&rel.on),
+    );
+    // #1549 — this is the path system migrations take, and
+    // it was silently dropping the declared action.
+    if let Some(action) = &rel.on_delete {
+        let _ = write!(s, " ON DELETE {action}");
+    }
+    s
 }
 
 /// Render a column `DEFAULT` expression for CREATE TABLE / ADD COLUMN.
@@ -1537,7 +1666,21 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         }
         sql.push(')');
     }
+    // SQLite cannot `ADD CONSTRAINT`; its FK rides on the column (#1877).
+    if let Some(rel) = inline_fk_on_add_column(f, dialect) {
+        sql.push_str(&inline_references(rel, dialect));
+    }
     sql
+}
+
+/// SQLite's inline FK for `ADD COLUMN`. With `foreign_keys=ON` SQLite
+/// refuses `REFERENCES` beside a non-NULL default once the table has rows.
+fn inline_fk_on_add_column<'a>(
+    f: &'a FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<&'a RelationSnapshot> {
+    f.fk.as_ref()
+        .filter(|_| dialect.inline_fks_in_create_table() && f.default.is_none())
 }
 
 #[cfg(test)]
@@ -1708,6 +1851,60 @@ mod sql_type_tests {
                 vec!["ALTER TABLE `t` DROP COLUMN `c`".to_string()]
             );
         }
+    }
+
+    /// `a_b.c` and `a.b_c` both shorten to `a_b_c_key`.
+    fn clashing_uniques() -> SchemaSnapshot {
+        let uniq = |t: &str, c: &str| TableSnapshot {
+            name: t.into(),
+            model: t.into(),
+            fields: vec![FieldSnapshot {
+                name: c.into(),
+                column: c.into(),
+                unique: true,
+                nullable: true,
+                ..fs("i64", false)
+            }],
+            composite_fks: vec![],
+        };
+        SchemaSnapshot {
+            tables: vec![uniq("a_b", "c"), uniq("a", "b_c")],
+            ..SchemaSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn clashing_unique_names_are_refused() {
+        use crate::migrate::SchemaChange;
+        let snap = clashing_uniques();
+        let err = render_changes_split_with_dialect(
+            &[SchemaChange::CreateTable("a_b".into())],
+            &snap,
+            &crate::sql::Postgres,
+        )
+        .expect_err("two UNIQUEs named a_b_c_key");
+        assert!(
+            err.contains("`a_b_c_key`") && err.contains("`a.b_c`"),
+            "{err}"
+        );
+    }
+
+    /// A dropped `a_b.c` must not drop `a.b_c`'s index.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_drop_column_keeps_another_tables_unique_index() {
+        use crate::migrate::SchemaChange;
+        let mut snap = clashing_uniques();
+        snap.tables.remove(0);
+        let drop = [SchemaChange::DropColumn {
+            table: "a_b".into(),
+            column: "c".into(),
+        }];
+        let out = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
+        assert_eq!(out.immediate, vec![r#"ALTER TABLE "a_b" DROP COLUMN "c""#]);
+        let out =
+            render_changes_split_with_dialect(&drop, &empty_snap(), &crate::sql::Sqlite).unwrap();
+        assert_eq!(out.immediate[0], r#"DROP INDEX IF EXISTS "a_b_c_key""#);
     }
 
     // -------- guard_alter_column_dialect (#559 protection) --------

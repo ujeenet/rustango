@@ -40,6 +40,22 @@ pub(super) struct Sql<'d> {
     /// aggregating query's projection, HAVING or ORDER BY, which are
     /// the places SQL accepts an aggregate call.
     pub aggregate_allowed: bool,
+    /// Set while writing a grouped aggregate's HAVING and ORDER BY over
+    /// a derived table. See [`DerivedJoins`].
+    pub derived_joins: Option<DerivedJoins>,
+    /// `(scope depth, alias, target)` of every model join in the open
+    /// queries, so the writer can type an aliased column.
+    pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
+}
+
+/// The joins a grouped aggregate's derived table hides. An aliased
+/// column on one of them reads the derived `"<table>"."<alias>__<col>"`,
+/// but only at `depth`: a nested query pushes a scope frame and sees
+/// its own aliases.
+pub(super) struct DerivedJoins {
+    depth: usize,
+    table: &'static str,
+    aliases: Vec<&'static str>,
 }
 
 impl<'d> Sql<'d> {
@@ -51,6 +67,8 @@ impl<'d> Sql<'d> {
             scope_stack: Vec::new(),
             current_qualify_alias: None,
             aggregate_allowed: false,
+            derived_joins: None,
+            join_types: Vec::new(),
         }
     }
 
@@ -62,6 +80,8 @@ impl<'d> Sql<'d> {
             scope_stack: Vec::new(),
             current_qualify_alias: None,
             aggregate_allowed: false,
+            derived_joins: None,
+            join_types: Vec::new(),
         }
     }
 
@@ -79,8 +99,7 @@ impl<'d> Sql<'d> {
     /// own in `INSERT` or `UPDATE SET`.
     pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<&'static str>) {
         let needs_cast = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
-        self.params.push(value);
-        let p = self.d.placeholder(self.params.len());
+        let p = self.bind(value);
         self.sql.push_str(&p);
         if needs_cast {
             if let Some(ty) = cast {
@@ -88,6 +107,20 @@ impl<'d> Sql<'d> {
                 self.sql.push_str(ty);
             }
         }
+    }
+
+    /// Add `value` to the bind list and return its placeholder, which
+    /// a JSON value gets wrapped in by the dialect.
+    pub(super) fn bind(&mut self, value: SqlValue) -> String {
+        let is_json = matches!(value, SqlValue::Json(_));
+        self.params.push(value);
+        let p = self.d.placeholder(self.params.len());
+        if !is_json {
+            return p;
+        }
+        let mut wrapped = String::new();
+        self.d.write_json_param(&mut wrapped, &p);
+        wrapped
     }
 
     /// [`Self::push_param_typed`] with no cast, for values whose
@@ -492,6 +525,29 @@ fn write_subquery_joins(
 }
 
 fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    with_join_types(b, &query.joins, None, |b| write_select_body(b, query))
+}
+
+/// Run `f` with `joins` (and a derived `source`'s joins) typed at the
+/// current scope depth.
+fn with_join_types(
+    b: &mut Sql<'_>,
+    joins: &[crate::core::Join],
+    source: Option<&SelectQuery>,
+    f: impl FnOnce(&mut Sql<'_>) -> Result<(), SqlError>,
+) -> Result<(), SqlError> {
+    let mark = b.join_types.len();
+    let depth = b.scope_stack.len();
+    let src = source.map_or(&[][..], |s| &s.joins[..]);
+    for j in joins.iter().chain(src) {
+        b.join_types.push((depth, j.alias, j.target));
+    }
+    let r = f(b);
+    b.join_types.truncate(mark);
+    r
+}
+
+fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     // `.distinct_on(cols)` is native on PG. Elsewhere the window
     // fallback emits the whole statement, so return early.
     if let Some(crate::core::DistinctMode::On(cols)) = &query.distinct {
@@ -734,7 +790,9 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
     // The scope frame gives a HAVING predicate's aggregates a model
     // to resolve their COALESCE-default cast against.
     b.scope_stack.push(query.model);
-    let r = write_aggregate_inner(b, query);
+    let r = with_join_types(b, &query.joins, query.source.as_deref(), |b| {
+        write_aggregate_inner(b, query)
+    });
     b.scope_stack.pop();
     r
 }
@@ -825,6 +883,22 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
         }
     }
 
+    // HAVING and ORDER BY see the derived table, not its joins.
+    let prev_derived = b.derived_joins.take();
+    if let Some(src) = query.source.as_deref() {
+        b.derived_joins = Some(DerivedJoins {
+            depth: b.scope_stack.len(),
+            table: query.model.table,
+            aliases: src.joins.iter().map(|j| j.alias).collect(),
+        });
+    }
+    let r = write_aggregate_tail(b, query);
+    b.derived_joins = prev_derived;
+    r
+}
+
+/// The HAVING, ORDER BY and LIMIT of a grouped aggregate.
+fn write_aggregate_tail(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
     if let Some(having) = &query.having {
         b.sql.push_str(" HAVING ");
         // Aggregates are legal in HAVING. Restore afterwards so
@@ -842,9 +916,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
     b.aggregate_allowed = true;
     let r = write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None);
     b.aggregate_allowed = prev;
-    r?;
-
-    Ok(())
+    r
 }
 
 /// The cast an aggregate needs so the decoder can read it. Databases
@@ -1492,6 +1564,8 @@ fn write_expr(
                 BO::Add => "+",
                 BO::Sub => "-",
                 BO::Mul => "*",
+                // MySQL's `/` returns a decimal even for two integers.
+                BO::Div if b.d.name() == "mysql" && is_int_expr(b, expr) => "DIV",
                 BO::Div => "/",
                 BO::Mod => "%",
                 BO::BitAnd => "&",
@@ -1618,8 +1692,18 @@ fn write_expr(
             Ok(())
         }
         Expr::AliasedColumn { alias, column } => {
-            // An explicit `<alias>.<col>`, written as given.
-            let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column),);
+            // An explicit `<alias>.<col>`, written as given unless the
+            // join lives inside a derived table.
+            let qualified = match &b.derived_joins {
+                Some(dj) if dj.depth == b.scope_stack.len() && dj.aliases.contains(alias) => {
+                    format!(
+                        "{}.{}",
+                        b.d.quote_ident(dj.table),
+                        b.d.quote_ident(&format!("{alias}__{column}"))
+                    )
+                }
+                _ => format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column)),
+            };
             b.sql.push_str(&qualified);
             Ok(())
         }
@@ -1646,6 +1730,58 @@ fn write_expr(
             as_text,
         } => write_json_path(b, source, path, *as_text),
     }
+}
+
+/// The type of `expr` when the writer can tell: a literal, a column of
+/// the current model or a join, or integer arithmetic over those.
+fn expr_type(b: &Sql<'_>, expr: &crate::core::Expr) -> Option<crate::core::FieldType> {
+    use crate::core::{BinOp as BO, Expr, FieldType};
+    match expr {
+        Expr::Literal(v) => v.field_type(),
+        Expr::Column(c) if b.current_qualify_alias.is_none() => {
+            b.scope_stack.last()?.field_by_column(c).map(|f| f.ty)
+        }
+        Expr::AliasedColumn { alias, column } => {
+            alias_model(b, alias)?.field_by_column(column).map(|f| f.ty)
+        }
+        Expr::BinOp {
+            op: BO::Add | BO::Sub | BO::Mul | BO::Div | BO::Mod,
+            ..
+        } if is_int_expr(b, expr) => Some(FieldType::I64),
+        _ => None,
+    }
+}
+
+/// The model `alias` names, innermost query first: its joins, then its
+/// table.
+fn alias_model(b: &Sql<'_>, alias: &str) -> Option<&'static ModelSchema> {
+    (1..=b.scope_stack.len()).rev().find_map(|depth| {
+        b.join_types
+            .iter()
+            .rev()
+            .find(|(d, a, _)| *d == depth && *a == alias)
+            .map(|(_, _, m)| *m)
+            .or_else(|| Some(b.scope_stack[depth - 1]).filter(|m| m.table == alias))
+    })
+}
+
+/// True for arithmetic whose operands are both known integers.
+fn is_int_expr(b: &Sql<'_>, expr: &crate::core::Expr) -> bool {
+    use crate::core::{Expr, FieldType as T};
+    let int = |e: &Expr| matches!(expr_type(b, e), Some(T::I16 | T::I32 | T::I64));
+    matches!(expr, Expr::BinOp { left, right, .. } if int(left) && int(right))
+}
+
+/// Write a PG datetime argument, a timestamptz shifted to UTC so the
+/// result ignores the session TimeZone, as MySQL and SQLite do.
+fn write_pg_utc_arg(b: &mut Sql<'_>, arg: &crate::core::Expr) -> Result<(), SqlError> {
+    if expr_type(b, arg) != Some(crate::core::FieldType::DateTime) {
+        return write_expr(b, arg, None);
+    }
+    b.sql.push('(');
+    write_expr(b, arg, None)?;
+    b.sql.push_str(" AT TIME ZONE 'UTC')");
+    Ok(())
 }
 
 /// Emit a JSON-path traversal.
@@ -1741,11 +1877,12 @@ fn write_json_path(
     }
     if dialect == "mysql" {
         if as_text {
-            b.sql.push_str("JSON_UNQUOTE(JSON_EXTRACT(");
+            // A JSON null reads as SQL NULL, as PG's `->>` gives.
+            b.sql.push_str("JSON_UNQUOTE(NULLIF(JSON_EXTRACT(");
             write_expr(b, source, None)?;
             b.sql.push_str(", '");
             b.sql.push_str(&json_path);
-            b.sql.push_str("'))");
+            b.sql.push_str("'), CAST('null' AS JSON)))");
         } else {
             b.sql.push_str("JSON_EXTRACT(");
             write_expr(b, source, None)?;
@@ -1755,9 +1892,22 @@ fn write_json_path(
         }
         return Ok(());
     }
-    // SQLite's json_extract already returns scalars unquoted, so
-    // `as_text` changes nothing here.
-    let _ = as_text;
+    if as_text {
+        // json_extract returns 1/0 for booleans and numbers as numbers;
+        // PG's `->>` returns text such as 'true' and '1'.
+        b.sql.push_str("CASE json_type(");
+        write_expr(b, source, None)?;
+        b.sql.push_str(", '");
+        b.sql.push_str(&json_path);
+        b.sql.push_str(
+            "') WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' ELSE CAST(json_extract(",
+        );
+        write_expr(b, source, None)?;
+        b.sql.push_str(", '");
+        b.sql.push_str(&json_path);
+        b.sql.push_str("') AS TEXT) END");
+        return Ok(());
+    }
     b.sql.push_str("json_extract(");
     write_expr(b, source, None)?;
     b.sql.push_str(", '");
@@ -2157,7 +2307,11 @@ fn write_function(
             }
             // Every dialect spells this `DATE(x)`.
             b.sql.push_str("DATE(");
-            write_expr(b, &args[0], None)?;
+            if b.d.name() == "postgres" {
+                write_pg_utc_arg(b, &args[0])?;
+            } else {
+                write_expr(b, &args[0], None)?;
+            }
             b.sql.push(')');
             Ok(())
         }
@@ -3048,12 +3202,22 @@ fn write_extract_int(
     let dialect = b.d.name();
     if dialect == "postgres" {
         // EXTRACT returns NUMERIC; cast to INTEGER for return-type
-        // parity with MySQL's per-field functions.
-        b.sql.push_str("CAST(EXTRACT(");
+        // parity with MySQL's per-field functions. SECOND has a
+        // fraction the cast would round (59.7 to 60), so FLOOR it.
+        let floor = field == "SECOND";
+        b.sql.push_str(if floor {
+            "CAST(FLOOR(EXTRACT("
+        } else {
+            "CAST(EXTRACT("
+        });
         b.sql.push_str(field);
         b.sql.push_str(" FROM ");
-        write_expr(b, &args[0], None)?;
-        b.sql.push_str(") AS INTEGER)");
+        write_pg_utc_arg(b, &args[0])?;
+        b.sql.push_str(if floor {
+            ")) AS INTEGER)"
+        } else {
+            ") AS INTEGER)"
+        });
     } else if dialect == "mysql" {
         b.sql.push_str(field);
         b.sql.push('(');
@@ -3093,7 +3257,7 @@ fn write_extract_weekday(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<
     let dialect = b.d.name();
     if dialect == "postgres" {
         b.sql.push_str("CAST(EXTRACT(DOW FROM ");
-        write_expr(b, &args[0], None)?;
+        write_pg_utc_arg(b, &args[0])?;
         b.sql.push_str(") AS INTEGER)");
     } else if dialect == "mysql" {
         b.sql.push_str("(DAYOFWEEK(");
@@ -3141,6 +3305,10 @@ fn write_trunc(
         b.sql.push_str(pg_unit);
         b.sql.push_str("', ");
         write_expr(b, &args[0], None)?;
+        // Truncate a timestamptz in UTC, not the session TimeZone.
+        if expr_type(b, &args[0]) == Some(crate::core::FieldType::DateTime) {
+            b.sql.push_str(", 'UTC'");
+        }
         b.sql.push(')');
     } else if dialect == "mysql" {
         if matches!(kind, F::TruncDay) {
@@ -4064,8 +4232,7 @@ fn write_filter(
         }
         Op::IsDistinctFrom | Op::IsNotDistinctFrom => {
             require_op(b.d, filter.op)?;
-            b.params.push(filter.value.clone());
-            let p = b.d.placeholder(b.params.len());
+            let p = b.bind(filter.value.clone());
             b.d.write_null_safe_eq(
                 &mut b.sql,
                 &qualified_col,

@@ -88,6 +88,12 @@ pub fn create_table_sql_with_dialect(dialect: &dyn Dialect, model: &ModelSchema)
         first = false;
         write_column_def(&mut s, dialect, field);
     }
+    for field in model.scalar_fields() {
+        if field.unique && !field.primary_key && field.generated_as.is_none() {
+            s.push_str(", ");
+            s.push_str(&unique_clause(dialect, model.table, field.column));
+        }
+    }
     // SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN KEY`, so its
     // FKs must go inside this statement. PG and MySQL get theirs
     // afterwards from `create_constraints_sql_with_dialect`, which
@@ -197,11 +203,11 @@ pub fn drop_constraints_sql_with_dialect(
     let mut push = |name: String| out.extend(dialect.drop_foreign_key_sql(model.table, &name));
     for field in model.scalar_fields() {
         if field.relation.is_some() {
-            push(format!("{}_{}_fkey", model.table, field.column));
+            push(fk_constraint_name(model.table, field.column));
         }
     }
     for rel in model.composite_relations {
-        push(format!("{}_{}_fkey", model.table, rel.name));
+        push(fk_constraint_name(model.table, rel.name));
     }
     out
 }
@@ -228,7 +234,7 @@ pub fn create_constraints_sql_with_dialect(
         let mut s = String::from("ALTER TABLE ");
         s.push_str(&dialect.quote_ident(model.table));
         s.push_str(" ADD CONSTRAINT ");
-        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, field.column)));
+        s.push_str(&dialect.quote_ident(&fk_constraint_name(model.table, field.column)));
         s.push_str(" FOREIGN KEY (");
         s.push_str(&dialect.quote_ident(field.column));
         s.push_str(") REFERENCES ");
@@ -248,7 +254,7 @@ pub fn create_constraints_sql_with_dialect(
         let mut s = String::from("ALTER TABLE ");
         s.push_str(&dialect.quote_ident(model.table));
         s.push_str(" ADD CONSTRAINT ");
-        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, rel.name)));
+        s.push_str(&dialect.quote_ident(&fk_constraint_name(model.table, rel.name)));
         s.push_str(" FOREIGN KEY (");
         for (i, col) in rel.from.iter().enumerate() {
             if i > 0 {
@@ -271,6 +277,52 @@ pub fn create_constraints_sql_with_dialect(
     out
 }
 
+/// The name of the UNIQUE constraint on `table.column`, at most 63 bytes.
+///
+/// PostgreSQL's own `makeObjectName` rule, so it matches the name PG gave
+/// tables created with a bare inline `UNIQUE` (#1880).
+#[must_use]
+pub fn unique_constraint_name(table: &str, column: &str) -> String {
+    const LABEL: &str = "key";
+    // Two `_` separators plus the label; PG's NAMEDATALEN is 64.
+    let avail = 63 - (LABEL.len() + 2);
+    let (mut t, mut c) = (table.len(), column.len());
+    while t + c > avail {
+        if t > c {
+            t -= 1;
+        } else {
+            c -= 1;
+        }
+    }
+    format!("{}_{}_{LABEL}", clip(table, t), clip(column, c))
+}
+
+/// `<table>_<column>_fkey`, cut to 63 bytes: the name PG already stored
+/// for a longer one, and within MySQL's 64 (error 1059).
+#[must_use]
+pub fn fk_constraint_name(table: &str, column: &str) -> String {
+    let name = format!("{table}_{column}_fkey");
+    clip(&name, 63).to_owned()
+}
+
+fn clip(s: &str, n: usize) -> &str {
+    let mut n = n.min(s.len());
+    while !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    &s[..n]
+}
+
+/// Table-level `CONSTRAINT <name> UNIQUE (<col>)`: every dialect parses it,
+/// and unlike an inline `UNIQUE` it fixes the name.
+pub(crate) fn unique_clause(dialect: &dyn Dialect, table: &str, column: &str) -> String {
+    format!(
+        "CONSTRAINT {} UNIQUE ({})",
+        dialect.quote_ident(&unique_constraint_name(table, column)),
+        dialect.quote_ident(column)
+    )
+}
+
 // ============================================================ internals
 
 /// FK clauses to join with `, ` into a `CREATE TABLE (...)` body, for
@@ -286,7 +338,7 @@ fn inline_fk_clauses(dialect: &dyn Dialect, model: &ModelSchema) -> Vec<String> 
             Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
         };
         let mut s = String::from("CONSTRAINT ");
-        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, field.column)));
+        s.push_str(&dialect.quote_ident(&fk_constraint_name(model.table, field.column)));
         s.push_str(" FOREIGN KEY (");
         s.push_str(&dialect.quote_ident(field.column));
         s.push_str(") REFERENCES ");
@@ -302,7 +354,7 @@ fn inline_fk_clauses(dialect: &dyn Dialect, model: &ModelSchema) -> Vec<String> 
     }
     for rel in model.composite_relations {
         let mut s = String::from("CONSTRAINT ");
-        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, rel.name)));
+        s.push_str(&dialect.quote_ident(&fk_constraint_name(model.table, rel.name)));
         s.push_str(" FOREIGN KEY (");
         for (i, col) in rel.from.iter().enumerate() {
             if i > 0 {
@@ -363,9 +415,7 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     if field.primary_key && !serial_pk_inline {
         s.push_str(" PRIMARY KEY");
     }
-    if field.unique && !field.primary_key {
-        s.push_str(" UNIQUE");
-    }
+    // UNIQUE goes table-level, named, from `create_table_sql_with_dialect`.
     write_check_constraint(s, dialect, field);
     // MySQL puts `COMMENT '...'` on the column line. PG uses a
     // separate `COMMENT ON COLUMN` statement from
@@ -791,6 +841,42 @@ mod tests {
         assert!(
             sql.contains("ON DELETE CASCADE"),
             "expected inline ON DELETE CASCADE; got: {sql}"
+        );
+    }
+
+    /// PostgreSQL 16 stored this name for the untruncated one.
+    #[test]
+    fn fk_constraint_name_is_what_postgres_stored() {
+        assert_eq!(
+            fk_constraint_name("post", "author_id"),
+            "post_author_id_fkey"
+        );
+        assert_eq!(
+            fk_constraint_name(
+                "probe_c",
+                "subscription_notification_preferences_primary_contact_id"
+            ),
+            "probe_c_subscription_notification_preferences_primary_contact_i"
+        );
+    }
+
+    /// The names PostgreSQL 16 picked for a bare inline `UNIQUE` (#1880).
+    #[test]
+    fn unique_constraint_name_matches_postgres() {
+        assert_eq!(unique_constraint_name("post", "slug"), "post_slug_key");
+        assert_eq!(
+            unique_constraint_name(
+                "subscription_notification_preferences",
+                "primary_contact_email_address"
+            ),
+            "subscription_notification_pre_primary_contact_email_address_key"
+        );
+        assert_eq!(
+            unique_constraint_name(
+                "a_very_long_table_name_that_goes_on_and_on_and_on_forever_x",
+                "c"
+            ),
+            "a_very_long_table_name_that_goes_on_and_on_and_on_forever_c_key"
         );
     }
 }
