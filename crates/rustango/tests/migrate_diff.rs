@@ -496,6 +496,7 @@ fn render_alter_column_default_drop_emits_drop_default() {
 }
 
 #[test]
+/// No `USING`: a `::VARCHAR(n)` cast silently truncates (#1878).
 fn render_alter_column_max_length_emits_varchar_or_text() {
     let to_varchar = vec![SchemaChange::AlterColumnMaxLength {
         table: "u".into(),
@@ -506,7 +507,7 @@ fn render_alter_column_max_length_emits_varchar_or_text() {
     let ddl = render_changes(&to_varchar, &empty_snap()).unwrap();
     assert_eq!(
         ddl,
-        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE VARCHAR(64) USING "name"::VARCHAR(64)"#]
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE VARCHAR(64)"#]
     );
 
     let to_text = vec![SchemaChange::AlterColumnMaxLength {
@@ -518,7 +519,7 @@ fn render_alter_column_max_length_emits_varchar_or_text() {
     let ddl = render_changes(&to_text, &empty_snap()).unwrap();
     assert_eq!(
         ddl,
-        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE TEXT USING "name"::TEXT"#]
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE TEXT"#]
     );
 }
 
@@ -940,5 +941,170 @@ fn unchanged_index_emits_nothing() {
             SchemaChange::DropIndex { .. } | SchemaChange::CreateIndex { .. }
         )),
         "no index change → no Drop/CreateIndex; got {changes:?}",
+    );
+}
+
+// ---------------- #1877–#1881 review follow-ups ----------------
+
+fn snap(v: serde_json::Value) -> SchemaSnapshot {
+    serde_json::from_value(v).expect("snapshot JSON")
+}
+
+/// Author, book (FK + UNIQUE), a composite FK onto a unique index, a
+/// CHECK, an EXCLUDE and an M2M junction.
+fn full_schema(fk_to: &str, check: &str, exclude_where: &str) -> SchemaSnapshot {
+    let id = serde_json::json!({"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true});
+    let int = |c: &str| serde_json::json!({"name": c, "column": c, "ty": "i64", "nullable": true, "primary_key": false});
+    snap(serde_json::json!({
+        "tables": [
+            {"name": "rv_author", "model": "A", "fields": [id, int("a"), int("b")]},
+            {"name": "rv_other", "model": "O", "fields": [id, int("a"), int("b")]},
+            {"name": "rv_book", "model": "B", "fields": [id, int("a"), int("b"),
+                {"name": "author_id", "column": "author_id", "ty": "i64", "nullable": true,
+                 "primary_key": false, "fk": {"kind": "fk", "to": "rv_author", "on": "id"}},
+                {"name": "isbn", "column": "isbn", "ty": "string", "nullable": true,
+                 "primary_key": false, "max_length": 20, "unique": true}],
+             "composite_fks": [{"name": "rv_book_ab_fk", "to": fk_to, "from": ["a", "b"], "on": ["a", "b"]}]},
+        ],
+        "indexes": [
+            {"name": "rv_author_ab_uq", "table": "rv_author", "columns": ["a", "b"], "unique": true},
+            {"name": "rv_other_ab_uq", "table": "rv_other", "columns": ["a", "b"], "unique": true},
+        ],
+        "checks": [{"name": "rv_book_ck", "table": "rv_book", "expr": check}],
+        "excludes": [{"name": "rv_book_ex", "table": "rv_book", "using": "gist",
+                      "elements": [["a", "="]], "where_clause": exclude_where}],
+        "m2m_tables": [{"through": "rv_book_tags", "src_table": "rv_book", "src_col": "book_id",
+                        "dst_table": "rv_author", "dst_col": "author_id"}],
+    }))
+}
+
+/// `makemigrations` on an unchanged schema writes nothing, for every
+/// object the diff compares whole.
+#[test]
+fn unchanged_schema_with_every_constraint_kind_emits_nothing() {
+    let s = full_schema("rv_author", "a >= 0", "a > 0");
+    assert_eq!(detect_changes(&s, &s.clone()), vec![]);
+}
+
+/// Two models sharing one junction give the same snapshot in either
+/// `inventory` order, so the diff between them is empty.
+#[test]
+fn shared_through_pair_emits_nothing_in_either_order() {
+    use rustango::core::{M2MRelation, ModelSchema};
+    const M2M: &[M2MRelation] = &[M2MRelation::new(
+        "tags",
+        "rv_tag",
+        "rv_shared_tags",
+        "item_id",
+        "tag_id",
+    )];
+    const fn model(name: &'static str, table: &'static str) -> ModelSchema {
+        let mut s = ModelSchema::new(name, table);
+        s.m2m = M2M;
+        s
+    }
+    static POST: ModelSchema = model("Post", "rv_post");
+    static NOTE: ModelSchema = model("Note", "rv_note");
+    let a = SchemaSnapshot::from_models(&[&POST, &NOTE]);
+    let b = SchemaSnapshot::from_models(&[&NOTE, &POST]);
+    assert_eq!(detect_changes(&a, &b), vec![]);
+}
+
+/// Each edited object is dropped and added again with its new shape, and
+/// the recreated composite FK comes after the unique index it needs.
+#[test]
+fn edited_constraints_are_recreated_with_the_new_shape() {
+    let prev = full_schema("rv_author", "a >= 0", "a > 0");
+    let mut cur = full_schema("rv_other", "a > 0", "a > 1");
+    cur.indexes[1].columns = vec!["b".into(), "a".into()];
+    let changes = detect_changes(&prev, &cur);
+    let pos = |f: &dyn Fn(&SchemaChange) -> bool| {
+        changes
+            .iter()
+            .position(f)
+            .unwrap_or_else(|| panic!("missing in {changes:#?}"))
+    };
+    let add_fk = pos(
+        &|c| matches!(c, SchemaChange::AddCompositeFk { to, on, .. } if to == "rv_other" && on == &["a", "b"]),
+    );
+    pos(&|c| matches!(c, SchemaChange::DropCompositeFk { name, .. } if name == "rv_book_ab_fk"));
+    pos(&|c| matches!(c, SchemaChange::AddCheckConstraint { expr, .. } if expr == "a > 0"));
+    pos(
+        &|c| matches!(c, SchemaChange::AddExclusionConstraint { where_clause: Some(w), .. } if w == "a > 1"),
+    );
+    let create_ix =
+        pos(&|c| matches!(c, SchemaChange::CreateIndex { name, .. } if name == "rv_other_ab_uq"));
+    assert!(
+        create_ix < add_fk,
+        "the index must exist before the FK: {changes:#?}"
+    );
+}
+
+/// Dropping everything: dependents before their tables, tables child
+/// first. Checked on the op order, because PG and SQLite `CASCADE` or
+/// skip FK checks and would hide a wrong order.
+#[test]
+fn drops_come_before_what_they_hang_off() {
+    let prev = full_schema("rv_author", "a >= 0", "a > 0");
+    let changes = detect_changes(&prev, &SchemaSnapshot::default());
+    let pos = |f: &dyn Fn(&SchemaChange) -> bool| {
+        changes
+            .iter()
+            .position(f)
+            .unwrap_or_else(|| panic!("missing in {changes:#?}"))
+    };
+    let table = |t: &'static str| pos(&move |c| matches!(c, SchemaChange::DropTable(n) if n == t));
+    let (author, book) = (table("rv_author"), table("rv_book"));
+    assert!(book < author, "child first: {changes:#?}");
+    for dep in [
+        pos(&|c| matches!(c, SchemaChange::DropM2MTable { .. })),
+        pos(&|c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "rv_author_ab_uq")),
+        pos(&|c| matches!(c, SchemaChange::DropCheckConstraint { .. })),
+        pos(&|c| matches!(c, SchemaChange::DropExclusionConstraint { .. })),
+    ] {
+        assert!(dep < book && dep < author, "{changes:#?}");
+    }
+}
+
+/// A dropped column goes after its index.
+#[test]
+fn column_drops_after_its_index() {
+    let prev = full_schema("rv_author", "a >= 0", "a > 0");
+    let mut cur = prev.clone();
+    cur.tables[0]
+        .fields
+        .retain(|f| f.column != "a" && f.column != "b");
+    cur.indexes.remove(0);
+    let changes = detect_changes(&prev, &cur);
+    let ix = changes.iter().position(
+        |c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "rv_author_ab_uq"),
+    );
+    let col = changes
+        .iter()
+        .position(|c| matches!(c, SchemaChange::DropColumn { table, .. } if table == "rv_author"));
+    assert!(ix.is_some() && ix < col, "{changes:#?}");
+}
+
+/// `i32` → `String(5)`: the type change, then the length, or the TEXT
+/// the type change renders would win (#1878).
+#[test]
+fn type_change_into_a_string_runs_before_its_length() {
+    let t = |ty: &str, len: Option<u32>| {
+        snap(
+            serde_json::json!({"tables": [{"name": "rv_t", "model": "T", "fields": [
+            {"name": "c", "column": "c", "ty": ty, "nullable": true, "primary_key": false,
+             "max_length": len}]}]}),
+        )
+    };
+    let changes = detect_changes(&t("i32", None), &t("string", Some(5)));
+    assert!(
+        matches!(
+            changes.as_slice(),
+            [
+                SchemaChange::AlterColumnType { .. },
+                SchemaChange::AlterColumnMaxLength { to: Some(5), .. }
+            ]
+        ),
+        "{changes:#?}"
     );
 }

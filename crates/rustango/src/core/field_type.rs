@@ -24,7 +24,8 @@ pub enum FieldType {
     Uuid,
     Json,
     /// Exact fixed-point decimal.
-    /// Postgres `NUMERIC`, MySQL `DECIMAL(38, 10)`, SQLite `NUMERIC`.
+    /// Postgres `NUMERIC`, MySQL `DECIMAL(65, 28)`, SQLite `NUMERIC`
+    /// (affinity keeps only ~15 significant digits there).
     /// Rust type: `rust_decimal::Decimal`. Use it for money and other
     /// data where `f64` rounding would be wrong.
     Decimal,

@@ -4,6 +4,72 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.12] — 2026-10-01
+
+### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)
+
+Same-name edits migrate as Drop + Add, and `Option<T>` → `T` with a default fills NULLs before `SET NOT NULL`.
+A junction, CHECK, EXCLUDE or index name shared by two models now resolves in a fixed order, not `inventory` order.
+
+### Fixed — a `max_length` change no longer undoes a type change (#1878)
+
+Shrinking a length on PostgreSQL now refuses over longer values instead of truncating them.
+
+### Fixed — migrations drop dependents first (#1879)
+
+Indexes, checks, composite FKs and M2M junctions drop before their columns and tables,
+and tables child first; SQLite and MySQL refused the old order.
+
+### Fixed — `AddColumn` keeps the field's FK and UNIQUE (#1877)
+
+As `CREATE TABLE` does; SQLite gets inline `REFERENCES` and a unique index.
+On SQLite a column with a default skips the FK and warns: SQLite refuses it on a table with rows.
+
+### Fixed — removing `unique` works for long table and column names (#1880)
+
+Every UNIQUE is named by one 63-byte helper (PG's rule), so the drop finds it.
+FK names are cut to 63 bytes, as PG already stored them, so MySQL no longer refuses long ones (1059).
+Two columns whose names shorten to one UNIQUE name are refused with an error.
+
+### Fixed — grouped aggregate `having` / `order_by` on a joined column (#1975)
+
+Over a derived table (distinct, limit, …) they now read the projected `alias__col`; a subquery inside them keeps its own aliases.
+`order_by(&[("a.name", ..)])` on a grouped aggregate now names `"a"."name"`, not one `"a.name"` identifier.
+
+### Fixed — integer division, `__second` and date lookups agree across backends (#1900)
+
+MySQL divides two integer expressions with `DIV`; PostgreSQL floors `__second` (59.7 is 59).
+PostgreSQL date lookups and `trunc_*` on a `DateTime` column, also across a relation, read it in UTC, not the session TimeZone.
+
+### Fixed — `Decimal` keeps its digits on MySQL; whole decimals show on SQLite (#1899)
+
+MySQL `Decimal` columns are now `DECIMAL(65, 28)`, wide enough for every `rust_decimal` value.
+The SQLite row decoder no longer shows a whole-number decimal as null.
+
+### Fixed — JSON equality on MySQL; `as_text` JSON paths on SQLite (#1898)
+
+MySQL now binds a JSON value as `CAST(? AS JSON)` (also for `<=>`), so `filter("data", json)` matches; its `as_text` of a JSON null is NULL.
+SQLite's `json_path(.., as_text = true)` returns text for numbers and booleans (`'1'`, `'true'`); other formatting can still differ from PostgreSQL.
+
+### Fixed — a model on table `audit` no longer grants the audit feed (#1979)
+
+The feed now needs `rustango_audit_log.view_feed` / `.clean_feed`, which no model's CRUD codename
+can equal. The old `audit.*` names still work while no model uses table `audit`.
+
+### Fixed — a parent with 1000+ inline children can be saved again (#1977)
+
+The edit form renders at most `MAX_FORMS` inline slots and links the child list for the rest.
+Rows it leaves out are not touched by the save.
+
+### Fixed — an INSERT whose generated PK can't be read back writes no row (#1978, #1969)
+
+On MySQL a non-integer DB-default PK is refused before the INSERT, so a re-submit can't duplicate it.
+SQLite reads a TEXT UUID default back. A submitted PK is reported as written (#1969, via #1894).
+
+### Fixed — `JtiStore` docs no longer suggest `rows_affected` after `DO NOTHING` (#1968)
+
+A MySQL skip reports one row too, so a replay passed. The example uses `sql::insert_or_ignore`.
+
 ## [0.59.11] — 2026-09-30
 
 ### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)

@@ -433,3 +433,158 @@ async fn generic_inline_cannot_touch_another_parents_row() {
         .unwrap();
     assert_eq!(names, vec![("b-tag".to_owned(),)]);
 }
+
+/// Field names differ from the GFK columns, so the overflow link must map them.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "gigc_post")]
+#[rustango(app = "gige_blog")]
+#[allow(dead_code)]
+pub struct CapPost {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "gigc_note")]
+#[rustango(app = "gige_blog")]
+#[rustango(generic_fk(name = "target", ct_column = "ct_id", pk_column = "obj_id"))]
+#[allow(dead_code)]
+pub struct CapNote {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(column = "ct_id")]
+    pub kind: i64,
+    #[rustango(column = "obj_id")]
+    pub target_pk: i64,
+    #[rustango(max_length = 40)]
+    pub name: String,
+}
+
+register_admin_inline_generic!(
+    parent = "gigc_post",
+    child = "gigc_note",
+    ct = "ct_id",
+    pk = "obj_id",
+    kind = InlineKind::Tabular,
+    label = "Notes",
+    fields = &["name"],
+    extra = 2,
+);
+
+async fn get_html(app: &axum::Router, uri: &str) -> String {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "{uri}");
+    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// Past the formset cap the generic inline renders a TOTAL_FORMS the POST
+/// accepts and links the rest by field name (#1977).
+#[tokio::test]
+async fn generic_inline_past_the_cap_saves_and_links_the_rest() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let p = rustango::sql::Pool::from(pool.clone());
+    contenttypes::ensure_seeded(&p).await.unwrap();
+    for sql in [
+        r#"DROP TABLE IF EXISTS "gigc_note", "gigc_post" CASCADE"#,
+        r#"CREATE TABLE "gigc_post" (id BIGSERIAL PRIMARY KEY, title VARCHAR(200) NOT NULL)"#,
+        r#"CREATE TABLE "gigc_note" (id BIGSERIAL PRIMARY KEY, ct_id BIGINT NOT NULL,
+               obj_id BIGINT NOT NULL, name VARCHAR(40) NOT NULL)"#,
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let ct = contenttypes::ContentType::get_for_model::<CapPost>(&p)
+        .await
+        .unwrap()
+        .unwrap();
+    let ct = *ct.id.get().unwrap();
+    let mut posts = Vec::new();
+    for title in ["Big", "Other"] {
+        let mut post = CapPost {
+            id: Auto::Unset,
+            title: title.into(),
+        };
+        post.save_pool(&p).await.unwrap();
+        posts.push(*post.id.get().unwrap());
+    }
+    let (pk, other) = (posts[0], posts[1]);
+    sqlx::query(r#"INSERT INTO "gigc_note" (ct_id, obj_id, name) VALUES ($1, $2, 'other')"#)
+        .bind(ct)
+        .bind(other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"INSERT INTO "gigc_note" (ct_id, obj_id, name)
+           SELECT $1, $2, 'n' || g FROM generate_series(1, 1001) g"#,
+    )
+    .bind(ct)
+    .bind(pk)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ids: Vec<i64> =
+        sqlx::query_scalar(r#"SELECT id FROM "gigc_note" WHERE obj_id = $1 ORDER BY id"#)
+            .bind(pk)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+    let app = rustango::admin::Builder::new(p.clone())
+        .admin_prefix("")
+        .build();
+    let html = get_html(&app, &format!("/gigc_post/{pk}/edit")).await;
+    let marker = r#"name="gigc_note-TOTAL_FORMS" value=""#;
+    let at = html.find(marker).expect("management form") + marker.len();
+    let total = html[at..at + html[at..].find('"').unwrap()].to_owned();
+
+    let more = html.find("inline-form-more").expect("overflow link");
+    let at = more + html[more..].find(r#"href=""#).unwrap() + 6;
+    let href = html[at..at + html[at..].find('"').unwrap()]
+        .replace("&amp;", "&")
+        .replace("&#x2F;", "/");
+    assert_eq!(href, format!("/gigc_note?kind={ct}&target_pk={pk}"));
+    let list = get_html(&app, &href).await;
+    assert!(list.contains("&mdash; 1001 rows"), "link filters the list");
+
+    let (id0, id1) = (ids[0].to_string(), ids[1].to_string());
+    let form: HashMap<&str, &str> = HashMap::from([
+        ("title", "Big"),
+        ("gigc_note-TOTAL_FORMS", total.as_str()),
+        ("gigc_note-0-id", id0.as_str()),
+        ("gigc_note-0-name", "renamed"),
+        ("gigc_note-1-id", id1.as_str()),
+        ("gigc_note-1-name", "n2"),
+        ("gigc_note-1-DELETE", "on"),
+    ]);
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/gigc_post/{pk}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(urlencode(&form)))
+        .unwrap();
+    let status = app.clone().oneshot(req).await.unwrap().status();
+    assert!(status.is_redirection(), "TOTAL_FORMS={total}: got {status}");
+
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as(r#"SELECT id, name FROM "gigc_note" WHERE obj_id = $1 ORDER BY id"#)
+            .bind(pk)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1000, "one rendered row deleted, the rest kept");
+    assert_eq!(rows[0], (ids[0], "renamed".to_owned()));
+    assert_ne!(rows[1].0, ids[1], "ticked row is gone");
+    assert_eq!(
+        rows.last().unwrap().0,
+        *ids.last().unwrap(),
+        "unrendered row kept"
+    );
+}

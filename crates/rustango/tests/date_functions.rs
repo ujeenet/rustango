@@ -107,7 +107,7 @@ fn pg_extract_year_emits_extract_from_with_int_cast() {
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
         stmt.sql
-            .contains(r#"CAST(EXTRACT(YEAR FROM "created_at") AS INTEGER)"#),
+            .contains(r#"CAST(EXTRACT(YEAR FROM ("created_at" AT TIME ZONE 'UTC')) AS INTEGER)"#),
         "got: {}",
         stmt.sql
     );
@@ -171,7 +171,7 @@ fn pg_extract_weekday_uses_dow_with_int_cast() {
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
         stmt.sql
-            .contains(r#"CAST(EXTRACT(DOW FROM "created_at") AS INTEGER)"#),
+            .contains(r#"CAST(EXTRACT(DOW FROM ("created_at" AT TIME ZONE 'UTC')) AS INTEGER)"#),
         "got: {}",
         stmt.sql
     );
@@ -257,7 +257,8 @@ fn pg_trunc_year_emits_date_trunc_with_year_unit() {
     let q = update_set(trunc_year(F("created_at")));
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
-        stmt.sql.contains(r#"DATE_TRUNC('year', "created_at")"#),
+        stmt.sql
+            .contains(r#"DATE_TRUNC('year', "created_at", 'UTC')"#),
         "got: {}",
         stmt.sql
     );
@@ -289,7 +290,9 @@ fn sqlite_trunc_year_emits_strftime_with_year_template() {
 fn pg_trunc_month_emits_date_trunc_with_month_unit() {
     let q = update_set(trunc_month(F("created_at")));
     let stmt = Postgres.compile_update(&q).unwrap();
-    assert!(stmt.sql.contains(r#"DATE_TRUNC('month', "created_at")"#));
+    assert!(stmt
+        .sql
+        .contains(r#"DATE_TRUNC('month', "created_at", 'UTC')"#));
 }
 
 #[test]
@@ -318,7 +321,9 @@ fn sqlite_trunc_month_emits_strftime_with_month_template() {
 fn pg_trunc_day_emits_date_trunc() {
     let q = update_set(trunc_day(F("created_at")));
     let stmt = Postgres.compile_update(&q).unwrap();
-    assert!(stmt.sql.contains(r#"DATE_TRUNC('day', "created_at")"#));
+    assert!(stmt
+        .sql
+        .contains(r#"DATE_TRUNC('day', "created_at", 'UTC')"#));
 }
 
 #[test]
@@ -357,8 +362,9 @@ fn extract_year_of_F_column_composes_with_other_funcs() {
     let q = update_set(nested);
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
-        stmt.sql
-            .contains(r#"GREATEST(CAST(EXTRACT(YEAR FROM "created_at") AS INTEGER), $1)"#),
+        stmt.sql.contains(
+            r#"GREATEST(CAST(EXTRACT(YEAR FROM ("created_at" AT TIME ZONE 'UTC')) AS INTEGER), $1)"#
+        ),
         "got: {}",
         stmt.sql
     );
