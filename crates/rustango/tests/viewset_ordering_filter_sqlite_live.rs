@@ -382,3 +382,26 @@ async fn ordering_is_closed_when_the_serializer_renders_no_model_field() {
     let body = body_json(resp).await;
     assert_eq!(ids(&body), vec![1, 2, 3], "secret order leaked: {body}");
 }
+
+/// `.ordering_fields(&[])` makes nothing sortable, not every rendered field.
+#[tokio::test]
+async fn an_empty_ordering_fields_list_sorts_on_nothing() {
+    let pool = fresh_pool().await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+        .page_size(50)
+        .ordering(&[("id", false)])
+        .ordering_fields(&[])
+        .router_pool("/posts", pool.clone());
+
+    seed_divergent(&pool).await;
+
+    for q in ["secret_score", "-rating"] {
+        let resp = app
+            .clone()
+            .oneshot(get(&format!("/posts?ordering={q}")))
+            .await
+            .unwrap();
+        let body = body_json(resp).await;
+        assert_eq!(ids(&body), vec![1, 2, 3], "?ordering={q} was honoured");
+    }
+}

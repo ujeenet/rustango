@@ -14,11 +14,12 @@ With no `.ordering(..)`, the list uses `default_order`, as ListView and the admi
 
 ### Fixed — a duplicate unique value on a `CreateView` is a form error (#2033)
 
-The form re-renders with `422` and an error on the taken field (`__all__` when no single field is to blame), not a `500`.
+The form re-renders with `422` and an error on the taken field (`__all__` when no single field is to blame), not a `500`, on `router` and `tenant_router`.
 
 ### Security — an empty `?ordering=` allow-list permits nothing (#1996)
 
 `list_params::parse_ordering` with an empty allow-list drops every token, so a serializer that renders no model field no longer makes every column a sort key.
+`ViewSet::ordering_fields(&[])` makes nothing sortable.
 
 ### Security — ViewSet bulk create is capped; the throttle map is bounded (#1999)
 

@@ -686,10 +686,9 @@ pub struct ViewSet {
     fields: Option<Vec<String>>,
     filter_fields: Vec<String>,
     search_fields: Vec<String>,
-    /// Allow-list for `?ordering=`. When non-empty, only these fields
-    /// are honored and unknown names are dropped. Empty (the default)
-    /// means the fields the response renders.
-    ordering_fields: Vec<String>,
+    /// Allow-list for `?ordering=`. `None` (the default) means the
+    /// fields the response renders; `Some(empty)` means none.
+    ordering_fields: Option<Vec<String>>,
     default_page_size: usize,
     default_ordering: Vec<(String, bool)>,
     perms: ViewSetPerms,
@@ -727,7 +726,7 @@ impl ViewSet {
             fields: None,
             filter_fields: Vec::new(),
             search_fields: Vec::new(),
-            ordering_fields: Vec::new(),
+            ordering_fields: None,
             default_page_size: 20,
             default_ordering: Vec::new(),
             perms: ViewSetPerms::default(),
@@ -938,9 +937,10 @@ impl ViewSet {
     /// Allow-list for `?ordering=`. When set, only these names are
     /// honored; unknown ones are dropped, so a client cannot sort on
     /// a sensitive column. Unset (the default) means the fields the
-    /// response renders; none when it renders none (#1996).
+    /// response renders; none when it renders none (#1996). An empty
+    /// slice makes nothing sortable.
     pub fn ordering_fields(mut self, fields: &[&str]) -> Self {
-        self.ordering_fields = fields.iter().map(|&s| s.to_owned()).collect();
+        self.ordering_fields = Some(fields.iter().map(|&s| s.to_owned()).collect());
         self
     }
 
@@ -2242,14 +2242,13 @@ async fn run_list(
     //
     // `list_params::parse_ordering` is the single source of truth,
     // shared with `template_views::ListView`.
-    let ordering_allowlist: Vec<String> = if state.vs.ordering_fields.is_empty() {
-        state
+    let ordering_allowlist: Vec<String> = match &state.vs.ordering_fields {
+        Some(allowed) => allowed.clone(),
+        None => state
             .rendered_fields()
             .iter()
             .map(|f| f.name.to_owned())
-            .collect()
-    } else {
-        state.vs.ordering_fields.clone()
+            .collect(),
     };
     let order_by: Vec<crate::core::OrderItem> = params
         .get("ordering")

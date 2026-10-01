@@ -165,6 +165,7 @@ A template must render `form.errors` (`__all__` for a row-level error) to show i
 ### `list_params::parse_ordering` with an empty allow-list sorts on nothing (#1996)
 
 Pass the sortable names explicitly; empty no longer means every field.
+`ViewSet::ordering_fields(&[])` now disables `?ordering=` instead of allowing the rendered fields.
 
 ### ViewSet bulk create takes at most 1000 rows (#1999)
 
