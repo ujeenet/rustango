@@ -15,6 +15,7 @@ The preview used PostgreSQL SQL; it now uses the target dialect and the previous
 ### Fixed — a regenerated system chain restores missing indexes (#2016)
 
 Converge adds a framework table's missing indexes too, and warns about leftover columns it will not drop.
+It also warns when an index's name is taken by one on another table or other columns.
 
 ### Fixed — schema-mode tenant FKs no longer bind to `public` (#1718)
 

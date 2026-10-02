@@ -359,6 +359,58 @@ async fn later_index_on_owned(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
+/// #2016 — a converged index whose name is taken by one on other columns is reported.
+async fn clashing_index_is_reported(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "idxclash").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let first = read(&tenant_file(&root.join("system/migrations")));
+    let idx = first["snapshot"]["indexes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["columns"] != json!(["id"]))
+        .expect("a tenant index not on `id`")
+        .clone();
+    let (table, index) = (
+        idx["table"].as_str().unwrap(),
+        idx["name"].as_str().unwrap(),
+    );
+    let dir = root.join("migrations");
+    let mut clash = idx.clone();
+    clash["columns"] = json!(["id"]);
+    clash["unique"] = json!(false);
+    write_step(
+        &dir,
+        "0001_initial",
+        None,
+        json!({ "tables": [current_table(table, None)], "indexes": [clash] }),
+        vec![
+            json!({ "CreateTable": table }),
+            json!({ "CreateIndex": { "name": index, "table": table, "columns": ["id"],
+                                     "unique": false } }),
+        ],
+    );
+    let buf = rustango::testkit::CaptureWriter::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    manage_migrate(&pool, &dir).await.expect("migrate");
+    let logged = buf.contents();
+    assert!(
+        logged.contains(&format!("index `{index}` is on `{table}` (id)")),
+        "{logged}"
+    );
+}
+
 /// A system step that only FK-references an owned table runs without first
 /// adding that table's unrelated columns; `finish` reports what it can't add.
 async fn fk_only_step_adds_only_targets(backend: Backend) {
@@ -1056,6 +1108,7 @@ per_backend!(
     owned_table_dropped_later,
     not_null_column_on_empty_table,
     later_index_on_owned,
+    clashing_index_is_reported,
     fk_only_step_adds_only_targets,
     nested_lock_is_an_error,
 );

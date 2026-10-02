@@ -2170,7 +2170,35 @@ async fn converge_regenerated(
             );
         }
     }
-    Ok(super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?)
+    let failed = super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?;
+    warn_on_index_clash(pool, mig).await?;
+    Ok(failed)
+}
+
+/// An index create that hit an existing name was skipped; warn when that
+/// live index is on another table or other columns (#2016).
+async fn warn_on_index_clash(pool: &crate::sql::Pool, mig: &Migration) -> Result<(), MigrateError> {
+    let schema = super::ensure::creation_schema(pool)
+        .await?
+        .unwrap_or_default();
+    for idx in &mig.snapshot.indexes {
+        let live = super::inspectdb::index_columns(pool, &schema, &idx.table, &idx.name).await?;
+        let Some((table, _)) = live.first() else {
+            continue;
+        };
+        let columns: Vec<&str> = live.iter().map(|(_, c)| c.as_str()).collect();
+        if table != &idx.table || columns != idx.columns {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "index `{}` is on `{table}` ({}), not `{}` ({}); drop or rename it by hand",
+                idx.name,
+                columns.join(", "),
+                idx.table,
+                idx.columns.join(", "),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// How many of `tables` already exist in `pool`. Probes with
