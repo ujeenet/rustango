@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Bounded deletes and `IN (… LIMIT n)` on MySQL were already in; a `where_not_exists` + `outer_ref` delete is now tested on all three backends.
 
+### Fixed — media sweeps and deletes go through the ORM (#1571)
+
+`delete`, `purge`, `purge_orphans`, `purge_pending` and `delete_collection` no longer build SQL or bind order by hand.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)

@@ -654,24 +654,14 @@ impl MediaManager {
             Auto::Set(v) => v,
             _ => return Err(MediaError::Other("Media has no id".into())),
         };
-        let d = self.pool.dialect();
-        // Bind `Utc::now()` from Rust so one SQL string works on
-        // PG, MySQL and SQLite without a per-dialect `NOW()`.
-        let sql = format!(
-            "UPDATE rustango_media SET deleted_at = {now} WHERE id = {p}",
-            now = d.placeholder(1),
-            p = d.placeholder(2),
-        );
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &sql,
-            vec![
-                crate::core::SqlValue::DateTime(Utc::now()),
-                crate::core::SqlValue::I64(id),
-            ],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        use crate::sql::UpdaterPool as _;
+        Media::objects()
+            .where_(Media::id.eq(id))
+            .update()
+            .set("deleted_at", Utc::now())
+            .execute_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -704,20 +694,25 @@ impl MediaManager {
         // retry it.
         let storage = self.resolve_disk(&m.disk)?;
         storage.delete(&m.storage_key).await?;
-        let p = self.pool.dialect().placeholder(1);
         // Links first. `rustango_media_tag_links.media_id` has no
         // foreign key, so deleting the media row alone would leave
         // them behind, and `popular_tags` counts links.
         // One transaction, so a failed row delete keeps its links (#1573).
-        let unlink_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p}");
-        let sql = format!("DELETE FROM rustango_media WHERE id = {p}");
+        let unlink = MediaTagLink::objects()
+            .where_(MediaTagLink::media_id.eq(id))
+            .compile_delete()
+            .map_err(media_err_from_query)?;
+        let row = Media::objects()
+            .where_(Media::id.eq(id))
+            .compile_delete()
+            .map_err(media_err_from_query)?;
         let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
-        crate::sql::raw_execute_tx(&mut tx, &unlink_sql, vec![crate::core::SqlValue::I64(id)])
+        crate::sql::delete_tx(&mut tx, &unlink)
             .await
             .map_err(media_err_from_exec)?;
-        crate::sql::raw_execute_tx(&mut tx, &sql, vec![crate::core::SqlValue::I64(id)])
+        crate::sql::delete_tx(&mut tx, &row)
             .await
             .map_err(media_err_from_exec)?;
         tx.commit().await?;
@@ -799,25 +794,16 @@ impl MediaManager {
     /// [`Self::purge_orphans`] and [`Self::purge_orphans_dry_run`] so
     /// the dry run cannot drift from the real sweep.
     async fn orphans_older_than(&self, older_than: Duration) -> Result<Vec<Media>, MediaError> {
-        // Cutoff computed in Rust so one SQL string runs on PG,
-        // MySQL and SQLite without `NOW() - INTERVAL`.
+        use crate::sql::FetcherPool as _;
+        // Cutoff computed in Rust, so no per-dialect `NOW() - INTERVAL`.
         let cutoff = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!(
-            "SELECT id, disk, storage_key, mime, size_bytes, original_filename, \
-                    status, uploaded_at, uploaded_by_id, derived_from_id, \
-                    collection_id, metadata, deleted_at \
-               FROM rustango_media \
-              WHERE deleted_at IS NOT NULL AND deleted_at < {p}"
-        );
-        crate::sql::raw_query_pool(
-            &sql,
-            vec![crate::core::SqlValue::DateTime(cutoff)],
-            &self.pool,
-        )
-        .await
-        .map_err(media_err_from_exec)
+        Media::objects()
+            .where_(Media::deleted_at.is_not_null())
+            .where_(Media::deleted_at.lt(cutoff))
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)
     }
 
     /// Hard-delete Media rows still `Pending`, or `Failed`, after
@@ -875,10 +861,15 @@ impl MediaManager {
         // exist", rather than on the ids just deleted, makes this
         // race-free: a link whose media row is present is never
         // touched, and one whose row is absent is garbage.
-        let unlink_sql = "DELETE FROM rustango_media_tag_links \
-                           WHERE NOT EXISTS (SELECT 1 FROM rustango_media m \
-                                              WHERE m.id = rustango_media_tag_links.media_id)";
-        crate::sql::raw_execute_pool(&self.pool, unlink_sql, Vec::new())
+        let alive = Media::objects()
+            .where_(Media::id.eq_expr(crate::core::subquery::outer_ref("media_id")))
+            .compile()
+            .map_err(media_err_from_query)?;
+        let orphans = MediaTagLink::objects()
+            .where_not_exists(alive)
+            .compile_delete()
+            .map_err(media_err_from_query)?;
+        crate::sql::delete_pool(&self.pool, &orphans)
             .await
             .map_err(media_err_from_exec)?;
         first_err.map_or(Ok(purged), Err)
@@ -895,7 +886,7 @@ impl MediaManager {
             .where_(Media::id.eq(id))
             .where_(Media::status.eq(m.status.clone()))
             .compile_delete()
-            .map_err(|e| media_err_from_exec(e.into()))?;
+            .map_err(media_err_from_query)?;
         let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
@@ -1098,14 +1089,19 @@ impl MediaManager {
             ids.push(id);
         }
 
-        let d = self.pool.dialect();
-        let placeholders: Vec<String> = (1..=ids.len()).map(|i| d.placeholder(i)).collect();
-        let in_list = placeholders.join(", ");
-        let binds: Vec<crate::core::SqlValue> = ids
-            .iter()
-            .copied()
-            .map(crate::core::SqlValue::I64)
-            .collect();
+        // Media survives, as documented — it is orphaned, not deleted.
+        let orphan = Media::objects()
+            .where_(Media::collection_id.is_in(ids.iter().copied()))
+            .update()
+            .set("collection_id", crate::core::SqlValue::Null)
+            .compile()
+            .map_err(media_err_from_query)?;
+        let soft_delete = MediaCollection::objects()
+            .where_(MediaCollection::id.is_in(ids))
+            .update()
+            .set("deleted_at", Utc::now())
+            .compile()
+            .map_err(media_err_from_query)?;
 
         // Both statements in one transaction. Run separately, a
         // failure of the soft-delete leaves the orphaning committed:
@@ -1115,33 +1111,10 @@ impl MediaManager {
         let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
-
-        // Media survives, as documented — it is orphaned, not deleted.
-        let orphan_sql = format!(
-            "UPDATE rustango_media SET collection_id = NULL \
-              WHERE collection_id IN ({in_list})"
-        );
-        crate::sql::raw_execute_tx(&mut tx, &orphan_sql, binds.clone())
+        crate::sql::update_tx(&mut tx, &orphan)
             .await
             .map_err(media_err_from_exec)?;
-
-        // Bind `Utc::now()` from Rust so the SQL is portable.
-        //
-        // The timestamp binds **first**, because it appears first in
-        // the statement. `Dialect::placeholder(n)` ignores `n` and
-        // returns a positional `?` on every dialect except
-        // PostgreSQL, so the bind order must follow the order the
-        // placeholders appear in the text, not their numbers.
-        let p_now = d.placeholder(1);
-        let id_placeholders: Vec<String> = (2..=ids.len() + 1).map(|i| d.placeholder(i)).collect();
-        let id_list = id_placeholders.join(", ");
-        let soft_delete_sql = format!(
-            "UPDATE rustango_media_collections SET deleted_at = {p_now} \
-              WHERE id IN ({id_list})"
-        );
-        let mut del_binds = vec![crate::core::SqlValue::DateTime(Utc::now())];
-        del_binds.extend(ids.iter().copied().map(crate::core::SqlValue::I64));
-        crate::sql::raw_execute_tx(&mut tx, &soft_delete_sql, del_binds)
+        crate::sql::update_tx(&mut tx, &soft_delete)
             .await
             .map_err(media_err_from_exec)?;
         tx.commit().await?;
@@ -1711,6 +1684,10 @@ fn media_err_from_exec(e: crate::sql::ExecError) -> MediaError {
         crate::sql::ExecError::Driver(e) => MediaError::Db(e),
         other => MediaError::Other(other.to_string()),
     }
+}
+
+fn media_err_from_query(e: crate::core::QueryError) -> MediaError {
+    media_err_from_exec(e.into())
 }
 
 /// Decode one `popular_tags` row: a `MediaTag` plus the aggregate
