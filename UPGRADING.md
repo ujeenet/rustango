@@ -150,6 +150,30 @@ untouched.
 
 ## Unreleased
 
+### Bearer tokens need a login session
+
+`require_bearer` and `/api/auth/me` refuse access tokens not minted by `/login` or `/refresh` (e.g. from `JwtAuth::lifecycle().issue_access_with`), and tokens after a logout or password change (#2086).
+
+### `OnAuthSuccess` takes an `AuthSuccess`
+
+**Breaking:** write `Arc::new(|login: AuthSuccess| Box::pin(async move { .. Ok(Redirect::to("/").into_response()) }))`. Find users by `login.identity_key()` (#1989).
+
+### `WebhookEvent` has `body` and `signature`
+
+**Breaking:** `signing_secret`, `signature_format` and `payload` are gone; sign with `webhook::sign` (#1852). Drain the webhook queue before upgrading: older queued jobs fail to decode.
+
+### Provision webhook secrets are at least 32 bytes
+
+**Breaking:** `WebhookConfig::secret` is a `WebhookSecret`; `WebhookConfig::new` panics on a shorter key (#1850).
+
+### CBV CSRF follows the outer layer
+
+With an app-wide `CsrfLayer` (e.g. `Cli::with_csrf_config`), template views use its cookie name and origins; forms posted with the old `rustango_csrf` cookie need a reload (#1722). A CBV defers to that layer only when it checked the token: on a path its `exempt_prefixes` skip, the CBV still requires one.
+
+### `webhook::sign` returns a `Result`
+
+**Breaking:** add `?` or `.expect(..)`; an empty key is `Err(EmptySigningKey)` (#1850).
+
 ### Template views and ViewSet writes respect soft delete
 
 On a `#[rustango(soft_delete)]` model, `DeleteView` and `delete_selected` now stamp the column instead of deleting, the other template views 404 on deleted rows, and no form or ViewSet body can set the column (#2082, #2074). Use `soft_delete::restore` to undelete.

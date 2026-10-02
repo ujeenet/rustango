@@ -710,7 +710,7 @@ A couple of end-to-end flows still need gluing together from the primitives belo
 
 Already shipped (don't reach for a workaround):
 
-- **OAuth2 / OIDC social login** — `oauth2::providers` ships Google, GitHub, Microsoft, GitLab, and Discord helpers (plus `OAuth2Provider::from_discovery` for any OIDC provider), and `oauth2::router::oauth2_router` mounts the login + callback routes, creates the user record, and sets the session cookie.
+- **OAuth2 / OIDC social login** — `oauth2::providers` ships Google, GitHub, Microsoft, GitLab, and Discord helpers (plus `OAuth2Provider::from_discovery` for any OIDC provider), and `oauth2::router::oauth2_router` mounts the login + callback routes; your `OnAuthSuccess` hook finds the user by `AuthSuccess::identity_key()` and sets the session cookie.
 - **Per-account lockout** — `rustango::account_lockout::Lockout` (cache-backed; `is_locked` / `record_failure` / `clear`, configurable `max_attempts` + `lockout_duration`).
 - **CSP report endpoint** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`.
 - **Distributed rate limiting** — `rate_limit_cache::CacheRateLimitLayer` (see [Rate limiting requests](#rate-limiting-requests)).

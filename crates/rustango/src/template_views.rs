@@ -771,7 +771,7 @@ struct ListViewState {
 
 async fn handle_list(
     State(state): State<Arc<ListViewState>>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
     extra: Option<axum::Extension<ExtraContext>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -855,7 +855,7 @@ async fn handle_list(
     // cookie on the response. ListView's bulk-action POST is gated
     // by the router's CSRF layer; without this the
     // form-rendered token is empty and every legitimate POST 403s.
-    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let set_cookie = stamp_csrf(&csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.vs.template, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -908,7 +908,7 @@ async fn handle_list_action(
             &action,
             &raws,
             &objects,
-            &parts.headers,
+            &CsrfCookie::of(&parts),
         );
     }
 
@@ -1210,7 +1210,7 @@ struct DeleteViewState {
 async fn handle_delete_confirm(
     State(state): State<Arc<DeleteViewState>>,
     Path(pk): Path<String>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
 ) -> Response {
     let Some(pk_field) = state.vs.schema.primary_key() else {
         return template_error(&format!(
@@ -1229,7 +1229,7 @@ async fn handle_delete_confirm(
     };
     let mut ctx = Context::new();
     ctx.insert("object", &object);
-    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let set_cookie = stamp_csrf(&csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.vs.template, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -1884,10 +1884,7 @@ fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
         .ok()
 }
 
-async fn handle_create_get(
-    State(state): State<Arc<FormViewState>>,
-    headers: axum::http::HeaderMap,
-) -> Response {
+async fn handle_create_get(State(state): State<Arc<FormViewState>>, csrf: CsrfCookie) -> Response {
     let mut ctx = Context::new();
     let fields = form_fields(
         state.schema,
@@ -1901,7 +1898,7 @@ async fn handle_create_get(
     );
     ctx.insert("is_create", &true);
     ctx.insert("is_update", &false);
-    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let set_cookie = stamp_csrf(&csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.template, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -1909,7 +1906,7 @@ async fn handle_create_get(
 
 async fn handle_create_post(
     State(state): State<Arc<FormViewState>>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
     let (mut columns, mut values, mut errors) = parse_form(
@@ -1920,7 +1917,7 @@ async fn handle_create_post(
     );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
-        return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
+        return rerender_form(&state, &form, &errors, /*is_update=*/ false, &csrf);
     }
     // Schema-driven INSERT: nothing else supplies these (#1464).
     crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
@@ -1935,7 +1932,7 @@ async fn handle_create_post(
     {
         Ok(url) => axum::response::Redirect::to(&url).into_response(),
         Err(WriteFailed::Duplicate(errors)) => {
-            rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers)
+            rerender_form(&state, &form, &errors, /*is_update=*/ false, &csrf)
         }
         Err(WriteFailed::Error(resp)) => resp,
     }
@@ -2080,7 +2077,7 @@ const DUPLICATE_VALUE: &str = "a row with this value already exists";
 async fn handle_update_get(
     State(state): State<Arc<FormViewState>>,
     Path(pk): Path<String>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
 ) -> Response {
     let Some(pk_field) = state.schema.primary_key() else {
         return template_error(&format!(
@@ -2125,7 +2122,7 @@ async fn handle_update_get(
     ctx.insert("pk", &pk);
     ctx.insert("is_create", &false);
     ctx.insert("is_update", &true);
-    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let set_cookie = stamp_csrf(&csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.template, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -2134,7 +2131,7 @@ async fn handle_update_get(
 async fn handle_update_post(
     State(state): State<Arc<FormViewState>>,
     Path(pk): Path<String>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
     let Some(pk_field) = state.schema.primary_key() else {
@@ -2151,7 +2148,7 @@ async fn handle_update_post(
     );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
-        return rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers);
+        return rerender_form(&state, &form, &errors, /*is_update=*/ true, &csrf);
     }
     let pk_match = WhereExpr::Predicate(Filter {
         column: pk_field.column,
@@ -2165,7 +2162,7 @@ async fn handle_update_post(
             axum::response::Redirect::to(&target).into_response()
         }
         Err(WriteFailed::Duplicate(errors)) => {
-            rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers)
+            rerender_form(&state, &form, &errors, /*is_update=*/ true, &csrf)
         }
         Err(WriteFailed::Error(resp)) => resp,
     }
@@ -2314,7 +2311,7 @@ fn rerender_form(
     submitted: &HashMap<String, String>,
     errors: &HashMap<String, String>,
     is_update: bool,
-    headers: &axum::http::HeaderMap,
+    csrf: &CsrfCookie,
 ) -> Response {
     let fields = form_fields(
         state.schema,
@@ -2333,7 +2330,7 @@ fn rerender_form(
     // is almost always already present. Stamp the same token back
     // into the context so the re-rendered form's hidden input
     // matches what the browser will send on the next attempt.
-    let set_cookie = stamp_csrf(headers, &mut ctx);
+    let set_cookie = stamp_csrf(csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.template, &ctx);
     *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     apply_csrf_cookie(&mut resp, set_cookie);
@@ -2555,9 +2552,36 @@ fn filter_value(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue>
     }
 }
 
+/// The request's CSRF cookie under the name its CSRF layer checks: an
+/// app's `CsrfConfig::cookie_name`, not always the default (#1722).
+struct CsrfCookie {
+    headers: axum::http::HeaderMap,
+    name: String,
+}
+
+impl CsrfCookie {
+    fn of(parts: &axum::http::request::Parts) -> Self {
+        Self {
+            headers: parts.headers.clone(),
+            name: crate::forms::csrf::active_cookie_name(&parts.extensions).to_owned(),
+        }
+    }
+}
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CsrfCookie {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self::of(parts))
+    }
+}
+
 /// Stamp `csrf_token` and `csrf_input` into the context (issue #15).
-fn stamp_csrf(headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
-    crate::forms::csrf::stamp_into_context(headers, ctx)
+fn stamp_csrf(csrf: &CsrfCookie, ctx: &mut Context) -> Option<String> {
+    crate::forms::csrf::stamp_named_into_context(&csrf.headers, &csrf.name, ctx)
 }
 
 /// Every CBV router with a POST route goes through here, so each
@@ -3005,13 +3029,13 @@ fn render_bulk_delete_confirm(
     action: &str,
     pks: &[String],
     objects: &[Value],
-    headers: &axum::http::HeaderMap,
+    csrf: &CsrfCookie,
 ) -> Response {
     let mut ctx = Context::new();
     ctx.insert("action", action);
     ctx.insert("pks", &pks);
     ctx.insert("objects", &objects);
-    let set_cookie = stamp_csrf(headers, &mut ctx);
+    let set_cookie = stamp_csrf(csrf, &mut ctx);
     let mut resp = render(tera, &template_name, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -3500,7 +3524,7 @@ mod tenant {
 
     pub(super) async fn handle_list_tenant(
         State(state): State<Arc<TenantListViewState>>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         Query(params): Query<HashMap<String, String>>,
         t: Tenant,
     ) -> Response {
@@ -3578,7 +3602,7 @@ mod tenant {
         // v0.30.17 — same CSRF stamping as the static-pool variant
         // (handle_list above). Without it, ListView with bulk_actions
         // mounted under a CSRF-protected scope can't post anything.
-        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.vs.template, &ctx);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
@@ -3637,7 +3661,7 @@ mod tenant {
                 &action,
                 &raws,
                 &objects,
-                &parts.headers,
+                &super::CsrfCookie::of(&parts),
             );
         }
 
@@ -3746,7 +3770,7 @@ mod tenant {
     pub(super) async fn handle_delete_confirm_tenant(
         State(state): State<Arc<TenantDeleteViewState>>,
         Path(pk): Path<String>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
@@ -3767,7 +3791,7 @@ mod tenant {
         };
         let mut ctx = Context::new();
         ctx.insert("object", &object);
-        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.vs.template, &ctx);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
@@ -3815,7 +3839,7 @@ mod tenant {
 
     pub(super) async fn handle_create_get_tenant(
         State(state): State<Arc<TenantFormViewState>>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
     ) -> Response {
         let mut ctx = Context::new();
         let fields = form_fields(
@@ -3830,7 +3854,7 @@ mod tenant {
         );
         ctx.insert("is_create", &true);
         ctx.insert("is_update", &false);
-        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.template, &ctx);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
@@ -3838,7 +3862,7 @@ mod tenant {
 
     pub(super) async fn handle_create_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
@@ -3850,9 +3874,7 @@ mod tenant {
         );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
-            return rerender_form_tenant(
-                &state, &form, &errors, /*is_update=*/ false, &headers,
-            );
+            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &csrf);
         }
         // Schema-driven INSERT: nothing else supplies these (#1464).
         crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
@@ -3861,7 +3883,7 @@ mod tenant {
         match insert.await {
             Ok(url) => axum::response::Redirect::to(&url).into_response(),
             Err(super::WriteFailed::Duplicate(errors)) => {
-                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &headers)
+                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &csrf)
             }
             Err(super::WriteFailed::Error(resp)) => resp,
         }
@@ -3870,7 +3892,7 @@ mod tenant {
     pub(super) async fn handle_update_get_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {
@@ -3915,7 +3937,7 @@ mod tenant {
         ctx.insert("pk", &pk);
         ctx.insert("is_create", &false);
         ctx.insert("is_update", &true);
-        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.template, &ctx);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
@@ -3924,7 +3946,7 @@ mod tenant {
     pub(super) async fn handle_update_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
@@ -3942,9 +3964,7 @@ mod tenant {
         );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
-            return rerender_form_tenant(
-                &state, &form, &errors, /*is_update=*/ true, &headers,
-            );
+            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &csrf);
         }
         let pk_match = WhereExpr::Predicate(Filter {
             column: pk_field.column,
@@ -3958,7 +3978,7 @@ mod tenant {
                 axum::response::Redirect::to(&target).into_response()
             }
             Err(super::WriteFailed::Duplicate(errors)) => {
-                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &headers)
+                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &csrf)
             }
             Err(super::WriteFailed::Error(resp)) => resp,
         }
@@ -3969,7 +3989,7 @@ mod tenant {
         submitted: &HashMap<String, String>,
         errors: &HashMap<String, String>,
         is_update: bool,
-        headers: &axum::http::HeaderMap,
+        csrf: &CsrfCookie,
     ) -> Response {
         let fields = form_fields(
             state.schema,
@@ -3984,7 +4004,7 @@ mod tenant {
         );
         ctx.insert("is_create", &!is_update);
         ctx.insert("is_update", &is_update);
-        let set_cookie = super::stamp_csrf(headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.template, &ctx);
         *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
         super::apply_csrf_cookie(&mut resp, set_cookie);
@@ -4478,8 +4498,12 @@ mod tests {
                 "session=abc; rustango_csrf=existing-token-existing-token-existing-toke",
             ),
         );
+        let csrf = CsrfCookie {
+            headers,
+            name: crate::forms::csrf::CSRF_COOKIE.to_owned(),
+        };
         let mut ctx = Context::new();
-        let set_cookie = stamp_csrf(&headers, &mut ctx);
+        let set_cookie = stamp_csrf(&csrf, &mut ctx);
         assert!(
             set_cookie.is_none(),
             "no Set-Cookie when cookie was present"
@@ -4494,9 +4518,12 @@ mod tests {
     /// and returns the Set-Cookie header for the caller to attach.
     #[test]
     fn stamp_csrf_mints_fresh_when_absent() {
-        let headers = axum::http::HeaderMap::new();
+        let csrf = CsrfCookie {
+            headers: axum::http::HeaderMap::new(),
+            name: crate::forms::csrf::CSRF_COOKIE.to_owned(),
+        };
         let mut ctx = Context::new();
-        let set_cookie = stamp_csrf(&headers, &mut ctx);
+        let set_cookie = stamp_csrf(&csrf, &mut ctx);
         let cookie = set_cookie.expect("Set-Cookie returned when cookie absent");
         assert!(cookie.starts_with("rustango_csrf="), "got: {cookie}");
         // The token in the context matches what's in the Set-Cookie.
@@ -5928,6 +5955,96 @@ mod tests {
             .header("cookie", format!("rustango_csrf={TEST_CSRF}"))
             .body(Body::from(body))
             .unwrap()
+    }
+
+    /// An app's CSRF layer config reaches the CBVs: the form carries the
+    /// token of its cookie, and the POST passes its check (#1722).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cbv_uses_the_apps_csrf_cookie_name() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "{{ csrf_token }}").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let cfg = crate::forms::csrf::CsrfConfig {
+            cookie_name: "app_csrf".into(),
+            ..Default::default()
+        };
+        let app = CreateView::for_model(schema_two_fields())
+            .template("f.html")
+            .router("/c", Arc::new(tera), pool)
+            .layer(crate::forms::csrf::with_config(cfg));
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/c/new")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookies: Vec<String> = res
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect();
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        let token = std::str::from_utf8(&body).unwrap().to_owned();
+        assert_eq!(cookies.len(), 1, "{cookies:?}");
+        assert!(
+            cookies[0].starts_with(&format!("app_csrf={token};")),
+            "{cookies:?}"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/c/new")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("app_csrf={token}"))
+                    .body(Body::from(format!("_csrf={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Past the CSRF check; the empty form fails validation.
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let forged = Request::builder()
+            .method("POST")
+            .uri("/c/new")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("app_csrf={token}"))
+            .body(Body::from("_csrf=forged"))
+            .unwrap();
+        let res = app.oneshot(forged).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// An outer layer's `exempt_prefix` does not switch off a CBV's own
+    /// guard (#1669): `/c` would also cover `/comments`.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_outer_exempt_prefix_keeps_the_cbv_guard() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let cfg = crate::forms::csrf::CsrfConfig::default().exempt_prefix("/c");
+        let app = CreateView::for_model(schema_two_fields())
+            .template("f.html")
+            .router("/c", Arc::new(tera), pool)
+            .layer(crate::forms::csrf::with_config(cfg));
+        let post = Request::builder()
+            .method("POST")
+            .uri("/c/new")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("title=x"))
+            .unwrap();
+        let res = app.oneshot(post).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
     /// Every CBV router with a POST route rejects a write without the token (#1669).

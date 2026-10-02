@@ -13,8 +13,8 @@
 //! ## Quick start
 //!
 //! ```ignore
-//! use rustango::oauth2::{providers, router::oauth2_router, OAuth2Registry};
-//! use axum::response::Redirect;
+//! use rustango::oauth2::{providers, router::{oauth2_router, AuthSuccess}, OAuth2Registry};
+//! use axum::response::{IntoResponse, Redirect};
 //! use std::sync::Arc;
 //!
 //! let registry = OAuth2Registry::new();
@@ -28,10 +28,12 @@
 //!     registry,
 //!     b"flow-signing-secret-keep-me-safe".to_vec(),
 //!     true, // Secure flow cookie (HTTPS); use false only for local HTTP dev
-//!     Arc::new(|user, _tokens| Box::pin(async move {
-//!         // Persist or look up your user record by user.email / user.provider_user_id
-//!         tracing::info!(email = ?user.email, "logged in");
-//!         Ok(Redirect::to("/dashboard"))
+//!     Arc::new(|login: AuthSuccess| Box::pin(async move {
+//!         // Look up your user by `login.identity_key()`, never by email or
+//!         // `sub` alone: a tenant's IdP vouches only for that tenant.
+//!         tracing::info!(tenant = %login.tenant, "logged in");
+//!         // Set your session cookie on this response.
+//!         Ok(Redirect::to("/dashboard").into_response())
 //!     })),
 //! ));
 //! ```
@@ -45,7 +47,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
@@ -53,18 +55,52 @@ use serde::Deserialize;
 use super::{open_flow, seal_flow, NormalizedUser, OAuth2Registry, OAuthError, TokenResponse};
 
 const FLOW_COOKIE: &str = "rustango_oauth_flow";
+const INVALID_FLOW_COOKIE: &str = "invalid flow cookie — restart at /login";
 
-/// Per-app callback. Receives the resolved user + token bag and returns
-/// the response to send the browser. Typical implementations look up or
-/// create a user record, set a session cookie, and redirect to a UI route.
+/// Per-app callback. Receives the completed login and returns the response
+/// to send the browser: typically it finds or creates the user, sets a
+/// session cookie and redirects. The router adds its flow-cookie wipe.
 pub type OnAuthSuccess = Arc<
-    dyn Fn(
-            NormalizedUser,
-            TokenResponse,
-        ) -> Pin<Box<dyn Future<Output = Result<Redirect, AuthError>> + Send>>
+    dyn Fn(AuthSuccess) -> Pin<Box<dyn Future<Output = Result<Response, AuthError>> + Send>>
         + Send
         + Sync,
 >;
+
+/// A completed login, as the [`OnAuthSuccess`] hook sees it (#1989).
+/// No `Debug`: it carries the provider's tokens.
+#[non_exhaustive]
+pub struct AuthSuccess {
+    /// The registry tenant whose provider vouched for `user` (`""` when
+    /// single-tenant). Its IdP speaks for no other tenant.
+    pub tenant: String,
+    /// The identity the provider returned.
+    pub user: NormalizedUser,
+    /// The provider's token bag.
+    pub tokens: TokenResponse,
+}
+
+impl AuthSuccess {
+    /// Build one, e.g. to test a hook.
+    #[must_use]
+    pub fn new(tenant: impl Into<String>, user: NormalizedUser, tokens: TokenResponse) -> Self {
+        Self {
+            tenant: tenant.into(),
+            user,
+            tokens,
+        }
+    }
+
+    /// `(tenant, provider, subject)`: the key to find a user by. An email
+    /// or `sub` alone lets one tenant's IdP sign in as another's user.
+    #[must_use]
+    pub fn identity_key(&self) -> (&str, &str, &str) {
+        (
+            &self.tenant,
+            &self.user.provider,
+            &self.user.provider_user_id,
+        )
+    }
+}
 
 /// Application-side error from the [`OnAuthSuccess`] hook. Whatever is
 /// `Display`-able will be returned in the `502 Bad Gateway` body —
@@ -190,7 +226,9 @@ async fn callback_handler(
     let flow = match open_flow(sealed, &state.flow_secret) {
         Ok(f) => f,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid flow cookie: {e}")).into_response()
+            // The reason helps a forger more than the user (#2087).
+            tracing::warn!(error = %e, provider = %provider_name, "oauth2 callback: bad flow cookie");
+            return (StatusCode::BAD_REQUEST, INVALID_FLOW_COOKIE).into_response();
         }
     };
 
@@ -220,12 +258,24 @@ async fn callback_handler(
         }
     };
 
-    match (state.on_success)(user, tokens).await {
-        Ok(redirect) => {
-            // Wipe the flow cookie on the way out.
+    finish(
+        &state,
+        AuthSuccess {
+            tenant,
+            user,
+            tokens,
+        },
+    )
+    .await
+}
+
+/// Run the hook, then wipe the flow cookie next to any cookie it set.
+async fn finish(state: &RouterState, login: AuthSuccess) -> Response {
+    match (state.on_success)(login).await {
+        Ok(mut resp) => {
             let secure = if state.secure { "; Secure" } else { "" };
-            let mut resp = redirect.into_response();
-            resp.headers_mut().insert(
+            // `append`: the hook's own session cookie must survive.
+            resp.headers_mut().append(
                 header::SET_COOKIE,
                 format!("{FLOW_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}")
                     .parse()
@@ -243,10 +293,65 @@ mod tests {
     use crate::oauth2::providers;
     use axum::body::Body;
     use axum::http::Request;
+    use axum::response::Redirect;
     use tower::ServiceExt;
 
     fn dummy_success() -> OnAuthSuccess {
-        Arc::new(|_user, _tokens| Box::pin(async { Ok(Redirect::to("/")) }))
+        Arc::new(|_login| Box::pin(async { Ok(Redirect::to("/").into_response()) }))
+    }
+
+    /// #1989 — the hook learns the tenant, and its `Set-Cookie` survives
+    /// the router's flow-cookie wipe.
+    #[tokio::test]
+    async fn the_hook_sees_the_tenant_and_keeps_its_cookie() {
+        let hook: OnAuthSuccess = Arc::new(|login: AuthSuccess| {
+            Box::pin(async move {
+                let (tenant, provider, sub) = login.identity_key();
+                let mut resp = Redirect::to("/").into_response();
+                resp.headers_mut().insert(
+                    header::SET_COOKIE,
+                    format!("session={tenant}|{provider}|{sub}")
+                        .parse()
+                        .unwrap(),
+                );
+                Ok(resp)
+            })
+        });
+        let state = RouterState {
+            registry: OAuth2Registry::new(),
+            flow_secret: Arc::new(b"signing".to_vec()),
+            on_success: hook,
+            secure: true,
+        };
+        let user = NormalizedUser {
+            provider: "google".into(),
+            provider_user_id: "42".into(),
+            email: None,
+            email_verified: false,
+            name: None,
+            avatar_url: None,
+            raw: serde_json::Value::Null,
+        };
+        let tokens: TokenResponse =
+            serde_json::from_value(serde_json::json!({"access_token": "at"})).unwrap();
+        let login = AuthSuccess::new("acme", user, tokens);
+        let resp = finish(&state, login).await;
+        let cookies: Vec<_> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            cookies.contains(&"session=acme|google|42".to_owned()),
+            "{cookies:?}"
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|c| c.starts_with(&format!("{FLOW_COOKIE}=;"))),
+            "{cookies:?}"
+        );
     }
 
     #[tokio::test]
@@ -376,10 +481,9 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
             .await
             .unwrap();
-        // A reader that never finds the cookie says "missing" instead.
-        assert!(std::str::from_utf8(&body)
-            .unwrap()
-            .contains("invalid flow cookie"));
+        // A reader that never finds the cookie says "missing" instead;
+        // the open error's text is not echoed (#2087).
+        assert_eq!(std::str::from_utf8(&body).unwrap(), INVALID_FLOW_COOKIE);
     }
 
     /// #1847 — an upstream failure's text (here a blocked address) stays out of the 502.

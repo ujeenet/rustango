@@ -29,7 +29,7 @@ use axum::Router;
 use rustango::core::Model as _;
 use rustango::extractors::TenantContext;
 use rustango::sql::sqlx;
-use rustango::sql::{Auto, Pool};
+use rustango::sql::{Auto, FetcherPool as _, Pool};
 use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::tenancy::{
     session::SessionSecret, ChainResolver, Org, OrgResolver, TenancyError, TenantPools,
@@ -41,7 +41,7 @@ use tower::ServiceExt as _;
 
 const SECRET: &[u8] = b"owned_by_bearer_test_secret_32byte!!";
 
-/// The auth both the middleware and `token_for` use.
+/// The auth the middleware and the login router share.
 fn auth() -> JwtAuth {
     JwtAuth::new(Config {
         session_secret: Some(SECRET.to_vec()),
@@ -133,7 +133,7 @@ async fn app(slug: &str, name: &str) -> (Router, i64, i64, i64) {
 
     let alice = seed_member(&pool, "alice", true).await;
     let bob = seed_member(&pool, "bob", true).await;
-    let ghost = seed_member(&pool, "ghost", false).await; // deactivated
+    let ghost = seed_member(&pool, "ghost", true).await; // deactivated by its test
 
     for (member_id, body) in [(alice, "alice one"), (alice, "alice two"), (bob, "bob one")] {
         let mut n = Note {
@@ -178,13 +178,31 @@ async fn app(slug: &str, name: &str) -> (Router, i64, i64, i64) {
     (router, alice, bob, ghost)
 }
 
-/// An access token exactly as `/api/auth/login` mints one: tenant-pinned.
-fn token_for(user_id: i64, tenant: &str) -> String {
-    let jwt = auth();
-    let jwt = jwt.lifecycle();
-    let mut custom = serde_json::Map::new();
-    custom.insert("tenant".into(), Value::String(tenant.to_owned()));
-    jwt.issue_pair_with(user_id, custom).expect("issue").access
+/// An access token from `/api/auth/login`: tenant-pinned, session-bound.
+async fn login(app: &Router, username: &str) -> String {
+    let login = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(format!(
+            r#"{{"username":"{username}","password":"irrelevant"}}"#
+        )))
+        .expect("request");
+    let resp = app.clone().oneshot(login).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "login {username}");
+    json(resp).await["access"]
+        .as_str()
+        .expect("access token")
+        .to_owned()
+}
+
+/// A tenant database for `name`, opened outside the app.
+async fn tenant_pool(name: &str) -> Pool {
+    Pool::Sqlite(
+        sqlx::SqlitePool::connect(&db_url(name))
+            .await
+            .expect("tenant db"),
+    )
 }
 
 fn req(method: Method, uri: &str, token: Option<&str>) -> Request<Body> {
@@ -204,11 +222,15 @@ async fn json(resp: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn a_token_sees_only_its_own_rows() {
-    let (app, alice, bob, _) = app("acme", "own_rows").await;
+    let (app, alice, _, _) = app("acme", "own_rows").await;
 
     let body = json(
         app.clone()
-            .oneshot(req(Method::GET, "/notes", Some(&token_for(alice, "acme"))))
+            .oneshot(req(
+                Method::GET,
+                "/notes",
+                Some(&login(&app, "alice").await),
+            ))
             .await
             .expect("response"),
     )
@@ -219,7 +241,8 @@ async fn a_token_sees_only_its_own_rows() {
     }
 
     let body = json(
-        app.oneshot(req(Method::GET, "/notes", Some(&token_for(bob, "acme"))))
+        app.clone()
+            .oneshot(req(Method::GET, "/notes", Some(&login(&app, "bob").await)))
             .await
             .expect("response"),
     )
@@ -230,12 +253,13 @@ async fn a_token_sees_only_its_own_rows() {
 
 #[tokio::test]
 async fn another_members_row_is_not_found_by_id() {
-    let (app, alice, bob, _) = app("acme", "by_id").await;
+    let (app, _, _, _) = app("acme", "by_id").await;
+    let (alice, bob) = (login(&app, "alice").await, login(&app, "bob").await);
 
     // Bob reads his own row (id 3) …
     let resp = app
         .clone()
-        .oneshot(req(Method::GET, "/notes/3", Some(&token_for(bob, "acme"))))
+        .oneshot(req(Method::GET, "/notes/3", Some(&bob)))
         .await
         .expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
@@ -243,11 +267,7 @@ async fn another_members_row_is_not_found_by_id() {
     // … and for Alice it does not exist. 404, not 403: a 403 would confirm it.
     let resp = app
         .clone()
-        .oneshot(req(
-            Method::GET,
-            "/notes/3",
-            Some(&token_for(alice, "acme")),
-        ))
+        .oneshot(req(Method::GET, "/notes/3", Some(&alice)))
         .await
         .expect("response");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -255,17 +275,13 @@ async fn another_members_row_is_not_found_by_id() {
     // Deleting it is refused the same way, and the row survives.
     let resp = app
         .clone()
-        .oneshot(req(
-            Method::DELETE,
-            "/notes/3",
-            Some(&token_for(alice, "acme")),
-        ))
+        .oneshot(req(Method::DELETE, "/notes/3", Some(&alice)))
         .await
         .expect("response");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     let resp = app
-        .oneshot(req(Method::GET, "/notes/3", Some(&token_for(bob, "acme"))))
+        .oneshot(req(Method::GET, "/notes/3", Some(&bob)))
         .await
         .expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
@@ -325,11 +341,27 @@ async fn a_token_from_another_tenant_is_refused() {
     // Both tenants sign with the same key — the `tenant` claim is the only
     // thing that makes `sub: 1` mean a different person on each subdomain.
     let (app, alice, _, _) = app("acme", "cross_tenant").await;
+    let (globex, globex_alice, _, _) = app("globex", "cross_tenant_globex").await;
+    assert_eq!(alice, globex_alice);
+    // Same id and same hash on both, so only the tenant check can refuse.
+    let fetch = |pool: Pool, id: i64| async move {
+        rustango::tenancy::User::objects()
+            .filter("id", id)
+            .fetch(&pool)
+            .await
+            .expect("fetch")
+            .remove(0)
+    };
+    let theirs = fetch(tenant_pool("cross_tenant_globex").await, alice).await;
+    let acme_pool = tenant_pool("cross_tenant").await;
+    let mut ours = fetch(acme_pool.clone(), alice).await;
+    ours.password_hash = theirs.password_hash;
+    ours.save_pool(&acme_pool).await.expect("same hash");
     let resp = app
         .oneshot(req(
             Method::GET,
             "/notes",
-            Some(&token_for(alice, "globex")),
+            Some(&login(&globex, "alice").await),
         ))
         .await
         .expect("response");
@@ -350,8 +382,18 @@ async fn a_deactivated_account_stops_working_immediately() {
     // middleware re-reads the row per request precisely so this does not wait
     // for the access token to expire.
     let (app, _, _, ghost) = app("acme", "deactivated").await;
+    let token = login(&app, "ghost").await;
+    let pool = tenant_pool("deactivated").await;
+    let mut user = rustango::tenancy::User::objects()
+        .filter("id", ghost)
+        .fetch(&pool)
+        .await
+        .expect("fetch")
+        .remove(0);
+    user.active = false;
+    user.save_pool(&pool).await.expect("deactivate");
     let resp = app
-        .oneshot(req(Method::GET, "/notes", Some(&token_for(ghost, "acme"))))
+        .oneshot(req(Method::GET, "/notes", Some(&token)))
         .await
         .expect("response");
     assert_unauthorized(resp, "invalid or expired token").await;
