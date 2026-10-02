@@ -187,11 +187,7 @@ impl OpBrand {
             Ok(s) => Self::apply_brand_settings(&mut out, &s.brand),
             Err(e) if e.is_missing_config() => {}
             // A broken config should say so, not silently drop the brand (#1948).
-            Err(e) => tracing::warn!(
-                target: "rustango::tenancy::operator_console",
-                error = %e,
-                "the config does not load; console branding uses defaults"
-            ),
+            Err(e) => warn_config_error(&e),
         }
         Self::apply_env_overrides(&mut out);
         out
@@ -2293,6 +2289,41 @@ fn handoff_port_suffix(
         })
         .map(|p| format!(":{p}"))
         .unwrap_or_default()
+}
+
+/// Names only where the config broke; the error text can quote a secret.
+#[cfg(feature = "config")]
+fn warn_config_error(e: &crate::config::ConfigError) {
+    tracing::warn!(
+        target: "rustango::tenancy::operator_console",
+        at = %e.location(),
+        "the config does not load; console branding uses defaults"
+    );
+}
+
+#[cfg(all(test, feature = "config", feature = "runtime"))]
+mod config_warn_tests {
+    #[test]
+    fn a_broken_config_logs_its_line_not_its_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config/default.toml"),
+            "[database]\nurl = \"postgres://app:s3cret@db/app\n",
+        )
+        .unwrap();
+        let err = crate::config::Settings::load_from(&dir.path().join("config"), "dev")
+            .expect_err("unterminated string");
+        let out = crate::testkit::CaptureWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, || super::warn_config_error(&err));
+        let logged = out.contents();
+        assert!(!logged.contains("s3cret"), "{logged}");
+        assert!(logged.contains("line 2"), "{logged}");
+    }
 }
 
 #[cfg(test)]

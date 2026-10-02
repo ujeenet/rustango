@@ -53,6 +53,31 @@ impl ConfigError {
     pub fn is_missing_config(&self) -> bool {
         matches!(self, Self::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
     }
+
+    /// Where loading failed, without the error text: a TOML error
+    /// quotes the offending line, which can hold a secret.
+    pub(crate) fn location(&self) -> String {
+        match self {
+            Self::Io { path, source } => format!("{path} ({})", source.kind()),
+            Self::Parse { path, source } => {
+                match source.span().and_then(|s| line_col(path, s.start)) {
+                    Some((line, col)) => format!("{path}, line {line}, column {col}"),
+                    None => path.clone(),
+                }
+            }
+            Self::Shape(_) => "the merged settings (a value has the wrong type)".into(),
+            Self::EnvOverride { var, .. } => format!("env var `{var}`"),
+        }
+    }
+}
+
+/// 1-based line and column of byte `offset` in the file at `path`.
+fn line_col(path: &str, offset: usize) -> Option<(usize, usize)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let before = text.get(..offset)?;
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    Some((line, col))
 }
 
 pub(super) fn load_with_root(root: &Path, env: &str) -> Result<Settings, ConfigError> {
