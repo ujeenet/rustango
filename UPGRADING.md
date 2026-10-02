@@ -152,7 +152,8 @@ untouched.
 
 ### Background work keeps its caller's audit source
 
-`InMemoryJobQueue` jobs and `Scheduler` ticks now audit as the scope they were dispatched or registered in, not `system` (#1229). A `run()` that re-enters `audit::with_source` overrides it. Reports counting `system` rows will drop.
+`InMemoryJobQueue` jobs and `Scheduler` ticks now run with the audit source and timezone of the scope they were dispatched or registered in, not `system` and UTC (#1229). A `run()` that re-enters `audit::with_source` overrides it. Reports counting `system` rows will drop.
+A tenant admin user's id is recorded only on that tenant's writes (a `for_each_tenant` pass); elsewhere it is `system`. Tenant handlers that set a user source should use `audit::with_tenant_source`.
 
 ## 0.59.18
 

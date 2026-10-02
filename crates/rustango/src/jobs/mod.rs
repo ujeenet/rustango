@@ -431,7 +431,12 @@ async fn worker_loop(
                             attempts: next_attempt,
                             error: msg,
                         };
-                        deliver_dead_letter(cb, dl).await;
+                        // The callback sees who enqueued the job, as the job did.
+                        envelope
+                            .context
+                            .clone()
+                            .install(deliver_dead_letter(cb, dl))
+                            .await;
                     } else {
                         tracing::error!(job = envelope.name, attempts = next_attempt, error = %msg, "job exhausted retries");
                     }
@@ -458,7 +463,12 @@ async fn worker_loop(
                         attempts: envelope.attempt + 1,
                         error: msg,
                     };
-                    deliver_dead_letter(cb, dl).await;
+                    // The callback sees who enqueued the job, as the job did.
+                    envelope
+                        .context
+                        .clone()
+                        .install(deliver_dead_letter(cb, dl))
+                        .await;
                 } else {
                     tracing::error!(job = envelope.name, error = %msg, "job fatal");
                 }
@@ -588,7 +598,10 @@ mod tests {
         })
         .await;
 
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while SEEN.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         q.shutdown().await;
 
         assert_eq!(
@@ -622,7 +635,10 @@ mod tests {
         q.register::<RecordPlain>().await;
         q.start().await;
         q.dispatch(&RecordPlain).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while SEEN.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         q.shutdown().await;
 
         assert_eq!(SEEN.lock().unwrap().clone(), Some("system".to_owned()));
@@ -660,6 +676,34 @@ mod tests {
         assert_eq!(captured.lock().await.len(), 1);
         assert!(captured.lock().await[0].error.contains("dead now"));
         q.shutdown().await;
+    }
+
+    /// #1229 — the dead-letter callback runs as the job's enqueuer.
+    #[tokio::test]
+    async fn dead_letter_callback_sees_the_enqueuer() {
+        use crate::audit::{current_source, with_source, AuditSource};
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<AlwaysFail>().await;
+        let seen: Arc<Mutex<Option<String>>> = Arc::default();
+        let s = seen.clone();
+        q.on_dead_letter(move |_dl| {
+            let s = s.clone();
+            async move {
+                *s.lock().await = Some(current_source().as_token());
+            }
+        })
+        .await;
+        q.start().await;
+        with_source(AuditSource::User { id: "5".into() }, async {
+            q.dispatch(&AlwaysFail { fatal: true }).await.unwrap();
+        })
+        .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while seen.lock().await.is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        q.shutdown().await;
+        assert_eq!(seen.lock().await.as_deref(), Some("user:5"));
     }
 
     #[tokio::test]

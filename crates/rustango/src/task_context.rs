@@ -5,22 +5,27 @@
 //! from a job records `system` — so "who deleted this customer?" is a
 //! dead end whenever a job did it.
 //!
-//! ## Why this is a list and not a loop
+//! ## An explicit list, not every task-local
 //!
-//! Copying *every* task-local across the boundary is the obvious
-//! implementation and it is wrong. Three of the framework's five would
-//! cause bugs if they crossed:
+//! It copies the task-locals named below, and only those. Declaring a
+//! new `task_local!` does not opt it in.
 //!
-//! | task-local | crosses? | why |
+//! | task-local | copied? | why |
 //! |---|---|---|
-//! | `AUDIT_SOURCE` | yes | who triggered the work — the point of this |
-//! | `ACTIVE_TZ` | yes | a formatting preference; harmless and useful |
-//! | `ON_COMMIT` | **no** | a callback queue for a *live* transaction. A job inheriting it would queue callbacks onto one that already finished. |
-//! | `SUPPRESS_SIGNALS` | **no** | means "don't fire signals *here*". A request calling `save_quietly` must not silence a job running days later. |
-//! | `CURRENT_SESSION` | **no** | a *request's* session. A job is not in a request; deep-stack helpers would act on a stale one. |
+//! | `audit::AUDIT_SOURCE` (+ its tenant binding) | yes | who triggered the work |
+//! | `i18n::timezone::ACTIVE_TZ` | yes | a formatting preference |
+//! | `sql::executor::atomic::BLOCK` | **no** | the caller's live transaction and its on-commit queue |
+//! | `signals::SUPPRESS_SIGNALS` | **no** | `save_quietly` must not silence a job days later |
+//! | `admin::session::CURRENT_SESSION`, `CURRENT_CSRF_TOKEN` | **no** | belong to one request |
+//! | `tenant_log::TENANT` | **no** | a log label for one request |
 //!
-//! So adding to this list is a deliberate act. Declaring a new
-//! `task_local!` elsewhere does not opt it in.
+//! A value that was never set is not copied as a default: the work sees
+//! "no scope", exactly as its caller did.
+//!
+//! A source set by the tenant admin (or `audit::with_tenant_source`) names a user of that tenant, so it
+//! is recorded only where writes are known to go there (a
+//! `for_each_tenant` pass over it); elsewhere, the registry included,
+//! it reads as `system`.
 //!
 //! ## Where it is carried
 //!
@@ -38,7 +43,7 @@
 //! it ran deferred needs its own column rather than a prefix on the
 //! token, which would break the exact-match filters that read it: #1385.
 
-use crate::audit::AuditSource;
+use crate::audit::{AuditSource, CapturedSource};
 
 /// A snapshot of the ambient context worth carrying into deferred work.
 ///
@@ -46,8 +51,8 @@ use crate::audit::AuditSource;
 /// runs — a worker is spawned at boot and has no caller.
 #[derive(Debug, Clone)]
 pub struct TaskContext {
-    source: AuditSource,
-    offset: chrono::FixedOffset,
+    source: Option<CapturedSource>,
+    offset: Option<chrono::FixedOffset>,
 }
 
 impl TaskContext {
@@ -55,15 +60,15 @@ impl TaskContext {
     #[must_use]
     pub fn capture() -> Self {
         Self {
-            source: crate::audit::current_source(),
-            offset: crate::i18n::timezone::current_offset(),
+            source: CapturedSource::capture(),
+            offset: crate::i18n::timezone::active_override(),
         }
     }
 
-    /// The audit source this context carries.
+    /// The audit source this context carries, if one was set.
     #[must_use]
-    pub fn source(&self) -> &AuditSource {
-        &self.source
+    pub fn source(&self) -> Option<&AuditSource> {
+        self.source.as_ref().map(CapturedSource::source)
     }
 
     /// Run `fut` with this context installed.
@@ -71,9 +76,16 @@ impl TaskContext {
     where
         F: std::future::Future<Output = T>,
     {
-        let offset = self.offset;
-        crate::audit::with_source(self.source, crate::i18n::timezone::with_offset(offset, fut))
-            .await
+        let fut = async move {
+            match self.offset {
+                Some(offset) => crate::i18n::timezone::with_offset(offset, fut).await,
+                None => fut.await,
+            }
+        };
+        match self.source {
+            Some(source) => source.scope(fut).await,
+            None => fut.await,
+        }
     }
 }
 
@@ -82,21 +94,64 @@ mod tests {
     use super::*;
     use crate::audit::{current_source, with_source, AuditSource};
 
-    /// Work nobody triggered — a boot hook, a test — captures as
-    /// `System`/UTC rather than inventing an actor or a locale.
+    /// Work nobody triggered captures nothing, and installs nothing: no
+    /// invented actor, and no explicit UTC override.
     #[tokio::test]
-    async fn capture_outside_any_scope_is_system_utc() {
+    async fn no_scope_stays_no_scope() {
         let ctx = TaskContext::capture();
-        assert_eq!(ctx.source().as_token(), "system");
-        assert_eq!(ctx.offset, chrono::FixedOffset::east_opt(0).unwrap());
+        assert!(ctx.source().is_none());
+        assert!(ctx.offset.is_none());
+        let (token, tz) = ctx
+            .install(async {
+                (
+                    current_source().as_token(),
+                    crate::i18n::timezone::active_override(),
+                )
+            })
+            .await;
+        assert_eq!(token, "system");
+        assert_eq!(tz, None);
     }
 
     #[tokio::test]
     async fn capture_takes_the_active_source() {
         with_source(AuditSource::User { id: "42".into() }, async {
-            assert_eq!(TaskContext::capture().source().as_token(), "user:42");
+            let ctx = TaskContext::capture();
+            assert_eq!(
+                ctx.source().map(AuditSource::as_token).as_deref(),
+                Some("user:42")
+            );
         })
         .await;
+    }
+
+    /// A tenant user's id is recorded only on writes known to go to that
+    /// tenant; elsewhere it falls back to `system` (#1229).
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_tenant_bound_source_stays_in_its_tenant() {
+        use crate::audit::{with_tenant_source, writing_to_tenant};
+        let ctx = with_tenant_source(AuditSource::User { id: "42".into() }, "a".into(), async {
+            assert_eq!(current_source().as_token(), "user:42", "the request itself");
+            TaskContext::capture()
+        })
+        .await;
+        let tokens = tokio::spawn(ctx.install(async {
+            let unknown = current_source().as_token();
+            let in_a = writing_to_tenant("a".into(), async { current_source().as_token() }).await;
+            let in_b = writing_to_tenant("b".into(), async { current_source().as_token() }).await;
+            let explicit = with_source(AuditSource::Custom("cli".into()), async {
+                writing_to_tenant("b".into(), async { current_source().as_token() }).await
+            })
+            .await;
+            (unknown, in_a, in_b, explicit)
+        }))
+        .await
+        .expect("join");
+        assert_eq!(tokens.0, "system", "write target unknown");
+        assert_eq!(tokens.1, "user:42");
+        assert_eq!(tokens.2, "system", "tenant B must not get A's user id");
+        assert_eq!(tokens.3, "cli", "an explicit source is not bound");
     }
 
     /// The whole point: a spawned task sees the captured context, which
@@ -139,6 +194,9 @@ mod tests {
 
         let second = first.install(async { TaskContext::capture() }).await;
 
-        assert_eq!(second.source().as_token(), "user:42");
+        assert_eq!(
+            second.source().map(AuditSource::as_token).as_deref(),
+            Some("user:42")
+        );
     }
 }

@@ -69,6 +69,12 @@ pub fn current_offset() -> FixedOffset {
         .unwrap_or_else(|_| FixedOffset::east_opt(0).expect("UTC offset"))
 }
 
+/// The override in force, or `None` when none is: unlike
+/// [`current_offset`], "no override" is not UTC.
+pub(crate) fn active_override() -> Option<FixedOffset> {
+    ACTIVE_TZ.try_with(|tz| *tz).ok()
+}
+
 /// Run `future` with the active timezone temporarily set to
 /// `offset`.
 ///

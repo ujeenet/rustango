@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — in-memory jobs and scheduled tasks keep the caller's audit source and timezone (#1229)
 
-`InMemoryJobQueue` captures them at `dispatch`, `Scheduler` at `every()`; a job enqueued by user 42 audits as `user:42`, not `system`. `PgJobQueue` still runs as `system`.
+`InMemoryJobQueue` captures them at `dispatch`, `Scheduler` at `every()`; a job enqueued by user 42 audits as `user:42`, not `system`. A tenant user's id stays on its own tenant's rows. `PgJobQueue` still runs as `system`.
 
 ## [0.59.18] — 2026-10-02
 
