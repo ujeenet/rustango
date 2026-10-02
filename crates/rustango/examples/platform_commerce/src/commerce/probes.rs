@@ -343,9 +343,13 @@ pub async fn webhook_probe(body: Value) -> ProbeResult {
         id: nonce(),
         event: "soak.probe".into(),
         target_url: url,
-        signing_secret: "soak-webhook-secret".into(),
-        signature_format: rustango::webhook::SignatureFormat::HexSha256WithPrefix,
-        payload: json!({ "probe": true }),
+        body: json!({ "probe": true }).to_string(),
+        signature: rustango::webhook::sign(
+            rustango::webhook::SignatureFormat::HexSha256WithPrefix,
+            b"soak-webhook-secret",
+            br#"{"probe":true}"#,
+        )
+        .unwrap_or_default(),
         headers: HashMap::new(),
         timeout_secs: 3,
         retry_status_codes: Vec::new(),

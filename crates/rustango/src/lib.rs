@@ -624,7 +624,7 @@ pub mod content_negotiation;
 
 /// ETag middleware — hashes 2xx response bodies, returns 304 when
 /// `If-None-Match` matches. See [`etag::EtagLayer`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod etag;
 
 /// In-process scheduled task runner — fire async jobs at fixed intervals.
@@ -745,7 +745,7 @@ pub mod trailing_slash;
 /// Static file serving — read files from a directory with sensible
 /// `Content-Type`, `Cache-Control`, `Last-Modified`, and 304 support.
 /// See [`static_files::StaticFiles`] + [`static_files::static_router`].
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 pub mod static_files;
 
 /// HTTP method override — rewrite POST to PUT/PATCH/DELETE from the

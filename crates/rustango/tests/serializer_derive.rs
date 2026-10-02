@@ -634,3 +634,40 @@ mod declarative_validators {
         assert!(s.validate().is_ok());
     }
 }
+
+// ------------------------------------------------------------------ Raw idents (#1937)
+
+#[derive(rustango::Model, Clone)]
+#[rustango(table = "kinds")]
+#[allow(non_snake_case)]
+pub struct Kind {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    pub r#type: String,
+    #[rustango(index)]
+    pub userName: String,
+}
+
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = Kind)]
+struct KindSerializer {
+    pub r#type: String,
+}
+
+/// `r#type` derives as the field `type`, and a field index names the
+/// column the field really has (#1937).
+#[test]
+fn raw_idents_and_field_index_columns() {
+    use rustango::core::Model as _;
+    let field = Kind::SCHEMA.field("type").expect("field `type`");
+    assert_eq!(field.column, "type");
+    let index = &Kind::SCHEMA.indexes[0];
+    assert_eq!(index.columns, &["userName"]);
+    let k = Kind {
+        id: rustango::sql::Auto::Set(1),
+        r#type: "a".into(),
+        userName: "u".into(),
+    };
+    assert_eq!(KindSerializer::from_model(&k).r#type, "a");
+    assert_eq!(KindSerializer::writable_fields(), &["type"]);
+}

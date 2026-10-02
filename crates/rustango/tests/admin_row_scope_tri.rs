@@ -1,5 +1,5 @@
 //! `register_admin_queryset!` scopes by-pk reads, facet counts and FK
-//! facet labels on every backend (#1859, #2029); inlines hide secrets and
+//! facet labels and FK cells on every backend (#1859, #2029, #2080); inlines hide secrets and
 //! rows the view hook refuses, cap rows and insert natural PKs (#1861, #1717).
 
 #![cfg(all(
@@ -39,7 +39,7 @@ rustango::register_admin_queryset!("rowscope_item", owner_one);
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rowscope_note",
-    admin(list_display = "body", list_filter = "item_id")
+    admin(list_display = "body, item_id", list_filter = "item_id")
 )]
 #[allow(dead_code)]
 pub struct Note {
@@ -234,8 +234,9 @@ async fn hidden_rows_are_404_and_uncounted(pool: &Pool) {
 /// An FK facet labels a hidden target by its key, not its title (#2029).
 async fn fk_facet_hides_a_hidden_targets_name(pool: &Pool) {
     let theirs = seed(pool, "secret-title", 77).await;
+    // An id unlike the item's, so a JOIN-ON / WHERE bind swap shows.
     let mut note = Note {
-        id: Auto::default(),
+        id: Auto::Set(7),
         body: "n".into(),
         item_id: theirs,
     };
@@ -244,6 +245,40 @@ async fn fk_facet_hides_a_hidden_targets_name(pool: &Pool) {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains(&format!("item_id={theirs}")), "facet: {body}");
     assert!(!body.contains("secret-title"), "hidden name leaked: {body}");
+    // Nor in the FK cell or the detail page's joined display (#2080).
+    let (status, body) = get(pool, &format!("/rowscope_note/{}", note.id.get().unwrap())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-title"), "detail leaked: {body}");
+}
+
+/// A visible target's name still shows in the FK cell (#2080 control).
+async fn fk_cell_shows_a_visible_targets_name(pool: &Pool) {
+    let mine = seed(pool, "shown-title", 1).await;
+    // An id unlike the item's, so a JOIN-ON / WHERE bind swap shows.
+    let mut note = Note {
+        id: Auto::Set(7),
+        body: "n".into(),
+        item_id: mine,
+    };
+    note.insert_pool(pool).await.expect("insert note");
+    let (status, body) = get(pool, &format!("/rowscope_note/{}", note.id.get().unwrap())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("shown-title"), "detail: {body}");
+}
+
+/// List and inline View links percent-encode a string PK (#2079).
+async fn view_links_encode_the_pk(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a/b?c", p, "l", false).await;
+    for uri in [
+        "/rowscope_child".to_owned(),
+        format!("/rowscope_parent/{p}"),
+    ] {
+        let (status, body) = get(pool, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        let linked = [r#"a%2Fb%3Fc">View</a>"#, r#"a%2Fb%3Fc">#"#];
+        assert!(linked.iter().any(|l| body.contains(l)), "{uri}: {body}");
+    }
 }
 
 async fn seed_child(pool: &Pool, code: &str, parent_id: i64, label: &str, hidden: bool) {
@@ -518,6 +553,8 @@ tri_dialect_test! {
         nullable_bool_round_trips_in_inline,
         hidden_rows_are_404_and_uncounted,
         fk_facet_hides_a_hidden_targets_name,
+        fk_cell_shows_a_visible_targets_name,
+        view_links_encode_the_pk,
         inlines_hide_secrets_and_refused_rows,
         inline_post_keeps_secrets_and_inserts_natural_pks,
         inline_post_enforces_max_num,

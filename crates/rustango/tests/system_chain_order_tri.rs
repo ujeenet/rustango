@@ -359,6 +359,104 @@ async fn later_index_on_owned(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
+/// Run `sql` on a new pool: a pooled SQLite connection keeps a stale schema
+/// after another connection's DDL, and then refuses `CREATE INDEX`.
+async fn ddl(url: &str, sql: &str) -> bool {
+    let pool = Pool::connect(url).await.expect("connect");
+    let ok = rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+        .await
+        .is_ok();
+    pool.close().await;
+    ok
+}
+
+/// Migrate `tmp/a`, then drop a live system index not on `id`; returns it.
+async fn drop_a_system_index(
+    backend: Backend,
+    url: &str,
+    tmp: &Path,
+) -> rustango::migrate::IndexSnapshot {
+    let pool = Pool::connect(url).await.expect("connect");
+    manage_migrate(&pool, &tmp.join("a/migrations"))
+        .await
+        .expect("first run");
+    let sys = rustango::migrate::file::list_dir(&tmp.join("a/system/migrations")).unwrap();
+    // Not audit's: its `ensure_table_pool` recreates its own indexes. MySQL
+    // refuses to drop an index an FK needs, so take the first that drops.
+    for idx in sys.iter().flat_map(|m| &m.snapshot.indexes) {
+        if idx.table == "rustango_audit_log"
+            || idx.columns == ["id"]
+            || !has_index(&pool, &idx.name).await
+        {
+            continue;
+        }
+        let sql = match backend {
+            #[cfg(feature = "mysql")]
+            Backend::Mysql => format!("DROP INDEX {} ON {}", idx.name, idx.table),
+            #[allow(unreachable_patterns)]
+            _ => format!("DROP INDEX {}", idx.name),
+        };
+        if ddl(url, &sql).await {
+            pool.close().await;
+            return idx.clone();
+        }
+    }
+    panic!("no live system index to drop");
+}
+
+/// #2016 — a second dir's regenerated system chain restores a dropped index.
+async fn dropped_index_is_restored(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_, url)) = fresh(backend, tmp.path(), "idxgone").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let idx = drop_a_system_index(backend, &url, tmp.path()).await;
+    let pool = Pool::connect(&url).await.expect("connect");
+    assert!(
+        !has_index(&pool, &idx.name).await,
+        "{} was not dropped",
+        idx.name
+    );
+    manage_migrate(&pool, &tmp.path().join("b/migrations"))
+        .await
+        .expect("second dir");
+    assert!(
+        has_index(&pool, &idx.name).await,
+        "{} was not restored",
+        idx.name
+    );
+}
+
+/// #2016 — a converged index whose name is taken by one on other columns is reported.
+async fn clashing_index_is_reported(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_, url)) = fresh(backend, tmp.path(), "idxclash").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let idx = drop_a_system_index(backend, &url, tmp.path()).await;
+    let (table, index) = (&idx.table, &idx.name);
+    assert!(ddl(&url, &format!("CREATE INDEX {index} ON {table} (id)")).await);
+    let buf = rustango::testkit::CaptureWriter::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let pool = Pool::connect(&url).await.expect("connect");
+    manage_migrate(&pool, &tmp.path().join("b/migrations"))
+        .await
+        .expect("second dir");
+    let logged = buf.contents();
+    assert!(
+        logged.contains(&format!("index `{index}` is on `{table}` (id)")),
+        "{logged}"
+    );
+}
+
 /// A system step that only FK-references an owned table runs without first
 /// adding that table's unrelated columns; `finish` reports what it can't add.
 async fn fk_only_step_adds_only_targets(backend: Backend) {
@@ -819,6 +917,101 @@ async fn schema_mode_tenant_converges() {
     assert_eq!(n, 1, "t1.{table}.{column}");
 }
 
+/// #1718 — a tenant FK to a table its schema lacks must not bind to `public`'s;
+/// one to a registry table must.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn schema_mode_fk_stays_in_the_tenant_schema() {
+    let _signals = SIGNALS.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((registry, registry_url)) = fresh(Backend::Postgres, tmp.path(), "fkq").await else {
+        eprintln!("skipping — DATABASE_URL unset");
+        return;
+    };
+    let boot = tmp.path().join("boot/migrations");
+    std::fs::create_dir_all(&boot).unwrap();
+    rustango::tenancy::migrate_registry_pool(&registry, &boot)
+        .await
+        .expect("registry tables");
+    let mut org = rustango::tenancy::Org {
+        slug: "t1".into(),
+        display_name: "t1".into(),
+        storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
+        backend_kind: "postgres".into(),
+        schema_name: Some("t1".into()),
+        database_url: None,
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&registry).await.unwrap();
+    let Pool::Postgres(pg) = &registry else {
+        unreachable!()
+    };
+    rustango::sql::sqlx::query("CREATE TABLE fkq_parent (id BIGINT PRIMARY KEY)")
+        .execute(pg)
+        .await
+        .unwrap();
+    let field = |name: &str, fk: Option<Value>| {
+        json!({ "name": name, "column": name, "ty": "i64", "nullable": fk.is_some(),
+                "primary_key": fk.is_none(), "fk": fk })
+    };
+    let parent = json!({ "name": "fkq_parent", "model": "P", "fields": [field("id", None)] });
+    let child = json!({ "name": "fkq_child", "model": "C", "fields": [
+        field("id", None),
+        field("parent_id", Some(json!({ "kind": "fk", "to": "fkq_parent", "on": "id" }))),
+    ] });
+    let orgs = json!({ "name": "rustango_orgs", "model": "Org", "fields": [field("id", None)] });
+    let reg = json!({ "name": "fkq_reg", "model": "R", "fields": [
+        field("id", None),
+        field("org_id", Some(json!({ "kind": "fk", "to": "rustango_orgs", "on": "id" }))),
+    ] });
+    let dir = tmp.path().join("app/migrations");
+    write_step(
+        &dir,
+        "0001_reg",
+        None,
+        json!({ "tables": [orgs.clone(), reg.clone()] }),
+        vec![json!({ "CreateTable": "fkq_reg" })],
+    );
+    write_step(
+        &dir,
+        "0002_child",
+        Some("0001_reg"),
+        json!({ "tables": [orgs, reg, parent, child] }),
+        vec![json!({ "CreateTable": "fkq_child" })],
+    );
+    let pools = rustango::tenancy::TenantPools::new(pg.clone());
+    let report = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url)
+        .await
+        .expect("tenants");
+    let to_public: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_constraint c JOIN pg_class r ON r.oid = c.confrelid \
+         JOIN pg_namespace n ON n.oid = r.relnamespace \
+         WHERE c.contype = 'f' AND n.nspname = 'public' AND r.relname = 'fkq_parent'",
+    )
+    .fetch_one(pg)
+    .await
+    .unwrap();
+    assert_eq!(to_public, 0, "t1.fkq_child references public.fkq_parent");
+    // A registry model's table is shared: its FK still reaches `public`.
+    let to_registry: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_constraint c JOIN pg_class r ON r.oid = c.confrelid \
+         JOIN pg_namespace n ON n.oid = r.relnamespace JOIN pg_class t ON t.oid = c.conrelid \
+         WHERE c.contype = 'f' AND n.nspname = 'public' AND r.relname = 'rustango_orgs' \
+         AND t.relname = 'fkq_reg'",
+    )
+    .fetch_one(pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        to_registry, 1,
+        "t1.fkq_reg must reference public.rustango_orgs"
+    );
+    assert!(
+        !report.all_ok(),
+        "the missing tenant parent is reported: {report:?}"
+    );
+}
+
 /// A `post_migrate` receiver may migrate again: the signal fires outside the lock.
 #[cfg(all(feature = "postgres", feature = "signals"))]
 #[tokio::test]
@@ -870,6 +1063,147 @@ async fn post_migrate_receiver_can_migrate() {
     assert_eq!(seen, Some(Ok(())), "the receiver's migrate");
 }
 
+/// #2027 — migrates waiting on the lock must not hold the pool the holder needs.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn waiters_leave_the_pool_free(backend: Backend) {
+    use rustango::sql::sqlx;
+    const KEY: i64 = 0x5255_5354_4d49_4754;
+    const N: u32 = 3;
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_, url)) = fresh(backend, tmp.path(), "smallpool").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let wait = std::time::Duration::from_secs(5);
+    // Another process holds the lock while N migrates queue on a pool of N.
+    let (pool, outside) = match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => {
+            use sqlx::Connection as _;
+            let opts = sqlx::postgres::PgPoolOptions::new().max_connections(N);
+            let pool = opts.acquire_timeout(wait).connect(&url).await.unwrap();
+            let mut outside = sqlx::PgConnection::connect(&url).await.unwrap();
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(KEY)
+                .execute(&mut outside)
+                .await
+                .unwrap();
+            (
+                Pool::Postgres(pool),
+                Box::new(outside) as Box<dyn std::any::Any>,
+            )
+        }
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => {
+            use sqlx::Connection as _;
+            let opts = sqlx::mysql::MySqlPoolOptions::new().max_connections(N);
+            let pool = opts.acquire_timeout(wait).connect(&url).await.unwrap();
+            let mut outside = sqlx::MySqlConnection::connect(&url).await.unwrap();
+            sqlx::query("SELECT GET_LOCK(?, -1)")
+                .bind(format!("rustango_migrate_{KEY:x}"))
+                .execute(&mut outside)
+                .await
+                .unwrap();
+            (
+                Pool::Mysql(pool),
+                Box::new(outside) as Box<dyn std::any::Any>,
+            )
+        }
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite => unreachable!(),
+    };
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let runs: Vec<_> = (0..N)
+        .map(|_| {
+            let (pool, dir) = (pool.clone(), empty.clone());
+            tokio::spawn(async move { rustango::migrate::migrate_pool(&pool, &dir).await })
+        })
+        .collect();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    drop(outside);
+    for run in runs {
+        tokio::time::timeout(std::time::Duration::from_secs(60), run)
+            .await
+            .expect("no hang")
+            .unwrap()
+            .expect("migrate on a shared small pool");
+    }
+}
+
+/// A migrate under `with_lock_timeout` gives up on a held lock with a clear error.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn lock_timeout_gives_up(backend: Backend) {
+    use rustango::sql::sqlx::{self, Connection as _};
+    const KEY: i64 = 0x5255_5354_4d49_4754;
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, url)) = fresh(backend, tmp.path(), "locktimeout").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let _outside: Box<dyn std::any::Any> = match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => {
+            let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(KEY)
+                .execute(&mut c)
+                .await
+                .unwrap();
+            Box::new(c)
+        }
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => {
+            let mut c = sqlx::MySqlConnection::connect(&url).await.unwrap();
+            sqlx::query("SELECT GET_LOCK(?, -1)")
+                .bind(format!("rustango_migrate_{KEY:x}"))
+                .execute(&mut c)
+                .await
+                .unwrap();
+            Box::new(c)
+        }
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite => unreachable!(),
+    };
+    let dir = tmp.path().join("empty");
+    std::fs::create_dir_all(&dir).unwrap();
+    let limit = std::time::Duration::from_secs(1);
+    let run =
+        rustango::migrate::with_lock_timeout(limit, rustango::migrate::migrate_pool(&pool, &dir));
+    let err = tokio::time::timeout(std::time::Duration::from_secs(20), run)
+        .await
+        .expect("the wait is bounded")
+        .expect_err("the lock is held");
+    assert!(
+        matches!(err, rustango::migrate::MigrateError::LockTimeout(d) if d == limit),
+        "{err}"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn lock_timeout_gives_up_postgres() {
+    lock_timeout_gives_up(Backend::Postgres).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn lock_timeout_gives_up_mysql() {
+    lock_timeout_gives_up(Backend::Mysql).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn waiters_leave_the_pool_free_postgres() {
+    waiters_leave_the_pool_free(Backend::Postgres).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn waiters_leave_the_pool_free_mysql() {
+    waiters_leave_the_pool_free(Backend::Mysql).await;
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn concurrent_migrates_postgres() {
@@ -908,6 +1242,8 @@ per_backend!(
     owned_table_dropped_later,
     not_null_column_on_empty_table,
     later_index_on_owned,
+    clashing_index_is_reported,
+    dropped_index_is_restored,
     fk_only_step_adds_only_targets,
     nested_lock_is_an_error,
 );

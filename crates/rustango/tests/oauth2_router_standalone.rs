@@ -27,13 +27,13 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use axum::response::Redirect;
+use axum::response::{IntoResponse as _, Redirect};
 use rustango::oauth2::router::{oauth2_router, OnAuthSuccess};
 use rustango::oauth2::{providers, OAuth2Registry};
 use tower::ServiceExt;
 
 fn dummy_success() -> OnAuthSuccess {
-    Arc::new(|_user, _tokens| Box::pin(async { Ok(Redirect::to("/dashboard")) }))
+    Arc::new(|_login| Box::pin(async { Ok(Redirect::to("/dashboard").into_response()) }))
 }
 
 #[tokio::test]
