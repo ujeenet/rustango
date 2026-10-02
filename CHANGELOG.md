@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.18] — 2026-10-02
+
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)
 
 `CreateView` and `ModelForm::save` write the `create` (or `update`) audit row in the write's transaction. A webhook allowed private targets still refuses all of `169.254.0.0/16` and `fd00:ec2::/32`.
