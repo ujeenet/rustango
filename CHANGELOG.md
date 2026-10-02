@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — job queues drain on shutdown (#1255)
+
+`shutdown()` lets running jobs finish within `shutdown_grace` (default 5s), then aborts and re-queues them. Parked retries are kept, so `pending_count()` returns to 0.
+
+### Fixed — a job queue restarts after `shutdown()` (#1677)
+
+`start()` after `shutdown()` panicked on `InMemoryJobQueue` and ran nothing on `DatabaseJobQueue`. Each start now gets fresh workers.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)

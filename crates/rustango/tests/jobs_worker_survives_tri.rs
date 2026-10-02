@@ -1,6 +1,7 @@
 //! #1843 — a panicking job does not kill its worker and counts as a run;
 //! a long job is not run twice by a reclaim, and a worker that lost its
 //! lease does not finish the row for the worker that holds it now.
+//! #1677: a queue restarts after `shutdown`.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -389,6 +390,22 @@ async fn shutdown_releases_an_aborted_job(pool: &Pool) {
     );
 }
 
+/// #1677: `start` after `shutdown` runs jobs again; the stop flag was never reset.
+async fn start_after_shutdown_runs_jobs(pool: &Pool) {
+    let tick = token(pool, "restart");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.start().await;
+    q.shutdown().await;
+    q.start().await;
+    q.dispatch(&Tick {
+        token: tick.clone(),
+    })
+    .await
+    .unwrap();
+    wait_for("the job after a restart", || counts(&tick).1 == 1).await;
+    q.shutdown().await;
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -401,5 +418,6 @@ tri_dialect_test! {
         a_job_without_a_handler_spends_no_attempts,
         a_lost_lease_fires_no_dead_letter,
         shutdown_releases_an_aborted_job,
+        start_after_shutdown_runs_jobs,
     ],
 }

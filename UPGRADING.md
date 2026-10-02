@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Job queue `shutdown()` drains
+
+`shutdown()` now waits up to `shutdown_grace` (default 5s) for running jobs; `InMemoryJobQueue` used to abort at once. Aborted jobs and parked retries stay queued for the next `start()` (#1255, #1677).
+
 ## 0.59.19
 
 ### Bearer tokens need a login session
