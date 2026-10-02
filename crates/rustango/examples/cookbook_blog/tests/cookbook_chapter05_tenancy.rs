@@ -28,7 +28,7 @@ async fn pool() -> Option<sqlx::PgPool> {
 #[tokio::test]
 async fn provision_two_tenants_then_resolve_and_lazy_pool() {
     let Some(registry) = pool().await else { return };
-    cleanup_tenants(&registry, &["cookbook_acme", "cookbook_globex"]).await;
+    cleanup_tenants(&registry, &["cookbook-acme", "cookbook-globex"]).await;
 
     // These chapters share the `public` schema; a sibling chapter may
     // have created the framework registry tables through a different
@@ -65,9 +65,9 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
 
     // §5.66b — SubdomainResolver works against a real apex pattern.
     // host_pattern = "{slug}.cookbook-test.local" so the resolver can
-    // tell apart cookbook_acme.cookbook-test.local vs
-    // cookbook_globex.cookbook-test.local.
-    for slug in ["cookbook_acme", "cookbook_globex"] {
+    // tell apart cookbook-acme.cookbook-test.local vs
+    // cookbook-globex.cookbook-test.local.
+    for slug in ["cookbook-acme", "cookbook-globex"] {
         let opts = tenancy::manage::api::CreateTenantOpts {
             host_pattern: Some(format!("{slug}.cookbook-test.local")),
             ..Default::default()
@@ -78,7 +78,7 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
     }
 
     // Schema exists for each tenant.
-    for slug in ["cookbook_acme", "cookbook_globex"] {
+    for slug in ["cookbook-acme", "cookbook-globex"] {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
         )
@@ -89,10 +89,10 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
         assert!(exists, "tenant `{slug}` schema must exist");
     }
 
-    // §5.66 — SubdomainResolver: acme.<apex> → cookbook_acme org.
+    // §5.66 — SubdomainResolver: acme.<apex> → cookbook-acme org.
     {
         let r = SubdomainResolver::new("cookbook-test.local");
-        let req = http::Request::get("http://cookbook_acme.cookbook-test.local/")
+        let req = http::Request::get("http://cookbook-acme.cookbook-test.local/")
             .body(())
             .unwrap();
         let parts = req.into_parts().0;
@@ -101,7 +101,7 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
             .await
             .expect("resolve");
         let org = org.expect("subdomain resolver should match seeded acme tenant");
-        assert_eq!(org.slug, "cookbook_acme");
+        assert_eq!(org.slug, "cookbook-acme");
     }
 
     // §5.68 — HeaderResolver: looks up by X-Org slug directly.
@@ -109,14 +109,14 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
         let r = HeaderResolver::default();
         let mut req = http::Request::get("http://localhost/").body(()).unwrap();
         req.headers_mut()
-            .insert("X-Org", "cookbook_globex".parse().unwrap());
+            .insert("X-Org", "cookbook-globex".parse().unwrap());
         let parts = req.into_parts().0;
         let org = r
             .resolve(&parts, &registry.clone().into())
             .await
             .expect("resolve");
         let org = org.expect("X-Org should match seeded globex tenant");
-        assert_eq!(org.slug, "cookbook_globex");
+        assert_eq!(org.slug, "cookbook-globex");
     }
 
     // §5.70 — ChainResolver tries Subdomain, then Header.
@@ -127,28 +127,28 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
         // No subdomain → Subdomain arm misses; X-Org wins.
         let mut req = http::Request::get("http://localhost/").body(()).unwrap();
         req.headers_mut()
-            .insert("X-Org", "cookbook_acme".parse().unwrap());
+            .insert("X-Org", "cookbook-acme".parse().unwrap());
         let parts = req.into_parts().0;
         let org = r
             .resolve(&parts, &registry.clone().into())
             .await
             .expect("resolve");
         let org = org.expect("chain should fall through to header arm");
-        assert_eq!(org.slug, "cookbook_acme");
+        assert_eq!(org.slug, "cookbook-acme");
     }
 
     // §5.73 — TenantPools::get_pool returns a tenant-scoped pool.
     // For schema-mode tenants the pool's search_path lands on the
     // tenant's schema, so plain queries hit the right tables.
     {
-        let acme = tenancy::manage::api::find_org(&pools, "cookbook_acme")
+        let acme = tenancy::manage::api::find_org(&pools, "cookbook-acme")
             .await
             .unwrap()
             .expect("acme org");
         let _tenant_pool = pools.pool_for_org(&acme).await.expect("tenant pool");
     }
 
-    cleanup_tenants(&registry, &["cookbook_acme", "cookbook_globex"]).await;
+    cleanup_tenants(&registry, &["cookbook-acme", "cookbook-globex"]).await;
     std::fs::remove_dir_all(&dir).ok();
 }
 

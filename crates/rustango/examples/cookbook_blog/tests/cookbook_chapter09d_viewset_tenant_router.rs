@@ -46,7 +46,7 @@ static UNIQ: AtomicU64 = AtomicU64::new(0);
 fn unique(prefix: &str) -> String {
     let n = UNIQ.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
-    format!("{prefix}_{pid}_{n}")
+    format!("{prefix}-{pid}-{n}")
 }
 
 fn url() -> Option<String> {
