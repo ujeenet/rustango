@@ -378,3 +378,37 @@ async fn a_prefix_or_port_another_tenant_uses_is_refused() {
         .await
         .expect("own prefix");
 }
+
+/// A tenant may promote its own extra host to its base host, and a host
+/// row stored before lowercasing still clashes.
+#[tokio::test]
+async fn own_extra_hosts_are_not_a_clash_and_case_is_ignored() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.tenant("beta").await;
+    b.run(&["add-host", "acme", "extra.example.com"])
+        .await
+        .expect("extra host");
+    b.run(&["edit-tenant", "acme", "--host-pattern", "extra.example.com"])
+        .await
+        .expect("acme's own extra host");
+
+    let mut legacy = rustango::tenancy::OrgHost {
+        id: rustango::sql::Auto::Unset,
+        org_id: b.org("acme").await.id.get().copied().unwrap_or_default(),
+        hostname: "LEGACY.example.com".to_owned(),
+        enabled: true,
+        created_at: rustango::sql::Auto::Unset,
+    };
+    legacy.insert_pool(&b.registry).await.expect("legacy row");
+    let err = b
+        .run(&[
+            "edit-tenant",
+            "beta",
+            "--host-pattern",
+            "legacy.example.com",
+        ])
+        .await
+        .expect_err("claimed by acme in another case");
+    assert!(err.contains("another tenant"), "{err}");
+}

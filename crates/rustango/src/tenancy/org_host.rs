@@ -201,7 +201,7 @@ pub async fn add_host(
 }
 
 /// Is `host` some tenant's base host or extra host, other than
-/// `except_org`'s base host? Every path that writes a host asks this, since
+/// `except_org`'s own? Every path that writes a host asks this, since
 /// a host two tenants claim routes by row order (#1931).
 ///
 /// # Errors
@@ -213,18 +213,22 @@ pub(crate) async fn host_claimed(
 ) -> Result<bool, crate::sql::ExecError> {
     // The unique index on `rustango_org_hosts` cannot see
     // `rustango_orgs.host_pattern`, so both tables are checked.
+    // `iexact`: a row stored before hosts were lowercased still clashes,
+    // and only MySQL's collation would catch it with `=`.
     let base: Vec<super::Org> = super::Org::objects()
-        .where_(super::Org::host_pattern.eq(Some(host.to_owned())))
+        .where_(super::Org::host_pattern.iexact(host))
         .fetch(registry)
         .await?;
     if other_org(&base, except_org) {
         return Ok(true);
     }
-    Ok(!OrgHost::objects()
-        .where_(OrgHost::hostname.eq(host.to_owned()))
+    let extra: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::hostname.iexact(host))
         .fetch(registry)
-        .await?
-        .is_empty())
+        .await?;
+    Ok(extra
+        .iter()
+        .any(|h| except_org.is_none() || Some(h.org_id) != except_org))
 }
 
 /// Is `prefix` another tenant's path prefix? Two would route by row order.
