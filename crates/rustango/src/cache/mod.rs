@@ -93,7 +93,8 @@ pub trait Cache: Send + Sync + 'static {
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError>;
 
     /// Store `value` with no expiry, even on a backend built with a
-    /// default TTL. Wrapping caches must forward it.
+    /// default TTL. A bounded backend must not evict it either. Wrapping
+    /// caches must forward it.
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
         self.set(key, value, None).await
     }
@@ -544,19 +545,73 @@ struct CacheEntry {
     last_used: AtomicU64,
     /// `key.len() + value.len()`: this entry's share of the byte budget.
     size: usize,
+    /// Written by `set_forever`: outside both budgets, never evicted (#2009).
+    pinned: bool,
 }
 
 impl CacheEntry {
+    fn new(value: String, expires_at: Option<Instant>, tick: u64, size: usize) -> Self {
+        Self {
+            value,
+            expires_at,
+            last_used: AtomicU64::new(tick),
+            size,
+            pinned: false,
+        }
+    }
+
     fn is_expired(&self) -> bool {
         self.expires_at.map_or(false, |t| Instant::now() > t)
     }
 }
 
-/// The map and its running byte total, behind one lock so they cannot
-/// drift apart.
+/// The map and the totals of its evictable entries, behind one lock so
+/// they cannot drift apart. Change the map only through `put`/`take`/`retain`.
 struct Store {
     map: HashMap<String, CacheEntry>,
+    /// Bytes of the non-pinned entries.
     used_bytes: usize,
+    /// Count of the non-pinned entries.
+    evictable: usize,
+}
+
+impl Store {
+    fn put(&mut self, key: String, entry: CacheEntry) {
+        self.take(&key);
+        if !entry.pinned {
+            self.used_bytes += entry.size;
+            self.evictable += 1;
+        }
+        self.map.insert(key, entry);
+    }
+
+    fn take(&mut self, key: &str) -> Option<CacheEntry> {
+        let e = self.map.remove(key)?;
+        if !e.pinned {
+            self.used_bytes = self.used_bytes.saturating_sub(e.size);
+            self.evictable = self.evictable.saturating_sub(1);
+        }
+        Some(e)
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&str, &CacheEntry) -> bool) {
+        let (mut bytes, mut count) = (0usize, 0usize);
+        self.map.retain(|k, e| {
+            let kept = keep(k, e);
+            if !kept && !e.pinned {
+                bytes += e.size;
+                count += 1;
+            }
+            kept
+        });
+        self.used_bytes = self.used_bytes.saturating_sub(bytes);
+        self.evictable = self.evictable.saturating_sub(count);
+    }
+}
+
+/// Eviction stops at 90% of a budget, so the sets after it skip the scan (#1906).
+fn low_water(limit: usize) -> usize {
+    limit - limit / 10
 }
 
 /// Default byte budget for [`InMemoryCache::new`]: 256 MiB. Large
@@ -579,9 +634,10 @@ pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
 /// Size is bounded by [`DEFAULT_MAX_BYTES`] and
 /// [`DEFAULT_MAX_ENTRIES`], so a flood of unique keys cannot grow the
 /// process without limit. Eviction drops expired entries first, then
-/// the least recently used, until both budgets are met. Change the
+/// the least recently used, until both are 10% under budget. Change the
 /// budgets with [`InMemoryCache::with_max_bytes`] and
 /// [`InMemoryCache::with_max_entries`]; `0` means unbounded.
+/// Entries written with `set_forever` sit outside both budgets and are never evicted.
 ///
 /// Build with [`InMemoryCache::with_default_ttl`] to give every
 /// `set(_, _, None)` call a TTL.
@@ -630,6 +686,7 @@ impl InMemoryCache {
             inner: tokio::sync::RwLock::new(Store {
                 map: HashMap::new(),
                 used_bytes: 0,
+                evictable: 0,
             }),
             default_ttl,
             max_bytes,
@@ -644,23 +701,12 @@ impl InMemoryCache {
     }
 
     /// Store `value` expiring at `expires_at` (`None` = never).
-    async fn insert(&self, key: &str, value: &str, expires_at: Option<Instant>) {
+    async fn insert(&self, key: &str, value: &str, expires_at: Option<Instant>, pinned: bool) {
         let size = key.len() + value.len();
-        let tick = self.next_tick();
+        let mut entry = CacheEntry::new(value.to_owned(), expires_at, self.next_tick(), size);
+        entry.pinned = pinned;
         let mut store = self.inner.write().await;
-        if let Some(old) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(old.size);
-        }
-        store.used_bytes += size;
-        store.map.insert(
-            key.to_owned(),
-            CacheEntry {
-                value: value.to_owned(),
-                expires_at,
-                last_used: AtomicU64::new(tick),
-                size,
-            },
-        );
+        store.put(key.to_owned(), entry);
         self.evict_locked(&mut store);
     }
 
@@ -668,44 +714,37 @@ impl InMemoryCache {
         self.tick.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn over_budget(&self, s: &Store) -> bool {
-        (self.max_bytes > 0 && s.used_bytes > self.max_bytes)
-            || (self.max_entries > 0 && s.map.len() > self.max_entries)
+    fn over(s: &Store, max_bytes: usize, max_entries: usize) -> bool {
+        (max_bytes > 0 && s.used_bytes > max_bytes)
+            || (max_entries > 0 && s.evictable > max_entries)
     }
 
-    /// Evict until both budgets are met: expired entries first, then
-    /// the least recently used. The caller holds the write lock. One
-    /// entry always survives, so a value bigger than the whole budget
-    /// still caches.
+    /// Once over budget, evict to the low-water mark: expired entries
+    /// first, then the least recently used. The caller holds the write
+    /// lock. The newest entry always survives, so a value bigger than
+    /// the whole budget still caches.
     fn evict_locked(&self, store: &mut Store) {
-        if !self.over_budget(store) {
+        if !Self::over(store, self.max_bytes, self.max_entries) {
             return;
         }
-        let expired: Vec<String> = store
+        let (bytes, entries) = (low_water(self.max_bytes), low_water(self.max_entries));
+        store.retain(|_, e| !e.is_expired());
+        if !Self::over(store, bytes, entries) {
+            return;
+        }
+        let mut lru: Vec<(u64, String)> = store
             .map
             .iter()
-            .filter(|(_, e)| e.is_expired())
-            .map(|(k, _)| k.clone())
+            .filter(|(_, e)| !e.pinned)
+            .map(|(k, e)| (e.last_used.load(Ordering::Relaxed), k.clone()))
             .collect();
-        for k in expired {
-            if let Some(e) = store.map.remove(&k) {
-                store.used_bytes = store.used_bytes.saturating_sub(e.size);
+        lru.sort_unstable_by_key(|(tick, _)| *tick);
+        lru.pop();
+        for (_, k) in lru {
+            if !Self::over(store, bytes, entries) {
+                break;
             }
-        }
-        while self.over_budget(store) && store.map.len() > 1 {
-            let victim = store
-                .map
-                .iter()
-                .min_by_key(|(_, e)| e.last_used.load(Ordering::Relaxed))
-                .map(|(k, _)| k.clone());
-            match victim {
-                Some(k) => {
-                    if let Some(e) = store.map.remove(&k) {
-                        store.used_bytes = store.used_bytes.saturating_sub(e.size);
-                    }
-                }
-                None => break,
-            }
+            store.take(&k);
         }
     }
 }
@@ -736,12 +775,13 @@ impl Cache for InMemoryCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
-        self.insert(key, value, self.resolve_ttl(ttl)).await;
+        self.insert(key, value, self.resolve_ttl(ttl), false).await;
         Ok(())
     }
 
+    /// Pinned: no TTL, outside both budgets, never evicted (feature flags, #2009).
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
-        self.insert(key, value, None).await;
+        self.insert(key, value, None, true).await;
         Ok(())
     }
 
@@ -769,18 +809,9 @@ impl Cache for InMemoryCache {
             Some(e) if !e.is_expired() && ttl.is_none() => e.expires_at,
             _ => self.resolve_ttl(ttl),
         };
-        if let Some(old) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(old.size);
-        }
-        store.used_bytes += size;
-        store.map.insert(
+        store.put(
             key.to_owned(),
-            CacheEntry {
-                value,
-                expires_at,
-                last_used: AtomicU64::new(tick),
-                size,
-            },
+            CacheEntry::new(value, expires_at, tick, size),
         );
         self.evict_locked(&mut store);
         Ok(new)
@@ -796,28 +827,14 @@ impl Cache for InMemoryCache {
             return Ok(false);
         }
         let size = key.len() + value.len();
-        if let Some(old) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(old.size);
-        }
-        store.used_bytes += size;
-        store.map.insert(
-            key.to_owned(),
-            CacheEntry {
-                value: value.to_owned(),
-                expires_at: self.resolve_ttl(ttl),
-                last_used: AtomicU64::new(tick),
-                size,
-            },
-        );
+        let entry = CacheEntry::new(value.to_owned(), self.resolve_ttl(ttl), tick, size);
+        store.put(key.to_owned(), entry);
         self.evict_locked(&mut store);
         Ok(true)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
-        let mut store = self.inner.write().await;
-        if let Some(e) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(e.size);
-        }
+        self.inner.write().await.take(key);
         Ok(())
     }
 
@@ -830,24 +847,17 @@ impl Cache for InMemoryCache {
         let mut store = self.inner.write().await;
         store.map.clear();
         store.used_bytes = 0;
+        store.evictable = 0;
         Ok(())
     }
 
     /// Exact prefix delete: the map is right here, so it can be
-    /// filtered. `used_bytes` drops by exactly what was removed, so
-    /// the budget stays honest.
+    /// filtered. `Store::retain` keeps the budget totals honest.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
-        let mut store = self.inner.write().await;
-        let mut freed = 0usize;
-        store.map.retain(|k, e| {
-            if k.starts_with(prefix) {
-                freed += k.len() + e.value.len();
-                false
-            } else {
-                true
-            }
-        });
-        store.used_bytes = store.used_bytes.saturating_sub(freed);
+        self.inner
+            .write()
+            .await
+            .retain(|k, _| !k.starts_with(prefix));
         Ok(())
     }
 }
@@ -1573,6 +1583,34 @@ mod bound_tests {
             cache.set(&format!("k{i}"), "v", None).await.unwrap();
         }
         assert_eq!(cache.inner.read().await.map.len(), 1000);
+    }
+
+    /// Over budget, eviction goes down to the 90% mark, not to the cap (#1906).
+    #[tokio::test]
+    async fn eviction_stops_at_the_low_water_mark() {
+        let cache = InMemoryCache::new().with_max_bytes(0).with_max_entries(100);
+        for i in 0..=100 {
+            cache.set(&format!("k{i}"), "v", None).await.unwrap();
+        }
+        assert_eq!(cache.inner.read().await.map.len(), 90);
+        assert_eq!(cache.get("k100").await.unwrap().as_deref(), Some("v"));
+    }
+
+    /// `set_forever` entries survive a flood and use none of the budget (#2009).
+    #[tokio::test]
+    async fn set_forever_is_never_evicted() {
+        let cache = InMemoryCache::new().with_max_bytes(64).with_max_entries(3);
+        cache.set_forever("flag:x", "on").await.unwrap();
+        for i in 0..50 {
+            cache.set(&format!("k{i}"), "v", None).await.unwrap();
+        }
+        assert_eq!(cache.get("flag:x").await.unwrap().as_deref(), Some("on"));
+        let store = cache.inner.read().await;
+        assert!(store.evictable <= 3, "{}", store.evictable);
+        drop(store);
+        cache.delete("flag:x").await.unwrap();
+        let store = cache.inner.read().await;
+        assert_eq!(store.map.len(), store.evictable);
     }
 
     /// Deleting an entry returns its bytes to the budget.
