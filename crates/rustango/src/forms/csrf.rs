@@ -363,6 +363,20 @@ fn wildcard_matches(authority: &str, wild: &str) -> bool {
         .is_some_and(|rest| rest.ends_with('.'))
 }
 
+/// The config of the CSRF layer checking this request, in its extensions.
+#[derive(Clone)]
+pub(crate) struct ActiveCsrf(Arc<CsrfConfig>);
+
+/// The cookie name the CSRF layer on this request checks; the default
+/// when there is none.
+#[cfg(feature = "template_views")]
+#[must_use]
+pub(crate) fn active_cookie_name(extensions: &axum::http::Extensions) -> &str {
+    extensions
+        .get::<ActiveCsrf>()
+        .map_or(CSRF_COOKIE, |a| a.0.cookie_name.as_str())
+}
+
 /// The [`tower::Layer`] implementation. Wraps inner services with
 /// [`CsrfService`].
 #[derive(Clone)]
@@ -415,6 +429,13 @@ where
         let cfg = Arc::clone(&self.cfg);
         let mut inner = self.inner.clone();
         Box::pin(async move {
+            let mut req = req;
+            // An outer CSRF layer already checked this request with the
+            // app's config; a router's own default layer defers to it (#1722).
+            if req.extensions().get::<ActiveCsrf>().is_some() {
+                return inner.call(req).await;
+            }
+            req.extensions_mut().insert(ActiveCsrf(Arc::clone(&cfg)));
             let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
 
             // Enforce on unsafe methods — unless the path is exempt
@@ -784,7 +805,17 @@ pub fn stamp_into_context(
     headers: &axum::http::HeaderMap,
     ctx: &mut tera::Context,
 ) -> Option<String> {
-    let (token, set_cookie) = ensure_token(headers, CSRF_COOKIE);
+    stamp_named_into_context(headers, CSRF_COOKIE, ctx)
+}
+
+/// [`stamp_into_context`] for the cookie `cookie_name`.
+#[cfg(feature = "template_views")]
+pub(crate) fn stamp_named_into_context(
+    headers: &axum::http::HeaderMap,
+    cookie_name: &str,
+    ctx: &mut tera::Context,
+) -> Option<String> {
+    let (token, set_cookie) = ensure_token(headers, cookie_name);
     let html = csrf_input_html(&token);
     ctx.insert("csrf_token", &token);
     ctx.insert("csrf_input", &html);
