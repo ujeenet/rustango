@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [0.60.0] — 2026-10-02
 
+### Fixed — a new schema tenant reads its own migration ledgers (#2143)
+
+On PostgreSQL its first ledger read could hit `public`'s through the search path, so it skipped migrations `public` had applied.
+
 ### Fixed — the commerce examples' system chains are current (#2054)
 
 Regenerated with `migrate` / `makemigrations`; CI now fails when an example's framework steps are not committed.

@@ -75,7 +75,7 @@ where
     Fut: Future<Output = Result<Vec<Migration>, MigrateError>>,
 {
     runner::with_migrate_lock_held(pool, |held| async move {
-        let tables = ProjectTables::read(pool, project_dir).await?;
+        let tables = ProjectTables::read(held, pool, project_dir).await?;
         let run = Run {
             held,
             pool,
@@ -114,11 +114,9 @@ struct ProjectTables {
 }
 
 impl ProjectTables {
-    async fn read(pool: &Pool, dir: &Path) -> Result<Self, MigrateError> {
+    async fn read(held: LockHeld, pool: &Pool, dir: &Path) -> Result<Self, MigrateError> {
         let migs = file::list_dir(dir)?;
-        let applied = runner::applied_set_pool_with_ledger(pool, runner::LEDGER_TABLE)
-            .await
-            .unwrap_or_default();
+        let applied = runner::ledger_names(held, pool, runner::LEDGER_TABLE).await?;
         let mut out = Self {
             owned: BTreeSet::new(),
             claimed: BTreeSet::new(),
@@ -315,7 +313,8 @@ impl Run<'_> {
                 absent.insert(t.clone());
             }
         }
-        let ledger = runner::system_ledger_names(self.held, self.pool).await?;
+        let ledger =
+            runner::ledger_names(self.held, self.pool, runner::SYSTEM_LEDGER_TABLE).await?;
         // Tables a waiting step's creations already made (#2083); a
         // regenerated chain's names miss the ledger, and its runner converges.
         let mut early = BTreeSet::new();
