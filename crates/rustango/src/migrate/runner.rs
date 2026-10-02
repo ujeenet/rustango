@@ -1543,6 +1543,16 @@ async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(
     Ok(())
 }
 
+/// The system ledger's names, creating it first: on PG a read before a tenant
+/// schema has its ledger caches a plan bound to `public`'s.
+pub(crate) async fn system_ledger_names(
+    _: LockHeld,
+    pool: &crate::sql::Pool,
+) -> Result<HashSet<String>, MigrateError> {
+    create_ledger_locked(pool, SYSTEM_LEDGER_TABLE).await?;
+    applied_set_pool_with_ledger(pool, SYSTEM_LEDGER_TABLE).await
+}
+
 /// The statement that records a migration as applied — one column list
 /// for the five runners that write it.
 ///

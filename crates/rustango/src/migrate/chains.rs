@@ -307,9 +307,7 @@ impl Run<'_> {
                 absent.insert(t.clone());
             }
         }
-        let ledger = runner::applied_set_pool_with_ledger(self.pool, runner::SYSTEM_LEDGER_TABLE)
-            .await
-            .unwrap_or_default();
+        let ledger = runner::system_ledger_names(self.held, self.pool).await?;
         // Tables a waiting step's creations already made (#2083); a
         // regenerated chain's names miss the ledger, and its runner converges.
         let mut early = BTreeSet::new();
