@@ -263,6 +263,7 @@ pub(super) async fn tenant_sso_callback(
     tenant_pool: &Pool,
     registry_pool: &Pool,
     routes: &RouteConfig,
+    cookie_path: &str,
     parts: &Parts,
 ) -> Response {
     let params: CallbackParams =
@@ -347,7 +348,7 @@ pub(super) async fn tenant_sso_callback(
     payload.iat = crate::session::issued_at(user.sessions_revoked_at);
     let cookie_value = tenant_console::encode(secret, &payload);
     let session_cookie = format!(
-        "{}={cookie_value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{}",
+        "{}={cookie_value}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age={ttl}{}",
         tenant_console::COOKIE_NAME,
         secure_suffix()
     );

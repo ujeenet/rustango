@@ -12,6 +12,10 @@ It reads the user row like `require_bearer`, so a logout, password change or dea
 
 `protect_with_basic_auth` adds CSRF and form tokens, since the browser resends basic credentials cross-site. New `admin::protect_with_csrf` does the same for an admin behind app cookie auth.
 
+### Security — path-prefix tenants keep separate sessions (#2098)
+
+The tenant session cookie is scoped to the tenant's path prefix, so signing in to one prefix tenant no longer replaces another's session on the same host.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)

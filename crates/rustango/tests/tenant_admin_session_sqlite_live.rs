@@ -290,16 +290,16 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
     );
     let handoff = &location[location.find("/acme/").expect("prefixed handoff")..];
     let redeemed = env.get(handoff, "").await;
-    let cookie = redeemed
+    let set_cookie = redeemed
         .headers()
         .get("set-cookie")
         .unwrap_or_else(|| panic!("handoff should set a cookie, got {}", redeemed.status()))
         .to_str()
         .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
         .to_owned();
+    // Scoped to the prefix, so a second prefix tenant on this host keeps its own (#2098).
+    assert!(set_cookie.contains("Path=/acme;"), "{set_cookie}");
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
     assert_eq!(
         redeemed
             .headers()
