@@ -256,9 +256,12 @@ impl<'a> Reporter<'a> {
         let Some(store) = &self.store else {
             return;
         };
-        if let Err(e) =
-            super::provision_store::attach_org(store.registry, store.run_id, org_id).await
-        {
+        let attach = || super::provision_store::attach_org(store.registry, store.run_id, org_id);
+        // One retry: this is the run's only org link (#2061).
+        if let Err(e) = match attach().await {
+            Err(_) => attach().await,
+            ok => ok,
+        } {
             tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not attach org id to run");
         }
     }
