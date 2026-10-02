@@ -472,88 +472,140 @@ async fn migrate_with_ledger(
     ledger: &str,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
+    with_migrate_signals(
+        async {
+            ensure_ledger_for(pool, ledger).await?;
+            with_migrate_lock(pool, migrate_with_ledger_body(pool, dir, ledger, observer)).await
+        },
+        |newly| newly.iter().map(|m| m.name.clone()).collect(),
+    )
+    .await
+}
+
+/// [`migrate_with_progress`] for a caller that holds the migrate lock. Fires
+/// no signals: they would run under the lock, so [`Signals::Fire`] does.
+#[cfg(feature = "postgres")]
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
+pub(crate) async fn migrate_locked(
+    _: LockHeld,
+    pool: &PgPool,
+    dir: &Path,
+    observer: Option<&dyn MigrationObserver>,
+) -> Result<Vec<Migration>, MigrateError> {
+    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
+    create_ledger_locked(&enum_pool, LEDGER_TABLE).await?;
+    migrate_with_ledger_body(pool, dir, LEDGER_TABLE, observer).await
+}
+
+/// Whether a run fires `pre_migrate` / `post_migrate`. They fire outside
+/// the migrate lock, so a handler may migrate again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signals {
+    /// The PG `migrate` runner's contract.
+    #[cfg_attr(
+        not(all(feature = "postgres", any(feature = "manage", feature = "tenancy"))),
+        allow(dead_code)
+    )]
+    Fire,
+    Skip,
+}
+
+/// `pre_migrate` / `post_migrate` around `run`; `applied` names what it applied.
+pub(crate) async fn with_migrate_signals<T>(
+    run: impl std::future::Future<Output = Result<T, MigrateError>>,
+    applied: impl FnOnce(&T) -> Vec<String>,
+) -> Result<T, MigrateError> {
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
         send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
     send_pre_migrate(PreMigrateContext { source: "migrate" }).await;
-    ensure_ledger_for(pool, ledger).await?;
-    let newly = with_migrate_lock(pool, async {
-        let all = file::list_dir(dir)?;
-        let applied = applied_set_for(pool, ledger).await?;
-        let pending = pending_migrations(&all, &applied);
-
-        let total = pending.len();
-        emit(observer, || MigrationEvent::Planned { total });
-
-        let mut newly = Vec::with_capacity(total);
-        // Squash reconciliation applies on this legacy PgPool entry point
-        // too — route through the same dialect-agnostic decision used by
-        // `migrate_pool` so both runners agree. `fake_initial` stays off
-        // here: table-existence faking is opted into only by the
-        // framework's system-migration path.
-        let enum_pool = crate::sql::Pool::Postgres(pool.clone());
-        for (i, mig) in pending.into_iter().enumerate() {
-            let index = i + 1;
-            emit(observer, || MigrationEvent::Started {
-                name: mig.name.clone(),
-                index,
-                total,
-            });
-            let began = std::time::Instant::now();
-
-            let step = async {
-                Ok::<_, MigrateError>(match reconcile(&enum_pool, &mig, &applied, false).await? {
-                    ReconcileAction::Fake => {
-                        fake_apply_pool(&enum_pool, &mig, ledger).await?;
-                        Outcome::Faked
-                    }
-                    // `fake_initial` is off on this path, so
-                    // `RunPartial` is unreachable here; treat it as a
-                    // plain run for totality.
-                    ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-                        apply_one(pool, &mig, ledger).await?;
-                        Outcome::Ran
-                    }
-                })
-            }
-            .await;
-
-            let outcome = match step {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    emit(observer, || MigrationEvent::Failed {
-                        name: mig.name.clone(),
-                        index,
-                        total,
-                        error: e.to_string(),
-                    });
-                    return Err(e);
-                }
-            };
-
-            emit(observer, || MigrationEvent::Finished {
-                name: mig.name.clone(),
-                index,
-                total,
-                outcome,
-                elapsed: began.elapsed(),
-            });
-            newly.push(mig);
-        }
-        Ok(newly)
-    })
-    .await?;
+    let out = run.await?;
     // #411 — post_migrate fires once after the file-based migrate
     // session completes. `applied` lists newly-applied migration
     // names (empty when everything was already applied).
     #[cfg(feature = "signals")]
     send_post_migrate(PostMigrateContext {
         source: "migrate",
-        applied: newly.iter().map(|m| m.name.clone()).collect(),
+        applied: applied(&out),
     })
     .await;
+    #[cfg(not(feature = "signals"))]
+    let _ = applied;
+    Ok(out)
+}
+
+/// The legacy PG run; the caller holds the migrate lock.
+#[cfg(feature = "postgres")]
+async fn migrate_with_ledger_body(
+    pool: &PgPool,
+    dir: &Path,
+    ledger: &str,
+    observer: Option<&dyn MigrationObserver>,
+) -> Result<Vec<Migration>, MigrateError> {
+    let all = file::list_dir(dir)?;
+    let applied = applied_set_for(pool, ledger).await?;
+    let pending = pending_migrations(&all, &applied);
+
+    let total = pending.len();
+    emit(observer, || MigrationEvent::Planned { total });
+
+    let mut newly = Vec::with_capacity(total);
+    // Squash reconciliation applies on this legacy PgPool entry point
+    // too — route through the same dialect-agnostic decision used by
+    // `migrate_pool` so both runners agree. `fake_initial` stays off
+    // here: table-existence faking is opted into only by the
+    // framework's system-migration path.
+    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
+    for (i, mig) in pending.into_iter().enumerate() {
+        let index = i + 1;
+        emit(observer, || MigrationEvent::Started {
+            name: mig.name.clone(),
+            index,
+            total,
+        });
+        let began = std::time::Instant::now();
+
+        let step = async {
+            Ok::<_, MigrateError>(match reconcile(&enum_pool, &mig, &applied, false).await? {
+                ReconcileAction::Fake => {
+                    fake_apply_pool(&enum_pool, &mig, ledger).await?;
+                    Outcome::Faked
+                }
+                // `fake_initial` is off on this path, so
+                // `RunPartial` is unreachable here; treat it as a
+                // plain run for totality.
+                ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
+                    apply_one(pool, &mig, ledger).await?;
+                    Outcome::Ran
+                }
+            })
+        }
+        .await;
+
+        let outcome = match step {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                emit(observer, || MigrationEvent::Failed {
+                    name: mig.name.clone(),
+                    index,
+                    total,
+                    error: e.to_string(),
+                });
+                return Err(e);
+            }
+        };
+
+        emit(observer, || MigrationEvent::Finished {
+            name: mig.name.clone(),
+            index,
+            total,
+            outcome,
+            elapsed: began.elapsed(),
+        });
+        newly.push(mig);
+    }
     Ok(newly)
 }
 
@@ -576,15 +628,18 @@ where
     // SQLite (when added in slice 10.5) returns `None` and the body
     // runs without a session lock (SQLite's single-writer model
     // achieves the same exclusion via `BEGIN EXCLUSIVE`).
+    refuse_nested_lock()?;
     let dialect = Postgres;
     let mut lock_conn = pool.acquire().await?;
+    // A cancelled run must not pool a session that still holds the lock.
+    lock_conn.close_on_drop();
     if let Some(acquire_sql) = dialect.acquire_session_lock_sql() {
         sqlx::query(&acquire_sql)
             .bind(MIGRATE_LOCK_KEY)
             .execute(&mut *lock_conn)
             .await?;
     }
-    let result = body.await;
+    let result = LOCK_HELD.scope((), body).await;
     // Always try to release. If unlock fails (e.g. connection died),
     // Postgres releases on session close so we won't deadlock peers
     // forever — and we want the original error from `result` to
@@ -1611,13 +1666,34 @@ pub(crate) enum ChainOrigin {
 /// As [`migrate_pool_with_ledger_fake_initial`], plus catalog reads and
 /// what a [`ChainOrigin::Regenerated`] chain could not converge.
 pub(crate) async fn migrate_system_chain(
+    _: LockHeld,
     pool: &crate::sql::Pool,
     chain: &super::make::SystemChain,
     run_dir: &Path,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     let origin = chain.origin();
-    migrate_pool_with_ledger_opts(pool, run_dir, SYSTEM_LEDGER_TABLE, true, origin, observer).await
+    create_ledger_locked(pool, SYSTEM_LEDGER_TABLE).await?;
+    migrate_pool_body(pool, run_dir, SYSTEM_LEDGER_TABLE, true, origin, observer).await
+}
+
+/// [`migrate_pool_with_progress`] for a caller that holds the migrate lock.
+pub(crate) async fn migrate_pool_locked(
+    _: LockHeld,
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    observer: Option<&dyn MigrationObserver>,
+) -> Result<Vec<Migration>, MigrateError> {
+    create_ledger_locked(pool, LEDGER_TABLE).await?;
+    migrate_pool_body(
+        pool,
+        dir,
+        LEDGER_TABLE,
+        false,
+        ChainOrigin::OnDisk,
+        observer,
+    )
+    .await
 }
 
 async fn migrate_pool_with_ledger_opts(
@@ -1628,75 +1704,89 @@ async fn migrate_pool_with_ledger_opts(
     origin: ChainOrigin,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
-    with_migrate_lock_pool(pool, ledger, async {
-        let all = file::list_dir(dir)?;
-        let mut applied = applied_set_pool_with_ledger(pool, ledger).await?;
-        if origin == ChainOrigin::Regenerated && !applied.is_empty() {
-            // Match the live schema, not the names, then record the chain.
-            let mut unfixed = Vec::new();
-            for mig in &all {
-                let failed = converge_regenerated(pool, mig).await?;
-                if failed.is_empty() {
-                    if applied.insert(mig.name.clone()) {
-                        fake_apply_pool(pool, mig, ledger).await?;
-                    }
-                } else {
-                    unfixed.extend(failed);
-                }
-            }
-            if !unfixed.is_empty() {
-                return Err(MigrateError::Validation(format!(
-                    "the framework schema is missing objects `migrate` cannot add; \
-                     add them by hand, then rerun `migrate`:\n  - {}",
-                    unfixed.join("\n  - ")
-                )));
-            }
-        }
-        let pending = pending_migrations(&all, &applied);
-
-        let total = pending.len();
-        emit(observer, || MigrationEvent::Planned { total });
-
-        let mut newly = Vec::with_capacity(total);
-        for (i, mig) in pending.into_iter().enumerate() {
-            let index = i + 1;
-            emit(observer, || MigrationEvent::Started {
-                name: mig.name.clone(),
-                index,
-                total,
-            });
-            let began = std::time::Instant::now();
-
-            // The whole apply is wrapped so a failure can be reported to
-            // the observer before it propagates. `?` on its own would
-            // leave a watcher looking at a migration stuck on "started"
-            // forever, which is the state this exists to prevent.
-            let outcome = reconcile_and_apply(pool, &mig, &applied, ledger, fake_initial).await;
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    emit(observer, || MigrationEvent::Failed {
-                        name: mig.name.clone(),
-                        index,
-                        total,
-                        error: e.to_string(),
-                    });
-                    return Err(e);
-                }
-            };
-
-            emit(observer, || MigrationEvent::Finished {
-                name: mig.name.clone(),
-                index,
-                total,
-                outcome,
-                elapsed: began.elapsed(),
-            });
-            newly.push(mig);
-        }
-        Ok(newly)
-    })
+    with_migrate_lock_pool(
+        pool,
+        ledger,
+        migrate_pool_body(pool, dir, ledger, fake_initial, origin, observer),
+    )
     .await
+}
+
+/// The pool runner's apply loop; the caller holds the migrate lock.
+async fn migrate_pool_body(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    ledger: &str,
+    fake_initial: bool,
+    origin: ChainOrigin,
+    observer: Option<&dyn MigrationObserver>,
+) -> Result<Vec<Migration>, MigrateError> {
+    let all = file::list_dir(dir)?;
+    let mut applied = applied_set_pool_with_ledger(pool, ledger).await?;
+    if origin == ChainOrigin::Regenerated && !applied.is_empty() {
+        // Match the live schema, not the names, then record the chain.
+        let mut unfixed = Vec::new();
+        for mig in &all {
+            let failed = converge_regenerated(pool, mig).await?;
+            if failed.is_empty() {
+                if applied.insert(mig.name.clone()) {
+                    fake_apply_pool(pool, mig, ledger).await?;
+                }
+            } else {
+                unfixed.extend(failed);
+            }
+        }
+        if !unfixed.is_empty() {
+            return Err(MigrateError::Validation(format!(
+                "the framework schema is missing objects `migrate` cannot add; \
+                     add them by hand, then rerun `migrate`:\n  - {}",
+                unfixed.join("\n  - ")
+            )));
+        }
+    }
+    let pending = pending_migrations(&all, &applied);
+
+    let total = pending.len();
+    emit(observer, || MigrationEvent::Planned { total });
+
+    let mut newly = Vec::with_capacity(total);
+    for (i, mig) in pending.into_iter().enumerate() {
+        let index = i + 1;
+        emit(observer, || MigrationEvent::Started {
+            name: mig.name.clone(),
+            index,
+            total,
+        });
+        let began = std::time::Instant::now();
+
+        // The whole apply is wrapped so a failure can be reported to
+        // the observer before it propagates. `?` on its own would
+        // leave a watcher looking at a migration stuck on "started"
+        // forever, which is the state this exists to prevent.
+        let outcome = reconcile_and_apply(pool, &mig, &applied, ledger, fake_initial).await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                emit(observer, || MigrationEvent::Failed {
+                    name: mig.name.clone(),
+                    index,
+                    total,
+                    error: e.to_string(),
+                });
+                return Err(e);
+            }
+        };
+
+        emit(observer, || MigrationEvent::Finished {
+            name: mig.name.clone(),
+            index,
+            total,
+            outcome,
+            elapsed: began.elapsed(),
+        });
+        newly.push(mig);
+    }
+    Ok(newly)
 }
 
 /// Reconcile and apply a single pending migration, reporting which of
@@ -2064,7 +2154,7 @@ async fn count_existing_tables(pool: &crate::sql::Pool, tables: &[String]) -> us
 /// * Postgres — `information_schema.tables` filtered to `current_schema()`
 /// * MySQL — filtered to `DATABASE()` (a schema is a database here)
 /// * SQLite — `sqlite_master`, which is inherently per-connection
-async fn table_exists_here(pool: &crate::sql::Pool, table: &str) -> bool {
+pub(crate) async fn table_exists_here(pool: &crate::sql::Pool, table: &str) -> bool {
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => sqlx::query_scalar::<_, i64>(
@@ -2183,14 +2273,60 @@ async fn with_migrate_lock_pool<F, R>(
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    let body = async {
+    hold_migrate_lock(pool, async {
         create_ledger_locked(pool, ledger).await?;
         body.await
-    };
+    })
+    .await
+}
+
+/// Proof the caller holds the migrate lock; only [`with_migrate_lock_held`]
+/// mints one, so the `*_locked` runners can't run unlocked.
+#[derive(Clone, Copy)]
+pub(crate) struct LockHeld(());
+
+/// Run `body` under one migrate lock. Locks don't nest across pooled
+/// connections, so `body` must call the `LockHeld` runners, not re-lock.
+pub(crate) async fn with_migrate_lock_held<F, Fut, R>(
+    pool: &crate::sql::Pool,
+    body: F,
+) -> Result<R, MigrateError>
+where
+    F: FnOnce(LockHeld) -> Fut,
+    Fut: std::future::Future<Output = Result<R, MigrateError>>,
+{
+    hold_migrate_lock(pool, body(LockHeld(()))).await
+}
+
+tokio::task_local! {
+    /// Set while this task holds the migrate lock.
+    static LOCK_HELD: ();
+}
+
+/// A second lock from the task holding it would wait on itself forever.
+fn refuse_nested_lock() -> Result<(), MigrateError> {
+    if LOCK_HELD.try_with(|()| ()).is_ok() {
+        return Err(MigrateError::Validation(
+            "migrate called while this task holds the migrate lock; \
+             run it after the outer migrate returns"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn hold_migrate_lock<F, R>(pool: &crate::sql::Pool, body: F) -> Result<R, MigrateError>
+where
+    F: std::future::Future<Output = Result<R, MigrateError>>,
+{
+    refuse_nested_lock()?;
+    let body = LOCK_HELD.scope((), body);
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let mut lock_conn = pg.acquire().await?;
+            // A cancelled run must not pool a session that still holds the lock.
+            lock_conn.close_on_drop();
             sqlx::query("SELECT pg_advisory_lock($1)")
                 .bind(MIGRATE_LOCK_KEY)
                 .execute(&mut *lock_conn)
@@ -2208,6 +2344,7 @@ where
         crate::sql::Pool::Mysql(my) => {
             let lock_name = format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY);
             let mut lock_conn = my.acquire().await?;
+            lock_conn.close_on_drop();
             sqlx::query("SELECT GET_LOCK(?, -1)")
                 .bind(&lock_name)
                 .execute(&mut *lock_conn)

@@ -219,8 +219,9 @@ fn apply_number_fmt(integer_part: &str, frac_part: &str, fmt: NumberFmt) -> Stri
 pub fn format_number(value: f64, locale: &str, decimals: Option<usize>) -> String {
     let fmt = locale_number_fmt(locale);
     let s = match decimals {
-        Some(d) => format!("{value:.*}", d),
-        None => format!("{value}"),
+        Some(d) => crate::numberformat::round_half_up(value, d),
+        // `-0.0 == 0.0`, so this prints "0", never "-0".
+        None => format!("{}", if value == 0.0 { 0.0 } else { value }),
     };
     let negative = s.starts_with('-');
     let body = if negative { &s[1..] } else { &s };
@@ -267,10 +268,10 @@ fn format_number_filter(value: &Value, args: &HashMap<String, Value>) -> tera::R
 }
 
 /// How to show one currency.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CurrencyFmt {
     /// The symbol, such as "$", "€" or "₽".
-    symbol: &'static str,
+    symbol: std::borrow::Cow<'static, str>,
     /// `true` puts the symbol first (`$1,234.56`), `false` last
     /// (`1.234,56 €`).
     prefix: bool,
@@ -279,51 +280,62 @@ struct CurrencyFmt {
 }
 
 fn currency_fmt(code: &str) -> CurrencyFmt {
+    use std::borrow::Cow;
     let code = code.to_ascii_uppercase();
     match code.as_str() {
         "USD" | "CAD" | "AUD" | "NZD" | "HKD" | "SGD" | "MXN" => CurrencyFmt {
-            symbol: "$",
+            symbol: Cow::Borrowed("$"),
             prefix: true,
             decimals: 2,
         },
         "EUR" => CurrencyFmt {
-            symbol: "€",
+            symbol: Cow::Borrowed("€"),
             prefix: true,
             decimals: 2,
         },
         "GBP" => CurrencyFmt {
-            symbol: "£",
+            symbol: Cow::Borrowed("£"),
             prefix: true,
             decimals: 2,
         },
-        "JPY" | "KRW" | "CLP" => CurrencyFmt {
-            // No sub-unit in circulation.
-            symbol: "¥",
+        // No sub-unit in circulation.
+        "JPY" => CurrencyFmt {
+            symbol: Cow::Borrowed("¥"),
+            prefix: true,
+            decimals: 0,
+        },
+        "KRW" => CurrencyFmt {
+            symbol: Cow::Borrowed("₩"),
+            prefix: true,
+            decimals: 0,
+        },
+        "CLP" => CurrencyFmt {
+            symbol: Cow::Borrowed("$"),
             prefix: true,
             decimals: 0,
         },
         "CNY" => CurrencyFmt {
-            symbol: "¥",
+            symbol: Cow::Borrowed("¥"),
             prefix: true,
             decimals: 2,
         },
         "RUB" => CurrencyFmt {
-            symbol: "₽",
+            symbol: Cow::Borrowed("₽"),
             prefix: false,
             decimals: 2,
         },
         "INR" => CurrencyFmt {
-            symbol: "₹",
+            symbol: Cow::Borrowed("₹"),
             prefix: true,
             decimals: 2,
         },
         "BRL" => CurrencyFmt {
-            symbol: "R$",
+            symbol: Cow::Borrowed("R$"),
             prefix: true,
             decimals: 2,
         },
         "CHF" => CurrencyFmt {
-            symbol: "CHF",
+            symbol: Cow::Borrowed("CHF"),
             prefix: true,
             decimals: 2,
         },
@@ -336,7 +348,7 @@ fn currency_fmt(code: &str) -> CurrencyFmt {
                 "format_currency: unknown ISO 4217 code, using raw code as symbol"
             );
             CurrencyFmt {
-                symbol: Box::leak(code.into_boxed_str()),
+                symbol: Cow::Owned(code),
                 prefix: true,
                 decimals: 2,
             }
@@ -372,7 +384,7 @@ pub fn format_currency(amount: f64, currency: &str, locale: &str) -> String {
     let cur = currency_fmt(currency);
     let fmt = locale_number_fmt(locale);
 
-    let body_str = format!("{amount:.*}", cur.decimals as usize);
+    let body_str = crate::numberformat::round_half_up(amount, cur.decimals as usize);
     let negative = body_str.starts_with('-');
     let unsigned = if negative { &body_str[1..] } else { &body_str };
     let (int_part, frac_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
@@ -733,19 +745,8 @@ pub fn naturaltime_short(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
         return "now".to_owned();
     }
     let past = delta.num_seconds() >= 0;
-    let (n, unit) = if abs < 60 {
-        (abs, "s")
-    } else if abs < 3600 {
-        (abs / 60, "m")
-    } else if abs < 86_400 {
-        (abs / 3600, "h")
-    } else if abs < 2_592_000 {
-        (abs / 86_400, "d")
-    } else if abs < 31_536_000 {
-        (abs / 2_592_000, "mo")
-    } else {
-        (abs / 31_536_000, "y")
-    };
+    let (n, unit) = time_bucket(abs);
+    let unit = unit.short();
     if past {
         format!("{n}{unit} ago")
     } else {
@@ -784,27 +785,62 @@ fn natural_time_string(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     if abs < 30 {
         return "now".to_owned();
     }
-    if abs < 60 {
-        return format_unit(abs, "second", suffix);
+    let (n, unit) = time_bucket(abs);
+    format_unit(n, unit.name(), suffix)
+}
+
+/// The units [`time_bucket`] picks from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Month,
+    Year,
+}
+
+impl TimeUnit {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Second => "second",
+            Self::Minute => "minute",
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Month => "month",
+            Self::Year => "year",
+        }
     }
-    let minutes = abs / 60;
-    if minutes < 60 {
-        return format_unit(minutes, "minute", suffix);
+
+    fn short(self) -> &'static str {
+        match self {
+            Self::Second => "s",
+            Self::Minute => "m",
+            Self::Hour => "h",
+            Self::Day => "d",
+            Self::Month => "mo",
+            Self::Year => "y",
+        }
     }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return format_unit(hours, "hour", suffix);
+}
+
+/// The largest whole unit in `secs` (30-day months, 365-day years).
+/// Days 360-364 read 12 months: a year bucket would round them to 0.
+fn time_bucket(secs: i64) -> (i64, TimeUnit) {
+    let days = secs / 86_400;
+    if secs < 60 {
+        (secs, TimeUnit::Second)
+    } else if secs < 3600 {
+        (secs / 60, TimeUnit::Minute)
+    } else if days < 1 {
+        (secs / 3600, TimeUnit::Hour)
+    } else if days < 30 {
+        (days, TimeUnit::Day)
+    } else if days < 365 {
+        (days / 30, TimeUnit::Month)
+    } else {
+        (days / 365, TimeUnit::Year)
     }
-    let days = hours / 24;
-    if days < 30 {
-        return format_unit(days, "day", suffix);
-    }
-    let months = days / 30;
-    if months < 12 {
-        return format_unit(months, "month", suffix);
-    }
-    let years = days / 365;
-    format_unit(years, "year", suffix)
 }
 
 fn format_unit(n: i64, unit: &str, suffix: &str) -> String {
@@ -987,27 +1023,8 @@ fn magnitude_string(seconds: i64) -> String {
     if seconds <= 0 {
         return "0 minutes".to_owned();
     }
-    if seconds < 60 {
-        return format_magnitude(seconds, "second");
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return format_magnitude(minutes, "minute");
-    }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return format_magnitude(hours, "hour");
-    }
-    let days = hours / 24;
-    if days < 30 {
-        return format_magnitude(days, "day");
-    }
-    let months = days / 30;
-    if months < 12 {
-        return format_magnitude(months, "month");
-    }
-    let years = days / 365;
-    format_magnitude(years, "year")
+    let (n, unit) = time_bucket(seconds);
+    format_magnitude(n, unit.name())
 }
 
 fn format_magnitude(n: i64, unit: &str) -> String {
@@ -1239,6 +1256,7 @@ mod tests {
             (86_400 * 2, "2 days ago"),
             (86_400 * 31, "1 month ago"),
             (86_400 * 400, "1 year ago"),
+            (86_400 * 362, "12 months ago"),
             (-3600, "in 1 hour"),
         ] {
             let then = now - Duration::seconds(offset_secs);
@@ -1291,6 +1309,7 @@ mod tests {
         assert_eq!(magnitude_string(60 * 60 * 24), "1 day");
         assert_eq!(magnitude_string(60 * 60 * 24 * 31), "1 month");
         assert_eq!(magnitude_string(60 * 60 * 24 * 366), "1 year");
+        assert_eq!(magnitude_string(60 * 60 * 24 * 364), "12 months");
     }
 
     #[test]
@@ -1764,6 +1783,19 @@ mod tests {
         // JPY, KRW and CLP show no decimals.
         assert_eq!(format_currency(1234.0, "JPY", "ja"), "¥1,234");
         assert_eq!(format_currency(1234.99, "JPY", "ja"), "¥1,235"); // rounds
+        assert_eq!(format_currency(1234.0, "KRW", "ko"), "₩1,234");
+        assert_eq!(format_currency(1234.0, "CLP", "es"), "$1.234");
+    }
+
+    #[test]
+    fn format_currency_rounds_to_zero_without_a_sign() {
+        assert_eq!(format_currency(-0.001, "USD", "en"), "$0.00");
+        assert_eq!(format_currency(0.125, "USD", "en"), "$0.13");
+    }
+
+    #[test]
+    fn format_currency_unknown_code_is_its_own_symbol() {
+        assert_eq!(format_currency(5.0, "xyz", "en"), "XYZ5.00");
     }
 
     #[test]

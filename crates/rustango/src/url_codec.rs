@@ -286,6 +286,8 @@ fn is_uri_reserved(ch: char) -> bool {
             | ','
             | ';'
             | '='
+            // Decoding `%25` would make the next two chars read as an escape.
+            | '%'
     )
 }
 
@@ -818,6 +820,12 @@ mod tests {
         assert_eq!(uri_to_iri("/a%2Fb"), "/a%2Fb");
         // `?`, `#`, `&` and `=` are reserved too.
         assert_eq!(uri_to_iri("/q%3Fk%3Dv%26"), "/q%3Fk%3Dv%26");
+    }
+
+    #[test]
+    fn uri_to_iri_keeps_an_encoded_percent() {
+        assert_eq!(uri_to_iri("/x%2541"), "/x%2541");
+        assert_eq!(uri_to_iri("/100%25"), "/100%25");
     }
 
     #[test]

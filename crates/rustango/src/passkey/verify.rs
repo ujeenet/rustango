@@ -17,6 +17,7 @@ use super::error::PasskeyError;
 
 /// `authenticatorData` flag bits (WebAuthn §6.1).
 const FLAG_UP: u8 = 0b0000_0001; // User Present
+const FLAG_UV: u8 = 0b0000_0100; // User Verified
 const FLAG_AT: u8 = 0b0100_0000; // Attested credential data included
 
 /// Parsed `authenticatorData`.
@@ -37,6 +38,12 @@ impl AuthenticatorData {
     #[must_use]
     pub fn user_present(&self) -> bool {
         self.flags & FLAG_UP != 0
+    }
+
+    /// `User Verified` bit (PIN / biometric).
+    #[must_use]
+    pub fn user_verified(&self) -> bool {
+        self.flags & FLAG_UV != 0
     }
 }
 

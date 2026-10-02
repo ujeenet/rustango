@@ -263,9 +263,14 @@ impl From<crate::tenancy::AgentError> for BearerRejection {
 }
 
 impl BearerRejection {
-    pub(crate) fn into_response(self, headers: &HeaderMap, uri: &axum::http::Uri) -> Response {
+    pub(crate) fn into_response(
+        self,
+        headers: &HeaderMap,
+        extensions: &axum::http::Extensions,
+        uri: &axum::http::Uri,
+    ) -> Response {
         match self {
-            Self::Unauthorized => unauthorized(headers, uri),
+            Self::Unauthorized => unauthorized(headers, extensions, uri),
             Self::CheckFailed => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response()
             }
@@ -331,9 +336,10 @@ pub(crate) fn post_authed<DB: crate::sql::sqlx::Database>(
     State(state): State<AuthedMcpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Bytes,
 ) -> impl std::future::Future<Output = Response> + Send {
-    post_authed_in(t.into(), state, uri, headers, body)
+    post_authed_in(t.into(), state, uri, headers, extensions, body)
 }
 
 async fn post_authed_in(
@@ -341,14 +347,15 @@ async fn post_authed_in(
     state: AuthedMcpState,
     uri: axum::http::Uri,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Bytes,
 ) -> Response {
     let Some(token) = bearer(&headers) else {
-        return unauthorized(&headers, &uri);
+        return unauthorized(&headers, &extensions, &uri);
     };
     let agent = match authenticate_bearer(&state.jwt, t.pool(), &t.org.slug, token).await {
         Ok(agent) => agent,
-        Err(e) => return e.into_response(&headers, &uri),
+        Err(e) => return e.into_response(&headers, &extensions, &uri),
     };
     // The agent is verified, so hand the tools layer this tenant's
     // pool along with it, and `tools/call` runs on the right tenant.
@@ -559,16 +566,14 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// The request's origin, `scheme://host`, read from the headers. It
-/// honours `X-Forwarded-Proto`, and otherwise assumes `http` on
-/// localhost and `https` anywhere else.
-pub(crate) fn origin(headers: &HeaderMap) -> String {
+/// honours `X-Forwarded-Proto` from a trusted proxy, and otherwise
+/// assumes `http` on localhost and `https` anywhere else.
+pub(crate) fn origin(headers: &HeaderMap, extensions: &axum::http::Extensions) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|h| h.to_str().ok())
+    let scheme = crate::real_ip::trusted_forwarded(headers, extensions, "x-forwarded-proto")
         .map(str::to_owned)
         .unwrap_or_else(|| {
             if host.starts_with("localhost") || host.starts_with("127.") {
@@ -593,6 +598,7 @@ pub(crate) fn origin(headers: &HeaderMap) -> String {
 /// an empty `strip_suffix`.
 pub(crate) fn mount_base(
     headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
     original: &axum::http::Uri,
     strip_suffix: &str,
 ) -> String {
@@ -601,15 +607,19 @@ pub(crate) fn mount_base(
         .strip_suffix(strip_suffix)
         .unwrap_or(path)
         .trim_end_matches('/');
-    format!("{}{}", origin(headers), prefix)
+    format!("{}{}", origin(headers, extensions), prefix)
 }
 
 /// A `401` whose `WWW-Authenticate` header carries a
 /// `resource_metadata` URL, so a standards-compliant client can find
 /// the authorization server. The URL follows the real mount prefix,
 /// not the origin root.
-pub(crate) fn unauthorized(headers: &HeaderMap, original: &axum::http::Uri) -> Response {
-    let base = mount_base(headers, original, "");
+pub(crate) fn unauthorized(
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    original: &axum::http::Uri,
+) -> Response {
+    let base = mount_base(headers, extensions, original, "");
     let challenge =
         format!(r#"Bearer resource_metadata="{base}/.well-known/oauth-protected-resource""#);
     (
@@ -695,14 +705,32 @@ mod tests {
         h
     }
 
+    fn no_ext() -> axum::http::Extensions {
+        axum::http::Extensions::new()
+    }
+
+    /// `X-Forwarded-Proto` counts only from a trusted proxy.
+    #[test]
+    fn forwarded_proto_needs_a_trusted_proxy() {
+        let mut h = headers("app.example");
+        h.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert_eq!(origin(&h, &no_ext()), "https://app.example");
+        let mut ext = no_ext();
+        ext.insert(crate::real_ip::TrustedRealIp([10, 0, 0, 1].into()));
+        assert_eq!(origin(&h, &ext), "http://app.example");
+    }
+
     /// A busy raw-key check is 503 + Retry-After, through the same
     /// conversion `authenticate_bearer` uses (#1748).
     #[test]
     fn a_busy_raw_key_check_is_503_not_401() {
         use crate::tenancy::{AgentError, TenancyError};
         let uri: Uri = "/mcp".parse().unwrap();
-        let r = BearerRejection::from(AgentError::Tenancy(TenancyError::Busy))
-            .into_response(&headers("app.example"), &uri);
+        let r = BearerRejection::from(AgentError::Tenancy(TenancyError::Busy)).into_response(
+            &headers("app.example"),
+            &no_ext(),
+            &uri,
+        );
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(r.headers().contains_key(header::RETRY_AFTER));
     }
@@ -722,7 +750,7 @@ mod tests {
             panic!("a failed check must not authenticate");
         };
         let uri: Uri = "/mcp".parse().unwrap();
-        let r = e.into_response(&headers("app.example"), &uri);
+        let r = e.into_response(&headers("app.example"), &no_ext(), &uri);
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -731,20 +759,23 @@ mod tests {
         let h = headers("app.example");
         // On the JSON-RPC endpoint the path already is the prefix.
         let uri: Uri = "/mcp".parse().unwrap();
-        assert_eq!(mount_base(&h, &uri, ""), "https://app.example/mcp");
+        assert_eq!(
+            mount_base(&h, &no_ext(), &uri, ""),
+            "https://app.example/mcp"
+        );
         // On a discovery document, strip the suffix off to get it.
         let uri: Uri = "/api/mcp/.well-known/oauth-protected-resource"
             .parse()
             .unwrap();
         assert_eq!(
-            mount_base(&h, &uri, "/.well-known/oauth-protected-resource"),
+            mount_base(&h, &no_ext(), &uri, "/.well-known/oauth-protected-resource"),
             "https://app.example/api/mcp"
         );
         // A mount at the origin root gives an empty prefix, with no
         // trailing slash left behind.
         let uri: Uri = "/.well-known/oauth-protected-resource".parse().unwrap();
         assert_eq!(
-            mount_base(&h, &uri, "/.well-known/oauth-protected-resource"),
+            mount_base(&h, &no_ext(), &uri, "/.well-known/oauth-protected-resource"),
             "https://app.example"
         );
     }
@@ -753,7 +784,7 @@ mod tests {
     fn unauthorized_challenge_points_at_the_mount_prefix() {
         let h = headers("app.example");
         let uri: Uri = "/mcp".parse().unwrap();
-        let resp = unauthorized(&h, &uri);
+        let resp = unauthorized(&h, &no_ext(), &uri);
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         let challenge = resp
             .headers()
@@ -771,7 +802,10 @@ mod tests {
     fn localhost_origin_uses_http() {
         let h = headers("localhost:8080");
         let uri: Uri = "/mcp".parse().unwrap();
-        assert_eq!(mount_base(&h, &uri, ""), "http://localhost:8080/mcp");
+        assert_eq!(
+            mount_base(&h, &no_ext(), &uri, ""),
+            "http://localhost:8080/mcp"
+        );
     }
 
     /// The raw-key cache is shared, so these tests take turns.
