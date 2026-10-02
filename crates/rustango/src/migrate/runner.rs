@@ -2153,6 +2153,22 @@ async fn converge_regenerated(
                     }]
                 }),
         );
+        // A create that already exists is skipped, so every index is offered (#2016).
+        groups.extend(
+            mig.snapshot
+                .indexes
+                .iter()
+                .filter(|i| &i.table == table)
+                .map(|i| vec![super::diff::create_index(i)]),
+        );
+        // Dropping a column loses data, so a leftover one is reported, not dropped.
+        for column in live.iter().filter(|c| snap.field(c).is_none()) {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "`{table}.{column}` is not in the framework schema; drop it by hand \
+                 if it is NOT NULL with no default, or inserts fail"
+            );
+        }
     }
     Ok(super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?)
 }

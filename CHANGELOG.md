@@ -12,6 +12,10 @@ A migrate waiting for the lock polls a try-lock and holds no pool connection, so
 
 The preview used PostgreSQL SQL; it now uses the target dialect and the previous snapshot, so MySQL shows the FK drop.
 
+### Fixed — a regenerated system chain restores missing indexes (#2016)
+
+Converge adds a framework table's missing indexes too, and warns about leftover columns it will not drop.
+
 ### Fixed — schema-mode tenant FKs no longer bind to `public` (#1718)
 
 FK targets are qualified with the tenant schema; a registry model's table stays unqualified.
