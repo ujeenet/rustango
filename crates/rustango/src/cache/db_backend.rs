@@ -187,8 +187,22 @@ impl DatabaseCache {
     }
 
     /// Name of the `expires` index. Postgres index names are per schema, so it carries the table.
-    fn expires_index(&self) -> String {
-        format!("{}_expires_idx", self.table)
+    /// A long table name is cut and hashed to stay under PG's 63 and MySQL's 64 bytes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn expires_index(&self) -> String {
+        const MAX_IDENT: usize = 63;
+        let plain = format!("{}_expires_idx", self.table);
+        if plain.len() <= MAX_IDENT {
+            return plain;
+        }
+        use sha2::{Digest, Sha256};
+        let mut head = 40;
+        while !self.table.is_char_boundary(head) {
+            head -= 1;
+        }
+        let digest = crate::hex::hex_encode(&Sha256::digest(self.table.as_bytes()));
+        format!("{}_{}_exp", &self.table[..head], &digest[..8])
     }
 
     /// Drop the cache table. Handy in tests. In production, run it

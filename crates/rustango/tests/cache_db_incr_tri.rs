@@ -119,7 +119,11 @@ async fn purge_is_batched_and_indexed(pool: &Pool) {
     assert!(cache.exists("forever").await.unwrap());
     assert!(cache.exists("live").await.unwrap());
 
-    let index = format!("{table}_expires_idx");
+    assert_eq!(index_count(pool, format!("{table}_expires_idx")).await, 1);
+    let _ = cache.drop_table().await;
+}
+
+async fn index_count(pool: &Pool, index: String) -> i64 {
     let sql = match pool.dialect().name() {
         "postgres" => "SELECT COUNT(*) FROM pg_indexes WHERE indexname = $1",
         "mysql" => {
@@ -131,8 +135,7 @@ async fn purge_is_batched_and_indexed(pool: &Pool) {
     let rows: Vec<(i64,)> = raw_query_pool(sql, vec![SqlValue::String(index)], pool)
         .await
         .unwrap();
-    assert_eq!(rows[0].0, 1, "expires index");
-    let _ = cache.drop_table().await;
+    rows[0].0
 }
 
 /// A failed `expires` index (here: the name is a view) still leaves a usable `ensure_table`.
@@ -156,6 +159,19 @@ async fn index_failure_is_not_fatal(pool: &Pool) {
     result.expect("index failure must not fail ensure_table");
 }
 
+/// Long table names get a short, distinct `expires` index on every backend.
+async fn long_table_names_get_distinct_indexes(pool: &Pool) {
+    let base = "rustango_cache_with_a_table_name_long_enough_to_pass_limits";
+    let (a, b) = (format!("{base}_a"), format!("{base}_b"));
+    let (ca, cb) = (fresh(pool, &a).await, fresh(pool, &b).await);
+    let (ia, ib) = (ca.expires_index(), cb.expires_index());
+    assert!(ia.len() <= 63 && ia != ib, "{ia} / {ib}");
+    for (cache, index) in [(&ca, ia), (&cb, ib)] {
+        assert_eq!(index_count(pool, index).await, 1, "expires index");
+        let _ = cache.drop_table().await;
+    }
+}
+
 tri_dialect_test! {
     setup: noop,
     scenarios: [
@@ -164,5 +180,6 @@ tri_dialect_test! {
         incr_overflow_is_an_error,
         purge_is_batched_and_indexed,
         index_failure_is_not_fatal,
+        long_table_names_get_distinct_indexes,
     ],
 }

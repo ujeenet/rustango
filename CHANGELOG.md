@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `DatabaseCache` keeps a racing write; `InMemoryCache` evicts to a low-water mark; purge is batched (#1906)
 
-An expired read deletes only a still-expired row. Eviction stops at 90% of each budget, so the next sets skip the scan. `purge_expired` deletes 1000 rows per statement over a new `expires` index; a role that cannot create the index gets a warning, not an error.
+An expired read deletes only a still-expired row. Eviction stops at 90% of each budget, so the next sets skip the scan. `purge_expired` deletes 1000 rows per statement over a new `expires` index; a role that cannot create the index gets a warning, not an error. A long table name gets a hashed index name under 63 bytes.
 
 ### Fixed — feature flags on `InMemoryCache` are never evicted (#2009)
 
