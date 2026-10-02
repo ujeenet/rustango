@@ -1482,21 +1482,24 @@ async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
     exec(pool, "INSERT INTO {} ({}) VALUES (5)", &[a, "id"])
         .await
         .unwrap();
-    let sq = pool.as_sqlite().expect("sqlite");
-    let mut conn = sq.acquire().await.unwrap();
-    for sql in [
-        "PRAGMA foreign_keys = OFF",
-        "CREATE TABLE IF NOT EXISTS mad_ro_other (id INTEGER PRIMARY KEY, \
-         a_id INTEGER REFERENCES mad_ro_author (id))",
-        "INSERT INTO mad_ro_other (id, a_id) VALUES (1, 99)",
-        "PRAGMA foreign_keys = ON",
-    ] {
-        rustango::sql::sqlx::query(sql)
-            .execute(&mut *conn)
-            .await
-            .unwrap();
+    // Only SQLite gets here; the gate keeps mysql- and postgres-only builds compiling.
+    #[cfg(feature = "sqlite")]
+    {
+        let sq = pool.as_sqlite().expect("sqlite");
+        let mut conn = sq.acquire().await.unwrap();
+        for sql in [
+            "PRAGMA foreign_keys = OFF",
+            "CREATE TABLE IF NOT EXISTS mad_ro_other (id INTEGER PRIMARY KEY, \
+             a_id INTEGER REFERENCES mad_ro_author (id))",
+            "INSERT INTO mad_ro_other (id, a_id) VALUES (1, 99)",
+            "PRAGMA foreign_keys = ON",
+        ] {
+            rustango::sql::sqlx::query(sql)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
     }
-    drop(conn);
     let err = chain
         .hand(
             pool,
