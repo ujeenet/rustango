@@ -16,6 +16,8 @@ Bounded deletes and `IN (… LIMIT n)` on MySQL were already in; a `where_not_ex
 
 It runs as `CountQuery::exists`, and skips partial unique indexes, which used to reject a legal duplicate.
 
+### Fixed — `.dates()` / `.datetimes()` SQL comes from the dialect emitter (#2030)
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)
