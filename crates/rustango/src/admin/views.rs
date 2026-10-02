@@ -424,7 +424,7 @@ pub(crate) async fn table_view(
         )
         .await?
     };
-    let joins = build_fk_joins(&state, model);
+    let joins = build_fk_joins(&state, model, &parts);
     let order_by = list_order_by(model, &admin_cfg);
     // With the count skipped, fetch one extra row to detect "has
     // more" without counting the table. The extra row is trimmed
@@ -1529,7 +1529,7 @@ pub(crate) async fn detail_view(
     let row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
-            joins: build_fk_joins(&state, model),
+            joins: build_fk_joins(&state, model, &parts),
             ..RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone())
         },
         &detail_fields,
