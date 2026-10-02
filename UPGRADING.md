@@ -152,6 +152,30 @@ untouched.
 
 ## 0.60.0
 
+### `verify_for_tenant` takes the `Tenant`
+
+**Breaking:** call `auth.verify_for_tenant(token, &tenant)`. It refuses tokens not minted by `/login` or `/refresh`, and ended sessions (#2118).
+
+### Strict CSP and the bundled admin
+
+Put `'nonce-__RUSTANGO_NONCE__'` in `script-src` and `style-src` of `[security] csp` to run the admin without `'unsafe-inline'`. The `csp_nonce` module now also builds with `admin` (#1703).
+
+### Basic-auth admins check CSRF
+
+`protect_with_basic_auth` now refuses a POST without the `rustango_csrf` cookie and a matching `_csrf` field or `X-CSRF-Token` header. Scripts that post to it get 403 (#2131).
+
+### Path-prefix tenant cookies use the prefix path
+
+Tenant session, member session and SSO flow cookies set under a path prefix now carry `Path=/<prefix>`, not `Path=/` (#2098).
+
+### `api::create_tenant` refuses what the CLI refuses
+
+A bad slug or host, or a host, prefix or port another tenant uses, is now a `Validation` error (#2097).
+
+### `user_model` validates the model
+
+**Breaking:** `Cli::user_model` / `Builder::user_model` panic if the model lacks a required column. Add `password_changed_at` and `sessions_revoked_at` (`Option<DateTime<Utc>>`) to a custom user model (#1203).
+
 ### SQLite rebuilds tables for CHECK and composite FK changes
 
 These ops no longer fail on SQLite (#2127); like other rebuilds, they refuse a table with a column the migration snapshot lacks. On PG, `render_changes_split_with_dialect` no longer emits the `DROP CONSTRAINT` of a UNIQUE drop: the runner finds the live name (#2133). `render_changes` still prints the usual name.

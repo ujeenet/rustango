@@ -101,7 +101,7 @@
 </form>
 {% if prepopulated_active %}
 <script id="prepopulated-config" type="application/json">{{ prepopulated_fields | json_encode | safe }}</script>
-<script>
+<script nonce="{{ csp_nonce }}">
 (function() {
   // Backs `prepopulated_fields`: fill one field from others as you
   // type. Lowercase + ascii-fold + strip non-[a-z0-9] + collapse into

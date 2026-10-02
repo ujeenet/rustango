@@ -635,29 +635,11 @@ where
         return migrate_and_activate(pools, registry_url, dir, request, &org, rep).await;
     }
 
-    // Every free-text field, not just the slug. Returns the request
-    // back with `host_pattern` normalized — see `validate_fields`.
-    let normalized = match validate_fields(request) {
+    let normalized = match checked_request(&registry, request).await {
         Ok(r) => r,
-        Err(msg) => {
-            return rep
-                .fail(ProvisionStep::Validate, TenancyError::Validation(msg))
-                .await;
-        }
+        Err(e) => return rep.fail(ProvisionStep::Validate, e).await,
     };
     let request = &normalized;
-
-    if let Some(clash) = match routing_clash(&registry, request).await {
-        Ok(c) => c,
-        Err(e) => return rep.fail(ProvisionStep::Validate, e.into()).await,
-    } {
-        return rep
-            .fail(
-                ProvisionStep::Validate,
-                TenancyError::Validation(format!("{clash} is already used by another tenant")),
-            )
-            .await;
-    }
 
     if request.mode == StorageMode::Database && request.database_url.is_none() {
         return rep
@@ -1080,6 +1062,21 @@ pub(crate) fn validate_port(port: i32) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Every free-text field, then the routing clash check. Returns the
+/// request with `host_pattern` normalized; shared with `api::create_tenant` (#2097).
+pub(crate) async fn checked_request(
+    registry: &crate::sql::Pool,
+    request: &ProvisionRequest,
+) -> Result<ProvisionRequest, TenancyError> {
+    let normalized = validate_fields(request).map_err(TenancyError::Validation)?;
+    if let Some(clash) = routing_clash(registry, &normalized).await? {
+        return Err(TenancyError::Validation(format!(
+            "{clash} is already used by another tenant"
+        )));
+    }
+    Ok(normalized)
 }
 
 /// The host, path prefix or port of `request` another tenant routes on.

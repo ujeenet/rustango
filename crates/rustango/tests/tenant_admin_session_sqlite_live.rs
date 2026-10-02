@@ -109,6 +109,24 @@ async fn boot() -> Env {
 }
 
 impl Env {
+    async fn post(&self, uri: &str, cookie: &str, body: &str) -> axum::response::Response {
+        self.admin
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::HOST, &self.host)
+                    .header(header::COOKIE, format!("rustango_csrf=t; {cookie}"))
+                    .header("x-csrf-token", "t")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     async fn get(&self, uri: &str, cookie: &str) -> axum::response::Response {
         self.admin
             .clone()
@@ -163,9 +181,8 @@ async fn a_password_change_in_the_login_second_ends_a_tenant_admin_session() {
     );
 }
 
-/// Log an operator into the console and start impersonating `env`'s
-/// tenant. Returns the operator and the handoff redirect.
-async fn start_impersonation(env: &Env) -> (Operator, String) {
+/// Log an operator into the console: the operator, the console and its cookie.
+async fn console_session(env: &Env) -> (Operator, axum::Router, String) {
     let password = "operator-password-1";
     let mut op = Operator {
         id: Auto::default(),
@@ -225,6 +242,43 @@ async fn start_impersonation(env: &Env) -> (Operator, String) {
     )
     .await;
     let op_cookie = first(&login, "set-cookie");
+    (op, console, op_cookie)
+}
+
+/// Log an operator into the console and start impersonating `env`'s
+/// tenant. Returns the operator and the handoff redirect.
+async fn start_impersonation(env: &Env) -> (Operator, String) {
+    let (op, console, op_cookie) = console_session(env).await;
+    let post = |uri: String, body: String, cookie: String| {
+        let console = console.clone();
+        async move {
+            console
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(header::COOKIE, format!("rustango_csrf=t; {cookie}"))
+                        .header("x-csrf-token", "t")
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let first = |resp: &axum::response::Response, name| {
+        resp.headers()
+            .get(name)
+            .unwrap_or_else(|| panic!("response has {name}"))
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+
     let start = post(
         format!("/orgs/{}/impersonate", env.slug),
         String::new(),
@@ -297,16 +351,16 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
     );
     let handoff = &location[location.find("/acme/").expect("prefixed handoff")..];
     let redeemed = env.get(handoff, "").await;
-    let cookie = redeemed
+    let set_cookie = redeemed
         .headers()
         .get("set-cookie")
         .unwrap_or_else(|| panic!("handoff should set a cookie, got {}", redeemed.status()))
         .to_str()
         .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
         .to_owned();
+    // Scoped to the prefix, so a second prefix tenant on this host keeps its own (#2098).
+    assert!(set_cookie.contains("Path=/acme;"), "{set_cookie}");
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
     assert_eq!(
         redeemed
             .headers()
@@ -337,6 +391,49 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
         "{:?}",
         anon.headers().get("location")
     );
+
+    // #2098 — end-impersonation clears the prefix cookie and a legacy `Path=/` one.
+    let ended = env
+        .post("/acme/__admin/__end-impersonation", &cookie, "")
+        .await;
+    let paths = session_cookie_paths(&ended);
+    assert_eq!(paths, ["/acme", "/"], "end-impersonation clears");
+
+    // Login and logout use the prefix path too.
+    let mut user = User {
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&env.tenant).await.expect("seed user");
+    let login = env
+        .post(
+            "/acme/__login",
+            "",
+            "username=alice&password=first-password&_csrf=t",
+        )
+        .await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    assert_eq!(session_cookie_paths(&login), ["/acme"], "login sets");
+    let session = login.headers()["set-cookie"].to_str().unwrap();
+    let session = session.split(';').next().unwrap().to_owned();
+    let logout = env.post("/acme/__logout", &session, "").await;
+    assert_eq!(session_cookie_paths(&logout), ["/acme"], "logout clears");
+}
+
+/// The `Path` of every tenant session `Set-Cookie` on `resp`.
+fn session_cookie_paths(resp: &axum::response::Response) -> Vec<String> {
+    resp.headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .filter(|v| v.starts_with(&format!("{COOKIE_NAME}=")))
+        .map(|v| {
+            v.split("; ")
+                .find_map(|a| a.strip_prefix("Path="))
+                .unwrap_or("")
+                .to_owned()
+        })
+        .collect()
 }
 
 /// An operator password change ends their open impersonation session.
@@ -442,4 +539,143 @@ async fn a_short_new_password_is_refused_by_the_tenant_admin() {
         rustango::tenancy::password::verify("first-password", &stored[0].password_hash).unwrap(),
         "the short password must not be stored"
     );
+}
+
+/// #1703 — the tenant login, admin pages, change-password page and the
+/// logged-in operator console all run under a strict CSP.
+#[tokio::test]
+async fn tenant_pages_pass_a_strict_csp() {
+    use rustango::testkit::{assert_strict_csp_page, with_strict_csp};
+    let env = boot().await;
+    let app = with_strict_csp(env.admin.clone());
+    let mut user = User {
+        is_superuser: true,
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&env.tenant).await.expect("seed user");
+    let uid = user.id.get().copied().unwrap();
+    let login = TenantSessionPayload::new(
+        uid,
+        &env.slug,
+        3600,
+        PasswordFingerprint::of(&env.secret, &user.password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&env.secret, &login));
+    let get = |uri: String, cookie: String| {
+        let app = app.clone();
+        let host = env.host.clone();
+        async move {
+            let req = Request::builder()
+                .uri(uri)
+                .header(header::HOST, host)
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap();
+            app.oneshot(req).await.unwrap()
+        }
+    };
+    let pages = [
+        ("/__login".to_owned(), String::new()),
+        ("/__admin/".to_owned(), cookie.clone()),
+        ("/__admin/rustango_users".to_owned(), cookie.clone()),
+        ("/__admin/rustango_users/new".to_owned(), cookie.clone()),
+        (format!("/__admin/rustango_users/{uid}"), cookie.clone()),
+        ("/__admin/__audit".to_owned(), cookie.clone()),
+        ("/__change-password".to_owned(), cookie.clone()),
+    ];
+    for (uri, cookie) in pages {
+        assert_strict_csp_page(get(uri.clone(), cookie).await, &uri).await;
+    }
+
+    // The console, signed in: every page an operator reads.
+    let (_op, console, op_cookie) = console_session(&env).await;
+    let console = with_strict_csp(console);
+    let mut uris = vec![
+        "/".to_owned(),
+        "/orgs".to_owned(),
+        "/operators".to_owned(),
+        "/audit".to_owned(),
+        "/change-password".to_owned(),
+        format!("/orgs/{}/edit", env.slug),
+        format!("/orgs/{}/hosts", env.slug),
+    ];
+    if cfg!(feature = "admin-sso") {
+        uris.push("/sso-shared".to_owned());
+    }
+    for uri in uris {
+        let req = Request::builder()
+            .uri(&uri)
+            .header(header::COOKIE, &op_cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = console.clone().oneshot(req).await.unwrap();
+        assert_strict_csp_page(resp, &format!("console {uri}")).await;
+    }
+}
+
+/// #2097 — `api::create_tenant` refuses a bad host and a host, prefix or
+/// port another tenant routes on.
+#[tokio::test]
+async fn api_create_tenant_checks_the_host() {
+    use rustango::tenancy::manage::api::{create_tenant, CreateTenantOpts};
+    use rustango::tenancy::{BackendKind, StorageMode, TenancyError};
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.path_prefix = Some("/taken".into());
+    org.port = Some(8443);
+    org.save_pool(&env.registry)
+        .await
+        .expect("claim prefix and port");
+    let dir = tempfile::tempdir().unwrap();
+    let opts = |host: &str| CreateTenantOpts {
+        mode: StorageMode::Database,
+        backend: BackendKind::Sqlite,
+        database_url: Some(format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("new.db").display()
+        )),
+        host_pattern: Some(host.to_owned()),
+        no_migrate: true,
+        ..CreateTenantOpts::default()
+    };
+    let reg = "sqlite::memory:";
+    let cases = [
+        (opts(&env.host), "already used by another tenant"),
+        (opts("bad host!"), "host"),
+        (
+            CreateTenantOpts {
+                path_prefix: Some("/taken".into()),
+                ..opts("p.app.test")
+            },
+            "path prefix `/taken` is already used",
+        ),
+        (
+            CreateTenantOpts {
+                port: Some(8443),
+                ..opts("q.app.test")
+            },
+            "port 8443 is already used",
+        ),
+    ];
+    for (o, want) in cases {
+        match create_tenant(env.pools.as_ref(), reg, dir.path(), &unique("n"), o).await {
+            Err(TenancyError::Validation(msg)) => assert!(msg.contains(want), "{msg}"),
+            other => panic!("want Validation({want}), got {other:?}"),
+        }
+    }
+    let ok = create_tenant(
+        env.pools.as_ref(),
+        reg,
+        dir.path(),
+        &unique("n"),
+        opts("fresh.app.test"),
+    )
+    .await;
+    assert!(ok.is_ok(), "{ok:?}");
 }

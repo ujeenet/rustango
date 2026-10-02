@@ -162,3 +162,21 @@ async fn a_panic_500_carries_the_headers() {
     assert_eq!(resp.headers()["x-frame-options"], "DENY");
     assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
 }
+
+/// #1703 — under a strict nonce CSP the console login nonces its tags,
+/// and the header's placeholder is filled with that same nonce.
+#[tokio::test]
+async fn the_console_login_passes_a_strict_csp() {
+    use rustango::csp_nonce::CSP_NONCE_PLACEHOLDER;
+    let csp = format!(
+        "default-src 'self'; script-src {CSP_NONCE_PLACEHOLDER}; style-src {CSP_NONCE_PLACEHOLDER}"
+    );
+    let (app, _tmp) = build(|b| b.security_headers(SecurityHeadersLayer::strict().csp(csp))).await;
+    let req = Request::builder()
+        .uri("/login")
+        .header("host", "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    rustango::testkit::assert_strict_csp_page(resp, "console /login").await;
+}

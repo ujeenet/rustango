@@ -863,7 +863,7 @@ cargo run -- init-tenancy   # does nothing now; kept so old scripts don't break
 
 Older versions wrote `0001_rustango_*_initial.json` here; that hardcoded
 flow is gone. **To provision, just run `cargo run -- migrate`.** A custom
-user model (`.user_model::<AppUser>()`) flows through the same generated
+user model declared on `rustango_users` flows through the same generated
 `system/migrations/` — see
 [Custom user model](#custom-user-model-extra-columns-on-rustango_users).
 
@@ -1293,7 +1293,8 @@ into `system/migrations/`, so `AppUser`'s columns land in the generated
 
 **Step 1.** Define your model. It has to declare every framework-required
 column exactly (`id`, `username`, `password_hash`, `is_superuser`,
-`active`, `created_at`, `data`), plus your extras. Each extra column must
+`active`, `created_at`, `data`,
+`password_changed_at`, `sessions_revoked_at`), plus your extras. Each extra column must
 either allow `NULL` or have a `default = "…"`.
 
 ```rust
@@ -1309,6 +1310,8 @@ pub struct AppUser {
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[rustango(default = "'{}'")] pub data: serde_json::Value,
+    pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     // extras —
     #[rustango(max_length = 128, default = "''")] pub display_name: String,
     #[rustango(max_length = 64, default = "'UTC'")] pub timezone: String,
@@ -1328,6 +1331,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run().await
 }
 ```
+
+`user_model` checks the model at startup and panics if a required column is
+missing; declaring the model on `rustango_users` is what selects it.
 
 **Step 3.** Register `AppUser` **instead of** the framework `User` — only
 one model may claim `table = "rustango_users"`. The scaffolder ships no
@@ -1349,7 +1355,7 @@ cargo run -- migrate              # creates rustango_users with your extras
   framework `User` and your `AppUser` makes `makemigrations` ambiguous —
   register `AppUser` alone. This is the main reason Option 2 is for fresh
   projects only; on an existing project, Option 1 avoids the problem.
-- Framework auth and admin code reads the seven core columns by name;
+- Framework auth and admin code reads the nine core columns by name;
   your extra columns are reachable only through
   `AppUser::objects().fetch(...)`.
 

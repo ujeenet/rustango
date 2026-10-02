@@ -757,7 +757,7 @@ cargo run -- init-tenancy   # does nothing now; kept so old scripts don't break
 Las versiones más antiguas escribían aquí `0001_rustango_*_initial.json`; ese
 flujo codificado a mano ya no existe. **Para aprovisionar, simplemente ejecuta
 `cargo run -- migrate`.** Un modelo de usuario personalizado
-(`.user_model::<AppUser>()`) fluye por las mismas `system/migrations/` generadas
+(declarado sobre `rustango_users`) fluye por las mismas `system/migrations/` generadas
 — consulta [Modelo de usuario personalizado](#modelo-de-usuario-personalizado-columnas-extra-en-rustango_users).
 
 ### `migrate-registry`
@@ -1192,7 +1192,8 @@ generado.
 
 **Paso 1.** Define tu modelo. Tiene que declarar cada columna requerida por el
 framework exactamente (`id`, `username`, `password_hash`, `is_superuser`,
-`active`, `created_at`, `data`), más tus extras. Cada columna extra debe permitir
+`active`, `created_at`, `data`,
+`password_changed_at`, `sessions_revoked_at`), más tus extras. Cada columna extra debe permitir
 `NULL` o tener un `default = "…"`.
 
 ```rust
@@ -1208,6 +1209,8 @@ pub struct AppUser {
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[rustango(default = "'{}'")] pub data: serde_json::Value,
+    pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     // extras —
     #[rustango(max_length = 128, default = "''")] pub display_name: String,
     #[rustango(max_length = 64, default = "'UTC'")] pub timezone: String,
@@ -1227,6 +1230,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run().await
 }
 ```
+
+`user_model` comprueba el modelo al arrancar y hace panic si falta una columna
+requerida; declararlo sobre `rustango_users` es lo que lo selecciona.
 
 **Paso 3.** Registra `AppUser` **en lugar del** `User` del framework — solo un
 modelo puede reclamar `table = "rustango_users"`. El scaffolder no incluye JSON
@@ -1249,7 +1255,7 @@ cargo run -- migrate              # creates rustango_users with your extras
   del framework y tu `AppUser`, hace que `makemigrations` sea ambiguo — registra
   `AppUser` solo. Esta es la razón principal por la que la Opción 2 es solo para
   proyectos nuevos; en un proyecto existente, la Opción 1 evita el problema.
-- El código de auth y admin del framework lee las siete columnas núcleo por
+- El código de auth y admin del framework lee las nueve columnas núcleo por
   nombre; tus columnas extra solo son accesibles a través de
   `AppUser::objects().fetch(...)`.
 

@@ -790,7 +790,7 @@ cargo run -- init-tenancy   # does nothing now; kept so old scripts don't break
 Les anciennes versions écrivaient ici `0001_rustango_*_initial.json` ;
 ce flux figé a disparu. **Pour provisionner, exécutez simplement
 `cargo run -- migrate`.** Un modèle utilisateur personnalisé
-(`.user_model::<AppUser>()`) passe par le même `system/migrations/`
+(déclaré sur `rustango_users`) passe par le même `system/migrations/`
 généré — voir
 [Modèle utilisateur personnalisé](#modèle-utilisateur-personnalisé-colonnes-supplémentaires-sur-rustango_users).
 
@@ -1244,7 +1244,8 @@ d'`AppUser` se retrouvent dans le `CREATE TABLE rustango_users` généré.
 
 **Étape 1.** Définissez votre modèle. Il doit déclarer exactement chaque
 colonne requise par le framework (`id`, `username`, `password_hash`,
-`is_superuser`, `active`, `created_at`, `data`), plus vos extras. Chaque
+`is_superuser`, `active`, `created_at`, `data`,
+`password_changed_at`, `sessions_revoked_at`), plus vos extras. Chaque
 colonne supplémentaire doit soit autoriser `NULL`, soit avoir un
 `default = "…"`.
 
@@ -1261,6 +1262,8 @@ pub struct AppUser {
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[rustango(default = "'{}'")] pub data: serde_json::Value,
+    pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     // extras —
     #[rustango(max_length = 128, default = "''")] pub display_name: String,
     #[rustango(max_length = 64, default = "'UTC'")] pub timezone: String,
@@ -1280,6 +1283,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run().await
 }
 ```
+
+`user_model` vérifie le modèle au démarrage et panique s'il manque une colonne
+requise ; c'est la déclaration du modèle sur `rustango_users` qui le sélectionne.
 
 **Étape 3.** Enregistrez `AppUser` **au lieu du** `User` du framework —
 un seul modèle peut revendiquer `table = "rustango_users"`. Le
@@ -1306,7 +1312,7 @@ cargo run -- migrate              # creates rustango_users with your extras
   raison principale pour laquelle l'option 2 est réservée aux projets
   neufs ; sur un projet existant, l'option 1 évite le problème.
 - Le code d'authentification et d'administration du framework lit les
-  sept colonnes essentielles par leur nom ; vos colonnes
+  neuf colonnes essentielles par leur nom ; vos colonnes
   supplémentaires ne sont accessibles que via
   `AppUser::objects().fetch(...)`.
 

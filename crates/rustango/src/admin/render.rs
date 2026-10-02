@@ -342,7 +342,7 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
             r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-fA-F\-]+"{required}{readonly}>"#
         ),
         FieldType::Json => format!(
-            r#"<textarea name="{name}" id="{name}"{readonly} style="font-family:monospace">{val}</textarea>"#
+            r#"<textarea name="{name}" id="{name}"{readonly} class="mono">{val}</textarea>"#
         ),
         // `step="any"` on `type="number"` lets the browser accept any
         // number of decimal places. A tighter `step` could encode the
@@ -354,7 +354,7 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         // consistency we expose a hex text field; the form parser
         // accepts lowercase hex (even length).
         FieldType::Binary => format!(
-            r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-f]*" inputmode="latin"{readonly} style="font-family:monospace">"#
+            r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-f]*" inputmode="latin"{readonly} class="mono">"#
         ),
         // #341 — PG array: comma-separated text input (the form parser
         // splits on `,`). Placeholder hints the expected shape.

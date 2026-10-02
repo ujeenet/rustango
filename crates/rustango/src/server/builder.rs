@@ -417,11 +417,13 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
-    /// Swap the tenant user model used by [`Builder::migrate`]. Same
-    /// semantics as [`crate::manage::Cli::user_model`].
+    /// Check a custom tenant user model at startup. Same as
+    /// [`crate::manage::Cli::user_model`].
     #[must_use]
-    pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
-        self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
+    pub fn user_model<U: crate::tenancy::TenantUserModel>(self) -> Self {
+        if let Err(e) = crate::tenancy::validate_tenant_user_schema(U::SCHEMA) {
+            panic!("Builder::user_model: {e}");
+        }
         self
     }
 
@@ -841,8 +843,12 @@ impl<DB: Database> Builder<DB> {
         #[cfg(feature = "admin")]
         let app = match self.security_headers {
             Some(layer) => {
+                use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
                 use crate::security_headers::SecurityHeadersRouterExt as _;
+                // Outside the headers, so it fills their nonce placeholder;
+                // the bundled pages nonce their inline tags (#1703).
                 app.security_headers(layer)
+                    .csp_nonce(CspNonceLayer::default())
             }
             None => app,
         };

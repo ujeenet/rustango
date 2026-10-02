@@ -1,4 +1,4 @@
-<style>
+<style nonce="{{ csp_nonce }}">
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -542,4 +542,8 @@ fieldset.section.danger form.edit-form { margin-bottom: 0; }
   fieldset.section th { padding-bottom: 0; }
   .filter-bar, .inline-reset { flex-direction: column; align-items: stretch; }
 }
+/* Classes, not inline style attributes: a strict CSP blocks those (#1703). */
+.section-note { margin: 0 0 var(--space-3) 0; color: var(--color-fg-muted); font-size: 13px; }
+.faint { color: #aaa; }
+.issuer-url { color: #888; font-size: .85em; }
 </style>

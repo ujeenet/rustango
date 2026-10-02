@@ -397,7 +397,10 @@ pub async fn authenticate_user_pool(
 /// Extras must be NULL-able or carry a `default = "…"` so existing
 /// tenants can run the bootstrap migration without per-row backfill.
 ///
-/// Wire your model in via [`crate::manage::Cli::user_model`].
+/// Declaring the model on `rustango_users` is what makes it the user
+/// table: `makemigrations` builds the table from it. Register it instead
+/// of the framework [`User`], never beside it.
+/// [`crate::manage::Cli::user_model`] checks this contract at startup (#1203).
 ///
 /// ```ignore
 /// #[derive(rustango::Model)]
@@ -410,6 +413,8 @@ pub async fn authenticate_user_pool(
 ///     pub active: bool,
 ///     pub created_at: chrono::DateTime<chrono::Utc>,
 ///     #[rustango(default = "'{}'")] pub data: serde_json::Value,
+///     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+///     pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 ///     // extras —
 ///     #[rustango(max_length = 128, default = "''")] pub display_name: String,
 ///     #[rustango(max_length = 64, default = "'UTC'")] pub timezone: String,
@@ -431,13 +436,14 @@ pub const REQUIRED_USER_COLUMNS: &[&str] = &[
     "active",
     "created_at",
     "data",
+    // Read by every session check (#1338, #2036).
+    "password_changed_at",
+    "sessions_revoked_at",
 ];
 
 /// Validate that `schema` is a viable `rustango_users` model — same
-/// table name and all [`REQUIRED_USER_COLUMNS`] present. Called by
-/// the bootstrap-migration generators so a misconfigured override
-/// fails fast with a clear message at `init-tenancy` time, not later
-/// during a tenant create or login.
+/// table name and all [`REQUIRED_USER_COLUMNS`] present. `user_model`
+/// calls it, so a bad override fails at startup, not at first login.
 ///
 /// # Errors
 /// Returns [`TenancyError::Validation`] when the table name is wrong
@@ -537,6 +543,16 @@ mod tests {
         pub active: bool,
         pub created_at: chrono::DateTime<chrono::Utc>,
         // `data` deliberately omitted
+    }
+
+    impl TenantUserModel for MissingDataColumn {}
+
+    /// #1203 — `user_model` is a startup check, not a no-op.
+    #[cfg(feature = "manage")]
+    #[test]
+    #[should_panic(expected = "missing required column")]
+    fn user_model_refuses_a_model_missing_a_column() {
+        let _ = crate::manage::Cli::new().user_model::<MissingDataColumn>();
     }
 
     #[test]

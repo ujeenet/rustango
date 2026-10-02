@@ -863,8 +863,9 @@ pub mod security_headers;
 /// request, exposes it as `Extension<Nonce>`, and replaces
 /// `'nonce-__RUSTANGO_NONCE__'` in the CSP header, so inline
 /// `<script nonce="...">` tags pass a strict CSP. See
-/// [`csp_nonce::CspNonceLayer`].
-#[cfg(feature = "csp-nonce")]
+/// [`csp_nonce::CspNonceLayer`]. Built with `admin` too: `[security]`
+/// mounts it so the bundled admin pages pass a strict CSP (#1703).
+#[cfg(feature = "admin")]
 pub mod csp_nonce;
 
 /// Signed URL helpers — HMAC-SHA256 with optional expiry.

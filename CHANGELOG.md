@@ -6,6 +6,38 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [0.60.0] — 2026-10-02
 
+### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
+
+It reads the user row like `require_bearer`, so a logout, password change or deactivation ends the token. It now takes the `Tenant`, and its future is `Send`.
+
+### Security — admin CSRF without session auth (#2131)
+
+`protect_with_basic_auth` adds CSRF and form tokens, since the browser resends basic credentials cross-site. New `admin::protect_with_csrf` does the same for an admin behind app cookie auth.
+
+### Security — path-prefix tenants keep separate sessions (#2098)
+
+Tenant session, member session and SSO flow cookies are scoped to the tenant's path prefix, so signing in to one prefix tenant no longer replaces another's session on the same host. End-impersonation also clears an old `Path=/` cookie.
+
+### Fixed — admin, console and tenant login work under a strict CSP (#1703)
+
+`[security]` headers now run the CSP nonce layer. Bundled pages nonce their inline `<script>`/`<style>` and drop inline `on*` handlers and `style` attributes. New `csp_nonce::current()` gives a template the request's nonce.
+
+### Fixed — `api::create_tenant` validates and clash-checks the host (#2097)
+
+It runs the provisioner's checks: slug, host pattern, path prefix, port, and that no other tenant routes on them.
+
+### Security — a custom `redact` list keeps `?token=` hidden (#1818)
+
+`token`, `signature` and `code` are always redacted in access and trace logs. `register_action` documents that custom actions are gated like edits.
+
+### Fixed — docs: a new password hash ends sessions (#1736)
+
+The reset docs no longer say `password_changed_at` ends sessions; `_into` notes that app-written session checks must compare the hash.
+
+### Fixed — `Cli::user_model` checks the model at startup (#1203)
+
+It panics when the model lacks a required column. `REQUIRED_USER_COLUMNS` adds `password_changed_at` and `sessions_revoked_at`; the docs say declaring the model is what selects it.
+
 ### Fixed — a new schema tenant reads its own migration ledgers (#2143)
 
 On PostgreSQL its first ledger read could hit `public`'s through the search path, so it skipped migrations `public` had applied.

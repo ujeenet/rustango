@@ -795,7 +795,7 @@ fn render_form_with_inlines_and_pickers(
                     input_html,
                     concat!(
                         r#" <datalist id="{datalist}"></datalist>"#,
-                        r#"<script>(function(){{"#,
+                        r#"<script{nonce}>(function(){{"#,
                         r#"  var inp=document.querySelector('input[name="{name}"]');"#,
                         r#"  if(!inp)return;"#,
                         r#"  var dl=document.getElementById('{datalist}');"#,
@@ -810,6 +810,7 @@ fn render_form_with_inlines_and_pickers(
                         r#"}})();</script>"#,
                     ),
                     datalist = datalist_id,
+                    nonce = crate::csp_nonce::nonce_attr(),
                     name = escaped_name,
                     prefix = render::escape(admin_prefix),
                     target = escaped_target,

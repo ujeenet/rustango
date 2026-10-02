@@ -34,7 +34,7 @@
   <span id="probe-result"></span>
   {% if provisioning_enabled %}
   <form method="post" action="/orgs/{{ slug }}/migrate" class="inline-form"
-        onsubmit="return confirm('Run migrations for {{ slug }}?');">
+        data-confirm="Run migrations for {{ slug }}?">
     {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Run migrations</button>
   </form>
@@ -116,7 +116,7 @@
   {{ csrf_input | default(value='') | safe }}
   <fieldset class="section">
     <legend>Impersonate (sign in as superuser)</legend>
-    <p style="margin: 0 0 var(--space-3) 0; color: var(--color-fg-muted); font-size: 13px">
+    <p class="section-note">
       Open this tenant's admin as a synthetic operator-superuser.
       You'll see an unmissable banner during the session; every
       write is recorded as
@@ -139,7 +139,7 @@
   <legend>Decommission</legend>
 
   <form method="post" action="/orgs/{{ slug }}/deactivate" class="inline-form"
-        onsubmit="return confirm('Deactivate {{ slug }}? It stops serving immediately; nothing is destroyed.');">
+        data-confirm="Deactivate {{ slug }}? It stops serving immediately; nothing is destroyed.">
     {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Deactivate</button>
   </form>
@@ -174,12 +174,12 @@
     </table>
     <p class="form-actions">
       <button type="submit" class="btn btn-danger"
-              onclick="return confirm('Permanently destroy {{ slug }} and all its data?');">Purge {{ slug }}</button>
+              data-confirm="Permanently destroy {{ slug }} and all its data?">Purge {{ slug }}</button>
     </p>
   </form>
 </fieldset>
 
-<script>
+<script nonce="{{ csp_nonce }}">
   // Drops the returned fragment in place, so an operator can check a
   // tenant without losing unsaved edits to a page reload. The URL is
   // resolved server-side and never sent here — it carries a password.
