@@ -703,6 +703,39 @@ async fn drop_index_on_owned(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
+/// #2139 — an index a later step drops and re-creates is there on an owned table.
+async fn recreated_index_on_owned(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "reidx").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let sys = root.join("system/migrations");
+    let first = read(&tenant_file(&sys));
+    let idx = first["snapshot"]["indexes"][0].clone();
+    let (table, index) = (
+        idx["table"].as_str().unwrap(),
+        idx["name"].as_str().unwrap(),
+    );
+    write_step(
+        &sys,
+        "9001_reindex",
+        first["name"].as_str(),
+        first["snapshot"].clone(),
+        vec![
+            json!({ "DropIndex": { "name": index, "table": table } }),
+            json!({ "CreateIndex": idx }),
+        ],
+    );
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, None));
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_index(&pool, index).await, "{table}.{index} missing");
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
 /// A table a waiting step made early still gets a later step's new index.
 async fn early_table_gets_a_later_index(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
@@ -1678,6 +1711,7 @@ per_backend!(
     fk_to_a_later_system_step,
     fk_to_a_waiting_system_step,
     drop_index_on_owned,
+    recreated_index_on_owned,
     dropped_table_gets_its_fks_back,
     later_step_waits_on_a_held_table,
     early_table_gets_a_later_index,

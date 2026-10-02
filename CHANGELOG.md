@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a re-created system index on a project-owned table (#2139)
+
+An index a later system step drops and creates again is restored on the project's copy of the table.
+
 ### Fixed — MySQL atomic-migration warning says what the transaction covers (#1660)
 
 Only data ops before the first DDL are in it; each DDL commits and later ops run in autocommit. The warning no longer mentions RunPython.
