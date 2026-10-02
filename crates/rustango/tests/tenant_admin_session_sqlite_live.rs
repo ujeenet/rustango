@@ -19,6 +19,10 @@ use tower::ServiceExt;
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
+/// Tracing's callsite interest is process-global: a sibling logging on another
+/// thread can hide the handoff line from the capture test's scoped subscriber.
+static SUITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn unique(prefix: &str) -> String {
     format!(
         "{prefix}{}x{}",
@@ -36,11 +40,13 @@ struct Env {
     slug: String,
     host: String,
     _dir: tempfile::TempDir,
+    _suite: tokio::sync::MutexGuard<'static, ()>,
 }
 
 /// A migrated registry, one database-mode tenant with a users table,
 /// and the tenant admin on legacy routes.
 async fn boot() -> Env {
+    let suite = SUITE.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let reg_url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
     let tenant_url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
@@ -98,6 +104,7 @@ async fn boot() -> Env {
         slug,
         host,
         _dir: dir,
+        _suite: suite,
     }
 }
 
