@@ -130,6 +130,12 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` when changing a column restates its whole definition
+    /// (MySQL's `MODIFY COLUMN`), not one property at a time (#1676).
+    fn modifies_whole_column(&self) -> bool {
+        false
+    }
+
     /// How many binds the backend takes in one statement. A multi-row
     /// `INSERT` reaches this at `rows × columns`.
     ///

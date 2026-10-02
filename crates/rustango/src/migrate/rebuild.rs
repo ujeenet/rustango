@@ -20,6 +20,9 @@ pub struct TableRebuild {
     dropping: Vec<String>,
     /// `(column, expression)` copied instead of the bare column.
     copy: Vec<(String, String)>,
+    /// A column whose single-column UNIQUE index goes, and the declared
+    /// index names that stay.
+    unique_drop: Option<(String, Vec<String>)>,
 }
 
 impl TableRebuild {
@@ -31,7 +34,16 @@ impl TableRebuild {
             target: target.clone(),
             dropping: Vec::new(),
             copy: Vec::new(),
+            unique_drop: None,
         }
+    }
+
+    /// Leave out `column`'s single-column UNIQUE indexes, whatever their
+    /// name, except the declared ones in `keep`.
+    #[must_use]
+    pub(crate) fn dropping_unique(mut self, column: &str, keep: Vec<String>) -> Self {
+        self.unique_drop = Some((column.to_owned(), keep));
+        self
     }
 
     /// Copy `column` as `expr` over the old table, e.g. a `COALESCE` that
@@ -176,7 +188,20 @@ impl TableRebuild {
         .bind(self.table())
         .fetch_all(&mut *tx.tx)
         .await?;
-        let inline = self.inline_uniques();
+        let mut inline = self.inline_uniques();
+        if let Some((column, keep)) = &self.unique_drop {
+            let names: Vec<String> = sqlx::query_scalar(
+                "SELECT il.name FROM pragma_index_list(?) il \
+                 WHERE il.\"unique\" = 1 AND il.origin = 'c' \
+                 AND (SELECT COUNT(*) FROM pragma_index_info(il.name)) = 1 \
+                 AND (SELECT ii.name FROM pragma_index_info(il.name) ii) = ?",
+            )
+            .bind(self.table())
+            .bind(column)
+            .fetch_all(&mut *tx.tx)
+            .await?;
+            inline.extend(names.into_iter().filter(|n| !keep.contains(n)));
+        }
         let before = self.orphans(tx).await?;
         for stmt in self.statements(&crate::sql::Sqlite) {
             sqlx::query(&stmt).execute(&mut *tx.tx).await?;
@@ -284,7 +309,12 @@ pub(crate) fn shape_at(
                 column, nullable, ..
             } => field(&mut t, column)?.nullable = !nullable,
             SC::AlterColumnDefault { column, from, .. } => {
-                field(&mut t, column)?.default.clone_from(from);
+                // An older file sets NOT NULL before the default; keep the
+                // default so that rebuild can fill the NULLs with it.
+                let f = field(&mut t, column)?;
+                if f.nullable || from.is_some() {
+                    f.default.clone_from(from);
+                }
             }
             SC::AlterColumnMaxLength { column, from, .. } => {
                 field(&mut t, column)?.max_length = *from;

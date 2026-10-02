@@ -322,6 +322,10 @@ impl Dialect for MySql {
         )
     }
 
+    fn modifies_whole_column(&self) -> bool {
+        true
+    }
+
     /// `PRIMARY` and multi-column indexes are left out.
     fn unique_index_names_sql(&self) -> Option<&'static str> {
         Some(

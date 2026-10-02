@@ -864,7 +864,8 @@ fn preview_migration(
                         statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
                     }
                 }
-                if let (Some(u), Some(_)) = (&step.drop_uniques, dialect.unique_index_names_sql()) {
+                // Apply drops the name it finds in the catalog; this is the usual one.
+                if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
                     let name = ddl::unique_constraint_name(&u.table, &u.column);
                     statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
                 }
@@ -1962,17 +1963,34 @@ async fn reconcile(
         }
         let existing = count_existing_tables(pool, &targets).await;
         if existing == targets.len() {
-            if create_only_tables(mig).is_none() {
-                // Faking it would skip an AddColumn elsewhere and still record it.
+            // Its changes to other tables: run them if none ran, fake if all did.
+            let outside: Vec<&super::SchemaChange> = mig
+                .forward
+                .iter()
+                .filter_map(|op| match op {
+                    Operation::Schema(c) if !targets.iter().any(|t| t == c.table()) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            let (present, absent) = applied_counts(pool, &outside).await?;
+            if present > 0 && absent > 0 {
+                return Err(MigrateError::Validation(format!(
+                    "cannot reconcile squash `{}`: its tables exist and {present} of its other \
+                     changes are applied, {absent} are not. The database is in a partial \
+                     state — resolve it by hand (see `migrate --fake <name>`).",
+                    mig.name
+                )));
+            }
+            if absent > 0 {
                 if mig
                     .forward
                     .iter()
                     .any(|op| !matches!(op, Operation::Schema(_)))
                 {
                     return Err(MigrateError::Validation(format!(
-                        "cannot reconcile squash `{}`: its tables already exist, but whether \
-                         its data operations ran is unknown. Resolve it by hand (see \
-                         `migrate --fake <name>`).",
+                        "cannot reconcile squash `{}`: its tables exist but its other changes \
+                         do not, and whether its data operations ran is unknown. Resolve it \
+                         by hand (see `migrate --fake <name>`).",
                         mig.name
                     )));
                 }
@@ -2076,6 +2094,56 @@ pub(crate) fn without_tables(mig: &Migration, existing: &[String]) -> Migration 
     }
 }
 
+/// How many of `changes` the live schema shows applied and not applied;
+/// a change it cannot tell counts as neither.
+async fn applied_counts(
+    pool: &crate::sql::Pool,
+    changes: &[&super::SchemaChange],
+) -> Result<(usize, usize), MigrateError> {
+    use super::SchemaChange as SC;
+    let schema = super::ensure::creation_schema(pool)
+        .await?
+        .unwrap_or_default();
+    let (mut present, mut absent) = (0, 0);
+    for change in changes {
+        let applied = match change {
+            SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. } => {
+                Some(table_exists_here(pool, t).await)
+            }
+            SC::DropTable(t) | SC::DropM2MTable { through: t } => {
+                Some(!table_exists_here(pool, t).await)
+            }
+            SC::AddColumn { table, column } => Some(
+                super::ensure::live_columns(pool, table)
+                    .await?
+                    .contains(column),
+            ),
+            SC::DropColumn { table, column } => Some(
+                !super::ensure::live_columns(pool, table)
+                    .await?
+                    .contains(column),
+            ),
+            SC::CreateIndex { name, table, .. } => Some(
+                !super::inspectdb::index_columns(pool, &schema, table, name)
+                    .await?
+                    .is_empty(),
+            ),
+            SC::DropIndex { name, table } => Some(
+                super::inspectdb::index_columns(pool, &schema, table, name)
+                    .await?
+                    .is_empty(),
+            ),
+            _ => None,
+        };
+        match applied {
+            Some(true) => present += 1,
+            Some(false) => absent += 1,
+            None => {}
+        }
+    }
+    Ok((present, absent))
+}
+
 /// `mig` with only its schema ops on tables outside `existing`.
 fn outside_tables(mig: &Migration, existing: &[String]) -> Migration {
     let forward = mig
@@ -2120,10 +2188,13 @@ fn pending_migrations(all: &[Migration], applied: &HashSet<String>) -> Vec<Migra
 /// alongside its `CreateTable`s, and it is the created tables that tell us
 /// whether the end state is already present.
 fn create_table_targets(mig: &Migration) -> Vec<String> {
+    use super::diff::SchemaChange as SC;
     mig.forward
         .iter()
         .filter_map(|op| match op {
-            Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => Some(t.clone()),
+            Operation::Schema(SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. }) => {
+                Some(t.clone())
+            }
             _ => None,
         })
         .collect()
@@ -2604,18 +2675,21 @@ struct Step {
     retry: Option<super::ensure::FilledTableRetry>,
     /// Live FKs on a column to drop by catalog name before the step.
     #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
-    drop_fks: Option<FkDrop>,
+    drop_fks: Option<ColumnRef>,
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
-    drop_uniques: Option<FkDrop>,
+    drop_unique: Option<ColumnRef>,
 }
 
-/// The FKs on `table.column`, found by name in the catalog: a dropped
-/// column's, which MySQL keeps (1828) (#1981), or one being replaced (#1557).
+/// A column whose FKs or UNIQUE the runner finds by name in the catalog:
+/// a dropped column's FKs, which MySQL keeps (1828) (#1981), one being
+/// replaced (#1557), or an index under an altered column (#1676).
 #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
-struct FkDrop {
+struct ColumnRef {
     table: String,
     column: String,
+    /// Declared indexes that stay.
+    keep: Vec<String>,
 }
 
 /// Render `change`, one of `ops`, which together move the schema to `after`.
@@ -2634,17 +2708,34 @@ fn render_step(
         .transpose()
         .map_err(MigrateError::Validation)?;
     use super::SchemaChange as SC;
-    let at_column = |table: &str, column: &str| FkDrop {
+    let at_column = |table: &str, column: &str| ColumnRef {
         table: table.to_owned(),
         column: column.to_owned(),
+        keep: super::diff::declared_indexes(after, table),
+    };
+    let has_fk = |table: &str, column: &str| {
+        after
+            .table(table)
+            .and_then(|t| t.field(column))
+            .is_some_and(|f| f.fk.is_some())
     };
     let drop_fks = match change {
         SC::DropColumn { table, column } | SC::AlterFkOnDelete { table, column, .. } => {
             Some(at_column(table, column))
         }
+        // MySQL re-adds it after the MODIFY or the index drop (3780, 1553).
+        SC::AlterColumnType { table, column, .. }
+        | SC::AlterColumnMaxLength { table, column, .. }
+        | SC::AlterColumnUnique {
+            table,
+            column,
+            unique: false,
+        } if dialect.modifies_whole_column() && has_fk(table, column) => {
+            Some(at_column(table, column))
+        }
         _ => None,
     };
-    let drop_uniques = match change {
+    let drop_unique = match change {
         SC::AlterColumnUnique {
             table,
             column,
@@ -2700,7 +2791,7 @@ fn render_step(
         batch,
         retry,
         drop_fks,
-        drop_uniques,
+        drop_unique,
     })
 }
 
@@ -2775,7 +2866,7 @@ macro_rules! step_statements {
                     .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
             );
         }
-        if let (Some(u), Some(sql)) = (&step.drop_uniques, dialect.unique_index_names_sql()) {
+        if let (Some(u), Some(sql)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
             let names: Vec<String> = sqlx::query_scalar(sql)
                 .bind(&u.table)
                 .bind(&u.column)
@@ -2784,6 +2875,7 @@ macro_rules! step_statements {
             out.extend(
                 names
                     .iter()
+                    .filter(|n| !u.keep.contains(n))
                     .filter_map(|n| dialect.drop_unique_index_sql(&u.table, n)),
             );
         }

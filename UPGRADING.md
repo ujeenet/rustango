@@ -152,7 +152,7 @@ untouched.
 
 ### `AlterColumn*` no longer refused on MySQL and SQLite
 
-A type, nullability, default, length or UNIQUE change now applies instead of failing with "not yet supported" (#1676); drop any RunSQL workaround you wrote for it. MySQL relies on strict `sql_mode` to refuse a shrink that would truncate. SQLite keeps a value its new type cannot convert (column affinity), where PG and MySQL refuse it.
+A type, nullability, default, length or UNIQUE change now applies instead of failing with "not yet supported" (#1676); new migrations need no RunSQL workaround; leave applied ones as they are. MySQL relies on strict `sql_mode` to refuse a shrink that would truncate. SQLite keeps a value its new type cannot convert (column affinity), where PG and MySQL refuse it.
 
 ### `on_delete` changes are migrated
 

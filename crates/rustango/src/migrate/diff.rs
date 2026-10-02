@@ -854,6 +854,7 @@ fn alter_column_elsewhere(
     f: &FieldSnapshot,
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
     unique_names: &UniqueNames,
     out: &mut RenderedBatch,
 ) -> Result<(), String> {
@@ -862,16 +863,12 @@ fn alter_column_elsewhere(
         _ => None,
     };
     if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table) {
-        // An AddColumn's named unique index would come back from the catalog.
-        if unique == Some(false) {
-            if let Ok(name) = unique_names.get(table, &f.column) {
-                out.immediate.push(format!(
-                    "DROP INDEX IF EXISTS {}",
-                    dialect.quote_ident(&name)
-                ));
-            }
-        }
         let mut rebuild = rebuild?;
+        // An AddColumn's unique index would come back from the catalog,
+        // under whatever name a rename left it.
+        if unique == Some(false) {
+            rebuild = rebuild.dropping_unique(&f.column, declared_indexes(current, table));
+        }
         if !f.nullable && f.generated_as.is_none() {
             if let Some(expr) = &f.default {
                 let value = render_column_default(expr, &f.ty, f.max_length, dialect);
@@ -880,6 +877,18 @@ fn alter_column_elsewhere(
             }
         }
         return out.set_rebuild(rebuild);
+    }
+    // MySQL refuses to change an FK column's type (3780) or drop its index
+    // (1553) under the FK; the runner drops it, and it comes back here.
+    let under_fk = matches!(
+        change,
+        SchemaChange::AlterColumnType { .. }
+            | SchemaChange::AlterColumnMaxLength { .. }
+            | SchemaChange::AlterColumnUnique { unique: false, .. }
+    );
+    if let Some(rel) = f.fk.as_ref().filter(|_| under_fk) {
+        out.deferred_fks
+            .push(field_fk_sql(table, &f.column, rel, dialect, schema));
     }
     match unique {
         Some(true) => {
@@ -901,6 +910,16 @@ fn alter_column_elsewhere(
         }
     }
     Ok(())
+}
+
+/// The indexes `current` declares on `table`, which a UNIQUE drop keeps.
+pub(crate) fn declared_indexes(current: &SchemaSnapshot, table: &str) -> Vec<String> {
+    current
+        .indexes
+        .iter()
+        .filter(|i| i.table == table)
+        .map(|i| i.name.clone())
+        .collect()
 }
 
 /// `<column> <type> [DEFAULT …] [NOT NULL] [COMMENT …]`, as CREATE TABLE
@@ -1132,7 +1151,7 @@ fn render_changes_split_inner(
             | SchemaChange::AlterColumnDefault { table, column, .. }
             | SchemaChange::AlterColumnMaxLength { table, column, .. }
             | SchemaChange::AlterColumnUnique { table, column, .. }
-                if dialect.name() != "postgres" =>
+                if dialect.alters_by_rebuild() || dialect.modifies_whole_column() =>
             {
                 // VARCHAR(n) and TEXT are one affinity there, and n is never enforced (#1220).
                 if dialect.alters_by_rebuild()
@@ -1152,6 +1171,7 @@ fn render_changes_split_inner(
                     f,
                     current,
                     dialect,
+                    schema,
                     &unique_names,
                     &mut out,
                 )?;

@@ -1708,6 +1708,233 @@ async fn alter_then_add_on_one_table(pool: &Pool) {
     assert_eq!(got, [(3, None)]);
 }
 
+// ---------------------------------------------------------------- #2126
+
+/// A cross-ledger squash whose other changes the first ledger already
+/// applied fakes, data op and M2M junction included, as it did before.
+async fn cross_ledger_squash_already_applied_fakes(pool: &Pool) {
+    let (a, other, through) = ("mad_sf_a", "mad_sf_other", "mad_sf_a_other");
+    let first = Chain::new(pool, "sf1", &[through, a, other]).await;
+    let m2m = json!([{"through": through, "src_table": a, "src_col": "a_id",
+                      "dst_table": other, "dst_col": "other_id"}]);
+    let after = json!({"tables": [table(a, vec![id()]),
+        table(other, vec![id(), col("c", "i64", json!({}))])], "m2m_tables": m2m});
+    first
+        .step(pool, after.clone())
+        .await
+        .expect("history under the first ledger");
+    let second = Chain::new(pool, "sf2", &[]).await;
+    let mut squash = make_migrations_from(second.dir.path(), &snap(after), None)
+        .unwrap()
+        .unwrap();
+    squash.replaces = vec!["0001_gone".into()];
+    squash.forward = vec![
+        Operation::Schema(SchemaChange::CreateTable(a.into())),
+        Operation::Schema(SchemaChange::AddColumn {
+            table: other.into(),
+            column: "c".into(),
+        }),
+        Operation::Schema(SchemaChange::CreateM2MTable {
+            through: through.into(),
+            src_table: a.into(),
+            src_col: "a_id".into(),
+            dst_table: other.into(),
+            dst_col: "other_id".into(),
+        }),
+        Operation::Data(rustango::migrate::DataOp {
+            sql: q(pool, "DELETE FROM {}", &[a]),
+            reverse_sql: Some("SELECT 1".into()),
+            reversible: true,
+        }),
+    ];
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    second.write(&squash);
+    second
+        .migrate(pool)
+        .await
+        .expect("everything is applied, so the squash fakes");
+    assert_eq!(rows(pool, a).await, 1, "the data op did not run again");
+}
+
+/// A file from before the default-first order: NOT NULL, then the default.
+async fn not_null_before_default_still_fills(pool: &Pool) {
+    let t = "mad_od2_item";
+    let chain = Chain::new(pool, "od2", &[t]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("n", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "id"])
+        .await
+        .unwrap();
+    chain
+        .hand(
+            pool,
+            json!({"tables": [table(t, vec![id(),
+                col("n", "i64", json!({"nullable": false, "default": "4"}))])]}),
+            vec![
+                SchemaChange::AlterColumnNullable {
+                    table: t.into(),
+                    column: "n".into(),
+                    nullable: false,
+                },
+                SchemaChange::AlterColumnDefault {
+                    table: t.into(),
+                    column: "n".into(),
+                    from: None,
+                    to: Some("4".into()),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("the NULL is filled with the later default");
+    let sql = q(pool, "SELECT {} FROM {}", &["n", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(4,)]);
+}
+
+/// Dropping a field's UNIQUE keeps a declared unique index on the column,
+/// and works on an FK column (MySQL 1553).
+async fn unique_drop_keeps_a_declared_index(pool: &Pool) {
+    let (a, b) = ("mad_dk_author", "mad_dk_book");
+    let chain = Chain::new(pool, "dk", &[b, a]).await;
+    let with = |unique: bool| {
+        json!({"tables": [table(a, vec![id()]), table(b, vec![id(),
+            col("author_id", "i64", json!({"unique": unique,
+                "fk": {"kind": "fk", "to": a, "on": "id"}})),
+            col("code", "i64", json!({"unique": unique}))])],
+            "indexes": [{"name": "mad_dk_code_uq", "table": b, "columns": ["code"], "unique": true}]})
+    };
+    chain.step(pool, with(true)).await.expect("initial");
+    chain
+        .step(pool, with(false))
+        .await
+        .expect("both UNIQUEs drop");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}, {{}}) VALUES ({id}, 1, {id})"),
+            &[b, "id", "author_id", "code"],
+        )
+        .await
+        .expect("author_id is no longer unique");
+    }
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (3, 1)",
+            &[b, "id", "code"]
+        )
+        .await
+        .is_err(),
+        "the declared index still makes code unique on {}",
+        pool.dialect().name()
+    );
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (4, 99)",
+            &[b, "id", "author_id"]
+        )
+        .await
+        .is_err(),
+        "the FK is back on {}",
+        pool.dialect().name()
+    );
+}
+
+/// An AddColumn UNIQUE dropped after its column was renamed: the index
+/// keeps its old name.
+async fn unique_drop_after_a_rename(pool: &Pool) {
+    let t = "mad_ur_item";
+    let chain = Chain::new(pool, "ur", &[t]).await;
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id()])]}))
+        .await
+        .expect("initial");
+    let unique = |name: &str, unique: bool| json!({"tables": [table(t, vec![id(), col(name, "i64", json!({"unique": unique}))])]});
+    chain
+        .step(pool, unique("c", true))
+        .await
+        .expect("AddColumn UNIQUE");
+    chain
+        .hand(
+            pool,
+            unique("d", true),
+            vec![SchemaChange::RenameColumn {
+                table: t.into(),
+                old_column: "c".into(),
+                new_column: "d".into(),
+            }],
+            None,
+        )
+        .await
+        .expect("rename");
+    let drop = chain.step(pool, unique("d", false)).await;
+    let by_name = by_dialect! { pool,
+        postgres => true, because "PG drops the constraint by the new column's name",
+        mysql => false, because "MySQL finds the index in the catalog",
+        sqlite => false, because "SQLite finds the index by its column",
+    };
+    if by_name.value {
+        drop.expect_err(by_name.why);
+        return;
+    }
+    drop.expect(by_name.why);
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, 5)"),
+            &[t, "id", "d"],
+        )
+        .await
+        .expect("no longer unique");
+    }
+}
+
+/// AlterColumn* unapplies on every backend.
+async fn alter_column_unapplies(pool: &Pool) {
+    let t = "mad_ua_item";
+    let chain = Chain::new(pool, "ua", &[t]).await;
+    let with = |strict: bool| {
+        let n = if strict {
+            json!({"nullable": false, "default": "5"})
+        } else {
+            json!({})
+        };
+        json!({"tables": [table(t, vec![id(), col("n", "i64", n),
+            col("s", "string", json!({"max_length": 10, "unique": strict}))])]})
+    };
+    chain.step(pool, with(false)).await.expect("initial");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'x')",
+        &[t, "id", "s"],
+    )
+    .await
+    .unwrap();
+    let name = chain.step(pool, with(true)).await.expect("alter");
+    chain.undo(pool, &name).await.expect("unapply");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (2, NULL, 'x')",
+        &[t, "id", "n", "s"],
+    )
+    .await
+    .expect("nullable and not unique again");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -1721,6 +1948,11 @@ tri_dialect_test!(
         cross_ledger_squash_runs_its_other_changes,
         unique_drop_finds_the_live_name,
         alter_then_add_on_one_table,
+        cross_ledger_squash_already_applied_fakes,
+        not_null_before_default_still_fills,
+        unique_drop_keeps_a_declared_index,
+        unique_drop_after_a_rename,
+        alter_column_unapplies,
         rebuild_keeps_unknown_columns,
         unique_column_drops,
         unique_drops_on_long_names,
