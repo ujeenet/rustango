@@ -606,7 +606,7 @@ impl Dialect for MySql {
     // ---- advisory locks ----
 
     fn acquire_session_lock_sql(&self) -> Option<String> {
-        Some(format!("SELECT GET_LOCK({}, -1)", self.placeholder(1)))
+        Some(format!("SELECT GET_LOCK({}, 0)", self.placeholder(1)))
     }
 
     fn release_session_lock_sql(&self) -> Option<String> {

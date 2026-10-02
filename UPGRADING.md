@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `Dialect::acquire_session_lock_sql` no longer waits (#2027)
+
+It returns a try-lock (`pg_try_advisory_lock`, `GET_LOCK(?, 0)`) that yields whether it was taken; a custom dialect must follow suit.
+
 ## 0.59.17
 
 ### Number filters round halves up (#1896)

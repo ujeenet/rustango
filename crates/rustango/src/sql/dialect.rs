@@ -743,8 +743,9 @@ pub trait Dialect: Send + Sync {
     // a transaction one held while creating the ledger table. SQLite
     // needs neither, since it has a single writer.
 
-    /// SQL that takes a session-scoped advisory lock. The runner
-    /// executes it on its own connection. `None` skips the lock.
+    /// SQL that tries a session-scoped advisory lock without waiting and
+    /// returns whether it was taken. The runner polls it, so a waiting run
+    /// holds no pool connection (#2027). `None` skips the lock.
     fn acquire_session_lock_sql(&self) -> Option<String> {
         None
     }

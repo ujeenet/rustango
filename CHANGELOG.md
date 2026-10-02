@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — concurrent migrates on one small pool no longer deadlock (#2027)
+
+A migrate waiting for the lock polls a try-lock and holds no pool connection, so the holder can borrow one.
+
 ## [0.59.17] — 2026-10-01
 
 ### Fixed — humanize and number rounding (#1896)

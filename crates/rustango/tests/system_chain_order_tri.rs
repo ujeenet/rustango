@@ -870,6 +870,86 @@ async fn post_migrate_receiver_can_migrate() {
     assert_eq!(seen, Some(Ok(())), "the receiver's migrate");
 }
 
+/// #2027 — migrates waiting on the lock must not hold the pool the holder needs.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn waiters_leave_the_pool_free(backend: Backend) {
+    use rustango::sql::sqlx;
+    const KEY: i64 = 0x5255_5354_4d49_4754;
+    const N: u32 = 3;
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_, url)) = fresh(backend, tmp.path(), "smallpool").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let wait = std::time::Duration::from_secs(5);
+    // Another process holds the lock while N migrates queue on a pool of N.
+    let (pool, outside) = match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => {
+            use sqlx::Connection as _;
+            let opts = sqlx::postgres::PgPoolOptions::new().max_connections(N);
+            let pool = opts.acquire_timeout(wait).connect(&url).await.unwrap();
+            let mut outside = sqlx::PgConnection::connect(&url).await.unwrap();
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(KEY)
+                .execute(&mut outside)
+                .await
+                .unwrap();
+            (
+                Pool::Postgres(pool),
+                Box::new(outside) as Box<dyn std::any::Any>,
+            )
+        }
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => {
+            use sqlx::Connection as _;
+            let opts = sqlx::mysql::MySqlPoolOptions::new().max_connections(N);
+            let pool = opts.acquire_timeout(wait).connect(&url).await.unwrap();
+            let mut outside = sqlx::MySqlConnection::connect(&url).await.unwrap();
+            sqlx::query("SELECT GET_LOCK(?, -1)")
+                .bind(format!("rustango_migrate_{KEY:x}"))
+                .execute(&mut outside)
+                .await
+                .unwrap();
+            (
+                Pool::Mysql(pool),
+                Box::new(outside) as Box<dyn std::any::Any>,
+            )
+        }
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite => unreachable!(),
+    };
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let runs: Vec<_> = (0..N)
+        .map(|_| {
+            let (pool, dir) = (pool.clone(), empty.clone());
+            tokio::spawn(async move { rustango::migrate::migrate_pool(&pool, &dir).await })
+        })
+        .collect();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    drop(outside);
+    for run in runs {
+        tokio::time::timeout(std::time::Duration::from_secs(60), run)
+            .await
+            .expect("no hang")
+            .unwrap()
+            .expect("migrate on a shared small pool");
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn waiters_leave_the_pool_free_postgres() {
+    waiters_leave_the_pool_free(Backend::Postgres).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn waiters_leave_the_pool_free_mysql() {
+    waiters_leave_the_pool_free(Backend::Mysql).await;
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn concurrent_migrates_postgres() {
