@@ -142,17 +142,32 @@ pub struct SavedUpload {
 /// Save every file field in `mp` to `storage` and return one
 /// [`SavedUpload`] per file. Fields without a `filename` are skipped.
 ///
-/// The first error stops the loop. Files saved before it stay in
-/// storage, except on [`UploadError::TooManyFiles`], which deletes them.
+/// The first error stops the loop and deletes the files already saved,
+/// so a refused request leaves nothing behind (#1905).
 ///
 /// # Errors
 /// See [`UploadError`].
 pub async fn save_uploads(
-    mut mp: Multipart,
+    mp: Multipart,
     cfg: &UploadConfig,
     storage: &BoxedStorage,
 ) -> Result<Vec<SavedUpload>, UploadError> {
     let mut out: Vec<SavedUpload> = Vec::new();
+    let result = save_each(mp, cfg, storage, &mut out).await;
+    if result.is_err() {
+        for saved in &out {
+            let _ = storage.delete(&saved.key).await;
+        }
+    }
+    result.map(|()| out)
+}
+
+async fn save_each(
+    mut mp: Multipart,
+    cfg: &UploadConfig,
+    storage: &BoxedStorage,
+    out: &mut Vec<SavedUpload>,
+) -> Result<(), UploadError> {
     let mut skipped = 0;
     while let Some(mut field) = mp.next_field().await? {
         let Some(filename) = field.file_name().map(str::to_owned) else {
@@ -163,10 +178,6 @@ pub async fn save_uploads(
             continue;
         };
         if out.len() >= cfg.max_files {
-            // The request is refused as a whole, so leave none of it behind.
-            for saved in &out {
-                let _ = storage.delete(&saved.key).await;
-            }
             return Err(UploadError::TooManyFiles { max: cfg.max_files });
         }
         let content_type = field.content_type().map(str::to_owned);
@@ -215,7 +226,7 @@ pub async fn save_uploads(
             size_bytes: size,
         });
     }
-    Ok(out)
+    Ok(())
 }
 
 // ---- pure helpers ----
@@ -262,13 +273,10 @@ fn lowercase_ext(name: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// Build `{unix_nanos}-{name}` so two uploads with the same name do
-/// not overwrite each other.
+/// Build `{uuid}-{name}` so two uploads with the same name do not
+/// overwrite each other. A clock prefix collided within a tick (#1905).
 fn randomize(name: &str) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!("{nanos}-{name}")
+    format!("{}-{name}", uuid::Uuid::new_v4().simple())
 }
 
 #[cfg(test)]
@@ -352,20 +360,18 @@ mod tests {
     // -------- randomize
 
     #[test]
-    fn randomize_preserves_name_and_prepends_nanos() {
+    fn randomize_preserves_name_and_prepends_a_hex_id() {
         let r = randomize("photo.jpg");
         assert!(r.ends_with("-photo.jpg"));
-        // Nanos prefix is purely digits before the dash.
         let dash = r.find('-').unwrap();
-        assert!(r[..dash].chars().all(|c| c.is_ascii_digit()));
+        assert!(r[..dash].chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// #1905: back-to-back calls in one clock tick must not collide.
     #[test]
-    fn randomize_two_calls_produce_different_prefixes() {
-        let a = randomize("x");
-        std::thread::sleep(std::time::Duration::from_micros(1));
-        let b = randomize("x");
-        assert_ne!(a, b);
+    fn randomize_never_repeats_in_a_tight_loop() {
+        let keys: HashSet<String> = (0..10_000).map(|_| randomize("x")).collect();
+        assert_eq!(keys.len(), 10_000);
     }
 
     // -------- save_uploads end-to-end via a real multipart body
@@ -633,6 +639,17 @@ mod tests {
         }
         let (status, body, _) = upload(cfg, &["a.png", "b.png"]).await;
         assert_eq!((status, body.as_str()), (200, "2"));
+    }
+
+    /// #1905: a later file's error removes the files saved before it.
+    #[tokio::test]
+    async fn a_refused_file_removes_the_ones_saved_before_it() {
+        let cfg = UploadConfig::new("u/")
+            .allowed_extensions(&["png"])
+            .randomize_filename(false);
+        let (status, body, storage) = upload(cfg, &["a.png", "b.exe"]).await;
+        assert_eq!(status, 400, "{body}");
+        assert!(!storage.exists("u/a.png").await.unwrap(), "orphan u/a.png");
     }
 
     #[tokio::test]

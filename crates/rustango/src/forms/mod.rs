@@ -714,10 +714,8 @@ impl ModelForm {
     /// Validate and execute the INSERT or UPDATE. Returns the PK value
     /// (newly generated for inserts; the supplied value for updates).
     ///
-    /// v0.38 — fully tri-dialect via `&crate::sql::Pool`. Routes through
-    /// the backend-erasing `update_pool` / `insert_returning_pool`
-    /// helpers and decodes the returned PK per backend (PgRow on PG,
-    /// `LAST_INSERT_ID()` on MySQL, SqliteRow on SQLite).
+    /// Tri-dialect. Writes on audited models write their audit row in the
+    /// same transaction.
     ///
     /// # Errors
     /// [`ModelFormError::Validation`] if any field is invalid.
@@ -895,7 +893,7 @@ impl PreparedSave {
                     value: pk_val.clone(),
                 }),
             };
-            crate::sql::update_pool(pool, &query).await?;
+            crate::audit::update(pool, &query).await?;
             return Ok(pk_val);
         }
 
@@ -915,8 +913,8 @@ impl PreparedSave {
             returning: vec![self.pk_field.column],
             on_conflict: None,
         };
-        let returning = crate::sql::insert_returning_pool(pool, &query).await?;
-        Ok(crate::sql::inserted_pk(&query, &returning, self.pk_field)?)
+        // Audited models write their `create` row in the insert's transaction (#1821).
+        Ok(crate::audit::insert(pool, &query, self.pk_field).await?)
     }
 }
 

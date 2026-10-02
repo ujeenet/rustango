@@ -69,6 +69,10 @@ async fn create_table(pool: &Pool) {
     )
     .await
     .expect("create table");
+    // Admin edits commit with their audit row (#2060).
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .expect("audit table");
 }
 
 async fn body_string(resp: axum::response::Response) -> String {

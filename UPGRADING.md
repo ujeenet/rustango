@@ -150,6 +150,65 @@ untouched.
 
 ## Unreleased
 
+## 0.59.18
+
+### `with_rollback` hands the closure an `AtomicTx`
+
+**Breaking:** write `insert_tx(&mut *tx.lock().await?, &q)` where you passed `tx` (#1761). A nested `atomic()` on the same pool is now a savepoint; drop the guard before it or a `bulk_insert_pool`, or they fail with `NestedAtomic`.
+
+### Admin edits need the audit table
+
+An admin edit of a model with `audit(...)` writes its audit row in the UPDATE's transaction, so a missing `rustango_audit_log` table now fails the edit (#2060). `manage migrate` creates it. Other models still log best-effort.
+
+### Webhooks with private targets still refuse cloud metadata
+
+`allow_private_targets` no longer reaches `100.100.100.200`, any `169.254.0.0/16` address or `fd00:ec2::/32` (#1821).
+
+### `CreateView` on MySQL fails closed for some audited models
+
+An audited model whose PK the database generates and is not an integer (a UUID default, say) cannot report the new PK on MySQL, so `CreateView` now fails instead of saving it unaudited (#1821).
+
+### Schema-mode tenants cannot use `public`
+
+Provisioning and `create_tenant` refuse a schema named `public` (#1868). Rename any such tenant's schema.
+
+### Tenant hosts must be unique
+
+Editing or provisioning a tenant with a host another tenant uses (base or extra) is refused (#1931). The console edit form now rejects a host with a port, a bad `path_prefix` or `port`. A path prefix or port another tenant uses is refused too.
+
+The `<slug>.<RUSTANGO_APEX_DOMAIN>` default host is validated, so an apex with a port (`localhost:8080`) now fails provisioning. Set the apex without the port.
+
+### Derived tenant URLs keep only TLS options
+
+`tenant_url_on_registry_server` copies only the `sslmode`/`ssl-*` keys from the registry query; set any other option on the tenant URL itself.
+
+### Mail config errors
+
+`email::from_settings` returns `MailError::Config` for `backend = "file"` without `file_email_dir` and for unknown backends, instead of using the console (#1948). An SMTP 550–555 refusal is the new `MailError::Rejected`, which `is_retryable()` is false for; an auth failure (535) stays `Transport`.
+
+### Impersonation username
+
+An impersonation session's username is `operator:<username>`, not empty (#1939).
+
+### Direct media uploads
+
+**Breaking:** `Storage::presigned_put_url` takes a `content_length: Option<u64>`, and a backend that presigns PUTs
+must implement the new `Storage::metadata`, or `finalize_upload` errors. `UploadTicket` gains `content_type`;
+the browser must send that header and exactly `size_bytes` bytes.
+
+**Breaking:** `Storage::presigned_put_url` takes `&PutConditions` instead of the type and length. Direct-upload PUTs
+must also send `If-None-Match: *` (all of `UploadTicket.headers`); allow that header in the bucket's CORS rule.
+
+`purge_pending` now also deletes old `Failed` rows, and the storage object of every row it purges.
+
+`begin_upload` refuses a declared size over 100 MiB; raise it with `MediaManager::with_max_upload_bytes`.
+
+Storage keys with an empty or `.` segment (`a//b`, `./a`, `a/`) are now `InvalidPath`.
+
+### `save_uploads` keeps nothing on error
+
+Any error now deletes the files the request already saved, not only `TooManyFiles`. Random key prefixes are UUIDs, not nanos.
+
 ## 0.59.17
 
 ### Number filters round halves up (#1896)

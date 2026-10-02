@@ -777,6 +777,8 @@ where
     let result: Result<Vec<Org>, _> = Org::objects()
         .where_(typed)
         .where_(Org::active.eq(true))
+        // Deterministic if two rows ever match: the oldest org wins (#1931).
+        .order_by(&[("id", false)])
         .fetch(registry)
         .await;
 

@@ -123,7 +123,6 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::cache` | Cache-Backends |
 | `rustango::cache_page` | Page-Cache-Middleware |
 | `rustango::cors` | CORS-Entscheidungen |
-| `rustango::email` | Mail-Versand |
 | `rustango::email::smtp` | SMTP-Transport |
 | `rustango::error` | Die Ursache eines 5xx, die der Response-Body zurückhält |
 | `rustango::auth_flows` | Vom Cache abgewiesene Einmal-Auth-Links |

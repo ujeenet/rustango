@@ -80,7 +80,8 @@ async fn rollback_discards_inserts_on_ok_return() {
         Box::pin(async move {
             // Use sqlx directly through the PoolTx to insert rows.
             // The PoolTx variants expose the inner sqlx Transaction.
-            let rustango::sql::PoolTx::Postgres(t) = tx else {
+            let mut guard = tx.lock().await?;
+            let rustango::sql::PoolTx::Postgres(t) = &mut *guard else {
                 panic!("PG pool variant expected");
             };
             sqlx::query(r#"INSERT INTO "trb_rollback_check" (label) VALUES ('a'), ('b')"#)
@@ -113,7 +114,8 @@ async fn rollback_fires_on_closure_err_too() {
 
     let r: Result<(), ExecError> = with_rollback(&pool, |tx| {
         Box::pin(async move {
-            let rustango::sql::PoolTx::Postgres(t) = tx else {
+            let mut guard = tx.lock().await?;
+            let rustango::sql::PoolTx::Postgres(t) = &mut *guard else {
                 panic!("PG pool variant expected");
             };
             sqlx::query(r#"INSERT INTO "trb_rollback_check" (label) VALUES ('c')"#)

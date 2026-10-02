@@ -185,22 +185,7 @@ pub async fn add_host(
     else {
         return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
-    // Is it some tenant's base host? The unique index cannot see
-    // `rustango_orgs.host_pattern`, and `SubdomainResolver` runs first,
-    // so a row added here would never win.
-    let base_clash: Vec<super::Org> = super::Org::objects()
-        .where_(super::Org::host_pattern.eq(Some(host.clone())))
-        .fetch(registry)
-        .await?;
-    if !base_clash.is_empty() {
-        return Err(HostError::Taken(host));
-    }
-    if !OrgHost::objects()
-        .where_(OrgHost::hostname.eq(host.clone()))
-        .fetch(registry)
-        .await?
-        .is_empty()
-    {
+    if host_claimed(registry, &host, None).await? {
         return Err(HostError::Taken(host));
     }
     let mut row = OrgHost {
@@ -213,6 +198,74 @@ pub async fn add_host(
     row.insert_pool(registry).await?;
     super::invalidate_host_cache();
     Ok(row)
+}
+
+/// Is `host` some tenant's base host or extra host, other than
+/// `except_org`'s own? Every path that writes a host asks this, since
+/// a host two tenants claim routes by row order (#1931).
+///
+/// # Errors
+/// Driver / query failures.
+pub(crate) async fn host_claimed(
+    registry: &Pool,
+    host: &str,
+    except_org: Option<i64>,
+) -> Result<bool, crate::sql::ExecError> {
+    // The unique index on `rustango_org_hosts` cannot see
+    // `rustango_orgs.host_pattern`, so both tables are checked.
+    // `iexact`: a row stored before hosts were lowercased still clashes,
+    // and only MySQL's collation would catch it with `=`.
+    let base: Vec<super::Org> = super::Org::objects()
+        .where_(super::Org::host_pattern.iexact(host))
+        .fetch(registry)
+        .await?;
+    if other_org(&base, except_org) {
+        return Ok(true);
+    }
+    let extra: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::hostname.iexact(host))
+        .fetch(registry)
+        .await?;
+    Ok(extra
+        .iter()
+        .any(|h| except_org.is_none() || Some(h.org_id) != except_org))
+}
+
+/// Is `prefix` another tenant's path prefix? Two would route by row order.
+///
+/// # Errors
+/// Driver / query failures.
+pub(crate) async fn prefix_claimed(
+    registry: &Pool,
+    prefix: &str,
+    except_org: Option<i64>,
+) -> Result<bool, crate::sql::ExecError> {
+    let rows: Vec<super::Org> = super::Org::objects()
+        .where_(super::Org::path_prefix.iexact(prefix))
+        .fetch(registry)
+        .await?;
+    Ok(other_org(&rows, except_org))
+}
+
+/// Is `port` another tenant's listener port?
+///
+/// # Errors
+/// Driver / query failures.
+pub(crate) async fn port_claimed(
+    registry: &Pool,
+    port: i32,
+    except_org: Option<i64>,
+) -> Result<bool, crate::sql::ExecError> {
+    let rows: Vec<super::Org> = super::Org::objects()
+        .where_(super::Org::port.eq(Some(port)))
+        .fetch(registry)
+        .await?;
+    Ok(other_org(&rows, except_org))
+}
+
+fn other_org(rows: &[super::Org], except_org: Option<i64>) -> bool {
+    rows.iter()
+        .any(|o| except_org.is_none() || o.id.get().copied() != except_org)
 }
 
 /// Unbind an extra hostname.

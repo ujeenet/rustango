@@ -3,10 +3,10 @@
 //! * `audit_log_view`: `GET /__audit`, the cross-row activity feed.
 //! * `audit_cleanup_submit`: `POST /__audit/cleanup` retention.
 //! * `emit_admin_audit`: snapshot-shaped emit for create and bulk.
-//! * `emit_admin_audit_diff`: diff-shaped emit for update.
+//! * `admin_audit_diff_entry`: diff-shaped entry for update.
 //!
-//! The write handlers in `views.rs` call the two emit helpers after the
-//! data write.
+//! Create emits after the insert; an edit writes its entry in the
+//! UPDATE's transaction (#2060).
 
 use std::collections::HashMap;
 
@@ -365,22 +365,15 @@ pub(crate) async fn audit_cleanup_submit(
     Ok(Redirect::to(&audit_path(&state)).into_response())
 }
 
-/// Diff-shaped audit emit for admin UPDATE writes. Takes the row that
-/// `update_submit` read before the UPDATE and emits a
-/// `{ "field": { "before": v, "after": v } }` entry. Falls back to the
-/// snapshot path when `before_row` is `None`, which happens if the row
-/// was deleted between the SELECT and the UPDATE.
-pub(crate) async fn emit_admin_audit_diff(
-    state: &AppState,
+/// Diff-shaped audit entry for an admin UPDATE: `{ "field": { "before": v,
+/// "after": v } }` from the row `update_submit` locked before the write.
+/// `None` when nothing changed.
+pub(crate) fn admin_audit_diff_entry(
     model: &'static crate::core::ModelSchema,
     pk_str: &str,
-    before_row: Option<&serde_json::Value>,
+    row: &serde_json::Value,
     form: &HashMap<String, String>,
-) {
-    let Some(row) = before_row else {
-        emit_admin_audit(state, model, pk_str, crate::audit::AuditOp::Update, form).await;
-        return;
-    };
+) -> Option<crate::audit::PendingEntry> {
     // Both sides use typed JSON (numbers as numbers, bools as bools),
     // so an app-code write and an admin form POST produce the same
     // diff. `before` reads the SELECTed row; `after` coerces the form
@@ -411,28 +404,16 @@ pub(crate) async fn emit_admin_audit_diff(
             (f.name, v)
         })
         .collect();
-    let Some(entry) = crate::audit::PendingEntry::update_diff(
+    crate::audit::PendingEntry::update_diff(
         model.table,
         pk_str.to_owned(),
         &before_pairs,
         &after_pairs,
-    ) else {
-        return;
-    };
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
-        tracing::warn!(
-            target: "rustango::admin::audit",
-            error = %e,
-            entity_table = %model.table,
-            entity_pk = %pk_str,
-            "admin audit emit failed (data write already committed)",
-        );
-    }
+    )
 }
 
-/// Build an audit `PendingEntry` from a form submission and write it to
-/// `rustango_audit_log`. Best-effort: the data write already succeeded,
-/// so a failure here only logs a warning.
+/// Write [`admin_audit_entry`] to `rustango_audit_log`. Best-effort: the
+/// data write already succeeded, so a failure here only logs a warning.
 pub(crate) async fn emit_admin_audit(
     state: &AppState,
     model: &'static crate::core::ModelSchema,
@@ -440,6 +421,29 @@ pub(crate) async fn emit_admin_audit(
     op: crate::audit::AuditOp,
     form: &HashMap<String, String>,
 ) {
+    emit_best_effort(state, &admin_audit_entry(model, pk_str, op, form)).await;
+}
+
+/// Write `entry` after its data write committed; a failure only warns.
+pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::PendingEntry) {
+    if let Err(e) = crate::audit::emit_one_pool(&state.pool, entry).await {
+        tracing::warn!(
+            target: "rustango::admin::audit",
+            error = %e,
+            entity_table = %entry.entity_table,
+            entity_pk = %entry.entity_pk,
+            "admin audit emit failed (data write already committed)",
+        );
+    }
+}
+
+/// Snapshot audit entry from a form submission.
+fn admin_audit_entry(
+    model: &'static crate::core::ModelSchema,
+    pk_str: &str,
+    op: crate::audit::AuditOp,
+    form: &HashMap<String, String>,
+) -> crate::audit::PendingEntry {
     // Snapshot every field the form carries and skip the rest, such as
     // unchecked checkboxes. Values coerce to typed JSON so a create
     // snapshot has the same shape as a diff.
@@ -455,21 +459,12 @@ pub(crate) async fn emit_admin_audit(
                 .map(|v| (f.name, render::coerce_form_to_json(f, v)))
         })
         .collect();
-    let entry = crate::audit::PendingEntry {
+    crate::audit::PendingEntry {
         entity_table: model.table,
         entity_pk: pk_str.to_owned(),
         operation: op,
         source: crate::audit::current_source(),
         changes: crate::audit::snapshot_changes(&pairs),
-    };
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
-        tracing::warn!(
-            target: "rustango::admin::audit",
-            error = %e,
-            entity_table = %model.table,
-            entity_pk = %pk_str,
-            "admin audit emit failed (data write already committed)",
-        );
     }
 }
 

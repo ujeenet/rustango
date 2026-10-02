@@ -538,3 +538,54 @@ pub async fn select_one_row_as_json(
         }
     }
 }
+
+/// [`select_one_row_as_json`] inside an open transaction.
+#[cfg(feature = "admin")]
+pub(crate) async fn select_one_row_as_json_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Option<serde_json::Value>, ExecError> {
+    crate::test_assertions::query_counter::bump();
+    let stmt = tx.dialect().compile_select(query)?;
+    match tx {
+        #[cfg(feature = "postgres")]
+        crate::sql::PoolTx::Postgres(t) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query(q, v);
+            }
+            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
+                let mut json = row_to_json(r, fields);
+                augment_joined_columns_pg(&mut json, r, &query.joins);
+                json
+            }))
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::PoolTx::Mysql(t) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
+                let mut json = row_to_json_my(r, fields);
+                augment_joined_columns_my(&mut json, r, &query.joins);
+                json
+            }))
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::PoolTx::Sqlite(t) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
+                let mut json = row_to_json_sqlite(r, fields);
+                augment_joined_columns_sqlite(&mut json, r, &query.joins);
+                json
+            }))
+        }
+    }
+}

@@ -100,8 +100,9 @@ async fn seed_media(mgr: &MediaManager) -> i64 {
 
 /// The router under `MediaPerms`, with `user` injected the way
 /// `require_auth` injects it. `None` is an anonymous request.
-fn app(mgr: MediaManager, pool: Pool, user: Option<AuthenticatedUser>) -> axum::Router {
-    let router = media_router_with(mgr, MediaPerms::new(pool));
+fn app(mgr: MediaManager, _pool: Pool, user: Option<AuthenticatedUser>) -> axum::Router {
+    let perms = MediaPerms::from_manager(&mgr);
+    let router = media_router_with(mgr, perms);
     router.layer(axum::middleware::from_fn(
         move |mut req: axum::extract::Request, next: axum::middleware::Next| {
             let user = user.clone();

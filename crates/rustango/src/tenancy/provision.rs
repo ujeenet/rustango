@@ -648,6 +648,18 @@ where
     };
     let request = &normalized;
 
+    if let Some(clash) = match routing_clash(&registry, request).await {
+        Ok(c) => c,
+        Err(e) => return rep.fail(ProvisionStep::Validate, e.into()).await,
+    } {
+        return rep
+            .fail(
+                ProvisionStep::Validate,
+                TenancyError::Validation(format!("{clash} is already used by another tenant")),
+            )
+            .await;
+    }
+
     if request.mode == StorageMode::Database && request.database_url.is_none() {
         return rep
             .fail(
@@ -899,9 +911,13 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
     }
 
     let mut out = request.clone();
-    if let Some(pattern) = &request.host_pattern {
-        out.host_pattern = Some(validate_host_pattern(pattern)?);
-    }
+    // The `<slug>.<APEX>` default is filled in here so it is validated too.
+    let pattern = request.host_pattern.clone().or_else(|| {
+        std::env::var("RUSTANGO_APEX_DOMAIN")
+            .ok()
+            .map(|apex| format!("{}.{apex}", request.slug))
+    });
+    out.host_pattern = pattern.as_deref().map(validate_host_pattern).transpose()?;
     Ok(out)
 }
 
@@ -914,7 +930,7 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
 ///
 /// The rule is the slug's, plus underscores: a schema name is not a
 /// hostname label, and Postgres is happy with `_`.
-fn validate_schema_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_schema_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("a schema name is required".into());
     }
@@ -945,6 +961,13 @@ fn validate_schema_name(name: &str) -> Result<(), String> {
     if name.starts_with("pg_") || name == "information_schema" {
         return Err(format!(
             "schema name `{name}` is reserved by Postgres — choose another"
+        ));
+    }
+    // `public` holds the registry tables and ends every tenant's
+    // `search_path`, so a tenant there would share both.
+    if name == "public" {
+        return Err(format!(
+            "schema name `{name}` is the registry's schema — choose another"
         ));
     }
     Ok(())
@@ -1060,6 +1083,30 @@ pub(crate) fn validate_port(port: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// The host, path prefix or port of `request` another tenant routes on.
+async fn routing_clash(
+    registry: &crate::sql::Pool,
+    request: &ProvisionRequest,
+) -> Result<Option<String>, crate::sql::ExecError> {
+    use super::org_host::{host_claimed, port_claimed, prefix_claimed};
+    if let Some(host) = &request.host_pattern {
+        if host_claimed(registry, host, None).await? {
+            return Ok(Some(format!("host `{host}`")));
+        }
+    }
+    if let Some(prefix) = &request.path_prefix {
+        if prefix_claimed(registry, prefix, None).await? {
+            return Ok(Some(format!("path prefix `{prefix}`")));
+        }
+    }
+    if let Some(port) = request.port {
+        if port_claimed(registry, port, None).await? {
+            return Ok(Some(format!("port {port}")));
+        }
+    }
+    Ok(None)
+}
+
 /// Refuse a tenant URL that points at the registry's own database.
 ///
 /// Otherwise provisioning runs the *tenant* migration chain into the
@@ -1117,13 +1164,47 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
     }
 
     let (scheme, rest) = registry_url.split_once("://")?;
+    // Split the query off first: it can hold a `/` (`sslrootcert=/ca.pem`)
+    // and its TLS options must carry over to the tenant.
+    let (rest, query) = match rest.split_once('?') {
+        Some((path, q)) => (path, Some(q)),
+        None => (rest, None),
+    };
     // Keep userinfo and authority; replace only the path segment.
     let (authority, _old_db) = rest.rsplit_once('/')?;
     if authority.is_empty() {
         return None;
     }
-    Some(format!("{scheme}://{authority}/{database}"))
+    // Only TLS keys carry over: sqlx lets `dbname`/`host`/`user` in the
+    // query override the URL, so keeping them could point at the registry.
+    let tls: Vec<&str> = query
+        .unwrap_or("")
+        .split('&')
+        .filter(|chunk| {
+            let key = chunk.split_once('=').map_or(*chunk, |(k, _)| k);
+            TLS_QUERY_KEYS.contains(&crate::url_codec::url_decode(key).as_str())
+        })
+        .collect();
+    Some(if tls.is_empty() {
+        format!("{scheme}://{authority}/{database}")
+    } else {
+        format!("{scheme}://{authority}/{database}?{}", tls.join("&"))
+    })
 }
+
+/// The TLS query keys sqlx 0.8 reads for Postgres and MySQL.
+const TLS_QUERY_KEYS: &[&str] = &[
+    "sslmode",
+    "ssl-mode",
+    "sslrootcert",
+    "ssl-root-cert",
+    "sslca",
+    "ssl-ca",
+    "sslcert",
+    "ssl-cert",
+    "sslkey",
+    "ssl-key",
+];
 
 /// Scheme + host + port + database, lowercased, credentials and query
 /// dropped. Two URLs naming the same database compare equal even when
@@ -1136,13 +1217,30 @@ fn endpoint_identity(url: &str) -> String {
     // Drop userinfo (everything before the last `@` of the authority).
     let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
     // Drop the query string: `?mode=rwc` does not change which database
-    // this is.
-    let rest = rest.split_once('?').map_or(rest, |(before, _)| before);
-    format!(
-        "{}://{}",
-        scheme.to_ascii_lowercase(),
-        rest.to_ascii_lowercase()
-    )
+    // this is. A Postgres `dbname=` does, and sqlx lets it win over the path.
+    let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+    // sqlx reads `postgresql://` as `postgres://`.
+    let scheme = match scheme.to_ascii_lowercase().as_str() {
+        "postgresql" => "postgres".to_owned(),
+        other => other.to_owned(),
+    };
+    let dbname = if scheme == "postgres" {
+        crate::urls::parse_query_pairs(query)
+            .into_iter()
+            .rev()
+            .find(|(k, _)| k == "dbname")
+            .map(|(_, v)| v)
+    } else {
+        None
+    };
+    let rest = match dbname {
+        Some(db) => {
+            let authority = rest.split_once('/').map_or(rest, |(a, _)| a);
+            format!("{authority}/{db}")
+        }
+        None => rest.to_owned(),
+    };
+    format!("{scheme}://{}", rest.to_ascii_lowercase())
 }
 
 /// The schema a schema-mode tenant lives in: whatever the request
@@ -1161,11 +1259,6 @@ fn schema_name_for(request: &ProvisionRequest) -> Option<String> {
 
 /// The registry row for a validated request, slug-derived defaults
 /// filled in.
-///
-/// `host_pattern` is the interesting one: an unset pattern becomes
-/// `<slug>.<RUSTANGO_APEX_DOMAIN>` when that env var is set, and stays
-/// unset when it is not — a tenant with no host pattern simply does not
-/// resolve by subdomain.
 fn new_org_row(request: &ProvisionRequest, schema_name: Option<String>) -> Org {
     Org {
         id: Auto::default(),
@@ -1178,11 +1271,8 @@ fn new_org_row(request: &ProvisionRequest, schema_name: Option<String>) -> Org {
         backend_kind: request.backend.as_str().into(),
         database_url: request.database_url.clone(),
         schema_name,
-        host_pattern: request.host_pattern.clone().or_else(|| {
-            std::env::var("RUSTANGO_APEX_DOMAIN")
-                .ok()
-                .map(|apex| format!("{}.{apex}", request.slug))
-        }),
+        // `validate_fields` already filled in the `<slug>.<APEX>` default.
+        host_pattern: request.host_pattern.clone(),
         port: request.port,
         path_prefix: request.path_prefix.clone(),
         // Inactive until the schema is in place. The resolver already
@@ -1527,6 +1617,7 @@ mod validation_tests {
             "pg_toast",           // reserved
             "pg_anything",        // the whole `pg_` namespace is reserved
             "information_schema", // reserved
+            "public",             // the registry's schema (#1868)
         ] {
             assert!(
                 validate_schema_name(bad).is_err(),
@@ -1724,6 +1815,74 @@ mod validation_tests {
                 .as_deref(),
             Some("mysql://app:pw@db.internal:3306/t_acme")
         );
+    }
+
+    /// #1932: the query is split off before the path, so a `/` inside it
+    /// is not the database segment and TLS options carry over.
+    #[test]
+    fn a_server_url_keeps_its_query_string() {
+        for (registry, want) in [
+            (
+                "postgres://app@db:5432/reg?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem",
+                "postgres://app@db:5432/tenant_acme?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem",
+            ),
+            (
+                "postgres://app@db:5432/reg?sslmode=require",
+                "postgres://app@db:5432/tenant_acme?sslmode=require",
+            ),
+            (
+                "mysql://app@db:3306/reg?ssl-mode=REQUIRED",
+                "mysql://app@db:3306/tenant_acme?ssl-mode=REQUIRED",
+            ),
+        ] {
+            assert_eq!(
+                tenant_url_on_registry_server(registry, "tenant_acme").as_deref(),
+                Some(want),
+                "registry `{registry}`"
+            );
+        }
+        assert!(tenant_url_on_registry_server("postgres://db?sslrootcert=/ca.pem", "t").is_none());
+    }
+
+    /// sqlx reads `dbname`/`password`/`host` from the query and lets it
+    /// win, so a kept non-TLS key would aim tenant migrations elsewhere.
+    #[test]
+    fn a_server_url_drops_every_non_tls_query_key() {
+        for (registry, want) in [
+            (
+                "postgres://app@db:5432/reg?dbname=reg",
+                "postgres://app@db:5432/tenant_acme",
+            ),
+            (
+                "postgres://app@db:5432/reg?password=s3cret&sslmode=require",
+                "postgres://app@db:5432/tenant_acme?sslmode=require",
+            ),
+            (
+                "mysql://app@db:3306/reg?ssl-ca=/ca.pem&socket=/tmp/x",
+                "mysql://app@db:3306/tenant_acme?ssl-ca=/ca.pem",
+            ),
+        ] {
+            let derived = tenant_url_on_registry_server(registry, "tenant_acme");
+            assert_eq!(derived.as_deref(), Some(want), "registry `{registry}`");
+            assert!(refuse_registry_url(&derived.unwrap(), registry).is_ok());
+        }
+    }
+
+    /// A tenant URL whose `dbname=` names the registry is the registry.
+    #[test]
+    fn a_dbname_query_naming_the_registry_is_refused() {
+        let registry = "postgres://app:pw@db:5432/reg";
+        for tenant in [
+            "postgres://other@db:5432/tenant_acme?dbname=reg",
+            "postgres://db:5432?dbname=reg",
+            "postgresql://db:5432/x?dbname=t&dbname=reg",
+        ] {
+            assert!(
+                refuse_registry_url(tenant, registry).is_err(),
+                "`{tenant}` names the registry"
+            );
+        }
+        assert!(refuse_registry_url("postgres://db:5432/reg?dbname=t", registry).is_ok());
     }
 
     /// sqlite has no server, so the sibling is a file in the registry

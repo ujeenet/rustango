@@ -4,6 +4,100 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.18] — 2026-10-02
+
+### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)
+
+`CreateView` and `ModelForm::save` write the `create` (or `update`) audit row in the write's transaction. A webhook allowed private targets still refuses all of `169.254.0.0/16` and `fd00:ec2::/32`.
+
+### Fixed — an admin edit commits with its audit row (#2060)
+
+The diff entry is written in the UPDATE's transaction; if it fails, the edit is not saved.
+Its "before" side is read under lock in that transaction, so a stale form that undoes a concurrent edit is audited.
+Only models with `audit(...)` fail without the audit table ("run `manage migrate`"); others still log best-effort.
+
+### Fixed — test assertions that passed when they should fail (#1960)
+
+`assert_cookie_set` fails on a deleting `Set-Cookie` (a Netscape-style past `Expires` too), `assert_messages` on a cookie that does not verify, and a nested `assert_num_queries` counts toward the outer one.
+
+### Fixed — an `atomic()` inside `with_rollback` is rolled back too (#1761)
+
+**Breaking:** the `with_rollback` closure gets an `AtomicTx`; lock it per statement.
+
+### Fixed — tenant URL derivation keeps the query string (#1932)
+
+`tenant_url_on_registry_server` splits the query off first, so `sslrootcert=/ca.pem` is not cut and `sslmode` carries over. Only TLS keys carry over: a `dbname=` or `password=` is dropped, and a `dbname=` naming the registry is refused. `redact` masks a query `password=`.
+
+### Security — a schema-mode tenant cannot be named `public` (#1868)
+
+`public` holds the registry and ends every tenant's `search_path`; provisioning and `create_tenant` now refuse it.
+
+### Fixed — tenant hosts are validated on every write path and cannot clash (#1931)
+
+The console edit form uses the CLI's validators; edit and provision refuse a host, path prefix or port another tenant uses (hosts compared case-insensitively); the `<slug>.<APEX>` default is validated; the resolver orders by id.
+
+### Fixed — path-prefix tenants get a working admin and impersonation (#2059)
+
+The tenant admin serves login, admin and handoff under the org's `path_prefix`; the console's handoff URL carries it when it is a valid one-segment prefix.
+
+### Fixed — admin audit and impersonation attribution (#1939)
+
+The update diff no longer records a skipped readonly/hidden value as "after"; impersonation sessions are named `operator:<username>`, so `updated_by` is never empty.
+
+### Fixed — mail and console config failures are loud (#1948)
+
+`mail.backend = "file"` without a dir and unknown backends are errors; an SMTP 550–555 refusal is `MailError::Rejected`, not retried, while auth and connect failures stay retryable; a broken config logs where it broke, not the error text.
+
+### Security — direct uploads are checked against the bucket, not the client (#1851)
+
+The presigned PUT signs the declared size, and `finalize_upload` reads the object's real size and type with
+`Storage::metadata`; a mismatch is deleted and the row marked `Failed`.
+
+### Security — direct uploads never store an active MIME (#2057)
+
+`begin_upload` signs `text/html`, SVG, XML and script types as `application/octet-stream`; `UploadTicket.content_type` says what to send.
+
+### Fixed — storage keys may contain `..` inside a name (#1903)
+
+`validate_key` rejects `..` only as a whole path segment, so `report..final.pdf` uploads again.
+
+### Fixed — no orphan or torn upload files (#1905)
+
+`save_bytes` deletes the object when the row insert fails; `LocalStorage` writes via temp file + rename;
+`save_uploads` removes earlier files on any error; random key prefixes are UUIDs.
+
+### Fixed — S3 presigning derives the SigV4 key once per date (#1570)
+
+### Fixed — `purge` deletes links and row in one transaction; `MediaPerms::from_manager` (#1573)
+
+### Security — `finalize_upload` only changes a `Pending` row
+
+A second finalize no longer deletes a `Ready` row's object or flips `Failed` back; the update is `WHERE status = 'pending'`.
+
+### Security — direct-upload URLs are create-only
+
+`begin_upload` signs `If-None-Match: *`, so a replayed URL cannot swap a finalized object; `UploadTicket.headers` lists what to send.
+
+### Fixed — `purge_pending` deletes the storage objects, and sweeps `Failed` rows too
+
+Each row is deleted on its read status with its tag links, and its object inside the same transaction.
+
+### Fixed — a cancelled `LocalStorage::save` leaves no temp file
+
+A drop guard removes the temp file unless the rename ran; it is opened with `create_new`.
+
+### Fixed — `finalize_upload` compares only `type/subtype`
+
+A backend that rewrites the type's parameters no longer fails a good upload.
+
+### Fixed — `begin_upload` caps the declared size
+
+`MediaManager::with_max_upload_bytes` sets it; the default is 100 MiB (`DEFAULT_MAX_UPLOAD_BYTES`).
+
+### Fixed — `validate_key` rejects empty and `.` segments
+
+`a//b`, `./a` and `a/` named a different file on disk than on S3.
+
 ## [0.59.17] — 2026-10-01
 
 ### Fixed — humanize and number rounding (#1896)

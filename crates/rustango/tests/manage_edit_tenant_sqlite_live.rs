@@ -299,3 +299,116 @@ async fn an_unknown_tenant_is_named() {
         .expect_err("unknown");
     assert!(err.contains("nosuchtenant"), "{err}");
 }
+
+/// #1931: a host another tenant answers on, as its base or an extra
+/// host, would route by row order, so it is refused.
+#[tokio::test]
+async fn a_host_another_tenant_uses_is_refused() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.tenant("beta").await;
+    b.run(&["edit-tenant", "acme", "--host-pattern", "shop.example.com"])
+        .await
+        .expect("first claim");
+    b.run(&["add-host", "acme", "extra.example.com"])
+        .await
+        .expect("extra host");
+
+    for taken in ["SHOP.example.com", "extra.example.com"] {
+        let err = b
+            .run(&["edit-tenant", "beta", "--host-pattern", taken])
+            .await
+            .expect_err("claimed by acme");
+        assert!(err.contains("another tenant"), "{taken}: {err}");
+    }
+    assert!(b.org("beta").await.host_pattern.is_none());
+
+    // Re-saving a tenant's own host is not a clash.
+    b.run(&["edit-tenant", "acme", "--host-pattern", "shop.example.com"])
+        .await
+        .expect("own host");
+}
+
+/// A path prefix or port another tenant routes on is refused on both
+/// write paths, like a host.
+#[tokio::test]
+async fn a_prefix_or_port_another_tenant_uses_is_refused() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.tenant("beta").await;
+    b.run(&[
+        "edit-tenant",
+        "acme",
+        "--path-prefix",
+        "/shop",
+        "--port",
+        "8443",
+    ])
+    .await
+    .expect("first claim");
+
+    for args in [["--path-prefix", "/shop"], ["--port", "8443"]] {
+        let err = b
+            .run(&["edit-tenant", "beta", args[0], args[1]])
+            .await
+            .expect_err("claimed by acme");
+        assert!(err.contains("another tenant"), "{args:?}: {err}");
+    }
+    let db = b._tmp.path().join("gamma.db");
+    let err = b
+        .run(&[
+            "create-tenant",
+            "gamma",
+            "--mode",
+            "database",
+            "--backend",
+            "sqlite",
+            "--database-url",
+            &format!("sqlite://{}?mode=rwc", db.display()),
+            "--path-prefix",
+            "/shop",
+            "--no-migrate",
+        ])
+        .await
+        .expect_err("prefix claimed by acme");
+    assert!(err.contains("another tenant"), "{err}");
+
+    // Re-saving a tenant's own prefix is not a clash.
+    b.run(&["edit-tenant", "acme", "--path-prefix", "/shop"])
+        .await
+        .expect("own prefix");
+}
+
+/// A tenant may promote its own extra host to its base host, and a host
+/// row stored before lowercasing still clashes.
+#[tokio::test]
+async fn own_extra_hosts_are_not_a_clash_and_case_is_ignored() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.tenant("beta").await;
+    b.run(&["add-host", "acme", "extra.example.com"])
+        .await
+        .expect("extra host");
+    b.run(&["edit-tenant", "acme", "--host-pattern", "extra.example.com"])
+        .await
+        .expect("acme's own extra host");
+
+    let mut legacy = rustango::tenancy::OrgHost {
+        id: rustango::sql::Auto::Unset,
+        org_id: b.org("acme").await.id.get().copied().unwrap_or_default(),
+        hostname: "LEGACY.example.com".to_owned(),
+        enabled: true,
+        created_at: rustango::sql::Auto::Unset,
+    };
+    legacy.insert_pool(&b.registry).await.expect("legacy row");
+    let err = b
+        .run(&[
+            "edit-tenant",
+            "beta",
+            "--host-pattern",
+            "legacy.example.com",
+        ])
+        .await
+        .expect_err("claimed by acme in another case");
+    assert!(err.contains("another tenant"), "{err}");
+}
