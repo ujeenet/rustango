@@ -150,6 +150,28 @@ untouched.
 
 ## Unreleased
 
+### Schema-mode tenants cannot use `public`
+
+Provisioning and `create_tenant` refuse a schema named `public` (#1868). Rename any such tenant's schema.
+
+### Tenant hosts must be unique
+
+Editing or provisioning a tenant with a host another tenant uses (base or extra) is refused (#1931). The console edit form now rejects a host with a port, a bad `path_prefix` or `port`. A path prefix or port another tenant uses is refused too.
+
+The `<slug>.<RUSTANGO_APEX_DOMAIN>` default host is validated, so an apex with a port (`localhost:8080`) now fails provisioning. Set the apex without the port.
+
+### Derived tenant URLs keep only TLS options
+
+`tenant_url_on_registry_server` copies only the `sslmode`/`ssl-*` keys from the registry query; set any other option on the tenant URL itself.
+
+### Mail config errors
+
+`email::from_settings` returns `MailError::Config` for `backend = "file"` without `file_email_dir` and for unknown backends, instead of using the console (#1948). An SMTP 550–555 refusal is the new `MailError::Rejected`, which `is_retryable()` is false for; an auth failure (535) stays `Transport`.
+
+### Impersonation username
+
+An impersonation session's username is `operator:<username>`, not empty (#1939).
+
 ### Direct media uploads
 
 **Breaking:** `Storage::presigned_put_url` takes a `content_length: Option<u64>`, and a backend that presigns PUTs

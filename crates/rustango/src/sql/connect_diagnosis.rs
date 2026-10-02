@@ -235,6 +235,23 @@ fn classify_db(db: &dyn sqlx::error::DatabaseError) -> ConnectFault {
 /// exactly what the reader needs to see.
 #[must_use]
 pub fn redact(url: &str) -> String {
+    let url = redact_userinfo(url);
+    // sqlx also reads `password=` from the query; mask it after the
+    // userinfo pass so a `?` in the password cannot start the query.
+    let Some((base, query)) = url.split_once('?') else {
+        return url;
+    };
+    let query: Vec<String> = query
+        .split('&')
+        .map(|chunk| match chunk.split_once('=') {
+            Some((k, _)) if crate::url_codec::url_decode(k) == "password" => format!("{k}=***"),
+            _ => chunk.to_owned(),
+        })
+        .collect();
+    format!("{base}?{}", query.join("&"))
+}
+
+fn redact_userinfo(url: &str) -> String {
     // `scheme://user:password@host:port/db?params`. Only the segment
     // between the last `:` of the userinfo and the `@` is secret, and
     // userinfo is whatever precedes the *first* `@` after `://`.
@@ -284,6 +301,16 @@ mod tests {
             "sqlite:./dev.db?mode=rwc"
         );
         assert_eq!(redact("sqlite://./dev.db"), "sqlite://./dev.db");
+    }
+
+    #[test]
+    fn redact_masks_a_password_in_the_query() {
+        assert_eq!(
+            redact("postgres://db:5432/acme?sslmode=require&password=s3cret"),
+            "postgres://db:5432/acme?sslmode=require&password=***"
+        );
+        let out = redact("postgres://app:pw@db/acme?pass%77ord=s3cret");
+        assert!(!out.contains("s3cret") && !out.contains(":pw@"), "{out}");
     }
 
     /// An `@` inside the password must not be mistaken for the userinfo

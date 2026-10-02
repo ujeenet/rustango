@@ -1913,9 +1913,16 @@ fn audit_form(
     form: &HashMap<String, String>,
     written: &[(&'static str, SqlValue)],
 ) -> HashMap<String, String> {
+    // Only written fields: a POSTed readonly or hidden value is skipped,
+    // so the diff must fall back to the row for it (#1939).
+    let is_written = |name: &str| {
+        model
+            .field(name)
+            .is_some_and(|f| written.iter().any(|(c, _)| *c == f.column))
+    };
     let mut out: HashMap<String, String> = form
         .iter()
-        .filter(|(k, _)| !is_secret_field(admin_cfg, k))
+        .filter(|(k, _)| !is_secret_field(admin_cfg, k) && is_written(k))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     for (column, value) in written {
@@ -2621,6 +2628,24 @@ fn rows_with_pk(rows: &mut Vec<serde_json::Value>, pk_field: &FieldSchema) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1939: a POSTed field the update skipped is not an audit "after".
+    #[test]
+    fn the_audit_form_holds_only_written_fields() {
+        use crate::core::Model as _;
+        let model = crate::admin::user::AdminUser::SCHEMA;
+        let form: HashMap<String, String> = [
+            ("username", "alice"),
+            ("sessions_revoked_at", "2020-01-01T00:00"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        let written = vec![("username", SqlValue::String("alice".into()))];
+        let out = audit_form(model, &crate::core::AdminConfig::DEFAULT, &form, &written);
+        assert_eq!(out.get("username").map(String::as_str), Some("alice"));
+        assert!(!out.contains_key("sessions_revoked_at"), "{out:?}");
+    }
 
     #[test]
     fn rows_with_pk_drops_the_audit_row_with_its_pk() {

@@ -131,20 +131,14 @@ async fn from_settings_file_backend_writes_to_configured_dir() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
-async fn from_settings_file_backend_without_dir_falls_back() {
+/// No directory is a config error, not a console that logs the mail (#1948).
+#[test]
+fn from_settings_file_backend_without_dir_is_an_error() {
     let s = MailSettings {
         backend: Some("file".into()),
         from_address: Some("noreply@example.com".into()),
         file_email_dir: None,
         ..Default::default()
     };
-    // No panic, no error — just a warning + ConsoleMailer fallback.
-    let mailer = from_settings(&s).expect("mailer");
-    let email = Email::new()
-        .to("ops@example.com")
-        .from("noreply@example.com")
-        .subject("Hi")
-        .body("body");
-    mailer.send(&email).await.expect("fallback console send ok");
+    assert!(from_settings(&s).is_err());
 }

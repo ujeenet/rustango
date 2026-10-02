@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenant URL derivation keeps the query string (#1932)
+
+`tenant_url_on_registry_server` splits the query off first, so `sslrootcert=/ca.pem` is not cut and `sslmode` carries over. Only TLS keys carry over: a `dbname=` or `password=` is dropped, and a `dbname=` naming the registry is refused. `redact` masks a query `password=`.
+
+### Security — a schema-mode tenant cannot be named `public` (#1868)
+
+`public` holds the registry and ends every tenant's `search_path`; provisioning and `create_tenant` now refuse it.
+
+### Fixed — tenant hosts are validated on every write path and cannot clash (#1931)
+
+The console edit form uses the CLI's validators; edit and provision refuse a host, path prefix or port another tenant uses (hosts compared case-insensitively); the `<slug>.<APEX>` default is validated; the resolver orders by id.
+
+### Fixed — path-prefix tenants get a working admin and impersonation (#2059)
+
+The tenant admin serves login, admin and handoff under the org's `path_prefix`; the console's handoff URL carries it when it is a valid one-segment prefix.
+
+### Fixed — admin audit and impersonation attribution (#1939)
+
+The update diff no longer records a skipped readonly/hidden value as "after"; impersonation sessions are named `operator:<username>`, so `updated_by` is never empty.
+
+### Fixed — mail and console config failures are loud (#1948)
+
+`mail.backend = "file"` without a dir and unknown backends are errors; an SMTP 550–555 refusal is `MailError::Rejected`, not retried, while auth and connect failures stay retryable; a broken config logs where it broke, not the error text.
+
 ### Security — direct uploads are checked against the bucket, not the client (#1851)
 
 The presigned PUT signs the declared size, and `finalize_upload` reads the object's real size and type with
