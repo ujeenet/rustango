@@ -29,18 +29,15 @@
 //! async fn create_and_count() {
 //!     let pool = test_pool().await;
 //!     with_rollback(&pool, |tx| Box::pin(async move {
-//!         // Inserts here are visible to assertions inside the
-//!         // closure, but rolled back when it returns.
+//!         // Rolled back when the closure returns.
 //!         let mut tx = tx.lock().await?;
 //!         insert_tx(&mut tx, &article_q("First")).await?;
 //!         insert_tx(&mut tx, &article_q("Second")).await?;
-//!
-//!         let count = count_tx::<Article>(&mut tx).await?;
-//!         assert_eq!(count, 2);
 //!         Ok(())
 //!     })).await.unwrap();
 //!
 //!     // The two articles are gone — rollback happened on return.
+//!     assert_eq!(Article::objects().count(&pool).await.unwrap(), 0);
 //! }
 //! ```
 //!

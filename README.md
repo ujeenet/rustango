@@ -169,7 +169,7 @@ Full walkthrough: [getting started](docs/getting-started.md) · [scaffolding](do
 
 ## The ORM
 
-`#[derive(Model)]` registers a struct in a global inventory and emits typed query, save, and `FromRow` code. The query builder is lazy and chainable (`.filter()`, `.exclude()`, `.order_by()`, `.annotate()`, `.select_related()`, `.prefetch_related()`) — nothing hits the database until you `.fetch()` — and the **same code runs on all three backends** through the `Pool` enum.
+`#[derive(Model)]` registers a struct in a global inventory and emits typed query, save, and `FromRow` code. The query builder is lazy and chainable (`.filter()`, `.exclude()`, `.order_by()`, `.annotate()`, `.select_related()`) — nothing hits the database until you `.fetch()` — reverse relations batch through `sql::fetch_with_prefetch_pool(qs, "fk_col", &pool)`, and the **same code runs on all three backends** through the `Pool` enum.
 
 ```rust
 // Filter, order, paginate
@@ -236,7 +236,7 @@ pub struct PostViewSet;
 let app = Router::new().merge(PostViewSet::router("/api/posts", pool.clone()));
 ```
 
-`#[derive(Serializer)]` is a declarative JSON façade over a model (read-only / write-only / renamed / computed `method` fields, per-field `validate`, nested FK serialization, and `many` collections). JWT ships a full lifecycle (issue with custom claims, verify without a DB hit, refresh, re-check permissions, revoke/blacklist). OpenAPI 3.1 auto-derives from your serializers + viewsets, and responses follow JSON:API + RFC 7807 Problem Details. The HTTP `QUERY` method (RFC 10008) is supported for body-carrying reads.
+`#[derive(Serializer)]` is a declarative JSON façade over a model (read-only / write-only / renamed / computed `method` fields, per-field `validate`, nested FK serialization, and `many` collections). JWT ships a full lifecycle (issue with custom claims, verify without a DB hit, refresh, re-check permissions, revoke/blacklist). OpenAPI 3.1 auto-derives from your serializers + viewsets. ViewSets answer in rustango's own shape (a `{count, page, results, …}` list envelope and `{error, message, status}` errors); `jsonapi` and `problem_details` are adapters you apply in your own handlers. The HTTP `QUERY` method (RFC 10008) is supported for body-carrying reads.
 
 📖 [ViewSets](docs/viewsets.md) · [serializers](docs/serializers.md) · [JWT](docs/auth-jwt-api.md) · [OpenAPI](docs/openapi.md) · [QUERY method](docs/query-method.md)
 

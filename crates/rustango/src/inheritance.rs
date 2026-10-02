@@ -95,7 +95,7 @@
 //! | What you want | Rust idiom |
 //! |---------------|-----------|
 //! | Abstract base class | trait, plus the fields on each model |
-//! | Multi-table inheritance | explicit `#[rustango(o2o)]` FK |
+//! | Multi-table inheritance | explicit `#[rustango(o2o = "parent")]` FK |
 //! | Proxy model | extension trait on `QuerySet<T>` |
 //!
 //! There is no `#[rustango(abstract)]` attribute. Copying parent

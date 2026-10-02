@@ -1299,7 +1299,7 @@ impl<T: Model> QuerySet<T> {
     /// // rustango:
     /// let post = Post::objects()
     ///     .where_key(42_i64)
-    ///     .first_pool(&pool).await?;
+    ///     .first(&pool).await?;
     /// ```
     ///
     /// Models without `#[rustango(primary_key)]` surface as
