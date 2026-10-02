@@ -632,12 +632,19 @@ impl Dialect for MySql {
 
     // ---- advisory locks ----
 
+    // GET_LOCK names are server-wide: suffix the database so tenants don't share one (#1991).
     fn acquire_session_lock_sql(&self) -> Option<String> {
-        Some(format!("SELECT GET_LOCK({}, 0)", self.placeholder(1)))
+        Some(format!(
+            "SELECT GET_LOCK({}, 0)",
+            my_db_lock_name(self.placeholder(1))
+        ))
     }
 
     fn release_session_lock_sql(&self) -> Option<String> {
-        Some(format!("SELECT RELEASE_LOCK({})", self.placeholder(1)))
+        Some(format!(
+            "SELECT RELEASE_LOCK({})",
+            my_db_lock_name(self.placeholder(1))
+        ))
     }
 
     // MySQL has no transaction-scoped advisory lock.
@@ -698,6 +705,11 @@ impl Dialect for MySql {
 /// Write a backtick-quoted identifier in place, for the conflict
 /// clause, which writes straight into a `String` rather than through
 /// the [`Sql`] builder.
+/// Bound prefix + SHA1 of the current database: 57 chars, under MySQL's 64-char lock-name cap.
+fn my_db_lock_name(prefix: impl std::fmt::Display) -> String {
+    format!("CONCAT({prefix}, SHA1(COALESCE(DATABASE(), '')))")
+}
+
 fn write_my_ident(sql: &mut String, name: &str) {
     sql.push('`');
     for ch in name.chars() {
@@ -933,6 +945,7 @@ mod tests {
         let acq = MySql.acquire_session_lock_sql().unwrap();
         assert!(acq.contains("GET_LOCK"));
         assert!(acq.contains("?"));
+        assert!(acq.contains("DATABASE()"), "{acq}");
         let rel = MySql.release_session_lock_sql().unwrap();
         assert!(rel.contains("RELEASE_LOCK"));
     }

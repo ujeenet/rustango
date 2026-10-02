@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL migrate lock name changed
+
+The lock is now `rustango_migrate_<sha1 of DATABASE()>` (#1991). During a rolling upgrade an old and a new process on the same database do not exclude each other: upgrade them one at a time.
+
 ### SQLite rebuilds tables for CHECK and composite FK changes
 
 These ops no longer fail on SQLite (#2127); like other rebuilds, they refuse a table with a column the migration snapshot lacks. On PG, `render_changes_split_with_dialect` no longer emits the `DROP CONSTRAINT` of a UNIQUE drop: the runner finds the live name (#2133). `render_changes` still prints the usual name.

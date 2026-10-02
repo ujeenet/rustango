@@ -2465,10 +2465,9 @@ async fn fake_apply_pool(
 /// - **Postgres** — `pg_advisory_lock($1)` takes an `i64`; we bind
 ///   [`MIGRATE_LOCK_KEY`] (the same key the legacy PgPool runner
 ///   uses, so the two paths coordinate).
-/// - **MySQL** — `GET_LOCK(?, -1)` takes a `VARCHAR` lock name; we
-///   bind `format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY)` so
-///   the name is stable, deterministic, and namespaced (MySQL
-///   `GET_LOCK` is global to the server, not scoped per database).
+/// - **MySQL** — `GET_LOCK` names are server-wide, so the dialect
+///   appends a hash of `DATABASE()` to the bound `rustango_migrate_`
+///   prefix: one lock per database, like PG advisory locks.
 ///
 /// The lock is acquired on a checked-out connection and held until
 /// `body` returns; release happens on the same connection so MySQL's
@@ -2581,12 +2580,12 @@ where
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            let name = format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY);
+            const NAME: &str = "rustango_migrate_";
             let mut held = LockSession::wait(my, |conn| {
-                let (sql, name) = (acquire.clone(), name.clone());
+                let sql = acquire.clone();
                 Box::pin(async move {
                     let got: Option<i64> = sqlx::query_scalar(&sql)
-                        .bind(name)
+                        .bind(NAME)
                         .fetch_one(&mut **conn)
                         .await?;
                     mysql_lock_taken(got)
@@ -2595,7 +2594,7 @@ where
             .await?;
             let result = body.await;
             let _ = sqlx::query(&release)
-                .bind(&name)
+                .bind(NAME)
                 .execute(&mut **held.conn())
                 .await;
             result

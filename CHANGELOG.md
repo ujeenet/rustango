@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL's migrate lock is per database (#1991)
+
+The `GET_LOCK` name carries a hash of `DATABASE()`, so tenant databases on one server no longer wait on each other's migrations.
+
 ### Fixed — the commerce examples' system chains are current (#2054)
 
 Regenerated with `migrate` / `makemigrations`; CI now fails when an example's framework steps are not committed.
