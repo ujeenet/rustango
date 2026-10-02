@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the ORM covers the media sweeps' anti-join delete (#1578)
+
+Bounded deletes and `IN (… LIMIT n)` on MySQL were already in; a `where_not_exists` + `outer_ref` delete is now tested on all three backends.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)

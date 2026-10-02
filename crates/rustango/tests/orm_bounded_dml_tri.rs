@@ -28,6 +28,16 @@ pub struct Child {
     pub item: ForeignKey<Item>,
 }
 
+/// Points at `Item` with no foreign key, like `rustango_media_tag_links`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "bdml_link")]
+#[allow(dead_code)]
+pub struct Link {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub item_id: i64,
+}
+
 /// No primary key at all: a bounded write has nothing to bound by.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "bdml_log")]
@@ -192,6 +202,30 @@ async fn unbounded_paths_unchanged(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![1, 3, 5]);
 }
 
+async fn anti_join_delete(pool: &Pool) {
+    // The media orphan-link sweep (#1578): delete links whose item is gone.
+    use rustango::core::{subquery::outer_ref, Column as _};
+    rustango::testkit::matrix::fresh_table::<Link>(pool).await;
+    for (id, item_id) in [(1, 1), (2, 99), (3, 5), (4, 98)] {
+        Link { id, item_id }.insert_pool(pool).await.unwrap();
+    }
+    let alive = Item::objects()
+        .where_(Item::id.eq_expr(outer_ref("item_id")))
+        .compile()
+        .unwrap();
+    let q = Link::objects()
+        .where_not_exists(alive)
+        .compile_delete()
+        .unwrap();
+    assert_eq!(delete_pool(pool, &q).await.unwrap(), 2);
+    let left: Vec<Link> = Link::objects()
+        .order_by(&[("id", false)])
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert_eq!(left.iter().map(|l| l.id).collect::<Vec<_>>(), vec![1, 3]);
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
@@ -204,6 +238,7 @@ tri_dialect_test! {
         filtered_limited_update_binds,
         ties_page_by_pk,
         unbounded_paths_unchanged,
+        anti_join_delete,
     ],
 }
 
