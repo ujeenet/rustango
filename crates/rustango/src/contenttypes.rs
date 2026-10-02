@@ -138,7 +138,7 @@ impl ContentType {
         pool: &crate::sql::Pool,
     ) -> Result<Option<Self>, ExecError> {
         let entry =
-            ModelEntry::for_table(T::SCHEMA.table).ok_or_else(|| ExecError::MissingPrimaryKey {
+            ModelEntry::for_schema(T::SCHEMA).ok_or_else(|| ExecError::MissingPrimaryKey {
                 table: T::SCHEMA.table,
             })?;
         let app = entry.resolved_app_label().unwrap_or("project");
@@ -343,7 +343,7 @@ impl ContentType {
         pool: &crate::sql::Pool,
     ) -> Result<Option<Self>, ExecError> {
         let entry =
-            ModelEntry::for_table(T::SCHEMA.table).ok_or_else(|| ExecError::MissingPrimaryKey {
+            ModelEntry::for_schema(T::SCHEMA).ok_or_else(|| ExecError::MissingPrimaryKey {
                 table: T::SCHEMA.table,
             })?;
         let app = entry.resolved_app_label().unwrap_or("project");
@@ -363,10 +363,9 @@ impl ContentType {
         pool: &crate::sql::Pool,
         schema: &'static crate::core::ModelSchema,
     ) -> Result<Option<Self>, ExecError> {
-        let entry =
-            ModelEntry::for_table(schema.table).ok_or_else(|| ExecError::MissingPrimaryKey {
-                table: schema.table,
-            })?;
+        let entry = ModelEntry::for_schema(schema).ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: schema.table,
+        })?;
         let app = entry.resolved_app_label().unwrap_or("project");
         let name = schema.name.to_ascii_lowercase();
         Self::get_by_natural_key(pool, app, &name).await
