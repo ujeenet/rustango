@@ -222,6 +222,10 @@ pub(crate) async fn converge_groups(
                 format!("table `{t}`")
             }
             Some(SC::CreateIndex { name, .. }) => format!("index `{name}`"),
+            Some(SC::AlterFkOnDelete { table, column, .. }) => {
+                format!("foreign key `{table}.{column}`")
+            }
+            Some(SC::AddCompositeFk { table, name, .. }) => format!("foreign key `{table}.{name}`"),
             _ => continue,
         };
         let mut no_rows = false;

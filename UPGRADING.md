@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### SQLite rebuilds tables for CHECK and composite FK changes
+
+These ops no longer fail on SQLite (#2127); like other rebuilds, they refuse a table with a column the migration snapshot lacks. On PG, `render_changes_split_with_dialect` no longer emits the `DROP CONSTRAINT` of a UNIQUE drop: the runner finds the live name (#2133). `render_changes` still prints the usual name.
+
 ### `AlterColumn*` no longer refused on MySQL and SQLite
 
 A type, nullability, default, length or UNIQUE change now applies instead of failing with "not yet supported" (#1676); new migrations need no RunSQL workaround; leave applied ones as they are. MySQL relies on strict `sql_mode` to refuse a shrink that would truncate. SQLite keeps a value its new type cannot convert (column affinity), where PG and MySQL refuse it.

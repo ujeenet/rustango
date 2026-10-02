@@ -292,7 +292,7 @@ async fn list_pk_columns(
     not(any(feature = "postgres", feature = "mysql")),
     allow(unused_variables)
 )]
-async fn list_fks(
+pub(super) async fn list_fks(
     pool: &Pool,
     schema: &str,
     table: &str,

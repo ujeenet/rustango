@@ -498,7 +498,7 @@ fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
     }
 }
 
-fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
+pub(super) fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
     SchemaChange::CreateM2MTable {
         through: mt.through.clone(),
         src_table: mt.src_table.clone(),
@@ -508,7 +508,10 @@ fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
     }
 }
 
-fn add_composite_fk(table: &str, cf: &super::snapshot::CompositeFkSnapshot) -> SchemaChange {
+pub(super) fn add_composite_fk(
+    table: &str,
+    cf: &super::snapshot::CompositeFkSnapshot,
+) -> SchemaChange {
     SchemaChange::AddCompositeFk {
         table: table.to_owned(),
         name: cf.name.clone(),

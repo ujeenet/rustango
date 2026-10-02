@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — PG drops a UNIQUE after its column was renamed (#2133)
+
+The runner drops the constraint by its name in the catalog, which keeps the old column's name, as MySQL and SQLite already did.
+
+### Fixed — SQLite applies CHECK and composite FK changes to existing tables (#2127)
+
+`AddCheckConstraint`, `DropCheckConstraint`, `AddCompositeFk` and `DropCompositeFk` rebuild the table instead of being refused; every rebuild keeps the table's CHECKs.
+
+### Fixed — MySQL: a system `DropIndex` on a project-owned table (#2094)
+
+A system step no longer drops an index the project's own copy of a framework table never got; MySQL has no `DROP INDEX IF EXISTS`.
+
+### Fixed — a recreated framework table gets its M2M tables and FKs back (#2084)
+
+When the project dropped a framework table, `migrate` now also recreates its junction tables and re-adds the FKs PG's `DROP TABLE … CASCADE` took from other tables.
+
+### Fixed — a project FK to a table a waiting system step creates (#2083)
+
+A system step that waits for the project chain first creates its tables that need nothing waiting, so a pending project migration that references one no longer fails on every run.
+
+### Fixed — unrelated system steps no longer wait for the project chain (#2053)
+
+Only the system ops that depend on a waiting step wait; later unrelated steps run before the project chain.
+
 ### Fixed — `AlterColumn*` migrations run on MySQL and SQLite (#1676)
 
 MySQL restates the column with `MODIFY COLUMN` (NULLs filled first; strict mode refuses a truncating shrink) and drops a UNIQUE by its catalog name; SQLite rebuilds the table, copying NULLs as the new default.
