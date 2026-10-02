@@ -163,7 +163,7 @@ impl IntoResponse for AdminError {
                 let body = format!(
                     r##"<!doctype html>
 <html><head><meta charset="utf-8"><title>Table not migrated — rustango admin</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:680px;margin:4em auto;padding:0 1em;color:#222}}
+<style{nonce}>body{{font-family:system-ui,sans-serif;max-width:680px;margin:4em auto;padding:0 1em;color:#222}}
 h1{{color:#b00;font-size:1.25em}} code{{background:#f3f3f3;padding:.1em .35em;border-radius:.2em}}
 .hint{{background:#fff8dc;border-left:4px solid #d4a000;padding:.8em 1em;margin:1em 0}}</style>
 </head><body>
@@ -180,6 +180,7 @@ applied yet for this tenant / database.</p>
 </body></html>
 "##,
                     table = html_escape(&table),
+                    nonce = crate::csp_nonce::nonce_attr(),
                 );
                 (StatusCode::SERVICE_UNAVAILABLE, Html(body)).into_response()
             }

@@ -1,4 +1,4 @@
-<style>
+<style nonce="{{ csp_nonce }}">
 * { box-sizing: border-box; }
 body {
   font-family: var(--font-family-base);
@@ -494,4 +494,13 @@ dt { font-weight: var(--font-weight-bold); }
   aside.sidebar { border-right: none; border-bottom: 1px solid var(--color-border); }
   main.content { padding: var(--space-4); }
 }
+/* Classes, not inline style attributes: a strict CSP blocks those (#1703). */
+.inline-form { display: inline; }
+.history-link { font-weight: normal; text-transform: none; letter-spacing: 0; }
+.filter-select { width: 100%; margin-bottom: .4rem; }
+.num-input { width: 5rem; }
+.mono { font-family: monospace; }
+p.flash { padding: var(--space-2) var(--space-3); border-radius: var(--radius); }
+p.flash.success { background: color-mix(in srgb, var(--color-success, #2a7) 14%, transparent); border: 1px solid var(--color-success, #2a7); color: var(--color-success, #2a7); }
+p.flash.error { background: color-mix(in srgb, var(--color-danger, #d33) 14%, transparent); border: 1px solid var(--color-danger, #d33); color: var(--color-danger, #d33); }
 </style>

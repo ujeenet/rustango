@@ -996,6 +996,10 @@ async fn login_form(
     // v0.27.5 — log render errors instead of silently rendering an
     // empty body. The previous `unwrap_or_default()` hid a real
     // template-include resolution bug from the operator.
+    ctx.insert(
+        "csp_nonce",
+        &crate::csp_nonce::current().unwrap_or_default(),
+    );
     let html = axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
         Ok(html) => html,
         Err(e) => {
@@ -1037,11 +1041,11 @@ async fn login_submit(
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
+    cookie_path: &str,
     extensions: &axum::http::Extensions,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    cookie_path: &str,
     use crate::core::Column as _;
     use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
@@ -1228,11 +1232,11 @@ async fn redeem_impersonation_handoff(
     org: &super::Org,
     cfg: &TenantSessionConfig,
     routes: &super::routes::RouteConfig,
+    cookie_path: &str,
     query: Option<&str>,
     registry: &crate::sql::Pool,
 ) -> Response {
     use super::impersonation_handoff::{decode, JtiBlacklist};
-    cookie_path: &str,
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
@@ -1444,6 +1448,10 @@ fn change_password_form(
     if let Some(token) = crate::admin::session::current_csrf_token() {
         ctx.insert("csrf_token", &token);
     }
+    ctx.insert(
+        "csp_nonce",
+        &crate::csp_nonce::current().unwrap_or_default(),
+    );
     axum::response::Html(match cfg.tera.render("tenant_change_password.html", &ctx) {
         Ok(html) => html,
         Err(e) => {

@@ -154,6 +154,10 @@ untouched.
 
 **Breaking:** call `auth.verify_for_tenant(token, &tenant)`. It refuses tokens not minted by `/login` or `/refresh`, and ended sessions (#2118).
 
+### Strict CSP and the bundled admin
+
+Add `CSP_NONCE_PLACEHOLDER` to `script-src` and `style-src` to run the admin without `'unsafe-inline'`. The `csp_nonce` module now also builds with `admin` (#1703).
+
 ## 0.59.19
 
 ### Bearer tokens need a login session

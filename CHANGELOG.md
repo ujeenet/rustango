@@ -16,6 +16,10 @@ It reads the user row like `require_bearer`, so a logout, password change or dea
 
 The tenant session cookie is scoped to the tenant's path prefix, so signing in to one prefix tenant no longer replaces another's session on the same host.
 
+### Fixed — admin, console and tenant login work under a strict CSP (#1703)
+
+`[security]` headers now run the CSP nonce layer. Bundled pages nonce their inline `<script>`/`<style>` and drop inline `on*` handlers and `style` attributes.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)

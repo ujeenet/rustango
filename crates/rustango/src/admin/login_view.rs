@@ -946,10 +946,11 @@ pub(crate) async fn require_session(
 fn forbidden_page(session: &AdminSession, logout_path: &str) -> Response {
     let username = crate::text::html_escape(&session.username);
     let logout_path = crate::text::html_escape(logout_path);
+    let nonce = crate::csp_nonce::nonce_attr();
     let body = format!(
         "<!doctype html>\
          <html><head><title>Forbidden</title>\
-         <style>body{{font-family:system-ui;max-width:42em;margin:4em auto;padding:0 1em;line-height:1.5}}\
+         <style{nonce}>body{{font-family:system-ui;max-width:42em;margin:4em auto;padding:0 1em;line-height:1.5}}\
          h1{{font-size:1.4em}}\
          .meta{{color:#666;font-size:.9em}}\
          </style></head><body>\

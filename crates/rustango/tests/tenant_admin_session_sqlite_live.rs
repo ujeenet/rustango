@@ -436,3 +436,84 @@ async fn a_short_new_password_is_refused_by_the_tenant_admin() {
         "the short password must not be stored"
     );
 }
+
+/// #1703 — the tenant login, admin pages and change-password page nonce
+/// their inline tags and use no on* handlers or style attributes.
+#[tokio::test]
+async fn tenant_pages_pass_a_strict_csp() {
+    use rustango::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _, CSP_NONCE_PLACEHOLDER};
+    use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt as _};
+    let env = boot().await;
+    let csp = format!(
+        "default-src 'self'; script-src {CSP_NONCE_PLACEHOLDER}; style-src {CSP_NONCE_PLACEHOLDER}"
+    );
+    let app = env
+        .admin
+        .clone()
+        .security_headers(SecurityHeadersLayer::strict().csp(csp))
+        .csp_nonce(CspNonceLayer::default());
+    let mut user = User {
+        is_superuser: true,
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&env.tenant).await.expect("seed user");
+    let login = TenantSessionPayload::new(
+        user.id.get().copied().unwrap(),
+        &env.slug,
+        3600,
+        PasswordFingerprint::of(&env.secret, &user.password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&env.secret, &login));
+    for (uri, cookie) in [
+        ("/__login", ""),
+        ("/__admin/", cookie.as_str()),
+        ("/__admin/rustango_users", cookie.as_str()),
+        ("/__change-password", cookie.as_str()),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, &env.host)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let csp = resp.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let nonce = csp
+            .split("'nonce-")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap()
+            .to_owned();
+        let html = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&html);
+        assert!(html.contains("<script") || html.contains("<style"), "{uri}");
+        for tag in ["<script", "<style"] {
+            for (i, _) in html.match_indices(tag) {
+                let open = &html[i..i + html[i..].find('>').unwrap()];
+                if !open.contains("application/json") {
+                    assert!(
+                        open.contains(&format!(r#"nonce="{nonce}""#)),
+                        "{uri}: {open}"
+                    );
+                }
+            }
+        }
+        for bad in [" onclick=", " onsubmit=", " onchange=", " style=\""] {
+            assert!(!html.contains(bad), "{uri}: {bad}");
+        }
+    }
+}

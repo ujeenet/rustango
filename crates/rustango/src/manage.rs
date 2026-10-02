@@ -1697,6 +1697,12 @@ impl OuterLayers {
     fn apply(self, mut app: Router) -> Router {
         use crate::host_validation::AllowedHostsRouterExt as _;
         use crate::security_headers::SecurityHeadersRouterExt as _;
+        // Fills the CSP nonce placeholder; the bundled admin nonces its tags (#1703).
+        #[cfg(feature = "admin")]
+        {
+            use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
+            app = app.csp_nonce(CspNonceLayer::default());
+        }
         use crate::ssl_redirect::SslRedirectRouterExt as _;
         app = app.security_headers(self.headers);
         if let Some(l) = self.ssl_redirect {

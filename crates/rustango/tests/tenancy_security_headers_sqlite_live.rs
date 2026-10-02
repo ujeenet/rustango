@@ -162,3 +162,61 @@ async fn a_panic_500_carries_the_headers() {
     assert_eq!(resp.headers()["x-frame-options"], "DENY");
     assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
 }
+
+/// Every inline `<script>` / `<style>` in `html` carries `nonce`, and
+/// nothing a strict CSP blocks outright is left: on* handlers, style attrs.
+pub fn assert_strict_csp_safe(html: &str, nonce: &str) {
+    for tag in ["<script", "<style"] {
+        for (i, _) in html.match_indices(tag) {
+            let open = &html[i..i + html[i..].find('>').unwrap()];
+            if open.contains("application/json") {
+                continue;
+            }
+            assert!(
+                open.contains(&format!(r#"nonce="{nonce}""#)),
+                "un-nonced {open}"
+            );
+        }
+    }
+    for bad in [" onclick=", " onsubmit=", " onchange=", " style=\""] {
+        assert!(!html.contains(bad), "{bad} survives a strict CSP");
+    }
+}
+
+/// #1703 — under a strict nonce CSP the console login nonces its tags,
+/// and the header's placeholder is filled with that same nonce.
+#[tokio::test]
+async fn the_console_login_passes_a_strict_csp() {
+    use rustango::csp_nonce::CSP_NONCE_PLACEHOLDER;
+    let csp = format!(
+        "default-src 'self'; script-src {CSP_NONCE_PLACEHOLDER}; style-src {CSP_NONCE_PLACEHOLDER}"
+    );
+    let (app, _tmp) = build(|b| b.security_headers(SecurityHeadersLayer::strict().csp(csp))).await;
+    let req = Request::builder()
+        .uri("/login")
+        .header("host", "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let header = resp.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let nonce = header
+        .split("'nonce-")
+        .nth(1)
+        .and_then(|s| s.split('\'').next())
+        .expect("a nonce in the CSP")
+        .to_owned();
+    assert!(!nonce.contains("RUSTANGO"), "placeholder left in {header}");
+    let html = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains("<style"),
+        "the page has inline styles to check"
+    );
+    assert_strict_csp_safe(&html, &nonce);
+}

@@ -844,8 +844,12 @@ impl<DB: Database> Builder<DB> {
                 use crate::security_headers::SecurityHeadersRouterExt as _;
                 app.security_headers(layer)
             }
+                use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
             None => app,
+                // Outside the headers, so it fills their nonce placeholder;
+                // the bundled pages nonce their inline tags (#1703).
         };
+                    .csp_nonce(CspNonceLayer::default())
         // Same order as the single-tenant router: the Host allowlist is
         // outermost, so a bad Host is refused, never redirected to.
         #[cfg(feature = "admin")]
