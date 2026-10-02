@@ -52,10 +52,13 @@ pub use range::Range;
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 pub(crate) use executor::inserted_pk;
+pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use executor::row_to_json_sqlite;
+#[cfg(feature = "admin")]
+pub(crate) use executor::select_one_row_as_json_tx;
 pub use executor::{
     atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
     explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,

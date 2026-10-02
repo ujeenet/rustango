@@ -444,13 +444,45 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
+    run(pool, End::Commit, f).await
+}
+
+/// How a block ends when its closure returns `Ok`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    Commit,
+    /// `test_db::with_rollback`: undo the writes, keep the value.
+    Rollback,
+}
+
+/// An [`atomic`] block that always rolls back, so a nested `atomic` on
+/// `pool` runs in a savepoint of it (#1761).
+pub(crate) async fn rolled_back<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx AtomicTx,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
+    run(pool, End::Rollback, f).await
+}
+
+async fn run<F, T>(pool: &Pool, end: End, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx AtomicTx,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
     let id = PoolId(pool.clone());
     let current = BLOCK.try_with(Arc::clone).ok();
     let same_pool =
         std::iter::successors(current.clone(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id));
     match same_pool {
-        Some(parent) => nested(parent, current, f).await,
-        None => outermost(pool, id, current, f).await,
+        Some(parent) => nested(parent, current, end, f).await,
+        None => outermost(pool, id, current, end, f).await,
     }
 }
 
@@ -458,6 +490,7 @@ async fn outermost<F, T>(
     pool: &Pool,
     id: PoolId,
     enclosing: Option<Arc<Block>>,
+    end: End,
     f: F,
 ) -> Result<T, ExecError>
 where
@@ -511,13 +544,17 @@ where
     let settled = match st.settle(&slot).await {
         Ok(()) if st.depth != 0 => Err(ExecError::AtomicAborted),
         // PG turns a COMMIT after a failed statement into a silent ROLLBACK.
-        Ok(()) if res.is_ok() => st.check_open(&slot).await,
+        Ok(()) if res.is_ok() && end == End::Commit => st.check_open(&slot).await,
         other => other,
     };
     let mut tx = st.tx.take().expect("atomic transaction is open");
     drop(st);
     tx.clear_sqlite_rollback().await;
     match res.and_then(|v| settled.map(|()| v)) {
+        Ok(v) if end == End::Rollback => {
+            tx.rollback().await?;
+            Ok(v)
+        }
         Ok(v) => {
             tx.commit().await?;
             block.committed.store(true, Ordering::SeqCst);
@@ -540,6 +577,7 @@ where
 async fn nested<F, T>(
     parent: Arc<Block>,
     enclosing: Option<Arc<Block>>,
+    end: End,
     f: F,
 ) -> Result<T, ExecError>
 where
@@ -605,7 +643,7 @@ where
     // From here the background task finishes the savepoint, callbacks
     // included, even if this future is dropped.
     open.ending = true;
-    let release = res.is_ok();
+    let release = res.is_ok() && end == End::Commit;
     let claim = Claim::new(&slot);
     let ended = in_background(async move {
         let mut g = guard;

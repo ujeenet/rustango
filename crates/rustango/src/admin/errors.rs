@@ -134,14 +134,20 @@ impl From<sqlx::Error> for AdminError {
     }
 }
 
+/// The table `e` says is missing, on any dialect.
+pub(crate) fn missing_table(e: &crate::sql::ExecError) -> Option<String> {
+    match e {
+        crate::sql::ExecError::Driver(sqlx_err) => undefined_table_error(sqlx_err),
+        _ => None,
+    }
+}
+
 impl From<crate::sql::ExecError> for AdminError {
     fn from(e: crate::sql::ExecError) -> Self {
         // Unwrap the sqlx error so the per-dialect undefined-table
         // check still runs and hosts get `TableMissing`, not a 500.
-        if let crate::sql::ExecError::Driver(sqlx_err) = &e {
-            if let Some(table) = undefined_table_error(sqlx_err) {
-                return Self::TableMissing { table };
-            }
+        if let Some(table) = missing_table(&e) {
+            return Self::TableMissing { table };
         }
         Self::Internal(e.to_string())
     }

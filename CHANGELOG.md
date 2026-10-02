@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)
+
+`CreateView` and `ModelForm::save` write the `create` (or `update`) audit row in the write's transaction. A webhook allowed private targets still refuses all of `169.254.0.0/16` and `fd00:ec2::/32`.
+
+### Fixed — an admin edit commits with its audit row (#2060)
+
+The diff entry is written in the UPDATE's transaction; if it fails, the edit is not saved.
+Its "before" side is read under lock in that transaction, so a stale form that undoes a concurrent edit is audited.
+Only models with `audit(...)` fail without the audit table ("run `manage migrate`"); others still log best-effort.
+
+### Fixed — test assertions that passed when they should fail (#1960)
+
+`assert_cookie_set` fails on a deleting `Set-Cookie` (a Netscape-style past `Expires` too), `assert_messages` on a cookie that does not verify, and a nested `assert_num_queries` counts toward the outer one.
+
+### Fixed — an `atomic()` inside `with_rollback` is rolled back too (#1761)
+
+**Breaking:** the `with_rollback` closure gets an `AtomicTx`; lock it per statement.
+
 ### Fixed — tenant URL derivation keeps the query string (#1932)
 
 `tenant_url_on_registry_server` splits the query off first, so `sslrootcert=/ca.pem` is not cut and `sslmode` carries over. Only TLS keys carry over: a `dbname=` or `password=` is dropped, and a `dbname=` naming the registry is refused. `redact` masks a query `password=`.

@@ -266,6 +266,8 @@ pub use row_to_json::row_to_json;
 pub use row_to_json::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use row_to_json::row_to_json_sqlite;
+#[cfg(feature = "admin")]
+pub(crate) use row_to_json::select_one_row_as_json_tx;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 
 /// Annotate each parent row with the COUNT of its children, from a
@@ -951,6 +953,7 @@ pub(crate) use tx::write_transaction_pool;
 pub use tx::{transaction_pool, PoolTx};
 
 mod atomic;
+pub(crate) use atomic::rolled_back;
 pub use atomic::{atomic, on_commit, on_commit_pending, AtomicTx, TxGuard};
 
 // `&Pool` dispatch. The `_pool` functions below take a [`Pool`],

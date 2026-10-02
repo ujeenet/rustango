@@ -2113,15 +2113,6 @@ pub(crate) async fn update_submit(
         })
         .collect();
 
-    // Reuse the row the permission hook already fetched: the audit
-    // diff wants the same snapshot. The emit writes
-    // `{ "field": { "before": v, "after": v } }`. If the fetch
-    // returned None, because of a concurrent delete, the emit falls
-    // back to a plain snapshot.
-    let before_row = pre_update_row
-        .as_ref()
-        .map(|row| mask_secrets(model, &admin_cfg, row));
-
     // Gate every inline row before anything is written, the parent included.
     let inline_plan = match super::inlines::plan_post(&state, &parts, model, &pk_value, &form).await
     {
@@ -2137,6 +2128,8 @@ pub(crate) async fn update_submit(
         }
     };
 
+    // The diff's "before" is re-read under lock in the UPDATE's tx.
+    let before_select = RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone());
     let query = UpdateQuery {
         model,
         set: assignments,
@@ -2152,15 +2145,47 @@ pub(crate) async fn update_submit(
         change: true,
     })
     .await;
-    if let Err(e) = crate::sql::update_pool(&state.pool, &query).await {
-        let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
-        return Ok(Html(html).into_response());
+    // "Before" is the locked row, "after" the form. The per-request
+    // `with_source(User { id })` gives a "who changed what" trail. An
+    // `audit(...)` model's entry commits with the UPDATE (#2060); others
+    // keep the best-effort emit after it.
+    let emit = if model.audit_track.is_some() {
+        crate::audit::DiffEmit::InTx
+    } else {
+        crate::audit::DiffEmit::AfterCommit
+    };
+    let written = crate::audit::update_one_with_row_diff(
+        &state.pool,
+        &query,
+        before_select,
+        &pre_update_fields,
+        |row| {
+            let row = mask_secrets(model, &admin_cfg, row);
+            super::audit::admin_audit_diff_entry(model, &pk_raw, &row, &audit_form)
+        },
+        emit,
+    )
+    .await;
+    match written {
+        Ok(crate::audit::RowDiffWrite::Written { deferred }) => {
+            if let Some(entry) = deferred {
+                super::audit::emit_best_effort(&state, &entry).await;
+            }
+        }
+        Ok(crate::audit::RowDiffWrite::Gone) => {
+            return Err(AdminError::RowNotFound { table, pk: pk_raw })
+        }
+        Err(e) => {
+            let msg = match super::errors::missing_table(&e) {
+                Some(t) if t == crate::audit::AUDIT_TABLE => {
+                    "audit table missing — run `manage migrate`".to_owned()
+                }
+                _ => e.to_string(),
+            };
+            let html = render_form(&state, model, Some(&form), true, Some(&msg));
+            return Ok(Html(html).into_response());
+        }
     }
-    // "Before" comes from the SELECT, "after" from the form. The
-    // per-request `with_source(User { id })` that `tenancy::admin`
-    // installs gives a "who changed what" trail for free.
-    super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &audit_form)
-        .await;
     // The `post_save` hook fires after the UPDATE and the audit
     // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {

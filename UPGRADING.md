@@ -150,6 +150,22 @@ untouched.
 
 ## Unreleased
 
+### `with_rollback` hands the closure an `AtomicTx`
+
+**Breaking:** write `insert_tx(&mut *tx.lock().await?, &q)` where you passed `tx` (#1761). A nested `atomic()` on the same pool is now a savepoint; drop the guard before it or a `bulk_insert_pool`, or they fail with `NestedAtomic`.
+
+### Admin edits need the audit table
+
+An admin edit of a model with `audit(...)` writes its audit row in the UPDATE's transaction, so a missing `rustango_audit_log` table now fails the edit (#2060). `manage migrate` creates it. Other models still log best-effort.
+
+### Webhooks with private targets still refuse cloud metadata
+
+`allow_private_targets` no longer reaches `100.100.100.200`, any `169.254.0.0/16` address or `fd00:ec2::/32` (#1821).
+
+### `CreateView` on MySQL fails closed for some audited models
+
+An audited model whose PK the database generates and is not an integer (a UUID default, say) cannot report the new PK on MySQL, so `CreateView` now fails instead of saving it unaudited (#1821).
+
 ### Schema-mode tenants cannot use `public`
 
 Provisioning and `create_tenant` refuse a schema named `public` (#1868). Rename any such tenant's schema.

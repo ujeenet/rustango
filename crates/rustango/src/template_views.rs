@@ -1916,8 +1916,15 @@ async fn create_insert(
 ) -> Result<String, InsertFailed> {
     // `{column}` placeholders in `success_url` come back via RETURNING;
     // otherwise a plain INSERT saves the round-trip.
-    let returning = success_url_returning_columns(success_url, schema)
+    let mut returning = success_url_returning_columns(success_url, schema)
         .map_err(|e| InsertFailed::Error(template_error(&e)))?;
+    // An audited create needs the new PK for its audit row (#1821).
+    let audited_pk = schema
+        .primary_key()
+        .filter(|_| crate::audit::audits_creates(schema));
+    if let Some(pk) = audited_pk.filter(|pk| !returning.contains(&pk.column)) {
+        returning.push(pk.column);
+    }
     let insert_q = crate::core::InsertQuery {
         model: schema,
         columns,
@@ -1925,7 +1932,11 @@ async fn create_insert(
         returning,
         on_conflict: None,
     };
-    let result = if insert_q.returning.is_empty() {
+    let result = if let Some(pk) = audited_pk {
+        crate::audit::insert_returning(pool, &insert_q, pk)
+            .await
+            .map(|(_, row)| interpolate_success_url(success_url, &row, &insert_q))
+    } else if insert_q.returning.is_empty() {
         crate::sql::insert_pool(pool, &insert_q)
             .await
             .map(|()| Ok(success_url.to_owned()))
