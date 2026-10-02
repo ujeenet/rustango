@@ -48,6 +48,16 @@ pub struct RenamedFkBook {
     pub writer: ForeignKey<Author>,
 }
 
+/// An FK named by a raw ident: its relation name is `ref`, not `r#ref`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "occ_rawbook")]
+#[allow(dead_code)]
+pub struct RawFkBook {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub r#ref: ForeignKey<Author>,
+}
+
 /// Ten columns, so a bind-limited batch is a few thousand rows.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "occ_wide")]
@@ -100,6 +110,7 @@ pub struct ShelfBook {
 async fn seeded(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Book::SCHEMA.table).await;
     rustango::testkit::matrix::drop_table(pool, RenamedFkBook::SCHEMA.table).await;
+    rustango::testkit::matrix::drop_table(pool, RawFkBook::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Author>(pool).await;
     rustango::testkit::matrix::fresh_table::<Book>(pool).await;
     rustango::testkit::matrix::fresh_table::<Wide>(pool).await;
@@ -184,6 +195,52 @@ async fn renamed_fk_column_loads_on_every_path(pool: &Pool) {
         .renamed_fk_book_set_pool(pool)
         .await
         .expect("reverse");
+    assert_eq!(books.len(), 2);
+}
+
+/// `r#ref` loads through select_related("ref"), prefetch and the reverse helper.
+async fn raw_ident_fk_loads_on_every_path(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<RawFkBook>(pool).await;
+    for (id, author) in [(1, 1), (2, 2), (3, 1)] {
+        RawFkBook {
+            id,
+            r#ref: ForeignKey::unloaded(author),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed rawbook");
+    }
+    let rows: Vec<RawFkBook> = RawFkBook::objects()
+        .select_related("ref")
+        .order_by(&[("id", false)])
+        .fetch(pool)
+        .await
+        .expect("select_related");
+    let names: Vec<_> = rows
+        .iter()
+        .map(|b| b.r#ref.value().map(|a| a.name.clone()))
+        .collect();
+    assert_eq!(
+        names,
+        [Some("Ada".into()), Some("Bob".into()), Some("Ada".into())]
+    );
+
+    let grouped = rustango::sql::fetch_with_prefetch_pool::<Author, RawFkBook>(
+        Author::objects().order_by(&[("id", false)]),
+        "ref",
+        pool,
+    )
+    .await
+    .expect("prefetch");
+    let counts: Vec<usize> = grouped.iter().map(|(_, kids)| kids.len()).collect();
+    assert_eq!(counts, [2, 1]);
+
+    let ada = Author::objects()
+        .filter("id", 1_i64)
+        .fetch(pool)
+        .await
+        .expect("ada");
+    let books = ada[0].raw_fk_book_set_pool(pool).await.expect("reverse");
     assert_eq!(books.len(), 2);
 }
 
@@ -728,6 +785,7 @@ tri_dialect_test! {
     setup: seeded,
     scenarios: [
         renamed_fk_column_loads_on_every_path,
+        raw_ident_fk_loads_on_every_path,
         none_counts_nothing,
         count_honours_limit_and_offset,
         count_honours_compound,

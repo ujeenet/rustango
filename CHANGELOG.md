@@ -22,7 +22,7 @@ A bare CRLF read as a blank line, so Python and pandas dropped the row.
 
 ### Fixed — derive: char lengths in `Form`, raw idents, field-index column, misplaced attrs (#1937)
 
-`derive(Form)` length checks count chars; `r#type` fields no longer panic; `index` uses the field's real column;
+`derive(Form)` length checks count chars; `r#type` fields no longer panic and an `r#ref` FK loads as `ref`; `index` uses the field's real column;
 `citext`/`vector`/`geometry` on the wrong type are errors; a skipped or failed `insert_or_ignore` resets Rust-filled ids and timestamps to `Unset`.
 
 ### Fixed — `M2MManager::add` on MySQL no longer uses `INSERT IGNORE` (#1966)

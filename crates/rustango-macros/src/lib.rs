@@ -1031,7 +1031,7 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
         let field_ident = &rel.field_ident;
-        let fk_name = field_ident.to_string();
+        let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
@@ -1135,7 +1135,7 @@ fn load_related_impl_my_tokens(
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
         let field_ident = &rel.field_ident;
-        let fk_name = field_ident.to_string();
+        let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
@@ -1204,7 +1204,7 @@ fn load_related_impl_sqlite_tokens(
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
         let field_ident = &rel.field_ident;
-        let fk_name = field_ident.to_string();
+        let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
@@ -1267,7 +1267,7 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let field_ident = &rel.field_ident;
-        let fk_name = field_ident.to_string();
+        let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         if rel.pk_kind == DetectedKind::I64 {
             // i64 FK — return the stored PK so prefetch_related can
@@ -1306,7 +1306,7 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     // here.
     let value_arms = fk_relations.iter().map(|rel| {
         let field_ident = &rel.field_ident;
-        let fk_name = field_ident.to_string();
+        let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         if rel.nullable {
             quote! {
@@ -1386,7 +1386,7 @@ fn reverse_helper_tokens(
     // framework's convention for the `&Pool` flavor of every helper).
     let default_pg_suffix = default_related_name
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("{}_set", to_snake_case(&child_ident.to_string())));
+        .unwrap_or_else(|| format!("{}_set", to_snake_case(&ident_name(child_ident))));
     let impls = fk_relations.iter().map(|rel| {
         let pg_suffix = rel
             .related_name
@@ -1396,7 +1396,7 @@ fn reverse_helper_tokens(
         let pg_method_ident = syn::Ident::new(&pg_suffix, child_ident.span());
         let pool_method_ident = syn::Ident::new(&pool_suffix, child_ident.span());
         let parent_ty = &rel.parent_type;
-        let fk_name = rel.field_ident.to_string();
+        let fk_name = ident_name(&rel.field_ident);
         let fk_col = fk_name.as_str();
         let doc = format!(
             "Fetch every `{child_ident}` whose `{fk_col}` foreign key points at this row. \
