@@ -1528,9 +1528,17 @@ async fn legacy_pg_runner_replaces_the_fk(pool: &Pool) {
         mysql => false, because "no `&PgPool` runner",
         sqlite => false, because "no `&PgPool` runner",
     };
-    let Some(pg) = pool.as_postgres().filter(|_| legacy.value) else {
-        return;
-    };
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = pool.as_postgres().filter(|_| legacy.value) {
+        legacy_pg_runner_body(pool, pg, legacy.why).await;
+    }
+    #[cfg(not(feature = "postgres"))]
+    let _ = legacy;
+}
+
+/// Gated so sqlite- and mysql-only builds compile without the `&PgPool` runners.
+#[cfg(feature = "postgres")]
+async fn legacy_pg_runner_body(pool: &Pool, pg: &rustango::sql::sqlx::PgPool, why: &str) {
     let (a, b) = ("mad_lg_author", "mad_lg_book");
     let chain = Chain::new(pool, "lg", &[b, a]).await;
     drop_table(pool, "mad_ledger_legacy").await;
@@ -1551,10 +1559,7 @@ async fn legacy_pg_runner_replaces_the_fk(pool: &Pool) {
             .unwrap();
         mig.atomic = atomic;
         chain.write(&mig);
-        runner
-            .migrate(pg, chain.dir.path())
-            .await
-            .expect(legacy.why);
+        runner.migrate(pg, chain.dir.path()).await.expect(why);
     }
     exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
         .await
