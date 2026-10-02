@@ -153,7 +153,7 @@ untouched.
 ### Cache and derive behaviour
 
 - `InMemoryCache::set_forever` entries are no longer evicted and do not count toward the budgets; do not store unbounded data with it.
-- `DatabaseCache::ensure_table` now also creates `<table>_expires_idx`; run it once on existing tables.
+- `DatabaseCache::ensure_table` now also creates the `expires` index (best effort); run it once on existing tables.
 - `#[derive(Model)]`: `citext`, `vector(dims)` and `geometry(srid)` on a field of another type are now compile errors.
 - A field `index` on a non-snake_case field now indexes its real column (`userName`, not `user_name`).
 - `M2MManager::add` / `GenericM2MManager::add` on MySQL now return data errors (truncation, FK) that `INSERT IGNORE` hid.

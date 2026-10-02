@@ -14,7 +14,7 @@ use std::time::Duration;
 use rustango::cache::db_backend::PURGE_BATCH;
 use rustango::cache::{Cache, DatabaseCache};
 use rustango::core::SqlValue;
-use rustango::sql::{raw_query_pool, Pool};
+use rustango::sql::{raw_execute_pool, raw_query_pool, Pool};
 use rustango::test_assertions::QueryCounter;
 use rustango::tri_dialect_test;
 
@@ -135,6 +135,27 @@ async fn purge_is_batched_and_indexed(pool: &Pool) {
     let _ = cache.drop_table().await;
 }
 
+/// A failed `expires` index (here: the name is a view) still leaves a usable `ensure_table`.
+async fn index_failure_is_not_fatal(pool: &Pool) {
+    let table = "rustango_cache_idx_view";
+    let cache = DatabaseCache::new(pool.clone(), table);
+    let _ = cache.drop_table().await;
+    let quoted = pool.dialect().quote_ident(table);
+    let _ = raw_execute_pool(pool, &format!("DROP VIEW IF EXISTS {quoted}"), vec![]).await;
+    raw_execute_pool(
+        pool,
+        &format!("CREATE VIEW {quoted} AS SELECT 1 AS expires"),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let result = cache.ensure_table().await;
+    raw_execute_pool(pool, &format!("DROP VIEW {quoted}"), vec![])
+        .await
+        .unwrap();
+    result.expect("index failure must not fail ensure_table");
+}
+
 tri_dialect_test! {
     setup: noop,
     scenarios: [
@@ -142,5 +163,6 @@ tri_dialect_test! {
         incr_ttl_and_reset,
         incr_overflow_is_an_error,
         purge_is_batched_and_indexed,
+        index_failure_is_not_fatal,
     ],
 }

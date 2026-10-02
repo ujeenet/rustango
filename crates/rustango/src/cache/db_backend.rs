@@ -45,6 +45,7 @@
 //! `CREATE TABLE IF NOT EXISTS` at boot; `manage createcachetable`
 //! does the same from the CLI.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -130,8 +131,8 @@ impl DatabaseCache {
     /// boot.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] when the DDL fails, for example on a
-    /// permission problem.
+    /// [`CacheError::Connection`] when the table DDL fails, for example on a
+    /// permission problem. A failed `expires` index only logs a warning.
     pub async fn ensure_table(&self) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
@@ -169,12 +170,19 @@ impl DatabaseCache {
         } else {
             ""
         };
-        run_ddl_idempotent(
-            &self.pool,
-            &format!("CREATE INDEX {guard}{index} ON {table} (expires)"),
-        )
-        .await
-        .map_err(|e| CacheError::Connection(format!("ensure_table: {e}")))?;
+        // Best effort: a non-owner PG role or a MySQL role without INDEX still gets a cache.
+        let ddl = format!("CREATE INDEX {guard}{index} ON {table} (expires)");
+        if let Err(e) = run_ddl_idempotent(&self.pool, &ddl).await {
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    target: "rustango::cache",
+                    table = %self.table,
+                    error = %e,
+                    "DatabaseCache: could not create the expires index; purge_expired will scan the table"
+                );
+            }
+        }
         Ok(())
     }
 
