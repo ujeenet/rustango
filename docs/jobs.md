@@ -424,11 +424,12 @@ yourself, as above. New tenants provisioned after boot get no workers until
 the process restarts. Tracked in
 [#1223](https://github.com/ujeenet/rustango/issues/1223).
 
-**No ambient context, either.** Workers are `tokio::spawn`ed, and task-locals
-do not cross a spawn — so a job runs with the audit source at
-`AuditSource::System` and the default timezone, no matter what the dispatching
-request had set. Carry what you need in the payload, or re-enter the scope
-inside `run()` with `audit::with_source`. Tracked in
+**Ambient context: audit source and timezone only.** `InMemoryJobQueue`
+captures them at `dispatch` and the scheduler at `every()`, and each reinstalls
+them around the run. `PgJobQueue` does not yet: its jobs run as
+`AuditSource::System` with the default timezone, so carry the actor in the
+payload and re-enter the scope inside `run()` with `audit::with_source`. No
+queue carries a session or a tenant. Tracked in
 [#1229](https://github.com/ujeenet/rustango/issues/1229).
 
 ---

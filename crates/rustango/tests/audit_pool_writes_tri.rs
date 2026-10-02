@@ -238,6 +238,193 @@ async fn pg_macro_save(pool: &Pool) {
     assert_eq!(updated, 0, "the UPDATE ran without its audit row");
 }
 
+/// Polls for the note titled `title`; returns its newest audit source.
+#[cfg(any(feature = "jobs", feature = "scheduler"))]
+async fn source_of_title(pool: &Pool, title: &str) -> Option<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let notes = Note::objects()
+            .filter("title", title)
+            .fetch(pool)
+            .await
+            .expect("fetch");
+        if let Some(note) = notes.first() {
+            let pk = note.id.get().expect("pk").to_string();
+            if let Some(e) = entries(pool, &pk).await.first() {
+                return Some(e.source.clone());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    None
+}
+
+#[cfg(feature = "jobs")]
+mod ctx_jobs {
+    use super::*;
+    use rustango::jobs::{Job, JobError};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Pools by key: a job payload cannot carry one, and backends share
+    /// the process under `cargo test`.
+    pub fn pools() -> &'static Mutex<HashMap<String, Pool>> {
+        static P: OnceLock<Mutex<HashMap<String, Pool>>> = OnceLock::new();
+        P.get_or_init(Default::default)
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct WriteNote {
+        pub key: String,
+        pub title: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Job for WriteNote {
+        const NAME: &'static str = "audit1229_write_note";
+        async fn run(&self) -> Result<(), JobError> {
+            let pool = pools().lock().unwrap()[&self.key].clone();
+            let mut note = Note {
+                id: Auto::default(),
+                title: self.title.clone(),
+                deleted_at: None,
+            };
+            note.insert_pool(&pool)
+                .await
+                .map_err(|e| JobError::Fatal(e.to_string()))
+        }
+    }
+
+    pub static PENDING_SEEN: Mutex<Option<usize>> = Mutex::new(None);
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct ProbeAtomic;
+
+    #[async_trait::async_trait]
+    impl Job for ProbeAtomic {
+        const NAME: &'static str = "audit1229_probe_atomic";
+        async fn run(&self) -> Result<(), JobError> {
+            *PENDING_SEEN.lock().unwrap() = Some(rustango::sql::on_commit_pending());
+            Ok(())
+        }
+    }
+}
+
+/// #1229 — a job's audit row names its enqueuer; one enqueued outside a
+/// scope stays `system`.
+async fn job_audits_as_its_enqueuer(pool: &Pool) {
+    #[cfg(not(feature = "jobs"))]
+    let _ = pool;
+    #[cfg(feature = "jobs")]
+    {
+        use ctx_jobs::{pools, WriteNote};
+        use rustango::audit::{with_source, AuditSource};
+        use rustango::jobs::{InMemoryJobQueue, JobQueue as _};
+
+        let key = format!("{:p}", pool);
+        pools().lock().unwrap().insert(key.clone(), pool.clone());
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<WriteNote>().await;
+        q.start().await;
+        with_source(AuditSource::User { id: "42".into() }, async {
+            let job = WriteNote {
+                key: key.clone(),
+                title: "by-user".into(),
+            };
+            q.dispatch(&job).await.unwrap();
+        })
+        .await;
+        let job = WriteNote {
+            key,
+            title: "by-nobody".into(),
+        };
+        q.dispatch(&job).await.unwrap();
+
+        let by_user = source_of_title(pool, "by-user").await;
+        let by_nobody = source_of_title(pool, "by-nobody").await;
+        q.shutdown().await;
+        assert_eq!(by_user.as_deref(), Some("user:42"));
+        assert_eq!(by_nobody.as_deref(), Some("system"));
+    }
+}
+
+/// #1229 — the context crosses, the transaction does not: a job
+/// dispatched inside `atomic` sees none of its on-commit queue.
+async fn job_dispatched_in_atomic_does_not_join_it(pool: &Pool) {
+    #[cfg(not(feature = "jobs"))]
+    let _ = pool;
+    #[cfg(feature = "jobs")]
+    {
+        use ctx_jobs::{ProbeAtomic, PENDING_SEEN};
+        use rustango::jobs::{InMemoryJobQueue, JobQueue as _};
+
+        *PENDING_SEEN.lock().unwrap() = None;
+        let q = std::sync::Arc::new(InMemoryJobQueue::with_workers(1));
+        q.register::<ProbeAtomic>().await;
+        q.start().await;
+        let inner = q.clone();
+        rustango::sql::atomic(pool, move |_tx| {
+            Box::pin(async move {
+                rustango::sql::on_commit(|| {});
+                assert_eq!(rustango::sql::on_commit_pending(), 1);
+                inner.dispatch(&ProbeAtomic).await.unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while PENDING_SEEN.lock().unwrap().is_none() && std::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Ok(())
+            })
+        })
+        .await
+        .expect("atomic");
+        q.shutdown().await;
+        assert_eq!(*PENDING_SEEN.lock().unwrap(), Some(0));
+    }
+}
+
+/// #1229 — a scheduled tick audits as the scope `every()` ran in.
+async fn scheduled_task_audits_as_its_registration(pool: &Pool) {
+    #[cfg(not(feature = "scheduler"))]
+    let _ = pool;
+    #[cfg(feature = "scheduler")]
+    {
+        use rustango::audit::{with_source, AuditSource};
+        use rustango::scheduler::Scheduler;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let s = Scheduler::new();
+        let (p, done) = (pool.clone(), Arc::new(AtomicBool::new(false)));
+        let d = done.clone();
+        with_source(AuditSource::Custom("cron:sweep".into()), async {
+            s.every(
+                "audit1229",
+                std::time::Duration::from_millis(20),
+                move || {
+                    let (p, d) = (p.clone(), d.clone());
+                    async move {
+                        if d.swap(true, Ordering::SeqCst) {
+                            return;
+                        }
+                        let mut note = Note {
+                            id: Auto::default(),
+                            title: "by-cron".into(),
+                            deleted_at: None,
+                        };
+                        note.insert_pool(&p).await.expect("insert");
+                    }
+                },
+            );
+        })
+        .await;
+        let handle = s.start();
+        let source = source_of_title(pool, "by-cron").await;
+        handle.shutdown().await;
+        assert_eq!(source.as_deref(), Some("cron:sweep"));
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -249,5 +436,8 @@ tri_dialect_test! {
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
         pg_macro_save_skips_noop_and_fails_on_pre_read,
+        job_audits_as_its_enqueuer,
+        job_dispatched_in_atomic_does_not_join_it,
+        scheduled_task_audits_as_its_registration,
     ],
 }

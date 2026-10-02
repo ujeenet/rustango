@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Background work keeps its caller's audit source
+
+`InMemoryJobQueue` jobs and `Scheduler` ticks now audit as the scope they were dispatched or registered in, not `system` (#1229). A `run()` that re-enters `audit::with_source` overrides it. Reports counting `system` rows will drop.
+
 ## 0.59.18
 
 ### `with_rollback` hands the closure an `AtomicTx`

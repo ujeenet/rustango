@@ -22,22 +22,14 @@
 //! So adding to this list is a deliberate act. Declaring a new
 //! `task_local!` elsewhere does not opt it in.
 //!
-//! ## What does not carry this yet
+//! ## Where it is carried
 //!
-//! Only `jobs::InMemoryJobQueue` installs a captured context. Two other
-//! spawn boundaries still drop everything, and a job or task running on
-//! them sees `System` and UTC exactly as before:
-//!
-//! - **`jobs::pg::PgJobQueue`** — its envelope is a `rustango_jobs` row,
-//!   not a struct in memory, so carrying a context needs a column and a
-//!   migration. This is the queue most production deployments run, so
-//!   the gap is the larger half of #1229, not a corner case.
-//! - **`scheduler`** — a tick has no enqueuer to inherit from,
-//!   so it needs a context *assigned* rather than captured.
-//!
-//! Until both land, "who did this?" is answerable for in-memory jobs
-//! only. Treat a `System` source on a job row as "unknown", not as
-//! "the framework".
+//! - `jobs::InMemoryJobQueue` captures at `dispatch`.
+//! - `scheduler::Scheduler` captures at `every()`: a tick has no caller,
+//!   so registration is the hand-off.
+//! - **`jobs::pg::PgJobQueue` does not**: its envelope is a
+//!   `rustango_jobs` row, so it needs a column first (#1229). Treat a
+//!   `System` source on its rows as "unknown", not "the framework".
 //!
 //! ## What the source does not tell you
 //!
