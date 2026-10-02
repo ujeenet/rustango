@@ -152,6 +152,10 @@ untouched.
 
 ## 0.59.20
 
+### SQLite rebuilds tables for CHECK and composite FK changes
+
+These ops no longer fail on SQLite (#2127); like other rebuilds, they refuse a table with a column the migration snapshot lacks. On PG, `render_changes_split_with_dialect` no longer emits the `DROP CONSTRAINT` of a UNIQUE drop: the runner finds the live name (#2133). `render_changes` still prints the usual name.
+
 ### `fresh_table` creates indexes
 
 Test tables now carry the model's indexes (#2120): a test that inserted duplicate `unique_together` rows now gets a unique violation, and MySQL refuses an index over an unbounded `String`, as `migrate` does.

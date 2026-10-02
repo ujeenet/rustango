@@ -522,6 +522,386 @@ async fn fk_only_step_adds_only_targets(backend: Backend) {
     }
 }
 
+/// The first tenant-chain table nothing references and that references
+/// nothing, with its primary key field.
+fn a_leaf_table(first: &Value, not: &str) -> (String, Value) {
+    let tables = first["snapshot"]["tables"].as_array().unwrap();
+    let has_fk = |t: &Value| {
+        t["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| !f["fk"].is_null())
+    };
+    let referenced = |name: &Value| {
+        tables.iter().any(|t| {
+            t["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["fk"]["to"] == *name)
+        })
+    };
+    let t = tables
+        .iter()
+        // Not audit's: its `ensure_table_pool` creates it on its own.
+        .find(|t| {
+            t["name"] != not
+                && t["name"] != "rustango_audit_log"
+                && !has_fk(t)
+                && t.get("composite_fks").is_none()
+                && !referenced(&t["name"])
+        })
+        .expect("a leaf table");
+    let pk = t["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["primary_key"] == true)
+        .unwrap();
+    (t["name"].as_str().unwrap().to_owned(), pk.clone())
+}
+
+/// #2053 / #2083 — a pending project FK to a system table created in, or
+/// after, a system step that waits for the project chain. SQLite does not
+/// check FK targets at `CREATE TABLE`.
+async fn project_fk_to_waiting_system_table(backend: Backend, same_step: bool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "fkwait").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
+    let first = read(&tenant_file(&root.join("system/migrations")));
+    let (u, pk) = a_leaf_table(&first, table);
+    // Today's catch-up step adds `column` to `table` and creates `u`.
+    let path = tenant_file(&root.join("system/migrations"));
+    let mut mig = read(&path);
+    let tables = mig["snapshot"]["tables"].as_array_mut().unwrap();
+    tables.retain(|t| t["name"] != u.as_str());
+    let t = tables.iter_mut().find(|t| t["name"] == table).unwrap();
+    t["fields"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|f| f["column"] != column);
+    if let Some(list) = mig["snapshot"]["indexes"].as_array_mut() {
+        list.retain(|i| i["table"] != u.as_str());
+    }
+    mig["forward"].as_array_mut().unwrap().retain(|op| {
+        let s = &op["schema"];
+        s["CreateTable"] != u.as_str() && s["CreateIndex"]["table"] != u.as_str()
+    });
+    std::fs::write(&path, mig.to_string()).unwrap();
+    if !same_step {
+        // A first step adds only the column; `u` comes after it.
+        let mut snap = mig["snapshot"].clone();
+        let t = snap["tables"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t["name"] == table)
+            .unwrap();
+        t["fields"] = current_table(table, None)["fields"].clone();
+        write_step(
+            &root.join("system/migrations"),
+            "9001_column",
+            mig["name"].as_str(),
+            snap,
+            vec![json!({ "AddColumn": { "table": table, "column": column } })],
+        );
+    }
+    let step = rustango::migrate::make_migrations_system(&root, ModelScope::Tenant, None)
+        .unwrap()
+        .expect("the catch-up step");
+    let ops = format!("{:?}", step.forward);
+    assert!(ops.contains(&u), "{ops}");
+    assert_eq!(ops.contains(column), same_step, "{ops}");
+
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, Some(column)));
+    // An older release applied the project chain alone.
+    rustango::migrate::migrate_pool(&pool, &dir).await.unwrap();
+    // B references `u` and comes before A, which writes the owned table.
+    let mut u_id = pk.clone();
+    for (k, v) in [
+        ("name", json!("u_id")),
+        ("column", json!("u_id")),
+        ("nullable", json!(true)),
+        ("primary_key", json!(false)),
+        ("auto", json!(false)),
+        ("fk", json!({ "kind": "fk", "to": u, "on": pk["column"] })),
+    ] {
+        u_id[k] = v;
+    }
+    let b = json!({ "name": "syschain_b", "model": "B", "fields": [
+        { "name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true },
+        u_id,
+    ] });
+    let older = current_table(table, Some(column));
+    write_step(
+        &dir,
+        "0002_b",
+        Some("0001_initial"),
+        json!({ "tables": [older, b.clone()] }),
+        vec![json!({ "CreateTable": "syschain_b" })],
+    );
+    write_step(
+        &dir,
+        "0003_a",
+        Some("0002_b"),
+        json!({ "tables": [current_table(table, None), b] }),
+        vec![json!({ "AddColumn": { "table": table, "column": column } })],
+    );
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_table(&pool, "syschain_b").await);
+    assert!(has_column(&pool, table, column).await);
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+async fn fk_to_a_later_system_step(backend: Backend) {
+    project_fk_to_waiting_system_table(backend, false).await;
+}
+
+async fn fk_to_a_waiting_system_step(backend: Backend) {
+    project_fk_to_waiting_system_table(backend, true).await;
+}
+
+/// #2094 — a later system step drops an index the project's table never got.
+async fn drop_index_on_owned(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "dropidx").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let sys = root.join("system/migrations");
+    let first = read(&tenant_file(&sys));
+    let idx = first["snapshot"]["indexes"][0].clone();
+    let (table, index) = (
+        idx["table"].as_str().unwrap(),
+        idx["name"].as_str().unwrap(),
+    );
+    let mut snap = first["snapshot"].clone();
+    snap["indexes"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|i| i["name"] != index);
+    write_step(
+        &sys,
+        "9001_drop_index",
+        first["name"].as_str(),
+        snap,
+        vec![json!({ "DropIndex": { "name": index, "table": table } })],
+    );
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, None));
+    // MySQL failed here: `DROP INDEX` of an index that was never made.
+    manage_migrate(&pool, &dir).await.expect("first run");
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+/// A table a waiting step made early still gets a later step's new index.
+async fn early_table_gets_a_later_index(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "earlyidx").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let first = read(&tenant_file(&root.join("system/migrations")));
+    let users = "rustango_users";
+    let tables = first["snapshot"]["tables"].as_array().unwrap();
+    let no_fk = |name: &Value| {
+        tables.iter().any(|t| {
+            t["name"] == *name
+                && t["name"] != "rustango_audit_log"
+                && t["fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|f| f["fk"].is_null())
+        })
+    };
+    let idx = first["snapshot"]["indexes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["table"] != users && no_fk(&i["table"]))
+        .expect("an index on a table with no FK")
+        .clone();
+    let index = idx["name"].as_str().unwrap();
+    let ops = age_tenant_chain(&root, &[], Some(index));
+    assert!(ops.contains(index), "{ops}");
+    let dir = root.join("migrations");
+    // The project's `users` waits the first step; its other tables come early.
+    project_initial(&dir, current_table(users, None));
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_index(&pool, index).await, "{index} was not created");
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+/// A later system step that only references a waiting step's table waits
+/// with it: 9002's FK to 9001's table would fail before 9001 ran.
+async fn later_step_waits_on_a_held_table(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "held").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let sys = root.join("system/migrations");
+    let first = read(&tenant_file(&sys));
+    let owned = "rustango_admin_users";
+    let admin = current_table(owned, None);
+    let pk = admin["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["primary_key"] == true)
+        .unwrap()
+        .clone();
+    let fk = |name: &str, to: &str, on: &Value| {
+        let mut f = on.clone();
+        for (k, v) in [
+            ("name", json!(name)),
+            ("column", json!(name)),
+            ("nullable", json!(true)),
+            ("primary_key", json!(false)),
+            ("auto", json!(false)),
+            ("fk", json!({ "kind": "fk", "to": to, "on": on["column"] })),
+        ] {
+            f[k] = v;
+        }
+        f
+    };
+    let id = json!({ "name": "id", "column": "id", "ty": "i64", "nullable": false,
+                     "primary_key": true });
+    let p = json!({ "name": "syschain_p", "model": "P", "fields": [id.clone(), fk("admin_id", owned, &pk)] });
+    let q = json!({ "name": "syschain_q", "model": "Q", "fields": [id.clone(), fk("p_id", "syschain_p", &id)] });
+    let mut snap = first["snapshot"].clone();
+    snap["tables"].as_array_mut().unwrap().push(p);
+    write_step(
+        &sys,
+        "9001_p",
+        first["name"].as_str(),
+        snap.clone(),
+        vec![json!({ "CreateTable": "syschain_p" })],
+    );
+    snap["tables"].as_array_mut().unwrap().push(q);
+    write_step(
+        &sys,
+        "9002_q",
+        Some("9001_p"),
+        snap,
+        vec![json!({ "CreateTable": "syschain_q" })],
+    );
+    let dir = root.join("migrations");
+    // The project's `owned` is missing until its chain runs, so 9001 waits.
+    project_initial(&dir, admin);
+    manage_migrate(&pool, &dir).await.expect("first run");
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
+/// Whether `table` has an FK to `to`.
+async fn has_fk(pool: &Pool, table: &str, to: &str) -> bool {
+    let n: i64 = match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => rustango::sql::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_constraint \
+             WHERE contype = 'f' AND conrelid = to_regclass($1) AND confrelid = to_regclass($2)",
+        )
+        .bind(table)
+        .bind(to)
+        .fetch_one(pg)
+        .await
+        .unwrap(),
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => rustango::sql::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.key_column_usage \
+             WHERE table_schema = DATABASE() AND table_name = ? AND referenced_table_name = ?",
+        )
+        .bind(table)
+        .bind(to)
+        .fetch_one(my)
+        .await
+        .unwrap(),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => rustango::sql::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list(?) WHERE \"table\" = ?",
+        )
+        .bind(table)
+        .bind(to)
+        .fetch_one(sq)
+        .await
+        .unwrap(),
+    };
+    n > 0
+}
+
+/// #2084 — a framework table the project drops comes back with the FKs
+/// other tables had to it: PG's `DROP TABLE … CASCADE` takes them.
+async fn dropped_table_gets_its_fks_back(backend: Backend) {
+    #[allow(unreachable_patterns)]
+    match backend {
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => {
+            eprintln!("skipping — MySQL refuses to drop a referenced table (3730)");
+            return;
+        }
+        _ => {}
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "remade").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let first = read(&tenant_file(&root.join("system/migrations")));
+    let tables = first["snapshot"]["tables"].as_array().unwrap();
+    let fks = |t: &Value| {
+        t["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["fk"]["to"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    // A table that references nothing, and one table that references it.
+    let (parent, child) = tables
+        .iter()
+        .filter(|p| fks(p).is_empty())
+        .find_map(|p| {
+            let name = p["name"].as_str().unwrap();
+            let c = tables.iter().find(|c| fks(c) == [name])?;
+            Some((name.to_owned(), c["name"].as_str().unwrap().to_owned()))
+        })
+        .expect("a referenced leaf table");
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(&parent, None));
+    manage_migrate(&pool, &dir).await.expect("project owns it");
+    assert!(has_fk(&pool, &child, &parent).await);
+    write_step(
+        &dir,
+        "0002_drop",
+        Some("0001_initial"),
+        json!({ "tables": [] }),
+        vec![json!({ "DropTable": parent })],
+    );
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_table(&pool, &parent).await);
+    assert!(
+        has_fk(&pool, &child, &parent).await,
+        "{child} lost its FK to {parent}"
+    );
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
 /// A callback that migrates again while the outer migrate holds the lock.
 fn nested_migrate(pool: Pool) -> rustango::migrate::callbacks::MigrationCallbackFut {
     Box::pin(async move {
@@ -1246,4 +1626,10 @@ per_backend!(
     dropped_index_is_restored,
     fk_only_step_adds_only_targets,
     nested_lock_is_an_error,
+    fk_to_a_later_system_step,
+    fk_to_a_waiting_system_step,
+    drop_index_on_owned,
+    dropped_table_gets_its_fks_back,
+    later_step_waits_on_a_held_table,
+    early_table_gets_a_later_index,
 );

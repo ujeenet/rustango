@@ -498,7 +498,7 @@ fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
     }
 }
 
-fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
+pub(super) fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
     SchemaChange::CreateM2MTable {
         through: mt.through.clone(),
         src_table: mt.src_table.clone(),
@@ -508,7 +508,10 @@ fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
     }
 }
 
-fn add_composite_fk(table: &str, cf: &super::snapshot::CompositeFkSnapshot) -> SchemaChange {
+pub(super) fn add_composite_fk(
+    table: &str,
+    cf: &super::snapshot::CompositeFkSnapshot,
+) -> SchemaChange {
     SchemaChange::AddCompositeFk {
         table: table.to_owned(),
         name: cf.name.clone(),
@@ -805,7 +808,7 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, None, false)
+    render_changes_split_inner(changes, current, dialect, None, false, false)
 }
 
 /// As [`render_changes_split_with_dialect`], but every FK target is
@@ -817,7 +820,7 @@ pub(crate) fn render_changes_split_in_schema(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema, false)
+    render_changes_split_inner(changes, current, dialect, schema, false, true)
 }
 
 /// As [`render_changes_split_in_schema`] for tables with no rows, where a
@@ -828,7 +831,7 @@ pub(crate) fn render_changes_split_for_empty(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema, true)
+    render_changes_split_inner(changes, current, dialect, schema, true, true)
 }
 
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
@@ -1008,6 +1011,8 @@ fn render_changes_split_inner(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
     empty_tables: bool,
+    // The runner drops a UNIQUE by its catalog name; offline, the usual one.
+    by_catalog: bool,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
@@ -1246,15 +1251,16 @@ fn render_changes_split_inner(
                 column,
                 unique,
             } => {
-                let name = unique_names.get(table, column)?;
+                // The runner drops the name it finds in the catalog (#2133).
                 if *unique {
+                    let name = unique_names.get(table, column)?;
                     out.immediate
                         .push(dialect.add_unique_constraint_sql(table, &name, column));
-                } else {
+                } else if !by_catalog {
                     out.immediate.push(format!(
                         "ALTER TABLE {} DROP CONSTRAINT {}",
                         dialect.quote_ident(table),
-                        dialect.quote_ident(&name),
+                        dialect.quote_ident(&unique_names.get(table, column)?),
                     ));
                 }
             }
@@ -1402,17 +1408,27 @@ fn render_changes_split_inner(
                     dialect.quote_ident(name)
                 ));
             }
-            SchemaChange::AddCheckConstraint { name, table, expr } => {
-                if dialect.name() == "sqlite" {
-                    return Err(format!(
-                        "AddCheckConstraint for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE ADD CONSTRAINT CHECK` \
-                         syntax — CHECK constraints must be declared inside the original \
-                         CREATE TABLE statement. Workaround: emit a hand-written \
-                         `Operation::Data` (RunSQL) that rebuilds the table with the CHECK \
-                         inline, or use an application-level invariant. Tracked in #559."
-                    ));
+            // SQLite takes CHECKs and composite FKs only in `CREATE TABLE` (#2127).
+            SchemaChange::AddCheckConstraint { table, .. }
+            | SchemaChange::DropCheckConstraint { table, .. }
+            | SchemaChange::AddCompositeFk { table, .. }
+            | SchemaChange::DropCompositeFk { table, .. }
+                if dialect.alters_by_rebuild() =>
+            {
+                // A drop on a table this migration drops goes with the table.
+                let dropped = matches!(
+                    change,
+                    SchemaChange::DropCheckConstraint { .. } | SchemaChange::DropCompositeFk { .. }
+                ) && current.table(table).is_none();
+                if dropped {
+                    continue;
                 }
+                if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
+                {
+                    out.set_rebuild(rebuild?)?;
+                }
+            }
+            SchemaChange::AddCheckConstraint { name, table, expr } => {
                 out.immediate.push(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
                     dialect.quote_ident(table),
@@ -1552,16 +1568,6 @@ fn render_changes_split_inner(
                 from,
                 on,
             } => {
-                if dialect.name() == "sqlite" {
-                    return Err(format!(
-                        "AddCompositeFk for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN \
-                         KEY` syntax — composite FKs must be declared inside the original \
-                         CREATE TABLE statement. Workaround: emit a hand-written \
-                         `Operation::Data` (RunSQL) that rebuilds the table with the FK \
-                         inline. Tracked in #559."
-                    ));
-                }
                 let from_cols = from
                     .iter()
                     .map(|c| dialect.quote_ident(c))
@@ -2580,34 +2586,63 @@ mod sql_type_tests {
         );
     }
 
-    #[cfg(feature = "sqlite")]
+    /// Offline renders drop a UNIQUE by its usual name; the runner's by the catalog's (#2133).
     #[test]
-    fn add_check_constraint_sqlite_rejects() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AddCheckConstraint {
-            name: "ck_post_views_nonneg".into(),
-            table: "posts".into(),
-            expr: "views >= 0".into(),
+    fn unique_drop_is_rendered_offline_only() {
+        let drop = vec![SchemaChange::AlterColumnUnique {
+            table: "t".into(),
+            column: "c".into(),
+            unique: false,
         }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("AddCheckConstraint must reject SQLite");
-        assert!(err.contains("AddCheckConstraint"));
-        assert!(err.contains("sqlite"));
-        assert!(err.contains("ALTER TABLE ADD CONSTRAINT CHECK"));
+        let snap = alter_snap();
+        let offline = render_changes(&drop, &snap).unwrap();
+        assert_eq!(
+            offline,
+            vec![r#"ALTER TABLE "t" DROP CONSTRAINT "t_c_key""#.to_string()]
+        );
+        let runner =
+            render_changes_split_in_schema(&drop, &snap, &crate::sql::Postgres, None).unwrap();
+        assert!(runner.immediate.is_empty(), "{:?}", runner.immediate);
     }
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn drop_check_constraint_sqlite_rejects() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::DropCheckConstraint {
-            name: "ck_post_views_nonneg".into(),
-            table: "posts".into(),
+    fn check_constraints_rebuild_on_sqlite() {
+        let mut snap = alter_snap();
+        snap.checks.push(super::super::snapshot::CheckSnapshot {
+            name: "ck_t_c".into(),
+            table: "t".into(),
+            expr: "c >= 0".into(),
+        });
+        let add = vec![SchemaChange::AddCheckConstraint {
+            name: "ck_t_c".into(),
+            table: "t".into(),
+            expr: "c >= 0".into(),
         }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("DropCheckConstraint must reject SQLite");
-        assert!(err.contains("DropCheckConstraint"));
-        assert!(err.contains("sqlite"));
+        let batch = render_changes_split_with_dialect(&add, &snap, &crate::sql::Sqlite).unwrap();
+        let sql = batch
+            .rebuild
+            .expect("a rebuild")
+            .statements(&crate::sql::Sqlite);
+        assert!(
+            sql[0].contains(r#"CONSTRAINT "ck_t_c" CHECK (c >= 0)"#),
+            "{sql:?}"
+        );
+        snap.checks.clear();
+        let drop = vec![SchemaChange::DropCheckConstraint {
+            name: "ck_t_c".into(),
+            table: "t".into(),
+        }];
+        let batch = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
+        let sql = batch
+            .rebuild
+            .expect("a rebuild")
+            .statements(&crate::sql::Sqlite);
+        assert!(!sql[0].contains("CHECK"), "{sql:?}");
+        // Its table is dropped in the same migration: nothing to rebuild.
+        let gone =
+            render_changes_split_with_dialect(&drop, &empty_snap(), &crate::sql::Sqlite).unwrap();
+        assert!(gone.rebuild.is_none() && gone.immediate.is_empty());
     }
 
     /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
@@ -2747,20 +2782,6 @@ mod sql_type_tests {
         );
     }
 
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn add_composite_fk_sqlite_rejects() {
-        let err = render_changes_split_with_dialect(
-            &make_add_composite_fk(),
-            &empty_snap(),
-            &crate::sql::Sqlite,
-        )
-        .expect_err("AddCompositeFk must reject SQLite");
-        assert!(err.contains("AddCompositeFk"));
-        assert!(err.contains("sqlite"));
-        assert!(err.contains("ADD CONSTRAINT FOREIGN KEY"));
-    }
-
     #[test]
     fn drop_composite_fk_postgres_uses_ansi_quoting() {
         let snap = empty_snap();
@@ -2800,19 +2821,6 @@ mod sql_type_tests {
             !out.immediate[0].contains("IF EXISTS"),
             "MySQL parses no `IF EXISTS` on a constraint drop"
         );
-    }
-
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn drop_composite_fk_sqlite_rejects() {
-        let changes = vec![SchemaChange::DropCompositeFk {
-            table: "child".into(),
-            name: "fk_x".into(),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &empty_snap(), &crate::sql::Sqlite)
-            .expect_err("DropCompositeFk must reject SQLite");
-        assert!(err.contains("DropCompositeFk"));
-        assert!(err.contains("sqlite"));
     }
 
     #[cfg(feature = "sqlite")]

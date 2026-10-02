@@ -7,7 +7,7 @@
 //! `legacy_alter_table` cannot dodge that: with FKs on it still rewrites
 //! the children's `REFERENCES`.
 
-use super::snapshot::{SchemaSnapshot, TableSnapshot};
+use super::snapshot::{CheckSnapshot, SchemaSnapshot, TableSnapshot};
 use crate::sql::Dialect;
 
 /// Rebuild one table into `target`'s shape: create it under a new name,
@@ -16,6 +16,8 @@ use crate::sql::Dialect;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableRebuild {
     target: TableSnapshot,
+    /// The table's CHECKs: SQLite only takes them in `CREATE TABLE` (#2127).
+    checks: Vec<CheckSnapshot>,
     /// Live columns the rebuild may leave behind; any other one refuses it.
     dropping: Vec<String>,
     /// `(column, expression)` copied instead of the bare column.
@@ -29,9 +31,10 @@ impl TableRebuild {
     /// A rebuild into `target`. Every stored target column is copied by name,
     /// so the old table must have each one.
     #[must_use]
-    pub(crate) fn new(target: &TableSnapshot) -> Self {
+    pub(crate) fn new(target: &TableSnapshot, checks: Vec<CheckSnapshot>) -> Self {
         Self {
             target: target.clone(),
+            checks,
             dropping: Vec::new(),
             copy: Vec::new(),
             unique_drop: None,
@@ -69,9 +72,10 @@ impl TableRebuild {
         table: &str,
     ) -> Option<Result<Self, String>> {
         dialect.alters_by_rebuild().then(|| {
+            let checks = after.checks.iter().filter(|c| c.table == table);
             after
                 .table(table)
-                .map(Self::new)
+                .map(|t| Self::new(t, checks.cloned().collect()))
                 .ok_or_else(|| format!("no snapshot entry for `{table}` to rebuild it from"))
         })
     }
@@ -108,8 +112,20 @@ impl TableRebuild {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let mut create = super::diff::create_table_sql_as(&self.target, &new, dialect);
+        if !self.checks.is_empty() {
+            create.pop();
+            for c in &self.checks {
+                create.push_str(&format!(
+                    ", CONSTRAINT {} CHECK ({})",
+                    dialect.quote_ident(&c.name),
+                    c.expr
+                ));
+            }
+            create.push(')');
+        }
         let mut out = vec![
-            super::diff::create_table_sql_as(&self.target, &new, dialect),
+            create,
             format!(
                 "INSERT INTO {} ({cols}) SELECT {exprs} FROM {}",
                 dialect.quote_ident(&new),
@@ -332,8 +348,13 @@ pub(crate) fn shape_at(
                     rel.on_delete.clone_from(from);
                 }
             }
-            // Gone by then: the rebuild may drop it early.
+            SC::AddCompositeFk { name, .. } => t.composite_fks.retain(|c| c.name != *name),
+            // Gone by then: the rebuild may drop it early. A later CHECK is
+            // taken out of the snapshot by the caller.
             SC::DropColumn { .. }
+            | SC::DropCompositeFk { .. }
+            | SC::AddCheckConstraint { .. }
+            | SC::DropCheckConstraint { .. }
             | SC::RenameTable { .. }
             | SC::CreateIndex { .. }
             | SC::DropIndex { .. } => {}

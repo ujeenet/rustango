@@ -1640,6 +1640,13 @@ jobs:
             migrate: false
           - example: tenant_user_extension
             migrate: false
+          # Their committed system chains went stale unseen (#2054).
+          - example: platform_commerce
+            migrate: true
+            chain_check: true
+          - example: platform_commerce_saas
+            migrate: false
+            chain_check: true
     services:
       # GHCR mirror, see `postgres_test`.
       postgres:
@@ -1671,6 +1678,14 @@ jobs:
         if: ${{ matrix.migrate }}
         working-directory: crates/rustango/examples/${{ matrix.example }}
         run: cargo run --locked -- migrate
+      # `migrate` and `makemigrations` write any framework step not yet committed.
+      - name: System chain is committed
+        if: ${{ matrix.chain_check }}
+        working-directory: crates/rustango/examples/${{ matrix.example }}
+        run: |
+          cargo run --locked -- makemigrations
+          git status --porcelain -- system migrations
+          test -z "$(git status --porcelain -- system migrations)"
       # `--locked` is the point of committing these lockfiles: a bad
       # upstream release is then handled when we choose to bump, not at
       # the moment it lands (#1422).
