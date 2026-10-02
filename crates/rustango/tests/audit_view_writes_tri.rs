@@ -686,6 +686,33 @@ mod admin_views {
         assert_eq!(title().await, "z");
     }
 
+    /// A create whose audit row cannot be written is not saved (#2101).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn admin_create_rolls_back_when_its_audit_fails() {
+        // No audit table here, so the emit fails.
+        let pool = rustango::testkit::matrix::sqlite_file_pool().await;
+        rustango::testkit::matrix::fresh_table::<AdminDoc>(&pool).await;
+        let uri = format!("/{TABLE}");
+        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("audit table missing — run `manage migrate`"),
+            "{body}"
+        );
+        let rows = || async { AdminDoc::objects().fetch(&pool).await.unwrap().len() };
+        assert_eq!(
+            rows().await,
+            0,
+            "the create committed without its audit row"
+        );
+
+        audit::ensure_table_pool(&pool).await.expect("audit table");
+        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        assert!(status.is_redirection(), "{status} {body}");
+        assert_eq!(rows().await, 1);
+    }
+
     /// No `audit(...)`: the admin still logs edits, best-effort.
     #[derive(Model, Debug, Clone)]
     #[rustango(table = "audit2060_plain_doc", app = "audit1794")]
