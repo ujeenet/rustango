@@ -328,3 +328,53 @@ async fn a_host_another_tenant_uses_is_refused() {
         .await
         .expect("own host");
 }
+
+/// A path prefix or port another tenant routes on is refused on both
+/// write paths, like a host.
+#[tokio::test]
+async fn a_prefix_or_port_another_tenant_uses_is_refused() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.tenant("beta").await;
+    b.run(&[
+        "edit-tenant",
+        "acme",
+        "--path-prefix",
+        "/shop",
+        "--port",
+        "8443",
+    ])
+    .await
+    .expect("first claim");
+
+    for args in [["--path-prefix", "/shop"], ["--port", "8443"]] {
+        let err = b
+            .run(&["edit-tenant", "beta", args[0], args[1]])
+            .await
+            .expect_err("claimed by acme");
+        assert!(err.contains("another tenant"), "{args:?}: {err}");
+    }
+    let db = b._tmp.path().join("gamma.db");
+    let err = b
+        .run(&[
+            "create-tenant",
+            "gamma",
+            "--mode",
+            "database",
+            "--backend",
+            "sqlite",
+            "--database-url",
+            &format!("sqlite://{}?mode=rwc", db.display()),
+            "--path-prefix",
+            "/shop",
+            "--no-migrate",
+        ])
+        .await
+        .expect_err("prefix claimed by acme");
+    assert!(err.contains("another tenant"), "{err}");
+
+    // Re-saving a tenant's own prefix is not a clash.
+    b.run(&["edit-tenant", "acme", "--path-prefix", "/shop"])
+        .await
+        .expect("own prefix");
+}

@@ -648,21 +648,16 @@ where
     };
     let request = &normalized;
 
-    if let Some(host) = &request.host_pattern {
-        match super::org_host::host_claimed(&registry, host, None).await {
-            Ok(false) => {}
-            Ok(true) => {
-                return rep
-                    .fail(
-                        ProvisionStep::Validate,
-                        TenancyError::Validation(format!(
-                            "host `{host}` is already used by another tenant"
-                        )),
-                    )
-                    .await;
-            }
-            Err(e) => return rep.fail(ProvisionStep::Validate, e.into()).await,
-        }
+    if let Some(clash) = match routing_clash(&registry, request).await {
+        Ok(c) => c,
+        Err(e) => return rep.fail(ProvisionStep::Validate, e.into()).await,
+    } {
+        return rep
+            .fail(
+                ProvisionStep::Validate,
+                TenancyError::Validation(format!("{clash} is already used by another tenant")),
+            )
+            .await;
     }
 
     if request.mode == StorageMode::Database && request.database_url.is_none() {
@@ -1086,6 +1081,30 @@ pub(crate) fn validate_port(port: i32) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The host, path prefix or port of `request` another tenant routes on.
+async fn routing_clash(
+    registry: &crate::sql::Pool,
+    request: &ProvisionRequest,
+) -> Result<Option<String>, crate::sql::ExecError> {
+    use super::org_host::{host_claimed, port_claimed, prefix_claimed};
+    if let Some(host) = &request.host_pattern {
+        if host_claimed(registry, host, None).await? {
+            return Ok(Some(format!("host `{host}`")));
+        }
+    }
+    if let Some(prefix) = &request.path_prefix {
+        if prefix_claimed(registry, prefix, None).await? {
+            return Ok(Some(format!("path prefix `{prefix}`")));
+        }
+    }
+    if let Some(port) = request.port {
+        if port_claimed(registry, port, None).await? {
+            return Ok(Some(format!("port {port}")));
+        }
+    }
+    Ok(None)
 }
 
 /// Refuse a tenant URL that points at the registry's own database.

@@ -194,10 +194,21 @@ pub(crate) async fn apply_values(
                 let v = v.trim().to_owned();
                 crate::tenancy::provision::validate_path_prefix(&v)
                     .map_err(TenancyError::Validation)?;
+                if crate::tenancy::org_host::prefix_claimed(registry, &v, Some(existing_id)).await?
+                {
+                    return Err(TenancyError::Validation(format!(
+                        "path prefix `{v}` is already used by another tenant"
+                    )));
+                }
                 SqlValue::String(v)
             }
             ("port", SqlValue::I32(n)) => {
                 crate::tenancy::provision::validate_port(n).map_err(TenancyError::Validation)?;
+                if crate::tenancy::org_host::port_claimed(registry, n, Some(existing_id)).await? {
+                    return Err(TenancyError::Validation(format!(
+                        "port {n} is already used by another tenant"
+                    )));
+                }
                 SqlValue::I32(n)
             }
             (_, v) => v,

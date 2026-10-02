@@ -217,10 +217,7 @@ pub(crate) async fn host_claimed(
         .where_(super::Org::host_pattern.eq(Some(host.to_owned())))
         .fetch(registry)
         .await?;
-    if base
-        .iter()
-        .any(|o| except_org.is_none() || o.id.get().copied() != except_org)
-    {
+    if other_org(&base, except_org) {
         return Ok(true);
     }
     Ok(!OrgHost::objects()
@@ -228,6 +225,43 @@ pub(crate) async fn host_claimed(
         .fetch(registry)
         .await?
         .is_empty())
+}
+
+/// Is `prefix` another tenant's path prefix? Two would route by row order.
+///
+/// # Errors
+/// Driver / query failures.
+pub(crate) async fn prefix_claimed(
+    registry: &Pool,
+    prefix: &str,
+    except_org: Option<i64>,
+) -> Result<bool, crate::sql::ExecError> {
+    let rows: Vec<super::Org> = super::Org::objects()
+        .where_(super::Org::path_prefix.iexact(prefix))
+        .fetch(registry)
+        .await?;
+    Ok(other_org(&rows, except_org))
+}
+
+/// Is `port` another tenant's listener port?
+///
+/// # Errors
+/// Driver / query failures.
+pub(crate) async fn port_claimed(
+    registry: &Pool,
+    port: i32,
+    except_org: Option<i64>,
+) -> Result<bool, crate::sql::ExecError> {
+    let rows: Vec<super::Org> = super::Org::objects()
+        .where_(super::Org::port.eq(Some(port)))
+        .fetch(registry)
+        .await?;
+    Ok(other_org(&rows, except_org))
+}
+
+fn other_org(rows: &[super::Org], except_org: Option<i64>) -> bool {
+    rows.iter()
+        .any(|o| except_org.is_none() || o.id.get().copied() != except_org)
 }
 
 /// Unbind an extra hostname.
