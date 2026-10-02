@@ -28,6 +28,10 @@ It runs the provisioner's checks: slug, host pattern, path prefix, port, and tha
 
 `token` is always redacted in access and trace logs. `register_action` documents that custom actions are gated like edits.
 
+### Fixed — docs: a new password hash ends sessions (#1736)
+
+The reset docs no longer say `password_changed_at` ends sessions; `_into` notes that app-written session checks must compare the hash.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)

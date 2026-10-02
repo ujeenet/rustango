@@ -175,12 +175,9 @@ impl PasswordReset {
 /// [`confirm_password_reset_single_use`] instead wherever you have a
 /// cache.
 ///
-/// Stamps `password_changed_at`, so sessions issued before the reset stop
-/// validating (#1449) — a reset is what someone does when they think
-/// their account is compromised, and leaving the attacker's session alive
-/// defeats the point. [`confirm_password_reset_pool_into`] does **not**,
-/// because a caller-named table may have no such column; prefer this form
-/// for `rustango_users`.
+/// Sessions carry a fingerprint of the password hash (#1338), so the new
+/// hash ends every session issued before the reset, an attacker's
+/// included. It also stamps `password_changed_at` as a record (#1449).
 ///
 /// Pairs with [`PasswordReset::issue`] — issue the URL, email it,
 /// and call this helper from your POST `/password-reset/confirm`
@@ -219,12 +216,9 @@ pub async fn confirm_password_reset_pool(
 /// custom table (e.g. tenant `app_users`) rather than the framework's
 /// default `rustango_users`. Issue #391.
 ///
-/// **Writes only the password column.** A caller-named table may have no
-/// rotation timestamp, so this form cannot stamp one — which means it
-/// does not end sessions issued before the reset (#1449). If your table
-/// has an equivalent of `password_changed_at`, update it yourself in the
-/// same transaction, or use [`confirm_password_reset_pool`] when the
-/// table really is `rustango_users`.
+/// **Writes only the password column.** Framework sessions end on the new
+/// hash; a session check your app writes itself must compare the hash too,
+/// or stamp its own column in the same transaction (#1736).
 ///
 /// # Errors
 /// Same shape as [`confirm_password_reset_pool`].
