@@ -168,7 +168,11 @@ untouched.
 
 ### CBV CSRF follows the outer layer
 
-With an app-wide `CsrfLayer` (e.g. `Cli::with_csrf_config`), template views use its cookie name and origins; forms posted with the old `rustango_csrf` cookie need a reload (#1722).
+With an app-wide `CsrfLayer` (e.g. `Cli::with_csrf_config`), template views use its cookie name and origins; forms posted with the old `rustango_csrf` cookie need a reload (#1722). A CBV defers to that layer only when it checked the token: on a path its `exempt_prefixes` skip, the CBV still requires one.
+
+### `webhook::sign` returns a `Result`
+
+**Breaking:** add `?` or `.expect(..)`; an empty key is `Err(EmptySigningKey)` (#1850).
 
 ## 0.59.18
 

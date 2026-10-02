@@ -49,7 +49,7 @@ pub enum SignatureFormat {
 /// use rustango::webhook::{verify_signature, SignatureFormat, sign};
 /// let secret = b"my-shared-secret";
 /// let body = b"{\"event\":\"foo\"}";
-/// let sig = sign(SignatureFormat::HexSha256, secret, body);
+/// let sig = sign(SignatureFormat::HexSha256, secret, body).unwrap();
 /// assert!(verify_signature(SignatureFormat::HexSha256, secret, body, &sig));
 /// ```
 #[must_use]
@@ -72,21 +72,30 @@ pub fn verify_signature(
     expected_bytes.ct_eq(&provided_bytes).unwrap_u8() == 1
 }
 
+/// [`sign`] refuses an empty key: anyone could sign with it (#1850).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the webhook signing key is empty")]
+pub struct EmptySigningKey;
+
 /// Sign `body` with `secret` in the given format. Use it when you
-/// send webhooks, or in tests. An empty `secret` gives an empty string.
-#[must_use]
-pub fn sign(format: SignatureFormat, secret: &[u8], body: &[u8]) -> String {
-    let Some(bytes) = compute_hmac(secret, body) else {
-        return String::new();
-    };
-    match format {
+/// send webhooks, or in tests.
+///
+/// # Errors
+/// [`EmptySigningKey`] when `secret` is empty.
+pub fn sign(
+    format: SignatureFormat,
+    secret: &[u8],
+    body: &[u8],
+) -> Result<String, EmptySigningKey> {
+    let bytes = compute_hmac(secret, body).ok_or(EmptySigningKey)?;
+    Ok(match format {
         SignatureFormat::HexSha256WithPrefix => format!("sha256={}", to_hex(&bytes)),
         SignatureFormat::HexSha256 => to_hex(&bytes),
         SignatureFormat::Base64Sha256 => {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(&bytes)
         }
-    }
+    })
 }
 
 /// `None` for an empty key.
@@ -140,7 +149,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_hex_with_prefix() {
-        let sig = sign(SignatureFormat::HexSha256WithPrefix, SECRET, BODY);
+        let sig = sign(SignatureFormat::HexSha256WithPrefix, SECRET, BODY).unwrap();
         assert!(sig.starts_with("sha256="));
         assert!(verify_signature(
             SignatureFormat::HexSha256WithPrefix,
@@ -152,7 +161,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_hex_no_prefix() {
-        let sig = sign(SignatureFormat::HexSha256, SECRET, BODY);
+        let sig = sign(SignatureFormat::HexSha256, SECRET, BODY).unwrap();
         assert_eq!(sig.len(), 64); // 32 bytes hex
         assert!(verify_signature(
             SignatureFormat::HexSha256,
@@ -164,7 +173,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_base64() {
-        let sig = sign(SignatureFormat::Base64Sha256, SECRET, BODY);
+        let sig = sign(SignatureFormat::Base64Sha256, SECRET, BODY).unwrap();
         assert!(verify_signature(
             SignatureFormat::Base64Sha256,
             SECRET,
@@ -175,7 +184,7 @@ mod tests {
 
     #[test]
     fn wrong_secret_fails() {
-        let sig = sign(SignatureFormat::HexSha256, SECRET, BODY);
+        let sig = sign(SignatureFormat::HexSha256, SECRET, BODY).unwrap();
         assert!(!verify_signature(
             SignatureFormat::HexSha256,
             b"different-secret",
@@ -186,7 +195,7 @@ mod tests {
 
     #[test]
     fn wrong_body_fails() {
-        let sig = sign(SignatureFormat::HexSha256, SECRET, BODY);
+        let sig = sign(SignatureFormat::HexSha256, SECRET, BODY).unwrap();
         assert!(!verify_signature(
             SignatureFormat::HexSha256,
             SECRET,
@@ -259,13 +268,16 @@ mod tests {
             BODY,
             &forged
         ));
-        assert_eq!(sign(SignatureFormat::HexSha256, b"", BODY), "");
+        assert_eq!(
+            sign(SignatureFormat::HexSha256, b"", BODY),
+            Err(EmptySigningKey)
+        );
     }
 
     #[test]
     fn cross_format_does_not_verify() {
         // A hex signature must not pass as base64.
-        let hex_sig = sign(SignatureFormat::HexSha256, SECRET, BODY);
+        let hex_sig = sign(SignatureFormat::HexSha256, SECRET, BODY).unwrap();
         assert!(!verify_signature(
             SignatureFormat::Base64Sha256,
             SECRET,

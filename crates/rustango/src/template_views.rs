@@ -5929,6 +5929,7 @@ mod tests {
         );
 
         let res = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -5940,7 +5941,41 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_ne!(res.status(), StatusCode::FORBIDDEN);
+        // Past the CSRF check; the empty form fails validation.
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let forged = Request::builder()
+            .method("POST")
+            .uri("/c/new")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("app_csrf={token}"))
+            .body(Body::from("_csrf=forged"))
+            .unwrap();
+        let res = app.oneshot(forged).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// An outer layer's `exempt_prefix` does not switch off a CBV's own
+    /// guard (#1669): `/c` would also cover `/comments`.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_outer_exempt_prefix_keeps_the_cbv_guard() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let cfg = crate::forms::csrf::CsrfConfig::default().exempt_prefix("/c");
+        let app = CreateView::for_model(schema_two_fields())
+            .template("f.html")
+            .router("/c", Arc::new(tera), pool)
+            .layer(crate::forms::csrf::with_config(cfg));
+        let post = Request::builder()
+            .method("POST")
+            .uri("/c/new")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("title=x"))
+            .unwrap();
+        let res = app.oneshot(post).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
     /// Every CBV router with a POST route rejects a write without the token (#1669).

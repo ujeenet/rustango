@@ -25,7 +25,7 @@
 //! ## What gets sent
 //!
 //! - `POST <target_url>`
-//! - Body: the payload re-serialized to JSON.
+//! - Body: the payload as JSON, serialized and signed once at dispatch.
 //! - `Content-Type: application/json`
 //! - `User-Agent: rustango-webhook/<crate version>`
 //! - `X-Webhook-Id: <uuid>`, the same on every retry so the receiver
@@ -55,6 +55,9 @@
 //! turns the address check off; the `RUSTANGO_OUTBOUND_ALLOW` list never
 //! applies, since a tenant may set the URL.
 //! Only the status code is kept on failure.
+//!
+//! The queued job keeps the target URL and extra headers, so a secret in
+//! either is stored with it; the signing secret is not.
 //!
 //! [`SignatureFormat`]: crate::webhook::SignatureFormat
 //! [`WebhookSubscription::header`]: crate::webhook_delivery::WebhookSubscription::header
@@ -271,7 +274,8 @@ impl WebhookSubscription {
                 self.signature_format,
                 self.secret.as_bytes(),
                 body.as_bytes(),
-            ),
+            )
+            .map_err(|e| JobError::Queue(e.to_string()))?,
             body,
             headers: self.headers.clone(),
             timeout_secs: self.timeout.as_secs().max(1),
@@ -566,13 +570,16 @@ mod tests {
             .dispatch(&q, "ping", &serde_json::json!({"b": 1, "a": 2}))
             .await
             .unwrap();
-        for _ in 0..50 {
-            if !dead.lock().unwrap().is_empty() {
-                break;
-            }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while dead.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let stored = dead.lock().unwrap()[0].to_string();
+        let stored = dead
+            .lock()
+            .unwrap()
+            .first()
+            .expect("dead-lettered")
+            .to_string();
         assert!(!stored.contains(SECRET), "{stored}");
         let recv = received.lock().unwrap();
         let (_, hdrs, body) = &recv[0];

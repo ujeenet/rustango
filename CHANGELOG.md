@@ -26,11 +26,11 @@ The reason is logged; the browser gets a fixed message.
 
 ### Security — template views use the app's CSRF config (#1722)
 
-An outer `CsrfLayer`'s `cookie_name` and `trusted_origins` now apply to CBV routers, which defer to it.
+An outer `CsrfLayer`'s `cookie_name` and `trusted_origins` now apply to CBV routers, which defer to it once it has checked the token; its exempt prefixes do not switch off their guard. `stamp_named_into_context` stamps a custom cookie name.
 
 ### Security — the provision webhook refuses a short HMAC secret (#1850)
 
-`WebhookConfig::new` panics under 32 bytes; `webhook::verify_signature` never accepts an empty key.
+`WebhookConfig::new` panics under 32 bytes; `webhook::verify_signature` never accepts an empty key, and `webhook::sign` returns `Err(EmptySigningKey)` for one.
 
 ## [0.59.18] — 2026-10-02
 

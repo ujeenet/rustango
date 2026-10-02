@@ -610,6 +610,111 @@ async fn a_logout_elsewhere_ends_the_access_token() {
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "me");
 }
 
+impl Env {
+    /// Log `name` in through `/api/auth/login`; the access token.
+    async fn access(&self, name: &str) -> String {
+        let r = self.jwt_login(&next_ip(), name, PASS).await;
+        assert_eq!(r.status(), StatusCode::OK, "login {name}");
+        json_body(r).await["access"].as_str().unwrap().to_owned()
+    }
+
+    /// `GET uri` with `token`; the status.
+    async fn bearer_status(&self, uri: &str, token: &str) -> StatusCode {
+        let req = Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        send(&self.api, &next_ip(), req).await.status()
+    }
+
+    async fn user_row(&self, id: i64) -> User {
+        User::objects()
+            .where_(User::id.eq(id))
+            .fetch(&self.tenant)
+            .await
+            .unwrap()
+            .remove(0)
+    }
+}
+
+/// A password change ends the access token at once (#2086).
+#[tokio::test]
+async fn a_password_change_ends_the_access_token() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("pw");
+    let id = env.user(&name).await;
+    let access = env.access(&name).await;
+    assert_eq!(env.bearer_status("/bearer", &access).await, StatusCode::OK);
+
+    let mut user = env.user_row(id).await;
+    user.password_hash = rustango::tenancy::password::hash("another-password").unwrap();
+    user.password_changed_at = Some(chrono::Utc::now());
+    user.save_pool(&env.tenant).await.expect("change password");
+
+    assert_eq!(
+        env.bearer_status("/bearer", &access).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        env.bearer_status("/api/auth/me", &access).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// A tenant-pinned token not minted by `/login` has no session to check,
+/// so it is refused (#2086).
+#[tokio::test]
+async fn a_token_without_a_session_is_refused() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let id = env.user(&unique("ns")).await;
+    let jwt =
+        rustango::tenancy::auth_routes::JwtAuth::new(rustango::tenancy::auth_routes::Config {
+            session_secret: Some(b"login_limits_jwt_secret_32_bytes!!".to_vec()),
+            ..rustango::tenancy::auth_routes::Config::default()
+        });
+    let mut custom = serde_json::Map::new();
+    custom.insert("tenant".into(), env.slug.clone().into());
+    let token = jwt.lifecycle().issue_access_with(id, custom).unwrap();
+    assert_eq!(
+        env.bearer_status("/bearer", &token).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        env.bearer_status("/api/auth/me", &token).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// Same user id, same password hash, other tenant: only the `tenant`
+/// claim refuses the token (#2086 review).
+#[tokio::test]
+async fn a_token_from_another_tenant_is_refused_with_the_same_hash() {
+    let _g = SUITE.lock().await;
+    let acme = boot().await;
+    let globex = boot().await;
+    let name = unique("xt");
+    let acme_id = acme.user(&name).await;
+    let globex_id = globex.user(&name).await;
+    assert_eq!(acme_id, globex_id, "both tenant databases start at id 1");
+    let token = globex.access(&name).await;
+
+    let mut row = acme.user_row(acme_id).await;
+    row.password_hash = globex.user_row(globex_id).await.password_hash;
+    row.save_pool(&acme.tenant).await.expect("same hash");
+
+    assert_eq!(
+        globex.bearer_status("/bearer", &token).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        acme.bearer_status("/bearer", &token).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 async fn json_body(r: axum::response::Response) -> serde_json::Value {
     let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
     serde_json::from_slice(&b).unwrap()

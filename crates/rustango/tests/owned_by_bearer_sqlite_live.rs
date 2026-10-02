@@ -340,8 +340,23 @@ async fn a_logged_out_token_is_refused_by_the_middleware() {
 async fn a_token_from_another_tenant_is_refused() {
     // Both tenants sign with the same key — the `tenant` claim is the only
     // thing that makes `sub: 1` mean a different person on each subdomain.
-    let (app, _, _, _) = app("acme", "cross_tenant").await;
-    let (globex, _, _, _) = app("globex", "cross_tenant_globex").await;
+    let (app, alice, _, _) = app("acme", "cross_tenant").await;
+    let (globex, globex_alice, _, _) = app("globex", "cross_tenant_globex").await;
+    assert_eq!(alice, globex_alice);
+    // Same id and same hash on both, so only the tenant check can refuse.
+    let fetch = |pool: Pool, id: i64| async move {
+        rustango::tenancy::User::objects()
+            .filter("id", id)
+            .fetch(&pool)
+            .await
+            .expect("fetch")
+            .remove(0)
+    };
+    let theirs = fetch(tenant_pool("cross_tenant_globex").await, alice).await;
+    let acme_pool = tenant_pool("cross_tenant").await;
+    let mut ours = fetch(acme_pool.clone(), alice).await;
+    ours.password_hash = theirs.password_hash;
+    ours.save_pool(&acme_pool).await.expect("same hash");
     let resp = app
         .oneshot(req(
             Method::GET,

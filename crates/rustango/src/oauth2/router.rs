@@ -80,6 +80,16 @@ pub struct AuthSuccess {
 }
 
 impl AuthSuccess {
+    /// Build one, e.g. to test a hook.
+    #[must_use]
+    pub fn new(tenant: impl Into<String>, user: NormalizedUser, tokens: TokenResponse) -> Self {
+        Self {
+            tenant: tenant.into(),
+            user,
+            tokens,
+        }
+    }
+
     /// `(tenant, provider, subject)`: the key to find a user by. An email
     /// or `sub` alone lets one tenant's IdP sign in as another's user.
     #[must_use]
@@ -324,11 +334,7 @@ mod tests {
         };
         let tokens: TokenResponse =
             serde_json::from_value(serde_json::json!({"access_token": "at"})).unwrap();
-        let login = AuthSuccess {
-            tenant: "acme".into(),
-            user,
-            tokens,
-        };
+        let login = AuthSuccess::new("acme", user, tokens);
         let resp = finish(&state, login).await;
         let cookies: Vec<_> = resp
             .headers()

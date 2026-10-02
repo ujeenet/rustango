@@ -53,7 +53,7 @@ fn webhook_sign_then_verify_round_trip() {
     use rustango::webhook::{sign, verify_signature, SignatureFormat};
     let secret = b"webhook-secret-32-bytes-or-more!!!!!!!!";
     let body = b"{\"event\":\"post.created\",\"id\":42}";
-    let sig = sign(SignatureFormat::HexSha256, secret, body);
+    let sig = sign(SignatureFormat::HexSha256, secret, body).unwrap();
     assert!(verify_signature(SignatureFormat::HexSha256, secret, body, &sig));
     assert!(!verify_signature(SignatureFormat::HexSha256, secret, b"tampered", &sig));
 }
@@ -64,7 +64,7 @@ fn webhook_github_prefix_format() {
     use rustango::webhook::{sign, verify_signature, SignatureFormat};
     let secret = b"webhook-secret-32-bytes-or-more!!!!!!!!";
     let body = b"{\"event\":\"x\"}";
-    let sig = sign(SignatureFormat::HexSha256WithPrefix, secret, body);
+    let sig = sign(SignatureFormat::HexSha256WithPrefix, secret, body).unwrap();
     assert!(sig.starts_with("sha256="), "github prefix shape, got {sig}");
     assert!(verify_signature(SignatureFormat::HexSha256WithPrefix, secret, body, &sig));
 }

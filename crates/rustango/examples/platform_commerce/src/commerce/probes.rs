@@ -348,7 +348,8 @@ pub async fn webhook_probe(body: Value) -> ProbeResult {
             rustango::webhook::SignatureFormat::HexSha256WithPrefix,
             b"soak-webhook-secret",
             br#"{"probe":true}"#,
-        ),
+        )
+        .unwrap_or_default(),
         headers: HashMap::new(),
         timeout_secs: 3,
         retry_status_codes: Vec::new(),
