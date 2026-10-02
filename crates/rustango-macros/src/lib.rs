@@ -854,8 +854,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let mut all_indexes: Vec<IndexAttr> = container.indexes;
     for field in &named.named {
         let ident = field.ident.as_ref().expect("named");
-        let col = to_snake_case(&ident.to_string()); // column name fallback
-                                                     // Re-parse field attrs to check for index flag
+        // The same default column as `process_field` (#1937).
+        let col = ident_name(ident);
+        // Re-parse field attrs to check for index flag
         if let Ok(fa) = parse_field_attrs(field) {
             if fa.index {
                 let col_name = fa.column.clone().unwrap_or_else(|| col.clone());
@@ -2057,6 +2058,8 @@ struct CollectedFields {
     /// Fills each `default_uuid_v7` field of `_row` in place, so a
     /// mutable bulk insert hands the PKs back (#1934).
     bulk_fill_in_place: Vec<TokenStream2>,
+    /// The `default_uuid_v7` fields, reset when `insert_or_ignore` skips (#1937).
+    uuid_v7_idents: Vec<syn::Ident>,
     /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
     /// + the loop that asserts every row matches. One pair per Auto
     /// field. Empty when `has_auto == false`.
@@ -2144,6 +2147,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         bulk_columns_no_auto: Vec::with_capacity(cap),
         bulk_columns_all: Vec::with_capacity(cap),
         bulk_fill_in_place: Vec::new(),
+        uuid_v7_idents: Vec::new(),
         bulk_auto_uniformity: Vec::new(),
         first_auto_ident: None,
         has_auto: false,
@@ -2160,7 +2164,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
 
     for field in &named.named {
         let info = process_field(field, table)?;
-        out.field_names.push(info.ident.to_string());
+        out.field_names.push(ident_name(info.ident));
         out.field_schemas.push(info.schema);
         out.from_row_inits.push(info.from_row_init);
         out.from_aliased_row_inits.push(info.from_aliased_row_init);
@@ -2200,7 +2204,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.column_entries.push(ColumnEntry {
                 ident: ident.clone(),
                 value_ty: info.value_ty.clone(),
-                name: ident.to_string(),
+                name: ident_name(ident),
                 column: info.column.clone(),
                 field_type_tokens: info.field_type_tokens,
                 uuid_column: info.uuid_column,
@@ -2358,6 +2362,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 });
             }
             if info.default_uuid_v7 {
+                out.uuid_v7_idents.push(ident.clone());
                 out.bulk_fill_in_place.push(quote! {
                     if matches!(&_row.#ident, #root::sql::Auto::Unset) {
                         _row.#ident = #root::sql::Auto::Set(#root::__uuid::Uuid::now_v7());
@@ -2441,7 +2446,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         out.column_entries.push(ColumnEntry {
             ident: ident.clone(),
             value_ty: info.value_ty.clone(),
-            name: ident.to_string(),
+            name: ident_name(ident),
             column: info.column.clone(),
             field_type_tokens: info.field_type_tokens,
             uuid_column: info.uuid_column,
@@ -3099,6 +3104,11 @@ fn inherent_impl_tokens(
         // `insert_returning_pool` to skip the redundant RETURNING /
         // LAST_INSERT_ID round-trip.
         if fields.returning_cols.is_empty() {
+            let v7_idents = &fields.uuid_v7_idents;
+            let v7_was_unset: Vec<syn::Ident> = v7_idents
+                .iter()
+                .map(|i| quote::format_ident!("__{}_was_unset", ident_name(i)))
+                .collect();
             quote! {
                 /// Insert this row against either backend. Every
                 /// `Auto<T>` PK on this model is filled Rust-side
@@ -3135,6 +3145,8 @@ fn inherent_impl_tokens(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<bool, #root::sql::ExecError> {
+                    // A skipped row was never saved, so a generated id must not stay (#1937).
+                    #( let #v7_was_unset = matches!(&self.#v7_idents, #root::sql::Auto::Unset); )*
                     let mut _columns: ::std::vec::Vec<&'static str> =
                         ::std::vec::Vec::new();
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
@@ -3145,7 +3157,11 @@ fn inherent_impl_tokens(
                         _columns,
                         _values,
                     );
-                    #root::sql::insert_or_ignore(pool, &_query).await
+                    let _inserted = #root::sql::insert_or_ignore(pool, &_query).await?;
+                    if !_inserted {
+                        #( if #v7_was_unset { self.#v7_idents = #root::sql::Auto::Unset; } )*
+                    }
+                    ::core::result::Result::Ok(_inserted)
                 }
             }
         } else {
@@ -4224,7 +4240,7 @@ fn inherent_impl_tokens(
         let column_names: ::std::collections::HashSet<String> = fields
             .column_entries
             .iter()
-            .map(|c| c.ident.to_string())
+            .map(|c| ident_name(&c.ident))
             .collect();
         let emit_if_no_field_collision = |name: &str, tokens: TokenStream2| -> TokenStream2 {
             if column_names.contains(name) {
@@ -8151,7 +8167,24 @@ fn column_module_tokens(
 }
 
 fn column_type_ident(field_ident: &syn::Ident) -> syn::Ident {
-    syn::Ident::new(&format!("{field_ident}_col"), field_ident.span())
+    let name = ident_name(field_ident);
+    syn::Ident::new(&format!("{name}_col"), field_ident.span())
+}
+
+/// A field's name without the `r#` of a raw ident: `r#type` is `type` (#1937).
+fn ident_name(ident: &syn::Ident) -> String {
+    syn::ext::IdentExt::unraw(ident).to_string()
+}
+
+/// The ident for a field named `name`, raw when it is a keyword (`type` → `r#type`).
+fn ident_from_name(name: &str, span: proc_macro2::Span) -> syn::Ident {
+    match syn::parse_str::<syn::Ident>(name) {
+        Ok(mut ident) => {
+            ident.set_span(span);
+            ident
+        }
+        Err(_) => syn::Ident::new_raw(name, span),
+    }
 }
 
 fn column_module_ident(struct_name: &syn::Ident) -> syn::Ident {
@@ -11192,7 +11225,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         .ident
         .as_ref()
         .ok_or_else(|| syn::Error::new(field.span(), "tuple structs are not supported"))?;
-    let name = ident.to_string();
+    let name = ident_name(ident);
     let column = attrs.column.clone().unwrap_or_else(|| name.clone());
     let primary_key = attrs.primary_key;
     let DetectedType {
@@ -11482,6 +11515,25 @@ fn check_bound_compatibility(
         return Err(syn::Error::new_spanned(
             field,
             "`max_length` is only valid on `String` fields (or `Option<String>`)",
+        ));
+    }
+    // These were silently dropped on the wrong type (#1937).
+    if attrs.case_insensitive && kind != DetectedKind::String {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`citext` is only valid on `String` fields (or `Option<String>`)",
+        ));
+    }
+    if attrs.vector_dims.is_some() && kind != DetectedKind::Vector {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`vector(dims = …)` is only valid on a pgvector `Vector` field",
+        ));
+    }
+    if attrs.geometry_srid.is_some() && kind != DetectedKind::Geometry {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`geometry(srid = …)` is only valid on a PostGIS `Point` field",
         ));
     }
     if attrs.choices.is_some() && kind != DetectedKind::String {
@@ -12202,7 +12254,7 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let attrs = parse_form_field_attrs(field)?;
         let (kind, nullable) = detect_form_field(&field.ty, field.span())?;
 
-        let name_lit = ident.to_string();
+        let name_lit = ident_name(ident);
         let parse_block = render_form_field_parse(ident, &name_lit, kind, nullable, &attrs);
         // #372 — append the per-field `clean_<field>` call right after
         // the parse block when the attribute is set. The clean fn
@@ -12531,7 +12583,7 @@ fn render_form_validators(
             let min_len_usize = min_len as usize;
             checks.push(quote! {
                 if let ::core::option::Option::Some(__s) = #val_ref {
-                    if __s.len() < #min_len_usize {
+                    if __s.chars().count() < #min_len_usize {
                         __errors.add(
                             #name_lit,
                             ::std::format!("Ensure this value has at least {} characters.", #min_len_usize),
@@ -12544,7 +12596,7 @@ fn render_form_validators(
             let max_len_usize = max_len as usize;
             checks.push(quote! {
                 if let ::core::option::Option::Some(__s) = #val_ref {
-                    if __s.len() > #max_len_usize {
+                    if __s.chars().count() > #max_len_usize {
                         __errors.add(
                             #name_lit,
                             ::std::format!("Ensure this value has at most {} characters.", #max_len_usize),
@@ -13166,9 +13218,9 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 .attrs
                 .source
                 .as_deref()
-                .unwrap_or(&fi.ident.to_string())
+                .unwrap_or(&ident_name(&fi.ident))
                 .to_owned();
-            let src_ident = syn::Ident::new(&src_name, ident.span());
+            let src_ident = ident_from_name(&src_name, ident.span());
             let slug_ident = syn::Ident::new(slug_field, ident.span());
             quote! {
                 #ident: match model.#src_ident.value() {
@@ -13194,8 +13246,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             //                   strict)]` to keep the v0.18.1
             //                   panic-on-unloaded behavior for tests
             //                   that want hard guardrails.
-            let src_name = fi.attrs.source.as_deref().unwrap_or(&fi.ident.to_string()).to_owned();
-            let src_ident = syn::Ident::new(&src_name, ident.span());
+            let src_name = fi.attrs.source.as_deref().unwrap_or(&ident_name(&fi.ident)).to_owned();
+            let src_ident = ident_from_name(&src_name, ident.span());
             if fi.attrs.nested_strict {
                 let panic_msg = format!(
                     "nested(strict) serializer for `{ident}` requires `model.{src_name}` to be loaded — \
@@ -13220,7 +13272,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // Not read from model — use default
             quote! { #ident: ::core::default::Default::default() }
         } else if let Some(src) = &fi.attrs.source {
-            let src_ident = syn::Ident::new(src, ident.span());
+            let src_ident = ident_from_name(src, ident.span());
             quote! { #ident: ::core::clone::Clone::clone(&model.#src_ident) }
         } else {
             quote! { #ident: ::core::clone::Clone::clone(&model.#ident) }
@@ -13261,12 +13313,12 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .filter(is_writable)
         .map(|fi| {
             let ident = &fi.ident;
-            let fname = ident.to_string();
+            let fname = ident_name(ident);
             let mname = fi
                 .attrs
                 .source
                 .clone()
-                .unwrap_or_else(|| fi.ident.to_string());
+                .unwrap_or_else(|| ident_name(&fi.ident));
             let attr_max_len = opt_usize(fi.attrs.max_length);
             let attr_min_len = opt_usize(fi.attrs.min_length);
             let attr_min = opt_i64(fi.attrs.min);
@@ -13301,7 +13353,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .iter()
         .filter_map(|fi| {
             let ident = &fi.ident;
-            let name_lit = ident.to_string();
+            let name_lit = ident_name(ident);
             let method = fi.attrs.validate.as_ref()?;
             let method_ident = syn::Ident::new(method, ident.span());
             Some(quote! {
@@ -13398,7 +13450,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .filter_map(|fi| {
             let many_ty = fi.attrs.many.as_ref()?;
             let ident = &fi.ident;
-            let setter = syn::Ident::new(&format!("set_{ident}"), ident.span());
+            let setter = syn::Ident::new(&format!("set_{}", ident_name(ident)), ident.span());
             Some(quote! {
                 /// Populate this `many` field by mapping each parent model
                 /// through the inner serializer's `from_model`. Call after
@@ -13434,7 +13486,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let output_field_count = output_fields.len();
     let serialize_fields = output_fields.iter().map(|fi| {
         let ident = &fi.ident;
-        let name_lit = ident.to_string();
+        let name_lit = ident_name(ident);
         quote! { __state.serialize_field(#name_lit, &self.#ident)?; }
     });
 
@@ -13455,7 +13507,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let writable_lits: Vec<_> = fields_info
         .iter()
         .filter(is_writable)
-        .map(|fi| fi.ident.to_string())
+        .map(|fi| ident_name(&fi.ident))
         .collect();
 
     // `writable_source_fields`: the MODEL field names of writable
@@ -13469,7 +13521,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             fi.attrs
                 .source
                 .clone()
-                .unwrap_or_else(|| fi.ident.to_string())
+                .unwrap_or_else(|| ident_name(&fi.ident))
         })
         .collect();
 
@@ -13490,7 +13542,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             fi.attrs
                 .source
                 .clone()
-                .unwrap_or_else(|| fi.ident.to_string())
+                .unwrap_or_else(|| ident_name(&fi.ident))
         })
         .collect();
 
@@ -13504,7 +13556,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .iter()
         .map(|fi| {
             let ident = &fi.ident;
-            let fname = ident.to_string();
+            let fname = ident_name(ident);
             let ty = &fi.ty;
             if is_writable(&fi) {
                 quote! {
@@ -13534,7 +13586,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .filter(is_writable)
         .map(|fi| {
             let ident = &fi.ident;
-            let fname = ident.to_string();
+            let fname = ident_name(ident);
             let ty = &fi.ty;
             quote! {
                 if let ::core::option::Option::Some(__v) = __obj.and_then(|__o| __o.get(#fname)) {
@@ -13577,7 +13629,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         {
             let property_calls = output_fields.iter().map(|fi| {
                 let ident = &fi.ident;
-                let name_lit = ident.to_string();
+                let name_lit = ident_name(ident);
                 let ty = &fi.ty;
                 let nullable_call = if is_option(ty) {
                     quote! { .nullable() }
@@ -13595,7 +13647,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let required_lits: Vec<_> = output_fields
                 .iter()
                 .filter(|fi| !is_option(&fi.ty))
-                .map(|fi| fi.ident.to_string())
+                .map(|fi| ident_name(&fi.ident))
                 .collect();
             quote! {
                 impl #root::openapi::OpenApiSchema for #struct_name {
@@ -13759,5 +13811,34 @@ mod main_attr_tests {
         // match must not fire on the substring `logging`.
         assert!(parse_logging(&"logging = true".parse().unwrap()));
         assert!(!parse_logging(&"logging=false".parse().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod field_attr_tests {
+    use super::*;
+
+    fn error_for(field: syn::Field) -> Option<String> {
+        let attrs = parse_field_attrs(&field).unwrap();
+        let kind = detect_type(&field.ty).unwrap().kind;
+        check_bound_compatibility(&field, &attrs, kind)
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    /// `citext`, `vector` and `geometry` on the wrong type are errors, not no-ops (#1937).
+    #[test]
+    fn type_specific_attrs_reject_other_types() {
+        let f: syn::FieldsNamed = syn::parse_quote!({
+            #[rustango(citext)] a: i64,
+            #[rustango(vector(dims = 3))] b: String,
+            #[rustango(geometry(srid = 4326))] c: String,
+            #[rustango(citext)] d: String,
+        });
+        let errs: Vec<_> = f.named.into_iter().map(error_for).collect();
+        assert!(errs[0].as_deref().unwrap().contains("citext"), "{errs:?}");
+        assert!(errs[1].as_deref().unwrap().contains("vector"), "{errs:?}");
+        assert!(errs[2].as_deref().unwrap().contains("geometry"), "{errs:?}");
+        assert_eq!(errs[3], None);
     }
 }

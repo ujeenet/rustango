@@ -98,6 +98,16 @@ async fn audited_insert_fills_the_pk(pool: &Pool) {
     assert_eq!(Note::objects().fetch(pool).await.expect("fetch").len(), 2);
 }
 
+/// A skipped `insert_or_ignore` leaves no unsaved id behind (#1937).
+async fn skipped_insert_or_ignore_keeps_the_pk_unset(pool: &Pool) {
+    let mut first = item("dup", 1);
+    assert!(first.insert_or_ignore(pool).await.expect("first insert"));
+    assert!(first.id.get().is_some(), "inserted row keeps its id");
+    let mut second = item("dup", 2);
+    assert!(!second.insert_or_ignore(pool).await.expect("skip"));
+    assert!(matches!(second.id, Auto::Unset), "{:?}", second.id);
+}
+
 async fn bulk_writes_fill_the_pk(pool: &Pool) {
     Item::bulk_insert_or_ignore_pool(&[item("a", 1), item("b", 2)], pool)
         .await
@@ -190,6 +200,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         audited_insert_fills_the_pk,
+        skipped_insert_or_ignore_keeps_the_pk_unset,
         bulk_writes_fill_the_pk,
         pg_bulk_insert_writes_ids_back,
         db_pk_is_read_back_beside_a_rust_filled_auto,
