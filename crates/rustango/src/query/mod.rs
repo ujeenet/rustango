@@ -2558,7 +2558,7 @@ fn lower_select_related(
     model: &'static ModelSchema,
     names: &[String],
 ) -> Result<Vec<crate::core::Join>, QueryError> {
-    use crate::core::{inventory, Expr, Join, JoinKind, ModelEntry, Op, Relation, WhereExpr};
+    use crate::core::{Expr, Join, JoinKind, ModelEntry, Op, Relation, WhereExpr};
     let mut out: Vec<Join> = Vec::with_capacity(names.len());
     for name in names {
         // Walk each `__`-separated hop. `current` tracks the schema
@@ -2604,9 +2604,7 @@ fn lower_select_related(
                     });
                 }
             };
-            let target = inventory::iter::<ModelEntry>
-                .into_iter()
-                .find(|e| e.schema.table == to)
+            let target = ModelEntry::for_table(to)
                 .map(|e| e.schema)
                 .ok_or_else(|| QueryError::SelectRelatedInvalid {
                     model: current.name,
@@ -3363,7 +3361,7 @@ fn resolve_span_chain(
     ),
     QueryError,
 > {
-    use crate::core::{inventory, Expr, Join, JoinKind, ModelEntry, Relation};
+    use crate::core::{Expr, Join, JoinKind, ModelEntry, Relation};
     let segs: Vec<&str> = raw_key.split("__").collect();
     let mut joins: Vec<Join> = Vec::new();
     let mut current: &'static ModelSchema = model;
@@ -3380,14 +3378,12 @@ fn resolve_span_chain(
         match fk {
             // An FK that isn't the final segment is a JOIN hop.
             Some((field, to, on)) if !is_last => {
-                let target = inventory::iter::<ModelEntry>
-                    .into_iter()
-                    .find(|e| e.schema.table == to)
-                    .map(|e| e.schema)
-                    .ok_or_else(|| QueryError::UnknownField {
+                let target = ModelEntry::for_table(to).map(|e| e.schema).ok_or_else(|| {
+                    QueryError::UnknownField {
                         model: current.name,
                         field: format!("{seg} (target table `{to}` not registered)"),
-                    })?;
+                    }
+                })?;
                 // The first hop's alias is the schema's field name; deeper
                 // ones are interned. Same scheme as `lower_select_related`,
                 // so a span and a `select_related` over one path dedupe.

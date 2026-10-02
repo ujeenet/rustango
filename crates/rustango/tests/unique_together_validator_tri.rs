@@ -159,9 +159,24 @@ async fn model_form_skips_a_partial_unique_index(pool: &Pool) {
         .expect("partial index does not cover this row");
 }
 
+/// #2120: `fresh_table` built no `unique_together` index, so this passed.
+async fn the_table_itself_rejects_a_duplicate_pair(pool: &Pool) {
+    seed(pool, 1, 2).await;
+    let mut dup = UtvMembership {
+        id: Auto::Unset,
+        org_id: 1,
+        user_id: 2,
+    };
+    assert!(
+        dup.save_pool(pool).await.is_err(),
+        "duplicate pair inserted"
+    );
+}
+
 tri_dialect_test!(
     model: UtvMembership,
     scenarios: [
+        the_table_itself_rejects_a_duplicate_pair,
         validator_returns_ok_when_no_collision,
         validator_returns_err_on_collision,
         exclude_pk_lets_a_row_re_save_its_own_values,

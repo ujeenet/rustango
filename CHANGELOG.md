@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — testkit tables get their indexes (#2120)
+
+`create_tables_for` / `fresh_table` create the model's indexes, `unique_together` included, through the migrate renderer.
+
+### Fixed — `assert_num_queries` counts the PG `_on` reads (#1561)
+
+`fetch_on`, `count_on`, `fetch_paginated_on`, `explain_on`, `select_rows_on`, `fetch_aggregate_on`, `annotate_count_children_on` and `fetch_with_prefetch` were counted as 0.
+
+### Fixed — MySQL refuses a DB-default integer PK it cannot read (#1986)
+
+A non-`Auto` integer PK left to its DB default is refused before the INSERT, instead of reading `LAST_INSERT_ID()` = 0.
+
+### Fixed — PG `bulk_update` sets an all-NULL vector column (#1970)
+
+The NULL is cast `::vector`, not left as text.
+
+### Fixed — a DISTINCT page counts distinct rows (#1966)
+
+`fetch_paginated_pool` / `fetch_paginated_on` with `distinct()` (or PG `distinct_on`) counted rows before DISTINCT; the total is now a counting subquery. Table lookups share `ModelEntry::for_table`.
+
 ### Fixed — job queues drain on shutdown (#1255)
 
 `shutdown()` lets running jobs finish within `shutdown_grace` (default 5s), then aborts and re-queues them. Parked retries are kept, so `pending_count()` returns to 0.

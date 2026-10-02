@@ -367,10 +367,7 @@ impl SchemaSnapshot {
     #[must_use]
     pub fn filtered_to_scope(&self, scope: crate::core::ModelScope) -> Self {
         let scope_of = |table: &str| {
-            inventory::iter::<ModelEntry>
-                .into_iter()
-                .find(|e| e.schema.table == table)
-                .map_or(crate::core::ModelScope::Tenant, |e| e.schema.scope)
+            ModelEntry::for_table(table).map_or(crate::core::ModelScope::Tenant, |e| e.schema.scope)
         };
         let tables: Vec<TableSnapshot> = self
             .tables

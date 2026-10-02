@@ -389,6 +389,81 @@ async fn distinct_on_keeps_search_and_derived_joins(pool: &Pool) {
     assert_eq!(slugs(&rows), ["b"]);
 }
 
+/// #1966: a DISTINCT page counted the rows before DISTINCT.
+async fn paginated_distinct_counts_distinct_rows(pool: &Pool) {
+    seed_meas(pool, 1, "2024-01-01T00:00:00Z").await;
+    seed_meas(pool, 2, "2024-01-02T00:00:00Z").await;
+    let first = Meas::objects().fetch(pool).await.expect("meas")[0].id;
+    Reading {
+        id: Auto::default(),
+        meas: rustango::sql::ForeignKey::unloaded(first.get().copied().expect("id")),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("second reading");
+    // Joined to its 3 readings, the 2 measurements are 3 rows before DISTINCT.
+    let readings = Reading::objects().compile().expect("sub");
+    let on = WhereExpr::ExprCompare {
+        lhs: aliased("r", "meas"),
+        op: Op::Eq,
+        rhs: aliased("orm_dialect_tri_meas", "id"),
+    };
+    let qs = Meas::objects()
+        .join_sub(readings, "r", on)
+        .distinct()
+        .order_by(&[("id", false)])
+        .limit(1);
+    let page = rustango::sql::fetch_paginated_pool(qs, pool)
+        .await
+        .expect("paginated distinct");
+    assert_eq!((page.total, page.rows.len()), (2, 1));
+
+    // The count subquery repeats the WHERE binds; swapped, `n >= 3 AND n <= 2`.
+    seed_meas(pool, 3, "2024-01-03T00:00:00Z").await;
+    let second = Meas::objects()
+        .filter("n", 2_i64)
+        .fetch(pool)
+        .await
+        .expect("n=2")[0]
+        .id;
+    Reading {
+        id: Auto::default(),
+        meas: rustango::sql::ForeignKey::unloaded(second.get().copied().expect("id")),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("another reading");
+    let readings = Reading::objects().compile().expect("sub");
+    let on = WhereExpr::ExprCompare {
+        lhs: aliased("r", "meas"),
+        op: Op::Eq,
+        rhs: aliased("orm_dialect_tri_meas", "id"),
+    };
+    let qs = Meas::objects()
+        .join_sub(readings, "r", on)
+        .filter_op("n", Op::Gte, 2_i64)
+        .filter_op("n", Op::Lte, 3_i64)
+        .distinct()
+        .order_by(&[("id", false)])
+        .offset(1)
+        .limit(1);
+    let page = rustango::sql::fetch_paginated_pool(qs, pool)
+        .await
+        .expect("filtered distinct page");
+    let ns: Vec<i64> = page.rows.iter().map(|m| m.n).collect();
+    assert_eq!((page.total, ns), (2, vec![3]));
+
+    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana")]).await;
+    let qs = Post::objects()
+        .distinct_on(&["title"])
+        .order_by(&[("title", false), ("id", false)])
+        .limit(1);
+    let page = rustango::sql::fetch_paginated_pool(qs, pool)
+        .await
+        .expect("paginated distinct_on");
+    assert_eq!((page.total, slugs(&page.rows)), (2, vec!["a"]));
+}
+
 /// #1890: `paginate()` sent no ORDER BY, so a page followed heap order.
 async fn paginate_orders_by_pk(pool: &Pool) {
     seed(pool, &[("a", "a"), ("b", "b"), ("c", "c")]).await;
@@ -516,6 +591,7 @@ tri_dialect_test! {
         union_all_keeps_the_first_branch_distinct,
         distinct_on_keeps_search_and_derived_joins,
         paginate_orders_by_pk,
+        paginated_distinct_counts_distinct_rows,
         values_decode_uuid_and_bytes,
         values_decode_dates_and_timestamps,
         integer_division_truncates,

@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### `fresh_table` creates indexes
+
+Test tables now carry the model's indexes (#2120): a test that inserted duplicate `unique_together` rows now gets a unique violation, and MySQL refuses an index over an unbounded `String`, as `migrate` does.
+
+### `assert_num_queries` sees the PG `_on` reads
+
+A block using `fetch_on`, `count_on` or another `_on` read now counts its queries (#1561); an expectation of 0 written around one fails.
+
+### MySQL refuses a DB-default integer PK
+
+An insert that leaves a non-`Auto` integer PK to its DB default fails with `GeneratedPkUnreadable` on MySQL (#1986). Set the PK or use `Auto<i64>`.
+
 ### Job queue `shutdown()` drains
 
 `shutdown()` now waits up to `shutdown_grace` (default 5s) for running jobs; `InMemoryJobQueue` used to abort at once. Aborted jobs and parked retries stay queued for the next `start()` (#1255, #1677). An aborted job runs again from the start, so make jobs idempotent.

@@ -46,6 +46,8 @@ pub(super) struct Sql<'d> {
     /// `(scope depth, alias, target)` of every model join in the open
     /// queries, so the writer can type an aliased column.
     pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
+    /// Count the next SELECT body writes as its `__rustango_total` column.
+    pub total: Option<CountQuery>,
 }
 
 /// The joins a grouped aggregate's derived table hides. An aliased
@@ -69,6 +71,7 @@ impl<'d> Sql<'d> {
             aggregate_allowed: false,
             derived_joins: None,
             join_types: Vec::new(),
+            total: None,
         }
     }
 
@@ -82,6 +85,7 @@ impl<'d> Sql<'d> {
             aggregate_allowed: false,
             derived_joins: None,
             join_types: Vec::new(),
+            total: None,
         }
     }
 
@@ -189,6 +193,21 @@ pub(super) fn write_compound_with_total(
         query.compound_offset,
         None,
     )
+}
+
+/// A DISTINCT SELECT plus a `__rustango_total` column. `COUNT(*) OVER ()`
+/// runs before DISTINCT, so the total is a counting subquery instead (#1966).
+pub(super) fn write_distinct_with_total(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+) -> Result<(), SqlError> {
+    b.total = Some(CountQuery::from_select(SelectQuery {
+        limit: None,
+        offset: None,
+        lock_mode: None,
+        ..query.clone()
+    }));
+    write_select(b, query)
 }
 
 /// Emit a compound SELECT (`UNION`, `INTERSECT`, `EXCEPT`):
@@ -612,6 +631,13 @@ fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErro
             b.sql.push_str(" AS ");
             b.write_ident(&format!("{}__{}", join.alias, col));
         }
+    }
+    // Written before FROM, so the WHERE binds appear twice, in text order.
+    if let Some(count) = b.total.take() {
+        b.sql.push_str(", (");
+        write_count(b, &count)?;
+        b.sql.push_str(") AS ");
+        b.write_ident("__rustango_total");
     }
 
     b.sql.push_str(" FROM ");
@@ -3492,10 +3518,16 @@ pub(super) fn write_bulk_update_pg(
     }
     b.sql.push_str(" FROM (VALUES ");
     // A NULL takes its column's cast: an all-NULL column in VALUES
-    // is otherwise typed text.
+    // is otherwise typed text. Only here does a vector NULL need one (#1970).
     let casts: Vec<Option<&'static str>> = std::iter::once(pk_field.column)
         .chain(query.update_columns.iter().copied())
-        .map(|c| null_cast_for(b.d, query.model, c))
+        .map(|c| {
+            let vector = query
+                .model
+                .field_by_column(c)
+                .is_some_and(|f| matches!(f.ty, crate::core::FieldType::Vector(_)));
+            null_cast_for(b.d, query.model, c).or(vector.then_some("vector"))
+        })
         .collect();
     let mut first_row = true;
     for row in &query.rows {

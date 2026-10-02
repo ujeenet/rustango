@@ -2898,10 +2898,7 @@ fn collect_fk_target_lookups(schema: &'static ModelSchema, object_list: &[Value]
 /// view that the user already chose to mount, so they've already
 /// decided the target is theirs to render).
 fn lookup_target_schema(table: &str) -> Option<&'static ModelSchema> {
-    crate::core::inventory::iter::<crate::core::ModelEntry>
-        .into_iter()
-        .find(|e| e.schema.table == table)
-        .map(|e| e.schema)
+    crate::core::ModelEntry::for_table(table).map(|e| e.schema)
 }
 
 /// Run the FK display batch query against a static pool, return

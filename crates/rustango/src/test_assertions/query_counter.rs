@@ -56,6 +56,10 @@
 //! - `count_rows_pool`, `fetch_aggregate_pool`, `fetch_paginated_pool`
 //! - `insert_pool` / `update_pool` / `delete_pool` — single-row writes
 //! - the `_tx` counterparts of all of the above
+//! - the PostgreSQL `_on` reads: `QuerySet::fetch_on` / `count_on` /
+//!   `fetch_paginated_on` / `explain_on`, `select_rows_on`,
+//!   `fetch_aggregate_on`, `annotate_count_children_on`, and
+//!   `fetch_with_prefetch` (two queries) (#1561)
 //!
 //! Each call increments by 1 regardless of how many rows the query
 //! returns: one SQL statement is one count, even when it returns
@@ -63,16 +67,10 @@
 //!
 //! ## What does **not** get counted
 //!
-//! The PostgreSQL-only `_on` family — `annotate_count_children_on`,
-//! `fetch_aggregate_on`, `fetch_with_prefetch`, `QuerySet::fetch_on`
-//! — takes a bare sqlx executor rather than a [`crate::sql::Pool`] and
-//! runs its query without passing through any instrumented entry
-//! point. A block that only uses those counts zero.
-//!
-//! Stated here because the failure mode is a **pass**: `assert_num_queries`
-//! sees no query and agrees with any expectation of 0. Until #1561, read
-//! a 0 from a block that touched `_on` code as "not measured", not as
-//! "no queries".
+//! The PostgreSQL `_on` **writes** (`insert_on`, `update_on`,
+//! `delete_on`, `bulk_insert_on`) take a bare sqlx executor and run
+//! uncounted. Read a 0 from a block that only writes through them as
+//! "not measured", not as "no queries".
 
 use std::cell::Cell;
 use std::future::Future;
