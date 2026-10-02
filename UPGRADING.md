@@ -158,6 +158,10 @@ untouched.
 
 Add `CSP_NONCE_PLACEHOLDER` to `script-src` and `style-src` to run the admin without `'unsafe-inline'`. The `csp_nonce` module now also builds with `admin` (#1703).
 
+### `api::create_tenant` refuses what the CLI refuses
+
+A bad slug or host, or a host, prefix or port another tenant uses, is now a `Validation` error (#2097).
+
 ## 0.59.19
 
 ### Bearer tokens need a login session

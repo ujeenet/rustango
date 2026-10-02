@@ -20,6 +20,10 @@ The tenant session cookie is scoped to the tenant's path prefix, so signing in t
 
 `[security]` headers now run the CSP nonce layer. Bundled pages nonce their inline `<script>`/`<style>` and drop inline `on*` handlers and `style` attributes.
 
+### Fixed — `api::create_tenant` validates and clash-checks the host (#2097)
+
+It runs the provisioner's checks: slug, host pattern, path prefix, port, and that no other tenant routes on them.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)

@@ -517,3 +517,44 @@ async fn tenant_pages_pass_a_strict_csp() {
         }
     }
 }
+
+/// #2097 — `api::create_tenant` refuses a bad host and one another tenant routes on.
+#[tokio::test]
+async fn api_create_tenant_checks_the_host() {
+    use rustango::tenancy::manage::api::{create_tenant, CreateTenantOpts};
+    use rustango::tenancy::{BackendKind, StorageMode};
+    let env = boot().await;
+    let dir = tempfile::tempdir().unwrap();
+    let opts = |host: &str| CreateTenantOpts {
+        mode: StorageMode::Database,
+        backend: BackendKind::Sqlite,
+        database_url: Some(format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("new.db").display()
+        )),
+        host_pattern: Some(host.to_owned()),
+        no_migrate: true,
+        ..CreateTenantOpts::default()
+    };
+    let reg = "sqlite::memory:";
+    for host in [env.host.as_str(), "bad host!"] {
+        let res = create_tenant(
+            env.pools.as_ref(),
+            reg,
+            dir.path(),
+            &unique("n"),
+            opts(host),
+        )
+        .await;
+        assert!(res.is_err(), "{host} must be refused");
+    }
+    let ok = create_tenant(
+        env.pools.as_ref(),
+        reg,
+        dir.path(),
+        &unique("n"),
+        opts("fresh.app.test"),
+    )
+    .await;
+    assert!(ok.is_ok(), "{ok:?}");
+}

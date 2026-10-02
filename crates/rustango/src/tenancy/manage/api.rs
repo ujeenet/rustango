@@ -116,21 +116,31 @@ where
         .validate_storage_mode(opts.mode)
         .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
 
-    let host_pattern = opts.host_pattern.clone().or_else(|| {
-        std::env::var("RUSTANGO_APEX_DOMAIN")
-            .ok()
-            .map(|apex| format!("{slug}.{apex}"))
-    });
+    // The provisioner's own checks: slug, schema, host, prefix, port, and
+    // that no other tenant routes on them (#2097).
+    let checked = crate::tenancy::provision::checked_request(
+        &pools.registry_pool(),
+        &crate::tenancy::provision::ProvisionRequest {
+            slug: slug.to_owned(),
+            mode: opts.mode,
+            backend: opts.backend,
+            display_name: opts.display_name.clone(),
+            database_url: opts.database_url.clone(),
+            schema_name: opts.schema_name.clone(),
+            host_pattern: opts.host_pattern.clone(),
+            port: opts.port,
+            path_prefix: opts.path_prefix.clone(),
+            run_migrations: !opts.no_migrate,
+            preflight: crate::tenancy::preflight::Preflight::default(),
+        },
+    )
+    .await?;
+    let host_pattern = checked.host_pattern;
     let display_name = opts.display_name.clone().unwrap_or_else(|| slug.to_owned());
     let schema_name = match opts.mode {
         StorageMode::Schema => Some(opts.schema_name.clone().unwrap_or_else(|| slug.to_owned())),
         StorageMode::Database => None,
     };
-    // Same rule as the provisioner, so neither path can create `public`.
-    if let Some(schema) = &schema_name {
-        crate::tenancy::provision::validate_schema_name(schema)
-            .map_err(TenancyError::Validation)?;
-    }
 
     if let StorageMode::Schema = opts.mode {
         #[cfg(feature = "postgres")]
