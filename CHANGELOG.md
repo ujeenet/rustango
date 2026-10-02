@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — PG `bulk_update` sets an all-NULL vector column (#1970)
+
+The NULL is cast `::vector`, not left as text.
+
 ### Fixed — a DISTINCT page counts distinct rows (#1966)
 
 `fetch_paginated_pool` / `fetch_paginated_on` with `distinct()` (or PG `distinct_on`) counted rows before DISTINCT; the total is now a counting subquery. Table lookups share `ModelEntry::for_table`.

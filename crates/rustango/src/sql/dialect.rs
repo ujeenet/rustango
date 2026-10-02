@@ -432,9 +432,9 @@ pub trait Dialect: Send + Sync {
             FieldType::Range(crate::core::RangeElem::Date) => "daterange",
             FieldType::Range(crate::core::RangeElem::DateTime) => "tstzrange",
             FieldType::HStore => "hstore",
-            // `vector(N)` and `geometry(Point, srid)` carry a runtime
-            // value in the type, so they have no fixed CAST spelling.
-            FieldType::Vector(_) => return None,
+            // Bare `vector` takes any dimension, so an all-NULL VALUES column types (#1970).
+            FieldType::Vector(_) => "vector",
+            // PostGIS casts text to geometry implicitly, so a NULL needs no cast.
             FieldType::Geometry(_) => return None,
         })
     }
