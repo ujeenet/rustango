@@ -322,6 +322,26 @@ impl Dialect for MySql {
         )
     }
 
+    /// `PRIMARY` and multi-column indexes are left out.
+    fn unique_index_names_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(s.INDEX_NAME AS CHAR) FROM information_schema.STATISTICS s \
+             WHERE s.TABLE_SCHEMA = DATABASE() AND s.TABLE_NAME = ? AND s.COLUMN_NAME = ? \
+             AND s.NON_UNIQUE = 0 AND s.INDEX_NAME <> 'PRIMARY' AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.STATISTICS o \
+             WHERE o.TABLE_SCHEMA = s.TABLE_SCHEMA AND o.TABLE_NAME = s.TABLE_NAME \
+             AND o.INDEX_NAME = s.INDEX_NAME AND o.SEQ_IN_INDEX > 1)",
+        )
+    }
+
+    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP INDEX {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        ))
+    }
+
     /// MySQL has no `ON CONFLICT`, so this writes
     /// `ON DUPLICATE KEY UPDATE <col> = <col>`: a no-op assignment
     /// that satisfies its need for at least one. Any of the conflict

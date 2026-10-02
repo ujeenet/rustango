@@ -165,18 +165,11 @@ async fn unique_drops_on_long_names(pool: &Pool) {
         pool.dialect().name()
     );
 
-    let drop = chain.step(pool, with(false)).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "AlterColumnUnique renders on Postgres",
-        mysql => false, because "AlterColumn* is refused at render until #559",
-        sqlite => false, because "AlterColumn* is refused at render until #559",
-    };
-    if !runs.value {
-        let err = drop.expect_err(runs.why);
-        assert!(err.contains("AlterColumnUnique"), "{err}");
-        return;
-    }
-    drop.expect("dropping UNIQUE finds the constraint by name");
+    // PG drops it by name, MySQL by its catalog name, SQLite rebuilds (#1676).
+    chain
+        .step(pool, with(false))
+        .await
+        .expect("dropping UNIQUE finds the constraint");
     exec(
         pool,
         "INSERT INTO {} ({}, {}) VALUES (2, 'a')",
@@ -668,28 +661,40 @@ async fn type_change_is_not_undone_by_max_length(pool: &Pool) {
         .step(pool, c("string", json!({"max_length": 50})))
         .await
         .expect("initial");
-    let alter = chain.step(pool, c("i32", json!({}))).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "AlterColumnType renders on Postgres",
-        mysql => false, because "AlterColumn* is refused at render until #559",
-        sqlite => false, because "AlterColumn* is refused at render until #559",
-    };
-    if !runs.value {
-        let err = alter.expect_err(runs.why);
-        assert!(err.contains("is not yet supported on dialect"), "{err}");
-        return;
-    }
-    alter.expect("the type change applies");
-    assert!(
-        exec(
-            pool,
-            "INSERT INTO {} ({}, {}) VALUES (1, 'abc')",
-            &[t, "id", "c"]
-        )
+    chain
+        .step(pool, c("i32", json!({})))
         .await
-        .is_err(),
-        "the column is an integer, so text is refused"
-    );
+        .expect("the type change applies");
+    let refused = by_dialect! { pool,
+        postgres => true, because "an integer column refuses text",
+        mysql => true, because "strict mode refuses text in an integer column",
+        sqlite => false, because "INTEGER affinity keeps text it cannot convert",
+    };
+    let text = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'abc')",
+        &[t, "id", "c"],
+    )
+    .await;
+    assert_eq!(text.is_err(), refused.value, "{}", refused.why);
+    let ints = by_dialect! { pool,
+        postgres => true, because "the column is an integer",
+        mysql => true, because "the column is an integer",
+        sqlite => true, because "the rebuilt column has INTEGER affinity",
+    };
+    exec(pool, "DELETE FROM {}", &[t]).await.unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, '42')",
+        &[t, "id", "c"],
+    )
+    .await
+    .unwrap();
+    let sql = q(pool, "SELECT {} FROM {}", &["c", t]);
+    let got: Vec<(i32,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got == [(42,)], ints.value, "{}", ints.why);
 }
 
 /// Shrinking `max_length` over longer values fails instead of
@@ -710,8 +715,8 @@ async fn shrinking_max_length_refuses_to_truncate(pool: &Pool) {
     let refuses = by_dialect! { pool,
         postgres => Some("too long"),
             because "without USING, PG refuses a value too long for the new type",
-        mysql => Some("AlterColumnMaxLength"),
-            because "AlterColumnMaxLength is refused at render until #559",
+        mysql => Some("truncated"),
+            because "strict mode refuses to truncate in MODIFY COLUMN",
         sqlite => None, because "SQLite never enforces VARCHAR length, so the change is a no-op",
     };
     let Some(expected) = refuses.value else {
@@ -731,20 +736,15 @@ async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
         .step(pool, c("i32", json!({})))
         .await
         .expect("initial");
-    let alter = chain
+    chain
         .step(pool, c("string", json!({"max_length": 5})))
-        .await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "AlterColumnType renders on Postgres",
-        mysql => false, because "AlterColumn* is refused at render until #559",
-        sqlite => false, because "AlterColumn* is refused at render until #559",
+        .await
+        .expect("the type change applies");
+    let enforced = by_dialect! { pool,
+        postgres => true, because "the column is VARCHAR(5)",
+        mysql => true, because "the column is VARCHAR(5)",
+        sqlite => false, because "SQLite never enforces VARCHAR length",
     };
-    if !runs.value {
-        let err = alter.expect_err(runs.why);
-        assert!(err.contains("is not yet supported on dialect"), "{err}");
-        return;
-    }
-    alter.expect("the type change applies");
     exec(
         pool,
         "INSERT INTO {} ({}, {}) VALUES (1, 'abcde')",
@@ -752,7 +752,7 @@ async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
     )
     .await
     .expect("five characters fit");
-    assert!(
+    assert_eq!(
         exec(
             pool,
             "INSERT INTO {} ({}, {}) VALUES (2, 'abcdef')",
@@ -760,7 +760,9 @@ async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
         )
         .await
         .is_err(),
-        "the column is VARCHAR(5)"
+        enforced.value,
+        "{}",
+        enforced.why
     );
 }
 
@@ -975,18 +977,23 @@ async fn not_null_with_default_backfills(pool: &Pool) {
                 col("n", "i64", json!({"nullable": false, "default": "0"}))])]}),
         )
         .await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "AlterColumnNullable renders on Postgres",
-        mysql => false, because "AlterColumn* is refused at render until #559",
-        sqlite => false, because "AlterColumn* is refused at render until #559",
-    };
-    if !runs.value {
-        assert!(alter
-            .expect_err(runs.why)
-            .contains("is not yet supported on dialect"));
-        return;
-    }
     alter.expect("the NULL row is backfilled first");
+    let sql = q(pool, "SELECT {} FROM {}", &["n", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(0,)], "the NULL became the default");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, NULL)",
+            &[t, "id", "n"]
+        )
+        .await
+        .is_err(),
+        "the column is NOT NULL on {}",
+        pool.dialect().name()
+    );
 }
 
 // ---------------------------------------------------------------- #1557
@@ -1633,6 +1640,74 @@ async fn cross_ledger_squash_runs_its_other_changes(pool: &Pool) {
     .expect("its AddColumn ran");
 }
 
+/// A UNIQUE under a name the migrations did not give it still drops, and
+/// an AlterColumn before a later change on the table still rebuilds right.
+async fn unique_drop_finds_the_live_name(pool: &Pool) {
+    let t = "mad_ul_item";
+    let chain = Chain::new(pool, "ul", &[t]).await;
+    let with = |unique: bool| {
+        json!({"tables": [table(t, vec![id(),
+            col("c", "string", json!({"max_length": 20, "unique": unique}))])]})
+    };
+    chain.step(pool, with(true)).await.expect("initial");
+    let renamed = by_dialect! { pool,
+        postgres => false, because "PG drops the constraint by its rendered name",
+        mysql => true, because "MySQL looks the index up in the catalog",
+        sqlite => false, because "SQLite rebuilds the table",
+    };
+    if renamed.value {
+        let name = rustango::migrate::ddl::unique_constraint_name(t, "c");
+        exec(
+            pool,
+            "ALTER TABLE {} RENAME INDEX {} TO {}",
+            &[t, &name, "hand_uq"],
+        )
+        .await
+        .unwrap();
+    }
+    chain.step(pool, with(false)).await.expect("UNIQUE drops");
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, 'same')"),
+            &[t, "id", "c"],
+        )
+        .await
+        .expect("no longer unique");
+    }
+}
+
+/// A column added and another made NOT NULL in one migration: the
+/// rebuild keeps the new column and fills the NULL.
+async fn alter_then_add_on_one_table(pool: &Pool) {
+    let t = "mad_aa_item";
+    let chain = Chain::new(pool, "aa", &[t]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("n", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "id"])
+        .await
+        .unwrap();
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(),
+                col("n", "i64", json!({"nullable": false, "default": "3"})),
+                col("m", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("alter and add apply");
+    let sql = q(pool, "SELECT {}, {} FROM {}", &["n", "m", t]);
+    let got: Vec<(i64, Option<i64>)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(3, None)]);
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -1644,6 +1719,8 @@ tri_dialect_test!(
         rebuild_checks_only_its_own_orphans,
         legacy_pg_runner_replaces_the_fk,
         cross_ledger_squash_runs_its_other_changes,
+        unique_drop_finds_the_live_name,
+        alter_then_add_on_one_table,
         rebuild_keeps_unknown_columns,
         unique_column_drops,
         unique_drops_on_long_names,

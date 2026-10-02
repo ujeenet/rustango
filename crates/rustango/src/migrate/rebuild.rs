@@ -18,6 +18,8 @@ pub struct TableRebuild {
     target: TableSnapshot,
     /// Live columns the rebuild may leave behind; any other one refuses it.
     dropping: Vec<String>,
+    /// `(column, expression)` copied instead of the bare column.
+    copy: Vec<(String, String)>,
 }
 
 impl TableRebuild {
@@ -28,7 +30,16 @@ impl TableRebuild {
         Self {
             target: target.clone(),
             dropping: Vec::new(),
+            copy: Vec::new(),
         }
+    }
+
+    /// Copy `column` as `expr` over the old table, e.g. a `COALESCE` that
+    /// fills the NULLs a new NOT NULL refuses.
+    #[must_use]
+    pub(crate) fn copy_as(mut self, column: &str, expr: String) -> Self {
+        self.copy.push((column.to_owned(), expr));
+        self
     }
 
     /// Let the rebuild leave the live `column` behind.
@@ -66,18 +77,29 @@ impl TableRebuild {
     pub(crate) fn statements(&self, dialect: &dyn Dialect) -> Vec<String> {
         let old = &self.target.name;
         let new = format!("_rustango_rebuild_{old}");
-        let cols = self
-            .target
-            .fields
-            .iter()
-            .filter(|f| f.generated_as.is_none())
+        let stored = || {
+            self.target
+                .fields
+                .iter()
+                .filter(|f| f.generated_as.is_none())
+        };
+        let cols = stored()
             .map(|f| dialect.quote_ident(&f.column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let exprs = stored()
+            .map(|f| {
+                self.copy
+                    .iter()
+                    .find(|(c, _)| *c == f.column)
+                    .map_or_else(|| dialect.quote_ident(&f.column), |(_, e)| e.clone())
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let mut out = vec![
             super::diff::create_table_sql_as(&self.target, &new, dialect),
             format!(
-                "INSERT INTO {} ({cols}) SELECT {cols} FROM {}",
+                "INSERT INTO {} ({cols}) SELECT {exprs} FROM {}",
                 dialect.quote_ident(&new),
                 dialect.quote_ident(old)
             ),
@@ -255,6 +277,21 @@ pub(crate) fn shape_at(
                     f.column.clone_from(old_column);
                 }
             }
+            SC::AlterColumnType { column, from, .. } => {
+                field(&mut t, column)?.ty.clone_from(from);
+            }
+            SC::AlterColumnNullable {
+                column, nullable, ..
+            } => field(&mut t, column)?.nullable = !nullable,
+            SC::AlterColumnDefault { column, from, .. } => {
+                field(&mut t, column)?.default.clone_from(from);
+            }
+            SC::AlterColumnMaxLength { column, from, .. } => {
+                field(&mut t, column)?.max_length = *from;
+            }
+            SC::AlterColumnUnique { column, unique, .. } => {
+                field(&mut t, column)?.unique = !unique;
+            }
             SC::AlterFkOnDelete { column, from, .. } => {
                 if let Some(rel) = t
                     .fields
@@ -279,6 +316,17 @@ pub(crate) fn shape_at(
         }
     }
     Ok(t)
+}
+
+fn field<'t>(
+    t: &'t mut TableSnapshot,
+    column: &str,
+) -> Result<&'t mut super::snapshot::FieldSnapshot, String> {
+    let name = t.name.clone();
+    t.fields
+        .iter_mut()
+        .find(|f| f.column == column)
+        .ok_or_else(|| format!("`{name}.{column}` is altered later but not in the snapshot"))
 }
 
 /// A pooled SQLite connection for migration DDL, FK enforcement off when it

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `AlterColumn*` migrations run on MySQL and SQLite (#1676)
+
+MySQL restates the column with `MODIFY COLUMN` (NULLs filled first; strict mode refuses a truncating shrink) and drops a UNIQUE by its catalog name; SQLite rebuilds the table, copying NULLs as the new default.
+
 ### Fixed — a cross-ledger squash no longer skips its other changes (#1676)
 
 When a squash's tables already exist under another ledger, its changes to other tables run instead of being recorded unrun; a squash with data ops there is refused.

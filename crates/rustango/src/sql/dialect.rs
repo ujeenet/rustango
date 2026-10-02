@@ -343,6 +343,20 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Query for the names of the single-column UNIQUE indexes on one
+    /// column, binding `(table, column)`. `Some` where an `AlterColumnUnique`
+    /// drops the index by that name (MySQL) (#1676).
+    fn unique_index_names_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Drop the UNIQUE index `name` from `table`, for
+    /// [`Self::unique_index_names_sql`]'s names.
+    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+        let _ = (table, name);
+        None
+    }
+
     /// Statement that moves `table.column`'s serial counter past the rows
     /// already there, binding `(quoted table, column)` in that order.
     /// `None` where the counter follows explicit ids by itself (MySQL,

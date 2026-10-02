@@ -584,19 +584,20 @@ fn push_alter_changes(
     if !leaving_string {
         out.extend(max_length);
     }
-    if pf.nullable != cf.nullable {
-        out.push(SchemaChange::AlterColumnNullable {
-            table: table.to_owned(),
-            column: cf.column.clone(),
-            nullable: cf.nullable,
-        });
-    }
+    // The default first: a SQLite rebuild to NOT NULL fills NULLs with it.
     if pf.default != cf.default {
         out.push(SchemaChange::AlterColumnDefault {
             table: table.to_owned(),
             column: cf.column.clone(),
             from: pf.default.clone(),
             to: cf.default.clone(),
+        });
+    }
+    if pf.nullable != cf.nullable {
+        out.push(SchemaChange::AlterColumnNullable {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            nullable: cf.nullable,
         });
     }
     if pf.unique != cf.unique {
@@ -845,43 +846,86 @@ fn fk_target(dialect: &dyn crate::sql::Dialect, schema: Option<&str>, table: &st
     }
 }
 
-/// Reject `AlterColumn*` operations on dialects whose DDL we
-/// don't yet render natively.
-///
-/// History: the `AlterColumnType / Nullable / Default / MaxLength
-/// / Unique` arms emit hand-rolled Postgres syntax — `ALTER TABLE
-/// "<t>" ALTER COLUMN "<c>" TYPE / SET NOT NULL / DROP DEFAULT /
-/// ...`. Before this guard those arms ignored the `dialect`
-/// parameter and emitted PG SQL on MySQL / SQLite, which then
-/// failed at apply time with a cryptic database error (MySQL
-/// rejects `ALTER COLUMN` — wants `MODIFY COLUMN`; SQLite has no
-/// `ALTER COLUMN` at all, only `ALTER TABLE … RENAME COLUMN`).
-///
-/// Until we ship native MySQL `MODIFY COLUMN` + SQLite
-/// table-rebuild rendering (tracked in #559), surface the gap
-/// loudly at preview / apply time so operators can swap to a
-/// manual `RunSQL` operation before hitting the wall in prod. The
-/// PG path is unchanged.
-fn guard_alter_column_dialect(
-    dialect: &dyn crate::sql::Dialect,
-    op: &'static str,
+/// An `AlterColumn*` on MySQL or SQLite (#1676). MySQL restates the whole
+/// column with `MODIFY COLUMN`; SQLite rebuilds the table into `current`.
+fn alter_column_elsewhere(
+    change: &SchemaChange,
     table: &str,
-    column: &str,
+    f: &FieldSnapshot,
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    unique_names: &UniqueNames,
+    out: &mut RenderedBatch,
 ) -> Result<(), String> {
-    if dialect.name() == "postgres" {
-        return Ok(());
+    let unique = match change {
+        SchemaChange::AlterColumnUnique { unique, .. } => Some(*unique),
+        _ => None,
+    };
+    if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table) {
+        // An AddColumn's named unique index would come back from the catalog.
+        if unique == Some(false) {
+            if let Ok(name) = unique_names.get(table, &f.column) {
+                out.immediate.push(format!(
+                    "DROP INDEX IF EXISTS {}",
+                    dialect.quote_ident(&name)
+                ));
+            }
+        }
+        let mut rebuild = rebuild?;
+        if !f.nullable && f.generated_as.is_none() {
+            if let Some(expr) = &f.default {
+                let value = render_column_default(expr, &f.ty, f.max_length, dialect);
+                let col = dialect.quote_ident(&f.column);
+                rebuild = rebuild.copy_as(&f.column, format!("COALESCE({col}, {value})"));
+            }
+        }
+        return out.set_rebuild(rebuild);
     }
-    Err(format!(
-        "{op} for `{table}.{column}` is not yet supported on dialect `{dialect_name}`. \
-         The arm currently emits Postgres-specific DDL (ALTER COLUMN ... TYPE / SET NOT NULL / \
-         SET DEFAULT / ADD CONSTRAINT UNIQUE) which would fail at apply time. \
-         Workaround: emit a hand-written `Operation::Data` (RunSQL) with the dialect-correct \
-         DDL for your migration. Tracked in #559 (per-dialect ALTER COLUMN rendering).",
-        op = op,
-        table = table,
-        column = column,
-        dialect_name = dialect.name(),
-    ))
+    match unique {
+        Some(true) => {
+            let name = unique_names.get(table, &f.column)?;
+            out.immediate
+                .push(dialect.add_unique_constraint_sql(table, &name, &f.column));
+        }
+        // The runner drops it by its name in the catalog.
+        Some(false) => {}
+        None => {
+            if !f.nullable && f.default.is_some() {
+                out.immediate.push(fill_nulls_sql(table, f, dialect));
+            }
+            out.immediate.push(format!(
+                "ALTER TABLE {} MODIFY COLUMN {}",
+                dialect.quote_ident(table),
+                column_definition(f, dialect)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `<column> <type> [DEFAULT …] [NOT NULL] [COMMENT …]`, as CREATE TABLE
+/// writes it, for MySQL's `MODIFY COLUMN`; PK and CHECK stay where they are.
+fn column_definition(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    let mut sql = format!(
+        "{} {}",
+        dialect.quote_ident(&f.column),
+        sql_type_with_dialect(f, dialect)
+    );
+    if let Some(expr) = &f.generated_as {
+        let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
+    } else if let Some(expr) = &f.default {
+        let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
+        let _ = write!(sql, " DEFAULT {rendered}");
+    }
+    if !f.nullable {
+        sql.push_str(" NOT NULL");
+    }
+    if let Some(comment) = &f.db_comment {
+        if let Some(inline) = dialect.write_inline_column_comment(comment) {
+            sql.push_str(&inline);
+        }
+    }
+    sql
 }
 
 /// Who holds each UNIQUE name in `current`. Two columns that shorten to
@@ -1083,13 +1127,41 @@ fn render_changes_split_inner(
                 out.immediate
                     .push(format!("DROP TABLE {}{cascade}", dialect.quote_ident(name)));
             }
+            SchemaChange::AlterColumnType { table, column, .. }
+            | SchemaChange::AlterColumnNullable { table, column, .. }
+            | SchemaChange::AlterColumnDefault { table, column, .. }
+            | SchemaChange::AlterColumnMaxLength { table, column, .. }
+            | SchemaChange::AlterColumnUnique { table, column, .. }
+                if dialect.name() != "postgres" =>
+            {
+                // VARCHAR(n) and TEXT are one affinity there, and n is never enforced (#1220).
+                if dialect.alters_by_rebuild()
+                    && matches!(change, SchemaChange::AlterColumnMaxLength { .. })
+                {
+                    continue;
+                }
+                let f = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .ok_or_else(|| {
+                        format!("altering `{table}.{column}` but the snapshot has no such column")
+                    })?;
+                alter_column_elsewhere(
+                    change,
+                    table,
+                    f,
+                    current,
+                    dialect,
+                    &unique_names,
+                    &mut out,
+                )?;
+            }
             SchemaChange::AlterColumnType {
                 table,
                 column,
                 from: _,
                 to,
             } => {
-                guard_alter_column_dialect(dialect, "AlterColumnType", table, column)?;
                 let pg_to = pg_type_for_ty_name(to);
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
@@ -1100,7 +1172,6 @@ fn render_changes_split_inner(
                 column,
                 nullable,
             } => {
-                guard_alter_column_dialect(dialect, "AlterColumnNullable", table, column)?;
                 // Option<T> → T with a default: fill the NULLs first, or
                 // SET NOT NULL fails on them (#1881).
                 let field = current.table(table).and_then(|t| t.field(column));
@@ -1121,39 +1192,25 @@ fn render_changes_split_inner(
                 column,
                 from: _,
                 to,
-            } => {
-                guard_alter_column_dialect(dialect, "AlterColumnDefault", table, column)?;
-                match to {
-                    Some(expr) => {
-                        // Empty-string default → the literal `''`, not nothing
-                        // (#1161), so we don't emit `SET DEFAULT ` (invalid).
-                        let rendered: &str = if expr.is_empty() { "''" } else { expr };
-                        out.immediate.push(format!(
-                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {rendered}"#,
-                        ));
-                    }
-                    None => out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
-                    )),
+            } => match to {
+                Some(expr) => {
+                    // Empty-string default → the literal `''`, not nothing
+                    // (#1161), so we don't emit `SET DEFAULT ` (invalid).
+                    let rendered: &str = if expr.is_empty() { "''" } else { expr };
+                    out.immediate.push(format!(
+                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {rendered}"#,
+                    ));
                 }
-            }
+                None => out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
+                )),
+            },
             SchemaChange::AlterColumnMaxLength {
                 table,
                 column,
                 from: _,
                 to,
             } => {
-                // SQLite gives `VARCHAR(n)` and `TEXT` the same TEXT
-                // affinity and never enforces the length, so this
-                // change has no storage effect there. Emitting nothing
-                // is the honest rendering; the guard below used to
-                // reject it, failing a migration over DDL that would
-                // have been a no-op (#1220). MySQL *does* enforce the
-                // length and still needs `MODIFY COLUMN` (#559).
-                if dialect.name() == "sqlite" {
-                    continue;
-                }
-                guard_alter_column_dialect(dialect, "AlterColumnMaxLength", table, column)?;
                 let pg_to = match to {
                     Some(n) => format!("VARCHAR({n})"),
                     None => "TEXT".into(),
@@ -1169,7 +1226,6 @@ fn render_changes_split_inner(
                 column,
                 unique,
             } => {
-                guard_alter_column_dialect(dialect, "AlterColumnUnique", table, column)?;
                 let name = unique_names.get(table, column)?;
                 if *unique {
                     out.immediate
@@ -2203,10 +2259,42 @@ mod sql_type_tests {
         }
     }
 
-    // -------- guard_alter_column_dialect (#559 protection) --------
+    // -------- AlterColumn* per dialect (#1676) --------
 
     fn empty_snap() -> SchemaSnapshot {
         SchemaSnapshot::default()
+    }
+
+    /// `t(id, c)` with `c` NOT NULL DEFAULT 7.
+    fn alter_snap() -> SchemaSnapshot {
+        SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "t".into(),
+                model: "t".into(),
+                fields: vec![
+                    FieldSnapshot {
+                        primary_key: true,
+                        ..fs("i64", true)
+                    },
+                    FieldSnapshot {
+                        name: "c".into(),
+                        column: "c".into(),
+                        default: Some("7".into()),
+                        ..fs("i64", false)
+                    },
+                ],
+                composite_fks: vec![],
+            }],
+            ..SchemaSnapshot::default()
+        }
+    }
+
+    fn not_null() -> Vec<SchemaChange> {
+        vec![SchemaChange::AlterColumnNullable {
+            table: "t".into(),
+            column: "c".into(),
+            nullable: false,
+        }]
     }
 
     #[test]
@@ -2224,54 +2312,38 @@ mod sql_type_tests {
         assert!(out.immediate[0].contains("ALTER COLUMN \"c\" TYPE"));
     }
 
+    /// MySQL restates the whole column, NULLs filled first.
     #[cfg(feature = "mysql")]
     #[test]
-    fn alter_column_type_errors_on_mysql() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnType {
-            table: "t".into(),
-            column: "c".into(),
-            from: "i32".into(),
-            to: "i64".into(),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("AlterColumnType must reject MySQL until native rendering ships");
-        assert!(err.contains("AlterColumnType"));
-        assert!(err.contains("`t.c`"));
-        assert!(err.contains("mysql"));
-        assert!(err.contains("#559"));
-        // Workaround pointer present.
-        assert!(err.contains("RunSQL"));
+    fn alter_column_is_a_modify_on_mysql() {
+        let out = render_changes_split_with_dialect(&not_null(), &alter_snap(), &crate::sql::MySql)
+            .unwrap();
+        assert_eq!(
+            out.immediate,
+            [
+                "UPDATE `t` SET `c` = 7 WHERE `c` IS NULL",
+                "ALTER TABLE `t` MODIFY COLUMN `c` BIGINT DEFAULT 7 NOT NULL"
+            ]
+        );
     }
 
+    /// SQLite rebuilds, copying NULLs as the default.
     #[cfg(feature = "sqlite")]
     #[test]
-    fn alter_column_nullable_errors_on_sqlite() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnNullable {
-            table: "t".into(),
-            column: "c".into(),
-            nullable: false,
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("AlterColumnNullable must reject SQLite until rebuild path ships");
-        assert!(err.contains("AlterColumnNullable"));
-        assert!(err.contains("sqlite"));
-    }
-
-    #[cfg(feature = "mysql")]
-    #[test]
-    fn alter_column_default_errors_on_mysql() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnDefault {
-            table: "t".into(),
-            column: "c".into(),
-            from: None,
-            to: Some("'hi'".into()),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("AlterColumnDefault must reject MySQL");
-        assert!(err.contains("AlterColumnDefault"));
+    fn alter_column_is_a_rebuild_on_sqlite() {
+        let out =
+            render_changes_split_with_dialect(&not_null(), &alter_snap(), &crate::sql::Sqlite)
+                .unwrap();
+        assert!(out.immediate.is_empty());
+        let stmts = out
+            .rebuild
+            .expect("a rebuild")
+            .statements(&crate::sql::Sqlite);
+        assert!(
+            stmts[1].contains(r#"SELECT "x", COALESCE("c", 7) FROM "t""#),
+            "{}",
+            stmts[1]
+        );
     }
 
     #[cfg(feature = "sqlite")]
@@ -2297,38 +2369,6 @@ mod sql_type_tests {
             batch.immediate,
             batch.deferred_fks,
         );
-    }
-
-    #[cfg(feature = "mysql")]
-    #[test]
-    fn alter_column_max_length_still_errors_on_mysql() {
-        // The control for the SQLite no-op: MySQL *does* enforce
-        // VARCHAR length, so silently emitting nothing there would
-        // leave the column wrong. It must keep pointing at #559.
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnMaxLength {
-            table: "t".into(),
-            column: "c".into(),
-            from: Some(50),
-            to: Some(100),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("MySQL enforces VARCHAR length and cannot no-op");
-        assert!(err.contains("AlterColumnMaxLength"), "{err}");
-    }
-
-    #[cfg(feature = "mysql")]
-    #[test]
-    fn alter_column_unique_errors_on_mysql() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnUnique {
-            table: "t".into(),
-            column: "c".into(),
-            unique: true,
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("AlterColumnUnique must reject MySQL");
-        assert!(err.contains("AlterColumnUnique"));
     }
 
     // -------- CreateM2MTable (#559 tri-dialect) --------

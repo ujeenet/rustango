@@ -864,6 +864,10 @@ fn preview_migration(
                         statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
                     }
                 }
+                if let (Some(u), Some(_)) = (&step.drop_uniques, dialect.unique_index_names_sql()) {
+                    let name = ddl::unique_constraint_name(&u.table, &u.column);
+                    statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
+                }
                 statements.extend(step.batch.immediate);
                 if let Some(rebuild) = &step.batch.rebuild {
                     statements.extend(rebuild.statements(dialect));
@@ -2601,6 +2605,9 @@ struct Step {
     /// Live FKs on a column to drop by catalog name before the step.
     #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
     drop_fks: Option<FkDrop>,
+    /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
+    #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+    drop_uniques: Option<FkDrop>,
 }
 
 /// The FKs on `table.column`, found by name in the catalog: a dropped
@@ -2626,17 +2633,36 @@ fn render_step(
     let retry = super::ensure::filled_table_retry(dialect, after, changes, render)
         .transpose()
         .map_err(MigrateError::Validation)?;
-    let rebuilt = match change {
-        super::SchemaChange::DropColumn { table, column }
-        | super::SchemaChange::AlterFkOnDelete { table, column, .. } => {
-            Some((table.as_str(), column.as_str()))
+    use super::SchemaChange as SC;
+    let at_column = |table: &str, column: &str| FkDrop {
+        table: table.to_owned(),
+        column: column.to_owned(),
+    };
+    let drop_fks = match change {
+        SC::DropColumn { table, column } | SC::AlterFkOnDelete { table, column, .. } => {
+            Some(at_column(table, column))
         }
         _ => None,
     };
-    let drop_fks = rebuilt.map(|(table, column)| FkDrop {
-        table: table.to_owned(),
-        column: column.to_owned(),
-    });
+    let drop_uniques = match change {
+        SC::AlterColumnUnique {
+            table,
+            column,
+            unique: false,
+        } => Some(at_column(table, column)),
+        _ => None,
+    };
+    // The changes SQLite makes by rebuilding the table.
+    let rebuilt = match change {
+        SC::DropColumn { table, .. }
+        | SC::AlterFkOnDelete { table, .. }
+        | SC::AlterColumnType { table, .. }
+        | SC::AlterColumnNullable { table, .. }
+        | SC::AlterColumnDefault { table, .. }
+        | SC::AlterColumnMaxLength { table, .. }
+        | SC::AlterColumnUnique { table, .. } => Some(table.as_str()),
+        _ => None,
+    };
     // The ops after `change`, which is borrowed from `ops`.
     let later = ops
         .iter()
@@ -2644,7 +2670,7 @@ fn render_step(
         .map_or(&[][..], |i| &ops[i + 1..]);
     // A rebuild takes the table's shape at this op, not at the end (#2121).
     let at = match rebuilt.filter(|_| dialect.alters_by_rebuild()) {
-        Some((table, _)) if later.iter().any(|op| touches_table(op, table)) => {
+        Some(table) if later.iter().any(|op| touches_table(op, table)) => {
             let mut at = after.clone();
             let shape =
                 super::rebuild::shape_at(table, later, after).map_err(MigrateError::Validation)?;
@@ -2674,6 +2700,7 @@ fn render_step(
         batch,
         retry,
         drop_fks,
+        drop_uniques,
     })
 }
 
@@ -2746,6 +2773,18 @@ macro_rules! step_statements {
                 names
                     .iter()
                     .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+            );
+        }
+        if let (Some(u), Some(sql)) = (&step.drop_uniques, dialect.unique_index_names_sql()) {
+            let names: Vec<String> = sqlx::query_scalar(sql)
+                .bind(&u.table)
+                .bind(&u.column)
+                .fetch_all(&mut *$conn)
+                .await?;
+            out.extend(
+                names
+                    .iter()
+                    .filter_map(|n| dialect.drop_unique_index_sql(&u.table, n)),
             );
         }
         out.extend(step.batch.immediate.iter().cloned());
