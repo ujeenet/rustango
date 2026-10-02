@@ -451,14 +451,13 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             changes.push(create_m2m(mt));
         }
     }
-    // New composite FK constraints (added on existing tables, or on
-    // brand-new tables — we emit them either way and let `render`
-    // route through `deferred_fks` so referenced tables exist first).
+    // New composite FKs on existing tables. A new table's come with its
+    // `CreateTable`; emitting them here too added each one twice (#1983).
     for ct in &current.tables {
-        let prev_fks: &[_] = prev
-            .table(&ct.name)
-            .map(|t| t.composite_fks.as_slice())
-            .unwrap_or(&[]);
+        let Some(pt) = prev.table(&ct.name) else {
+            continue;
+        };
+        let prev_fks = pt.composite_fks.as_slice();
         for cf in &ct.composite_fks {
             if !prev_fks.iter().any(|p| p.name == cf.name) {
                 changes.push(add_composite_fk(&ct.name, cf));

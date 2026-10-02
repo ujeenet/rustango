@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a new table's composite FK is created once (#1983)
+
+`makemigrations` no longer adds an `AddCompositeFk` beside the `CreateTable` that already carries it; PG and MySQL failed with "already exists", SQLite refused the op.
+
 ### Fixed — a changed `on_delete` reaches an existing database (#1557)
 
 A new `SchemaChange::AlterFkOnDelete` replaces the FK: PG and MySQL drop it by its catalog name and re-add it; SQLite rebuilds the table (create, copy, drop, rename) with FK checks off. The framework's eleven cascading FKs get it through the system chain.

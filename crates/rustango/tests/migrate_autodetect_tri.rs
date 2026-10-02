@@ -612,14 +612,6 @@ async fn m2m_drops_before_its_tables(pool: &Pool) {
 async fn composite_fk_drops_before_its_parent(pool: &Pool) {
     let (parent, child) = ("mad_dx_parent", "mad_dx_child");
     let chain = Chain::new(pool, "dx", &[child, parent]).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "composite FKs are added by ALTER TABLE",
-        mysql => true, because "composite FKs are added by ALTER TABLE; 1553/3730 if misordered",
-        sqlite => false, because "SQLite cannot add a composite FK to a table (#559)",
-    };
-    if !runs.value {
-        return;
-    }
     let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
     let kid = |with_fk: bool| {
         let mut t = table(child, ab());
@@ -631,22 +623,33 @@ async fn composite_fk_drops_before_its_parent(pool: &Pool) {
     };
     let uq = json!([{"name": "mad_dx_ab_uq", "table": parent, "columns": ["a", "b"],
                      "unique": true}]);
-    chain
-        .step(
-            pool,
-            json!({"tables": [table(parent, ab()), kid(false)], "indexes": uq}),
-        )
-        .await
-        .expect("initial");
-    // A composite FK on a new table is emitted twice (a separate bug), so
-    // it is added to the existing one.
+    // A new table's composite FK comes once, with its CREATE (#1983).
     chain
         .step(
             pool,
             json!({"tables": [table(parent, ab()), kid(true)], "indexes": uq}),
         )
         .await
-        .expect("composite FK");
+        .expect("a new table with a composite FK");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (1, 9, 9)",
+            &[child, "id", "a", "b"]
+        )
+        .await
+        .is_err(),
+        "the composite FK holds on {}",
+        pool.dialect().name()
+    );
+    let runs = by_dialect! { pool,
+        postgres => true, because "composite FKs are dropped by ALTER TABLE",
+        mysql => true, because "composite FKs are dropped by ALTER TABLE; 1553/3730 if misordered",
+        sqlite => false, because "SQLite cannot drop a composite FK from a table (#559)",
+    };
+    if !runs.value {
+        return;
+    }
     chain
         .step(pool, json!({"tables": [kid(false)]}))
         .await
@@ -1288,17 +1291,13 @@ impl Chain {
 async fn hand_named_and_composite_fks_survive(pool: &Pool) {
     let (a, b) = ("mad_hc_author", "mad_hc_book");
     let chain = Chain::new(pool, "hc", &[b, a]).await;
-    let with = |on_delete: Option<&str>, composite: bool| {
+    let with = |on_delete: Option<&str>| {
         let mut rel = json!({"kind": "fk", "to": a, "on": "id"});
         if let Some(action) = on_delete {
             rel["on_delete"] = json!(action);
         }
-        let composite = if composite {
-            json!([{"name": "author_code", "to": a,
-                    "from": ["author_id", "code"], "on": ["id", "code"]}])
-        } else {
-            json!([])
-        };
+        let composite = json!([{"name": "author_code", "to": a,
+                                "from": ["author_id", "code"], "on": ["id", "code"]}]);
         json!({
             "tables": [
                 table(a, vec![id(), col("code", "i64", json!({}))]),
@@ -1310,18 +1309,14 @@ async fn hand_named_and_composite_fks_survive(pool: &Pool) {
                          "columns": ["id", "code"], "unique": true}],
         })
     };
-    chain.step(pool, with(None, false)).await.expect("initial");
+    chain.step(pool, with(None)).await.expect("initial");
     // As a hand edit or an old release would have named it.
     let renamed = by_dialect! { pool,
         postgres => true, because "PG renames a constraint in place",
         mysql => true, because "MySQL re-adds it under another name",
-        sqlite => false, because "SQLite FKs have no name, nor ADD CONSTRAINT (#559)",
+        sqlite => false, because "SQLite FKs have no name to look up",
     };
     if renamed.value {
-        chain
-            .step(pool, with(None, true))
-            .await
-            .expect("AddCompositeFk");
         let fk = format!("{b}_author_id_fkey");
         let rename = match pool.dialect().name() {
             "postgres" => vec![q(
@@ -1343,7 +1338,7 @@ async fn hand_named_and_composite_fks_survive(pool: &Pool) {
         }
     }
     chain
-        .step(pool, with(Some("CASCADE"), renamed.value))
+        .step(pool, with(Some("CASCADE")))
         .await
         .expect("AlterFkOnDelete replaces the hand-named FK");
     exec(
@@ -1353,16 +1348,17 @@ async fn hand_named_and_composite_fks_survive(pool: &Pool) {
     )
     .await
     .unwrap();
-    let bad = exec(
-        pool,
-        "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 2)",
-        &[b, "id", "author_id", "code"],
-    )
-    .await;
-    assert_eq!(bad.is_err(), renamed.value, "the composite FK still holds");
-    if bad.is_ok() {
-        exec(pool, "DELETE FROM {}", &[b]).await.unwrap();
-    }
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 2)",
+            &[b, "id", "author_id", "code"],
+        )
+        .await
+        .is_err(),
+        "the composite FK still holds on {}",
+        pool.dialect().name()
+    );
     exec(
         pool,
         // A NULL `code` leaves the composite FK out of the delete.
