@@ -150,6 +150,12 @@ untouched.
 
 ## Unreleased
 
+### `on_delete` changes are migrated
+
+The first `migrate` after upgrading writes a system migration that fixes the framework's cascading FKs, and `makemigrations` emits `AlterFkOnDelete` for your own (#1557). The 0.57.7 catalog check and manual `ALTER` are no longer needed. On SQLite this, and every `DropColumn`, rebuilds the table, which fails if the table has a column the migration snapshot lacks.
+
+**Breaking:** `SchemaChange` has a new `AlterFkOnDelete` variant, and `RenderedBatch` a new `rebuild` field.
+
 ## 0.59.18
 
 ### `with_rollback` hands the closure an `AtomicTx`

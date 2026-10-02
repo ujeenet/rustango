@@ -124,6 +124,12 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` when changing a table's constraints means rebuilding the
+    /// table (SQLite), not an `ALTER` (#1557, #1982).
+    fn alters_by_rebuild(&self) -> bool {
+        false
+    }
+
     /// How many binds the backend takes in one statement. A multi-row
     /// `INSERT` reaches this at `rows × columns`.
     ///
@@ -331,7 +337,7 @@ pub trait Dialect: Send + Sync {
     }
 
     /// Query for the names of the FKs on one column, binding `(table,
-    /// column)`. `Some` where `DROP COLUMN` keeps them (MySQL, 1828).
+    /// column)`. `None` where FKs cannot be dropped by name (SQLite).
     fn foreign_key_names_sql(&self) -> Option<&'static str> {
         None
     }

@@ -350,7 +350,7 @@ async fn sqlite_actually_cascades_the_delete() {
 // simulates an old snapshot meeting new models. That is what these do.
 // =====================================================================
 
-use rustango::migrate::detect_unsupported_field_changes;
+use rustango::migrate::{detect_unsupported_field_changes, SchemaChange};
 
 /// A snapshot as the previous release wrote it: no `on_delete` key.
 fn snapshot_without_on_delete() -> SchemaSnapshot {
@@ -381,49 +381,76 @@ fn snapshot_without_on_delete() -> SchemaSnapshot {
     serde_json::from_value(v).expect("a pre-#1549 snapshot still deserializes")
 }
 
-/// Upgrading with no model change must not look like a schema change.
+/// Upgrading with no model change is not an unsupported change...
 #[test]
-fn an_upgrade_is_not_a_schema_change() {
-    let old = snapshot_without_on_delete();
-    let new = SchemaSnapshot::from_models(&[
-        <Author as rustango::core::Model>::SCHEMA,
-        <PostCascade as rustango::core::Model>::SCHEMA,
-        <PostSetNull as rustango::core::Model>::SCHEMA,
-        <PostDefault as rustango::core::Model>::SCHEMA,
-    ]);
-
-    let problems = detect_unsupported_field_changes(&old, &new);
+fn an_upgrade_is_not_an_unsupported_change() {
+    let problems = detect_unsupported_field_changes(&snapshot_without_on_delete(), &models());
     assert!(
         problems.is_empty(),
-        "an upgrade with zero model changes was reported as an unsupported schema \
-         change, which makes `make_migrations` refuse to run at all — and the advice \
-         it prints cannot be followed, because there is no AlterFk operation to \
-         author:\n  {}",
+        "an upgrade with zero model changes made `make_migrations` refuse to run:\n  {}",
         problems.join("\n  ")
     );
 }
 
-/// A *real* action change is still reported.
-///
-/// Without this the fix above could be "ignore `on_delete` entirely",
-/// which would be the pre-#1549 behaviour wearing a new coat.
+/// ...but it is a schema change: `None → Some` emits the op that corrects
+/// an existing database (#1557, #1573).
 #[test]
-fn a_changed_on_delete_action_is_still_detected() {
-    let base = SchemaSnapshot::from_models(&[<PostCascade as rustango::core::Model>::SCHEMA]);
-    let mut changed = base.clone();
-    let field = changed.tables[0]
-        .fields
-        .iter_mut()
-        .find(|f| f.column == "author_id")
-        .expect("author_id");
-    field.fk.as_mut().expect("fk").on_delete = Some("SET NULL".to_owned());
-
-    let problems = detect_unsupported_field_changes(&base, &changed);
-    assert!(
-        problems.iter().any(|p| p.contains("on_delete")),
-        "changing a declared action from CASCADE to SET NULL was not reported: \
-         {problems:?}"
+fn an_upgrade_alters_each_declared_action() {
+    let changes = detect_changes(&snapshot_without_on_delete(), &models());
+    let altered: Vec<(&str, Option<&str>)> = changes
+        .iter()
+        .filter_map(|c| match c {
+            SchemaChange::AlterFkOnDelete {
+                table,
+                from: None,
+                to,
+                ..
+            } => Some((table.as_str(), to.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        altered,
+        [
+            ("fkod_post_cascade", Some("CASCADE")),
+            ("fkod_post_set_null", Some("SET NULL"))
+        ],
+        "{changes:?}"
     );
+}
+
+/// A changed action is an `AlterFkOnDelete` in both directions.
+#[test]
+fn a_changed_on_delete_action_is_an_op() {
+    let base = SchemaSnapshot::from_models(&[<PostCascade as rustango::core::Model>::SCHEMA]);
+    for to in [Some("SET NULL"), None] {
+        let mut changed = base.clone();
+        let field = changed.tables[0]
+            .fields
+            .iter_mut()
+            .find(|f| f.column == "author_id")
+            .expect("author_id");
+        field.fk.as_mut().expect("fk").on_delete = to.map(str::to_owned);
+        assert!(detect_unsupported_field_changes(&base, &changed).is_empty());
+        assert_eq!(
+            detect_changes(&base, &changed),
+            [SchemaChange::AlterFkOnDelete {
+                table: "fkod_post_cascade".into(),
+                column: "author_id".into(),
+                from: Some("CASCADE".into()),
+                to: to.map(str::to_owned),
+            }]
+        );
+    }
+}
+
+fn models() -> SchemaSnapshot {
+    SchemaSnapshot::from_models(&[
+        <Author as rustango::core::Model>::SCHEMA,
+        <PostCascade as rustango::core::Model>::SCHEMA,
+        <PostSetNull as rustango::core::Model>::SCHEMA,
+        <PostDefault as rustango::core::Model>::SCHEMA,
+    ])
 }
 
 /// A snapshot written by this release still loads on the previous one.

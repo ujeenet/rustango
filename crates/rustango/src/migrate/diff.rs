@@ -102,6 +102,14 @@ pub enum SchemaChange {
         column: String,
         unique: bool,
     },
+    /// Change an FK column's `ON DELETE` action; `None` is NO ACTION.
+    /// The FK is dropped and re-added; SQLite rebuilds the table (#1557).
+    AlterFkOnDelete {
+        table: String,
+        column: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
     /// Create a `CREATE [UNIQUE] INDEX` on a model table.
     CreateIndex {
         name: String,
@@ -228,6 +236,7 @@ impl SchemaChange {
             | Self::AlterColumnMaxLength { table: t, .. }
             | Self::RenameColumn { table: t, .. }
             | Self::AlterColumnUnique { table: t, .. }
+            | Self::AlterFkOnDelete { table: t, .. }
             | Self::CreateIndex { table: t, .. }
             | Self::DropIndex { table: t, .. }
             | Self::AddCheckConstraint { table: t, .. }
@@ -255,7 +264,10 @@ impl SchemaChange {
                 Self::CreateTable(t) => snapshot.table(t).is_some_and(|s| {
                     s.fields.iter().any(fk_to) || s.composite_fks.iter().any(|c| c.to == table)
                 }),
-                Self::AddColumn { table: t, column } => snapshot
+                Self::AddColumn { table: t, column }
+                | Self::AlterFkOnDelete {
+                    table: t, column, ..
+                } => snapshot
                     .table(t)
                     .and_then(|s| s.field(column))
                     .is_some_and(fk_to),
@@ -536,6 +548,11 @@ fn dropped_tables_child_first<'a>(
     out
 }
 
+/// What an FK points at, without its `ON DELETE` action.
+fn fk_identity(r: &RelationSnapshot) -> (&str, &str, &str) {
+    (&r.kind, &r.to, &r.on)
+}
+
 fn push_alter_changes(
     table: &str,
     pf: &FieldSnapshot,
@@ -588,6 +605,17 @@ fn push_alter_changes(
             column: cf.column.clone(),
             unique: cf.unique,
         });
+    }
+    // Same FK, new action; `None → Some` included, or an upgrade never gets it (#1557).
+    if let (Some(p), Some(c)) = (&pf.fk, &cf.fk) {
+        if fk_identity(p) == fk_identity(c) && p.on_delete != c.on_delete {
+            out.push(SchemaChange::AlterFkOnDelete {
+                table: table.to_owned(),
+                column: cf.column.clone(),
+                from: p.on_delete.clone(),
+                to: c.on_delete.clone(),
+            });
+        }
     }
     // primary_key, min, max, fk, auto changes still reach
     // `detect_unsupported_field_changes` and surface as the v0.3.1
@@ -652,41 +680,12 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
             pf.max, cf.max
         ));
     }
-    // FK identity and FK action are compared separately, because only
-    // the identity has ever been representable in a snapshot.
-    //
-    // `on_delete` was added to `RelationSnapshot` in #1549. Every
-    // snapshot written before it has `on_delete: None`, so a plain
-    // `pf.fk != cf.fk` reports "fk changed" for every FK that declares
-    // an action the moment the upgrade lands — and all three
-    // `make_migrations` entry points reject a non-empty result. An
-    // upgrade with zero model changes then fails outright, listing
-    // framework tables the user never wrote, with advice that cannot be
-    // followed: there is no `AlterField`/`AlterFk` operation to author.
-    //
-    // Eleven framework FKs declare `cascade` (ten of them in `tenancy`),
-    // and `fold_in_framework_tables` puts them in every project's
-    // snapshot, so this reached every existing tenancy app.
-    //
-    // `None → Some(_)` is therefore the upgrade, not a change. A real
-    // action change — `Some(a) → Some(b)` — is still reported, which is
-    // strictly more than was detectable before #1549, when the value was
-    // discarded and no action change was visible at all.
-    let fk_identity = |r: Option<&crate::migrate::RelationSnapshot>| {
-        r.map(|r| (r.kind.clone(), r.to.clone(), r.on.clone()))
-    };
-    if fk_identity(pf.fk.as_ref()) != fk_identity(cf.fk.as_ref()) {
+    // Identity only: an `on_delete` change is an `AlterFkOnDelete` op (#1557).
+    if pf.fk.as_ref().map(fk_identity) != cf.fk.as_ref().map(fk_identity) {
         out.push(format!(
             "`{table}.{col}` fk changed: {:?} → {:?}",
             pf.fk, cf.fk
         ));
-    } else if let (Some(p), Some(c)) = (pf.fk.as_ref(), cf.fk.as_ref()) {
-        if p.on_delete.is_some() && p.on_delete != c.on_delete {
-            out.push(format!(
-                "`{table}.{col}` fk on_delete changed: {:?} → {:?}",
-                p.on_delete, c.on_delete
-            ));
-        }
     }
     if pf.auto != cf.auto {
         out.push(format!(
@@ -722,7 +721,9 @@ pub fn render_changes(
     let RenderedBatch {
         mut immediate,
         deferred_fks,
+        // Postgres never rebuilds.
         warnings: _,
+        rebuild: _,
     } = render_changes_split(changes, current)?;
     immediate.extend(deferred_fks);
     Ok(immediate)
@@ -749,6 +750,9 @@ pub struct RenderedBatch {
     /// INDEX, add an application-level uniqueness check". Issue #265
     /// / T1.3. Empty when there's nothing to flag.
     pub warnings: Vec<String>,
+    /// A SQLite table rebuild that runs after `immediate`, for a change
+    /// the engine cannot `ALTER` in place.
+    pub rebuild: Option<super::rebuild::TableRebuild>,
 }
 
 /// Same as [`render_changes`] but keeps FK ALTER constraints in a
@@ -956,11 +960,34 @@ fn render_changes_split_inner(
                         dialect.quote_ident(&name)
                     ));
                 }
+                // SQLite's DROP COLUMN refuses a column in a table-level UNIQUE (#1982).
+                if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
+                {
+                    out.rebuild = Some(rebuild?.dropping(column));
+                    continue;
+                }
                 out.immediate.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     dialect.quote_ident(table),
                     dialect.quote_ident(column),
                 ));
+            }
+            SchemaChange::AlterFkOnDelete { table, column, .. } => {
+                if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
+                {
+                    out.rebuild = Some(rebuild?);
+                    continue;
+                }
+                let rel = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .and_then(|f| f.fk.as_ref())
+                    .ok_or_else(|| {
+                        format!("AlterFkOnDelete for `{table}.{column}` but no FK in the snapshot")
+                    })?;
+                // The runner drops the live FK by its catalog name first.
+                out.deferred_fks
+                    .push(field_fk_sql(table, column, rel, dialect, schema));
             }
             SchemaChange::AddColumn { table, column } => {
                 let t = current.table(table).ok_or_else(|| {
@@ -1513,7 +1540,16 @@ fn create_table_sql_from_snapshot_with_dialect(
     t: &TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> String {
-    let mut sql = format!("CREATE TABLE {} (", dialect.quote_ident(&t.name));
+    create_table_sql_as(t, &t.name, dialect)
+}
+
+/// `CREATE TABLE <name>` in `t`'s shape; constraint names still follow `t.name`.
+pub(super) fn create_table_sql_as(
+    t: &TableSnapshot,
+    name: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> String {
+    let mut sql = format!("CREATE TABLE {} (", dialect.quote_ident(name));
     let mut first = true;
     for f in &t.fields {
         if !first {
@@ -2070,16 +2106,77 @@ mod sql_type_tests {
     fn sqlite_drop_column_keeps_another_tables_unique_index() {
         use crate::migrate::SchemaChange;
         let mut snap = clashing_uniques();
-        snap.tables.remove(0);
+        snap.tables[0].fields.clear();
         let drop = [SchemaChange::DropColumn {
             table: "a_b".into(),
             column: "c".into(),
         }];
         let out = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
-        assert_eq!(out.immediate, vec![r#"ALTER TABLE "a_b" DROP COLUMN "c""#]);
-        let out =
-            render_changes_split_with_dialect(&drop, &empty_snap(), &crate::sql::Sqlite).unwrap();
-        assert_eq!(out.immediate[0], r#"DROP INDEX IF EXISTS "a_b_c_key""#);
+        assert!(out.immediate.is_empty(), "{:?}", out.immediate);
+        assert_eq!(out.rebuild.as_ref().map(|r| r.table()), Some("a_b"));
+        snap.tables.remove(1);
+        let out = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
+        assert_eq!(out.immediate, [r#"DROP INDEX IF EXISTS "a_b_c_key""#]);
+    }
+
+    /// SQLite changes an FK action by rebuilding; PG and MySQL re-add the FK
+    /// after the runner drops the live one (#1557).
+    #[test]
+    fn alter_fk_on_delete_renders_per_dialect() {
+        use crate::migrate::{RelationSnapshot, SchemaChange};
+        let mut child = TableSnapshot {
+            name: "c".into(),
+            model: "c".into(),
+            fields: vec![FieldSnapshot {
+                name: "p_id".into(),
+                column: "p_id".into(),
+                fk: Some(RelationSnapshot {
+                    kind: "fk".into(),
+                    to: "p".into(),
+                    on: "id".into(),
+                    on_delete: Some("CASCADE".into()),
+                }),
+                ..fs("i64", false)
+            }],
+            composite_fks: vec![],
+        };
+        child.fields.insert(0, fs("i64", true));
+        let snap = SchemaSnapshot {
+            tables: vec![child],
+            ..SchemaSnapshot::default()
+        };
+        let alter = [SchemaChange::AlterFkOnDelete {
+            table: "c".into(),
+            column: "p_id".into(),
+            from: None,
+            to: Some("CASCADE".into()),
+        }];
+        let pg = render_changes_split_with_dialect(&alter, &snap, &crate::sql::Postgres).unwrap();
+        assert!(pg.immediate.is_empty() && pg.rebuild.is_none());
+        assert_eq!(
+            pg.deferred_fks,
+            [
+                r#"ALTER TABLE "c" ADD CONSTRAINT "c_p_id_fkey" FOREIGN KEY ("p_id") REFERENCES "p" ("id") ON DELETE CASCADE"#
+            ]
+        );
+        #[cfg(feature = "sqlite")]
+        {
+            let sq = render_changes_split_with_dialect(&alter, &snap, &crate::sql::Sqlite).unwrap();
+            assert!(sq.immediate.is_empty() && sq.deferred_fks.is_empty());
+            let stmts = sq
+                .rebuild
+                .expect("a rebuild")
+                .statements(&crate::sql::Sqlite);
+            assert!(stmts[0].starts_with(r#"CREATE TABLE "_rustango_rebuild_c""#));
+            assert!(stmts[0].contains("ON DELETE CASCADE"), "{}", stmts[0]);
+            assert_eq!(
+                stmts[stmts.len() - 2..],
+                [
+                    r#"DROP TABLE "c""#,
+                    r#"ALTER TABLE "_rustango_rebuild_c" RENAME TO "c""#
+                ]
+            );
+        }
     }
 
     // -------- guard_alter_column_dialect (#559 protection) --------

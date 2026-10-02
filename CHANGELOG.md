@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a changed `on_delete` reaches an existing database (#1557)
+
+A new `SchemaChange::AlterFkOnDelete` replaces the FK: PG and MySQL drop it by its catalog name and re-add it; SQLite rebuilds the table (create, copy, drop, rename) with FK checks off. The framework's eleven cascading FKs get it through the system chain.
+
+### Fixed — `on_delete` from none to an action is no longer ignored (#1573)
+
+`makemigrations` emits the op for `None → Some`, the case every pre-0.57.7 snapshot is in.
+
+### Fixed — SQLite drops a column in a table-level UNIQUE (#1982)
+
+`DropColumn` on SQLite rebuilds the table. The rebuild keeps rows, indexes, triggers, inbound FKs and the AUTOINCREMENT counter, and refuses to lose a column the snapshot lacks.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)

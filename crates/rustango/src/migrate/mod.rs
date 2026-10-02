@@ -28,6 +28,7 @@ pub mod manage;
 /// Watching a migration run while it happens: the observer the
 /// progress-reporting entry points take.
 pub mod progress;
+mod rebuild;
 mod runner;
 pub mod scaffold;
 pub mod snapshot;
@@ -54,6 +55,7 @@ pub use make::{
 #[cfg(feature = "postgres")]
 pub use manage::{append_data_op, make_data_migration};
 pub use progress::{MigrationEvent, MigrationObserver, Outcome};
+pub use rebuild::TableRebuild;
 pub use runner::ensure_ledger_pool_with_ledger;
 #[cfg(all(feature = "postgres", any(feature = "manage", feature = "tenancy")))]
 pub(crate) use runner::migrate_locked;

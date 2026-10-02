@@ -986,9 +986,252 @@ async fn not_null_with_default_backfills(pool: &Pool) {
     alter.expect("the NULL row is backfilled first");
 }
 
+// ---------------------------------------------------------------- #1557
+
+/// `SELECT COUNT(*)` of `t`.
+async fn rows(pool: &Pool, t: &str) -> i64 {
+    let sql = q(pool, "SELECT COUNT(*) FROM {}", &[t]);
+    let n: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    n[0].0
+}
+
+/// A changed `on_delete` reaches a table that already exists, which
+/// keeps its rows, its index and the cascading FK into it.
+async fn on_delete_reaches_an_existing_table(pool: &Pool) {
+    on_delete_reaches(pool, "mad_od", true).await;
+}
+
+/// As above through the non-atomic runners.
+async fn on_delete_reaches_without_a_transaction(pool: &Pool) {
+    on_delete_reaches(pool, "mad_odn", false).await;
+}
+
+async fn on_delete_reaches(pool: &Pool, tag: &str, atomic: bool) {
+    let (a, b, c) = (
+        format!("{tag}_author"),
+        format!("{tag}_book"),
+        format!("{tag}_page"),
+    );
+    let (a, b, c) = (a.as_str(), b.as_str(), c.as_str());
+    let idx = format!("{tag}_title_idx");
+    let chain = Chain::new(pool, tag, &[c, b, a]).await;
+    // `None` is how a snapshot from before #1549 reads.
+    let with = |on_delete: Option<&str>| {
+        let mut rel = json!({"kind": "fk", "to": a, "on": "id"});
+        if let Some(action) = on_delete {
+            rel["on_delete"] = json!(action);
+        }
+        json!({
+            "tables": [
+                table(a, vec![id()]),
+                table(b, vec![id(), col("author_id", "i64", json!({"fk": rel})),
+                    col("title", "string", json!({"max_length": 32}))]),
+                table(c, vec![id(), col("book_id", "i64", fk(b))]),
+            ],
+            "indexes": [{"name": idx, "table": b, "columns": ["title"], "unique": false}],
+        })
+    };
+    chain.step(pool, with(None)).await.expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 't')",
+        &[b, "id", "author_id", "title"],
+    )
+    .await
+    .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[c, "id", "book_id"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(pool, "DELETE FROM {}", &[a]).await.is_err(),
+        "NO ACTION before"
+    );
+
+    let altered = chain
+        .step_with(pool, with(Some("CASCADE")), atomic)
+        .await
+        .expect("AlterFkOnDelete applies to the existing table");
+    assert_eq!(
+        (rows(pool, b).await, rows(pool, c).await),
+        (1, 1),
+        "rows kept"
+    );
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, 99)",
+            &[c, "id", "book_id"]
+        )
+        .await
+        .is_err(),
+        "the FK into the table still holds on {}",
+        pool.dialect().name()
+    );
+    assert!(
+        exec(pool, "CREATE INDEX {} ON {} ({})", &[&idx, b, "title"])
+            .await
+            .is_err(),
+        "the index is still there on {}",
+        pool.dialect().name()
+    );
+    exec(pool, "DELETE FROM {}", &[a])
+        .await
+        .expect("CASCADE after");
+    assert_eq!(
+        (rows(pool, b).await, rows(pool, c).await),
+        (0, 0),
+        "cascaded"
+    );
+
+    chain.undo(pool, &altered).await.expect("unapply");
+    exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (2, 2, 't')",
+        &[b, "id", "author_id", "title"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(pool, "DELETE FROM {}", &[a]).await.is_err(),
+        "NO ACTION again after unapply"
+    );
+}
+
+/// An action change and a dropped column on one table, in one migration:
+/// the first rebuild already drops the column.
+async fn on_delete_and_drop_in_one_migration(pool: &Pool) {
+    let (a, b) = ("mad_om_author", "mad_om_book");
+    let chain = Chain::new(pool, "om", &[b, a]).await;
+    let with = |rel: Value, extra: Vec<Value>| {
+        let mut fields = vec![id(), col("author_id", "i64", json!({"fk": rel}))];
+        fields.extend(extra);
+        json!({"tables": [table(a, vec![id()]), table(b, fields)]})
+    };
+    chain
+        .step(
+            pool,
+            with(
+                json!({"kind": "fk", "to": a, "on": "id"}),
+                vec![col("old", "i64", json!({}))],
+            ),
+        )
+        .await
+        .expect("initial");
+    chain
+        .step(
+            pool,
+            with(
+                json!({"kind": "fk", "to": a, "on": "id", "on_delete": "CASCADE"}),
+                vec![],
+            ),
+        )
+        .await
+        .expect("AlterFkOnDelete then DropColumn");
+}
+
+/// A rebuild refuses to lose a column the snapshot does not know.
+async fn rebuild_keeps_unknown_columns(pool: &Pool) {
+    let (a, b) = ("mad_ou_author", "mad_ou_book");
+    let chain = Chain::new(pool, "ou", &[b, a]).await;
+    let with = |rel: Value| {
+        json!({"tables": [table(a, vec![id()]),
+            table(b, vec![id(), col("author_id", "i64", json!({"fk": rel}))])]})
+    };
+    chain
+        .step(pool, with(json!({"kind": "fk", "to": a, "on": "id"})))
+        .await
+        .expect("initial");
+    exec(
+        pool,
+        "ALTER TABLE {} ADD COLUMN {} INTEGER",
+        &[b, "by_hand"],
+    )
+    .await
+    .unwrap();
+    let altered = chain
+        .step(
+            pool,
+            with(json!({"kind": "fk", "to": a, "on": "id", "on_delete": "CASCADE"})),
+        )
+        .await;
+    let rebuilds = by_dialect! { pool,
+        postgres => false, because "the FK is replaced in place",
+        mysql => false, because "the FK is replaced in place",
+        sqlite => true, because "the table is rebuilt from the snapshot",
+    };
+    if rebuilds.value {
+        assert!(altered.expect_err(rebuilds.why).contains("by_hand"));
+    } else {
+        altered.expect(rebuilds.why);
+    }
+}
+
+// ---------------------------------------------------------------- #1982
+
+/// A column in a table-level UNIQUE drops; SQLite refused it. Rows and
+/// the AUTOINCREMENT high-water mark survive the rebuild.
+async fn unique_column_drops(pool: &Pool) {
+    let t = "mad_ud_item";
+    let chain = Chain::new(pool, "ud", &[t]).await;
+    let n = col("n", "i64", json!({}));
+    let code = col("code", "string", json!({"max_length": 16, "unique": true}));
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), code, n.clone()])]}),
+        )
+        .await
+        .expect("initial");
+    for (code, n) in [("a", "1"), ("b", "2"), ("c", "3")] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ('{code}', {n})"),
+            &[t, "code", "n"],
+        )
+        .await
+        .unwrap();
+    }
+    exec(pool, "DELETE FROM {} WHERE {} = 3", &[t, "n"])
+        .await
+        .unwrap();
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), n])]}))
+        .await
+        .expect("DropColumn of a UNIQUE column applies");
+    exec(pool, "INSERT INTO {} ({}) VALUES (4)", &[t, "n"])
+        .await
+        .unwrap();
+    let sql = q(
+        pool,
+        "SELECT {}, {} FROM {} ORDER BY {}",
+        &["id", "n", t, "id"],
+    );
+    let got: Vec<(i64, i64)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(1, 1), (2, 2), (4, 4)], "rows kept, id 3 not reused");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        on_delete_reaches_an_existing_table,
+        on_delete_reaches_without_a_transaction,
+        on_delete_and_drop_in_one_migration,
+        rebuild_keeps_unknown_columns,
+        unique_column_drops,
         unique_drops_on_long_names,
         add_column_keeps_fk_and_unique,
         fk_column_drops,
