@@ -212,12 +212,14 @@ pub enum SchemaChange {
 }
 
 impl SchemaChange {
-    /// Whether this change reads or writes `table`, FK targets included.
-    pub(crate) fn touches(&self, table: &str) -> bool {
+    /// The table this change writes.
+    pub(crate) fn table(&self) -> &str {
         match self {
             Self::CreateTable(t)
             | Self::DropTable(t)
             | Self::DropM2MTable { through: t }
+            | Self::CreateM2MTable { through: t, .. }
+            | Self::RenameTable { old_name: t, .. }
             | Self::AddColumn { table: t, .. }
             | Self::DropColumn { table: t, .. }
             | Self::AlterColumnType { table: t, .. }
@@ -232,16 +234,33 @@ impl SchemaChange {
             | Self::DropCheckConstraint { table: t, .. }
             | Self::AddExclusionConstraint { table: t, .. }
             | Self::DropExclusionConstraint { table: t, .. }
-            | Self::DropCompositeFk { table: t, .. } => t == table,
-            Self::RenameTable { old_name, new_name } => old_name == table || new_name == table,
-            Self::CreateM2MTable {
-                through,
-                src_table,
-                dst_table,
-                ..
-            } => [through, src_table, dst_table].iter().any(|t| *t == table),
-            Self::AddCompositeFk { table: t, to, .. } => t == table || to == table,
+            | Self::AddCompositeFk { table: t, .. }
+            | Self::DropCompositeFk { table: t, .. } => t,
         }
+    }
+
+    /// Whether this change writes `table` or adds an FK to it. FK targets
+    /// live in `snapshot`, the migration's after-state.
+    pub(crate) fn touches(&self, table: &str, snapshot: &super::SchemaSnapshot) -> bool {
+        let fk_to = |f: &FieldSnapshot| f.fk.as_ref().is_some_and(|r| r.to == table);
+        self.table() == table
+            || match self {
+                Self::RenameTable { new_name, .. } => new_name == table,
+                Self::CreateM2MTable {
+                    src_table,
+                    dst_table,
+                    ..
+                } => src_table == table || dst_table == table,
+                Self::AddCompositeFk { to, .. } => to == table,
+                Self::CreateTable(t) => snapshot.table(t).is_some_and(|s| {
+                    s.fields.iter().any(fk_to) || s.composite_fks.iter().any(|c| c.to == table)
+                }),
+                Self::AddColumn { table: t, column } => snapshot
+                    .table(t)
+                    .and_then(|s| s.field(column))
+                    .is_some_and(fk_to),
+                _ => false,
+            }
     }
 }
 
@@ -437,7 +456,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
-fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
+pub(super) fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
     SchemaChange::CreateIndex {
         name: idx.name.clone(),
         table: idx.table.clone(),
@@ -766,7 +785,7 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, None)
+    render_changes_split_inner(changes, current, dialect, None, false)
 }
 
 /// As [`render_changes_split_with_dialect`], but every FK target is
@@ -778,7 +797,18 @@ pub(crate) fn render_changes_split_in_schema(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema)
+    render_changes_split_inner(changes, current, dialect, schema, false)
+}
+
+/// As [`render_changes_split_in_schema`] for tables with no rows, where a
+/// NOT NULL column needs no default (#2066).
+pub(crate) fn render_changes_split_for_empty(
+    changes: &[SchemaChange],
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<RenderedBatch, String> {
+    render_changes_split_inner(changes, current, dialect, schema, true)
 }
 
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
@@ -888,6 +918,7 @@ fn render_changes_split_inner(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
+    empty_tables: bool,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
@@ -938,7 +969,7 @@ fn render_changes_split_inner(
                 let f = t.field(column).ok_or_else(|| {
                     format!("AddColumn for `{table}.{column}` but field missing in snapshot")
                 })?;
-                if !f.nullable && f.default.is_none() {
+                if !f.nullable && f.default.is_none() && !empty_tables {
                     return Err(format!(
                         "AddColumn `{table}.{column}` is NOT NULL with no `default` — \
                          Postgres can't backfill existing rows. Pick one:\n  \
@@ -960,6 +991,10 @@ fn render_changes_split_inner(
                 if dialect.name() == "mysql" && is_uuid_default(f) {
                     out.immediate
                         .extend(add_column_backfilled(table, f, dialect));
+                } else if dialect.name() == "mysql" && !f.nullable && f.default.is_none() {
+                    // MySQL fills a NOT NULL ADD with '' or 0; MODIFY fails on a NULL row instead.
+                    out.immediate
+                        .extend(add_column_then_not_null(table, f, dialect));
                 } else {
                     out.immediate.push(add_column_sql(table, f, dialect));
                 }
@@ -1741,6 +1776,27 @@ fn add_column_backfilled(
     ]
 }
 
+/// `f` added nullable, then made NOT NULL by `MODIFY` (MySQL only).
+fn add_column_then_not_null(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Vec<String> {
+    let bare = FieldSnapshot {
+        nullable: true,
+        ..f.clone()
+    };
+    vec![
+        add_column_sql(table, &bare, dialect),
+        format!(
+            "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL",
+            dialect.quote_ident(table),
+            dialect.quote_ident(&f.column),
+            sql_type_with_dialect(f, dialect)
+        ),
+    ]
+}
+
 /// `UPDATE` setting each NULL `f` to its DEFAULT, evaluated per row.
 pub(crate) fn fill_nulls_sql(
     table: &str,
@@ -1865,6 +1921,38 @@ mod sql_type_tests {
             db_comment: None,
             fk: None,
         }
+    }
+
+    /// Added NOT NULL, MySQL would fill a row that slipped in after the empty check.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn mysql_not_null_add_on_empty_table_tightens_after() {
+        let snap = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "t".into(),
+                model: "T".into(),
+                fields: vec![fs("i32", false)],
+                composite_fks: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let add = [SchemaChange::AddColumn {
+            table: "t".into(),
+            column: "x".into(),
+        }];
+        let out = render_changes_split_for_empty(&add, &snap, &crate::sql::MySql, None).unwrap();
+        assert_eq!(out.immediate.len(), 2, "{:?}", out.immediate);
+        assert!(
+            !out.immediate[0].contains("NOT NULL"),
+            "{}",
+            out.immediate[0]
+        );
+        assert!(
+            out.immediate[1].starts_with("ALTER TABLE `t` MODIFY COLUMN `x` ")
+                && out.immediate[1].ends_with(" NOT NULL"),
+            "{}",
+            out.immediate[1]
+        );
     }
 
     #[test]

@@ -436,6 +436,13 @@ async fn converge_reports_what_it_cannot_add_and_fixes_the_rest() {
         .await
         .expect("first deploy");
     exec(&pool, "ALTER TABLE rustango_audit_log DROP COLUMN source").await;
+    // A row, so the column has no value to take; an empty table gets it (#2066).
+    exec(
+        &pool,
+        "INSERT INTO rustango_audit_log (entity_table, entity_pk, operation, changes) \
+         VALUES ('t', '1', 'create', '{}')",
+    )
+    .await;
     exec(&pool, "DROP TABLE rustango_user_permissions").await;
 
     let err = manage_migrate(&pool, tmp.path().join("deploy2/migrations"))

@@ -1169,29 +1169,30 @@ async fn login_submit(
         }
     }
 
-    let principal = match auth::check_operator_password(found, &form.password).await {
-        Ok(Some(op)) => op,
-        Ok(None) => {
-            attempt.failed().await;
-            send_user_login_failed(UserLoginFailedContext {
-                source: "operator",
-                attempted_username: Some(form.username.clone()),
-                reason: AuthFailureReason::InvalidCredentials,
-                request: meta,
-            })
-            .await;
-            return Redirect::to(&format!(
-                "/login?error=Invalid+credentials&next={}",
-                urlencoding_lite(&next)
-            ))
-            .into_response();
-        }
-        Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
-        Err(e) => {
-            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
-        }
-    };
+    let principal =
+        match auth::check_operator_password(&state.registry, found, &form.password).await {
+            Ok(Some(op)) => op,
+            Ok(None) => {
+                attempt.failed().await;
+                send_user_login_failed(UserLoginFailedContext {
+                    source: "operator",
+                    attempted_username: Some(form.username.clone()),
+                    reason: AuthFailureReason::InvalidCredentials,
+                    request: meta,
+                })
+                .await;
+                return Redirect::to(&format!(
+                    "/login?error=Invalid+credentials&next={}",
+                    urlencoding_lite(&next)
+                ))
+                .into_response();
+            }
+            Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
+            Err(e) => {
+                tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+            }
+        };
     let oid = principal.id.get().copied().unwrap_or_default();
     attempt.succeeded().await;
     let mut payload = SessionPayload::new(
@@ -1818,8 +1819,8 @@ async fn org_edit_submit(
     if !database_url_supplied {
         skip.push(DATABASE_URL_FIELD);
     }
-    // An unchecked checkbox is simply absent from the form;
-    // `collect_values` already reads a missing bool as `false`.
+    // An unticked checkbox is absent from the form; `collect_values`
+    // reads it as `false` for a NOT NULL bool (`active`), NULL if nullable.
 
     let collected = match crate::forms::collect_values(super::Org::SCHEMA, &form, &skip) {
         Ok(v) => v,

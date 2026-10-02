@@ -536,7 +536,7 @@ impl FakeScope {
             Self::Project => (dir.to_path_buf(), rustango::migrate::LEDGER_TABLE),
             Self::System => {
                 // `system/migrations/` sits beside the project's
-                // `migrations/` — mirror `apply_system_migrations`.
+                // `migrations/` — mirror `SystemChain::for_migrations_dir`.
                 let root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
                     dir.parent().unwrap_or(dir)
                 } else {

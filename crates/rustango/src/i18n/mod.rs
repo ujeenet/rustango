@@ -61,7 +61,8 @@ pub struct Locale(String);
 impl Locale {
     #[must_use]
     pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into().to_lowercase())
+        // `pt_BR` (a file stem) and `pt-BR` (a header) are one locale.
+        Self(s.into().to_lowercase().replace('_', "-"))
     }
 
     #[must_use]
@@ -108,9 +109,7 @@ impl Locale {
 /// region subtag.
 #[must_use]
 pub fn is_rtl_language(locale: &str) -> bool {
-    let lower = locale.to_ascii_lowercase();
-    let base = lower.split('-').next().unwrap_or(&lower);
-    is_rtl_base(base)
+    is_rtl_base(Locale::new(locale).base_language())
 }
 
 /// `"rtl"` / `"ltr"` for a bare locale string — the bidi sibling of
@@ -896,17 +895,39 @@ impl Translator {
 }
 
 /// Substitute `{name}` placeholders in `template` with values from `params`.
+/// One pass over the template, so an inserted value is never re-scanned; the
+/// last pair with a name wins.
 fn substitute(template: &str, params: &[(&str, &str)]) -> String {
-    let mut out = template.to_owned();
-    for (name, value) in params {
-        let placeholder = format!("{{{name}}}");
-        out = out.replace(&placeholder, value);
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let value = after.find('}').and_then(|close| {
+            let name = &after[..close];
+            params
+                .iter()
+                .rev()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| (*v, close))
+        });
+        match value {
+            Some((v, close)) => {
+                out.push_str(v);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
     }
+    out.push_str(rest);
     out
 }
 
 /// CLDR cardinal plural category for integer `n` in `locale` (#1102) — one of
-/// `"one"`, `"few"`, `"many"`, `"other"`. Drives [`Translator::translate_plural`]
+/// `"zero"`, `"one"`, `"two"`, `"few"`, `"many"`, `"other"`. Drives [`Translator::translate_plural`]
 /// (and the binary [`Translator::ngettext`], which maps `one`→singular).
 ///
 /// Selection is on the base language (`pl-PL` ≡ `pl`) and the absolute value of
@@ -932,34 +953,65 @@ fn substitute(template: &str, params: &[(&str, &str)]) -> String {
 enum PluralFamily {
     /// No count-based form distinction (always `other`).
     NoDistinction,
+    /// Explicit one (1) / other, where the base language is French-style.
+    OneOther,
     /// French / Brazilian-Portuguese: 0 and 1 are `one`.
     FrenchStyle,
     /// West-Slavic (Polish): one / few / many.
     WestSlavic,
     /// East-Slavic (Ukrainian, Russian, Belarusian): one / few / many.
     EastSlavic,
+    /// Czech / Slovak: one / few (2–4) / other.
+    CzechSlovak,
+    /// Arabic: zero / one / two / few / many / other.
+    Arabic,
+    /// Lithuanian: one / few / other.
+    Lithuanian,
+    /// Romanian: one (1) / few (0, or n % 100 in 1..=19 except 1) / other.
+    Romanian,
+    /// Hebrew: one / two / other.
+    Hebrew,
+    /// Slovenian: one / two / few by the last two digits.
+    Slovenian,
 }
 
-fn plural_family(base: &str) -> Option<PluralFamily> {
-    match base {
+fn plural_family(locale: &Locale) -> Option<PluralFamily> {
+    // European Portuguese counts 0 as plural, unlike `pt` / `pt-BR`.
+    if locale.as_str() == "pt-pt" {
+        return Some(PluralFamily::OneOther);
+    }
+    match locale.base_language() {
         "zh" | "ja" | "ko" | "th" | "vi" | "id" | "ms" | "lo" | "km" | "my" => {
             Some(PluralFamily::NoDistinction)
         }
         "fr" | "pt" | "ff" | "hy" | "kab" => Some(PluralFamily::FrenchStyle),
         "pl" => Some(PluralFamily::WestSlavic),
         "uk" | "ru" | "be" => Some(PluralFamily::EastSlavic),
+        "cs" | "sk" => Some(PluralFamily::CzechSlovak),
+        "ar" => Some(PluralFamily::Arabic),
+        "lt" => Some(PluralFamily::Lithuanian),
+        "ro" | "mo" => Some(PluralFamily::Romanian),
+        "he" | "iw" => Some(PluralFamily::Hebrew),
+        "sl" => Some(PluralFamily::Slovenian),
         _ => None,
     }
 }
 
 #[must_use]
 pub fn plural_category(locale: &str, n: i64) -> &'static str {
-    let base = Locale::new(locale);
+    let locale = Locale::new(locale);
     let n = n.unsigned_abs();
     let r10 = n % 10;
     let r100 = n % 100;
-    match plural_family(base.base_language()) {
+    match plural_family(&locale) {
         Some(PluralFamily::NoDistinction) => "other",
+        Some(PluralFamily::OneOther) => {
+            if n == 1 {
+                "one"
+            } else {
+                "other"
+            }
+        }
         Some(PluralFamily::FrenchStyle) => {
             if n == 0 || n == 1 {
                 "one"
@@ -985,6 +1037,50 @@ pub fn plural_category(locale: &str, n: i64) -> &'static str {
                 "many"
             }
         }
+        Some(PluralFamily::CzechSlovak) => match n {
+            1 => "one",
+            2..=4 => "few",
+            _ => "other",
+        },
+        Some(PluralFamily::Arabic) => match (n, r100) {
+            (0, _) => "zero",
+            (1, _) => "one",
+            (2, _) => "two",
+            (_, 3..=10) => "few",
+            (_, 11..=99) => "many",
+            _ => "other",
+        },
+        Some(PluralFamily::Lithuanian) => {
+            if (11..=19).contains(&r100) {
+                "other"
+            } else if r10 == 1 {
+                "one"
+            } else if r10 >= 2 {
+                "few"
+            } else {
+                "other"
+            }
+        }
+        Some(PluralFamily::Romanian) => {
+            if n == 1 {
+                "one"
+            } else if n == 0 || (1..=19).contains(&r100) {
+                "few"
+            } else {
+                "other"
+            }
+        }
+        Some(PluralFamily::Hebrew) => match n {
+            1 => "one",
+            2 => "two",
+            _ => "other",
+        },
+        Some(PluralFamily::Slovenian) => match r100 {
+            1 => "one",
+            2 => "two",
+            3 | 4 => "few",
+            _ => "other",
+        },
         // Germanic / Romance / default: one / other (n == 1 → one).
         None => {
             if n == 1 {
@@ -1004,7 +1100,7 @@ pub fn plural_category(locale: &str, n: i64) -> &'static str {
 /// "basic one/other", not an error. Backs [`LocaleInfo::has_plural_rules`].
 #[must_use]
 pub fn plural_category_is_explicit(locale: &str) -> bool {
-    plural_family(Locale::new(locale).base_language()).is_some()
+    plural_family(&Locale::new(locale)).is_some()
 }
 
 // ------------------------------------------------------------------ Accept-Language negotiation
@@ -1023,11 +1119,12 @@ pub fn negotiate_language<S: AsRef<str>>(accept_language: &str, available: &[S])
 
     let avail_lower: Vec<String> = available
         .iter()
-        .map(|s| s.as_ref().to_lowercase())
+        .map(|s| Locale::new(s.as_ref()).0)
         .collect();
 
-    for (lang, _q) in prefs {
-        let lang_lower = lang.to_lowercase();
+    // `q=0` means "not acceptable" (RFC 9110 §12.4.2).
+    for (lang, _q) in prefs.into_iter().filter(|(_, q)| *q > 0.0) {
+        let lang_lower = Locale::new(lang).0;
         // Exact match
         if let Some(matched) = avail_lower.iter().find(|a| **a == lang_lower) {
             return Some(matched.clone());
@@ -1317,6 +1414,70 @@ mod tests {
             assert!(!is_rtl_language(code), "{code} should be LTR");
             assert_eq!(text_direction(code), "ltr");
         }
+    }
+
+    #[test]
+    fn negotiate_skips_q_zero() {
+        assert_eq!(negotiate_language("fr;q=0", &["en", "fr"]), None);
+        assert_eq!(
+            negotiate_language("fr;q=0,en;q=0.5", &["en", "fr"]).as_deref(),
+            Some("en")
+        );
+    }
+
+    #[test]
+    fn underscore_locales_match_hyphenated_ones() {
+        assert_eq!(Locale::new("pt_BR"), Locale::new("pt-BR"));
+        assert_eq!(Locale::new("uk_ua").base_language(), "uk");
+        assert!(is_rtl_language("ar_EG"));
+        assert_eq!(
+            negotiate_language("pt-BR", &["en", "pt_BR"]).as_deref(),
+            Some("pt-br")
+        );
+    }
+
+    #[test]
+    fn substitute_does_not_rescan_inserted_values() {
+        assert_eq!(
+            substitute("{name} has {count}", &[("count", "5"), ("name", "{count}")]),
+            "{count} has 5"
+        );
+        assert_eq!(substitute("{a}{", &[("a", "x")]), "x{");
+        assert_eq!(substitute("{missing}", &[]), "{missing}");
+        // Later pairs override earlier ones (ngettext_fmt's overlay).
+        assert_eq!(
+            substitute("{count}", &[("count", "1"), ("count", "2")]),
+            "2"
+        );
+    }
+
+    #[test]
+    fn plural_rules_for_more_families() {
+        let cats = |loc: &str, ns: &[i64]| {
+            ns.iter()
+                .map(|n| plural_category(loc, *n))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            cats("ar", &[0, 1, 2, 3, 11, 100, 102]),
+            ["zero", "one", "two", "few", "many", "other", "other"]
+        );
+        assert_eq!(cats("cs", &[1, 3, 5]), ["one", "few", "other"]);
+        assert_eq!(cats("sk", &[1, 4, 22]), ["one", "few", "other"]);
+        assert_eq!(
+            cats("lt", &[1, 2, 11, 10, 21]),
+            ["one", "few", "other", "other", "one"]
+        );
+        assert_eq!(
+            cats("ro", &[1, 0, 19, 20, 101]),
+            ["one", "few", "few", "other", "few"]
+        );
+        assert_eq!(cats("he", &[1, 2, 3]), ["one", "two", "other"]);
+        assert_eq!(cats("sl", &[1, 102, 3, 5]), ["one", "two", "few", "other"]);
+        assert_eq!(cats("pt-PT", &[0, 1, 2]), ["other", "one", "other"]);
+        assert!(plural_category_is_explicit("pt-PT"));
+        assert!(plural_category_is_explicit("pt_PT"));
+        assert_eq!(cats("pt_BR", &[0, 1]), ["one", "one"]);
     }
 
     #[test]

@@ -182,16 +182,12 @@ async fn resolve_by_slug(
 /// Derive the absolute per-provider callback URL for this tenant from the
 /// request — tenants are host-based, so the redirect_uri is per-host +
 /// per-slug: `{scheme}://{host}{login_url}/sso/{slug}/callback`. Scheme
-/// honors `X-Forwarded-Proto` (proxy), else defaults to `https`.
+/// honors `X-Forwarded-Proto` from a trusted proxy, else `https`.
 fn derive_redirect(parts: &Parts, routes: &RouteConfig, slug: &str) -> Option<String> {
     let host = parts.headers.get(header::HOST)?.to_str().ok()?;
-    let scheme = parts
-        .headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("https");
+    let scheme =
+        crate::real_ip::trusted_forwarded(&parts.headers, &parts.extensions, "x-forwarded-proto")
+            .unwrap_or("https");
     Some(format!(
         "{scheme}://{host}{}/sso/{slug}/callback",
         routes.login_url

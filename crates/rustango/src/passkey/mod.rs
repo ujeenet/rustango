@@ -30,10 +30,10 @@ pub mod verify;
 
 pub use ceremony::{
     authentication_options_json, generate_challenge, registration_options_json,
-    verify_authentication, verify_registration, RegistrationOutcome,
+    verify_authentication, verify_registration, AuthenticationOutcome, RegistrationOutcome,
 };
 pub use error::PasskeyError;
-pub use session::{open_challenge, seal_challenge};
+pub use session::{open_challenge, seal_challenge, CeremonyPurpose, CHALLENGE_TTL};
 
 use crate::sql::{Auto, Pool};
 use crate::Model;
@@ -152,9 +152,34 @@ pub async fn register(
     Ok(())
 }
 
-/// Advance the stored signature counter for a credential after a
-/// successful assertion (clone detection: the new count must exceed the
-/// stored one). No-op if the credential id is unknown.
+/// What [`update_sign_count`] did. Refuse the login unless
+/// [`is_accepted`](Self::is_accepted).
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignCountUpdate {
+    /// The stored counter moved up to the new value.
+    Advanced,
+    /// Both counters are 0: the authenticator keeps no counter.
+    NoCounter,
+    /// The stored counter is already at or above the new one: a clone,
+    /// or a second assertion that lost the race.
+    Stale,
+    /// No credential has this id.
+    Unknown,
+}
+
+impl SignCountUpdate {
+    /// `true` for [`Advanced`](Self::Advanced) and [`NoCounter`](Self::NoCounter).
+    #[must_use]
+    pub fn is_accepted(self) -> bool {
+        matches!(self, Self::Advanced | Self::NoCounter)
+    }
+}
+
+/// Advance the stored signature counter after a successful assertion.
+/// Writes only when `new_count` is above the stored count, so a racing
+/// or cloned assertion can't move it back (#1841).
 ///
 /// # Errors
 /// As the ORM update path ([`crate::sql::ExecError`]).
@@ -162,13 +187,23 @@ pub async fn update_sign_count(
     pool: &Pool,
     credential_id: &str,
     new_count: i64,
-) -> Result<(), crate::sql::ExecError> {
+) -> Result<SignCountUpdate, crate::sql::ExecError> {
     use crate::sql::UpdaterPool as _;
-    WebauthnCredential::objects()
-        .filter("credential_id", credential_id.to_owned())
-        .update()
-        .set("sign_count", new_count)
-        .execute_pool(pool)
-        .await?;
-    Ok(())
+    if new_count > 0 {
+        let moved = WebauthnCredential::objects()
+            .filter("credential_id", credential_id.to_owned())
+            .filter("sign_count__lt", new_count)
+            .update()
+            .set("sign_count", new_count)
+            .execute_pool(pool)
+            .await?;
+        if moved > 0 {
+            return Ok(SignCountUpdate::Advanced);
+        }
+    }
+    Ok(match by_credential_id(pool, credential_id).await? {
+        None => SignCountUpdate::Unknown,
+        Some(c) if c.sign_count == 0 && new_count == 0 => SignCountUpdate::NoCounter,
+        Some(_) => SignCountUpdate::Stale,
+    })
 }

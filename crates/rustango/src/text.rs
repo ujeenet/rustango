@@ -7,11 +7,11 @@
 
 /// Convert a string into a URL-safe slug.
 ///
-/// - Lowercases ASCII letters
+/// - Lowercases ASCII letters and folds accented Latin ones (`"Café"` → `"cafe"`)
 /// - Replaces non-alphanumeric runs with a single `-`
 /// - Strips leading and trailing `-`
-/// - Drops non-ASCII characters; when that leaves nothing, returns
-///   [`slugify_unicode`] instead, so `"Привет мир"` gives `"привет-мир"`
+/// - Drops other non-ASCII characters (`"Café 日本"` → `"cafe"`); when that
+///   leaves nothing, returns [`slugify_unicode`], so `"Привет мир"` gives `"привет-мир"`
 ///
 /// # Examples
 ///
@@ -29,6 +29,9 @@ pub fn slugify(s: &str) -> String {
         if c.is_ascii_alphanumeric() {
             out.push(c.to_ascii_lowercase());
             last_was_dash = false;
+        } else if let Some(folded) = fold_latin(c) {
+            out.push_str(folded);
+            last_was_dash = false;
         } else if !out.is_empty() && !last_was_dash {
             out.push('-');
             last_was_dash = true;
@@ -41,6 +44,45 @@ pub fn slugify(s: &str) -> String {
         return slugify_unicode(s);
     }
     trimmed.to_owned()
+}
+
+/// ASCII spelling of an accented Latin letter (Latin-1 and Extended-A).
+fn fold_latin(c: char) -> Option<&'static str> {
+    const FOLDS: &[(&str, &str)] = &[
+        ("àáâãäåāăą", "a"),
+        ("æ", "ae"),
+        ("çćĉċč", "c"),
+        ("ďđð", "d"),
+        ("èéêëēĕėęě", "e"),
+        ("ĝğġģ", "g"),
+        ("ĥħ", "h"),
+        ("ìíîïĩīĭįı", "i"),
+        ("ĳ", "ij"),
+        ("ĵ", "j"),
+        ("ķĸ", "k"),
+        ("ĺļľŀł", "l"),
+        ("ñńņňŉŋ", "n"),
+        ("òóôõöøōŏő", "o"),
+        ("œ", "oe"),
+        ("ŕŗř", "r"),
+        ("śŝşšșſ", "s"),
+        ("ß", "ss"),
+        ("ţťŧț", "t"),
+        ("þ", "th"),
+        ("ùúûüũūŭůűų", "u"),
+        ("ŵ", "w"),
+        ("ýÿŷ", "y"),
+        ("źżž", "z"),
+    ];
+    if c.is_ascii() {
+        return None;
+    }
+    // Upper-case Latin letters in these blocks lower to a single char.
+    let lower = c.to_lowercase().next()?;
+    FOLDS
+        .iter()
+        .find(|(from, _)| from.contains(lower))
+        .map(|(_, to)| *to)
 }
 
 /// Like [`slugify`] but preserves Unicode letters/digits (lowercased).
@@ -95,7 +137,7 @@ pub fn unique_slug<F>(input: &str, mut is_taken: F) -> String
 where
     F: FnMut(&str) -> bool,
 {
-    let base = slugify(input);
+    let base = slug_base(input);
     if !is_taken(&base) {
         return base;
     }
@@ -108,13 +150,24 @@ where
     base // pathological — fall back to base
 }
 
+/// [`slugify`], or `"untitled"` when nothing sluggable is left: `""` and
+/// `"-2"` are not usable slugs.
+fn slug_base(input: &str) -> String {
+    let base = slugify(input);
+    if base.is_empty() {
+        "untitled".to_owned()
+    } else {
+        base
+    }
+}
+
 /// Async variant of [`unique_slug`] for DB-backed uniqueness checks.
 pub async fn unique_slug_async<F, Fut>(input: &str, mut is_taken: F) -> String
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let base = slugify(input);
+    let base = slug_base(input);
     if !is_taken(base.clone()).await {
         return base;
     }
@@ -158,7 +211,8 @@ pub fn html_escape(s: &str) -> String {
 }
 
 /// Append `s` to `out` with the five XML characters escaped (`&apos;`
-/// for `'`), for feeds and sitemaps.
+/// for `'`), for feeds and sitemaps. Chars XML 1.0 forbids (C0 controls
+/// other than tab/LF/CR, U+FFFE, U+FFFF) are dropped: no escape is legal.
 pub(crate) fn xml_escape_into(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
@@ -167,6 +221,8 @@ pub(crate) fn xml_escape_into(out: &mut String, s: &str) {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            '\t' | '\n' | '\r' => out.push(c),
+            '\u{0}'..='\u{1F}' | '\u{FFFE}' | '\u{FFFF}' => {}
             _ => out.push(c),
         }
     }
@@ -2554,8 +2610,17 @@ mod tests {
     }
 
     #[test]
-    fn slugify_drops_non_ascii() {
-        assert_eq!(slugify("Café"), "caf");
+    fn slugify_folds_accented_latin_letters() {
+        assert_eq!(slugify("Café"), "cafe");
+        assert_eq!(slugify("Crème Brûlée à Łódź"), "creme-brulee-a-lodz");
+        assert_eq!(slugify("Straße ÆØ"), "strasse-aeo");
+        // Non-Latin input still falls back to the Unicode slug.
+        assert_eq!(slugify("Привет мир"), "привет-мир");
+    }
+
+    #[test]
+    fn slugify_drops_non_latin_letters_next_to_ascii() {
+        assert_eq!(slugify("Café 日本"), "cafe");
     }
 
     /// All-non-ASCII input falls back to the Unicode slug, not "" (#1919).
@@ -2592,6 +2657,13 @@ mod tests {
     #[test]
     fn html_escape_passes_safe_chars() {
         assert_eq!(html_escape("hello world 123"), "hello world 123");
+    }
+
+    #[test]
+    fn xml_escape_into_drops_chars_xml_forbids() {
+        let mut out = String::new();
+        xml_escape_into(&mut out, "a\u{8}b\u{0}c\td\ne\u{FFFF}");
+        assert_eq!(out, "abc\td\ne");
     }
 
     /// Atom writes this into a double-quoted `href`, so every arm matters.
@@ -2634,6 +2706,14 @@ mod tests {
     }
 
     // -------------------------------------------------------------- unique_slug
+
+    #[test]
+    fn unique_slug_never_builds_an_empty_slug() {
+        let mut taken = std::collections::HashSet::new();
+        assert_eq!(unique_slug("!!!", |s| taken.contains(s)), "untitled");
+        taken.insert("untitled".to_owned());
+        assert_eq!(unique_slug("???", |s| taken.contains(s)), "untitled-2");
+    }
 
     #[test]
     fn unique_slug_returns_base_when_free() {
