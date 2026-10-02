@@ -2751,7 +2751,11 @@ fn render_step(
         | SC::AlterColumnNullable { table, .. }
         | SC::AlterColumnDefault { table, .. }
         | SC::AlterColumnMaxLength { table, .. }
-        | SC::AlterColumnUnique { table, .. } => Some(table.as_str()),
+        | SC::AlterColumnUnique { table, .. }
+        | SC::AddCheckConstraint { table, .. }
+        | SC::DropCheckConstraint { table, .. }
+        | SC::AddCompositeFk { table, .. }
+        | SC::DropCompositeFk { table, .. } => Some(table.as_str()),
         _ => None,
     };
     // The ops after `change`, which is borrowed from `ops`.
@@ -2767,6 +2771,11 @@ fn render_step(
                 super::rebuild::shape_at(table, later, after).map_err(MigrateError::Validation)?;
             at.tables.retain(|t| t.name != table);
             at.tables.push(shape);
+            at.checks.retain(|c| {
+                !later.iter().any(|op| {
+                    matches!(op, Operation::Schema(SC::AddCheckConstraint { name, .. }) if *name == c.name)
+                })
+            });
             Some(at)
         }
         _ => None,

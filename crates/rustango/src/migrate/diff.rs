@@ -1406,17 +1406,19 @@ fn render_changes_split_inner(
                     dialect.quote_ident(name)
                 ));
             }
-            SchemaChange::AddCheckConstraint { name, table, expr } => {
-                if dialect.name() == "sqlite" {
-                    return Err(format!(
-                        "AddCheckConstraint for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE ADD CONSTRAINT CHECK` \
-                         syntax — CHECK constraints must be declared inside the original \
-                         CREATE TABLE statement. Workaround: emit a hand-written \
-                         `Operation::Data` (RunSQL) that rebuilds the table with the CHECK \
-                         inline, or use an application-level invariant. Tracked in #559."
-                    ));
+            // SQLite takes CHECKs and composite FKs only in `CREATE TABLE` (#2127).
+            SchemaChange::AddCheckConstraint { table, .. }
+            | SchemaChange::DropCheckConstraint { table, .. }
+            | SchemaChange::AddCompositeFk { table, .. }
+            | SchemaChange::DropCompositeFk { table, .. }
+                if dialect.alters_by_rebuild() =>
+            {
+                if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
+                {
+                    out.set_rebuild(rebuild?)?;
                 }
+            }
+            SchemaChange::AddCheckConstraint { name, table, expr } => {
                 out.immediate.push(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
                     dialect.quote_ident(table),
@@ -1556,16 +1558,6 @@ fn render_changes_split_inner(
                 from,
                 on,
             } => {
-                if dialect.name() == "sqlite" {
-                    return Err(format!(
-                        "AddCompositeFk for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN \
-                         KEY` syntax — composite FKs must be declared inside the original \
-                         CREATE TABLE statement. Workaround: emit a hand-written \
-                         `Operation::Data` (RunSQL) that rebuilds the table with the FK \
-                         inline. Tracked in #559."
-                    ));
-                }
                 let from_cols = from
                     .iter()
                     .map(|c| dialect.quote_ident(c))
@@ -2586,32 +2578,38 @@ mod sql_type_tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn add_check_constraint_sqlite_rejects() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AddCheckConstraint {
-            name: "ck_post_views_nonneg".into(),
-            table: "posts".into(),
-            expr: "views >= 0".into(),
+    fn check_constraints_rebuild_on_sqlite() {
+        let mut snap = alter_snap();
+        snap.checks.push(super::super::snapshot::CheckSnapshot {
+            name: "ck_t_c".into(),
+            table: "t".into(),
+            expr: "c >= 0".into(),
+        });
+        let add = vec![SchemaChange::AddCheckConstraint {
+            name: "ck_t_c".into(),
+            table: "t".into(),
+            expr: "c >= 0".into(),
         }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("AddCheckConstraint must reject SQLite");
-        assert!(err.contains("AddCheckConstraint"));
-        assert!(err.contains("sqlite"));
-        assert!(err.contains("ALTER TABLE ADD CONSTRAINT CHECK"));
-    }
-
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn drop_check_constraint_sqlite_rejects() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::DropCheckConstraint {
-            name: "ck_post_views_nonneg".into(),
-            table: "posts".into(),
+        let batch = render_changes_split_with_dialect(&add, &snap, &crate::sql::Sqlite).unwrap();
+        let sql = batch
+            .rebuild
+            .expect("a rebuild")
+            .statements(&crate::sql::Sqlite);
+        assert!(
+            sql[0].contains(r#"CONSTRAINT "ck_t_c" CHECK (c >= 0)"#),
+            "{sql:?}"
+        );
+        snap.checks.clear();
+        let drop = vec![SchemaChange::DropCheckConstraint {
+            name: "ck_t_c".into(),
+            table: "t".into(),
         }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("DropCheckConstraint must reject SQLite");
-        assert!(err.contains("DropCheckConstraint"));
-        assert!(err.contains("sqlite"));
+        let batch = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
+        let sql = batch
+            .rebuild
+            .expect("a rebuild")
+            .statements(&crate::sql::Sqlite);
+        assert!(!sql[0].contains("CHECK"), "{sql:?}");
     }
 
     /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
@@ -2751,20 +2749,6 @@ mod sql_type_tests {
         );
     }
 
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn add_composite_fk_sqlite_rejects() {
-        let err = render_changes_split_with_dialect(
-            &make_add_composite_fk(),
-            &empty_snap(),
-            &crate::sql::Sqlite,
-        )
-        .expect_err("AddCompositeFk must reject SQLite");
-        assert!(err.contains("AddCompositeFk"));
-        assert!(err.contains("sqlite"));
-        assert!(err.contains("ADD CONSTRAINT FOREIGN KEY"));
-    }
-
     #[test]
     fn drop_composite_fk_postgres_uses_ansi_quoting() {
         let snap = empty_snap();
@@ -2804,19 +2788,6 @@ mod sql_type_tests {
             !out.immediate[0].contains("IF EXISTS"),
             "MySQL parses no `IF EXISTS` on a constraint drop"
         );
-    }
-
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn drop_composite_fk_sqlite_rejects() {
-        let changes = vec![SchemaChange::DropCompositeFk {
-            table: "child".into(),
-            name: "fk_x".into(),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &empty_snap(), &crate::sql::Sqlite)
-            .expect_err("DropCompositeFk must reject SQLite");
-        assert!(err.contains("DropCompositeFk"));
-        assert!(err.contains("sqlite"));
     }
 
     #[cfg(feature = "sqlite")]

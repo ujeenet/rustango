@@ -508,16 +508,8 @@ async fn long_fk_names_apply(pool: &Pool) {
 async fn column_drops_after_its_index_and_check(pool: &Pool) {
     let t = "mad_dc_item";
     let chain = Chain::new(pool, "dc", &[t]).await;
-    let checks = by_dialect! { pool,
-        postgres => true, because "ALTER TABLE ADD CONSTRAINT CHECK is native",
-        mysql => true, because "MySQL 8.0.16+ has CHECK; DROP COLUMN takes it along",
-        sqlite => false, because "SQLite cannot add a CHECK to a table (#559)",
-    };
-    let checks_json = if checks.value {
-        json!([{"name": "mad_dc_ck", "table": t, "expr": "p >= 0"}])
-    } else {
-        json!([])
-    };
+    // SQLite adds the CHECK by a rebuild (#2127).
+    let checks_json = json!([{"name": "mad_dc_ck", "table": t, "expr": "p >= 0"}]);
     chain
         .step(
             pool,
@@ -635,14 +627,7 @@ async fn composite_fk_drops_before_its_parent(pool: &Pool) {
         "the composite FK holds on {}",
         pool.dialect().name()
     );
-    let runs = by_dialect! { pool,
-        postgres => true, because "composite FKs are dropped by ALTER TABLE",
-        mysql => true, because "composite FKs are dropped by ALTER TABLE; 1553/3730 if misordered",
-        sqlite => false, because "SQLite cannot drop a composite FK from a table (#559)",
-    };
-    if !runs.value {
-        return;
-    }
+    // SQLite drops it by a rebuild (#2127).
     chain
         .step(pool, json!({"tables": [kid(false)]}))
         .await
@@ -772,23 +757,21 @@ async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
 async fn edited_check_is_replaced(pool: &Pool) {
     let t = "mad_ck_item";
     let chain = Chain::new(pool, "ck", &[t]).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "ALTER TABLE ADD/DROP CONSTRAINT CHECK is native",
-        mysql => true, because "MySQL 8.0.16+ enforces CHECK and drops it with DROP CHECK",
-        sqlite => false, because "SQLite cannot add a CHECK to a table (#559)",
-    };
-    if !runs.value {
-        return;
-    }
-    let with = |expr: &str| {
-        json!({"tables": [table(t, vec![id(), col("price", "i64", json!({}))])],
+    let with_default = |expr: &str, default: Value| {
+        json!({"tables": [table(t, vec![id(), col("price", "i64", default)])],
                "checks": [{"name": "mad_ck_price", "table": t, "expr": expr}]})
     };
+    let with = |expr: &str| with_default(expr, json!({}));
     chain.step(pool, with("price >= 0")).await.expect("initial");
     chain
         .step(pool, with("price > 0"))
         .await
         .expect("the edit applies");
+    // SQLite rebuilds the table for this; the CHECK must survive it.
+    chain
+        .step(pool, with_default("price > 0", json!({"default": "1"})))
+        .await
+        .expect("a later column change");
     assert!(
         exec(
             pool,
@@ -805,14 +788,6 @@ async fn edited_check_is_replaced(pool: &Pool) {
 async fn edited_composite_fk_is_replaced(pool: &Pool) {
     let (p1, p2, child) = ("mad_cf_parent1", "mad_cf_parent2", "mad_cf_child");
     let chain = Chain::new(pool, "cf", &[child, p1, p2]).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "composite FKs are added by ALTER TABLE",
-        mysql => true, because "composite FKs are added by ALTER TABLE",
-        sqlite => false, because "SQLite cannot add a composite FK to a table (#559)",
-    };
-    if !runs.value {
-        return;
-    }
     let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
     let with = |to: Option<&str>| {
         let mut c = table(child, ab());
