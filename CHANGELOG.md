@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the commerce examples' system chains are current (#2054)
+
+Regenerated with `migrate` / `makemigrations`; CI now fails when an example's framework steps are not committed.
+
 ### Fixed — PG drops a UNIQUE after its column was renamed (#2133)
 
 The runner drops the constraint by its name in the catalog, which keeps the old column's name, as MySQL and SQLite already did.
