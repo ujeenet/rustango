@@ -1,6 +1,6 @@
 #![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds.
 //! The template views' `tenant_router()` copies apply global scopes too (#1746),
-//! and audit their writes (#1794).
+//! and audit their writes (#1794), and honour soft delete (#2082).
 
 // `not(postgres)`: the `Tenant` extractor looks up `TenantContext<DefaultDb>`,
 // which is Postgres once that feature is on.
@@ -47,6 +47,17 @@ pub struct Note {
     #[rustango(max_length = 32)]
     pub tag: String,
     pub visible: bool,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "sd2082t_memo", app = "scope1746t")]
+pub struct Memo {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub tag: String,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 const SECRET: &[u8] = b"scope1746-tenant-secret-32-bytes!!";
@@ -98,6 +109,9 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
     rustango::testkit::create_tables_for::<Note>(&pool)
         .await
         .expect("notes table");
+    rustango::testkit::create_tables_for::<Memo>(&pool)
+        .await
+        .expect("memos table");
     rustango::audit::ensure_table_pool(&pool)
         .await
         .expect("audit table");
@@ -170,7 +184,30 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
             DeleteView::for_model(Note::SCHEMA)
                 .template("confirm.html")
                 .success_url("/notes")
-                .tenant_router("/notes", t),
+                .tenant_router("/notes", t.clone()),
+        )
+        .merge(
+            ListView::for_model(Memo::SCHEMA)
+                .template("list.html")
+                .bulk_actions(true)
+                .tenant_router("/memos", t.clone()),
+        )
+        .merge(
+            DetailView::for_model(Memo::SCHEMA)
+                .template("detail.html")
+                .tenant_router("/memos", t.clone()),
+        )
+        .merge(
+            UpdateView::for_model(Memo::SCHEMA)
+                .template("form.html")
+                .success_url("/memos")
+                .tenant_router("/memos", t.clone()),
+        )
+        .merge(
+            DeleteView::for_model(Memo::SCHEMA)
+                .template("confirm.html")
+                .success_url("/memos")
+                .tenant_router("/memos", t),
         )
         .layer(axum::middleware::from_fn(
             move |mut req: Request<Body>, next: axum::middleware::Next| {
@@ -299,4 +336,74 @@ async fn tenant_bulk_actions_skip_hidden_rows() {
     assert!(status.is_redirection(), "{status}");
     assert!(row(&pool, hidden[0]).await.is_some(), "hidden row kept");
     assert!(row(&pool, shown[0]).await.is_none(), "visible row deleted");
+}
+
+async fn memo(pool: &Pool, pk: i64) -> Memo {
+    Memo::objects()
+        .without_global_scopes()
+        .fetch(pool)
+        .await
+        .expect("memos")
+        .into_iter()
+        .find(|m| *m.id.get().unwrap() == pk)
+        .expect("memo row kept")
+}
+
+/// The tenant copies soft-delete and hide deleted rows too (#2082).
+#[tokio::test]
+async fn tenant_views_soft_delete_and_hide_deleted_rows() {
+    let (app, pool, _, _) = app("softdel").await;
+    let mut pks = Vec::new();
+    for tag in ["a", "b", "c"] {
+        let mut m = Memo {
+            id: Auto::default(),
+            tag: tag.into(),
+            deleted_at: None,
+        };
+        m.insert_pool(&pool).await.expect("seed memo");
+        pks.push(*m.id.get().expect("pk"));
+    }
+    let (status, _) = send(
+        &app,
+        Method::POST,
+        &format!("/memos/{}/delete", pks[0]),
+        Some(""),
+    )
+    .await;
+    assert!(status.is_redirection(), "DeleteView: {status}");
+    let pick = format!(
+        "action=delete_selected&_selected_action={}&confirmed=true",
+        pks[1]
+    );
+    let (status, _) = send(&app, Method::POST, "/memos", Some(&pick)).await;
+    assert!(status.is_redirection(), "delete_selected: {status}");
+    assert!(
+        memo(&pool, pks[0]).await.deleted_at.is_some(),
+        "DeleteView stamped"
+    );
+    assert!(
+        memo(&pool, pks[1]).await.deleted_at.is_some(),
+        "bulk stamped"
+    );
+
+    let (_, body) = send(&app, Method::GET, "/memos", None).await;
+    assert_eq!(body, "rows=1 total=1", "list");
+    let gone = pks[0];
+    for uri in [format!("/memos/{gone}"), format!("/memos/{gone}/edit")] {
+        let (status, _) = send(&app, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "GET {uri}");
+    }
+    let (status, _) = send(
+        &app,
+        Method::POST,
+        &format!("/memos/{gone}/edit"),
+        Some("tag=x"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "UpdateView POST");
+    assert_eq!(
+        memo(&pool, gone).await.tag,
+        "a",
+        "a deleted row is not updated"
+    );
 }

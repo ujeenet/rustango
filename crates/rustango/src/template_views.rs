@@ -96,6 +96,51 @@ macro_rules! pk_or_404 {
     };
 }
 
+/// The rows a template view may read or write: the model's global
+/// scopes, and only live rows on a soft-delete model (#2082).
+trait Visible {
+    fn visible(self) -> Self;
+}
+
+macro_rules! impl_visible {
+    ($($ty:ty),*) => {$(
+        impl Visible for $ty {
+            fn visible(self) -> Self {
+                let model = self.model;
+                let mut q = self.with_global_scopes();
+                q.where_clause = crate::soft_delete::compose_with_active(model, q.where_clause);
+                q
+            }
+        }
+    )*};
+}
+impl_visible!(
+    SelectQuery,
+    crate::core::CountQuery,
+    crate::core::UpdateQuery,
+    crate::core::DeleteQuery
+);
+
+/// Run `query`; a soft-delete model stamps its column instead, as the admin does (#2082).
+async fn delete_rows(
+    pool: &Pool,
+    query: crate::core::DeleteQuery,
+) -> Result<u64, crate::sql::ExecError> {
+    let query = query.visible();
+    let Some(col) = query.model.soft_delete_column else {
+        return crate::audit::delete(pool, &query).await;
+    };
+    let stamp = crate::core::UpdateQuery::new(
+        query.model,
+        vec![crate::core::Assignment {
+            column: col,
+            value: SqlValue::from(chrono::Utc::now()).into(),
+        }],
+        query.where_clause,
+    );
+    crate::audit::update_as(pool, &stamp, crate::audit::AuditOp::SoftDelete).await
+}
+
 // ============================================================== ListView
 
 // ============================================================== Bulk actions
@@ -726,7 +771,7 @@ struct ListViewState {
 
 async fn handle_list(
     State(state): State<Arc<ListViewState>>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
     extra: Option<axum::Extension<ExtraContext>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -758,9 +803,9 @@ async fn handle_list(
         offset: Some(offset),
         ..SelectQuery::new(state.vs.schema)
     }
-    .with_global_scopes();
+    .visible();
     // Search predicates are folded into where_clause by build_list_where.
-    let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
+    let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).visible();
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let (rows_result, count_result) = tokio::join!(
@@ -810,7 +855,7 @@ async fn handle_list(
     // cookie on the response. ListView's bulk-action POST is gated
     // by the router's CSRF layer; without this the
     // form-rendered token is empty and every legitimate POST 403s.
-    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let set_cookie = stamp_csrf(&csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.vs.template, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -863,7 +908,7 @@ async fn handle_list_action(
             &action,
             &raws,
             &objects,
-            &parts.headers,
+            &CsrfCookie::of(&parts),
         );
     }
 
@@ -1037,8 +1082,8 @@ async fn handle_detail(
     };
     // #562 — use the `SelectQuery::by_pk` constructor instead of
     // spelling out the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
-        .with_global_scopes();
+    let select_q =
+        SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk)).visible();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1165,7 +1210,7 @@ struct DeleteViewState {
 async fn handle_delete_confirm(
     State(state): State<Arc<DeleteViewState>>,
     Path(pk): Path<String>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
 ) -> Response {
     let Some(pk_field) = state.vs.schema.primary_key() else {
         return template_error(&format!(
@@ -1174,8 +1219,8 @@ async fn handle_delete_confirm(
         ));
     };
     // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
-        .with_global_scopes();
+    let select_q =
+        SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk)).visible();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1184,7 +1229,7 @@ async fn handle_delete_confirm(
     };
     let mut ctx = Context::new();
     ctx.insert("object", &object);
-    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let set_cookie = stamp_csrf(&csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.vs.template, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -1204,9 +1249,8 @@ async fn handle_delete_submit(
         state.vs.schema,
         pk_field.column,
         pk_or_404!(pk_field, &pk),
-    )
-    .with_global_scopes();
-    match crate::audit::delete(&state.pool, &delete_q).await {
+    );
+    match delete_rows(&state.pool, delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             // Note: typically `{pk}` in a delete success_url
@@ -1548,7 +1592,7 @@ fn form_fields(
         .fields
         .iter()
         .filter(|f| {
-            if !f.accepts_input(kind) {
+            if !takes_input(schema, f, kind) {
                 return false;
             }
             match explicit {
@@ -1840,10 +1884,7 @@ fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
         .ok()
 }
 
-async fn handle_create_get(
-    State(state): State<Arc<FormViewState>>,
-    headers: axum::http::HeaderMap,
-) -> Response {
+async fn handle_create_get(State(state): State<Arc<FormViewState>>, csrf: CsrfCookie) -> Response {
     let mut ctx = Context::new();
     let fields = form_fields(
         state.schema,
@@ -1857,7 +1898,7 @@ async fn handle_create_get(
     );
     ctx.insert("is_create", &true);
     ctx.insert("is_update", &false);
-    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let set_cookie = stamp_csrf(&csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.template, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -1865,7 +1906,7 @@ async fn handle_create_get(
 
 async fn handle_create_post(
     State(state): State<Arc<FormViewState>>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
     let (mut columns, mut values, mut errors) = parse_form(
@@ -1876,7 +1917,7 @@ async fn handle_create_post(
     );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
-        return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
+        return rerender_form(&state, &form, &errors, /*is_update=*/ false, &csrf);
     }
     // Schema-driven INSERT: nothing else supplies these (#1464).
     crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
@@ -1890,15 +1931,15 @@ async fn handle_create_post(
     .await
     {
         Ok(url) => axum::response::Redirect::to(&url).into_response(),
-        Err(InsertFailed::Duplicate(errors)) => {
-            rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers)
+        Err(WriteFailed::Duplicate(errors)) => {
+            rerender_form(&state, &form, &errors, /*is_update=*/ false, &csrf)
         }
-        Err(InsertFailed::Error(resp)) => resp,
+        Err(WriteFailed::Error(resp)) => resp,
     }
 }
 
-/// Why a CreateView INSERT did not redirect.
-enum InsertFailed {
+/// Why a CreateView INSERT or UpdateView UPDATE did not redirect.
+enum WriteFailed {
     /// A unique value is taken: field errors for the form (#2033).
     Duplicate(HashMap<String, String>),
     /// Anything else: an opaque 500.
@@ -1913,11 +1954,11 @@ async fn create_insert(
     success_url: &str,
     columns: Vec<&'static str>,
     values: Vec<SqlValue>,
-) -> Result<String, InsertFailed> {
+) -> Result<String, WriteFailed> {
     // `{column}` placeholders in `success_url` come back via RETURNING;
     // otherwise a plain INSERT saves the round-trip.
     let mut returning = success_url_returning_columns(success_url, schema)
-        .map_err(|e| InsertFailed::Error(template_error(&e)))?;
+        .map_err(|e| WriteFailed::Error(template_error(&e)))?;
     // An audited create needs the new PK for its audit row (#1821).
     let audited_pk = schema
         .primary_key()
@@ -1947,33 +1988,73 @@ async fn create_insert(
     };
     match result {
         Ok(Ok(url)) => Ok(url),
-        Ok(Err(e)) => Err(InsertFailed::Error(template_error(&e))),
-        Err(e) if e.is_unique_violation() => Err(InsertFailed::Duplicate(
-            duplicate_errors(pool, &insert_q).await,
+        Ok(Err(e)) => Err(WriteFailed::Error(template_error(&e))),
+        Err(e) if e.is_unique_violation() => Err(WriteFailed::Duplicate(
+            duplicate_errors(
+                pool,
+                schema,
+                insert_q.columns.iter().copied().zip(&insert_q.values),
+                None,
+            )
+            .await,
         )),
-        Err(e) => Err(InsertFailed::Error(template_error(&format!(
+        Err(e) => Err(WriteFailed::Error(template_error(&format!(
             "insert row: {e}"
         )))),
     }
 }
 
-/// Blames each submitted unique field whose value is already taken.
-async fn duplicate_errors(
+/// The UpdateView UPDATE shared by the static and tenant routers; returns
+/// the rows changed, `0` when no visible row has `this_row`'s PK.
+async fn update_row(
     pool: &Pool,
-    insert_q: &crate::core::InsertQuery,
-) -> HashMap<String, String> {
-    let schema = insert_q.model;
-    let mut errors = HashMap::new();
-    let unique = insert_q
-        .columns
+    schema: &'static ModelSchema,
+    columns: Vec<&'static str>,
+    values: Vec<SqlValue>,
+    this_row: WhereExpr,
+) -> Result<u64, WriteFailed> {
+    let set = columns
         .iter()
-        .zip(&insert_q.values)
+        .zip(&values)
+        .map(|(column, value)| crate::core::Assignment::new(*column, value.clone()))
+        .collect();
+    let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible();
+    match crate::audit::update(pool, &update_q).await {
+        Ok(n) => Ok(n),
+        // A taken unique value is a form error, as on create (#2073).
+        Err(e) if e.is_unique_violation() => Err(WriteFailed::Duplicate(
+            duplicate_errors(
+                pool,
+                schema,
+                columns.into_iter().zip(&values),
+                Some(&this_row),
+            )
+            .await,
+        )),
+        Err(e) => Err(WriteFailed::Error(template_error(&format!(
+            "update row: {e}"
+        )))),
+    }
+}
+
+/// Blames each written unique field whose value another row holds;
+/// `this_row` is the row an UPDATE writes, which may keep its own value.
+async fn duplicate_errors<'a>(
+    pool: &Pool,
+    schema: &'static ModelSchema,
+    written: impl Iterator<Item = (&'static str, &'a SqlValue)>,
+    this_row: Option<&WhereExpr>,
+) -> HashMap<String, String> {
+    let mut errors = HashMap::new();
+    let unique = written
         .filter_map(|(col, v)| Some((schema.field_by_column(col)?, v)))
         .filter(|(f, _)| f.unique || f.primary_key);
     for (field, value) in unique {
+        let same = WhereExpr::Predicate(Filter::new(field.column, Op::Eq, value.clone()));
+        let other = this_row.map(|w| WhereExpr::Not(Box::new(w.clone())));
         let taken = crate::core::CountQuery::new(
             schema,
-            WhereExpr::Predicate(Filter::new(field.column, Op::Eq, value.clone())),
+            WhereExpr::And(std::iter::once(same).chain(other).collect()),
         );
         if count_rows_pool(pool, &taken).await.unwrap_or(0) > 0 {
             errors.insert(field.name.to_owned(), DUPLICATE_VALUE.to_owned());
@@ -1996,7 +2077,7 @@ const DUPLICATE_VALUE: &str = "a row with this value already exists";
 async fn handle_update_get(
     State(state): State<Arc<FormViewState>>,
     Path(pk): Path<String>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
 ) -> Response {
     let Some(pk_field) = state.schema.primary_key() else {
         return template_error(&format!(
@@ -2006,8 +2087,8 @@ async fn handle_update_get(
     };
     // #562 — `SelectQuery::by_pk` replaces the 11-field struct
     // literal.
-    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
-        .with_global_scopes();
+    let select_q =
+        SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk)).visible();
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
@@ -2041,7 +2122,7 @@ async fn handle_update_get(
     ctx.insert("pk", &pk);
     ctx.insert("is_create", &false);
     ctx.insert("is_update", &true);
-    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let set_cookie = stamp_csrf(&csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.template, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -2050,7 +2131,7 @@ async fn handle_update_get(
 async fn handle_update_post(
     State(state): State<Arc<FormViewState>>,
     Path(pk): Path<String>,
-    headers: axum::http::HeaderMap,
+    csrf: CsrfCookie,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
     let Some(pk_field) = state.schema.primary_key() else {
@@ -2067,31 +2148,29 @@ async fn handle_update_post(
     );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
-        return rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers);
+        return rerender_form(&state, &form, &errors, /*is_update=*/ true, &csrf);
     }
-    let assignments: Vec<crate::core::Assignment> = columns
-        .into_iter()
-        .zip(values)
-        .map(|(column, value)| crate::core::Assignment {
-            column,
-            value: value.into(),
-        })
-        .collect();
     let pk_match = WhereExpr::Predicate(Filter {
         column: pk_field.column,
         op: Op::Eq,
         value: pk_or_404!(pk_field, &pk),
     });
-    let update_q =
-        crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
-    match crate::audit::update(&state.pool, &update_q).await {
+    match update_row(&state.pool, state.schema, columns, values, pk_match).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             let target = substitute_pk(&state.success_url, &pk);
             axum::response::Redirect::to(&target).into_response()
         }
-        Err(e) => template_error(&format!("update row: {e}")),
+        Err(WriteFailed::Duplicate(errors)) => {
+            rerender_form(&state, &form, &errors, /*is_update=*/ true, &csrf)
+        }
+        Err(WriteFailed::Error(resp)) => resp,
     }
+}
+
+/// Whether a form may set `f`; only DeleteView stamps the soft-delete column (#2082).
+fn takes_input(schema: &ModelSchema, f: &FieldSchema, kind: crate::core::WriteKind) -> bool {
+    f.accepts_input(kind) && schema.soft_delete_column != Some(f.column)
 }
 
 /// Walk the form submission and produce `(columns, values, errors)`.
@@ -2109,7 +2188,7 @@ fn parse_form(
     let mut values: Vec<SqlValue> = Vec::new();
     let mut errors: HashMap<String, String> = HashMap::new();
     for f in schema.fields {
-        if !f.accepts_input(kind) {
+        if !takes_input(schema, f, kind) {
             continue;
         }
         if let Some(names) = explicit {
@@ -2232,7 +2311,7 @@ fn rerender_form(
     submitted: &HashMap<String, String>,
     errors: &HashMap<String, String>,
     is_update: bool,
-    headers: &axum::http::HeaderMap,
+    csrf: &CsrfCookie,
 ) -> Response {
     let fields = form_fields(
         state.schema,
@@ -2251,7 +2330,7 @@ fn rerender_form(
     // is almost always already present. Stamp the same token back
     // into the context so the re-rendered form's hidden input
     // matches what the browser will send on the next attempt.
-    let set_cookie = stamp_csrf(headers, &mut ctx);
+    let set_cookie = stamp_csrf(csrf, &mut ctx);
     let mut resp = render(&state.tera, &state.template, &ctx);
     *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     apply_csrf_cookie(&mut resp, set_cookie);
@@ -2473,9 +2552,36 @@ fn filter_value(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue>
     }
 }
 
+/// The request's CSRF cookie under the name its CSRF layer checks: an
+/// app's `CsrfConfig::cookie_name`, not always the default (#1722).
+struct CsrfCookie {
+    headers: axum::http::HeaderMap,
+    name: String,
+}
+
+impl CsrfCookie {
+    fn of(parts: &axum::http::request::Parts) -> Self {
+        Self {
+            headers: parts.headers.clone(),
+            name: crate::forms::csrf::active_cookie_name(&parts.extensions).to_owned(),
+        }
+    }
+}
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CsrfCookie {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self::of(parts))
+    }
+}
+
 /// Stamp `csrf_token` and `csrf_input` into the context (issue #15).
-fn stamp_csrf(headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
-    crate::forms::csrf::stamp_into_context(headers, ctx)
+fn stamp_csrf(csrf: &CsrfCookie, ctx: &mut Context) -> Option<String> {
+    crate::forms::csrf::stamp_named_into_context(&csrf.headers, &csrf.name, ctx)
 }
 
 /// Every CBV router with a POST route goes through here, so each
@@ -2824,8 +2930,7 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
         .expect("target table existed when collecting lookups");
     // #810 — IN-list lookup via the `by_pk_in` constructor; a target
     // row its own global scopes hide gets no `_display`.
-    SelectQuery::by_pk_in(target, fk.target_pk_column, fk.distinct_values.clone())
-        .with_global_scopes()
+    SelectQuery::by_pk_in(target, fk.target_pk_column, fk.distinct_values.clone()).visible()
 }
 
 /// v0.38 — operates on JSON rows from `select_rows_as_json`
@@ -2924,13 +3029,13 @@ fn render_bulk_delete_confirm(
     action: &str,
     pks: &[String],
     objects: &[Value],
-    headers: &axum::http::HeaderMap,
+    csrf: &CsrfCookie,
 ) -> Response {
     let mut ctx = Context::new();
     ctx.insert("action", action);
     ctx.insert("pks", &pks);
     ctx.insert("objects", &objects);
-    let set_cookie = stamp_csrf(headers, &mut ctx);
+    let set_cookie = stamp_csrf(csrf, &mut ctx);
     let mut resp = render(tera, &template_name, &ctx);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
@@ -2948,7 +3053,7 @@ async fn fetch_pks_as_objects_pool(
     pks: &[SqlValue],
 ) -> Result<Vec<Value>, String> {
     // #810 — IN-list lookup via the `by_pk_in` constructor.
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
     let rows = select_rows_as_json(pool, &q, &fields)
         .await
@@ -2956,7 +3061,7 @@ async fn fetch_pks_as_objects_pool(
     Ok(rows)
 }
 
-/// `pks` narrowed to the rows the model's global scopes let through,
+/// `pks` narrowed to the rows the view can see ([`Visible`]),
 /// in submitted order — what a custom bulk action receives.
 async fn visible_pks_pool(
     schema: &'static ModelSchema,
@@ -2964,10 +3069,10 @@ async fn visible_pks_pool(
     pool: &Pool,
     pks: &[SqlValue],
 ) -> Result<Vec<SqlValue>, String> {
-    if pks.is_empty() || schema.global_scopes.is_empty() {
+    if pks.is_empty() || (schema.global_scopes.is_empty() && schema.soft_delete_column.is_none()) {
         return Ok(pks.to_vec());
     }
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
     let rows = select_rows_as_json(pool, &q, &[pk_field])
         .await
         .map_err(|e| e.to_string())?;
@@ -2986,10 +3091,8 @@ async fn visible_pks_pool(
         .collect())
 }
 
-/// Run the built-in `delete_selected` action: `DELETE FROM <table>
-/// WHERE <pk> IN (...)`. Goes through `crate::core::DeleteQuery` +
-/// `crate::sql::delete{,_on}` so it composes the exact same SQL the
-/// per-row admin DELETE path uses.
+/// Run the built-in `delete_selected` action through [`delete_rows`]:
+/// `DELETE … WHERE <pk> IN (...)`, or a `deleted_at` stamp on a soft-delete model.
 async fn run_delete_selected_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
@@ -2997,9 +3100,8 @@ async fn run_delete_selected_pool(
     pks: &[SqlValue],
 ) -> Result<(), String> {
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
-    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec())
-        .with_global_scopes();
-    crate::audit::delete(pool, &q)
+    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+    delete_rows(pool, q)
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -3422,7 +3524,7 @@ mod tenant {
 
     pub(super) async fn handle_list_tenant(
         State(state): State<Arc<TenantListViewState>>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         Query(params): Query<HashMap<String, String>>,
         t: Tenant,
     ) -> Response {
@@ -3455,9 +3557,8 @@ mod tenant {
             offset: Some(offset),
             ..SelectQuery::new(state.vs.schema)
         }
-        .with_global_scopes();
-        let count_q =
-            crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
+        .visible();
+        let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).visible();
 
         // v0.38 — use the tenant's tri-dialect Pool enum; runs the
         // same code on PG / MySQL / SQLite. Routes through
@@ -3501,7 +3602,7 @@ mod tenant {
         // v0.30.17 — same CSRF stamping as the static-pool variant
         // (handle_list above). Without it, ListView with bulk_actions
         // mounted under a CSRF-protected scope can't post anything.
-        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.vs.template, &ctx);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
@@ -3560,7 +3661,7 @@ mod tenant {
                 &action,
                 &raws,
                 &objects,
-                &parts.headers,
+                &super::CsrfCookie::of(&parts),
             );
         }
 
@@ -3641,8 +3742,8 @@ mod tenant {
                 Err(e) => return template_error(&e),
             };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
-            .with_global_scopes();
+        let select_q =
+            SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk)).visible();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3669,7 +3770,7 @@ mod tenant {
     pub(super) async fn handle_delete_confirm_tenant(
         State(state): State<Arc<TenantDeleteViewState>>,
         Path(pk): Path<String>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
@@ -3681,7 +3782,7 @@ mod tenant {
         // #562 — by_pk constructor for single-PK-lookup shape.
         let select_q =
             SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
-                .with_global_scopes();
+                .visible();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3690,7 +3791,7 @@ mod tenant {
         };
         let mut ctx = Context::new();
         ctx.insert("object", &object);
-        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.vs.template, &ctx);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
@@ -3711,9 +3812,8 @@ mod tenant {
             state.vs.schema,
             pk_field.column,
             pk_or_404!(pk_field, &pk),
-        )
-        .with_global_scopes();
-        match crate::audit::delete(t.pool(), &delete_q).await {
+        );
+        match delete_rows(t.pool(), delete_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.vs.success_url, &pk);
@@ -3739,7 +3839,7 @@ mod tenant {
 
     pub(super) async fn handle_create_get_tenant(
         State(state): State<Arc<TenantFormViewState>>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
     ) -> Response {
         let mut ctx = Context::new();
         let fields = form_fields(
@@ -3754,7 +3854,7 @@ mod tenant {
         );
         ctx.insert("is_create", &true);
         ctx.insert("is_update", &false);
-        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.template, &ctx);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
@@ -3762,7 +3862,7 @@ mod tenant {
 
     pub(super) async fn handle_create_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
@@ -3774,9 +3874,7 @@ mod tenant {
         );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
-            return rerender_form_tenant(
-                &state, &form, &errors, /*is_update=*/ false, &headers,
-            );
+            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &csrf);
         }
         // Schema-driven INSERT: nothing else supplies these (#1464).
         crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
@@ -3784,17 +3882,17 @@ mod tenant {
             super::create_insert(t.pool(), state.schema, &state.success_url, columns, values);
         match insert.await {
             Ok(url) => axum::response::Redirect::to(&url).into_response(),
-            Err(super::InsertFailed::Duplicate(errors)) => {
-                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &headers)
+            Err(super::WriteFailed::Duplicate(errors)) => {
+                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &csrf)
             }
-            Err(super::InsertFailed::Error(resp)) => resp,
+            Err(super::WriteFailed::Error(resp)) => resp,
         }
     }
 
     pub(super) async fn handle_update_get_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {
@@ -3804,8 +3902,8 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
-            .with_global_scopes();
+        let select_q =
+            SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk)).visible();
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
         let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await
@@ -3839,7 +3937,7 @@ mod tenant {
         ctx.insert("pk", &pk);
         ctx.insert("is_create", &false);
         ctx.insert("is_update", &true);
-        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.template, &ctx);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
@@ -3848,7 +3946,7 @@ mod tenant {
     pub(super) async fn handle_update_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
-        headers: axum::http::HeaderMap,
+        csrf: CsrfCookie,
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
@@ -3866,32 +3964,23 @@ mod tenant {
         );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
-            return rerender_form_tenant(
-                &state, &form, &errors, /*is_update=*/ true, &headers,
-            );
+            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &csrf);
         }
-        let assignments: Vec<crate::core::Assignment> = columns
-            .into_iter()
-            .zip(values)
-            .map(|(column, value)| crate::core::Assignment {
-                column,
-                value: value.into(),
-            })
-            .collect();
         let pk_match = WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
             value: pk_or_404!(pk_field, &pk),
         });
-        let update_q =
-            crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
-        match crate::audit::update(t.pool(), &update_q).await {
+        match super::update_row(t.pool(), state.schema, columns, values, pk_match).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.success_url, &pk);
                 axum::response::Redirect::to(&target).into_response()
             }
-            Err(e) => template_error(&format!("update row: {e}")),
+            Err(super::WriteFailed::Duplicate(errors)) => {
+                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &csrf)
+            }
+            Err(super::WriteFailed::Error(resp)) => resp,
         }
     }
 
@@ -3900,7 +3989,7 @@ mod tenant {
         submitted: &HashMap<String, String>,
         errors: &HashMap<String, String>,
         is_update: bool,
-        headers: &axum::http::HeaderMap,
+        csrf: &CsrfCookie,
     ) -> Response {
         let fields = form_fields(
             state.schema,
@@ -3915,7 +4004,7 @@ mod tenant {
         );
         ctx.insert("is_create", &!is_update);
         ctx.insert("is_update", &is_update);
-        let set_cookie = super::stamp_csrf(headers, &mut ctx);
+        let set_cookie = super::stamp_csrf(csrf, &mut ctx);
         let mut resp = render(&state.tera, &state.template, &ctx);
         *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
         super::apply_csrf_cookie(&mut resp, set_cookie);
@@ -4409,8 +4498,12 @@ mod tests {
                 "session=abc; rustango_csrf=existing-token-existing-token-existing-toke",
             ),
         );
+        let csrf = CsrfCookie {
+            headers,
+            name: crate::forms::csrf::CSRF_COOKIE.to_owned(),
+        };
         let mut ctx = Context::new();
-        let set_cookie = stamp_csrf(&headers, &mut ctx);
+        let set_cookie = stamp_csrf(&csrf, &mut ctx);
         assert!(
             set_cookie.is_none(),
             "no Set-Cookie when cookie was present"
@@ -4425,9 +4518,12 @@ mod tests {
     /// and returns the Set-Cookie header for the caller to attach.
     #[test]
     fn stamp_csrf_mints_fresh_when_absent() {
-        let headers = axum::http::HeaderMap::new();
+        let csrf = CsrfCookie {
+            headers: axum::http::HeaderMap::new(),
+            name: crate::forms::csrf::CSRF_COOKIE.to_owned(),
+        };
         let mut ctx = Context::new();
-        let set_cookie = stamp_csrf(&headers, &mut ctx);
+        let set_cookie = stamp_csrf(&csrf, &mut ctx);
         let cookie = set_cookie.expect("Set-Cookie returned when cookie absent");
         assert!(cookie.starts_with("rustango_csrf="), "got: {cookie}");
         // The token in the context matches what's in the Set-Cookie.
@@ -5859,6 +5955,96 @@ mod tests {
             .header("cookie", format!("rustango_csrf={TEST_CSRF}"))
             .body(Body::from(body))
             .unwrap()
+    }
+
+    /// An app's CSRF layer config reaches the CBVs: the form carries the
+    /// token of its cookie, and the POST passes its check (#1722).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cbv_uses_the_apps_csrf_cookie_name() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "{{ csrf_token }}").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let cfg = crate::forms::csrf::CsrfConfig {
+            cookie_name: "app_csrf".into(),
+            ..Default::default()
+        };
+        let app = CreateView::for_model(schema_two_fields())
+            .template("f.html")
+            .router("/c", Arc::new(tera), pool)
+            .layer(crate::forms::csrf::with_config(cfg));
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/c/new")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookies: Vec<String> = res
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect();
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        let token = std::str::from_utf8(&body).unwrap().to_owned();
+        assert_eq!(cookies.len(), 1, "{cookies:?}");
+        assert!(
+            cookies[0].starts_with(&format!("app_csrf={token};")),
+            "{cookies:?}"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/c/new")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("app_csrf={token}"))
+                    .body(Body::from(format!("_csrf={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Past the CSRF check; the empty form fails validation.
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let forged = Request::builder()
+            .method("POST")
+            .uri("/c/new")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("app_csrf={token}"))
+            .body(Body::from("_csrf=forged"))
+            .unwrap();
+        let res = app.oneshot(forged).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// An outer layer's `exempt_prefix` does not switch off a CBV's own
+    /// guard (#1669): `/c` would also cover `/comments`.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_outer_exempt_prefix_keeps_the_cbv_guard() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let cfg = crate::forms::csrf::CsrfConfig::default().exempt_prefix("/c");
+        let app = CreateView::for_model(schema_two_fields())
+            .template("f.html")
+            .router("/c", Arc::new(tera), pool)
+            .layer(crate::forms::csrf::with_config(cfg));
+        let post = Request::builder()
+            .method("POST")
+            .uri("/c/new")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("title=x"))
+            .unwrap();
+        let res = app.oneshot(post).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
     /// Every CBV router with a POST route rejects a write without the token (#1669).

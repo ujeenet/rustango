@@ -424,7 +424,7 @@ pub(crate) async fn table_view(
         )
         .await?
     };
-    let joins = build_fk_joins(&state, model);
+    let joins = build_fk_joins(&state, model, &parts);
     let order_by = list_order_by(model, &admin_cfg);
     // With the count skipped, fetch one extra row to detect "has
     // more" without counting the table. The extra row is trimmed
@@ -631,12 +631,13 @@ pub(crate) async fn table_view(
             // A detail URL needs a pk. Rows without one keep plain
             // cell content.
             // A trashed row has no detail page.
-            let detail_href = (!pk_raw.is_empty() && !trashed).then(|| {
+            let pk_path =
+                (!pk_raw.is_empty() && !trashed).then(|| crate::url_codec::url_encode(&pk_raw));
+            let detail_href = pk_path.as_ref().map(|pk| {
                 format!(
                     "{prefix}/{table}/{pk}",
                     prefix = state.config.admin_prefix,
                     table = model.table,
-                    pk = crate::url_codec::url_encode(&pk_raw),
                 )
             });
             let cells: Vec<String> = display_items
@@ -681,7 +682,7 @@ pub(crate) async fn table_view(
                     }
                 })
                 .collect();
-            serde_json::json!({ "cells": cells, "pk": pk })
+            serde_json::json!({ "cells": cells, "pk": pk, "pk_path": pk_path })
         })
         .collect();
 
@@ -1513,7 +1514,7 @@ pub(crate) async fn autocomplete_view(
 //
 // The audit route handlers and the emit helpers live in
 // `super::audit`. The submit handlers below call
-// `super::audit::emit_admin_audit*`.
+// `super::audit::admin_audit_*entry` and `emit_best_effort`.
 // ============================================================== DETAIL
 
 pub(crate) async fn detail_view(
@@ -1529,7 +1530,7 @@ pub(crate) async fn detail_view(
     let row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
-            joins: build_fk_joins(&state, model),
+            joins: build_fk_joins(&state, model, &parts),
             ..RowScope::of(model, &parts).by_pk(model, pk_field.column, pk_value.clone())
         },
         &detail_fields,
@@ -1824,25 +1825,35 @@ pub(crate) async fn create_submit(
         change: false,
     })
     .await;
-    let written = match crate::sql::insert_returning_pool(&state.pool, &query).await {
-        Ok(returning) => crate::sql::inserted_pk(&query, &returning, pk_field),
-        Err(e) => Err(e),
+    // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
+    let emit = if model.audit_track.is_some() {
+        crate::audit::DiffEmit::InTx
+    } else {
+        crate::audit::DiffEmit::AfterCommit
     };
+    let written = crate::audit::insert_one_with_entry(
+        &state.pool,
+        &query,
+        pk_field,
+        |pk| {
+            let pk = pk.to_display_string();
+            super::audit::admin_audit_entry(model, &pk, crate::audit::AuditOp::Create, &audit_form)
+        },
+        emit,
+    )
+    .await;
     let pk_value = match written {
-        Ok(pk) => pk.to_display_string(),
+        Ok((pk, deferred)) => {
+            if let Some(entry) = deferred {
+                super::audit::emit_best_effort(&state, &entry).await;
+            }
+            pk.to_display_string()
+        }
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), false, Some(&e.to_string()));
+            let html = render_form(&state, model, Some(&form), false, Some(&write_error(&e)));
             return Ok(Html(html).into_response());
         }
     };
-    super::audit::emit_admin_audit(
-        &state,
-        model,
-        &pk_value,
-        crate::audit::AuditOp::Create,
-        &audit_form,
-    )
-    .await;
     // `save_model` hook. It fires only on admin writes, not on every
     // ORM insert, so it is a seam for admin-only side effects.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
@@ -1853,6 +1864,16 @@ pub(crate) async fn create_submit(
     .await;
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_value, &form);
     Ok(Redirect::to(&target).into_response())
+}
+
+/// The form error for a failed create or edit write.
+fn write_error(e: &crate::sql::ExecError) -> String {
+    match super::errors::missing_table(e) {
+        Some(t) if t == crate::audit::AUDIT_TABLE => {
+            "audit table missing — run `manage migrate`".to_owned()
+        }
+        _ => e.to_string(),
+    }
 }
 
 /// Fill read-only, NOT NULL timestamps with no default: the form never
@@ -2176,13 +2197,7 @@ pub(crate) async fn update_submit(
             return Err(AdminError::RowNotFound { table, pk: pk_raw })
         }
         Err(e) => {
-            let msg = match super::errors::missing_table(&e) {
-                Some(t) if t == crate::audit::AUDIT_TABLE => {
-                    "audit table missing — run `manage migrate`".to_owned()
-                }
-                _ => e.to_string(),
-            };
-            let html = render_form(&state, model, Some(&form), true, Some(&msg));
+            let html = render_form(&state, model, Some(&form), true, Some(&write_error(&e)));
             return Ok(Html(html).into_response());
         }
     }

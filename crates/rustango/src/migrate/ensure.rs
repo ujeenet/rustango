@@ -180,7 +180,7 @@ pub(crate) async fn live_columns(
 
 /// Where Postgres creates unqualified tables; `None` on backends
 /// without schemas.
-async fn creation_schema(pool: &Pool) -> Result<Option<String>, sqlx::Error> {
+pub(crate) async fn creation_schema(pool: &Pool) -> Result<Option<String>, sqlx::Error> {
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => sqlx::query_scalar::<_, Option<String>>("SELECT current_schema()")

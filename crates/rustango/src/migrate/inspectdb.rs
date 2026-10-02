@@ -307,6 +307,64 @@ async fn list_fks(
     }
 }
 
+/// `(table, column)` in key order of the live index a `CREATE INDEX name ON
+/// table` collides with: names are per schema on PG and SQLite, per table on MySQL.
+#[cfg_attr(
+    not(all(feature = "postgres", feature = "mysql")),
+    allow(unused_variables)
+)]
+pub(super) async fn index_columns(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+    name: &str,
+) -> Result<Vec<(String, String)>, MigrateError> {
+    let rows: Vec<(String, String)> = match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            sqlx::query_as(
+                "SELECT t.relname::text, a.attname::text FROM pg_index x \
+                JOIN pg_class i ON i.oid = x.indexrelid \
+                JOIN pg_class t ON t.oid = x.indrelid \
+                JOIN pg_namespace n ON n.oid = i.relnamespace \
+                CROSS JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) \
+                JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
+                WHERE n.nspname = $1 AND i.relname = $2 AND k.ord <= x.indnkeyatts \
+                ORDER BY k.ord",
+            )
+            .bind(schema)
+            .bind(name)
+            .fetch_all(pg)
+            .await
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            sqlx::query_as(
+                "SELECT CAST(TABLE_NAME AS CHAR), CAST(COLUMN_NAME AS CHAR) \
+                FROM information_schema.STATISTICS \
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? \
+                ORDER BY SEQ_IN_INDEX",
+            )
+            .bind(table)
+            .bind(name)
+            .fetch_all(my)
+            .await
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => {
+            sqlx::query_as(
+                "SELECT m.tbl_name, i.name FROM sqlite_master m, pragma_index_info(m.name) i \
+                WHERE m.type = 'index' AND m.name = ? ORDER BY i.seqno",
+            )
+            .bind(name)
+            .fetch_all(sq)
+            .await
+        }
+    }
+    .map_err(MigrateError::Driver)?;
+    Ok(rows)
+}
+
 #[cfg_attr(
     not(any(feature = "postgres", feature = "mysql")),
     allow(unused_variables)

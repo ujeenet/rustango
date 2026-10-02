@@ -64,7 +64,7 @@ fn one_migration_produces_create_table_sql() {
     let mig = create_table_migration("0001_init");
     file::write(&dir.join("0001_init.json"), &mig).unwrap();
 
-    let preview = sqlmigrate_one(&dir, "0001_init").expect("preview");
+    let preview = sqlmigrate_one(&dir, "0001_init", &rustango::sql::Postgres).expect("preview");
     assert_eq!(preview.name, "0001_init");
     // Atomic by default → BEGIN should be the first statement, COMMIT the last.
     assert!(preview.atomic);
@@ -86,7 +86,7 @@ fn missing_migration_returns_validation_error() {
     let mig = create_table_migration("0001_init");
     file::write(&dir.join("0001_init.json"), &mig).unwrap();
 
-    let err = sqlmigrate_one(&dir, "0002_not_there").unwrap_err();
+    let err = sqlmigrate_one(&dir, "0002_not_there", &rustango::sql::Postgres).unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("0002_not_there") && msg.contains("not found"),
@@ -103,11 +103,63 @@ fn sqlmigrate_is_pure_no_writes() {
     let mig = create_table_migration("0001_init");
     file::write(&dir.join("0001_init.json"), &mig).unwrap();
 
-    let _ = sqlmigrate_one(&dir, "0001_init").expect("preview");
+    let _ = sqlmigrate_one(&dir, "0001_init", &rustango::sql::Postgres).expect("preview");
     let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
     assert_eq!(
         entries.len(),
         1,
         "sqlmigrate must not write to the migrations dir"
+    );
+}
+
+/// #2025 — the preview renders for the target dialect, from the previous
+/// snapshot, so MySQL shows the FK drop a column drop runs first.
+#[test]
+fn preview_renders_for_the_target_dialect() {
+    let dir = fresh_dir("dialect");
+    let post = |with_author: bool| {
+        let mut fields = vec![
+            serde_json::json!({"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true}),
+        ];
+        if with_author {
+            fields.push(serde_json::json!({
+                "name": "author", "column": "author_id", "ty": "i64", "nullable": true,
+                "primary_key": false, "fk": {"kind": "fk", "to": "sqlmig_post", "on": "id"}
+            }));
+        }
+        let table: TableSnapshot = serde_json::from_value(serde_json::json!({
+            "name": "sqlmig_post", "model": "Post", "fields": fields
+        }))
+        .unwrap();
+        SchemaSnapshot {
+            tables: vec![table],
+            ..Default::default()
+        }
+    };
+    let mut first = create_table_migration("0001_init");
+    first.snapshot = post(true);
+    file::write(&dir.join("0001_init.json"), &first).unwrap();
+    let drop = Migration {
+        name: "0002_drop".into(),
+        prev: Some("0001_init".into()),
+        snapshot: post(false),
+        forward: vec![Operation::Schema(SchemaChange::DropColumn {
+            table: "sqlmig_post".into(),
+            column: "author_id".into(),
+        })],
+        ..first.clone()
+    };
+    file::write(&dir.join("0002_drop.json"), &drop).unwrap();
+
+    let my = sqlmigrate_one(&dir, "0002_drop", &rustango::sql::MySql).expect("preview");
+    let body = my.statements.join("\n");
+    let fk = body.find("DROP FOREIGN KEY").expect(&body);
+    let col = body.find("DROP COLUMN `author_id`").expect(&body);
+    assert!(fk < col, "{body}");
+    let pg = sqlmigrate_one(&dir, "0002_drop", &rustango::sql::Postgres).expect("preview");
+    let body = pg.statements.join("\n");
+    assert!(
+        body.contains("DROP COLUMN \"author_id\"") && !body.contains("FOREIGN KEY"),
+        "{body}"
     );
 }

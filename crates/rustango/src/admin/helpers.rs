@@ -140,7 +140,10 @@ pub(crate) fn chrome_context_with_session(
         "can_view_audit": state.audit_reader().is_some(),
         // v0.28.2 (#77) — sidebar "Change password" link target.
         // Threaded from the tenant admin's RouteConfig.
-        "change_password_url": &state.config.change_password_url,
+        "change_password_url": state.config.change_password_url.clone().or_else(|| {
+            state.config.session_secret.as_ref()
+                .map(|_| format!("{}/account/password", state.config.admin_prefix))
+        }),
         // Sidebar Logout POST target. Defaults to `{admin_prefix}/logout`
         // (the bare admin's own route); the tenant admin overrides it to
         // its RouteConfig logout_url (handled at the tenancy layer), so
@@ -403,7 +406,14 @@ pub(crate) fn lookup_model(state: &AppState, table: &str) -> Option<&'static Mod
 /// `ListSelectRelated::Only(&[...])` for a whitelist). The default
 /// `ListSelectRelated::All` preserves rustango's join-everything
 /// behavior.
-pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> Vec<Join> {
+///
+/// A target row outside its own queryset hooks joins nothing, so its
+/// display name stays hidden (#2080).
+pub(crate) fn build_fk_joins(
+    state: &AppState,
+    model: &'static ModelSchema,
+    parts: &axum::http::request::Parts,
+) -> Vec<Join> {
     let admin_cfg = model
         .admin
         .copied()
@@ -446,14 +456,17 @@ pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> V
             // `<main>.<fk_col> = <alias>.<target_pk>` expressed as a
             // WhereExpr now that Join's `on_local`/`on_remote` shape
             // was generalized in issue #80.
-            on: crate::core::WhereExpr::ExprCompare {
-                lhs: crate::core::Expr::AliasedColumn {
-                    alias: model.table,
-                    column: field.column,
+            // Bare scope columns in the ON resolve to the joined alias.
+            on: super::queryset_hooks::RowScope::of(target, parts).constrain(
+                crate::core::WhereExpr::ExprCompare {
+                    lhs: crate::core::Expr::AliasedColumn {
+                        alias: model.table,
+                        column: field.column,
+                    },
+                    op: crate::core::Op::Eq,
+                    rhs: crate::core::Expr::AliasedColumn { alias, column: on },
                 },
-                op: crate::core::Op::Eq,
-                rhs: crate::core::Expr::AliasedColumn { alias, column: on },
-            },
+            ),
             project: vec![display_field.column],
         });
     }
