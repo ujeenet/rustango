@@ -4,6 +4,34 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the admin sidebar "Change password" link points at the real route (#2102)
+
+It was prefixed with the admin path, so a tenant admin linked to `/admin/change-password` or doubled its prefix.
+
+### Fixed — template views honour `#[rustango(soft_delete)]` (#2082)
+
+`DeleteView` and `delete_selected` stamp the column; list, detail and update hide deleted rows, and no form sets the column.
+
+### Fixed — `UpdateView` shows a taken unique value as a form error (#2073)
+
+It answered with a 500; it now re-renders the form like `CreateView` (#2033).
+
+### Fixed — a ViewSet body cannot set the soft-delete column (#2074)
+
+`PATCH`, `PUT` and `POST` ignore it, so only `DELETE` soft-deletes a row.
+
+### Fixed — admin View links percent-encode the PK (#2079)
+
+The list and inline View links broke on a string PK with `/` or `?`.
+
+### Fixed — admin FK cells hide a target the queryset hooks hide (#2080)
+
+The list and detail FK joins apply the target's hooks and soft-delete filter, as the facets do (#2029).
+
+### Fixed — an admin create commits with its audit row (#2101)
+
+For a model with `audit(...)` the entry is written in the INSERT's transaction, as edits are (#2060).
+
 ### Fixed — concurrent migrates on one small pool no longer deadlock (#2027)
 
 A migrate waiting for the lock polls a try-lock and holds no pool connection, so the holder can borrow one.

@@ -102,7 +102,7 @@
         <td class="checkbox-col">{% if row.pk %}<input type="checkbox" name="_selected" value="{{ row.pk }}">{% endif %}</td>
         {% endif %}
         {% for cell in row.cells %}<td>{{ cell | safe }}</td>{% endfor %}
-        <td>{% if row.pk and not trashed %}<a href="{{ admin_prefix }}/{{ model.table }}/{{ row.pk }}">View</a>{% endif %}</td>
+        <td>{% if row.url %}<a href="{{ row.url }}">View</a>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
