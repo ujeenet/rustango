@@ -12,6 +12,10 @@ Bounded deletes and `IN (… LIMIT n)` on MySQL were already in; a `where_not_ex
 
 `delete`, `purge`, `purge_orphans`, `purge_pending` and `delete_collection` no longer build SQL or bind order by hand.
 
+### Fixed — the `ModelForm` unique_together check goes through the ORM (#2011)
+
+It runs as `CountQuery::exists`, and skips partial unique indexes, which used to reject a legal duplicate.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)

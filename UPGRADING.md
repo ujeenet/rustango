@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `ModelForm::validate_unique_together` skips partial unique indexes
+
+Like the serializer check; the database still enforces them (#2011).
+
 ## 0.59.18
 
 ### `with_rollback` hands the closure an `AtomicTx`
