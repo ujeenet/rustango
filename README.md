@@ -24,16 +24,16 @@ One `#[derive(Model)]` is the whole contract — from it Rustango emits typed qu
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.59"
+rustango = "0.60"
 
 # SQLite — file-backed or in-memory
-rustango = { version = "0.59", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.60", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.59", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.60", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 ```
 
-Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.59" }` needs no extra wiring.
+Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.60" }` needs no extra wiring.
 
 **Moving between versions?** Rustango is `0.x`, so a minor bump is allowed to break things and several have. [UPGRADING.md](UPGRADING.md) has the per-version notes and a checklist — including the two that bite regardless of version: a session secret that can stop a booting app, and a generated system migration that has to reach production.
 

@@ -150,7 +150,7 @@ untouched.
 
 ## Unreleased
 
-## 0.59.20
+## 0.60.0
 
 ### SQLite rebuilds tables for CHECK and composite FK changes
 

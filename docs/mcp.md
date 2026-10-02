@@ -63,7 +63,7 @@ MCP is the optional `mcp` feature (off by default). Turn it on:
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.59", features = ["mcp"] }
+rustango = { version = "0.60", features = ["mcp"] }
 ```
 
 It pulls in `tenancy` (agents/skills), `sse` (the notification stream),
@@ -169,7 +169,7 @@ The `initialize` handshake is a plain JSON-RPC POST and works on any mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.59.20" },
+    "serverInfo": { "name": "rustango", "version": "0.60.0" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 

@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-## [0.59.20] — 2026-10-02
+## [0.60.0] — 2026-10-02
 
 ### Fixed — the commerce examples' system chains are current (#2054)
 
