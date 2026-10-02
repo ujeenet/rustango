@@ -1096,7 +1096,7 @@ async fn login_submit(
         };
         async move { send_user_login_failed(ctx).await }
     };
-    let Some(user) = users.into_iter().next() else {
+    let Some(mut user) = users.into_iter().next() else {
         // Audit H1 — this handler does its own lookup+verify (so it
         // wasn't covered by the authenticate_*_pool timing fix); spend a
         // verify's worth of work on the unknown-user path so timing
@@ -1136,6 +1136,14 @@ async fn login_submit(
     }
 
     attempt.succeeded().await;
+    user.password_hash = crate::passwords::upgrade_stored_hash(
+        tenant_pool,
+        <super::auth::User as crate::core::Model>::SCHEMA,
+        uid,
+        &form.password,
+        &user.password_hash,
+    )
+    .await;
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
     let mut payload = TenantSessionPayload::new(
@@ -1520,7 +1528,9 @@ async fn change_password_submit(
             return crate::login_throttle::LoginRefused::Busy.into_response()
         }
         Err(e) => {
-            return redir_err(&format!("hash failed: {e}"));
+            // The hasher's text stays in the log, not the redirect URL (#2021).
+            warn!(target: "rustango::tenancy::admin", error = %e, "change-password hash");
+            return redir_err("Could not update the password; please try again.");
         }
     };
     user.password_hash = new_hash;

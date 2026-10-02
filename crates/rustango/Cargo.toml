@@ -336,7 +336,7 @@ totp = ["dep:hmac", "dep:sha1", "dep:sha2", "_rand"]
 # (no extra deps). The ceremony layer adds pure-Rust CBOR (`ciborium`) +
 # ES256 (`p256`) when it lands — keeping the all-RustCrypto, no-C-dep
 # stack (vs `webauthn-rs` → openssl).
-passkey = ["_rand", "dep:base64", "dep:sha2", "dep:ciborium", "dep:p256"]
+passkey = ["_rand", "cache", "dep:base64", "dep:hmac", "dep:sha2", "dep:ciborium", "dep:p256"]
 
 # Webhook signature verification (`rustango::webhook`) — HMAC-SHA256
 # constant-time verification for inbound webhooks (Stripe, GitHub, etc.).
@@ -511,7 +511,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.59.16", path = "../rustango-macros" }
+rustango-macros = { version = "0.59.17", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

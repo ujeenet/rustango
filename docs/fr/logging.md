@@ -137,6 +137,8 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::messages` | Messages flash |
 | `rustango::migrate` | Exécuteur de migrations |
 | `rustango::outbound` | Appels sortants vérifiés (SSO, Slack, webhooks) |
+| `rustango::passkey` | Défis passkey refusés par le cache |
+| `rustango::passwords` | Mise à niveau des hachages de mot de passe à la connexion |
 | `rustango::rate_limit` | Limitation de débit |
 | `rustango::request_timeout` | Délai par requête |
 | `rustango::scheduler` | Cron / tâches planifiées |

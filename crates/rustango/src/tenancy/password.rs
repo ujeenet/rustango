@@ -4,10 +4,9 @@
 //! Both identity domains share [`crate::passwords`]: hashes are stored as
 //! the standard PHC string (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`)
 //! so verification is self-describing — the parameters travel with the
-//! hash. Default parameters come from `argon2::Argon2::default()` —
-//! Argon2id with the OWASP-recommended cost (m=19456, t=2, p=1 as of
-//! 2026). There is no hook for stronger parameters yet: [`hash`] uses
-//! the defaults.
+//! hash. New hashes use [`crate::passwords::argon2_params`]: the
+//! OWASP cost (m=19456, t=2, p=1) unless `[auth] argon2_*` or
+//! [`crate::passwords::configure_argon2`] set another.
 //!
 //! From async code use the `*_async` variants; the sync calls block a
 //! runtime worker.
@@ -20,7 +19,7 @@ use argon2::password_hash::rand_core::OsRng;
 use super::error::TenancyError;
 use crate::passwords::PasswordError;
 
-/// Hash a plaintext password with default Argon2id parameters.
+/// Hash a plaintext password with the configured Argon2id parameters.
 ///
 /// Returns the PHC-format string suitable for storing in
 /// `Operator.password_hash` / `User.password_hash`.
@@ -104,8 +103,8 @@ pub fn verify(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
 /// Spend a verification's worth of work against a fixed dummy hash and
 /// discard the result. Call on the user-not-found / inactive branch of
 /// a login flow so timing doesn't reveal whether an account exists
-/// (audit H1). Delegates to [`crate::passwords::verify_dummy`] — same
-/// `Argon2::default()` cost as [`verify`] above.
+/// (audit H1). Delegates to [`crate::passwords::verify_dummy`], at the
+/// cost new hashes get.
 pub fn verify_dummy(plaintext: &str) {
     crate::passwords::verify_dummy(plaintext);
 }

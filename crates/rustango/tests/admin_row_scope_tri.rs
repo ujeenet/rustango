@@ -126,6 +126,37 @@ rustango::register_admin_inline!(
     max_num = Some(1),
 );
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rowscope_fparent", display = "name")]
+#[allow(dead_code)]
+pub struct FlagParent {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub name: String,
+}
+
+/// A NOT NULL and a nullable bool, edited top-level and inline (#1897).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rowscope_flag")]
+#[allow(dead_code)]
+pub struct Flag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub parent_id: i64,
+    pub active: bool,
+    #[rustango(default = "false")]
+    pub maybe: Option<bool>,
+}
+
+rustango::register_admin_inline!(
+    parent = "rowscope_fparent",
+    child = "rowscope_flag",
+    fk = "parent_id",
+    fields = &["active", "maybe"],
+    extra = 3,
+);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "rowscope_note").await;
@@ -134,6 +165,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<Parent>(pool).await;
     fresh_table::<Child>(pool).await;
     fresh_table::<AutoChild>(pool).await;
+    fresh_table::<FlagParent>(pool).await;
+    fresh_table::<Flag>(pool).await;
 }
 
 async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
@@ -421,9 +454,68 @@ async fn list_ignores_isnull_on_a_secret(pool: &Pool) {
     );
 }
 
+async fn flags(pool: &Pool) -> Vec<(bool, Option<bool>)> {
+    let mut rows = Flag::objects().fetch(pool).await.expect("fetch flags");
+    rows.sort_by_key(|f| *f.id.get().expect("pk"));
+    rows.iter().map(|f| (f.active, f.maybe)).collect()
+}
+
+/// "" saves NULL, "false" saves false, an unticked NOT NULL box saves false.
+async fn nullable_bool_round_trips_in_admin_form(pool: &Pool) {
+    let (status, body) = get(pool, "/rowscope_flag/new").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains(r#"value="false" selected"#),
+        "default No: {body}"
+    );
+
+    let (status, body) = post(pool, "/rowscope_flag", "parent_id=1&maybe=").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(flags(pool).await, [(false, None)]);
+
+    let id = *Flag::objects().fetch(pool).await.expect("fetch")[0]
+        .id
+        .get()
+        .expect("pk");
+    let uri = format!("/rowscope_flag/{id}");
+    let (status, body) = post(pool, &uri, "parent_id=1&active=true&maybe=false").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(flags(pool).await, [(true, Some(false))]);
+
+    let (status, body) = post(pool, &uri, "parent_id=1&maybe=").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(flags(pool).await, [(false, None)]);
+
+    // An absent nullable key is NULL too, not false.
+    post(pool, &uri, "parent_id=1&active=true&maybe=true").await;
+    let (status, body) = post(pool, &uri, "parent_id=1&active=true").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(flags(pool).await, [(true, None)]);
+}
+
+async fn nullable_bool_round_trips_in_inline(pool: &Pool) {
+    let mut p = FlagParent {
+        id: Auto::default(),
+        name: "p".into(),
+    };
+    p.insert_pool(pool).await.expect("insert parent");
+    let p = *p.id.get().expect("pk");
+    let form = "name=p&rowscope_flag-TOTAL_FORMS=3&rowscope_flag-INITIAL_FORMS=0\
+        &rowscope_flag-0-active=true&rowscope_flag-0-maybe=\
+        &rowscope_flag-1-maybe=false&rowscope_flag-2-active=true";
+    let (status, body) = post(pool, &format!("/rowscope_fparent/{p}"), form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(
+        flags(pool).await,
+        [(true, None), (false, Some(false)), (true, None)]
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        nullable_bool_round_trips_in_admin_form,
+        nullable_bool_round_trips_in_inline,
         hidden_rows_are_404_and_uncounted,
         fk_facet_hides_a_hidden_targets_name,
         inlines_hide_secrets_and_refused_rows,

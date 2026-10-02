@@ -1072,6 +1072,7 @@ jobs:
           --features sqlite,tenancy,admin-sso,testkit
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri
+          --test system_chain_order_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
@@ -1308,6 +1309,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
+      - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri

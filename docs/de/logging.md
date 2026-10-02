@@ -136,6 +136,8 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::messages` | Flash-Messages |
 | `rustango::migrate` | Migrations-Runner |
 | `rustango::outbound` | Geprüfte ausgehende Aufrufe (SSO, Slack, Webhooks) |
+| `rustango::passkey` | Vom Cache abgewiesene Passkey-Challenges |
+| `rustango::passwords` | Passwort-Hash-Upgrades beim Login |
 | `rustango::rate_limit` | Rate-Limiting |
 | `rustango::request_timeout` | Request-Timeout |
 | `rustango::scheduler` | Cron / geplante Tasks |

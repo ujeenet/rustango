@@ -29,6 +29,93 @@ A bare CRLF read as a blank line, so Python and pandas dropped the row.
 
 A too-long key or a bad FK is an error, as on Postgres, instead of a silent truncation.
 
+## [0.59.17] — 2026-10-01
+
+### Fixed — humanize and number rounding (#1896)
+
+`naturaltime`/`timesince` read 360–364 days as "12 months", not "0 years"; KRW shows `₩`, CLP `$`, and unknown codes no longer leak memory.
+`floatformat`, `format_number` and `format_currency` round halves up (`0.125` → `0.13`, `2.5` → `3`) and never print `-0`.
+
+### Fixed — email, IRI, nullable-bool and timesince parsing (#1897)
+
+`validate_email` rejects whitespace, control chars and over-long addresses; `uri_to_iri` keeps `%25`; an absent nullable bool is `NULL` (admin shows a Yes/No/Unknown select, preset to the model default); `timesince` stops at the first zero unit.
+
+### Fixed — i18n plural rules, `pt_BR` locales, `q=0` and placeholder substitution (#1921)
+
+Plural rules for ar, cs/sk, lt, ro, he and sl, and `pt-PT` 0 is plural; `Locale` treats `_` as `-` so `pt_BR.json` serves `pt-BR`, and `LocaleMiddleware` matches a `pt_BR` cookie too.
+`negotiate_language` skips `q=0`; placeholders fill in one pass, so a value is never re-substituted and Tera arg order no longer matters.
+
+### Fixed — feeds and sitemaps drop XML-illegal control chars; custom guids are not permalinks (#1925)
+
+A stray `\u{8}` in a title no longer breaks the whole document; `.with_guid(..)` emits `<guid isPermaLink="false">`.
+
+### Fixed — `slugify` keeps accented Latin letters; `unique_slug` never builds an empty slug (#2048)
+
+`"Café"` slugs to `"cafe"` (was `"caf"`); all-punctuation input gives `"untitled"`, `"untitled-2"` instead of `""`, `"-2"`.
+
+### Fixed — the translations editor no longer blanks file-catalog fallbacks (#1920)
+
+`apply_edits` writes only non-empty, changed cells, so saving an untouched grid no longer stores `""` over `fr.json` or re-upserts every row.
+
+### Security — GitHub email verification is read, member `redirect_uri` ignores spoofed hosts (#1842)
+
+**Breaking:** the GitHub preset takes `email_verified` from `/user/emails` and Facebook
+never vouches for an email. Member SSO honours `X-Forwarded-Host`/`-Proto` only from a
+proxy named in `RealIpLayer::trust_proxies`, and so do tenant and admin SSO and MCP for
+`X-Forwarded-Proto`. New `OAuth2Provider::with_emails_url`; a 403 or 404 from it means no
+verified email, not a failed login.
+
+### Security — passkey challenges expire and open once; counters can't reset (#1841)
+
+**Breaking:** a sealed challenge carries its ceremony and issue time, expires after 5 min
+and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused, and
+`update_sign_count` never moves the counter back and returns a `#[must_use]` `SignCountUpdate`.
+`verify_authentication` returns the UV flag. `open_challenge` warns once on a process-local cache.
+
+### Security — `[auth] argon2_*` set the cost of new password hashes (#1728)
+
+The keys were read by nothing. New `passwords::Argon2Params`, `configure_argon2` and
+`argon2_params`; an invalid combination keeps the default and logs an error. Built-in logins
+store a fresh hash when the old one is weaker (`passwords::upgrade_stored_hash`).
+
+### Security — a logout ends JWT refresh chains (#2036)
+
+`/refresh` checks `sessions_revoked_at`, so a chain started before a logout stops rotating.
+A JWT login stamps its session start after the last logout.
+
+### Security — tenant `change_password` keeps hasher errors out of the redirect URL (#2021)
+
+The error is logged; the form shows a fixed message.
+
+### Security — the OAuth2 callback 502 no longer echoes upstream error text (#1847)
+
+The IdP body or transport error is logged; the browser gets a fixed message.
+
+### Security — credential hardening: undecodable TOTP secret, redacted Debug, HOTP digits, argon2 rehash (#1875)
+
+A confirmed TOTP row that is not base32, or decodes to under 10 bytes, refuses the login instead
+of skipping 2FA; the lenient `totp_store::confirmed_secret` is deprecated. `TotpSecret`,
+`AdminTotp` and `Signer` redact secrets in `Debug`; 10-digit HOTP no longer overflows; the hasher
+chain rehashes argon2id below today's cost (`PasswordHasher::needs_rehash`, `passwords::needs_rehash`).
+
+### Fixed — `runserver` auto-migrate applies the framework's system chain (#2056)
+
+It ran only the project chain, so tables and columns like `sessions_revoked_at` were missing and logins failed.
+
+### Fixed — system and project chains apply in one safe order everywhere (#2055, #2052)
+
+A system step that FKs a project-created framework table waits for it on PG/MySQL; such tables get the framework's newer columns, on the tenancy runners too.
+Steps on those tables run after the project chain, under one migrate lock; a table the project later drops is the framework's again.
+A later system step's index on such a table is created.
+A system step that only FKs such a table first adds just the FK target columns.
+`pre_migrate`/`post_migrate` fire outside that lock, and a migrate started while the task holds it fails instead of hanging.
+A cancelled migrate closes its lock connection, so the pool does not keep the lock.
+
+### Fixed — converging a NOT NULL column with no default on an empty table (#2066)
+
+`migrate` adds it instead of asking for it by hand; a table with rows still fails.
+MySQL adds it nullable, then `MODIFY`s it NOT NULL, so a row written in between fails it instead of getting `''` or `0`.
+
 ## [0.59.16] — 2026-10-01
 
 ### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
