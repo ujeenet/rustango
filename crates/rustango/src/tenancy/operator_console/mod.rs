@@ -2219,10 +2219,7 @@ async fn org_impersonate(
     // token. Scheme comes from `RUSTANGO_TENANT_SCHEME`, defaulting to
     // http for local dev.
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
-    let prefix = org
-        .path_prefix
-        .as_deref()
-        .map_or("", |p| p.trim_end_matches('/'));
+    let prefix = handoff_prefix(org.path_prefix.as_deref());
     let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         pat.to_owned()
     } else {
@@ -2262,6 +2259,15 @@ async fn org_impersonate(
         "minted impersonation handoff token",
     );
     resp
+}
+
+/// The org's path prefix for the handoff URL, or `""` when the stored
+/// value is not one segment: `//evil.example` would redirect off-site.
+fn handoff_prefix(path_prefix: Option<&str>) -> &str {
+    path_prefix
+        .map(|p| p.trim_end_matches('/'))
+        .filter(|p| crate::tenancy::provision::validate_path_prefix(p).is_ok())
+        .unwrap_or("")
 }
 
 /// Port for the handoff URL. A port-routed org's own port wins (#1933);
@@ -2328,7 +2334,16 @@ mod config_warn_tests {
 
 #[cfg(test)]
 mod handoff_port_tests {
-    use super::handoff_port_suffix;
+    use super::{handoff_port_suffix, handoff_prefix};
+
+    #[test]
+    fn only_a_valid_path_prefix_reaches_the_handoff_url() {
+        assert_eq!(handoff_prefix(Some("/acme/")), "/acme");
+        assert_eq!(handoff_prefix(None), "");
+        for bad in ["//evil.example", "/a/b", "acme", "/a?b", "/@evil"] {
+            assert_eq!(handoff_prefix(Some(bad)), "", "`{bad}`");
+        }
+    }
 
     #[test]
     fn a_port_routed_org_lands_on_its_own_port() {
