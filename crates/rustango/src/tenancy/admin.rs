@@ -707,10 +707,13 @@ where
     };
     let audited = async {
         if let Some(uid) = session_user_id {
-            crate::audit::with_source(
+            // The id is this tenant's user: bind it, so work this
+            // request hands off does not stamp it on other tenants' rows.
+            crate::audit::with_tenant_source(
                 crate::audit::AuditSource::User {
                     id: uid.to_string(),
                 },
+                org.slug.clone(),
                 dispatch,
             )
             .await

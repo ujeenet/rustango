@@ -441,12 +441,12 @@ provisionnés après le démarrage n'ont aucun worker jusqu'au redémarrage du
 processus. Suivi dans
 [#1223](https://github.com/ujeenet/rustango/issues/1223).
 
-**Pas de contexte ambiant non plus.** Les workers sont lancés par
-`tokio::spawn`, et les task-locals ne traversent pas un spawn — une tâche
-s'exécute donc avec la source d'audit à `AuditSource::System` et le fuseau
-horaire par défaut, quoi qu'ait posé la requête qui l'a dispatchée. Emportez ce
-qu'il vous faut dans le payload, ou ré-entrez le scope dans `run()` avec
-`audit::with_source`. Suivi dans
+**Contexte ambiant : source d'audit et fuseau horaire seulement.**
+`InMemoryJobQueue` les capture au `dispatch` et le scheduler à `every()`, et
+les réinstalle autour de l'exécution. `PgJobQueue` pas encore : ses tâches
+tournent en `AuditSource::System` avec le fuseau par défaut — emportez l'acteur
+dans le payload et ré-entrez le scope dans `run()` avec `audit::with_source`.
+Aucune file ne porte de session ni de tenant. Suivi dans
 [#1229](https://github.com/ujeenet/rustango/issues/1229).
 
 ---

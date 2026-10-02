@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — in-memory jobs and scheduled tasks keep the caller's audit source and timezone (#1229)
+
+`InMemoryJobQueue` captures them at `dispatch`, `Scheduler` at `every()`; a job enqueued by user 42 audits as `user:42`, not `system`. A tenant user's id stays on its own tenant's rows. `PgJobQueue` still runs as `system`.
+
 ### Fixed — OpenAPI 3.1 nulls and ViewSet request bodies (#1922)
 
 `Schema::nullable` emits `type: [T, "null"]` (or `anyOf` for a `$ref`); 3.1 has no `nullable`.

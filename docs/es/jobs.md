@@ -433,12 +433,12 @@ tenants tú mismo, como arriba. Los tenants provisionados después del arranque
 no obtienen workers hasta que el proceso se reinicia. Seguimiento en
 [#1223](https://github.com/ujeenet/rustango/issues/1223).
 
-**Tampoco hay contexto ambiental.** Los workers se lanzan con `tokio::spawn`, y
-los task-locals no cruzan un spawn — así que un trabajo corre con la fuente de
-auditoría en `AuditSource::System` y la zona horaria por defecto, sin importar
-lo que hubiera fijado el request que lo despachó. Lleva lo que necesites en el
-payload, o vuelve a entrar en el scope dentro de `run()` con
-`audit::with_source`. Seguimiento en
+**Contexto ambiental: solo fuente de auditoría y zona horaria.**
+`InMemoryJobQueue` los captura en `dispatch` y el scheduler en `every()`, y
+ambos los reinstalan alrededor de la ejecución. `PgJobQueue` aún no: sus
+trabajos corren como `AuditSource::System` con la zona horaria por defecto —
+lleva el actor en el payload y vuelve a entrar en el scope dentro de `run()`
+con `audit::with_source`. Ninguna cola lleva sesión ni tenant. Seguimiento en
 [#1229](https://github.com/ujeenet/rustango/issues/1229).
 
 ---

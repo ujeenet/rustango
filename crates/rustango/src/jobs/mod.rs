@@ -97,13 +97,21 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
     /// retry with backoff, `Err(Fatal(_))` to dead-letter at once.
     ///
-    /// **No ambient context reaches here.** Workers run under
-    /// [`tokio::spawn`], which does not inherit `tokio::task_local!`
-    /// state. So there is no admin session, the timezone is the
-    /// default, and the audit source falls back to
-    /// [`crate::audit::AuditSource::System`]. Put everything the job
-    /// needs in its payload. A job can re-enter the audit scope itself
-    /// with [`crate::audit::with_source`].
+    /// **Which ambient context reaches here depends on the queue.**
+    /// [`tokio::spawn`] inherits no `tokio::task_local!` state, so the
+    /// queue must carry it — see [`crate::task_context::TaskContext`].
+    ///
+    /// | | [`InMemoryJobQueue`] | `PgJobQueue` |
+    /// |---|---|---|
+    /// | audit source | the enqueuer's | `System` |
+    /// | active timezone | the enqueuer's | the default |
+    ///
+    /// `PgJobQueue` stores its envelope as a `rustango_jobs` row, so it
+    /// needs a column to carry context (#1229). There, put the actor in
+    /// the payload and re-enter [`crate::audit::with_source`] yourself.
+    ///
+    /// **Neither queue carries a session or a tenant.** Anything else a
+    /// job needs travels in its payload.
     async fn run(&self) -> Result<(), JobError>;
 }
 
@@ -136,6 +144,13 @@ struct JobEnvelope {
     payload: serde_json::Value,
     attempt: u32,
     max_attempts: u32,
+    /// The caller's ambient context, captured at `dispatch`.
+    ///
+    /// Captured here rather than where the worker spawns, because
+    /// workers are spawned once at `start()` — by then the caller is
+    /// long gone and there is nothing to inherit. The context has to
+    /// travel with the job.
+    context: crate::task_context::TaskContext,
 }
 
 // ------------------------------------------------------------------ Handler registry
@@ -314,6 +329,9 @@ impl JobQueue for InMemoryJobQueue {
             payload: value,
             attempt: 0,
             max_attempts: T::MAX_ATTEMPTS,
+            // Captured here, at the hand-off. A worker is spawned at
+            // boot and has no caller to inherit from.
+            context: crate::task_context::TaskContext::capture(),
         };
         self.pending
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -392,7 +410,10 @@ async fn worker_loop(
         };
 
         let payload = envelope.payload.clone();
-        let result = handler(payload).await;
+        // Run the handler inside the context the caller had at
+        // `dispatch`. Without this the job sees none of it — an audit
+        // row written here would record `system` and lose the actor.
+        let result = envelope.context.clone().install(handler(payload)).await;
 
         match result {
             Ok(()) => {
@@ -410,7 +431,12 @@ async fn worker_loop(
                             attempts: next_attempt,
                             error: msg,
                         };
-                        deliver_dead_letter(cb, dl).await;
+                        // The callback sees who enqueued the job, as the job did.
+                        envelope
+                            .context
+                            .clone()
+                            .install(deliver_dead_letter(cb, dl))
+                            .await;
                     } else {
                         tracing::error!(job = envelope.name, attempts = next_attempt, error = %msg, "job exhausted retries");
                     }
@@ -437,7 +463,12 @@ async fn worker_loop(
                         attempts: envelope.attempt + 1,
                         error: msg,
                     };
-                    deliver_dead_letter(cb, dl).await;
+                    // The callback sees who enqueued the job, as the job did.
+                    envelope
+                        .context
+                        .clone()
+                        .install(deliver_dead_letter(cb, dl))
+                        .await;
                 } else {
                     tracing::error!(job = envelope.name, error = %msg, "job fatal");
                 }
@@ -534,6 +565,85 @@ mod tests {
         }
     }
 
+    /// The job records what the enqueuer's context was.
+    ///
+    /// Before this, a job ran with no ambient context at all — an audit
+    /// row written from one recorded `system`, so "who deleted this?"
+    /// was a dead end whenever a job did it.
+    ///
+    #[tokio::test]
+    async fn a_job_sees_the_context_of_whoever_enqueued_it() {
+        use crate::audit::{current_source, with_source, AuditSource};
+
+        static SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct RecordSource;
+
+        #[async_trait::async_trait]
+        impl Job for RecordSource {
+            const NAME: &'static str = "record_source";
+            async fn run(&self) -> Result<(), JobError> {
+                *SEEN.lock().unwrap() = Some(current_source().as_token());
+                Ok(())
+            }
+        }
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<RecordSource>().await;
+        q.start().await;
+
+        with_source(AuditSource::User { id: "99".into() }, async {
+            q.dispatch(&RecordSource).await.unwrap();
+        })
+        .await;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while SEEN.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        q.shutdown().await;
+
+        assert_eq!(
+            SEEN.lock().unwrap().clone(),
+            Some("user:99".to_owned()),
+            "the job should see who enqueued it"
+        );
+    }
+
+    /// A job enqueued by nobody in particular stays attributable to the
+    /// system — it does not invent an actor.
+    #[tokio::test]
+    async fn a_job_enqueued_outside_any_scope_is_system() {
+        use crate::audit::current_source;
+
+        static SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct RecordPlain;
+
+        #[async_trait::async_trait]
+        impl Job for RecordPlain {
+            const NAME: &'static str = "record_plain";
+            async fn run(&self) -> Result<(), JobError> {
+                *SEEN.lock().unwrap() = Some(current_source().as_token());
+                Ok(())
+            }
+        }
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<RecordPlain>().await;
+        q.start().await;
+        q.dispatch(&RecordPlain).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while SEEN.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        q.shutdown().await;
+
+        assert_eq!(SEEN.lock().unwrap().clone(), Some("system".to_owned()));
+    }
+
     #[tokio::test]
     async fn dispatch_runs_handler() {
         COUNTER.store(0, Ordering::SeqCst);
@@ -566,6 +676,34 @@ mod tests {
         assert_eq!(captured.lock().await.len(), 1);
         assert!(captured.lock().await[0].error.contains("dead now"));
         q.shutdown().await;
+    }
+
+    /// #1229 — the dead-letter callback runs as the job's enqueuer.
+    #[tokio::test]
+    async fn dead_letter_callback_sees_the_enqueuer() {
+        use crate::audit::{current_source, with_source, AuditSource};
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<AlwaysFail>().await;
+        let seen: Arc<Mutex<Option<String>>> = Arc::default();
+        let s = seen.clone();
+        q.on_dead_letter(move |_dl| {
+            let s = s.clone();
+            async move {
+                *s.lock().await = Some(current_source().as_token());
+            }
+        })
+        .await;
+        q.start().await;
+        with_source(AuditSource::User { id: "5".into() }, async {
+            q.dispatch(&AlwaysFail { fatal: true }).await.unwrap();
+        })
+        .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while seen.lock().await.is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        q.shutdown().await;
+        assert_eq!(seen.lock().await.as_deref(), Some("user:5"));
     }
 
     #[tokio::test]
