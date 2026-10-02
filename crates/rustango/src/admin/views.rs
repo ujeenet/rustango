@@ -631,12 +631,13 @@ pub(crate) async fn table_view(
             // A detail URL needs a pk. Rows without one keep plain
             // cell content.
             // A trashed row has no detail page.
-            let detail_href = (!pk_raw.is_empty() && !trashed).then(|| {
+            let pk_path =
+                (!pk_raw.is_empty() && !trashed).then(|| crate::url_codec::url_encode(&pk_raw));
+            let detail_href = pk_path.as_ref().map(|pk| {
                 format!(
                     "{prefix}/{table}/{pk}",
                     prefix = state.config.admin_prefix,
                     table = model.table,
-                    pk = crate::url_codec::url_encode(&pk_raw),
                 )
             });
             let cells: Vec<String> = display_items
@@ -681,7 +682,7 @@ pub(crate) async fn table_view(
                     }
                 })
                 .collect();
-            serde_json::json!({ "cells": cells, "pk": pk, "url": detail_href })
+            serde_json::json!({ "cells": cells, "pk": pk, "pk_path": pk_path })
         })
         .collect();
 
