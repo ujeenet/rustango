@@ -13841,4 +13841,12 @@ mod field_attr_tests {
         assert!(errs[2].as_deref().unwrap().contains("geometry"), "{errs:?}");
         assert_eq!(errs[3], None);
     }
+
+    /// A raw ident derives names without `r#`; this used to panic (#1937).
+    #[test]
+    fn raw_idents_derive_plain_names() {
+        let ident: syn::Ident = syn::parse_quote!(r#type);
+        assert_eq!(column_type_ident(&ident).to_string(), "type_col");
+        assert_eq!(ident_from_name("type", ident.span()).to_string(), "r#type");
+    }
 }
