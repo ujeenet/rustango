@@ -157,6 +157,7 @@ untouched.
 ### `Dialect::acquire_session_lock_sql` no longer waits (#2027)
 
 It returns a try-lock (`pg_try_advisory_lock`, `GET_LOCK(?, 0)`) that yields whether it was taken; a custom dialect must follow suit.
+`MigrateError` gains `LockTimeout`, returned only under `migrate::with_lock_timeout`.
 
 ### Schema-mode FK targets are schema-qualified (#1718)
 

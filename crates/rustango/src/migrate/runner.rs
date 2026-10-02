@@ -2375,6 +2375,25 @@ where
 tokio::task_local! {
     /// Set while this task holds the migrate lock.
     static LOCK_HELD: ();
+    /// How long migrates in this task wait for the lock; unset waits forever.
+    static LOCK_TIMEOUT: std::time::Duration;
+}
+
+/// Run `fut` with migrates that give up waiting for another run's lock after
+/// `timeout`, with [`MigrateError::LockTimeout`]. SQLite takes no lock, so it never times out.
+pub async fn with_lock_timeout<F: std::future::Future>(
+    timeout: std::time::Duration,
+    fut: F,
+) -> F::Output {
+    LOCK_TIMEOUT.scope(timeout, fut).await
+}
+
+/// MySQL `GET_LOCK`: 1 taken, 0 held elsewhere, NULL a server-side error.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+fn mysql_lock_taken(got: Option<i64>) -> Result<bool, sqlx::Error> {
+    got.map(|n| n == 1).ok_or_else(|| {
+        sqlx::Error::Protocol("GET_LOCK returned NULL: the server could not take the lock".into())
+    })
 }
 
 /// A second lock from the task holding it would wait on itself forever.
@@ -2434,7 +2453,7 @@ where
                         .bind(name)
                         .fetch_one(&mut **conn)
                         .await?;
-                    Ok(got == Some(1))
+                    mysql_lock_taken(got)
                 })
             })
             .await?;
@@ -2470,15 +2489,31 @@ impl<DB: sqlx::Database> LockSession<DB> {
     where
         F: for<'c> Fn(&'c mut sqlx::pool::PoolConnection<DB>) -> TryLock<'c>,
     {
-        let mut pause = std::time::Duration::from_millis(10);
+        use std::hash::{BuildHasher as _, Hasher as _};
+        use std::time::{Duration, Instant};
+        let limit = LOCK_TIMEOUT.try_with(|d| *d).ok();
+        let start = Instant::now();
+        let mut pause = Duration::from_millis(10);
+        let mut logged = false;
         loop {
             let mut session = Self(Some(pool.acquire().await?));
             if try_lock(session.conn()).await? {
                 return Ok(session);
             }
             drop(session.0.take());
-            tokio::time::sleep(pause).await;
-            pause = (pause * 2).min(std::time::Duration::from_millis(500));
+            if !std::mem::replace(&mut logged, true) {
+                tracing::info!(target: "rustango::migrate", "waiting for another run's migrate lock");
+            }
+            // Jitter, so waiters started together don't retry in step.
+            let rand = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            let sleep = pause / 2 + pause.mul_f64((rand % 1000) as f64 / 2000.0);
+            if let Some(limit) = limit.filter(|l| start.elapsed() + sleep > *l) {
+                return Err(MigrateError::LockTimeout(limit));
+            }
+            tokio::time::sleep(sleep).await;
+            pause = (pause * 2).min(Duration::from_millis(500));
         }
     }
 
@@ -3387,4 +3422,15 @@ async fn unapply_nonatomic_pool(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// GET_LOCK's NULL is a server error, not "held elsewhere": polling it would spin forever.
+    #[test]
+    fn mysql_get_lock_null_is_an_error() {
+        assert!(super::mysql_lock_taken(Some(1)).unwrap());
+        assert!(!super::mysql_lock_taken(Some(0)).unwrap());
+        assert!(super::mysql_lock_taken(None).is_err());
+    }
 }

@@ -7,6 +7,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — concurrent migrates on one small pool no longer deadlock (#2027)
 
 A migrate waiting for the lock polls a try-lock and holds no pool connection, so the holder can borrow one.
+The wait logs once, jitters its retries, and can be bounded with `migrate::with_lock_timeout`; a MySQL `GET_LOCK` NULL is an error.
 
 ### Fixed — `sqlmigrate` and `migrate --dry-run` render for the pool's backend (#2025)
 

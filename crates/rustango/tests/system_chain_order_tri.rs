@@ -1058,6 +1058,67 @@ async fn waiters_leave_the_pool_free(backend: Backend) {
     }
 }
 
+/// A migrate under `with_lock_timeout` gives up on a held lock with a clear error.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn lock_timeout_gives_up(backend: Backend) {
+    use rustango::sql::sqlx::{self, Connection as _};
+    const KEY: i64 = 0x5255_5354_4d49_4754;
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, url)) = fresh(backend, tmp.path(), "locktimeout").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let _outside: Box<dyn std::any::Any> = match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => {
+            let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(KEY)
+                .execute(&mut c)
+                .await
+                .unwrap();
+            Box::new(c)
+        }
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => {
+            let mut c = sqlx::MySqlConnection::connect(&url).await.unwrap();
+            sqlx::query("SELECT GET_LOCK(?, -1)")
+                .bind(format!("rustango_migrate_{KEY:x}"))
+                .execute(&mut c)
+                .await
+                .unwrap();
+            Box::new(c)
+        }
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite => unreachable!(),
+    };
+    let dir = tmp.path().join("empty");
+    std::fs::create_dir_all(&dir).unwrap();
+    let limit = std::time::Duration::from_secs(1);
+    let run =
+        rustango::migrate::with_lock_timeout(limit, rustango::migrate::migrate_pool(&pool, &dir));
+    let err = tokio::time::timeout(std::time::Duration::from_secs(20), run)
+        .await
+        .expect("the wait is bounded")
+        .expect_err("the lock is held");
+    assert!(
+        matches!(err, rustango::migrate::MigrateError::LockTimeout(d) if d == limit),
+        "{err}"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn lock_timeout_gives_up_postgres() {
+    lock_timeout_gives_up(Backend::Postgres).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn lock_timeout_gives_up_mysql() {
+    lock_timeout_gives_up(Backend::Mysql).await;
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn waiters_leave_the_pool_free_postgres() {
