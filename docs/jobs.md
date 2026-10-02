@@ -105,6 +105,10 @@ queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 then aborts and re-queues them. Queued jobs and parked retries stay queued, and
 `start()` again picks them up.
 
+Jobs are **at-least-once**. No stop signal reaches a running job, and an aborted
+job runs again from the start (the DB queue releases its row even if the job had
+just finished). The abort spends an attempt. Make every job idempotent.
+
 Keep the `Arc<InMemoryJobQueue>` in your app state so handlers can reach it.
 
 > **In-memory means in-memory.** Jobs queued or in-flight are **lost on

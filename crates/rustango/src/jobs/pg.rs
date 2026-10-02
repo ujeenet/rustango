@@ -428,6 +428,8 @@ async fn worker_loop(
 ) {
     while !stop.is_set() {
         match pick_one(&pool, &worker.id).await {
+            // Stop fired during the pick: hand the row back unrun.
+            Ok(Some(row)) if stop.is_set() => unpick(&pool, &worker, row.id).await,
             Ok(Some(row)) => {
                 run_one(&pool, &registry, &dead_letter, &worker, row).await;
                 // Loop again immediately — there might be more.
@@ -442,7 +444,10 @@ async fn worker_loop(
             }
             Err(e) => {
                 tracing::error!(error = %e, "job queue pickup failed");
-                tokio::time::sleep(poll_interval).await;
+                tokio::select! {
+                    () = tokio::time::sleep(poll_interval) => {}
+                    () = stop.wait() => {}
+                }
             }
         }
     }
@@ -720,6 +725,22 @@ async fn release_worker_rows(pool: &Pool, worker_id: &str) {
     let binds = vec![SqlValue::String(worker_id.to_owned())];
     if let Err(e) = crate::sql::raw_execute_pool(pool, &sql, binds).await {
         tracing::error!(worker = worker_id, error = %e, "releasing an aborted job failed");
+    }
+}
+
+/// Unlock a row this worker picked but did not run, refunding the attempt.
+async fn unpick(pool: &Pool, worker: &Worker, id: i64) {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL, attempt = attempt - 1 \
+         WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+    );
+    let binds = vec![SqlValue::I64(id), SqlValue::String(worker.id.clone())];
+    if let Err(e) = crate::sql::raw_execute_pool(pool, &sql, binds).await {
+        tracing::error!(id, worker = %worker.id, error = %e, "releasing an unrun job failed");
     }
 }
 

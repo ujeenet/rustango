@@ -372,7 +372,9 @@ async fn a_lost_lease_fires_no_dead_letter(pool: &Pool) {
 
 async fn shutdown_releases_an_aborted_job(pool: &Pool) {
     let tok = token(pool, "abort");
-    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let q = queue(pool, 1, Duration::from_secs(60))
+        .await
+        .shutdown_grace(Duration::from_millis(200));
     q.dispatch(&Slow {
         token: tok.clone(),
         first_ms: 30_000,
@@ -382,7 +384,13 @@ async fn shutdown_releases_an_aborted_job(pool: &Pool) {
     .unwrap();
     q.start().await;
     wait_for("the run to start", || counts(&tok).0 == 1).await;
+    let began = Instant::now();
     q.shutdown().await;
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "shutdown_grace bounds the wait: {:?}",
+        began.elapsed()
+    );
     assert_eq!(
         the_row(pool).await,
         (1, false),
@@ -406,6 +414,25 @@ async fn start_after_shutdown_runs_jobs(pool: &Pool) {
     q.shutdown().await;
 }
 
+/// A queue dropped without `shutdown` stops its workers instead of
+/// spinning on the closed stop signal.
+async fn a_dropped_queue_stops_its_workers(pool: &Pool) {
+    let tick = token(pool, "dropped");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.start().await;
+    drop(q);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let idle = queue(pool, 0, Duration::from_secs(60)).await;
+    idle.dispatch(&Tick {
+        token: tick.clone(),
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(counts(&tick), (0, 0), "no worker left to run it");
+    assert_eq!(the_row(pool).await, (0, false), "nor to lock it");
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -419,5 +446,6 @@ tri_dialect_test! {
         a_lost_lease_fires_no_dead_letter,
         shutdown_releases_an_aborted_job,
         start_after_shutdown_runs_jobs,
+        a_dropped_queue_stops_its_workers,
     ],
 }

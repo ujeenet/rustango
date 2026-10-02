@@ -125,6 +125,9 @@ pub trait JobQueue: Send + Sync + 'static {
     /// Stop all workers: running jobs get the shutdown grace period
     /// ([`DEFAULT_SHUTDOWN_GRACE`]), then are aborted and handed back
     /// to the queue. Queued jobs stay queued for the next `start`.
+    ///
+    /// No signal reaches a running job, and an aborted one runs again
+    /// from the start, so jobs are at-least-once: make them idempotent.
     async fn shutdown(&self);
 
     /// Number of jobs currently queued (waiting to be picked up).
@@ -149,8 +152,9 @@ pub(crate) struct StopSignal(watch::Receiver<bool>);
 
 impl StopSignal {
     #[cfg_attr(not(feature = "jobs-postgres"), allow(dead_code))]
+    /// Also true once the queue is dropped without `shutdown`.
     pub(crate) fn is_set(&self) -> bool {
-        *self.0.borrow()
+        *self.0.borrow() || self.0.has_changed().is_err()
     }
 
     /// Resolves once the run stops, or its queue is dropped.
@@ -198,6 +202,8 @@ struct JobEnvelope {
     payload: serde_json::Value,
     attempt: u32,
     max_attempts: u32,
+    /// A parked retry's due time; it survives a shutdown and restart.
+    not_before: Option<tokio::time::Instant>,
 }
 
 // ------------------------------------------------------------------ Handler registry
@@ -398,6 +404,7 @@ impl JobQueue for InMemoryJobQueue {
             payload: value,
             attempt: 0,
             max_attempts: T::MAX_ATTEMPTS,
+            not_before: None,
         };
         self.pending
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -441,13 +448,15 @@ impl JobQueue for InMemoryJobQueue {
             return;
         };
         for n in run.stop(self.shutdown_grace).await {
-            // Still counted in `pending`; back on the queue for the next start.
-            if let Some(job) = current[n].lock().unwrap().take() {
+            // Still counted in `pending`; back on the queue for the next
+            // start, with the run spent as on the DB queue.
+            if let Some(mut job) = current[n].lock().unwrap().take() {
                 tracing::warn!(job = job.name, "job aborted at shutdown; re-queued");
+                job.attempt += 1;
                 let _ = self.tx.send(job);
             }
         }
-        // Stop is set, so every parked retry re-queues now.
+        // Stop is set, so every parked retry re-queues now, due time kept.
         let mut timers = std::mem::take(&mut *self.retries.lock().unwrap());
         while timers.join_next().await.is_some() {}
     }
@@ -490,18 +499,38 @@ async fn worker_loop(w: InMemoryWorker) {
             },
         };
 
+        // Before any await, so an abort from here on re-queues it.
+        *current.lock().unwrap() = Some(envelope.clone());
+        if let Some(until) = envelope
+            .not_before
+            .filter(|t| *t > tokio::time::Instant::now())
+        {
+            current.lock().unwrap().take();
+            park(&retries, &tx, stop.clone(), envelope, until);
+            continue;
+        }
+        if envelope.attempt >= envelope.max_attempts {
+            // Aborted at shutdown on its last run: dead-letter, do not rerun.
+            current.lock().unwrap().take();
+            pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let error = "attempts spent by runs aborted at shutdown".to_owned();
+            let attempts = envelope.attempt;
+            dead_letter_job(&dead_letter, envelope, attempts, error).await;
+            continue;
+        }
+
         let handler = {
             let reg = registry.lock().await;
             reg.lookup(envelope.name)
         };
 
         let Some((handler, _max_attempts)) = handler else {
+            current.lock().unwrap().take();
             tracing::error!(job = envelope.name, "no handler registered");
             pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             continue;
         };
 
-        *current.lock().unwrap() = Some(envelope.clone());
         let result = handler(envelope.payload.clone()).await;
         current.lock().unwrap().take();
 
@@ -514,52 +543,64 @@ async fn worker_loop(w: InMemoryWorker) {
                 if next_attempt >= envelope.max_attempts {
                     // Count it done first: an abort in the callback must not leak `pending`.
                     pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    let dl_callback = dead_letter.lock().await.clone();
-                    if let Some(cb) = dl_callback {
-                        let dl = JobDeadLetter {
-                            name: envelope.name,
-                            payload: envelope.payload.clone(),
-                            attempts: next_attempt,
-                            error: msg,
-                        };
-                        deliver_dead_letter(cb, dl).await;
-                    } else {
-                        tracing::error!(job = envelope.name, attempts = next_attempt, error = %msg, "job exhausted retries");
-                    }
+                    dead_letter_job(&dead_letter, envelope, next_attempt, msg).await;
                 } else {
                     let backoff = Duration::from_millis(retry_backoff_ms(envelope.attempt));
-                    let mut retry = envelope.clone();
+                    let mut retry = envelope;
                     retry.attempt = next_attempt;
-                    let (tx, mut stop) = (tx.clone(), stop.clone());
-                    // Still counted in `pending`; a shutdown cuts the backoff short.
-                    let mut timers = retries.lock().unwrap();
-                    while timers.try_join_next().is_some() {}
-                    timers.spawn(async move {
-                        tokio::select! {
-                            () = tokio::time::sleep(backoff) => {}
-                            () = stop.wait() => {}
-                        }
-                        let _ = tx.send(retry);
-                    });
+                    // Still counted in `pending` while parked.
+                    let until = tokio::time::Instant::now() + backoff;
+                    park(&retries, &tx, stop.clone(), retry, until);
                 }
             }
             Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                let msg = e.to_string();
-                let dl_callback = dead_letter.lock().await.clone();
-                if let Some(cb) = dl_callback {
-                    let dl = JobDeadLetter {
-                        name: envelope.name,
-                        payload: envelope.payload.clone(),
-                        attempts: envelope.attempt + 1,
-                        error: msg,
-                    };
-                    deliver_dead_letter(cb, dl).await;
-                } else {
-                    tracing::error!(job = envelope.name, error = %msg, "job fatal");
-                }
+                let attempts = envelope.attempt + 1;
+                dead_letter_job(&dead_letter, envelope, attempts, e.to_string()).await;
             }
         }
+    }
+}
+
+/// Hold `job` until `until`, then queue it. A shutdown queues it at once
+/// with `until` kept, so the next run parks it again (#1255).
+fn park(
+    retries: &std::sync::Mutex<JoinSet<()>>,
+    tx: &mpsc::UnboundedSender<JobEnvelope>,
+    mut stop: StopSignal,
+    mut job: JobEnvelope,
+    until: tokio::time::Instant,
+) {
+    job.not_before = Some(until);
+    let tx = tx.clone();
+    let mut timers = retries.lock().unwrap();
+    while timers.try_join_next().is_some() {}
+    timers.spawn(async move {
+        tokio::select! {
+            () = tokio::time::sleep_until(until) => {}
+            () = stop.wait() => {}
+        }
+        let _ = tx.send(job);
+    });
+}
+
+async fn dead_letter_job(
+    dead_letter: &Mutex<Option<DeadLetterFn>>,
+    job: JobEnvelope,
+    attempts: u32,
+    error: String,
+) {
+    let cb = dead_letter.lock().await.clone();
+    if let Some(cb) = cb {
+        let dl = JobDeadLetter {
+            name: job.name,
+            payload: job.payload,
+            attempts,
+            error,
+        };
+        deliver_dead_letter(cb, dl).await;
+    } else {
+        tracing::error!(job = job.name, attempts, error = %error, "job dead-lettered");
     }
 }
 
@@ -919,6 +960,114 @@ mod tests {
             DRAINED.load(Ordering::SeqCst) == 1
         })
         .await;
+        q.shutdown().await;
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct Marker;
+
+    static MARKED: AtomicUsize = AtomicUsize::new(0);
+
+    #[async_trait::async_trait]
+    impl Job for Marker {
+        const NAME: &'static str = "test:marker";
+        async fn run(&self) -> Result<(), JobError> {
+            MARKED.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A one-run job that hangs; counts its runs.
+    #[derive(Serialize, Deserialize, Debug)]
+    struct HangOnce;
+
+    static HANG_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+    #[async_trait::async_trait]
+    impl Job for HangOnce {
+        const NAME: &'static str = "test:hang_once";
+        const MAX_ATTEMPTS: u32 = 1;
+        async fn run(&self) -> Result<(), JobError> {
+            HANG_RUNS.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(())
+        }
+    }
+
+    /// A job dispatched while shutdown drains stays queued for the next start.
+    #[tokio::test]
+    async fn dispatch_during_drain_stays_queued() {
+        let _g = LIFECYCLE.lock().await;
+        DRAIN_RUNS.store(0, Ordering::SeqCst);
+        MARKED.store(0, Ordering::SeqCst);
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<SlowOnce>().await;
+        q.register::<Marker>().await;
+        q.start().await;
+        q.dispatch(&SlowOnce { ms: 300 }).await.unwrap();
+        wait_until("the run to start", || {
+            DRAIN_RUNS.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        tokio::join!(q.shutdown(), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            q.dispatch(&Marker).await.unwrap();
+        });
+        assert_eq!(MARKED.load(Ordering::SeqCst), 0, "not run while stopping");
+        assert_eq!(q.pending_count().await, 1);
+        q.start().await;
+        wait_until("the queued job", || MARKED.load(Ordering::SeqCst) == 1).await;
+        q.shutdown().await;
+    }
+
+    /// A parked retry keeps its backoff across a restart.
+    #[tokio::test]
+    async fn a_parked_retry_keeps_its_backoff_across_restart() {
+        let _g = LIFECYCLE.lock().await;
+        RETRY_RUNS.store(0, Ordering::SeqCst);
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<RetryOnce>().await;
+        q.start().await;
+        q.dispatch(&RetryOnce).await.unwrap();
+        wait_until("the failed run", || RETRY_RUNS.load(Ordering::SeqCst) == 1).await;
+        q.shutdown().await;
+        q.start().await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            RETRY_RUNS.load(Ordering::SeqCst),
+            1,
+            "the 1s backoff still holds"
+        );
+        wait_until("the retry", || RETRY_RUNS.load(Ordering::SeqCst) == 2).await;
+        q.shutdown().await;
+    }
+
+    /// An aborted run spends its attempt, as on the DB queue.
+    #[tokio::test]
+    async fn an_aborted_run_spends_its_attempt() {
+        let _g = LIFECYCLE.lock().await;
+        HANG_RUNS.store(0, Ordering::SeqCst);
+        let q = InMemoryJobQueue::with_workers(1).shutdown_grace(Duration::from_millis(50));
+        q.register::<HangOnce>().await;
+        let dead: Arc<Mutex<Vec<JobDeadLetter>>> = Arc::default();
+        let d = dead.clone();
+        q.on_dead_letter(move |dl| {
+            let d = d.clone();
+            async move { d.lock().await.push(dl) }
+        })
+        .await;
+        q.start().await;
+        q.dispatch(&HangOnce).await.unwrap();
+        wait_until("the run to start", || HANG_RUNS.load(Ordering::SeqCst) == 1).await;
+        q.shutdown().await;
+        q.start().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while dead.lock().await.is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "no dead letter");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(HANG_RUNS.load(Ordering::SeqCst), 1, "not run again");
+        assert_eq!(q.pending_count().await, 0);
         q.shutdown().await;
     }
 

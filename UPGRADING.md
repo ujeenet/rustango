@@ -152,11 +152,18 @@ untouched.
 
 ### Job queue `shutdown()` drains
 
-`shutdown()` now waits up to `shutdown_grace` (default 5s) for running jobs; `InMemoryJobQueue` used to abort at once. Aborted jobs and parked retries stay queued for the next `start()` (#1255, #1677).
+`shutdown()` now waits up to `shutdown_grace` (default 5s) for running jobs; `InMemoryJobQueue` used to abort at once. Aborted jobs and parked retries stay queued for the next `start()` (#1255, #1677). An aborted job runs again from the start, so make jobs idempotent.
 
 ### `serve_until_drained(listener, app, drain)`
 
-**Breaking:** it takes the listener and `Router` instead of a serve closure, and adds `ConnectInfo` itself (#1948).
+**Breaking:** it takes a `TcpListener` and an `axum::Router` instead of a serve closure, always adds `ConnectInfo<SocketAddr>`, and needs an axum-enabled feature such as `admin` (#1948). Other listeners or services now call `axum::serve` directly.
+
+```rust
+// before
+serve_until_drained(|stop| axum::serve(listener, app).with_graceful_shutdown(stop), drain).await?;
+// after
+serve_until_drained(listener, app, drain).await?;
+```
 
 ## 0.59.19
 
