@@ -622,34 +622,14 @@ async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateErr
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    use crate::sql::{Dialect as _, Postgres};
-    // Dialect dispatch: Postgres returns the `pg_advisory_lock` SQL;
-    // SQLite (when added in slice 10.5) returns `None` and the body
-    // runs without a session lock (SQLite's single-writer model
-    // achieves the same exclusion via `BEGIN EXCLUSIVE`).
-    refuse_nested_lock()?;
-    let dialect = Postgres;
-    let mut lock_conn = pool.acquire().await?;
-    // A cancelled run must not pool a session that still holds the lock.
-    lock_conn.close_on_drop();
-    if let Some(acquire_sql) = dialect.acquire_session_lock_sql() {
-        sqlx::query(&acquire_sql)
-            .bind(MIGRATE_LOCK_KEY)
-            .execute(&mut *lock_conn)
-            .await?;
-    }
-    let result = LOCK_HELD.scope((), body).await;
-    // Always try to release. If unlock fails (e.g. connection died),
-    // Postgres releases on session close so we won't deadlock peers
-    // forever — and we want the original error from `result` to
-    // propagate, not a noisy unlock error.
-    if let Some(release_sql) = dialect.release_session_lock_sql() {
-        let _ = sqlx::query(&release_sql)
-            .bind(MIGRATE_LOCK_KEY)
-            .execute(&mut *lock_conn)
-            .await;
-    }
-    result
+    hold_migrate_lock(&crate::sql::Pool::Postgres(pool.clone()), body).await
+}
+
+/// The creation schema of `pool`'s sessions, for FK targets (#1718).
+#[cfg(feature = "postgres")]
+async fn pg_creation_schema(pool: &PgPool) -> Result<Option<String>, MigrateError> {
+    let pool = crate::sql::Pool::Postgres(pool.clone());
+    Ok(super::ensure::creation_schema(&pool).await?)
 }
 
 /// Set of migration names already recorded in the default ledger
@@ -726,6 +706,9 @@ async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateErr
 /// `INSERT INTO __rustango_migrations__` ledger row. Atomic
 /// migrations also get synthetic `BEGIN`/`COMMIT` markers so the
 /// reader can see where the transaction boundary is.
+///
+/// FK targets render unqualified here; on PostgreSQL the applied DDL
+/// pins them to the session's schema (#1718).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationPreview {
     pub name: String,
@@ -762,33 +745,41 @@ async fn migrate_dry_run_with_ledger(
     ensure_ledger_for(pool, ledger).await?;
     let all = file::list_dir(dir)?;
     let applied = applied_set_for(pool, ledger).await?;
-    let pending: Vec<Migration> = all
-        .into_iter()
-        .filter(|m| !applied.contains(&m.name))
-        .collect();
-
-    let mut out = Vec::with_capacity(pending.len());
+    let pending = all.iter().filter(|m| !applied.contains(&m.name));
+    let mut out = Vec::new();
     for mig in pending {
-        out.push(preview_migration(&mig, ledger)?);
+        let before = prev_snapshot(&all, mig, dir)?;
+        out.push(preview_migration(
+            mig,
+            &before,
+            &crate::sql::Postgres,
+            ledger,
+        )?);
     }
     Ok(out)
 }
 
 /// `sqlmigrate <name>` — compute the SQL the named
 /// migration would emit when applied, without touching the database.
-/// Pure file I/O + render — no ledger read required.
+/// Pure file I/O + render — no ledger read required. FK targets stay
+/// unqualified; PostgreSQL applies pin them to the session's schema (#1718).
 ///
 /// Issue #345. Use from `manage sqlmigrate <name>`.
 ///
 /// # Errors
 /// - [`MigrateError::Validation`] when `name` is not present in `dir`.
 /// - Any IO / parse error from [`file::list_dir`].
-pub fn sqlmigrate_one(dir: &Path, name: &str) -> Result<MigrationPreview, MigrateError> {
+pub fn sqlmigrate_one(
+    dir: &Path,
+    name: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<MigrationPreview, MigrateError> {
     let all = file::list_dir(dir)?;
-    let mig = all.into_iter().find(|m| m.name == name).ok_or_else(|| {
+    let mig = all.iter().find(|m| m.name == name).ok_or_else(|| {
         MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
     })?;
-    preview_migration(&mig, LEDGER_TABLE)
+    let before = prev_snapshot(&all, mig, dir)?;
+    preview_migration(mig, &before, dialect, LEDGER_TABLE)
 }
 
 /// #347 — invoke a named migration callback. Looks the name up in
@@ -819,10 +810,36 @@ fn callback_in_atomic(mig: &str, op: &crate::migrate::file::CallbackOp) -> Migra
     ))
 }
 
-/// Build a [`MigrationPreview`] for a single migration. Pure —
-/// no DB access. Same render path as `apply_atomic` / `apply_loose`
-/// but the statements stream into a `Vec<String>` instead of a tx.
-fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, MigrateError> {
+/// The schema before `mig`: its `prev` file's snapshot, or empty.
+fn prev_snapshot(
+    all: &[Migration],
+    mig: &Migration,
+    dir: &Path,
+) -> Result<SchemaSnapshot, MigrateError> {
+    let Some(prev_name) = &mig.prev else {
+        return Ok(SchemaSnapshot::default());
+    };
+    all.iter()
+        .find(|m| &m.name == prev_name)
+        .map(|m| m.snapshot.clone())
+        .ok_or_else(|| {
+            MigrateError::Validation(format!(
+                "migration `{}` declares prev=`{prev_name}` but that file is missing in {}",
+                mig.name,
+                dir.display()
+            ))
+        })
+}
+
+/// Build a [`MigrationPreview`] for a single migration. Pure — no DB
+/// access. Renders as the `_pool` runners do for `dialect`; `before` is
+/// the schema `mig` starts from, for the FKs a MySQL column drop removes.
+fn preview_migration(
+    mig: &Migration,
+    before: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    ledger: &str,
+) -> Result<MigrationPreview, MigrateError> {
     let mut statements = Vec::new();
     let mut deferred_fks: Vec<String> = Vec::new();
     if mig.atomic {
@@ -831,14 +848,26 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.forward, &mig.snapshot, &crate::sql::Postgres)?;
-                if let Some(fk) = &step.drop_fks {
-                    statements.push(format!(
-                        "-- drop the FOREIGN KEYs on {}.{} by their catalog names",
-                        fk.table, fk.column
-                    ));
+                let step = render_step(change, &mig.forward, &mig.snapshot, dialect, None)?;
+                // The runner looks these names up live; a migrate-built FK has this one.
+                if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
+                    let has_fk = before
+                        .table(&fk.table)
+                        .and_then(|t| t.field(&fk.column))
+                        .is_some_and(|f| f.fk.is_some());
+                    if has_fk {
+                        let name = ddl::fk_constraint_name(&fk.table, &fk.column);
+                        statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
+                    }
                 }
                 statements.extend(step.batch.immediate);
+                if let Some(rebuild) = &step.batch.rebuild {
+                    statements.extend(rebuild.statements(dialect));
+                    statements.push(format!(
+                        "-- re-create the indexes and triggers of {}",
+                        rebuild.table()
+                    ));
+                }
                 deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
@@ -874,12 +903,19 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
 #[cfg(feature = "postgres")]
 async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
+    let schema = pg_creation_schema(pool).await?;
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.forward, &mig.snapshot, &crate::sql::Postgres)?;
+                let step = render_step(
+                    change,
+                    &mig.forward,
+                    &mig.snapshot,
+                    &crate::sql::Postgres,
+                    schema.as_deref(),
+                )?;
                 for stmt in pg_statements(&mut tx, &step).await? {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
@@ -1292,25 +1328,7 @@ async fn unapply_locked(
             MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
         })?;
 
-    let prev_snapshot = match &target.prev {
-        None => SchemaSnapshot {
-            tables: vec![],
-            m2m_tables: vec![],
-            indexes: vec![],
-            checks: vec![],
-            excludes: vec![],
-        },
-        Some(prev_name) => all
-            .iter()
-            .find(|m| &m.name == prev_name)
-            .map(|m| m.snapshot.clone())
-            .ok_or_else(|| {
-                MigrateError::Validation(format!(
-                    "migration `{name}` declares prev=`{prev_name}` but that file is missing in {}",
-                    dir.display()
-                ))
-            })?,
-    };
+    let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert(&target.forward, &prev_snapshot)?;
 
@@ -1332,12 +1350,19 @@ async fn unapply_atomic(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic)");
+    let schema = pg_creation_schema(pool).await?;
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, inverted, snapshot, &crate::sql::Postgres)?;
+                let step = render_step(
+                    change,
+                    inverted,
+                    snapshot,
+                    &crate::sql::Postgres,
+                    schema.as_deref(),
+                )?;
                 for stmt in pg_statements(&mut tx, &step).await? {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
@@ -1369,11 +1394,18 @@ async fn unapply_loose(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (non-atomic)");
+    let schema = pg_creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, inverted, snapshot, &crate::sql::Postgres)?;
+                let step = render_step(
+                    change,
+                    inverted,
+                    snapshot,
+                    &crate::sql::Postgres,
+                    schema.as_deref(),
+                )?;
                 let mut conn = pool.acquire().await?;
                 for stmt in pg_statements(&mut conn, &step).await? {
                     sqlx::query(&stmt).execute(&mut *conn).await?;
@@ -1403,11 +1435,18 @@ async fn unapply_loose(
 #[cfg(feature = "postgres")]
 async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic)");
+    let schema = pg_creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.forward, &mig.snapshot, &crate::sql::Postgres)?;
+                let step = render_step(
+                    change,
+                    &mig.forward,
+                    &mig.snapshot,
+                    &crate::sql::Postgres,
+                    schema.as_deref(),
+                )?;
                 let mut conn = pool.acquire().await?;
                 for stmt in pg_statements(&mut conn, &step).await? {
                     sqlx::query(&stmt).execute(&mut *conn).await?;
@@ -2125,8 +2164,52 @@ async fn converge_regenerated(
                     }]
                 }),
         );
+        // A create that already exists is skipped, so every index is offered (#2016).
+        groups.extend(
+            mig.snapshot
+                .indexes
+                .iter()
+                .filter(|i| &i.table == table)
+                .map(|i| vec![super::diff::create_index(i)]),
+        );
+        // Dropping a column loses data, so a leftover one is reported, not dropped.
+        for column in live.iter().filter(|c| snap.field(c).is_none()) {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "`{table}.{column}` is not in the framework schema; drop it by hand \
+                 if it is NOT NULL with no default, or inserts fail"
+            );
+        }
     }
-    Ok(super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?)
+    let failed = super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?;
+    warn_on_index_clash(pool, mig).await?;
+    Ok(failed)
+}
+
+/// An index create that hit an existing name was skipped; warn when that
+/// live index is on another table or other columns (#2016).
+async fn warn_on_index_clash(pool: &crate::sql::Pool, mig: &Migration) -> Result<(), MigrateError> {
+    let schema = super::ensure::creation_schema(pool)
+        .await?
+        .unwrap_or_default();
+    for idx in &mig.snapshot.indexes {
+        let live = super::inspectdb::index_columns(pool, &schema, &idx.table, &idx.name).await?;
+        let Some((table, _)) = live.first() else {
+            continue;
+        };
+        let columns: Vec<&str> = live.iter().map(|(_, c)| c.as_str()).collect();
+        if table != &idx.table || columns != idx.columns {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "index `{}` is on `{table}` ({}), not `{}` ({}); drop or rename it by hand",
+                idx.name,
+                columns.join(", "),
+                idx.table,
+                idx.columns.join(", "),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// How many of `tables` already exist in `pool`. Probes with
@@ -2303,6 +2386,25 @@ where
 tokio::task_local! {
     /// Set while this task holds the migrate lock.
     static LOCK_HELD: ();
+    /// How long migrates in this task wait for the lock; unset waits forever.
+    static LOCK_TIMEOUT: std::time::Duration;
+}
+
+/// Run `fut` with migrates that give up waiting for another run's lock after
+/// `timeout`, with [`MigrateError::LockTimeout`]. SQLite takes no lock, so it never times out.
+pub async fn with_lock_timeout<F: std::future::Future>(
+    timeout: std::time::Duration,
+    fut: F,
+) -> F::Output {
+    LOCK_TIMEOUT.scope(timeout, fut).await
+}
+
+/// MySQL `GET_LOCK`: 1 taken, 0 held elsewhere, NULL a server-side error.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+fn mysql_lock_taken(got: Option<i64>) -> Result<bool, sqlx::Error> {
+    got.map(|n| n == 1).ok_or_else(|| {
+        sqlx::Error::Protocol("GET_LOCK returned NULL: the server could not take the lock".into())
+    })
 }
 
 /// A second lock from the task holding it would wait on itself forever.
@@ -2323,52 +2425,119 @@ where
 {
     refuse_nested_lock()?;
     let body = LOCK_HELD.scope((), body);
+    let dialect = pool.dialect();
+    let (Some(acquire), Some(release)) = (
+        dialect.acquire_session_lock_sql(),
+        dialect.release_session_lock_sql(),
+    ) else {
+        // SQLite: one writer, so the database file lock serializes runs.
+        return body.await;
+    };
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
-            let mut lock_conn = pg.acquire().await?;
-            // A cancelled run must not pool a session that still holds the lock.
-            lock_conn.close_on_drop();
-            sqlx::query("SELECT pg_advisory_lock($1)")
-                .bind(MIGRATE_LOCK_KEY)
-                .execute(&mut *lock_conn)
-                .await?;
+            let mut held = LockSession::wait(pg, |conn| {
+                let sql = acquire.clone();
+                Box::pin(async move {
+                    sqlx::query_scalar::<_, bool>(&sql)
+                        .bind(MIGRATE_LOCK_KEY)
+                        .fetch_one(&mut **conn)
+                        .await
+                })
+            })
+            .await?;
             let result = body.await;
-            // Best-effort release. PG releases on session close anyway,
-            // so a failed unlock can't permanently deadlock peers.
-            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            // Best-effort: PG releases on session close, and the session closes.
+            let _ = sqlx::query(&release)
                 .bind(MIGRATE_LOCK_KEY)
-                .execute(&mut *lock_conn)
+                .execute(&mut **held.conn())
                 .await;
             result
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            let lock_name = format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY);
-            let mut lock_conn = my.acquire().await?;
-            lock_conn.close_on_drop();
-            sqlx::query("SELECT GET_LOCK(?, -1)")
-                .bind(&lock_name)
-                .execute(&mut *lock_conn)
-                .await?;
+            let name = format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY);
+            let mut held = LockSession::wait(my, |conn| {
+                let (sql, name) = (acquire.clone(), name.clone());
+                Box::pin(async move {
+                    let got: Option<i64> = sqlx::query_scalar(&sql)
+                        .bind(name)
+                        .fetch_one(&mut **conn)
+                        .await?;
+                    mysql_lock_taken(got)
+                })
+            })
+            .await?;
             let result = body.await;
-            // Best-effort release. MySQL releases on connection close,
-            // so a failed RELEASE_LOCK can't permanently deadlock peers.
-            let _ = sqlx::query("SELECT RELEASE_LOCK(?)")
-                .bind(&lock_name)
-                .execute(&mut *lock_conn)
+            let _ = sqlx::query(&release)
+                .bind(&name)
+                .execute(&mut **held.conn())
                 .await;
             result
         }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => {
-            // SQLite has no advisory-lock primitive comparable to PG's
-            // `pg_advisory_lock` or MySQL's `GET_LOCK`. The single-writer
-            // semantics of SQLite (and the typical single-process
-            // deployment shape) make migration coordination unnecessary
-            // — concurrent migrations would serialize on the database
-            // file lock anyway. Run the body without an additional lock.
+        #[allow(unreachable_patterns)]
+        _ => {
+            let _ = (acquire, release);
             body.await
+        }
+    }
+}
+
+/// A lock-session connection: pooled again only after a clean failed try,
+/// closed otherwise, so a cancelled run never pools a session holding the lock.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+struct LockSession<DB: sqlx::Database>(Option<sqlx::pool::PoolConnection<DB>>);
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+type TryLock<'c> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, sqlx::Error>> + Send + 'c>>;
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+impl<DB: sqlx::Database> LockSession<DB> {
+    /// Poll `try_lock` until it takes the lock. A waiting run holds no pool
+    /// connection between tries, so the holder's body can borrow one (#2027).
+    async fn wait<F>(pool: &sqlx::Pool<DB>, try_lock: F) -> Result<Self, MigrateError>
+    where
+        F: for<'c> Fn(&'c mut sqlx::pool::PoolConnection<DB>) -> TryLock<'c>,
+    {
+        use std::hash::{BuildHasher as _, Hasher as _};
+        use std::time::{Duration, Instant};
+        let limit = LOCK_TIMEOUT.try_with(|d| *d).ok();
+        let start = Instant::now();
+        let mut pause = Duration::from_millis(10);
+        let mut logged = false;
+        loop {
+            let mut session = Self(Some(pool.acquire().await?));
+            if try_lock(session.conn()).await? {
+                return Ok(session);
+            }
+            drop(session.0.take());
+            if !std::mem::replace(&mut logged, true) {
+                tracing::info!(target: "rustango::migrate", "waiting for another run's migrate lock");
+            }
+            // Jitter, so waiters started together don't retry in step.
+            let rand = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            let sleep = pause / 2 + pause.mul_f64((rand % 1000) as f64 / 2000.0);
+            if let Some(limit) = limit.filter(|l| start.elapsed() + sleep > *l) {
+                return Err(MigrateError::LockTimeout(limit));
+            }
+            tokio::time::sleep(sleep).await;
+            pause = (pause * 2).min(Duration::from_millis(500));
+        }
+    }
+
+    fn conn(&mut self) -> &mut sqlx::pool::PoolConnection<DB> {
+        self.0.as_mut().expect("lock session connection")
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+impl<DB: sqlx::Database> Drop for LockSession<DB> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0.as_mut() {
+            conn.close_on_drop();
         }
     }
 }
@@ -2400,10 +2569,11 @@ fn render_step(
     ops: &[Operation],
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
 ) -> Result<Step, MigrateError> {
     let changes = std::slice::from_ref(change);
     let render = |snap: &SchemaSnapshot| {
-        super::diff::render_changes_split_with_dialect(changes, snap, dialect)
+        super::diff::render_changes_split_in_schema(changes, snap, dialect, schema)
     };
     let retry = super::ensure::filled_table_retry(dialect, after, changes, render)
         .transpose()
@@ -2452,7 +2622,7 @@ fn render_step(
 fn rebuilds(ops: &[Operation], after: &SchemaSnapshot) -> Result<bool, MigrateError> {
     for op in ops {
         if let Operation::Schema(change) = op {
-            if render_step(change, ops, after, &crate::sql::Sqlite)?
+            if render_step(change, ops, after, &crate::sql::Sqlite, None)?
                 .batch
                 .rebuild
                 .is_some()
@@ -2560,7 +2730,7 @@ async fn atomic_sqlite(
         for op in ops {
             match op {
                 Operation::Schema(change) => {
-                    let step = render_step(change, ops, after, &crate::sql::Sqlite)?;
+                    let step = render_step(change, ops, after, &crate::sql::Sqlite, None)?;
                     deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                 }
                 Operation::Data(d) => {
@@ -2651,6 +2821,11 @@ async fn apply_atomic_pool(
         not(any(feature = "postgres", feature = "mysql")),
         allow(unused_variables)
     )]
+    let schema = super::ensure::creation_schema(pool).await?;
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
     let dialect = pool.dialect();
     match pool {
         #[cfg(feature = "postgres")]
@@ -2660,7 +2835,13 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, &mig.forward, &mig.snapshot, dialect)?;
+                        let step = render_step(
+                            change,
+                            &mig.forward,
+                            &mig.snapshot,
+                            dialect,
+                            schema.as_deref(),
+                        )?;
                         for stmt in pg_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -2749,7 +2930,13 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, &mig.forward, &mig.snapshot, dialect)?;
+                        let step = render_step(
+                            change,
+                            &mig.forward,
+                            &mig.snapshot,
+                            dialect,
+                            schema.as_deref(),
+                        )?;
                         let stmts = mysql_statements(&mut tx, &step)
                             .await
                             .map_err(|e| stuck!(e))?;
@@ -2815,11 +3002,18 @@ async fn apply_nonatomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
+    let schema = super::ensure::creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.forward, &mig.snapshot, pool.dialect())?;
+                let step = render_step(
+                    change,
+                    &mig.forward,
+                    &mig.snapshot,
+                    pool.dialect(),
+                    schema.as_deref(),
+                )?;
                 deferred_fks.extend(run_step_pool(pool, step).await?);
             }
             Operation::Data(d) => {
@@ -3083,13 +3277,11 @@ pub async fn migrate_dry_run_pool_with_ledger(
     ensure_ledger_pool_with_ledger(pool, ledger).await?;
     let all = file::list_dir(dir)?;
     let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-    let pending: Vec<Migration> = all
-        .into_iter()
-        .filter(|m| !applied.contains(&m.name))
-        .collect();
-    let mut out = Vec::with_capacity(pending.len());
+    let pending = all.iter().filter(|m| !applied.contains(&m.name));
+    let mut out = Vec::new();
     for mig in pending {
-        out.push(preview_migration(&mig, ledger)?);
+        let before = prev_snapshot(&all, mig, dir)?;
+        out.push(preview_migration(mig, &before, pool.dialect(), ledger)?);
     }
     Ok(out)
 }
@@ -3146,25 +3338,7 @@ async fn unapply_locked_pool(
             MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
         })?;
 
-    let prev_snapshot = match &target.prev {
-        None => SchemaSnapshot {
-            tables: vec![],
-            m2m_tables: vec![],
-            indexes: vec![],
-            checks: vec![],
-            excludes: vec![],
-        },
-        Some(prev_name) => all
-            .iter()
-            .find(|m| &m.name == prev_name)
-            .map(|m| m.snapshot.clone())
-            .ok_or_else(|| {
-                MigrateError::Validation(format!(
-                    "migration `{name}` declares prev=`{prev_name}` but that file is missing in {}",
-                    dir.display()
-                ))
-            })?,
-    };
+    let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert(&target.forward, &prev_snapshot)?;
 
@@ -3212,6 +3386,7 @@ async fn unapply_atomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic, _pool)");
+    let schema = super::ensure::creation_schema(pool).await?;
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -3220,7 +3395,13 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, inverted, snapshot, pool.dialect())?;
+                        let step = render_step(
+                            change,
+                            inverted,
+                            snapshot,
+                            pool.dialect(),
+                            schema.as_deref(),
+                        )?;
                         for stmt in pg_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -3258,7 +3439,13 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, inverted, snapshot, pool.dialect())?;
+                        let step = render_step(
+                            change,
+                            inverted,
+                            snapshot,
+                            pool.dialect(),
+                            schema.as_deref(),
+                        )?;
                         for stmt in mysql_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -3362,11 +3549,18 @@ async fn unapply_nonatomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (non-atomic, _pool)");
+    let schema = super::ensure::creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, inverted, snapshot, pool.dialect())?;
+                let step = render_step(
+                    change,
+                    inverted,
+                    snapshot,
+                    pool.dialect(),
+                    schema.as_deref(),
+                )?;
                 deferred_fks.extend(run_step_pool(pool, step).await?);
             }
             Operation::Data(d) => {
@@ -3390,4 +3584,15 @@ async fn unapply_nonatomic_pool(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// GET_LOCK's NULL is a server error, not "held elsewhere": polling it would spin forever.
+    #[test]
+    fn mysql_get_lock_null_is_an_error() {
+        assert!(super::mysql_lock_taken(Some(1)).unwrap());
+        assert!(!super::mysql_lock_taken(Some(0)).unwrap());
+        assert!(super::mysql_lock_taken(None).is_err());
+    }
 }

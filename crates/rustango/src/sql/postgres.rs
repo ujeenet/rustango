@@ -249,7 +249,10 @@ impl Dialect for Postgres {
     }
 
     fn acquire_session_lock_sql(&self) -> Option<String> {
-        Some(format!("SELECT pg_advisory_lock({})", self.placeholder(1)))
+        Some(format!(
+            "SELECT pg_try_advisory_lock({})",
+            self.placeholder(1)
+        ))
     }
 
     fn release_session_lock_sql(&self) -> Option<String> {

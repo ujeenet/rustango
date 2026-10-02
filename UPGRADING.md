@@ -156,6 +156,19 @@ The first `migrate` after upgrading writes a system migration that fixes the fra
 
 **Breaking:** `SchemaChange` has a new `AlterFkOnDelete` variant, and `RenderedBatch` a new `rebuild` field.
 
+### `sqlmigrate_one` takes a dialect (#2025)
+
+**Breaking:** pass the target backend, e.g. `sqlmigrate_one(dir, name, pool.dialect())`; `manage sqlmigrate` and `migrate --dry-run` now render for the pool's backend.
+
+### `Dialect::acquire_session_lock_sql` no longer waits (#2027)
+
+It returns a try-lock (`pg_try_advisory_lock`, `GET_LOCK(?, 0)`) that yields whether it was taken; a custom dialect must follow suit.
+`MigrateError` gains `LockTimeout`, returned only under `migrate::with_lock_timeout`.
+
+### Schema-mode FK targets are schema-qualified (#1718)
+
+Migrations on PostgreSQL pin `REFERENCES` to the session's schema, so a tenant FK to a table its schema lacks fails instead of binding to `public`. Registry-scoped models stay unqualified.
+
 ## 0.59.18
 
 ### `with_rollback` hands the closure an `AtomicTx`
