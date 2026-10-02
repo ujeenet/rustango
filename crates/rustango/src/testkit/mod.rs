@@ -144,6 +144,14 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
         }
     }
+    // Indexes, `unique_together` among them, as the migrate renderer emits them (#2120).
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(models);
+    let indexes: Vec<crate::migrate::SchemaChange> =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot)
+            .into_iter()
+            .filter(|c| matches!(c, crate::migrate::SchemaChange::CreateIndex { .. }))
+            .collect();
+    crate::migrate::ensure::apply_changes_idempotent(pool, &snapshot, &indexes).await?;
     Ok(())
 }
 

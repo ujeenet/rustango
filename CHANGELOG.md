@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — testkit tables get their indexes (#2120)
+
+`create_tables_for` / `fresh_table` create the model's indexes, `unique_together` included, through the migrate renderer.
+
 ### Fixed — `assert_num_queries` counts the PG `_on` reads (#1561)
 
 `fetch_on`, `count_on`, `fetch_paginated_on`, `explain_on`, `select_rows_on`, `fetch_aggregate_on`, `annotate_count_children_on` and `fetch_with_prefetch` were counted as 0.
