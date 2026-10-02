@@ -310,7 +310,7 @@ async fn list_fks(
 /// `(table, column)` in key order of the live index a `CREATE INDEX name ON
 /// table` collides with: names are per schema on PG and SQLite, per table on MySQL.
 #[cfg_attr(
-    not(any(feature = "postgres", feature = "mysql")),
+    not(all(feature = "postgres", feature = "mysql")),
     allow(unused_variables)
 )]
 pub(super) async fn index_columns(

@@ -2,11 +2,11 @@
 //!
 //! * `audit_log_view`: `GET /__audit`, the cross-row activity feed.
 //! * `audit_cleanup_submit`: `POST /__audit/cleanup` retention.
-//! * `emit_admin_audit`: snapshot-shaped emit for create and bulk.
+//! * `admin_audit_entry`: snapshot-shaped entry for create.
 //! * `admin_audit_diff_entry`: diff-shaped entry for update.
 //!
-//! Create emits after the insert; an edit writes its entry in the
-//! UPDATE's transaction (#2060).
+//! An `audit(...)` model's create or edit writes its entry in the
+//! data write's transaction (#2060, #2101).
 
 use std::collections::HashMap;
 
@@ -412,18 +412,6 @@ pub(crate) fn admin_audit_diff_entry(
     )
 }
 
-/// Write [`admin_audit_entry`] to `rustango_audit_log`. Best-effort: the
-/// data write already succeeded, so a failure here only logs a warning.
-pub(crate) async fn emit_admin_audit(
-    state: &AppState,
-    model: &'static crate::core::ModelSchema,
-    pk_str: &str,
-    op: crate::audit::AuditOp,
-    form: &HashMap<String, String>,
-) {
-    emit_best_effort(state, &admin_audit_entry(model, pk_str, op, form)).await;
-}
-
 /// Write `entry` after its data write committed; a failure only warns.
 pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::PendingEntry) {
     if let Err(e) = crate::audit::emit_one_pool(&state.pool, entry).await {
@@ -438,7 +426,7 @@ pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::Pen
 }
 
 /// Snapshot audit entry from a form submission.
-fn admin_audit_entry(
+pub(crate) fn admin_audit_entry(
     model: &'static crate::core::ModelSchema,
     pk_str: &str,
     op: crate::audit::AuditOp,

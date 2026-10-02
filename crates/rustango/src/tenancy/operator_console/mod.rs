@@ -2241,7 +2241,8 @@ async fn org_impersonate(
     let handoff_path = format!("{prefix}{}", state.tenant_handoff_url.trim_end_matches('/'));
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
-    let redirect_to = format!("{scheme}://{host}{port_suffix}{handoff_path}?token={token}");
+    let handoff = format!("{scheme}://{host}{port_suffix}{handoff_path}");
+    let redirect_to = format!("{handoff}?token={token}");
 
     let mut resp = Redirect::to(&redirect_to).into_response();
     // The token in the URL is single-use + short-lived, but
@@ -2256,7 +2257,8 @@ async fn org_impersonate(
         slug = %slug,
         operator_id,
         ttl_secs = handoff::HANDOFF_TTL_SECS,
-        redirect_to = %redirect_to,
+        // Not the token: it is a live login until redeemed (#2107).
+        handoff = %handoff,
         "minted impersonation handoff token",
     );
     resp

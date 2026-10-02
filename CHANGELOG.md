@@ -28,6 +28,64 @@ A new `SchemaChange::AlterFkOnDelete` replaces the FK: PG and MySQL drop it by i
 
 `DropColumn` on SQLite rebuilds the table. The rebuild keeps rows, indexes, triggers, inbound FKs and the AUTOINCREMENT counter, and refuses to lose a column the snapshot lacks.
 
+## [0.59.19] — 2026-10-02
+
+### Security — a logout or password change ends JWT access tokens (#2086)
+
+`require_bearer` and `/me` check the token's session against the user row, so `sessions_revoked_at` and a password change apply at once. Only tokens from `/login` or `/refresh` pass.
+
+### Security — the impersonation handoff token is not logged (#2107)
+
+The info line names the handoff URL without its single-use token.
+
+### Security — the OAuth2 success hook sees the tenant (#1989)
+
+`OnAuthSuccess` gets an `AuthSuccess` with the tenant and `identity_key()`, so one tenant's IdP cannot sign in as another's user. It returns a `Response`, and its `Set-Cookie` survives.
+
+### Security — the OAuth2 callback does not echo the flow-cookie error (#2087)
+
+The reason is logged; the browser gets a fixed message.
+
+### Security — webhook jobs hold no signing secret, errors no URL (#1852)
+
+`WebhookEvent` stores the body and its signature, not the secret. A transport error drops the URL, whose path can be a secret.
+
+### Security — template views use the app's CSRF config (#1722)
+
+An outer `CsrfLayer`'s `cookie_name` and `trusted_origins` now apply to CBV routers, which defer to it once it has checked the token; its exempt prefixes do not switch off their guard. `stamp_named_into_context` stamps a custom cookie name.
+
+### Security — the provision webhook refuses a short HMAC secret (#1850)
+
+`WebhookConfig::new` panics under 32 bytes; `webhook::verify_signature` never accepts an empty key, and `webhook::sign` returns `Err(EmptySigningKey)` for one.
+
+### Fixed — the admin sidebar "Change password" link points at the real route (#2102)
+
+It was prefixed with the admin path, so a tenant admin linked to `/admin/change-password` or doubled its prefix.
+
+### Fixed — template views honour `#[rustango(soft_delete)]` (#2082)
+
+`DeleteView` and `delete_selected` stamp the column; list, detail and update hide deleted rows, and no form sets the column.
+
+### Fixed — `UpdateView` shows a taken unique value as a form error (#2073)
+
+It answered with a 500; it now re-renders the form like `CreateView` (#2033).
+
+### Fixed — a ViewSet body cannot set the soft-delete column (#2074)
+
+`PATCH`, `PUT` and `POST` ignore it, so only `DELETE` soft-deletes a row.
+
+### Fixed — admin View links percent-encode the PK (#2079)
+
+The list and inline View links broke on a string PK with `/` or `?`.
+
+### Fixed — admin FK cells hide a target the queryset hooks hide (#2080)
+
+The list and detail FK joins apply the target's hooks and soft-delete filter, as the facets do (#2029).
+
+### Fixed — an admin create commits with its audit row (#2101)
+
+For a model with `audit(...)` the entry is written in the INSERT's transaction, as edits are (#2060).
+
 ### Fixed — concurrent migrates on one small pool no longer deadlock (#2027)
 
 A migrate waiting for the lock polls a try-lock and holds no pool connection, so the holder can borrow one.
@@ -45,6 +103,31 @@ It also warns when an index's name is taken by one on another table or other col
 ### Fixed — schema-mode tenant FKs no longer bind to `public` (#1718)
 
 FK targets are qualified with the tenant schema; a registry model's table stays unqualified.
+
+### Fixed — `DatabaseCache` keeps a racing write; `InMemoryCache` evicts to a low-water mark; purge is batched (#1906)
+
+An expired read deletes only a still-expired row. Eviction stops at 90% of each budget, so the next sets skip the scan. `purge_expired` deletes 1000 rows per statement over a new `expires` index; a role that cannot create the index gets a warning, not an error. A long table name gets a hashed index name under 63 bytes.
+
+### Fixed — feature flags on `InMemoryCache` are never evicted (#2009)
+
+`set_forever` entries sit outside the byte and entry budgets, under their own caps (16 MiB, 10 000 entries); past them they are stored evictable, with a warning.
+
+### Fixed — CSV: a one-column row with an empty cell writes `""` (#1908)
+
+A bare CRLF read as a blank line, so Python and pandas dropped the row.
+
+### Fixed — `Cli::with_static` / `with_uploads` on manage-only builds (#2042)
+
+`static_files` and `etag` are gated on the HTTP layers `manage` already enables, not on `admin`.
+
+### Fixed — derive: char lengths in `Form`, raw idents, field-index column, misplaced attrs (#1937)
+
+`derive(Form)` length checks count chars; `r#type` fields no longer panic and an `r#ref` FK loads as `ref`; `index` uses the field's real column;
+`citext`/`vector`/`geometry` on the wrong type are errors; a skipped or failed `insert_or_ignore` resets Rust-filled ids and timestamps to `Unset`.
+
+### Fixed — `M2MManager::add` on MySQL no longer uses `INSERT IGNORE` (#1966)
+
+A too-long key or a bad FK is an error, as on Postgres, instead of a silent truncation.
 
 ## [0.59.18] — 2026-10-02
 

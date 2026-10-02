@@ -160,6 +160,44 @@ The first `migrate` after upgrading writes a system migration that fixes the fra
 
 **Breaking:** `SchemaChange` has a new `AlterFkOnDelete` variant, and `RenderedBatch` a new `rebuild` field; both are now `#[non_exhaustive]`, so match with `_` and build a batch from `Default`. On SQLite, `render_changes_split_with_dialect` returns no statements for `DropColumn` or `AlterFkOnDelete`: the work is in `rebuild`, which only the migrate runner can apply. Only single-column FKs are dropped by name before a `DropColumn` or an on_delete change.
 
+## 0.59.19
+
+### Bearer tokens need a login session
+
+`require_bearer` and `/api/auth/me` refuse access tokens not minted by `/login` or `/refresh` (e.g. from `JwtAuth::lifecycle().issue_access_with`), and tokens after a logout or password change (#2086).
+
+### `OnAuthSuccess` takes an `AuthSuccess`
+
+**Breaking:** write `Arc::new(|login: AuthSuccess| Box::pin(async move { .. Ok(Redirect::to("/").into_response()) }))`. Find users by `login.identity_key()` (#1989).
+
+### `WebhookEvent` has `body` and `signature`
+
+**Breaking:** `signing_secret`, `signature_format` and `payload` are gone; sign with `webhook::sign` (#1852). Drain the webhook queue before upgrading: older queued jobs fail to decode.
+
+### Provision webhook secrets are at least 32 bytes
+
+**Breaking:** `WebhookConfig::secret` is a `WebhookSecret`; `WebhookConfig::new` panics on a shorter key (#1850).
+
+### CBV CSRF follows the outer layer
+
+With an app-wide `CsrfLayer` (e.g. `Cli::with_csrf_config`), template views use its cookie name and origins; forms posted with the old `rustango_csrf` cookie need a reload (#1722). A CBV defers to that layer only when it checked the token: on a path its `exempt_prefixes` skip, the CBV still requires one.
+
+### `webhook::sign` returns a `Result`
+
+**Breaking:** add `?` or `.expect(..)`; an empty key is `Err(EmptySigningKey)` (#1850).
+
+### Template views and ViewSet writes respect soft delete
+
+On a `#[rustango(soft_delete)]` model, `DeleteView` and `delete_selected` now stamp the column instead of deleting, the other template views 404 on deleted rows, and no form or ViewSet body can set the column (#2082, #2074). Use `soft_delete::restore` to undelete.
+
+### Admin creates need the audit table
+
+An admin create of a model with `audit(...)` now fails without `rustango_audit_log`, as edits do (#2101). `manage migrate` creates it.
+
+### Admin `change_password_url` is a full path
+
+`admin::Builder::change_password_url` and the `[routes] change_password_url` settings key are linked as given, no longer prefixed with the admin path (#2102).
+
 ### `sqlmigrate_one` takes a dialect (#2025)
 
 **Breaking:** pass the target backend, e.g. `sqlmigrate_one(dir, name, pool.dialect())`; `manage sqlmigrate` and `migrate --dry-run` now render for the pool's backend.
@@ -172,6 +210,14 @@ It returns a try-lock (`pg_try_advisory_lock`, `GET_LOCK(?, 0)`) that yields whe
 ### Schema-mode FK targets are schema-qualified (#1718)
 
 Migrations on PostgreSQL pin `REFERENCES` to the session's schema, so a tenant FK to a table its schema lacks fails instead of binding to `public`. Registry-scoped models stay unqualified.
+
+### Cache and derive behaviour
+
+- `InMemoryCache::set_forever` entries are not evicted and do not count toward the budgets, up to `DEFAULT_MAX_PINNED_BYTES`/`_ENTRIES` (`with_max_pinned_bytes`/`_entries`); past them they are stored evictable.
+- `DatabaseCache::ensure_table` now also creates the `expires` index (best effort); run it once on existing tables.
+- `#[derive(Model)]`: `citext`, `vector(dims)` and `geometry(srid)` on a field of another type are now compile errors.
+- A field `index` on a non-snake_case field now indexes its real column (`userName`, not `user_name`).
+- `M2MManager::add` / `GenericM2MManager::add` on MySQL now return data errors (truncation, FK) that `INSERT IGNORE` hid.
 
 ## 0.59.18
 
