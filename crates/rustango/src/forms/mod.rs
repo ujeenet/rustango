@@ -256,6 +256,12 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
     }
 }
 
+/// Whether leaving `field` out of a full write is a [`FormError::Missing`].
+/// The OpenAPI request schemas mark exactly these `required`.
+pub(crate) fn absent_is_missing(field: &FieldSchema) -> bool {
+    !field.nullable && !matches!(field.ty, FieldType::Bool)
+}
+
 /// Parse one form value from a raw string.
 ///
 /// Empty string + nullable field → `SqlValue::Null`.
@@ -267,14 +273,15 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
 /// As [`parse_pk_string`], plus [`FormError::Missing`].
 pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlValue, FormError> {
     let Some(raw) = raw else {
-        return Ok(match field.ty {
-            _ if field.nullable => SqlValue::Null,
-            FieldType::Bool => SqlValue::Bool(false),
-            _ => {
-                return Err(FormError::Missing {
-                    field: field.name.to_owned(),
-                });
-            }
+        if absent_is_missing(field) {
+            return Err(FormError::Missing {
+                field: field.name.to_owned(),
+            });
+        }
+        return Ok(if field.nullable {
+            SqlValue::Null
+        } else {
+            SqlValue::Bool(false)
         });
     };
     if field.nullable && raw.is_empty() {

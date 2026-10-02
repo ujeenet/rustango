@@ -862,3 +862,50 @@ async fn a_renamed_fields_model_column_is_not_writable() {
         assert_eq!(json_body(resp).await["content"], "ok", "{enc}: stored");
     }
 }
+
+/// The request body a ViewSet's spec advertises for `method` on `path`.
+#[cfg(feature = "openapi")]
+fn spec_body(vs: rustango::viewset::ViewSet, path: &str, method: &str) -> serde_json::Value {
+    let (_, item) = vs
+        .openapi_paths("/x", "X")
+        .into_iter()
+        .find(|(p, _)| p == path)
+        .unwrap();
+    let v = serde_json::to_value(item).unwrap();
+    v[method]["requestBody"]["content"]["application/json"]["schema"].clone()
+}
+
+/// #1922: write bodies were the item schema, so a `read_only` field was
+/// offered, a `write_only` one hidden, and a `source` rename spelled as output.
+#[cfg(feature = "openapi")]
+#[test]
+fn spec_request_bodies_follow_the_serializer_write_set() {
+    use rustango::viewset::ViewSet;
+    let item = || ViewSet::for_model(Item::SCHEMA).serializer::<ItemSerializer>();
+    let post = spec_body(item(), "/x", "post");
+    assert_eq!(
+        post["properties"],
+        serde_json::json!({"name": {"type": "string"}, "slug": {"type": "string"}}),
+        "no id, no read_only field: {post}"
+    );
+    assert_eq!(post["required"], serde_json::json!(["name", "slug"]));
+    assert!(spec_body(item(), "/x/{pk}", "patch")
+        .get("required")
+        .is_none());
+
+    let acct = ViewSet::for_model(Acct::SCHEMA).serializer::<AcctSerializer>();
+    let put = spec_body(acct, "/x/{pk}", "put");
+    assert_eq!(
+        put["required"],
+        serde_json::json!(["name", "secret"]),
+        "write_only: {put}"
+    );
+
+    let doc = ViewSet::for_model(Doc::SCHEMA).serializer::<DocSerializer>();
+    let post = spec_body(doc, "/x", "post");
+    assert_eq!(
+        post["required"],
+        serde_json::json!(["title", "content"]),
+        "{post}"
+    );
+}
