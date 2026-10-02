@@ -2058,8 +2058,8 @@ struct CollectedFields {
     /// Fills each `default_uuid_v7` field of `_row` in place, so a
     /// mutable bulk insert hands the PKs back (#1934).
     bulk_fill_in_place: Vec<TokenStream2>,
-    /// The `default_uuid_v7` fields, reset when `insert_or_ignore` skips (#1937).
-    uuid_v7_idents: Vec<syn::Ident>,
+    /// Rust-filled `Auto` fields (`default_uuid_v7`, `auto_now(_add)`), reset when `insert_or_ignore` skips (#1937).
+    rust_filled_idents: Vec<syn::Ident>,
     /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
     /// + the loop that asserts every row matches. One pair per Auto
     /// field. Empty when `has_auto == false`.
@@ -2147,7 +2147,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         bulk_columns_no_auto: Vec::with_capacity(cap),
         bulk_columns_all: Vec::with_capacity(cap),
         bulk_fill_in_place: Vec::new(),
-        uuid_v7_idents: Vec::new(),
+        rust_filled_idents: Vec::new(),
         bulk_auto_uniformity: Vec::new(),
         first_auto_ident: None,
         has_auto: false,
@@ -2332,6 +2332,9 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // explicitly-Set value is still honoured; only `Unset`
             // takes the clock.
             // `default_uuid_v7` likewise: its column has no DB default (#1934).
+            if info.default_uuid_v7 || info.auto_now_add || info.auto_now {
+                out.rust_filled_idents.push(ident.clone());
+            }
             let rust_fill = if info.default_uuid_v7 {
                 Some(quote!(#root::__uuid::Uuid::now_v7()))
             } else if info.auto_now_add || info.auto_now {
@@ -2362,7 +2365,6 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 });
             }
             if info.default_uuid_v7 {
-                out.uuid_v7_idents.push(ident.clone());
                 out.bulk_fill_in_place.push(quote! {
                     if matches!(&_row.#ident, #root::sql::Auto::Unset) {
                         _row.#ident = #root::sql::Auto::Set(#root::__uuid::Uuid::now_v7());
@@ -3097,6 +3099,30 @@ fn inherent_impl_tokens(
     } else if fields.has_auto {
         let pushes = &fields.insert_pushes;
         let returning_cols = &fields.returning_cols;
+        // A row not inserted was never saved, so a Rust-filled value must not stay (#1937).
+        let filled = &fields.rust_filled_idents;
+        let was_unset: Vec<syn::Ident> = filled
+            .iter()
+            .map(|i| quote::format_ident!("__{}_was_unset", ident_name(i)))
+            .collect();
+        let insert_or_ignore_call = quote! {
+            #( let #was_unset = matches!(&self.#filled, #root::sql::Auto::Unset); )*
+            let mut _columns: ::std::vec::Vec<&'static str> =
+                ::std::vec::Vec::new();
+            let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                ::std::vec::Vec::new();
+            #( #pushes )*
+            let _query = #root::core::InsertQuery::new(
+                <Self as #root::core::Model>::SCHEMA,
+                _columns,
+                _values,
+            );
+            let _result = #root::sql::insert_or_ignore(pool, &_query).await;
+            if !matches!(_result, ::core::result::Result::Ok(true)) {
+                #( if #was_unset { self.#filled = #root::sql::Auto::Unset; } )*
+            }
+            _result
+        };
         // When every `Auto<T>` field is filled Rust-side
         // (`default_uuid_v7`, issue #823), there is no column to read
         // back from the database — `returning_cols` is empty. Route
@@ -3104,11 +3130,6 @@ fn inherent_impl_tokens(
         // `insert_returning_pool` to skip the redundant RETURNING /
         // LAST_INSERT_ID round-trip.
         if fields.returning_cols.is_empty() {
-            let v7_idents = &fields.uuid_v7_idents;
-            let v7_was_unset: Vec<syn::Ident> = v7_idents
-                .iter()
-                .map(|i| quote::format_ident!("__{}_was_unset", ident_name(i)))
-                .collect();
             quote! {
                 /// Insert this row against either backend. Every
                 /// `Auto<T>` PK on this model is filled Rust-side
@@ -3145,23 +3166,7 @@ fn inherent_impl_tokens(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<bool, #root::sql::ExecError> {
-                    // A skipped row was never saved, so a generated id must not stay (#1937).
-                    #( let #v7_was_unset = matches!(&self.#v7_idents, #root::sql::Auto::Unset); )*
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    );
-                    let _inserted = #root::sql::insert_or_ignore(pool, &_query).await?;
-                    if !_inserted {
-                        #( if #v7_was_unset { self.#v7_idents = #root::sql::Auto::Unset; } )*
-                    }
-                    ::core::result::Result::Ok(_inserted)
+                    #insert_or_ignore_call
                 }
             }
         } else {
@@ -3212,17 +3217,7 @@ fn inherent_impl_tokens(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<bool, #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    );
-                    #root::sql::insert_or_ignore(pool, &_query).await
+                    #insert_or_ignore_call
                 }
             }
         }

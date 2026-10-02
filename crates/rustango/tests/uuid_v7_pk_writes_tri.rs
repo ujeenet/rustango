@@ -48,7 +48,32 @@ pub struct Stamp {
     pub id: Auto<Uuid>,
 }
 
+/// DB-filled PK beside a Rust-filled timestamp: the RETURNING `insert_or_ignore`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "v71934_badge", app = "v71934")]
+pub struct Badge {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32, unique)]
+    pub name: String,
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(auto_now)]
+    pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Never created, so every insert fails.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "v71934_missing", app = "v71934")]
+pub struct Missing {
+    #[rustango(primary_key, default_uuid_v7)]
+    pub id: Auto<Uuid>,
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+}
+
 async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Badge>(pool).await;
     rustango::testkit::matrix::fresh_table::<Ticket>(pool).await;
     rustango::testkit::matrix::fresh_table::<Stamp>(pool).await;
     rustango::testkit::matrix::fresh_table::<Item>(pool).await;
@@ -106,6 +131,46 @@ async fn skipped_insert_or_ignore_keeps_the_pk_unset(pool: &Pool) {
     let mut second = item("dup", 2);
     assert!(!second.insert_or_ignore(pool).await.expect("skip"));
     assert!(matches!(second.id, Auto::Unset), "{:?}", second.id);
+}
+
+/// The RETURNING variant and a failed insert reset the Rust-filled fields too (#1937).
+async fn unsaved_insert_or_ignore_resets_rust_filled_fields(pool: &Pool) {
+    let badge = |name: &str| Badge {
+        id: Auto::Unset,
+        name: name.into(),
+        created_at: Auto::Unset,
+        updated_at: Auto::Unset,
+    };
+    let mut first = badge("dup");
+    assert!(first.insert_or_ignore(pool).await.expect("first insert"));
+    assert!(
+        first.created_at.get().is_some(),
+        "inserted row keeps its stamp"
+    );
+    let mut second = badge("dup");
+    assert!(!second.insert_or_ignore(pool).await.expect("skip"));
+    assert!(
+        matches!(second.created_at, Auto::Unset),
+        "{:?}",
+        second.created_at
+    );
+    assert!(
+        matches!(second.updated_at, Auto::Unset),
+        "{:?}",
+        second.updated_at
+    );
+
+    let mut ghost = Missing {
+        id: Auto::Unset,
+        created_at: Auto::Unset,
+    };
+    assert!(ghost.insert_or_ignore(pool).await.is_err());
+    assert!(matches!(ghost.id, Auto::Unset), "{:?}", ghost.id);
+    assert!(
+        matches!(ghost.created_at, Auto::Unset),
+        "{:?}",
+        ghost.created_at
+    );
 }
 
 async fn bulk_writes_fill_the_pk(pool: &Pool) {
@@ -201,6 +266,7 @@ tri_dialect_test! {
     scenarios: [
         audited_insert_fills_the_pk,
         skipped_insert_or_ignore_keeps_the_pk_unset,
+        unsaved_insert_or_ignore_resets_rust_filled_fields,
         bulk_writes_fill_the_pk,
         pg_bulk_insert_writes_ids_back,
         db_pk_is_read_back_beside_a_rust_filled_auto,
