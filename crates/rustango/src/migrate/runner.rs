@@ -850,13 +850,19 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
 #[cfg(feature = "postgres")]
 async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
+    let schema = pg_creation_schema(pool).await?;
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let batch = render_changes_split(std::slice::from_ref(change), &mig.snapshot)
-                    .map_err(MigrateError::Validation)?;
+                let batch = super::diff::render_changes_split_in_schema(
+                    std::slice::from_ref(change),
+                    &mig.snapshot,
+                    &crate::sql::Postgres,
+                    schema.as_deref(),
+                )
+                .map_err(MigrateError::Validation)?;
                 for stmt in batch.immediate {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
@@ -1309,13 +1315,19 @@ async fn unapply_atomic(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic)");
+    let schema = pg_creation_schema(pool).await?;
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let batch = render_changes_split(std::slice::from_ref(change), snapshot)
-                    .map_err(MigrateError::Validation)?;
+                let batch = super::diff::render_changes_split_in_schema(
+                    std::slice::from_ref(change),
+                    snapshot,
+                    &crate::sql::Postgres,
+                    schema.as_deref(),
+                )
+                .map_err(MigrateError::Validation)?;
                 for stmt in batch.immediate {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
@@ -1347,12 +1359,18 @@ async fn unapply_loose(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (non-atomic)");
+    let schema = pg_creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let batch = render_changes_split(std::slice::from_ref(change), snapshot)
-                    .map_err(MigrateError::Validation)?;
+                let batch = super::diff::render_changes_split_in_schema(
+                    std::slice::from_ref(change),
+                    snapshot,
+                    &crate::sql::Postgres,
+                    schema.as_deref(),
+                )
+                .map_err(MigrateError::Validation)?;
                 for stmt in batch.immediate {
                     sqlx::query(&stmt).execute(pool).await?;
                 }
@@ -1381,12 +1399,18 @@ async fn unapply_loose(
 #[cfg(feature = "postgres")]
 async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic)");
+    let schema = pg_creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let batch = render_changes_split(std::slice::from_ref(change), &mig.snapshot)
-                    .map_err(MigrateError::Validation)?;
+                let batch = super::diff::render_changes_split_in_schema(
+                    std::slice::from_ref(change),
+                    &mig.snapshot,
+                    &crate::sql::Postgres,
+                    schema.as_deref(),
+                )
+                .map_err(MigrateError::Validation)?;
                 for stmt in batch.immediate {
                     sqlx::query(&stmt).execute(pool).await?;
                 }
@@ -2413,15 +2437,17 @@ struct Step {
     dropped_column: Option<(String, String)>,
 }
 
-/// Render `change`, which moves the schema to `after`.
+/// Render `change`, which moves the schema to `after`; FK targets are
+/// pinned to `schema`, the creation schema (#1718).
 fn render_step(
     change: &super::SchemaChange,
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
 ) -> Result<Step, MigrateError> {
     let changes = std::slice::from_ref(change);
     let render = |snap: &SchemaSnapshot| {
-        super::diff::render_changes_split_with_dialect(changes, snap, dialect)
+        super::diff::render_changes_split_in_schema(changes, snap, dialect, schema)
     };
     let retry = super::ensure::filled_table_retry(dialect, after, changes, render)
         .transpose()
@@ -2527,6 +2553,7 @@ async fn apply_atomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic, _pool)");
+    let schema = super::ensure::creation_schema(pool).await?;
     let dialect = pool.dialect();
     match pool {
         #[cfg(feature = "postgres")]
@@ -2536,7 +2563,8 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = render_step(change, &mig.snapshot, dialect)?.batch;
+                        let batch =
+                            render_step(change, &mig.snapshot, dialect, schema.as_deref())?.batch;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -2625,7 +2653,7 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, &mig.snapshot, dialect)?;
+                        let step = render_step(change, &mig.snapshot, dialect, schema.as_deref())?;
                         let stmts = mysql_statements(&mut tx, &step)
                             .await
                             .map_err(|e| stuck!(e))?;
@@ -2676,7 +2704,7 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, &mig.snapshot, dialect)?;
+                        let step = render_step(change, &mig.snapshot, dialect, schema.as_deref())?;
                         deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                     }
                     Operation::Data(d) => {
@@ -2714,11 +2742,12 @@ async fn apply_nonatomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
+    let schema = super::ensure::creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.snapshot, pool.dialect())?;
+                let step = render_step(change, &mig.snapshot, pool.dialect(), schema.as_deref())?;
                 deferred_fks.extend(run_step_pool(pool, step).await?);
             }
             Operation::Data(d) => {
@@ -3111,6 +3140,7 @@ async fn unapply_atomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic, _pool)");
+    let schema = super::ensure::creation_schema(pool).await?;
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -3119,7 +3149,8 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = render_step(change, snapshot, pool.dialect())?.batch;
+                        let batch =
+                            render_step(change, snapshot, pool.dialect(), schema.as_deref())?.batch;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -3157,7 +3188,8 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, snapshot, pool.dialect())?;
+                        let step =
+                            render_step(change, snapshot, pool.dialect(), schema.as_deref())?;
                         for stmt in mysql_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -3185,7 +3217,8 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, snapshot, pool.dialect())?;
+                        let step =
+                            render_step(change, snapshot, pool.dialect(), schema.as_deref())?;
                         deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                     }
                     Operation::Data(d) => {
@@ -3275,11 +3308,12 @@ async fn unapply_nonatomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (non-atomic, _pool)");
+    let schema = super::ensure::creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, snapshot, pool.dialect())?;
+                let step = render_step(change, snapshot, pool.dialect(), schema.as_deref())?;
                 deferred_fks.extend(run_step_pool(pool, step).await?);
             }
             Operation::Data(d) => {

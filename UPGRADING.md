@@ -154,6 +154,10 @@ untouched.
 
 It returns a try-lock (`pg_try_advisory_lock`, `GET_LOCK(?, 0)`) that yields whether it was taken; a custom dialect must follow suit.
 
+### Schema-mode FK targets are schema-qualified (#1718)
+
+Migrations on PostgreSQL pin `REFERENCES` to the session's schema, so a tenant FK to a table its schema lacks fails instead of binding to `public`. Registry-scoped models stay unqualified.
+
 ## 0.59.17
 
 ### Number filters round halves up (#1896)

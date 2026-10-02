@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 A migrate waiting for the lock polls a try-lock and holds no pool connection, so the holder can borrow one.
 
+### Fixed — schema-mode tenant FKs no longer bind to `public` (#1718)
+
+FK targets are qualified with the tenant schema; a registry model's table stays unqualified.
+
 ## [0.59.17] — 2026-10-01
 
 ### Fixed — humanize and number rounding (#1896)

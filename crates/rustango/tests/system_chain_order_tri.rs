@@ -819,6 +819,74 @@ async fn schema_mode_tenant_converges() {
     assert_eq!(n, 1, "t1.{table}.{column}");
 }
 
+/// #1718 — a tenant FK to a table its schema lacks must not bind to `public`'s.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn schema_mode_fk_stays_in_the_tenant_schema() {
+    let _signals = SIGNALS.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((registry, registry_url)) = fresh(Backend::Postgres, tmp.path(), "fkq").await else {
+        eprintln!("skipping — DATABASE_URL unset");
+        return;
+    };
+    let boot = tmp.path().join("boot/migrations");
+    std::fs::create_dir_all(&boot).unwrap();
+    rustango::tenancy::migrate_registry_pool(&registry, &boot)
+        .await
+        .expect("registry tables");
+    let mut org = rustango::tenancy::Org {
+        slug: "t1".into(),
+        display_name: "t1".into(),
+        storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
+        backend_kind: "postgres".into(),
+        schema_name: Some("t1".into()),
+        database_url: None,
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&registry).await.unwrap();
+    let Pool::Postgres(pg) = &registry else {
+        unreachable!()
+    };
+    rustango::sql::sqlx::query("CREATE TABLE fkq_parent (id BIGINT PRIMARY KEY)")
+        .execute(pg)
+        .await
+        .unwrap();
+    let field = |name: &str, fk: Option<Value>| {
+        json!({ "name": name, "column": name, "ty": "i64", "nullable": fk.is_some(),
+                "primary_key": fk.is_none(), "fk": fk })
+    };
+    let parent = json!({ "name": "fkq_parent", "model": "P", "fields": [field("id", None)] });
+    let child = json!({ "name": "fkq_child", "model": "C", "fields": [
+        field("id", None),
+        field("parent_id", Some(json!({ "kind": "fk", "to": "fkq_parent", "on": "id" }))),
+    ] });
+    let dir = tmp.path().join("app/migrations");
+    write_step(
+        &dir,
+        "0001_child",
+        None,
+        json!({ "tables": [parent, child] }),
+        vec![json!({ "CreateTable": "fkq_child" })],
+    );
+    let pools = rustango::tenancy::TenantPools::new(pg.clone());
+    let report = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url)
+        .await
+        .expect("tenants");
+    let to_public: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_constraint c JOIN pg_class r ON r.oid = c.confrelid \
+         JOIN pg_namespace n ON n.oid = r.relnamespace \
+         WHERE c.contype = 'f' AND n.nspname = 'public' AND r.relname = 'fkq_parent'",
+    )
+    .fetch_one(pg)
+    .await
+    .unwrap();
+    assert_eq!(to_public, 0, "t1.fkq_child references public.fkq_parent");
+    assert!(
+        !report.all_ok(),
+        "the missing tenant parent is reported: {report:?}"
+    );
+}
+
 /// A `post_migrate` receiver may migrate again: the signal fires outside the lock.
 #[cfg(all(feature = "postgres", feature = "signals"))]
 #[tokio::test]
