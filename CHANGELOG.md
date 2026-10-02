@@ -16,7 +16,7 @@ Only models with `audit(...)` fail without the audit table ("run `manage migrate
 
 ### Fixed — test assertions that passed when they should fail (#1960)
 
-`assert_cookie_set` fails on a deleting `Set-Cookie`, `assert_messages` on a cookie that does not verify, and a nested `assert_num_queries` counts toward the outer one.
+`assert_cookie_set` fails on a deleting `Set-Cookie` (a Netscape-style past `Expires` too), `assert_messages` on a cookie that does not verify, and a nested `assert_num_queries` counts toward the outer one.
 
 ### Fixed — an `atomic()` inside `with_rollback` is rolled back too (#1761)
 

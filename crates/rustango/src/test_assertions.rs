@@ -515,12 +515,25 @@ fn deletes_cookie(set_cookie: &str) -> bool {
             .find(|(k, _)| k.trim().eq_ignore_ascii_case(key))
             .map(|(_, v)| v.trim().to_owned())
     };
-    if let Some(max_age) = attr("max-age") {
-        return max_age.parse::<i64>().is_ok_and(|n| n <= 0);
+    // A non-numeric Max-Age is ignored (RFC 6265 5.2.2), so Expires decides.
+    if let Some(n) = attr("max-age").and_then(|v| v.parse::<i64>().ok()) {
+        return n <= 0;
     }
     attr("expires")
-        .and_then(|v| chrono::DateTime::parse_from_rfc2822(&v).ok())
+        .and_then(|v| parse_cookie_date(&v))
         .is_some_and(|t| t < chrono::Utc::now())
+}
+
+/// An `Expires` date: RFC 1123, or the Netscape `Thu, 01-Jan-1970 00:00:00 GMT`.
+#[cfg(feature = "_axum")]
+fn parse_cookie_date(v: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(t) = chrono::DateTime::parse_from_rfc2822(v) {
+        return Some(t.with_timezone(&chrono::Utc));
+    }
+    ["%a, %d-%b-%Y %H:%M:%S GMT", "%A, %d-%b-%y %H:%M:%S GMT"]
+        .iter()
+        .find_map(|f| chrono::NaiveDateTime::parse_from_str(v, f).ok())
+        .map(|t| t.and_utc())
 }
 
 /// Opposite of [`assert_cookie_set`]: panics if a cookie called
@@ -956,6 +969,21 @@ mod tests {
     #[should_panic(expected = "deletes it")]
     fn assert_cookie_set_panics_on_a_past_expires() {
         let res = cookie_response(&["session=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT"]);
+        assert_cookie_set(&res, "session", None);
+    }
+
+    #[test]
+    #[should_panic(expected = "deletes it")]
+    fn assert_cookie_set_panics_on_a_past_netscape_expires() {
+        let res = cookie_response(&["session=x; Expires=Thu, 01-Jan-1970 00:00:00 GMT"]);
+        assert_cookie_set(&res, "session", None);
+    }
+
+    #[test]
+    #[should_panic(expected = "deletes it")]
+    fn assert_cookie_set_reads_expires_past_a_bad_max_age() {
+        let res =
+            cookie_response(&["session=x; Max-Age=soon; Expires=Thu, 01 Jan 1970 00:00:00 GMT"]);
         assert_cookie_set(&res, "session", None);
     }
 
