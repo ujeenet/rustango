@@ -35,7 +35,7 @@ pub fn gate() -> Result<(), (StatusCode, String)> {
 }
 
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    rustango::server_error(e)
 }
 
 fn nonce() -> String {

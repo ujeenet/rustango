@@ -16,6 +16,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `shutdown::serve_until_drained` takes the listener and router and is the crate's only `axum::serve`. A `config` build without `manage` no longer has dead settings setters.
 
+### Fixed — `rustango::server_error` for handler 500s (#2032)
+
+It logs the error and sends a fixed body. The examples use it instead of `(500, e.to_string())`.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)
