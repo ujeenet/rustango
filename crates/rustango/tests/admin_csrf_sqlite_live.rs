@@ -467,3 +467,82 @@ fn every_admin_post_form_renders_a_csrf_token() {
         missing.join("\n  "),
     );
 }
+
+/// #2131 — basic auth rides the browser like a session cookie, so a
+/// basic-auth admin refuses a tokenless mutation and renders a token.
+#[tokio::test]
+async fn a_basic_auth_admin_has_csrf_too() {
+    let app = rustango::admin::protect_with_basic_auth(
+        rustango::admin::Builder::new(pool().await)
+            .admin_prefix("")
+            .build(),
+        "op",
+        "pw",
+    );
+    // "op:pw"
+    let auth = "Basic b3A6cHc=";
+    let forged = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/csrf_post")
+                .header(header::AUTHORIZATION, auth)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("title=forged"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+
+    let form = app
+        .oneshot(
+            Request::builder()
+                .uri("/csrf_post/new")
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = csrf_cookies(&form).pop().expect("a GET seeds the cookie");
+    let html = axum::body::to_bytes(form.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains(&format!(r#"name="_csrf" value="{cookie}""#)),
+        "the form renders the cookie's token: {html}"
+    );
+}
+
+/// #2131 — an app behind its own cookie auth can add the same protection.
+#[tokio::test]
+async fn protect_with_csrf_guards_an_app_gated_admin() {
+    let app = rustango::admin::protect_with_csrf(
+        rustango::admin::Builder::new(pool().await)
+            .admin_prefix("")
+            .build(),
+    );
+    let post = |cookie: &str, body: &str| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/csrf_post")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie.to_owned())
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    };
+    let forged = app.clone().oneshot(post("", "title=forged")).await.unwrap();
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+    let t = "ffffffffffffffffffffffffffffffff";
+    let ok = app
+        .oneshot(post(
+            &format!("rustango_csrf={t}"),
+            &format!("title=ok&_csrf={t}"),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(ok.status(), StatusCode::FORBIDDEN);
+}

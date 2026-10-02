@@ -79,7 +79,7 @@ mod templates;
 mod urls;
 mod views;
 
-pub use auth::protect_with_basic_auth;
+pub use auth::{protect_with_basic_auth, protect_with_csrf};
 pub use computed_fields::{ComputedField, ComputedFieldLinkFn, ComputedFieldRenderFn};
 pub use custom_views::{AdminCustomView, CustomViewFuture, CustomViewHandler};
 pub use errors::AdminError;

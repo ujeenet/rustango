@@ -56,10 +56,19 @@ async fn basic_auth_middleware(
 
 /// Wrap `router` so every request needs HTTP Basic Auth with these
 /// credentials. The browser shows its own login dialog first.
+/// The browser resends them cross-site, so this adds [`protect_with_csrf`].
 pub fn protect_with_basic_auth(router: Router, username: &str, password: &str) -> Router {
     let creds = Arc::new(Creds {
         username: username.to_owned(),
         password: password.to_owned(),
     });
-    router.layer(middleware::from_fn_with_state(creds, basic_auth_middleware))
+    protect_with_csrf(router).layer(middleware::from_fn_with_state(creds, basic_auth_middleware))
+}
+
+/// CSRF on every admin mutation, with the token in every form. Wrap an
+/// admin behind your own cookie auth in it; session auth has it built in (#2131).
+pub fn protect_with_csrf(router: Router) -> Router {
+    router
+        .layer(middleware::from_fn(super::csrf_context::csrf_context))
+        .layer(crate::forms::csrf::layer())
 }

@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 It reads the user row like `require_bearer`, so a logout, password change or deactivation ends the token. It now takes the `Tenant`.
 
+### Security — admin CSRF without session auth (#2131)
+
+`protect_with_basic_auth` adds CSRF and form tokens, since the browser resends basic credentials cross-site. New `admin::protect_with_csrf` does the same for an admin behind app cookie auth.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)
