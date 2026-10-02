@@ -389,6 +389,46 @@ async fn distinct_on_keeps_search_and_derived_joins(pool: &Pool) {
     assert_eq!(slugs(&rows), ["b"]);
 }
 
+/// #1966: a DISTINCT page counted the rows before DISTINCT.
+async fn paginated_distinct_counts_distinct_rows(pool: &Pool) {
+    seed_meas(pool, 1, "2024-01-01T00:00:00Z").await;
+    seed_meas(pool, 2, "2024-01-02T00:00:00Z").await;
+    let first = Meas::objects().fetch(pool).await.expect("meas")[0].id;
+    Reading {
+        id: Auto::default(),
+        meas: rustango::sql::ForeignKey::unloaded(first.get().copied().expect("id")),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("second reading");
+    // Joined to its 3 readings, the 2 measurements are 3 rows before DISTINCT.
+    let readings = Reading::objects().compile().expect("sub");
+    let on = WhereExpr::ExprCompare {
+        lhs: aliased("r", "meas"),
+        op: Op::Eq,
+        rhs: aliased("orm_dialect_tri_meas", "id"),
+    };
+    let qs = Meas::objects()
+        .join_sub(readings, "r", on)
+        .distinct()
+        .order_by(&[("id", false)])
+        .limit(1);
+    let page = rustango::sql::fetch_paginated_pool(qs, pool)
+        .await
+        .expect("paginated distinct");
+    assert_eq!((page.total, page.rows.len()), (2, 1));
+
+    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana")]).await;
+    let qs = Post::objects()
+        .distinct_on(&["title"])
+        .order_by(&[("title", false), ("id", false)])
+        .limit(1);
+    let page = rustango::sql::fetch_paginated_pool(qs, pool)
+        .await
+        .expect("paginated distinct_on");
+    assert_eq!((page.total, slugs(&page.rows)), (2, vec!["a"]));
+}
+
 /// #1890: `paginate()` sent no ORDER BY, so a page followed heap order.
 async fn paginate_orders_by_pk(pool: &Pool) {
     seed(pool, &[("a", "a"), ("b", "b"), ("c", "c")]).await;
@@ -516,6 +556,7 @@ tri_dialect_test! {
         union_all_keeps_the_first_branch_distinct,
         distinct_on_keeps_search_and_derived_joins,
         paginate_orders_by_pk,
+        paginated_distinct_counts_distinct_rows,
         values_decode_uuid_and_bytes,
         values_decode_dates_and_timestamps,
         integer_division_truncates,

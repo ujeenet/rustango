@@ -137,10 +137,8 @@ impl ContentType {
     pub async fn for_model<T: crate::core::Model>(
         pool: &crate::sql::Pool,
     ) -> Result<Option<Self>, ExecError> {
-        let entry = inventory::iter::<ModelEntry>
-            .into_iter()
-            .find(|e| e.schema.table == T::SCHEMA.table)
-            .ok_or_else(|| ExecError::MissingPrimaryKey {
+        let entry =
+            ModelEntry::for_table(T::SCHEMA.table).ok_or_else(|| ExecError::MissingPrimaryKey {
                 table: T::SCHEMA.table,
             })?;
         let app = entry.resolved_app_label().unwrap_or("project");
@@ -344,10 +342,8 @@ impl ContentType {
     pub async fn get_for_model<T: crate::core::Model>(
         pool: &crate::sql::Pool,
     ) -> Result<Option<Self>, ExecError> {
-        let entry = inventory::iter::<ModelEntry>
-            .into_iter()
-            .find(|e| e.schema.table == T::SCHEMA.table)
-            .ok_or_else(|| ExecError::MissingPrimaryKey {
+        let entry =
+            ModelEntry::for_table(T::SCHEMA.table).ok_or_else(|| ExecError::MissingPrimaryKey {
                 table: T::SCHEMA.table,
             })?;
         let app = entry.resolved_app_label().unwrap_or("project");
@@ -367,10 +363,8 @@ impl ContentType {
         pool: &crate::sql::Pool,
         schema: &'static crate::core::ModelSchema,
     ) -> Result<Option<Self>, ExecError> {
-        let entry = inventory::iter::<ModelEntry>
-            .into_iter()
-            .find(|e| e.schema.table == schema.table)
-            .ok_or_else(|| ExecError::MissingPrimaryKey {
+        let entry =
+            ModelEntry::for_table(schema.table).ok_or_else(|| ExecError::MissingPrimaryKey {
                 table: schema.table,
             })?;
         let app = entry.resolved_app_label().unwrap_or("project");
@@ -401,9 +395,7 @@ pub async fn fetch_row_as_json(
     // that's no longer compiled in (e.g. an old app got
     // dropped). Return None rather than erroring — the audit
     // log + generic FK consumers want graceful degradation.
-    let entry = inventory::iter::<ModelEntry>
-        .into_iter()
-        .find(|e| e.schema.table == ct.table.as_str());
+    let entry = ModelEntry::for_table(ct.table.as_str());
     let Some(entry) = entry else {
         return Ok(None);
     };
@@ -438,9 +430,7 @@ where
 {
     use crate::core::{OrderClause, SelectQuery};
 
-    let entry = inventory::iter::<ModelEntry>
-        .into_iter()
-        .find(|e| e.schema.table == ct.table.as_str());
+    let entry = ModelEntry::for_table(ct.table.as_str());
     let Some(entry) = entry else {
         return Ok(0);
     };

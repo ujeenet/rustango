@@ -582,9 +582,7 @@ async fn resolve_ct_id_for_schema(
     pool: &Pool,
     schema: &'static ModelSchema,
 ) -> Result<Option<i64>, ExecError> {
-    let entry = inventory::iter::<ModelEntry>
-        .into_iter()
-        .find(|e| e.schema.table == schema.table);
+    let entry = ModelEntry::for_table(schema.table);
     let Some(entry) = entry else {
         return Ok(None);
     };
@@ -596,10 +594,7 @@ async fn resolve_ct_id_for_schema(
 
 /// Walk the model registry for a schema whose `table` matches.
 fn find_model_by_table(table: &str) -> Option<&'static ModelSchema> {
-    inventory::iter::<ModelEntry>
-        .into_iter()
-        .find(|e| e.schema.table == table)
-        .map(|e| e.schema)
+    ModelEntry::for_table(table).map(|e| e.schema)
 }
 
 /// Resolve the field list for an inline. Empty `fields` slice falls

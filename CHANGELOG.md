@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a DISTINCT page counts distinct rows (#1966)
+
+`fetch_paginated_pool` / `fetch_paginated_on` with `distinct()` (or PG `distinct_on`) counted rows before DISTINCT; the total is now a counting subquery. Table lookups share `ModelEntry::for_table`.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)
