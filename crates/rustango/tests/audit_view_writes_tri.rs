@@ -681,6 +681,11 @@ mod admin_views {
             "a",
             "the edit committed without its audit row"
         );
+
+        audit::ensure_table_pool(&pool).await.expect("audit table");
+        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        assert!(status.is_redirection(), "{status} {body}");
+        assert_eq!(title().await, "z");
     }
 
     /// No `audit(...)`: the admin still logs edits, best-effort.
