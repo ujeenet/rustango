@@ -1222,17 +1222,7 @@ impl Cli {
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
-            crate::shutdown::serve_until_drained(
-                |stop| {
-                    axum::serve(
-                        listener,
-                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(stop)
-                },
-                drain,
-            )
-            .await?;
+            crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
         }
@@ -1267,17 +1257,7 @@ impl Cli {
                 let app = self.assemble_app(pool);
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
-                crate::shutdown::serve_until_drained(
-                    |stop| {
-                        axum::serve(
-                            listener,
-                            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                        )
-                        .with_graceful_shutdown(stop)
-                    },
-                    drain,
-                )
-                .await?;
+                crate::shutdown::serve_until_drained(listener, app, drain).await?;
                 run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
             }
@@ -1301,21 +1281,7 @@ impl Cli {
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
-            // v0.30.16 — `into_make_service_with_connect_info` is what
-            // populates `ConnectInfo<SocketAddr>` in request extensions.
-            // Without it, `access_log` (and any other middleware that
-            // reads the peer address) sees "-".
-            crate::shutdown::serve_until_drained(
-                |stop| {
-                    axum::serve(
-                        listener,
-                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(stop)
-                },
-                drain,
-            )
-            .await?;
+            crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
             Ok(())
         } // end of #[cfg(feature = "postgres")] block for non-tenancy runserver

@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `start()` after `shutdown()` panicked on `InMemoryJobQueue` and ran nothing on `DatabaseJobQueue`. Each start now gets fresh workers.
 
+### Fixed — every server drains through one wrapper (#1948)
+
+`shutdown::serve_until_drained` takes the listener and router and is the crate's only `axum::serve`. A `config` build without `manage` no longer has dead settings setters.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)

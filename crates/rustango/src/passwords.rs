@@ -171,7 +171,8 @@ pub fn configure_argon2(params: Argon2Params) -> bool {
 }
 
 /// The `[auth] argon2_*` values; `false` if app code already set them.
-#[cfg(feature = "config")]
+// Only `manage` applies settings (#1948).
+#[cfg(all(feature = "config", feature = "manage"))]
 pub(crate) fn configure_argon2_from_settings(params: Argon2Params) -> bool {
     ARGON2.set_from_settings(params)
 }
@@ -326,7 +327,8 @@ pub fn configure_hash_wait(wait: std::time::Duration) -> bool {
 }
 
 /// The `[auth] hash_wait_ms` value; `false` if app code already set one.
-#[cfg(feature = "config")]
+// Only `manage` applies settings (#1948).
+#[cfg(all(feature = "config", feature = "manage"))]
 pub(crate) fn configure_hash_wait_from_settings(wait: std::time::Duration) -> bool {
     HASH_WAIT.set_from_settings(wait)
 }

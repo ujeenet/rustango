@@ -154,6 +154,10 @@ untouched.
 
 `shutdown()` now waits up to `shutdown_grace` (default 5s) for running jobs; `InMemoryJobQueue` used to abort at once. Aborted jobs and parked retries stay queued for the next `start()` (#1255, #1677).
 
+### `serve_until_drained(listener, app, drain)`
+
+**Breaking:** it takes the listener and `Router` instead of a serve closure, and adds `ConnectInfo` itself (#1948).
+
 ## 0.59.19
 
 ### Bearer tokens need a login session
