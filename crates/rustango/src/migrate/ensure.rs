@@ -151,13 +151,22 @@ pub(crate) async fn apply_changes_idempotent(
     changes: &[super::SchemaChange],
 ) -> Result<(), sqlx::Error> {
     let schema = creation_schema(pool).await?;
-    let batch = super::diff::render_changes_split_in_schema(
-        changes,
-        snapshot,
-        pool.dialect(),
-        schema.as_deref(),
-    )
-    .map_err(sqlx::Error::Protocol)?;
+    apply_changes_idempotent_in(pool, snapshot, changes, schema.as_deref()).await
+}
+
+/// [`apply_changes_idempotent`] into `schema` rather than the current one.
+///
+/// # Errors
+/// As [`apply_changes_idempotent`].
+pub(crate) async fn apply_changes_idempotent_in(
+    pool: &Pool,
+    snapshot: &super::SchemaSnapshot,
+    changes: &[super::SchemaChange],
+    schema: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let batch =
+        super::diff::render_changes_split_in_schema(changes, snapshot, pool.dialect(), schema)
+            .map_err(sqlx::Error::Protocol)?;
     apply_batch(pool, &batch).await
 }
 

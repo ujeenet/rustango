@@ -1253,7 +1253,8 @@ fn render_changes_split_inner(
                 out.immediate.push(format!(
                     "CREATE {unique_kw}INDEX {if_not_exists}{} ON {}{} ({cols}){include_suffix}{where_suffix}",
                     dialect.quote_ident(name),
-                    dialect.quote_ident(table),
+                    // In the table's schema, not whatever `search_path` finds first.
+                    fk_target(dialect, schema, table),
                     using,
                 ));
             }

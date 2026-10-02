@@ -112,6 +112,29 @@ pub async fn create_tables_in_schema(
         let sql = bare.replacen(&quoted, &qualified_target, 1);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
     }
+    emit_indexes(pool, models, Some(schema)).await
+}
+
+/// The models' indexes, `unique_together` among them, as the migrate
+/// renderer emits them (#2120). `None` is the current schema.
+async fn emit_indexes(
+    pool: &Pool,
+    models: &[&'static ModelSchema],
+    schema: Option<&str>,
+) -> Result<(), MigrateError> {
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(models);
+    let indexes: Vec<crate::migrate::SchemaChange> =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot)
+            .into_iter()
+            .filter(|c| matches!(c, crate::migrate::SchemaChange::CreateIndex { .. }))
+            .collect();
+    match schema {
+        Some(s) => {
+            crate::migrate::ensure::apply_changes_idempotent_in(pool, &snapshot, &indexes, Some(s))
+                .await?;
+        }
+        None => crate::migrate::ensure::apply_changes_idempotent(pool, &snapshot, &indexes).await?,
+    }
     Ok(())
 }
 
@@ -144,15 +167,7 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
         }
     }
-    // Indexes, `unique_together` among them, as the migrate renderer emits them (#2120).
-    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(models);
-    let indexes: Vec<crate::migrate::SchemaChange> =
-        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot)
-            .into_iter()
-            .filter(|c| matches!(c, crate::migrate::SchemaChange::CreateIndex { .. }))
-            .collect();
-    crate::migrate::ensure::apply_changes_idempotent(pool, &snapshot, &indexes).await?;
-    Ok(())
+    emit_indexes(pool, models, None).await
 }
 
 /// Generate the framework's system-app migrations from the current
