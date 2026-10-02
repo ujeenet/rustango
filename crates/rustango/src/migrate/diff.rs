@@ -719,14 +719,24 @@ pub fn render_changes(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
 ) -> Result<Vec<String>, String> {
-    let RenderedBatch {
-        mut immediate,
-        deferred_fks,
-        warnings: _,
+    let (mut immediate, mut deferred) = (Vec::new(), Vec::new());
+    for change in changes {
+        // The runner drops a UNIQUE by its live name; offline, the usual one.
+        if let SchemaChange::AlterColumnUnique {
+            table,
+            column,
+            unique: false,
+        } = change
+        {
+            let name = super::ddl::unique_constraint_name(table, column);
+            immediate.push(format!(r#"ALTER TABLE "{table}" DROP CONSTRAINT "{name}""#));
+        }
         // Postgres never rebuilds.
-        rebuild: _,
-    } = render_changes_split(changes, current)?;
-    immediate.extend(deferred_fks);
+        let batch = render_changes_split(std::slice::from_ref(change), current)?;
+        immediate.extend(batch.immediate);
+        deferred.extend(batch.deferred_fks);
+    }
+    immediate.extend(deferred);
     Ok(immediate)
 }
 
@@ -1246,16 +1256,11 @@ fn render_changes_split_inner(
                 column,
                 unique,
             } => {
-                let name = unique_names.get(table, column)?;
+                // A drop goes by the name the runner finds in the catalog (#2133).
                 if *unique {
+                    let name = unique_names.get(table, column)?;
                     out.immediate
                         .push(dialect.add_unique_constraint_sql(table, &name, column));
-                } else {
-                    out.immediate.push(format!(
-                        "ALTER TABLE {} DROP CONSTRAINT {}",
-                        dialect.quote_ident(table),
-                        dialect.quote_ident(&name),
-                    ));
                 }
             }
             // Both renames are genuinely portable — MySQL and SQLite

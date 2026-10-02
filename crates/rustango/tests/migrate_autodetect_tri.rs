@@ -1881,17 +1881,11 @@ async fn unique_drop_after_a_rename(pool: &Pool) {
         )
         .await
         .expect("rename");
-    let drop = chain.step(pool, unique("d", false)).await;
-    let by_name = by_dialect! { pool,
-        postgres => true, because "PG drops the constraint by the new column's name",
-        mysql => false, because "MySQL finds the index in the catalog",
-        sqlite => false, because "SQLite finds the index by its column",
-    };
-    if by_name.value {
-        drop.expect_err(by_name.why);
-        return;
-    }
-    drop.expect(by_name.why);
+    // Every backend finds the old name in the catalog (#2133).
+    chain
+        .step(pool, unique("d", false))
+        .await
+        .expect("drop the renamed column's UNIQUE");
     for id in [1, 2] {
         exec(
             pool,
