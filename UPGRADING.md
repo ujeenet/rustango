@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `verify_for_tenant` takes the `Tenant`
+
+**Breaking:** call `auth.verify_for_tenant(token, &tenant)`. It refuses tokens not minted by `/login` or `/refresh`, and ended sessions (#2118).
+
 ## 0.59.19
 
 ### Bearer tokens need a login session

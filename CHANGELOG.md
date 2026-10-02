@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
+
+It reads the user row like `require_bearer`, so a logout, password change or deactivation ends the token. It now takes the `Tenant`.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)
