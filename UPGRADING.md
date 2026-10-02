@@ -150,9 +150,17 @@ untouched.
 
 ## Unreleased
 
+### `audit::save_one_with_diff` takes the BEFORE query
+
+The macro-support function takes `&SelectQuery` (build it with `audit::before_image_query`) instead of a pk column, pk value and three column lists (#2061).
+
 ### `ModelForm::validate_unique_together` skips partial unique indexes
 
 Like the serializer check; the database still enforces them (#2011).
+
+### `auto_create_permissions(&PgPool)` seeds the reserved codenames
+
+It now seeds `auth.access_admin`, the audit codenames and `extra_permissions`, like `auto_create_permissions_pool` (#2061).
 
 ## 0.59.18
 

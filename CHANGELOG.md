@@ -22,6 +22,10 @@ It runs as `CountQuery::exists`, and skips partial unique indexes, which used to
 
 `template_extensions_live` is gated on Tera, so `--features sqlite,manage --tests` builds.
 
+### Fixed — audited saves pre-read through the emitter; legacy permission seeding is complete (#2061)
+
+`save_pool` / `save_on` read the "before" row with a compiled `SelectQuery`. `auto_create_permissions(&PgPool)` seeds what `auto_create_permissions_pool` seeds. A provision run attaches its org once.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)

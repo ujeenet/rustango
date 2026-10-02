@@ -565,11 +565,7 @@ where
         },
         Err(e) => (RunState::Failed, Some(e.to_string())),
     };
-    if let Ok(outcome) = &result {
-        if let Err(e) = store::attach_org(&registry, run_id, outcome.org_id).await {
-            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not attach org id to run");
-        }
-    }
+    // No `attach_org` here: `Reporter::registered` linked the org already.
     if let Err(e) = store::finish_run(&registry, run_id, state, error.as_deref()).await {
         tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not close provisioning run");
     }
