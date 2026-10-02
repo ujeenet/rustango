@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — tenant URL derivation keeps the query string (#1932)
 
-`tenant_url_on_registry_server` splits the query off first, so `sslrootcert=/ca.pem` is not cut and `sslmode` carries over.
+`tenant_url_on_registry_server` splits the query off first, so `sslrootcert=/ca.pem` is not cut and `sslmode` carries over. Only TLS keys carry over: a `dbname=` or `password=` is dropped, and a `dbname=` naming the registry is refused. `redact` masks a query `password=`.
 
 ### Security — a schema-mode tenant cannot be named `public` (#1868)
 
@@ -14,11 +14,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — tenant hosts are validated on every write path and cannot clash (#1931)
 
-The console edit form uses the CLI's validators; edit and provision refuse a host another tenant uses; the `<slug>.<APEX>` default is validated; the resolver orders by id.
+The console edit form uses the CLI's validators; edit and provision refuse a host, path prefix or port another tenant uses (hosts compared case-insensitively); the `<slug>.<APEX>` default is validated; the resolver orders by id.
 
 ### Fixed — path-prefix tenants get a working admin and impersonation (#2059)
 
-The tenant admin serves login, admin and handoff under the org's `path_prefix`; the console's handoff URL carries it.
+The tenant admin serves login, admin and handoff under the org's `path_prefix`; the console's handoff URL carries it when it is a valid one-segment prefix.
 
 ### Fixed — admin audit and impersonation attribution (#1939)
 
@@ -26,7 +26,7 @@ The update diff no longer records a skipped readonly/hidden value as "after"; im
 
 ### Fixed — mail and console config failures are loud (#1948)
 
-`mail.backend = "file"` without a dir and unknown backends are errors; an SMTP 5xx is `MailError::Rejected`, not retried; a broken config logs a warning in the console.
+`mail.backend = "file"` without a dir and unknown backends are errors; an SMTP 550–555 refusal is `MailError::Rejected`, not retried, while auth and connect failures stay retryable; a broken config logs where it broke, not the error text.
 
 ## [0.59.16] — 2026-10-01
 
