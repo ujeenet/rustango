@@ -579,6 +579,10 @@ async fn migrate_with_ledger_body(
                     apply_one(pool, &mig, ledger).await?;
                     Outcome::Ran
                 }
+                ReconcileAction::RunOutside(existing) => {
+                    apply_one(pool, &outside_tables(&mig, &existing), ledger).await?;
+                    Outcome::RanPartial { skipped: existing }
+                }
             })
         }
         .await;
@@ -1854,6 +1858,10 @@ async fn reconcile_and_apply(
                     std::borrow::Cow::Owned(without_tables(mig, &existing)),
                     Outcome::RanPartial { skipped: existing },
                 ),
+                ReconcileAction::RunOutside(existing) => (
+                    std::borrow::Cow::Owned(outside_tables(mig, &existing)),
+                    Outcome::RanPartial { skipped: existing },
+                ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
             apply_one_pool(pool, &effective, ledger).await?;
@@ -1877,6 +1885,9 @@ enum ReconcileAction {
     /// already exist (created by the retired `ensure_*` DDL of an older
     /// build). Only the framework's own system chain uses this.
     RunPartial(Vec<String>),
+    /// Apply only the schema ops on other tables: a squash whose tables
+    /// already exist still carries changes to tables it does not create.
+    RunOutside(Vec<String>),
 }
 
 /// Decide whether a pending migration should run or be reconciled.
@@ -1947,6 +1958,28 @@ async fn reconcile(
         }
         let existing = count_existing_tables(pool, &targets).await;
         if existing == targets.len() {
+            if create_only_tables(mig).is_none() {
+                // Faking it would skip an AddColumn elsewhere and still record it.
+                if mig
+                    .forward
+                    .iter()
+                    .any(|op| !matches!(op, Operation::Schema(_)))
+                {
+                    return Err(MigrateError::Validation(format!(
+                        "cannot reconcile squash `{}`: its tables already exist, but whether \
+                         its data operations ran is unknown. Resolve it by hand (see \
+                         `migrate --fake <name>`).",
+                        mig.name
+                    )));
+                }
+                tracing::info!(
+                    migration = %mig.name,
+                    tables = %targets.join(", "),
+                    "reconciling squash — its tables already exist (cross-ledger); \
+                     running only its changes to other tables"
+                );
+                return Ok(ReconcileAction::RunOutside(targets));
+            }
             tracing::info!(
                 migration = %mig.name,
                 tables = %targets.join(", "),
@@ -2030,6 +2063,23 @@ pub(crate) fn without_tables(mig: &Migration, existing: &[String]) -> Migration 
             Operation::Schema(SC::CreateIndex { table, .. }) => !skip(table),
             Operation::Schema(SC::CreateM2MTable { through, .. }) => !skip(through),
             _ => true,
+        })
+        .cloned()
+        .collect();
+    Migration {
+        forward,
+        ..mig.clone()
+    }
+}
+
+/// `mig` with only its schema ops on tables outside `existing`.
+fn outside_tables(mig: &Migration, existing: &[String]) -> Migration {
+    let forward = mig
+        .forward
+        .iter()
+        .filter(|op| match op {
+            Operation::Schema(c) => !existing.iter().any(|e| e == c.table()),
+            _ => false,
         })
         .cloned()
         .collect();

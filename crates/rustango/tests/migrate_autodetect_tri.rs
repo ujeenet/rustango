@@ -1594,6 +1594,45 @@ async fn legacy_pg_runner_replaces_the_fk(pool: &Pool) {
     );
 }
 
+// ---------------------------------------------------------------- #1676
+
+/// A squash whose tables exist under another ledger still runs its change
+/// to a table it does not create; it was recorded with the change skipped.
+async fn cross_ledger_squash_runs_its_other_changes(pool: &Pool) {
+    let (a, other) = ("mad_sq_a", "mad_sq_other");
+    let first = Chain::new(pool, "sq1", &[a, other]).await;
+    first
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), table(other, vec![id()])]}),
+        )
+        .await
+        .expect("history under the first ledger");
+    let second = Chain::new(pool, "sq2", &[]).await;
+    let after = json!({"tables": [table(a, vec![id()]),
+        table(other, vec![id(), col("c", "i64", json!({}))])]});
+    let mut squash = make_migrations_from(second.dir.path(), &snap(after), None)
+        .unwrap()
+        .unwrap();
+    squash.replaces = vec!["0001_gone".into()];
+    squash.forward = vec![
+        Operation::Schema(SchemaChange::CreateTable(a.into())),
+        Operation::Schema(SchemaChange::AddColumn {
+            table: other.into(),
+            column: "c".into(),
+        }),
+    ];
+    second.write(&squash);
+    second.migrate(pool).await.expect("the squash reconciles");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 2)",
+        &[other, "id", "c"],
+    )
+    .await
+    .expect("its AddColumn ran");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -1604,6 +1643,7 @@ tri_dialect_test!(
         rebuild_uses_the_shape_at_its_op,
         rebuild_checks_only_its_own_orphans,
         legacy_pg_runner_replaces_the_fk,
+        cross_ledger_squash_runs_its_other_changes,
         rebuild_keeps_unknown_columns,
         unique_column_drops,
         unique_drops_on_long_names,

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a cross-ledger squash no longer skips its other changes (#1676)
+
+When a squash's tables already exist under another ledger, its changes to other tables run instead of being recorded unrun; a squash with data ops there is refused.
+
 ### Fixed — a new table's composite FK is created once (#1983)
 
 `makemigrations` no longer adds an `AddCompositeFk` beside the `CreateTable` that already carries it; PG and MySQL failed with "already exists", SQLite refused the op.
