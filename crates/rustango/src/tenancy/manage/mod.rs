@@ -168,14 +168,15 @@ pub async fn run_with_writer_and_init<W: Write + Send, DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    dispatch(
+    // Boxed: inline, dispatch's state overflows a 2 MiB test thread in debug builds.
+    Box::pin(dispatch(
         pools,
         registry_url,
         dir,
         args.into_iter().collect(),
         writer,
         init_fn,
-    )
+    ))
     .await
 }
 

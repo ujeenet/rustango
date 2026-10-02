@@ -44,7 +44,15 @@ where
     F: FnOnce(LockHeld) -> Fut,
     Fut: Future<Output = Result<Vec<Migration>, MigrateError>>,
 {
-    let run = locked_chains(pool, chain, scope, project_dir, observer, project);
+    // Boxed so every caller up to `manage` dispatch holds a pointer, not the chain's state.
+    let run = Box::pin(locked_chains(
+        pool,
+        chain,
+        scope,
+        project_dir,
+        observer,
+        project,
+    ));
     match signals {
         Signals::Skip => run.await,
         Signals::Fire => {
