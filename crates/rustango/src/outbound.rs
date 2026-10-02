@@ -903,6 +903,26 @@ mod tests {
         }
     }
 
+    /// Under `AllowPrivate` the connect-time resolver refuses a name that
+    /// resolves to metadata; `localhost` still connects (#1821).
+    #[tokio::test]
+    async fn allow_private_resolver_refuses_metadata_names() {
+        use reqwest::dns::Resolve as _;
+        let resolver = CheckingResolver(TargetPolicy::AllowPrivate.allowlist().into_owned());
+        for name in ["169.254.169.254", "169.254.0.23", "100.100.100.200"] {
+            let route = resolver.resolve(name.parse().unwrap()).await;
+            assert!(route.is_err(), "{name}");
+        }
+        let (server, mut lines) = fake_proxy().await;
+        let port = server.rsplit(':').next().unwrap();
+        let egress = EgressCache::default()
+            .get_via(TargetPolicy::AllowPrivate, None, reqwest::Client::builder)
+            .unwrap();
+        let resp = get(&egress, &format!("http://localhost:{port}/private")).await;
+        assert_eq!(resp.unwrap().status(), 200);
+        assert_eq!(next_line(&mut lines).await, "GET /private HTTP/1.1");
+    }
+
     /// A pooled client re-checks a name when it connects, so a name that
     /// re-resolved to a private address after `check` is still refused.
     #[tokio::test]
