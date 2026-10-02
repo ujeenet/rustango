@@ -28,7 +28,7 @@ Les versions récentes ont ajouté un lot de fonctionnalités qui ne sont pas en
 - **Types de champ** — `rust_decimal::Decimal` (natif sur PG/MySQL, via un shim Decode sur SQLite), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) sont désormais acceptés par `#[derive(Model)]` (#524, v0.42).
 - **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — valider sans écrire tout de suite. Validez maintenant, modifiez l'ensemble d'écriture préparé, puis validez quand vous êtes prêt.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — contraintes d'unicité partielles. « E-mail unique par ligne non supprimée » / « Slug unique par tenant ».
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — trait d'extension de gestionnaire personnalisé, émis à côté du modèle. (Cela permet aussi plusieurs « personnalités » sur la même table physique, via des méthodes par trait. Voir `inheritance.rs:98-127`.)
+- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — émet un trait marqueur vide à côté du modèle. Il n'ajoute aucune méthode : placez vos raccourcis de requête sur votre propre trait d'extension sur `QuerySet<Foo>`, comme le montre `crates/rustango/src/manager.rs`.
 - **`manage makemigrations --merge`** (#346, v0.42) — nœud de fusion pour les chaînes de branches divergentes. Voir [`docs/manage.md`](manage.md#makemigrations---merge).
 
 Le CHANGELOG contient l'index complet des tickets pour chaque version.
@@ -864,8 +864,8 @@ let featured = Author::objects()
 
 **Mises en garde :**
 
-- **Rétrécissement de projection de `IN (SELECT …)`** : PG requiert strictement que le SELECT interne ne projette qu'une seule colonne pour la forme `<col> IN (…)`. **Rustango** ne livre pas encore le rétrécissement de projection de style `.values("col")` (ticket #62), donc le queryset interne projette toujours chaque colonne du modèle — ce qui fait que `in_subquery` ne fonctionne aujourd'hui que contre des tables dont le modèle a une seule colonne. Pour le cas multi-colonnes, utilisez `exists(inner.where_(<outer col>.eq_expr(outer_ref(...))))` — il a la même sémantique et ne dépend pas de la forme de la projection.
-- **Le `subquery(...)` scalaire requiert un interne une-colonne-une-ligne** : le SQL émis est `SET col = (SELECT …)` — si l'interne produit plus d'une ligne, la base de données génère une erreur à l'exécution. Contraignez via `.limit(1)` et soit rétrécissez la projection (une fois disponible), soit concevez l'interne autour d'un invariant d'unicité.
+- **Rétrécissement de projection de `IN (SELECT …)`** : PG requiert strictement que le SELECT interne ne projette qu'une seule colonne pour la forme `<col> IN (…)`. Rétrécissez le queryset interne avec `values_list_flat` : `in_subquery("id", Book::objects().values_list_flat("author_id").compile()?)` ne projette que `author_id` sur chaque backend. Un `QuerySet::compile()` simple projette chaque colonne du modèle, ne le passez donc que pour un modèle à une seule colonne.
+- **Le `subquery(...)` scalaire requiert un interne une-colonne-une-ligne** : le SQL émis est `SET col = (SELECT …)` — si l'interne produit plus d'une ligne, la base de données génère une erreur à l'exécution. Contraignez via `.limit(1)` et soit rétrécissez la projection avec `values_list_flat`, soit concevez l'interne autour d'un invariant d'unicité.
 - **La validation à la compilation des sous-requêtes réside sur le queryset interne** : les fautes de frappe de colonne remontent à l'appel `queryset.compile()?` interne, pas au `compile()` de la requête externe. Construisez l'interne en premier et propagez `?`.
 
 ### Quand passer plutôt au SQL brut
@@ -915,7 +915,7 @@ Vous écrivez rarement `GROUP BY` vous-même — **Rustango** l'infère à parti
 | **Fenêtrage seul** | `.aggregate().annotate("rn", row_number()…)` | (aucun `GROUP BY` — les fonctions de fenêtrage sont par ligne) |
 | **Surcharge explicite** | `.aggregate().group_by("month").annotate(...)` | `GROUP BY "month"` — l'explicite gagne |
 
-Le classificateur `AggregateExpr::is_aggregating()` distingue les variantes qui réduisent les lignes (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` — plus les enveloppes récursives `Filtered` / `Coalesced`) de `Window`, qui est par ligne. Seules les variantes agrégeantes déclenchent l'inférence de la Forme 3.
+Le classificateur `AggregateExpr::is_aggregating()` distingue les variantes qui réduisent les lignes (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` / `AnyValue` / `ArrayAgg` / `StringAgg` / `JsonbAgg` / `RelatedAggregate` — plus les enveloppes récursives `Filtered` / `Coalesced`) de `Window`, qui est par ligne. Seules les variantes agrégeantes déclenchent l'inférence de la Forme 3.
 
 ```rust
 use rustango::core::aggregates::{count_all, sum};
@@ -1007,7 +1007,7 @@ Le writer applique le cast entier/flottant du dialecte (`::bigint`, `CAST(... AS
 
 ### Fonctions de fenêtrage
 
-Calcule des totaux cumulés, des classements et des différences d'une ligne à l'autre sans réduire les lignes, via `Window(expression, partition_by=, order_by=, frame=)`. Huit fonctions (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`) plus les frames ROWS/RANGE. Chaque backend que **Rustango** prend en charge (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) livre la syntaxe native `OVER (…)`, donc l'émission est uniforme.
+Calcule des totaux cumulés, des classements et des différences d'une ligne à l'autre sans réduire les lignes, via `Window(expression, partition_by=, order_by=, frame=)`. Quatorze fonctions (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`, `sum_over`, `avg_over`, `min_over`, `max_over`, `count_over`, `count_column_over`) plus les frames ROWS/RANGE. Chaque backend que **Rustango** prend en charge (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) livre la syntaxe native `OVER (…)`, donc l'émission est uniforme.
 
 ```rust
 use rustango::core::aggregates::max;
@@ -1075,6 +1075,12 @@ let q = Post::objects()
 | `lead(col, offset, default)` | `LEAD(col, offset, default?)` | colonne + décalage + défaut optionnel |
 | `first_value(col)` | `FIRST_VALUE(col)` | colonne |
 | `last_value(col)` | `LAST_VALUE(col)` | colonne |
+| `sum_over(col)` | `SUM(col)` | colonne |
+| `avg_over(col)` | `AVG(col)` | colonne |
+| `min_over(col)` | `MIN(col)` | colonne |
+| `max_over(col)` | `MAX(col)` | colonne |
+| `count_column_over(col)` | `COUNT(col)` | colonne |
+| `count_over()` | `COUNT(*)` | — |
 
 Chacun renvoie un `WindowBuilder` avec trois modificateurs chaînables :
 
@@ -1571,14 +1577,15 @@ pub struct Post {
 Utilisation :
 
 ```rust
-post.soft_delete_on(&pool).await?;     // sets deleted_at = NOW()
-post.restore_on(&pool).await?;          // sets deleted_at = NULL
+post.soft_delete(&pool).await?;        // sets deleted_at = NOW()
+post.restore(&pool).await?;            // sets deleted_at = NULL
+post.force_delete(&pool).await?;       // real DELETE
 
 // Default queries DO include soft-deleted rows. Filter explicitly:
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Le bouton « Delete » de l'admin route automatiquement vers `soft_delete_on` pour tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` les réintègre. Faire de l'exclusion le comportement par défaut est suivi dans [#820](https://github.com/ujeenet/rustango/issues/820).
+Ces méthodes prennent le `&Pool` et tournent sur les trois backends ; `soft_delete_on` / `restore_on` sont les formes executor réservées à Postgres (pour passer une transaction). Le bouton « Delete » de l'admin supprime en douceur tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` est un marqueur qui exprime l'intention et ne change rien — il n'annule pas un `.active()` précédent. Pour les exclure par défaut, déclarez un global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, où `live_only()` renvoie le filtre `deleted_at IS NULL` — et désactivez-le par requête avec `.without_global_scope("live")`.
 
 ---
 

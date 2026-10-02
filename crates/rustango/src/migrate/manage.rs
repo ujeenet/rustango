@@ -5086,16 +5086,12 @@ pub fn settings_audit_check(
         );
     }
 
-    // [security] csrf_trusted_origins empty in prod with `*` headers
-    // preset means cross-origin POSTs aren't rejected by Origin
-    // header — only the double-submit token check fires. That's the
-    // back-compat default; promote it to info on prod so operators
-    // know to consider tightening.
+    // Empty list = same-host only (#1529); a cross-host SPA's POSTs get 403.
     if settings.security.csrf_trusted_origins.is_empty() {
         out.info.push(
-            "[security] csrf_trusted_origins = [] in prod tier — CSRF defense-in-depth Origin \
-             check is disabled. Populate with the canonical site + any trusted SPA origins to \
-             enable cross-origin POST rejection on top of the token check."
+            "[security] csrf_trusted_origins = [] in prod tier — the CSRF Origin check accepts \
+             only the request's own Host. Add any SPA or other origin that POSTs cross-host, \
+             or its requests get 403."
                 .into(),
         );
     }
@@ -6970,6 +6966,21 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "neither should be warnings, got: {:?}",
             r.warnings
         );
+    }
+
+    /// The Origin check is on by default (#1529); the audit must not say "disabled".
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_empty_trusted_origins_does_not_claim_check_disabled() {
+        let s = crate::config::Settings::default();
+        let r = settings_run("prod", &s);
+        let line = r
+            .info
+            .iter()
+            .find(|i| i.contains("csrf_trusted_origins"))
+            .expect("csrf_trusted_origins info line");
+        assert!(!line.contains("disabled"), "{line}");
+        assert!(line.contains("own Host"), "{line}");
     }
 
     // -------- v0.36 slice 7+10 — [admin] section audit --------

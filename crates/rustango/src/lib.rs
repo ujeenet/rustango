@@ -86,9 +86,9 @@
 //! |---|---|
 //! | `postgres` / `mysql` / `sqlite` | The database backend(s). |
 //! | `batteries` | The default bundle minus the backend (see [Install](#install)). |
-//! | `admin` | Auto-generated admin UI + session auth. |
+//! | `admin` | Auto-generated admin UI + session auth; `#[derive(ViewSet)]` REST endpoints (also under `tenancy`). |
 //! | `tenancy` | Multi-tenant resolver, per-tenant pools, operator console. |
-//! | `serializer` | Serializers + `#[derive(ViewSet)]` REST endpoints. |
+//! | `serializer` | `#[derive(Serializer)]` JSON serializers. |
 //! | `jwt` / `oauth2` | Token auth; social / OIDC login. |
 //! | `jobs` / `jobs-postgres` | Background jobs (in-memory / durable). |
 //! | `cache` / `cache-redis` | Cache layer; Redis backend. |

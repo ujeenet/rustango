@@ -261,8 +261,8 @@ impl<DB: Database> Builder<DB> {
     /// up with the two surfaces that most need attribution being the
     /// two that had none (#1480).
     ///
-    /// `Cli` calls this for you from `[logging]`; call it directly only
-    /// when building the server by hand.
+    /// `Cli` calls this for you from `[logging]`. A hand-built server also
+    /// needs `security_headers`, `allowed_hosts` and `ssl_redirect`.
     #[must_use]
     pub fn observability(mut self, access_log: Option<crate::access_log::AccessLogLayer>) -> Self {
         self.observability = true;

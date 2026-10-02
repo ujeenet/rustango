@@ -123,10 +123,23 @@ page {{ page }} / {{ total_pages }}
 {% if has_next %}<a href="?page={{ page + 1 }}">next →</a>{% endif %}
 ```
 
-`?page=`, `?status=`, `?search=` et `?ordering=` fonctionnent de la même façon que sur une liste
+`?page=`, `?status=` et `?search=` fonctionnent de la même façon que sur une liste
 ViewSet — la différence tient uniquement au fait que le résultat est une page rendue plutôt qu'une
 enveloppe JSON. Utilisez `.context_object_name("posts")` si vous préférez boucler sur `posts`
 plutôt que sur `object_list` dans le template.
+
+**`?ordering=` est l'exception.** La liste blanche d'un `ListView` démarre *vide*, donc
+le paramètre est ignoré tant que vous ne nommez pas vous-même les colonnes triables :
+
+```rust
+fn post_list() -> ListView {
+    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+}
+```
+
+Sans cet appel, la liste retombe sur le `.order_by(...)` du builder, ou sur PK-ASC pour
+que la pagination reste déterministe. Une seule colonne est acceptée, avec un `-`
+initial pour l'ordre décroissant.
 
 ---
 

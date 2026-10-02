@@ -528,8 +528,9 @@ nichts geloggt. Verfolgt in
 
 ## Siehe auch
 
-- [Scheduler](manage.md) — für *zeitbasierte* wiederkehrende Arbeit (cron-artig),
-  im Gegensatz zu On-Demand-Jobs.
+- [Scheduler](manage.md) — für *zeitbasierte* wiederkehrende Arbeit in festem
+  Intervall (`Scheduler::every` + `Duration`; keine Cron-Ausdrücke), im Gegensatz zu
+  On-Demand-Jobs.
 - [E-Mail](email.md) — die kanonische „mach es in einem Job"-Workload.
 - [Caching](caching.md) — der andere Weg, Request-Handler schnell zu halten.
 - [Signals](orm.md) — Fire-and-Forget-Hooks, die oft einen Job *dispatchen*.

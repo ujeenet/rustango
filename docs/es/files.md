@@ -166,7 +166,7 @@ Tus handlers y modelos no cambian; solo cambia el cableado en el arranque.
 ## La biblioteca de medios
 
 Cuando los archivos son registros de primera clase — rastreados en la base de datos, navegables en
-el admin, con miniaturas y entrega por CDN/prefirmada — recurre a `rustango::media` en lugar de a
+el admin, con entrega por CDN/prefirmada — recurre a `rustango::media` en lugar de a
 `Storage` en bruto. `MediaManager` persiste una fila `Media` por archivo y
 admite dos flujos de subida:
 
@@ -188,8 +188,8 @@ let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await e
 ```
 
 También gestiona el borrado lógico y la purga de huérfanos. El flujo completo se somete a prueba
-en `media_sqlite_live.rs`; los métodos prefirmados/de subida directa del manager están
-orientados a PostgreSQL.
+en `media_sqlite_live.rs`; los métodos prefirmados y de subida directa del manager
+funcionan en los tres backends.
 
 ### Servir medios en una página pública
 
@@ -307,7 +307,9 @@ framework, cada vez que ejecutas `migrate` / aprovisionas un inquilino. No hay u
 ## Referencia
 
 **Trait `Storage`:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
-`exists(key)` · `url(key) -> Option<String>`.
+`exists(key)` · `url(key) -> Option<String>`, más los métodos con default `save_with_content_type`,
+`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)` y `metadata(key)`
+(un backend que firma sobrescribe el par presign; los defaults devuelven `None`).
 
 **`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (insensible a mayúsculas/minúsculas) · `.randomize_filename(bool)`. Usado por

@@ -248,7 +248,9 @@ cache.clear().await?;                            // drops ONLY acme's entries
 `BoxedCache` erwartet wird — `cache_page`, `cache_fragment`, die Rate-Limiter,
 `DistributedLock`. Er leitet mit gemappten Keys an das innere Backend weiter,
 statt etwas neu zu implementieren, sodass native Primitive (Redis `INCRBY`,
-`SET NX`, `MGET`) ihre Atomarität und Batching behalten.
+`SET NX`) ihre Atomarität behalten. `get_many` / `set_many` / `delete_many` werden
+auch weitergeleitet, aber kein mitgeliefertes Backend bündelt sie bisher: jeder
+Key ist ein eigener Roundtrip.
 
 **Atomare Zähler und Sperren.** `Cache::incr` steckt hinter
 [Rate-Limiting](middleware.md) und Konto-Sperren; `Cache::add` (set-if-absent)

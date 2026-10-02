@@ -225,10 +225,15 @@ keinerlei HTTP/axum-Verklebung; verwenden Sie sie, wenn Sie austauschbare
 Auth-Backends innerhalb Ihres eigenen Auth-Codes wünschen:
 
 ```rust
-use rustango::auth_backends::{AuthBackendChain, Credentials, RemoteUserBackend};
+use std::sync::Arc;
+use rustango::auth_backends::{
+    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
+};
 
-let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-let principal = chain.authenticate(&Credentials::remote("alice")).await?;
+async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
+    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
+    chain.authenticate(&Credentials::remote(remote_user)).await
+}
 ```
 
 Dieselbe Semantik „erster Erfolg gewinnt / erster Fehler stoppt" wie die

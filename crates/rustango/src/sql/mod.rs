@@ -2,9 +2,8 @@
 //!
 //! The `Clause` IR (in `rustango-core`) is dialect-neutral. This crate
 //! contains the writers that turn the IR into a parameterized statement
-//! per dialect, plus the async executor that binds and runs them. v0.1
-//! ships Postgres only; `SQLite` and `MySQL` slot in as additional
-//! `Dialect` arms in v0.2+.
+//! per dialect — Postgres, `MySQL` and `SQLite` — plus the async executor
+//! that binds and runs them. [`Pool`] is the entry point.
 
 mod array;
 mod auto;

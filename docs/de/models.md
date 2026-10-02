@@ -270,7 +270,7 @@ pub author: ForeignKey<Author>,
 
 `ForeignKey<T>` setzt seinen Schlüsseltyp standardmäßig auf `i64`; wenn der PK des
 Elternobjekts einen anderen Typ hat, benenne ihn: `ForeignKey<User, String>`.
-Eins-zu-eins verwendet `#[rustango(o2o)]`; viele-zu-viele ist eine separate Tabelle —
+Eins-zu-eins verwendet `#[rustango(o2o = "parent_table")]`; viele-zu-viele ist eine separate Tabelle —
 siehe [ORM-Kochbuch → Viele-zu-viele](orm.md#many-to-many). Lade verwandte Zeilen eager
 mit `select_related` (ebenfalls im ORM-Leitfaden).
 
@@ -290,7 +290,7 @@ mit `select_related` (ebenfalls im ORM-Leitfaden).
 | `auto_now_add` | `#[rustango(auto_now_add)]` | beim **Einfügen** auf jetzt setzen (auf einem `Auto<DateTime<Utc>>`) |
 | `auto_now` | `#[rustango(auto_now)]` | bei **jedem Speichern** auf jetzt setzen |
 | `column = "…"` | `#[rustango(column = "account_no")]` | die SQL-Spalte umbenennen |
-| `null` / `Option<T>` | `pub note: Option<String>` | nullable Spalte |
+| `Option<T>` | `pub note: Option<String>` | nullable Spalte (es gibt kein `null`-Attribut) |
 | `min` / `max` | `#[rustango(min = 0, max = 100)]` | Bereichsvalidierung beim Schreiben |
 | `blank` / `editable` | `#[rustango(editable = false)]` | Formular-/Admin-Verhalten |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | Spalten-COMMENT |
@@ -325,7 +325,7 @@ Auf dem **Modell** deklariert:
 ```
 
 - **`index(...)`** — standardmäßig ein Btree-Index; wähle für PostgreSQL eine Methode
-  mit `index(columns = "body", method = "gin")` (auch `gist`, `brin`, `hash`, `bloom`,
+  mit `index("body", method = "gin")` (auch `gist`, `brin`, `hash`, `bloom`,
   `spgist`).
 - **`unique_together` / `index_together`** — mehrspaltig unique / nicht-unique.
 - **Partielle Indizes** — `unique_when(...)` / `index_when(...)` fügen eine `WHERE`-
@@ -410,11 +410,11 @@ spezifischer.
 | `default_permissions` | `"add, change, delete, view"` | zu erstellende Auto-Berechtigungen |
 | `default_related_name` | `"posts"` | Name des Rückwärts-Accessors auf dem Elternobjekt |
 | `base_manager_name` | `"all_objects"` | Name des Basis- (ungefilterten) Managers |
-| `manager(ext = "Trait")` | Trait-Pfad | ein benutzerdefiniertes Manager-Erweiterungs-Trait generieren |
+| `manager(ext = "Trait")` | Trait-Pfad | ein leeres Marker-Trait emittieren (ohne Methoden) |
 | `manager_fn` | `"published"` | einen Manager-Accessor über `objects()` hinaus hinzufügen |
 | `get_latest_by` | `"created_at"` | Standardspalte für `latest()`/`earliest()` |
 | `order_with_respect_to` | `"parent"` | Ordnung der Kindzeilen relativ zum Elternobjekt |
-| `index(...)` | `columns`, `method`, `name` | Sekundärindex (btree/gin/gist/brin/hash/bloom/spgist) |
+| `index(...)` | `"cols"`, then `unique`, `name`, `method` | Sekundärindex (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | zusammengesetzter Unique-Constraint |
 | `index_together` | `"a, b"` | zusammengesetzter Nicht-Unique-Index |
 | `unique_when(...)` / `index_when(...)` | Spalten + `condition` | partieller (bedingter) Index |
@@ -429,6 +429,13 @@ spezifischer.
 | `required_db_features` / `required_db_vendor` | Liste / Vendor | Deployment-Validierungs-Constraints |
 | `db_table_comment` | `"…"` | Tabellen-COMMENT |
 | `admin(...)` | Admin-Optionen | Admin-UI-Konfiguration (siehe [admin.md](admin.md)) |
+| `fk_composite(...)` / `generic_fk(...)` | Spezifikation | zusammengesetzter FK / generischer (Content-Type-) FK |
+| `m2m(...)` / `generic_m2m(...)` | Spezifikation | Viele-zu-viele- / generische Viele-zu-viele-Beziehung |
+| `managed` | `true` / `false` | `false` = die Tabelle gehört dir; Migrationen überspringen sie |
+| `view` | Flag | das Model liest eine Datenbank-View |
+| `permissions` | Flag / `true` / `false` | generierte Berechtigungen ein- (oder aus-)schalten |
+| `extra_permissions` | `"codename:Label, …"` | zusätzliche Berechtigungs-Codenamen |
+| `verbose_name` / `verbose_name_plural` | `"Label"` | lesbarer Model-Name in Admin/Formularen |
 
 ### Auf Feldebene (auf einem Feld)
 
@@ -438,7 +445,6 @@ spezifischer.
 | `column` | `"name"` | die SQL-Spalte umbenennen |
 | `max_length` | `N` | `VARCHAR(N)` + Längenvalidierung |
 | `default` | `"sql literal"` | Spalten-DEFAULT |
-| `null` | Flag | nullable (oder verwende `Option<T>`) |
 | `unique` | Flag | Unique-Constraint |
 | `index` / `index(...)` | Flag, oder `unique`, `name`, `method` | Einspaltiger Index auf diesem Feld |
 | `choices` | `"v:Label, …"` | aufgezählte Werte |
@@ -451,12 +457,12 @@ spezifischer.
 | `related_name` | `"posts"` | Name des Reverse-Accessors am FK-Ziel |
 | `auto_now` | Flag | bei jedem Speichern auf jetzt setzen |
 | `auto_now_add` | Flag | beim Einfügen auf jetzt setzen |
+| `soft_delete` | Flag | markiert den Soft-Delete-Zeitstempel (`Option<DateTime<Utc>>`) |
 | `auto_uuid` | Flag | Rust-seitiges UUID v4 (auf `Auto<Uuid>`) |
 | `default_uuid_v7` | Flag | Rust-seitiges sortierbares UUID v7 |
 | `fk` + `on` | `"table"`, `"col"` | Fremdschlüsselspalte |
-| `cascade` | Flag | `ON DELETE CASCADE` |
-| `o2o` | Flag | Eins-zu-eins-Beziehung |
-| `fk_composite(...)` / `generic_fk(...)` | Spezifikation | zusammengesetzter FK / generischer (Content-Type-) FK |
+| `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | `ON DELETE`-Aktion des FK |
+| `o2o` | `"table"` | Eins-zu-eins-FK auf diese Tabelle |
 | `generated_as` | `"expr"` | DB-berechnete (generierte) Spalte |
 | `citext` | Flag | case-insensitiver Text (PostgreSQL CITEXT) |
 | `vector(dims = N)` | `N` | pgvector-Dimension |

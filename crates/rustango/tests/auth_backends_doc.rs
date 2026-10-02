@@ -9,6 +9,9 @@
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 #![allow(irrefutable_let_patterns)]
 
+#[path = "support/doc_snippet.rs"]
+mod doc_snippet;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -281,4 +284,28 @@ async fn require_perm_gates_by_codename() {
     // anonymous → 401 (auth runs before the permission check).
     let (status, _) = call(&app, "/admin", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------- the portable registry
+
+// doc-snippet:start
+use rustango::auth_backends::{
+    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
+};
+
+async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
+    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
+    chain.authenticate(&Credentials::remote(remote_user)).await
+}
+// doc-snippet:end
+
+#[tokio::test]
+async fn portable_registry_trusts_the_remote_user() {
+    let p = who("alice").await.unwrap().expect("principal");
+    assert_eq!(p.username, "alice");
+}
+
+#[test]
+fn every_locale_publishes_the_portable_registry_snippet() {
+    doc_snippet::assert_published(include_str!("auth_backends_doc.rs"), "auth-backends.md");
 }

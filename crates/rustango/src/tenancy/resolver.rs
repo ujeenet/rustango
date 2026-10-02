@@ -672,6 +672,8 @@ impl ChainResolver {
     }
 }
 
+/// An **empty** chain, same as [`ChainResolver::new`]: it resolves no
+/// tenant. Use [`ChainResolver::standard`] for a working chain.
 impl Default for ChainResolver {
     fn default() -> Self {
         Self::new()

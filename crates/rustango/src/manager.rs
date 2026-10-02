@@ -14,7 +14,7 @@
 //!
 //! #[derive(rustango::Model, Debug)]
 //! struct Article {
-//!     #[rustango(primary_key, auto)]
+//!     #[rustango(primary_key)]
 //!     pub id: rustango::core::Auto<i64>,
 //!     #[rustango(max_length = 200)]
 //!     pub title: String,
@@ -43,7 +43,7 @@
 //!     let articles = Article::objects()
 //!         .published()                    // custom shortcut
 //!         .by_author(7)                   // another custom shortcut
-//!         .order_by("-id")                // framework method
+//!         .order_by(&[("id", true)])      // framework method
 //!         .fetch(pool).await.unwrap();
 //! }
 //! ```
@@ -66,15 +66,14 @@
 //!
 //! // Usage:
 //! let public_articles = Article::published_objects()
-//!     .order_by("-id")
+//!     .order_by(&[("id", true)])
 //!     .fetch(&pool).await?;
 //! ```
 //!
 //! Both shapes still compose with the rest of the QuerySet builder.
 //!
-//! There is no `#[rustango(manager = "...")]` attribute, because a
-//! plain trait already does the job: it needs no new syntax, several
-//! traits can coexist on one model, and the result keeps every
-//! framework method.
+//! `#[rustango(manager(ext = "Name"))]` only emits an empty
+//! `pub trait Name: Sized {}` beside the model. A trait impl cannot add
+//! methods, so the shortcuts still go on your own trait, as above.
 
 // Doc-only module; worked examples live in `tests/manager_pattern_live.rs`.

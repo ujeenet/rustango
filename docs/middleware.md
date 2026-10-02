@@ -122,8 +122,10 @@ Practical consequences:
 
 ## The built-in catalog
 
-Every entry is a `tower::Layer` with a matching `…RouterExt` one-liner unless
-noted. Bring the module's `…RouterExt` trait into scope to get the method.
+Most entries are config structs installed by their `…RouterExt` one-liner, not
+`tower::Layer`s — see [How middleware works](#how-middleware-works-in-rustango) for
+the few that accept `.layer(…)`. Bring the module's `…RouterExt` trait into scope
+to get the method.
 
 | Concern | Layer | Wire it with |
 | --- | --- | --- |
@@ -374,8 +376,8 @@ is required: templates autoescape, so without it the form carries no `_csrf`
 field and every POST 403s. The admin's own login form does exactly this — see
 `crates/rustango/src/admin/templates/login.html`. Override
 the cookie/header names or the `Secure` flag with `csrf::with_config(CsrfConfig)`;
-for SPA setups, add `.with_trusted_origins([...])` to enable the Origin-header
-defense-in-depth check on top of the token. For append-only collector endpoints
+the Origin-header check always runs and accepts the request's own Host; an SPA
+served from another origin adds it with `.with_trusted_origins([...])`. For append-only collector endpoints
 hit via `navigator.sendBeacon` (e.g. analytics) that can't send a token header,
 `CsrfConfig::exempt_prefix("/path")` skips enforcement for a narrow path prefix.
 The auto-admin enables CSRF on every mutation with no opt-out.

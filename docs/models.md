@@ -264,7 +264,7 @@ pub author: ForeignKey<Author>,
 
 `ForeignKey<T>` defaults its key type to `i64`; if the parent's PK is a
 different type, name it: `ForeignKey<User, String>`. One-to-one uses
-`#[rustango(o2o)]`; many-to-many is a separate table — see
+`#[rustango(o2o = "parent_table")]`; many-to-many is a separate table — see
 [ORM cookbook → Many-to-many](orm.md#many-to-many). Eager-load related rows with
 `select_related` (also in the ORM guide).
 
@@ -284,7 +284,7 @@ different type, name it: `ForeignKey<User, String>`. One-to-one uses
 | `auto_now_add` | `#[rustango(auto_now_add)]` | set to now on **insert** (on an `Auto<DateTime<Utc>>`) |
 | `auto_now` | `#[rustango(auto_now)]` | set to now on **every save** |
 | `column = "…"` | `#[rustango(column = "account_no")]` | rename the SQL column |
-| `null` / `Option<T>` | `pub note: Option<String>` | nullable column |
+| `Option<T>` | `pub note: Option<String>` | nullable column (there is no `null` attribute) |
 | `min` / `max` | `#[rustango(min = 0, max = 100)]` | write-time range validation |
 | `blank` / `editable` | `#[rustango(editable = false)]` | form/admin behavior |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | column COMMENT |
@@ -319,7 +319,7 @@ Declared on the **model**:
 ```
 
 - **`index(...)`** — a btree index by default; choose a method for PostgreSQL
-  with `index(columns = "body", method = "gin")` (also `gist`, `brin`, `hash`,
+  with `index("body", method = "gin")` (also `gist`, `brin`, `hash`,
   `bloom`, `spgist`).
 - **`unique_together` / `index_together`** — multi-column unique / non-unique.
 - **Partial indexes** — `unique_when(...)` / `index_when(...)` add a `WHERE`
@@ -402,11 +402,11 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `default_permissions` | `"add, change, delete, view"` | auto-permissions to create |
 | `default_related_name` | `"posts"` | reverse-accessor name on the parent |
 | `base_manager_name` | `"all_objects"` | name of the base (unfiltered) manager |
-| `manager(ext = "Trait")` | trait path | generate a custom manager extension trait |
+| `manager(ext = "Trait")` | trait path | emit an empty marker trait (no methods) |
 | `manager_fn` | `"published"` | add a manager accessor beyond `objects()` |
 | `get_latest_by` | `"created_at"` | default column for `latest()`/`earliest()` |
 | `order_with_respect_to` | `"parent"` | keep a manual row order within each parent |
-| `index(...)` | `columns`, `method`, `name` | secondary index (btree/gin/gist/brin/hash/bloom/spgist) |
+| `index(...)` | `"cols"`, then `unique`, `name`, `method` | secondary index (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | composite unique constraint |
 | `index_together` | `"a, b"` | composite non-unique index |
 | `unique_when(...)` / `index_when(...)` | columns + `condition` | partial (conditional) index |
@@ -421,6 +421,13 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `required_db_features` / `required_db_vendor` | list / vendor | deployment validation constraints |
 | `db_table_comment` | `"…"` | table COMMENT |
 | `admin(...)` | admin opts | admin UI config (see [admin.md](admin.md)) |
+| `fk_composite(...)` / `generic_fk(...)` | spec | composite FK / generic (content-type) FK |
+| `m2m(...)` / `generic_m2m(...)` | spec | many-to-many / generic many-to-many relation |
+| `managed` | `true` / `false` | `false` = the table is yours; migrations skip it |
+| `view` | flag | the model reads a database view |
+| `permissions` | flag / `true` / `false` | opt in to (or out of) the generated permissions |
+| `extra_permissions` | `"codename:Label, …"` | extra permission codenames |
+| `verbose_name` / `verbose_name_plural` | `"Label"` | human model name in admin/forms |
 
 ### Field-level (on a field)
 
@@ -430,7 +437,6 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `column` | `"name"` | rename the SQL column |
 | `max_length` | `N` | `VARCHAR(N)` + length validation |
 | `default` | `"sql literal"` | column DEFAULT |
-| `null` | flag | nullable (or use `Option<T>`) |
 | `unique` | flag | unique constraint |
 | `index` / `index(...)` | flag, or `unique`, `name`, `method` | single-column index on this field |
 | `choices` | `"v:Label, …"` | enumerated values |
@@ -443,12 +449,12 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `related_name` | `"posts"` | reverse-accessor name on the FK's target |
 | `auto_now` | flag | set to now on every save |
 | `auto_now_add` | flag | set to now on insert |
+| `soft_delete` | flag | marks the soft-delete timestamp (`Option<DateTime<Utc>>`) |
 | `auto_uuid` | flag | Rust-side UUID v4 (on `Auto<Uuid>`) |
 | `default_uuid_v7` | flag | Rust-side sortable UUID v7 |
 | `fk` + `on` | `"table"`, `"col"` | foreign key column |
-| `cascade` | flag | `ON DELETE CASCADE` |
-| `o2o` | flag | one-to-one relation |
-| `fk_composite(...)` / `generic_fk(...)` | spec | composite FK / generic (content-type) FK |
+| `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | FK `ON DELETE` action |
+| `o2o` | `"table"` | one-to-one FK to that table |
 | `generated_as` | `"expr"` | DB-computed (generated) column |
 | `citext` | flag | case-insensitive text (PostgreSQL CITEXT) |
 | `vector(dims = N)` | `N` | pgvector dimension |

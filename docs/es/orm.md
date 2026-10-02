@@ -28,7 +28,7 @@ Las versiones recientes añadieron un lote de características que aún no está
 - **Tipos de campo** — `rust_decimal::Decimal` (nativo en PG/MySQL, en SQLite vía shim de Decode), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) ahora aceptados por `#[derive(Model)]` (#524, v0.42).
 - **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — valida sin escribir de inmediato. Valida ahora, muta el conjunto de escritura preparado, confirma cuando estés listo.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — restricciones únicas parciales. "Email único por fila no eliminada" / "Slug único por tenant".
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — trait de extensión de manager personalizado, emitido junto al modelo. (También permite varias "personalidades" sobre la misma tabla física, vía métodos por trait. Ver `inheritance.rs:98-127`.)
+- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — emite un trait marcador vacío junto al modelo. No añade métodos: pon tus atajos de consulta en tu propio trait de extensión sobre `QuerySet<Foo>`, como muestra `crates/rustango/src/manager.rs`.
 - **`manage makemigrations --merge`** (#346, v0.42) — nodo de fusión para cadenas de ramas divergentes. Ver [`docs/manage.md`](manage.md#makemigrations---merge).
 
 El CHANGELOG contiene el índice completo de tickets de cada versión.
@@ -864,8 +864,8 @@ let featured = Author::objects()
 
 **Salvedades:**
 
-- **Estrechamiento de proyección de `IN (SELECT …)`**: PG requiere estrictamente que el SELECT interno proyecte exactamente una columna para la forma `<col> IN (…)`. **Rustango** aún no incluye estrechamiento de proyección al estilo `.values("col")` (issue #62), así que el queryset interno siempre proyecta todas las columnas del modelo — lo que hace que `in_subquery` solo funcione hoy contra tablas cuyo modelo tiene una sola columna. Para el caso multi-columna, recurre a `exists(inner.where_(<outer col>.eq_expr(outer_ref(...))))` — tiene la misma semántica y no depende de la forma de la proyección.
-- **El `subquery(...)` escalar requiere un interno de una columna y una fila**: el SQL emitido es `SET col = (SELECT …)` — si el interno produce más de una fila, la base de datos da error en tiempo de ejecución. Restríngelo vía `.limit(1)` y o bien estrecha la proyección (una vez que llegue) o diseña el interno en torno a una invariante de unicidad.
+- **Estrechamiento de proyección de `IN (SELECT …)`**: PG requiere estrictamente que el SELECT interno proyecte exactamente una columna para la forma `<col> IN (…)`. Estrecha el queryset interno con `values_list_flat`: `in_subquery("id", Book::objects().values_list_flat("author_id").compile()?)` proyecta solo `author_id` en cada backend. Un `QuerySet::compile()` simple proyecta todas las columnas del modelo, así que pásalo solo para un modelo de una sola columna.
+- **El `subquery(...)` escalar requiere un interno de una columna y una fila**: el SQL emitido es `SET col = (SELECT …)` — si el interno produce más de una fila, la base de datos da error en tiempo de ejecución. Restríngelo vía `.limit(1)` y o bien estrecha la proyección con `values_list_flat` o diseña el interno en torno a una invariante de unicidad.
 - **La validación en tiempo de compilación de la subconsulta vive en el queryset interno**: las erratas de columna se exponen en la llamada interna `queryset.compile()?`, no en el `compile()` de la consulta externa. Construye el interno primero y propaga `?`.
 
 ### Cuándo bajar a SQL crudo en su lugar
@@ -915,7 +915,7 @@ Rara vez escribes `GROUP BY` tú mismo — **Rustango** lo infiere de la forma d
 | **Solo ventana** | `.aggregate().annotate("rn", row_number()…)` | (sin `GROUP BY` — las funciones de ventana son por fila) |
 | **Sobrescritura explícita** | `.aggregate().group_by("month").annotate(...)` | `GROUP BY "month"` — lo explícito gana |
 
-El clasificador `AggregateExpr::is_aggregating()` distingue las variantes que colapsan filas (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` — más los envoltorios recursivos `Filtered` / `Coalesced`) de `Window`, que es por fila. Solo las variantes que agregan disparan la inferencia de Forma 3.
+El clasificador `AggregateExpr::is_aggregating()` distingue las variantes que colapsan filas (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` / `AnyValue` / `ArrayAgg` / `StringAgg` / `JsonbAgg` / `RelatedAggregate` — más los envoltorios recursivos `Filtered` / `Coalesced`) de `Window`, que es por fila. Solo las variantes que agregan disparan la inferencia de Forma 3.
 
 ```rust
 use rustango::core::aggregates::{count_all, sum};
@@ -1007,7 +1007,7 @@ El writer aplica el cast int/float del dialecto (`::bigint`, `CAST(... AS SIGNED
 
 ### Funciones de ventana
 
-Calcula totales acumulados, rankings y deltas fila-sobre-fila sin colapsar filas, con `Window(expression, partition_by=, order_by=, frame=)`. Ocho funciones (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`) más frames ROWS/RANGE. Cada backend que **Rustango** soporta (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) incluye sintaxis nativa `OVER (…)`, así que la emisión es uniforme.
+Calcula totales acumulados, rankings y deltas fila-sobre-fila sin colapsar filas, con `Window(expression, partition_by=, order_by=, frame=)`. Catorce funciones (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`, `sum_over`, `avg_over`, `min_over`, `max_over`, `count_over`, `count_column_over`) más frames ROWS/RANGE. Cada backend que **Rustango** soporta (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) incluye sintaxis nativa `OVER (…)`, así que la emisión es uniforme.
 
 ```rust
 use rustango::core::aggregates::max;
@@ -1075,6 +1075,12 @@ let q = Post::objects()
 | `lead(col, offset, default)` | `LEAD(col, offset, default?)` | columna + offset + default opcional |
 | `first_value(col)` | `FIRST_VALUE(col)` | columna |
 | `last_value(col)` | `LAST_VALUE(col)` | columna |
+| `sum_over(col)` | `SUM(col)` | columna |
+| `avg_over(col)` | `AVG(col)` | columna |
+| `min_over(col)` | `MIN(col)` | columna |
+| `max_over(col)` | `MAX(col)` | columna |
+| `count_column_over(col)` | `COUNT(col)` | columna |
+| `count_over()` | `COUNT(*)` | — |
 
 Cada uno devuelve un `WindowBuilder` con tres modificadores encadenables:
 
@@ -1570,14 +1576,15 @@ pub struct Post {
 Uso:
 
 ```rust
-post.soft_delete_on(&pool).await?;     // sets deleted_at = NOW()
-post.restore_on(&pool).await?;          // sets deleted_at = NULL
+post.soft_delete(&pool).await?;        // sets deleted_at = NOW()
+post.restore(&pool).await?;            // sets deleted_at = NULL
+post.force_delete(&pool).await?;       // real DELETE
 
 // Default queries DO include soft-deleted rows. Filter explicitly:
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-El botón "Delete" del admin encamina automáticamente a `soft_delete_on` para cualquier modelo que tenga la columna. Las consultas por defecto siguen incluyendo filas borradas en suave, pero ya no hace falta escribir el filtro a mano: `.active()` las excluye, `.only_trashed()` devuelve solo esas y `.with_trashed()` vuelve a incluirlas. Hacer que la exclusión sea el comportamiento por defecto se rastrea en [#820](https://github.com/ujeenet/rustango/issues/820).
+Estos reciben el `&Pool` y funcionan en los tres backends; `soft_delete_on` / `restore_on` son las formas executor solo de Postgres (para pasar una transacción). El botón "Delete" del admin borra en suave cualquier modelo que tenga la columna. Las consultas por defecto siguen incluyendo filas borradas en suave, pero ya no hace falta escribir el filtro a mano: `.active()` las excluye, `.only_trashed()` devuelve solo esas y `.with_trashed()` es un marcador que expresa la intención y no cambia nada — no deshace un `.active()` previo. Para excluirlas por defecto, declara un global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, donde `live_only()` devuelve el filtro `deleted_at IS NULL` — y desactívalo por consulta con `.without_global_scope("live")`.
 
 ---
 

@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — docs truth pass (#1680)
+
+`manage check --deploy` no longer reports the CSRF Origin check as disabled; it runs against the request's own Host.
+The Stripe webhook example now verifies Stripe's `t=…,v1=…` signature over `"{t}.{body}"` with a replay window, tested against a fixed vector.
+Corrected false claims across README, `models.md` (attribute reference), `orm.md`, `security.md`, `middleware.md`, `admin.md`, `files.md`, `caching.md`, `html-views.md`, `logging.md`, `jobs.md` and rustdoc, in every locale that carries them.
+
 ### Fixed — the ORM covers the media sweeps' anti-join delete (#1578)
 
 Bounded deletes and `IN (… LIMIT n)` on MySQL were already in; a `where_not_exists` + `outer_ref` delete is now tested on all three backends.
