@@ -432,8 +432,9 @@ pub trait Dialect: Send + Sync {
             FieldType::Range(crate::core::RangeElem::Date) => "daterange",
             FieldType::Range(crate::core::RangeElem::DateTime) => "tstzrange",
             FieldType::HStore => "hstore",
-            // Bare `vector` takes any dimension, so an all-NULL VALUES column types (#1970).
-            FieldType::Vector(_) => "vector",
+            // `vector(N)` carries a runtime value in the type, so it has
+            // no fixed CAST spelling; bulk_update casts its NULLs itself.
+            FieldType::Vector(_) => return None,
             // PostGIS casts text to geometry implicitly, so a NULL needs no cast.
             FieldType::Geometry(_) => return None,
         })

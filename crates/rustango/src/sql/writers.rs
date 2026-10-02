@@ -632,6 +632,7 @@ fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErro
             b.write_ident(&format!("{}__{}", join.alias, col));
         }
     }
+    // Written before FROM, so the WHERE binds appear twice, in text order.
     if let Some(count) = b.total.take() {
         b.sql.push_str(", (");
         write_count(b, &count)?;
@@ -3517,10 +3518,16 @@ pub(super) fn write_bulk_update_pg(
     }
     b.sql.push_str(" FROM (VALUES ");
     // A NULL takes its column's cast: an all-NULL column in VALUES
-    // is otherwise typed text.
+    // is otherwise typed text. Only here does a vector NULL need one (#1970).
     let casts: Vec<Option<&'static str>> = std::iter::once(pk_field.column)
         .chain(query.update_columns.iter().copied())
-        .map(|c| null_cast_for(b.d, query.model, c))
+        .map(|c| {
+            let vector = query
+                .model
+                .field_by_column(c)
+                .is_some_and(|f| matches!(f.ty, crate::core::FieldType::Vector(_)));
+            null_cast_for(b.d, query.model, c).or(vector.then_some("vector"))
+        })
         .collect();
     let mut first_row = true;
     for row in &query.rows {
