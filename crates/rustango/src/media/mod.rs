@@ -916,7 +916,8 @@ impl MediaManager {
     // Collections (folders)
     // =================================================================
 
-    /// Create a new collection. `slug` must be unique. `parent` may be
+    /// Create a new collection. `slug` must be unique among live
+    /// collections; a deleted one's slug is reused. `parent` may be
     /// `None` (root) or another collection's id (sub-folder).
     ///
     /// # Errors
@@ -932,6 +933,16 @@ impl MediaManager {
         let name = name.into();
         let slug = slug.into();
         let description = description.into();
+        // A soft-deleted folder has no restore path, yet its `unique`
+        // slug would block this one forever (#1677). Drop the tombstone.
+        let tombstone = MediaCollection::objects()
+            .where_(MediaCollection::slug.eq(slug.clone()))
+            .where_(MediaCollection::deleted_at.is_not_null())
+            .compile_delete()
+            .map_err(|e| media_err_from_exec(e.into()))?;
+        crate::sql::delete_pool(&self.pool, &tombstone)
+            .await
+            .map_err(media_err_from_exec)?;
         let parent_val = parent
             .map(crate::core::SqlValue::I64)
             .unwrap_or(crate::core::SqlValue::Null);
