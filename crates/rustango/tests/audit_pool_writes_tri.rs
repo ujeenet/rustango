@@ -295,16 +295,27 @@ mod ctx_jobs {
         }
     }
 
-    pub static PENDING_SEEN: Mutex<Option<usize>> = Mutex::new(None);
+    /// What each probe saw, by its key: the backends share the process
+    /// under `cargo test`.
+    pub fn pending_seen() -> &'static Mutex<HashMap<String, usize>> {
+        static S: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+        S.get_or_init(Default::default)
+    }
 
     #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct ProbeAtomic;
+    pub struct ProbeAtomic {
+        pub key: String,
+    }
 
     #[async_trait::async_trait]
     impl Job for ProbeAtomic {
         const NAME: &'static str = "audit1229_probe_atomic";
         async fn run(&self) -> Result<(), JobError> {
-            *PENDING_SEEN.lock().unwrap() = Some(rustango::sql::on_commit_pending());
+            let pending = rustango::sql::on_commit_pending();
+            pending_seen()
+                .lock()
+                .unwrap()
+                .insert(self.key.clone(), pending);
             Ok(())
         }
     }
@@ -355,21 +366,26 @@ async fn job_dispatched_in_atomic_does_not_join_it(pool: &Pool) {
     let _ = pool;
     #[cfg(feature = "jobs")]
     {
-        use ctx_jobs::{ProbeAtomic, PENDING_SEEN};
+        use ctx_jobs::{pending_seen, ProbeAtomic};
         use rustango::jobs::{InMemoryJobQueue, JobQueue as _};
 
-        *PENDING_SEEN.lock().unwrap() = None;
+        let key = format!("{:p}", pool);
+        pending_seen().lock().unwrap().remove(&key);
         let q = std::sync::Arc::new(InMemoryJobQueue::with_workers(1));
         q.register::<ProbeAtomic>().await;
         q.start().await;
-        let inner = q.clone();
+        let (inner, k) = (q.clone(), key.clone());
         rustango::sql::atomic(pool, move |_tx| {
             Box::pin(async move {
                 rustango::sql::on_commit(|| {});
                 assert_eq!(rustango::sql::on_commit_pending(), 1);
-                inner.dispatch(&ProbeAtomic).await.unwrap();
+                inner
+                    .dispatch(&ProbeAtomic { key: k.clone() })
+                    .await
+                    .unwrap();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while PENDING_SEEN.lock().unwrap().is_none() && std::time::Instant::now() < deadline
+                while !pending_seen().lock().unwrap().contains_key(&k)
+                    && std::time::Instant::now() < deadline
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
@@ -379,7 +395,7 @@ async fn job_dispatched_in_atomic_does_not_join_it(pool: &Pool) {
         .await
         .expect("atomic");
         q.shutdown().await;
-        assert_eq!(*PENDING_SEEN.lock().unwrap(), Some(0));
+        assert_eq!(pending_seen().lock().unwrap().get(&key), Some(&0));
     }
 }
 
