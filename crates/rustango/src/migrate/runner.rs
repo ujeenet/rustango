@@ -23,7 +23,6 @@ use crate::sql::sqlx::Row;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
 
-use super::diff::render_changes_split;
 use super::file::{self, Migration, Operation};
 use super::invert::invert;
 use super::progress::{emit, MigrationEvent, MigrationObserver, Outcome};
@@ -743,14 +742,16 @@ async fn migrate_dry_run_with_ledger(
     ensure_ledger_for(pool, ledger).await?;
     let all = file::list_dir(dir)?;
     let applied = applied_set_for(pool, ledger).await?;
-    let pending: Vec<Migration> = all
-        .into_iter()
-        .filter(|m| !applied.contains(&m.name))
-        .collect();
-
-    let mut out = Vec::with_capacity(pending.len());
+    let pending = all.iter().filter(|m| !applied.contains(&m.name));
+    let mut out = Vec::new();
     for mig in pending {
-        out.push(preview_migration(&mig, ledger)?);
+        let before = prev_snapshot(&all, mig, dir)?;
+        out.push(preview_migration(
+            mig,
+            &before,
+            &crate::sql::Postgres,
+            ledger,
+        )?);
     }
     Ok(out)
 }
@@ -764,12 +765,17 @@ async fn migrate_dry_run_with_ledger(
 /// # Errors
 /// - [`MigrateError::Validation`] when `name` is not present in `dir`.
 /// - Any IO / parse error from [`file::list_dir`].
-pub fn sqlmigrate_one(dir: &Path, name: &str) -> Result<MigrationPreview, MigrateError> {
+pub fn sqlmigrate_one(
+    dir: &Path,
+    name: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<MigrationPreview, MigrateError> {
     let all = file::list_dir(dir)?;
-    let mig = all.into_iter().find(|m| m.name == name).ok_or_else(|| {
+    let mig = all.iter().find(|m| m.name == name).ok_or_else(|| {
         MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
     })?;
-    preview_migration(&mig, LEDGER_TABLE)
+    let before = prev_snapshot(&all, mig, dir)?;
+    preview_migration(mig, &before, dialect, LEDGER_TABLE)
 }
 
 /// #347 — invoke a named migration callback. Looks the name up in
@@ -800,10 +806,36 @@ fn callback_in_atomic(mig: &str, op: &crate::migrate::file::CallbackOp) -> Migra
     ))
 }
 
-/// Build a [`MigrationPreview`] for a single migration. Pure —
-/// no DB access. Same render path as `apply_atomic` / `apply_loose`
-/// but the statements stream into a `Vec<String>` instead of a tx.
-fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, MigrateError> {
+/// The schema before `mig`: its `prev` file's snapshot, or empty.
+fn prev_snapshot(
+    all: &[Migration],
+    mig: &Migration,
+    dir: &Path,
+) -> Result<SchemaSnapshot, MigrateError> {
+    let Some(prev_name) = &mig.prev else {
+        return Ok(SchemaSnapshot::default());
+    };
+    all.iter()
+        .find(|m| &m.name == prev_name)
+        .map(|m| m.snapshot.clone())
+        .ok_or_else(|| {
+            MigrateError::Validation(format!(
+                "migration `{}` declares prev=`{prev_name}` but that file is missing in {}",
+                mig.name,
+                dir.display()
+            ))
+        })
+}
+
+/// Build a [`MigrationPreview`] for a single migration. Pure — no DB
+/// access. Renders as the `_pool` runners do for `dialect`; `before` is
+/// the schema `mig` starts from, for the FKs a MySQL column drop removes.
+fn preview_migration(
+    mig: &Migration,
+    before: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    ledger: &str,
+) -> Result<MigrationPreview, MigrateError> {
     let mut statements = Vec::new();
     let mut deferred_fks: Vec<String> = Vec::new();
     if mig.atomic {
@@ -812,10 +844,22 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let batch = render_changes_split(std::slice::from_ref(change), &mig.snapshot)
-                    .map_err(MigrateError::Validation)?;
-                statements.extend(batch.immediate);
-                deferred_fks.extend(batch.deferred_fks);
+                let step = render_step(change, &mig.snapshot, dialect, None)?;
+                // The runner looks these names up live; a migrate-built FK has this one.
+                if let (Some((table, column)), Some(_)) =
+                    (&step.dropped_column, dialect.foreign_key_names_sql())
+                {
+                    let fk = before
+                        .table(table)
+                        .and_then(|t| t.field(column))
+                        .and_then(|f| f.fk.as_ref());
+                    if fk.is_some() {
+                        let name = ddl::fk_constraint_name(table, column);
+                        statements.extend(dialect.drop_foreign_key_sql(table, &name));
+                    }
+                }
+                statements.extend(step.batch.immediate);
+                deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
                 statements.push(d.sql.clone());
@@ -1275,25 +1319,7 @@ async fn unapply_locked(
             MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
         })?;
 
-    let prev_snapshot = match &target.prev {
-        None => SchemaSnapshot {
-            tables: vec![],
-            m2m_tables: vec![],
-            indexes: vec![],
-            checks: vec![],
-            excludes: vec![],
-        },
-        Some(prev_name) => all
-            .iter()
-            .find(|m| &m.name == prev_name)
-            .map(|m| m.snapshot.clone())
-            .ok_or_else(|| {
-                MigrateError::Validation(format!(
-                    "migration `{name}` declares prev=`{prev_name}` but that file is missing in {}",
-                    dir.display()
-                ))
-            })?,
-    };
+    let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert(&target.forward, &prev_snapshot)?;
 
@@ -3011,13 +3037,11 @@ pub async fn migrate_dry_run_pool_with_ledger(
     ensure_ledger_pool_with_ledger(pool, ledger).await?;
     let all = file::list_dir(dir)?;
     let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-    let pending: Vec<Migration> = all
-        .into_iter()
-        .filter(|m| !applied.contains(&m.name))
-        .collect();
-    let mut out = Vec::with_capacity(pending.len());
+    let pending = all.iter().filter(|m| !applied.contains(&m.name));
+    let mut out = Vec::new();
     for mig in pending {
-        out.push(preview_migration(&mig, ledger)?);
+        let before = prev_snapshot(&all, mig, dir)?;
+        out.push(preview_migration(mig, &before, pool.dialect(), ledger)?);
     }
     Ok(out)
 }
@@ -3074,25 +3098,7 @@ async fn unapply_locked_pool(
             MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
         })?;
 
-    let prev_snapshot = match &target.prev {
-        None => SchemaSnapshot {
-            tables: vec![],
-            m2m_tables: vec![],
-            indexes: vec![],
-            checks: vec![],
-            excludes: vec![],
-        },
-        Some(prev_name) => all
-            .iter()
-            .find(|m| &m.name == prev_name)
-            .map(|m| m.snapshot.clone())
-            .ok_or_else(|| {
-                MigrateError::Validation(format!(
-                    "migration `{name}` declares prev=`{prev_name}` but that file is missing in {}",
-                    dir.display()
-                ))
-            })?,
-    };
+    let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert(&target.forward, &prev_snapshot)?;
 

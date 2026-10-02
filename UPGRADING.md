@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `sqlmigrate_one` takes a dialect (#2025)
+
+**Breaking:** pass the target backend, e.g. `sqlmigrate_one(dir, name, pool.dialect())`; `manage sqlmigrate` and `migrate --dry-run` now render for the pool's backend.
+
 ### `Dialect::acquire_session_lock_sql` no longer waits (#2027)
 
 It returns a try-lock (`pg_try_advisory_lock`, `GET_LOCK(?, 0)`) that yields whether it was taken; a custom dialect must follow suit.
