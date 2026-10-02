@@ -917,7 +917,8 @@ async fn schema_mode_tenant_converges() {
     assert_eq!(n, 1, "t1.{table}.{column}");
 }
 
-/// #1718 — a tenant FK to a table its schema lacks must not bind to `public`'s.
+/// #1718 — a tenant FK to a table its schema lacks must not bind to `public`'s;
+/// one to a registry table must.
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn schema_mode_fk_stays_in_the_tenant_schema() {
@@ -958,12 +959,24 @@ async fn schema_mode_fk_stays_in_the_tenant_schema() {
         field("id", None),
         field("parent_id", Some(json!({ "kind": "fk", "to": "fkq_parent", "on": "id" }))),
     ] });
+    let orgs = json!({ "name": "rustango_orgs", "model": "Org", "fields": [field("id", None)] });
+    let reg = json!({ "name": "fkq_reg", "model": "R", "fields": [
+        field("id", None),
+        field("org_id", Some(json!({ "kind": "fk", "to": "rustango_orgs", "on": "id" }))),
+    ] });
     let dir = tmp.path().join("app/migrations");
     write_step(
         &dir,
-        "0001_child",
+        "0001_reg",
         None,
-        json!({ "tables": [parent, child] }),
+        json!({ "tables": [orgs.clone(), reg.clone()] }),
+        vec![json!({ "CreateTable": "fkq_reg" })],
+    );
+    write_step(
+        &dir,
+        "0002_child",
+        Some("0001_reg"),
+        json!({ "tables": [orgs, reg, parent, child] }),
         vec![json!({ "CreateTable": "fkq_child" })],
     );
     let pools = rustango::tenancy::TenantPools::new(pg.clone());
@@ -979,6 +992,20 @@ async fn schema_mode_fk_stays_in_the_tenant_schema() {
     .await
     .unwrap();
     assert_eq!(to_public, 0, "t1.fkq_child references public.fkq_parent");
+    // A registry model's table is shared: its FK still reaches `public`.
+    let to_registry: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_constraint c JOIN pg_class r ON r.oid = c.confrelid \
+         JOIN pg_namespace n ON n.oid = r.relnamespace JOIN pg_class t ON t.oid = c.conrelid \
+         WHERE c.contype = 'f' AND n.nspname = 'public' AND r.relname = 'rustango_orgs' \
+         AND t.relname = 'fkq_reg'",
+    )
+    .fetch_one(pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        to_registry, 1,
+        "t1.fkq_reg must reference public.rustango_orgs"
+    );
     assert!(
         !report.all_ok(),
         "the missing tenant parent is reported: {report:?}"

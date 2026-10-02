@@ -706,6 +706,9 @@ async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateErr
 /// `INSERT INTO __rustango_migrations__` ledger row. Atomic
 /// migrations also get synthetic `BEGIN`/`COMMIT` markers so the
 /// reader can see where the transaction boundary is.
+///
+/// FK targets render unqualified here; on PostgreSQL the applied DDL
+/// pins them to the session's schema (#1718).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationPreview {
     pub name: String,
@@ -758,7 +761,8 @@ async fn migrate_dry_run_with_ledger(
 
 /// `sqlmigrate <name>` — compute the SQL the named
 /// migration would emit when applied, without touching the database.
-/// Pure file I/O + render — no ledger read required.
+/// Pure file I/O + render — no ledger read required. FK targets stay
+/// unqualified; PostgreSQL applies pin them to the session's schema (#1718).
 ///
 /// Issue #345. Use from `manage sqlmigrate <name>`.
 ///
