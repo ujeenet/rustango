@@ -10,7 +10,7 @@
 //!
 //! | Resolver               | Matches against                 | Notes                                          |
 //! |------------------------|---------------------------------|------------------------------------------------|
-//! | [`SubdomainResolver`]  | `Org.host_pattern` ↔ `Host` hdr | Default — composed first in `ChainResolver::default()`. |
+//! | [`SubdomainResolver`]  | `Org.host_pattern` ↔ `Host` hdr | Default — composed first in `ChainResolver::standard()`. |
 //! | [`PathPrefixResolver`] | `Org.path_prefix` ↔ URL path    | Opt-in — caller adds explicitly.               |
 //! | [`HeaderResolver`]     | `Org.slug` ↔ user header value  | API-only deployments.                          |
 //! | [`PortResolver`]       | `Org.port` ↔ listener port      | Niche — hard-isolated tenant ports.            |
@@ -481,7 +481,7 @@ impl OrgResolver for RegisteredHostResolver {
 // ---------------- PathPrefixResolver ----------------
 
 /// Match the request URL's first path segment against
-/// `Org.path_prefix`. Opt-in — not in `ChainResolver::default()`.
+/// `Org.path_prefix`. Opt-in — not in `ChainResolver::standard()`.
 ///
 /// A request to `app.com/acme/dashboard` matches an org with
 /// `path_prefix = "/acme"`. The leading slash is required in the

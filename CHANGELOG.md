@@ -18,6 +18,10 @@ It runs as `CountQuery::exists`, and skips partial unique indexes, which used to
 
 ### Fixed — `.dates()` / `.datetimes()` SQL comes from the dialect emitter (#2030)
 
+### Fixed — `ChainResolver` docs name `standard()`, not the empty `default()` (#2044)
+
+`template_extensions_live` is gated on Tera, so `--features sqlite,manage --tests` builds.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)
