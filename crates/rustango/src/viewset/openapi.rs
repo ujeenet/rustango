@@ -46,7 +46,8 @@ impl ViewSet {
     /// spec's `components.schemas` (typically the model name, e.g. `"Post"`).
     /// Responses reference it. Request bodies are inlined from the
     /// fields the ViewSet writes, so `Auto` ids and read-only fields are
-    /// left out, and a PATCH body requires nothing.
+    /// left out, and a PATCH body requires nothing. Filter-backend pins are
+    /// per request, so a pinned field still shows (the server ignores it).
     #[must_use]
     pub fn openapi_paths(&self, prefix: &str, item_schema_ref: &str) -> Vec<(String, PathItem)> {
         let prefix = prefix.trim_end_matches('/').to_owned();

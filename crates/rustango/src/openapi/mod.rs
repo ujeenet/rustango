@@ -845,12 +845,13 @@ impl Schema {
     /// this adds `"null"` to `type` (and `enum`), or wraps a `$ref` in `anyOf`.
     #[must_use]
     pub fn nullable(mut self) -> Self {
+        // An `enum` limits values whether or not `type` is set.
+        if !self.enum_.is_empty() && !self.enum_.contains(&serde_json::Value::Null) {
+            self.enum_.push(serde_json::Value::Null);
+        }
         if let Some(t) = &mut self.type_ {
             if !t.0.iter().any(|n| n == "null") {
                 t.0.push("null".into());
-            }
-            if !self.enum_.is_empty() && !self.enum_.contains(&serde_json::Value::Null) {
-                self.enum_.push(serde_json::Value::Null);
             }
             return self;
         }
@@ -1124,6 +1125,8 @@ mod tests {
     fn nullable_enum_lists_null() {
         let v = serde_json::to_value(Schema::string().enum_(["a"]).nullable()).unwrap();
         assert_eq!(v["enum"], serde_json::json!(["a", null]));
+        let v = serde_json::to_value(Schema::default().enum_([1]).nullable()).unwrap();
+        assert_eq!(v["enum"], serde_json::json!([1, null]), "no `type`");
     }
 
     #[test]

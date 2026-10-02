@@ -143,7 +143,9 @@ PATCH, DELETE), and it stays in sync with the ViewSet's configuration:
 - **`read_only()`** → the write operations (POST/PUT/PATCH/DELETE) are omitted.
 - **Request bodies** → inline schemas of the fields the ViewSet writes: no
   `Auto` id, `read_only` or soft-delete column; `write_only` fields included;
-  nothing required on PATCH. Responses reference the registered schema.
+  nothing required on PATCH. Responses reference the registered schema. A field
+  a filter backend pins per request still shows (and may show required); the
+  server ignores the body's value for it.
 - **Path param** → `{pk}` typed from the model's primary key.
 - **`operationId`** → `list_post`, `create_post`, … (snake-cased per action).
 
