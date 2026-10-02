@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### Template views and ViewSet writes respect soft delete
+
+On a `#[rustango(soft_delete)]` model, `DeleteView` and `delete_selected` now stamp the column instead of deleting, the other template views 404 on deleted rows, and no form or ViewSet body can set the column (#2082, #2074). Use `soft_delete::restore` to undelete.
+
+### Admin creates need the audit table
+
+An admin create of a model with `audit(...)` now fails without `rustango_audit_log`, as edits do (#2101). `manage migrate` creates it.
+
+### Admin `change_password_url` is a full path
+
+`admin::Builder::change_password_url` and the `[routes] change_password_url` settings key are linked as given, no longer prefixed with the admin path (#2102).
+
 ### OpenAPI `Schema` has no `nullable` field
 
 **Breaking:** `Schema.nullable` is gone and `Schema.type_` is a `SchemaType`; call `.nullable()` instead (#1922). A new `any_of` field holds a nullable `$ref`. ViewSet request bodies are now inline schemas, not `$ref`s to the item schema.

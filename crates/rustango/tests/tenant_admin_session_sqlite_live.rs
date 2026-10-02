@@ -287,9 +287,16 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
             .unwrap(),
         "/acme/__admin/"
     );
-    assert_eq!(
-        env.get("/acme/__admin/", &cookie).await.status(),
-        StatusCode::OK
+    let page = env.get("/acme/__admin/", &cookie).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let html = axum::body::to_bytes(page.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    // The sidebar link is the full route, not `{admin_prefix}{route}` (#2102).
+    assert!(
+        html.contains(r#"href="&#x2F;acme&#x2F;__change-password""#),
+        "sidebar change-password link: {html}"
     );
 
     // Anonymous: the login redirect keeps the prefix.

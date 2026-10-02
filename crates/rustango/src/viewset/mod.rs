@@ -1828,6 +1828,8 @@ impl WriteSet {
             .body_fields()
             .into_iter()
             .filter(|f| !pinned.iter().any(|(p, _)| p.name == f.name))
+            // Only DELETE stamps the soft-delete column; a body never sets it (#2074).
+            .filter(|f| schema.soft_delete_column != Some(f.column))
             .collect();
         Ok(Self {
             schema,
