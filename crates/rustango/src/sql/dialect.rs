@@ -337,7 +337,8 @@ pub trait Dialect: Send + Sync {
     }
 
     /// Query for the names of the FKs on one column, binding `(table,
-    /// column)`. `None` where FKs cannot be dropped by name (SQLite).
+    /// column)`. Single-column FKs only: a composite one stays (#1557).
+    /// `None` where FKs cannot be dropped by name (SQLite).
     fn foreign_key_names_sql(&self) -> Option<&'static str> {
         None
     }

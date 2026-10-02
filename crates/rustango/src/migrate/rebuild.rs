@@ -3,7 +3,9 @@
 //!
 //! The runner turns FK enforcement off before the transaction, as step 1
 //! requires: inside one the pragma is a no-op, and `DROP TABLE` would then
-//! cascade into the rows that reference the table.
+//! cascade into the rows that reference the table. A rename with
+//! `legacy_alter_table` cannot dodge that: with FKs on it still rewrites
+//! the children's `REFERENCES`.
 
 use super::snapshot::{SchemaSnapshot, TableSnapshot};
 use crate::sql::Dialect;
@@ -22,7 +24,7 @@ impl TableRebuild {
     /// A rebuild into `target`. Every stored target column is copied by name,
     /// so the old table must have each one.
     #[must_use]
-    pub fn new(target: &TableSnapshot) -> Self {
+    pub(crate) fn new(target: &TableSnapshot) -> Self {
         Self {
             target: target.clone(),
             dropping: Vec::new(),
@@ -31,7 +33,7 @@ impl TableRebuild {
 
     /// Let the rebuild leave the live `column` behind.
     #[must_use]
-    pub fn dropping(mut self, column: &str) -> Self {
+    pub(crate) fn dropping(mut self, column: &str) -> Self {
         self.dropping.push(column.to_owned());
         self
     }
@@ -59,8 +61,9 @@ impl TableRebuild {
 
     /// Steps 4 to 7: create the new table, copy the rows, drop the old one,
     /// rename. Indexes and triggers are the runner's, read from the catalog.
+    /// SQLite only: it writes `sqlite_sequence`.
     #[must_use]
-    pub fn statements(&self, dialect: &dyn Dialect) -> Vec<String> {
+    pub(crate) fn statements(&self, dialect: &dyn Dialect) -> Vec<String> {
         let old = &self.target.name;
         let new = format!("_rustango_rebuild_{old}");
         let cols = self
@@ -152,15 +155,130 @@ impl TableRebuild {
         .fetch_all(&mut *tx.tx)
         .await?;
         let inline = self.inline_uniques();
+        let before = self.orphans(tx).await?;
         for stmt in self.statements(&crate::sql::Sqlite) {
             sqlx::query(&stmt).execute(&mut *tx.tx).await?;
         }
         for (_, sql) in saved.iter().filter(|(n, _)| !inline.contains(n)) {
             sqlx::query(sql).execute(&mut *tx.tx).await?;
         }
-        tx.rebuilt = true;
+        // Step 10, for this table and its referrers: only a row the rebuild
+        // orphaned refuses it, not an old one elsewhere.
+        let new: Vec<_> = self
+            .orphans(tx)
+            .await?
+            .into_iter()
+            .filter(|o| !before.contains(o))
+            .collect();
+        if let Some((table, rowid, parent)) = new.first() {
+            return Err(super::MigrateError::Validation(format!(
+                "rebuilding `{}` left {} row(s) whose FOREIGN KEY points at no row, \
+                 first `{table}` rowid {rowid:?} -> `{parent}`",
+                self.table(),
+                new.len()
+            )));
+        }
         Ok(())
     }
+
+    /// `PRAGMA foreign_key_check` rows of this table and the tables that
+    /// reference it; none when FK enforcement was off to begin with.
+    #[cfg(feature = "sqlite")]
+    async fn orphans(
+        &self,
+        tx: &mut RebuildTx<'_>,
+    ) -> Result<Vec<(String, Option<i64>, String)>, sqlx::Error> {
+        if !tx.check {
+            return Ok(Vec::new());
+        }
+        let mut tables: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT m.name FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+             WHERE m.type = 'table' AND f.\"table\" = ?",
+        )
+        .bind(self.table())
+        .fetch_all(&mut *tx.tx)
+        .await?;
+        tables.push(self.table().to_owned());
+        let mut out = Vec::new();
+        for t in &tables {
+            let rows: Vec<(String, Option<i64>, String, i64)> =
+                sqlx::query_as("SELECT * FROM pragma_foreign_key_check(?)")
+                    .bind(t)
+                    .fetch_all(&mut *tx.tx)
+                    .await?;
+            out.extend(rows.into_iter().map(|(t, r, p, _)| (t, r, p)));
+        }
+        Ok(out)
+    }
+}
+
+/// `table`'s shape after the op that `later` follows, from the migration's
+/// final `after`: later renames, added columns and FK actions undone. A
+/// later op this cannot undo is refused rather than rebuilt past.
+pub(crate) fn shape_at(
+    table: &str,
+    later: &[super::Operation],
+    after: &SchemaSnapshot,
+) -> Result<TableSnapshot, String> {
+    use super::SchemaChange as SC;
+    // The table's name when each later op runs.
+    let mut name = table.to_owned();
+    let mut named = Vec::new();
+    for op in later {
+        let super::Operation::Schema(change) = op else {
+            continue;
+        };
+        named.push((change, name.clone()));
+        if let SC::RenameTable { old_name, new_name } = change {
+            if *old_name == name {
+                name.clone_from(new_name);
+            }
+        }
+    }
+    let mut t = after
+        .table(&name)
+        .cloned()
+        .ok_or_else(|| format!("no snapshot entry for `{name}` to rebuild `{table}` from"))?;
+    t.name = table.to_owned();
+    for (change, name) in named.into_iter().rev() {
+        if change.table() != name {
+            continue;
+        }
+        match change {
+            SC::AddColumn { column, .. } => t.fields.retain(|f| f.column != *column),
+            SC::RenameColumn {
+                old_column,
+                new_column,
+                ..
+            } => {
+                if let Some(f) = t.fields.iter_mut().find(|f| f.column == *new_column) {
+                    f.column.clone_from(old_column);
+                }
+            }
+            SC::AlterFkOnDelete { column, from, .. } => {
+                if let Some(rel) = t
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.column == *column)
+                    .and_then(|f| f.fk.as_mut())
+                {
+                    rel.on_delete.clone_from(from);
+                }
+            }
+            // Gone by then: the rebuild may drop it early.
+            SC::DropColumn { .. }
+            | SC::RenameTable { .. }
+            | SC::CreateIndex { .. }
+            | SC::DropIndex { .. } => {}
+            other => {
+                return Err(format!(
+                    "`{table}` is rebuilt before a later `{other:?}` on it in the same \
+                     migration; move that change to a migration of its own"
+                ))
+            }
+        }
+    }
+    Ok(t)
 }
 
 /// A pooled SQLite connection for migration DDL, FK enforcement off when it
@@ -206,7 +324,6 @@ impl RebuildConn {
             tx: self.conn.begin().await?,
             fks_off: self.fks_off,
             check: self.was_on,
-            rebuilt: false,
         })
     }
 
@@ -236,28 +353,13 @@ impl Drop for RebuildConn {
 pub(crate) struct RebuildTx<'c> {
     tx: sqlx::Transaction<'c, sqlx::Sqlite>,
     fks_off: bool,
+    /// FK enforcement was on, so a rebuild checks what it orphaned.
     check: bool,
-    rebuilt: bool,
 }
 
 #[cfg(feature = "sqlite")]
 impl RebuildTx<'_> {
-    /// Step 10, then commit: a rebuild that left a row pointing nowhere
-    /// rolls back.
-    pub(crate) async fn commit(mut self) -> Result<(), super::MigrateError> {
-        if self.rebuilt && self.check {
-            let bad: Vec<(String, Option<i64>, String, i64)> =
-                sqlx::query_as("PRAGMA foreign_key_check")
-                    .fetch_all(&mut *self.tx)
-                    .await?;
-            if let Some((table, rowid, parent, _)) = bad.first() {
-                return Err(super::MigrateError::Validation(format!(
-                    "the table rebuild left {} row(s) whose FOREIGN KEY points at no row, \
-                     first `{table}` rowid {rowid:?} -> `{parent}`",
-                    bad.len()
-                )));
-            }
-        }
+    pub(crate) async fn commit(self) -> Result<(), super::MigrateError> {
         self.tx.commit().await?;
         Ok(())
     }

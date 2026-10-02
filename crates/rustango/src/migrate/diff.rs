@@ -34,6 +34,7 @@ fn default_exclusion_method() -> String {
 /// `{"AddColumn": {"table": "foo", "column": "bar"}}`. This is what
 /// a migration file stores under `Operation::Schema`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SchemaChange {
     CreateTable(String /* table name */),
     DropTable(String /* table name */),
@@ -721,8 +722,8 @@ pub fn render_changes(
     let RenderedBatch {
         mut immediate,
         deferred_fks,
-        // Postgres never rebuilds.
         warnings: _,
+        // Postgres never rebuilds.
         rebuild: _,
     } = render_changes_split(changes, current)?;
     immediate.extend(deferred_fks);
@@ -738,6 +739,7 @@ pub fn render_changes(
 /// migration have run — otherwise an early `CreateTable` would emit
 /// its FK ALTER referencing a table that hasn't been created yet.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct RenderedBatch {
     /// DDL to execute now, in the order it appears here.
     pub immediate: Vec<String>,
@@ -753,6 +755,20 @@ pub struct RenderedBatch {
     /// A SQLite table rebuild that runs after `immediate`, for a change
     /// the engine cannot `ALTER` in place.
     pub rebuild: Option<super::rebuild::TableRebuild>,
+}
+
+impl RenderedBatch {
+    /// One rebuild per batch: a second would silently replace the first.
+    fn set_rebuild(&mut self, rebuild: super::rebuild::TableRebuild) -> Result<(), String> {
+        if self.rebuild.is_some() {
+            return Err(format!(
+                "rebuilding `{}` needs a batch of its own; render SQLite changes one at a time",
+                rebuild.table()
+            ));
+        }
+        self.rebuild = Some(rebuild);
+        Ok(())
+    }
 }
 
 /// Same as [`render_changes`] but keeps FK ALTER constraints in a
@@ -970,7 +986,7 @@ fn render_changes_split_inner(
                 // SQLite's DROP COLUMN refuses a column in a table-level UNIQUE (#1982).
                 if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
                 {
-                    out.rebuild = Some(rebuild?.dropping(column));
+                    out.set_rebuild(rebuild?.dropping(column))?;
                     continue;
                 }
                 out.immediate.push(format!(
@@ -982,7 +998,7 @@ fn render_changes_split_inner(
             SchemaChange::AlterFkOnDelete { table, column, .. } => {
                 if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
                 {
-                    out.rebuild = Some(rebuild?);
+                    out.set_rebuild(rebuild?)?;
                     continue;
                 }
                 let rel = current
@@ -2170,6 +2186,8 @@ mod sql_type_tests {
         {
             let sq = render_changes_split_with_dialect(&alter, &snap, &crate::sql::Sqlite).unwrap();
             assert!(sq.immediate.is_empty() && sq.deferred_fks.is_empty());
+            let twice = [alter[0].clone(), alter[0].clone()];
+            assert!(render_changes_split_with_dialect(&twice, &snap, &crate::sql::Sqlite).is_err());
             let stmts = sq
                 .rebuild
                 .expect("a rebuild")

@@ -93,7 +93,7 @@ impl Dialect for Postgres {
             "SELECT c.conname::text FROM pg_constraint c \
              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) \
              WHERE c.contype = 'f' AND c.conrelid = to_regclass(quote_ident($1)) \
-             AND a.attname = $2",
+             AND a.attname = $2 AND cardinality(c.conkey) = 1",
         )
     }
 

@@ -1055,6 +1055,23 @@ async fn on_delete_reaches(pool: &Pool, tag: &str, atomic: bool) {
         exec(pool, "DELETE FROM {}", &[a]).await.is_err(),
         "NO ACTION before"
     );
+    // SQLite re-creates the table's triggers from the catalog.
+    let trigger = by_dialect! { pool,
+        postgres => false, because "no table rebuild",
+        mysql => false, because "no table rebuild",
+        sqlite => true, because "the rebuild drops and re-creates triggers",
+    };
+    let trg = format!("{tag}_trg");
+    let create_trigger = q(
+        pool,
+        "CREATE TRIGGER {} AFTER UPDATE ON {} BEGIN SELECT 1; END",
+        &[&trg, b],
+    );
+    if trigger.value {
+        raw_execute_pool(pool, &create_trigger, Vec::new())
+            .await
+            .unwrap();
+    }
 
     let altered = chain
         .step_with(pool, with(Some("CASCADE")), atomic)
@@ -1065,6 +1082,15 @@ async fn on_delete_reaches(pool: &Pool, tag: &str, atomic: bool) {
         (1, 1),
         "rows kept"
     );
+    if trigger.value {
+        assert!(
+            raw_execute_pool(pool, &create_trigger, Vec::new())
+                .await
+                .is_err(),
+            "{}",
+            trigger.why
+        );
+    }
     assert!(
         exec(
             pool,
@@ -1224,12 +1250,364 @@ async fn unique_column_drops(pool: &Pool) {
     assert_eq!(got, [(1, 1), (2, 2), (4, 4)], "rows kept, id 3 not reused");
 }
 
+// ---------------------------------------------------------------- #2121
+
+impl Chain {
+    /// A hand-edited migration to `after` whose ops are `forward`.
+    async fn hand(
+        &self,
+        pool: &Pool,
+        after: Value,
+        forward: Vec<SchemaChange>,
+        data: Option<&str>,
+    ) -> Result<String, String> {
+        let mut mig = make_migrations_from(self.dir.path(), &snap(after), None)
+            .map_err(|e| e.to_string())?
+            .expect("the snapshot changed");
+        mig.forward = forward.into_iter().map(Operation::Schema).collect();
+        if let Some(sql) = data {
+            mig.forward.push(Operation::Data(rustango::migrate::DataOp {
+                sql: sql.to_owned(),
+                reverse_sql: Some(sql.to_owned()),
+                reversible: true,
+            }));
+        }
+        self.write(&mig);
+        self.migrate(pool).await.map(|()| mig.name)
+    }
+
+    /// Delete the newest migration file, one that failed to apply.
+    fn discard_head(&self) {
+        let path = self.dir.path().join(format!("{}.json", self.head().name));
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+/// The FK is found by its live name, not the rendered one, and a composite
+/// FK on the same column stays.
+async fn hand_named_and_composite_fks_survive(pool: &Pool) {
+    let (a, b) = ("mad_hc_author", "mad_hc_book");
+    let chain = Chain::new(pool, "hc", &[b, a]).await;
+    let with = |on_delete: Option<&str>, composite: bool| {
+        let mut rel = json!({"kind": "fk", "to": a, "on": "id"});
+        if let Some(action) = on_delete {
+            rel["on_delete"] = json!(action);
+        }
+        let composite = if composite {
+            json!([{"name": "author_code", "to": a,
+                    "from": ["author_id", "code"], "on": ["id", "code"]}])
+        } else {
+            json!([])
+        };
+        json!({
+            "tables": [
+                table(a, vec![id(), col("code", "i64", json!({}))]),
+                {"name": b, "model": b, "fields": [id(),
+                    col("author_id", "i64", json!({"fk": rel})), col("code", "i64", json!({}))],
+                 "composite_fks": composite},
+            ],
+            "indexes": [{"name": "mad_hc_author_id_code", "table": a,
+                         "columns": ["id", "code"], "unique": true}],
+        })
+    };
+    chain.step(pool, with(None, false)).await.expect("initial");
+    // As a hand edit or an old release would have named it.
+    let renamed = by_dialect! { pool,
+        postgres => true, because "PG renames a constraint in place",
+        mysql => true, because "MySQL re-adds it under another name",
+        sqlite => false, because "SQLite FKs have no name, nor ADD CONSTRAINT (#559)",
+    };
+    if renamed.value {
+        chain
+            .step(pool, with(None, true))
+            .await
+            .expect("AddCompositeFk");
+        let fk = format!("{b}_author_id_fkey");
+        let rename = match pool.dialect().name() {
+            "postgres" => vec![q(
+                pool,
+                "ALTER TABLE {} RENAME CONSTRAINT {} TO {}",
+                &[b, &fk, "hand_fk"],
+            )],
+            _ => vec![
+                q(pool, "ALTER TABLE {} DROP FOREIGN KEY {}", &[b, &fk]),
+                q(
+                    pool,
+                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+                    &[b, "hand_fk", "author_id", a, "id"],
+                ),
+            ],
+        };
+        for sql in rename {
+            raw_execute_pool(pool, &sql, Vec::new()).await.unwrap();
+        }
+    }
+    chain
+        .step(pool, with(Some("CASCADE"), renamed.value))
+        .await
+        .expect("AlterFkOnDelete replaces the hand-named FK");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[a, "id", "code"],
+    )
+    .await
+    .unwrap();
+    let bad = exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 2)",
+        &[b, "id", "author_id", "code"],
+    )
+    .await;
+    assert_eq!(bad.is_err(), renamed.value, "the composite FK still holds");
+    if bad.is_ok() {
+        exec(pool, "DELETE FROM {}", &[b]).await.unwrap();
+    }
+    exec(
+        pool,
+        // A NULL `code` leaves the composite FK out of the delete.
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    exec(pool, "DELETE FROM {}", &[a])
+        .await
+        .expect("no NO ACTION FK is left behind; the cascade fires");
+    assert_eq!(rows(pool, b).await, 0, "cascaded");
+}
+
+/// Unapplying [RenameColumn, AddColumn]: the DropColumn rebuild takes the
+/// table as it is then, with the new column name.
+async fn rebuild_uses_the_shape_at_its_op(pool: &Pool) {
+    let t = "mad_sa_item";
+    let chain = Chain::new(pool, "sa", &[t]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("a", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("initial");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 7)",
+        &[t, "id", "a"],
+    )
+    .await
+    .unwrap();
+    let name = chain
+        .hand(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("b", "i64", json!({})),
+                col("c", "i64", json!({}))])]}),
+            vec![
+                SchemaChange::RenameColumn {
+                    table: t.into(),
+                    old_column: "a".into(),
+                    new_column: "b".into(),
+                },
+                SchemaChange::AddColumn {
+                    table: t.into(),
+                    column: "c".into(),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("rename then add");
+    chain
+        .undo(pool, &name)
+        .await
+        .expect("unapply drops c, then renames b back");
+    let sql = q(pool, "SELECT {} FROM {}", &["a", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(7,)]);
+}
+
+/// SQLite: a rebuild that orphans a row rolls back; an orphan that was
+/// already there elsewhere does not block it; a RunSQL beside it is refused.
+async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
+    let (a, b) = ("mad_ro_author", "mad_ro_book");
+    let chain = Chain::new(pool, "ro", &[b, a]).await;
+    let books = |fields: Vec<Value>| json!({"tables": [table(a, vec![id()]), table(b, fields)]});
+    chain
+        .step(
+            pool,
+            books(vec![
+                id(),
+                col("x", "i64", json!({})),
+                col("y", "i64", json!({})),
+            ]),
+        )
+        .await
+        .expect("initial");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "x"],
+    )
+    .await
+    .unwrap();
+    // A NOT NULL FK column with a default: SQLite adds it without the FK.
+    let author = col(
+        "author_id",
+        "i64",
+        json!({"nullable": false, "default": "5",
+        "fk": {"kind": "fk", "to": a, "on": "id"}}),
+    );
+    let added = chain
+        .step(
+            pool,
+            books(vec![
+                id(),
+                col("x", "i64", json!({})),
+                col("y", "i64", json!({})),
+                author.clone(),
+            ]),
+        )
+        .await;
+    let sqlite = by_dialect! { pool,
+        postgres => false, because "the FK is added and refuses author 5",
+        mysql => false, because "the FK is added and refuses author 5",
+        sqlite => true, because "SQLite adds the column without its FK",
+    };
+    if !sqlite.value {
+        added.expect_err(sqlite.why);
+        return;
+    }
+    added.expect(sqlite.why);
+    // The rebuild adds the FK, which row 1 (author 5) breaks.
+    let err = chain
+        .step(
+            pool,
+            books(vec![id(), col("y", "i64", json!({})), author.clone()]),
+        )
+        .await
+        .expect_err("the rebuild orphans row 1");
+    assert!(err.contains("FOREIGN KEY"), "{err}");
+    chain.discard_head();
+    exec(pool, "SELECT {} FROM {}", &["x", b])
+        .await
+        .expect("rolled back: x is still there");
+    // Author 5 exists now; an old orphan in another table does not block.
+    exec(pool, "INSERT INTO {} ({}) VALUES (5)", &[a, "id"])
+        .await
+        .unwrap();
+    let sq = pool.as_sqlite().expect("sqlite");
+    let mut conn = sq.acquire().await.unwrap();
+    for sql in [
+        "PRAGMA foreign_keys = OFF",
+        "CREATE TABLE IF NOT EXISTS mad_ro_other (id INTEGER PRIMARY KEY, \
+         a_id INTEGER REFERENCES mad_ro_author (id))",
+        "INSERT INTO mad_ro_other (id, a_id) VALUES (1, 99)",
+        "PRAGMA foreign_keys = ON",
+    ] {
+        rustango::sql::sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    drop(conn);
+    let err = chain
+        .hand(
+            pool,
+            books(vec![id(), col("y", "i64", json!({})), author.clone()]),
+            vec![SchemaChange::DropColumn {
+                table: b.into(),
+                column: "x".into(),
+            }],
+            Some("SELECT 1"),
+        )
+        .await
+        .expect_err("RunSQL beside a rebuild");
+    assert!(err.contains("RunSQL"), "{err}");
+    chain.discard_head();
+    chain
+        .step(pool, books(vec![id(), col("y", "i64", json!({})), author]))
+        .await
+        .expect("an old orphan in mad_ro_other does not block");
+    drop_table(pool, "mad_ro_other").await;
+}
+
+/// The `&PgPool` runners drop the live FK too.
+async fn legacy_pg_runner_replaces_the_fk(pool: &Pool) {
+    let legacy = by_dialect! { pool,
+        postgres => true, because "the `&PgPool` runners are Postgres-only",
+        mysql => false, because "no `&PgPool` runner",
+        sqlite => false, because "no `&PgPool` runner",
+    };
+    let Some(pg) = pool.as_postgres().filter(|_| legacy.value) else {
+        return;
+    };
+    let (a, b) = ("mad_lg_author", "mad_lg_book");
+    let chain = Chain::new(pool, "lg", &[b, a]).await;
+    drop_table(pool, "mad_ledger_legacy").await;
+    let runner = rustango::migrate::Builder::new().ledger("mad_ledger_legacy");
+    let with = |rel: Value| {
+        json!({"tables": [table(a, vec![id()]),
+            table(b, vec![id(), col("author_id", "i64", json!({"fk": rel}))])]})
+    };
+    for (rel, atomic) in [
+        (json!({"kind": "fk", "to": a, "on": "id"}), true),
+        (
+            json!({"kind": "fk", "to": a, "on": "id", "on_delete": "CASCADE"}),
+            false,
+        ),
+    ] {
+        let mut mig = make_migrations_from(chain.dir.path(), &snap(with(rel)), None)
+            .unwrap()
+            .unwrap();
+        mig.atomic = atomic;
+        chain.write(&mig);
+        runner
+            .migrate(pg, chain.dir.path())
+            .await
+            .expect(legacy.why);
+    }
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    exec(pool, "DELETE FROM {}", &[a]).await.expect("CASCADE");
+    runner
+        .unapply(pg, chain.dir.path(), &chain.head().name)
+        .await
+        .expect("legacy unapply");
+    exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (2, 2)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(pool, "DELETE FROM {}", &[a]).await.is_err(),
+        "NO ACTION again"
+    );
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
         on_delete_reaches_an_existing_table,
         on_delete_reaches_without_a_transaction,
         on_delete_and_drop_in_one_migration,
+        hand_named_and_composite_fks_survive,
+        rebuild_uses_the_shape_at_its_op,
+        rebuild_checks_only_its_own_orphans,
+        legacy_pg_runner_replaces_the_fk,
         rebuild_keeps_unknown_columns,
         unique_column_drops,
         unique_drops_on_long_names,

@@ -152,9 +152,9 @@ untouched.
 
 ### `on_delete` changes are migrated
 
-The first `migrate` after upgrading writes a system migration that fixes the framework's cascading FKs, and `makemigrations` emits `AlterFkOnDelete` for your own (#1557). The 0.57.7 catalog check and manual `ALTER` are no longer needed. On SQLite this, and every `DropColumn`, rebuilds the table, which fails if the table has a column the migration snapshot lacks.
+The first `migrate` after upgrading writes a system migration that fixes the framework's cascading FKs, and `makemigrations` emits `AlterFkOnDelete` for your own (#1557). The 0.57.7 catalog check and manual `ALTER` are no longer needed. On SQLite this, and every `DropColumn`, rebuilds the table, which fails if the table has a column the migration snapshot lacks. An atomic SQLite migration that rebuilds a table cannot also hold RunSQL; split it or set `atomic: false`.
 
-**Breaking:** `SchemaChange` has a new `AlterFkOnDelete` variant, and `RenderedBatch` a new `rebuild` field.
+**Breaking:** `SchemaChange` has a new `AlterFkOnDelete` variant, and `RenderedBatch` a new `rebuild` field; both are now `#[non_exhaustive]`, so match with `_` and build a batch from `Default`. On SQLite, `render_changes_split_with_dialect` returns no statements for `DropColumn` or `AlterFkOnDelete`: the work is in `rebuild`, which only the migrate runner can apply. Only single-column FKs are dropped by name before a `DropColumn` or an on_delete change.
 
 ### `sqlmigrate_one` takes a dialect (#2025)
 

@@ -2559,8 +2559,6 @@ struct Step {
 struct FkDrop {
     table: String,
     column: String,
-    /// Composite FKs on the column that stay.
-    keep: Vec<String>,
 }
 
 /// Render `change`, one of `ops`, which together move the schema to `after`.
@@ -2578,26 +2576,38 @@ fn render_step(
     let retry = super::ensure::filled_table_retry(dialect, after, changes, render)
         .transpose()
         .map_err(MigrateError::Validation)?;
-    let drop_fks = match change {
-        super::SchemaChange::DropColumn { table, column } => Some(FkDrop {
-            table: table.clone(),
-            column: column.clone(),
-            keep: Vec::new(),
-        }),
-        super::SchemaChange::AlterFkOnDelete { table, column, .. } => Some(FkDrop {
-            table: table.clone(),
-            column: column.clone(),
-            keep: after
-                .table(table)
-                .map(|t| t.composite_fks.iter().map(|c| c.name.clone()).collect())
-                .unwrap_or_default(),
-        }),
+    let rebuilt = match change {
+        super::SchemaChange::DropColumn { table, column }
+        | super::SchemaChange::AlterFkOnDelete { table, column, .. } => {
+            Some((table.as_str(), column.as_str()))
+        }
         _ => None,
     };
-    let mut batch = render(after).map_err(MigrateError::Validation)?;
-    // A rebuild into `after` already leaves every column `ops` drop.
+    let drop_fks = rebuilt.map(|(table, column)| FkDrop {
+        table: table.to_owned(),
+        column: column.to_owned(),
+    });
+    // The ops after `change`, which is borrowed from `ops`.
+    let later = ops
+        .iter()
+        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
+        .map_or(&[][..], |i| &ops[i + 1..]);
+    // A rebuild takes the table's shape at this op, not at the end (#2121).
+    let at = match rebuilt.filter(|_| dialect.alters_by_rebuild()) {
+        Some((table, _)) if later.iter().any(|op| touches_table(op, table)) => {
+            let mut at = after.clone();
+            let shape =
+                super::rebuild::shape_at(table, later, after).map_err(MigrateError::Validation)?;
+            at.tables.retain(|t| t.name != table);
+            at.tables.push(shape);
+            Some(at)
+        }
+        _ => None,
+    };
+    let mut batch = render(at.as_ref().unwrap_or(after)).map_err(MigrateError::Validation)?;
+    // A rebuild already leaves every column the later ops drop.
     batch.rebuild = batch.rebuild.map(|r| {
-        let dropped: Vec<&str> = ops
+        let dropped: Vec<&str> = later
             .iter()
             .filter_map(|op| match op {
                 Operation::Schema(super::SchemaChange::DropColumn { table, column })
@@ -2615,6 +2625,11 @@ fn render_step(
         retry,
         drop_fks,
     })
+}
+
+/// Whether `op` changes `table` or renames it.
+fn touches_table(op: &Operation, table: &str) -> bool {
+    matches!(op, Operation::Schema(c) if c.table() == table)
 }
 
 /// Whether any of `ops` rebuilds a table, so FK enforcement must go off.
@@ -2680,7 +2695,6 @@ macro_rules! step_statements {
             out.extend(
                 names
                     .iter()
-                    .filter(|n| !fk.keep.contains(n))
                     .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
             );
         }
@@ -2723,7 +2737,16 @@ async fn atomic_sqlite(
     after: &SchemaSnapshot,
     ledger: LedgerWrite<'_>,
 ) -> Result<(), MigrateError> {
-    let mut conn = super::rebuild::RebuildConn::acquire(sq, rebuilds(ops, after)?).await?;
+    let rebuilds = rebuilds(ops, after)?;
+    // FK enforcement can only change outside a transaction, so it is off for
+    // the whole migration; a RunSQL would lose its ON DELETE actions.
+    if rebuilds && ops.iter().any(|op| matches!(op, Operation::Data(_))) {
+        return Err(MigrateError::Validation(format!(
+            "migration `{name}` rebuilds a SQLite table, which runs with FOREIGN KEY \
+             enforcement off; move its RunSQL to a migration of its own or set `atomic: false`"
+        )));
+    }
+    let mut conn = super::rebuild::RebuildConn::acquire(sq, rebuilds).await?;
     let result: Result<(), MigrateError> = async {
         let mut tx = conn.begin().await?;
         let mut deferred_fks: Vec<String> = Vec::new();
@@ -2763,8 +2786,10 @@ async fn atomic_sqlite(
         tx.commit().await
     }
     .await;
-    conn.finish().await?;
-    result
+    // The migration's own error wins over a failed restore.
+    let finished = conn.finish().await;
+    result?;
+    Ok(finished?)
 }
 
 /// Run `step` for the non-atomic runners, on any backend.
@@ -2775,15 +2800,17 @@ async fn run_step_pool(pool: &crate::sql::Pool, step: Step) -> Result<Vec<String
             // A rebuild is several statements; it gets a transaction of its own.
             let mut conn =
                 super::rebuild::RebuildConn::acquire(sq, step.batch.rebuild.is_some()).await?;
-            let result = async {
+            let result: Result<Vec<String>, MigrateError> = async {
                 let mut tx = conn.begin().await?;
                 let deferred = run_step_sqlite(&mut tx, step).await?;
                 tx.commit().await?;
                 Ok(deferred)
             }
             .await;
-            conn.finish().await?;
-            result
+            let finished = conn.finish().await;
+            let deferred = result?;
+            finished?;
+            Ok(deferred)
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
