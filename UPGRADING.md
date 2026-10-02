@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.19
+
 ### Bearer tokens need a login session
 
 `require_bearer` and `/api/auth/me` refuse access tokens not minted by `/login` or `/refresh` (e.g. from `JwtAuth::lifecycle().issue_access_with`), and tokens after a logout or password change (#2086).

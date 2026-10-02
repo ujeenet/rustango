@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.19] — 2026-10-02
+
 ### Security — a logout or password change ends JWT access tokens (#2086)
 
 `require_bearer` and `/me` check the token's session against the user row, so `sessions_revoked_at` and a password change apply at once. Only tokens from `/login` or `/refresh` pass.
