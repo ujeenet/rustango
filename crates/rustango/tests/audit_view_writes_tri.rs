@@ -549,20 +549,18 @@ mod admin_views {
                 if c.pk != target {
                     return;
                 }
-                let q = rustango::core::UpdateQuery {
-                    model: AdminDoc::SCHEMA,
-                    set: vec![rustango::core::Assignment {
-                        column: "title",
-                        value: SqlValue::String("other".into()).into(),
-                    }],
-                    where_clause: rustango::core::WhereExpr::Predicate(
-                        rustango::core::Filter::new(
-                            "id",
-                            rustango::core::Op::Eq,
-                            SqlValue::I64(c.pk.parse().unwrap()),
-                        ),
-                    ),
-                };
+                let q = rustango::core::UpdateQuery::new(
+                    AdminDoc::SCHEMA,
+                    vec![rustango::core::Assignment::new(
+                        "title",
+                        SqlValue::String("other".into()),
+                    )],
+                    rustango::core::WhereExpr::Predicate(rustango::core::Filter::new(
+                        "id",
+                        rustango::core::Op::Eq,
+                        SqlValue::I64(c.pk.parse().unwrap()),
+                    )),
+                );
                 rustango::sql::update_pool(&p, &q).await.expect("race");
             }
         });
