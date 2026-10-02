@@ -930,88 +930,39 @@ impl MediaManager {
         parent: Option<i64>,
         description: impl Into<String>,
     ) -> Result<MediaCollection, MediaError> {
-        let name = name.into();
         let slug = slug.into();
-        let description = description.into();
         // A soft-deleted folder has no restore path, yet its `unique`
-        // slug would block this one forever (#1677). Drop the tombstone.
+        // slug would block this one forever (#1677). Drop the tombstone
+        // in the INSERT's transaction, so a failed INSERT keeps it.
         let tombstone = MediaCollection::objects()
             .where_(MediaCollection::slug.eq(slug.clone()))
             .where_(MediaCollection::deleted_at.is_not_null())
             .compile_delete()
             .map_err(|e| media_err_from_exec(e.into()))?;
-        crate::sql::delete_pool(&self.pool, &tombstone)
+        let mut row = MediaCollection {
+            id: Auto::Unset,
+            name: name.into(),
+            slug,
+            parent_id: parent,
+            description: description.into(),
+            created_at: Auto::Unset,
+            deleted_at: None,
+        };
+        let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
-        let parent_val = parent
-            .map(crate::core::SqlValue::I64)
-            .unwrap_or(crate::core::SqlValue::Null);
-        let d = self.pool.dialect();
-        let insert_cols = "(name, slug, parent_id, description)";
-        let insert_vals = format!(
-            "({p1}, {p2}, {p3}, {p4})",
-            p1 = d.placeholder(1),
-            p2 = d.placeholder(2),
-            p3 = d.placeholder(3),
-            p4 = d.placeholder(4),
-        );
-        let select_cols = "id, name, slug, parent_id, description, created_at, deleted_at";
-        // MySQL has no `UPDATE … RETURNING`; PG + SQLite (≥3.35) do.
-        // Branch on dialect to keep the SQL portable.
-        if self.pool.dialect().name() == "mysql" {
-            #[cfg(feature = "mysql")]
-            {
-                // `Pool`'s variants are feature-gated, so this pattern
-                // is refutable in a multi-backend build and
-                // irrefutable in a mysql-only one. The `else` arm has
-                // to stay for the multi-backend case.
-                #[allow(irrefutable_let_patterns)]
-                let crate::sql::Pool::Mysql(my) = &self.pool
-                else {
-                    unreachable!("dialect name matched mysql but variant didn't");
-                };
-                let insert_sql = format!(
-                    "INSERT INTO `rustango_media_collections` {insert_cols} VALUES {insert_vals}"
-                );
-                let mut tx = my.begin().await?;
-                sqlx::query(&insert_sql)
-                    .bind(&name)
-                    .bind(&slug)
-                    .bind(parent)
-                    .bind(&description)
-                    .execute(&mut *tx)
-                    .await?;
-                let out: MediaCollection = sqlx::query_as(&format!(
-                    "SELECT {select_cols} FROM `rustango_media_collections` \
-                     WHERE id = LAST_INSERT_ID()"
-                ))
-                .fetch_one(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                return Ok(out);
-            }
-            #[cfg(not(feature = "mysql"))]
-            unreachable!("dialect reports mysql but Cargo feature is disabled");
-        }
-        let sql = format!(
-            "INSERT INTO rustango_media_collections {insert_cols} \
-             VALUES {insert_vals} RETURNING {select_cols}"
-        );
-        let rows: Vec<MediaCollection> = crate::sql::raw_query_pool(
-            &sql,
-            vec![
-                crate::core::SqlValue::String(name),
-                crate::core::SqlValue::String(slug),
-                parent_val,
-                crate::core::SqlValue::String(description),
-            ],
-            &self.pool,
-        )
-        .await
-        .map_err(media_err_from_exec)?;
-        rows.into_iter()
-            .next()
-            .ok_or_else(|| MediaError::Other("collection INSERT returned no rows".into()))
+        crate::sql::delete_tx(&mut tx, &tombstone)
+            .await
+            .map_err(media_err_from_exec)?;
+        row.insert_tx(&mut tx).await.map_err(media_err_from_exec)?;
+        tx.commit().await?;
+        // Read back for the database-stamped `created_at`.
+        let Auto::Set(id) = row.id else {
+            return Err(MediaError::Other("collection INSERT returned no id".into()));
+        };
+        self.get_collection(id)
+            .await?
+            .ok_or_else(|| MediaError::Other(format!("collection {id} vanished after INSERT")))
     }
 
     /// Look up by id (excludes soft-deleted).
