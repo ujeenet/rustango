@@ -150,6 +150,26 @@ untouched.
 
 ## Unreleased
 
+### Bearer tokens need a login session
+
+`require_bearer` and `/api/auth/me` refuse access tokens not minted by `/login` or `/refresh` (e.g. from `JwtAuth::lifecycle().issue_access_with`), and tokens after a logout or password change (#2086).
+
+### `OnAuthSuccess` takes an `AuthSuccess`
+
+**Breaking:** write `Arc::new(|login: AuthSuccess| Box::pin(async move { .. Ok(Redirect::to("/").into_response()) }))`. Find users by `login.identity_key()` (#1989).
+
+### `WebhookEvent` has `body` and `signature`
+
+**Breaking:** `signing_secret`, `signature_format` and `payload` are gone; sign with `webhook::sign` (#1852). Drain the webhook queue before upgrading: older queued jobs fail to decode.
+
+### Provision webhook secrets are at least 32 bytes
+
+**Breaking:** `WebhookConfig::secret` is a `WebhookSecret`; `WebhookConfig::new` panics on a shorter key (#1850).
+
+### CBV CSRF follows the outer layer
+
+With an app-wide `CsrfLayer` (e.g. `Cli::with_csrf_config`), template views use its cookie name and origins; forms posted with the old `rustango_csrf` cookie need a reload (#1722).
+
 ## 0.59.18
 
 ### `with_rollback` hands the closure an `AtomicTx`

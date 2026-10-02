@@ -4,6 +4,34 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — a logout or password change ends JWT access tokens (#2086)
+
+`require_bearer` and `/me` check the token's session against the user row, so `sessions_revoked_at` and a password change apply at once. Only tokens from `/login` or `/refresh` pass.
+
+### Security — the impersonation handoff token is not logged (#2107)
+
+The info line names the handoff URL without its single-use token.
+
+### Security — the OAuth2 success hook sees the tenant (#1989)
+
+`OnAuthSuccess` gets an `AuthSuccess` with the tenant and `identity_key()`, so one tenant's IdP cannot sign in as another's user. It returns a `Response`, and its `Set-Cookie` survives.
+
+### Security — the OAuth2 callback does not echo the flow-cookie error (#2087)
+
+The reason is logged; the browser gets a fixed message.
+
+### Security — webhook jobs hold no signing secret, errors no URL (#1852)
+
+`WebhookEvent` stores the body and its signature, not the secret. A transport error drops the URL, whose path can be a secret.
+
+### Security — template views use the app's CSRF config (#1722)
+
+An outer `CsrfLayer`'s `cookie_name` and `trusted_origins` now apply to CBV routers, which defer to it.
+
+### Security — the provision webhook refuses a short HMAC secret (#1850)
+
+`WebhookConfig::new` panics under 32 bytes; `webhook::verify_signature` never accepts an empty key.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)
