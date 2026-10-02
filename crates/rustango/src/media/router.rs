@@ -51,7 +51,7 @@
 //!
 //! | Method | Path                              | Purpose |
 //! |--------|-----------------------------------|---------|
-//! | POST   | `/uploads/begin`                  | Start a direct browser upload — returns `{media_id, upload_url, expires_at}`. |
+//! | POST   | `/uploads/begin`                  | Start a direct browser upload — returns `{media_id, upload_url, expires_at, headers}`. |
 //! | POST   | `/uploads/{id}/finalize`          | Confirm the storage object landed; flips the row Pending→Ready. |
 //! | GET    | `/media/{id}`                     | Single Media row + URL + presigned link. |
 //! | DELETE | `/media/{id}`                     | Soft-delete the Media row (storage preserved). |
@@ -93,8 +93,9 @@
 //! ```ignore
 //! use rustango::media::router::{media_router_with, MediaPerms};
 //!
+//! let perms = MediaPerms::from_manager(&manager);
 //! let app = axum::Router::new()
-//!     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+//!     .nest("/media", media_router_with(manager, perms));
 //! ```
 //!
 //! [`MediaPerms`] checks the `{table}.{action}` permission codenames
@@ -464,8 +465,9 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
 /// ```ignore
 /// use rustango::media::router::{media_router_with, MediaPerms};
 ///
+/// let perms = MediaPerms::from_manager(&manager);
 /// let app = axum::Router::new()
-///     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+///     .nest("/media", media_router_with(manager, perms));
 /// ```
 ///
 /// Mount it **inside** [`crate::tenancy::middleware::RouterAuthExt::require_auth`],
@@ -526,6 +528,13 @@ impl MediaPerms {
             pool,
             allowed_disks: None,
         }
+    }
+
+    /// Check permissions on the pool `manager` reads rows from, so the
+    /// grants and the rows always come from the same tenant (#1573).
+    #[must_use]
+    pub fn from_manager(manager: &MediaManager) -> Self {
+        Self::new(manager.pool_dyn().clone())
     }
 
     /// Restrict `POST /uploads/begin` to these disks.
@@ -1045,6 +1054,10 @@ struct UploadTicketBody {
     expires_at: chrono::DateTime<chrono::Utc>,
     disk: String,
     storage_key: String,
+    /// The `Content-Type` header the PUT must carry.
+    content_type: String,
+    /// Every header the PUT must carry.
+    headers: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1261,6 +1274,8 @@ async fn begin_upload_handler(
         expires_at: ticket.expires_at,
         disk: ticket.disk,
         storage_key: ticket.storage_key,
+        content_type: ticket.content_type,
+        headers: ticket.headers,
     }))
 }
 

@@ -335,3 +335,263 @@ async fn save_bytes_hands_a_safe_mime_to_storage() {
     want.extend(std::iter::repeat_n(octet, mimes.len() - 1));
     assert_eq!(*disk.1.lock().unwrap(), want);
 }
+
+/// A bucket that can presign, like S3, but does not enforce the
+/// signature, so a test can play a client that ignores it.
+#[derive(Default)]
+struct FakeBucket {
+    files: std::sync::Mutex<std::collections::HashMap<String, (Vec<u8>, Option<String>)>>,
+    signed: std::sync::Mutex<Vec<rustango::storage::PutConditions>>,
+}
+
+impl FakeBucket {
+    fn put(&self, key: &str, body: &[u8], ct: &str) {
+        let v = (body.to_vec(), Some(ct.to_owned()));
+        self.files.lock().unwrap().insert(key.to_owned(), v);
+    }
+    fn has(&self, key: &str) -> bool {
+        self.files.lock().unwrap().contains_key(key)
+    }
+}
+
+#[rustango::storage::async_trait]
+impl rustango::storage::Storage for FakeBucket {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<(), rustango::storage::StorageError> {
+        self.save_with_content_type(key, data, None).await
+    }
+    async fn save_with_content_type(
+        &self,
+        key: &str,
+        data: &[u8],
+        ct: Option<&str>,
+    ) -> Result<(), rustango::storage::StorageError> {
+        let v = (data.to_vec(), ct.map(str::to_owned));
+        self.files.lock().unwrap().insert(key.to_owned(), v);
+        Ok(())
+    }
+    async fn load(&self, key: &str) -> Result<Vec<u8>, rustango::storage::StorageError> {
+        let files = self.files.lock().unwrap();
+        files
+            .get(key)
+            .map(|v| v.0.clone())
+            .ok_or_else(|| rustango::storage::StorageError::NotFound(key.into()))
+    }
+    async fn delete(&self, key: &str) -> Result<(), rustango::storage::StorageError> {
+        self.files.lock().unwrap().remove(key);
+        Ok(())
+    }
+    async fn exists(&self, key: &str) -> Result<bool, rustango::storage::StorageError> {
+        Ok(self.has(key))
+    }
+    fn url(&self, _key: &str) -> Option<String> {
+        None
+    }
+    async fn presigned_put_url(
+        &self,
+        key: &str,
+        _ttl: std::time::Duration,
+        put: &rustango::storage::PutConditions,
+    ) -> Option<String> {
+        self.signed.lock().unwrap().push(put.clone());
+        Some(format!("mem://{key}"))
+    }
+    async fn metadata(
+        &self,
+        key: &str,
+    ) -> Result<Option<rustango::storage::ObjectMeta>, rustango::storage::StorageError> {
+        let files = self.files.lock().unwrap();
+        Ok(files
+            .get(key)
+            .map(|(b, ct)| rustango::storage::ObjectMeta::new(b.len() as u64, ct.clone())))
+    }
+}
+
+async fn bucket_manager() -> (MediaManager, Arc<FakeBucket>, sqlx::SqlitePool) {
+    let sq = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite connect");
+    let pool = Pool::Sqlite(sq.clone());
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate");
+    let disk = Arc::new(FakeBucket::default());
+    let registry = StorageRegistry::new()
+        .set("default", disk.clone())
+        .with_default("default");
+    (MediaManager::new_pool(pool, registry), disk, sq)
+}
+
+/// #2057: an active MIME is signed, and reported, as octet-stream.
+#[tokio::test]
+async fn begin_upload_signs_a_safe_type_and_the_declared_size() {
+    let (mgr, disk, _) = bucket_manager().await;
+    let intent = rustango::media::UploadIntent::new("default", "image/svg+xml", "x.svg", 10);
+    let ticket = mgr.begin_upload(intent).await.expect("begin");
+    assert_eq!(ticket.content_type, "application/octet-stream");
+    let want = rustango::storage::PutConditions::new()
+        .content_type("application/octet-stream")
+        .content_length(10)
+        .create_only();
+    assert_eq!(*disk.signed.lock().unwrap(), vec![want]);
+    assert_eq!(
+        ticket.headers.get("if-none-match").map(String::as_str),
+        Some("*")
+    );
+    let neg = rustango::media::UploadIntent::new("default", "image/png", "x.png", -1);
+    assert!(mgr.begin_upload(neg).await.is_err(), "negative size signed");
+}
+
+/// #1851: finalize checks the object, not the client's claim.
+#[tokio::test]
+async fn finalize_refuses_an_object_of_another_size_or_type() {
+    use rustango::media::{MediaStatus, UploadIntent};
+    let (mgr, disk, _) = bucket_manager().await;
+    let cases: [(&[u8], &str, MediaStatus); 3] = [
+        (&[b'x'; 20], "image/png", MediaStatus::Failed),
+        (b"0123456789", "text/html", MediaStatus::Failed),
+        (b"0123456789", "image/png", MediaStatus::Ready),
+    ];
+    for (body, ct, want) in cases {
+        let intent = UploadIntent::new("default", "image/png", "a.png", 10);
+        let t = mgr.begin_upload(intent).await.expect("begin");
+        disk.put(&t.storage_key, body, ct);
+        let m = mgr.finalize_upload(t.media_id).await.expect("finalize");
+        assert_eq!(m.status_enum(), Some(want), "{} bytes as {ct}", body.len());
+        let stored = mgr.get(t.media_id).await.unwrap().unwrap();
+        assert_eq!(stored.status_enum(), Some(want));
+        assert_eq!(disk.has(&t.storage_key), want == MediaStatus::Ready);
+    }
+}
+
+/// #1905: a failed row insert must not leave an object no sweep finds.
+#[tokio::test]
+async fn save_bytes_removes_the_object_when_the_row_insert_fails() {
+    let (mgr, disk, sq) = bucket_manager().await;
+    sqlx::query("DROP TABLE rustango_media")
+        .execute(&sq)
+        .await
+        .expect("drop");
+    let opts = SaveOpts {
+        disk: "default".into(),
+        key_prefix: "u/".into(),
+        bytes: b"data".to_vec(),
+        mime: "image/png".into(),
+        original_filename: "a.png".into(),
+        uploaded_by_id: None,
+        collection_id: None,
+        metadata: serde_json::json!({}),
+    };
+    assert!(mgr.save_bytes(opts).await.is_err());
+    assert!(disk.files.lock().unwrap().is_empty(), "object left behind");
+}
+
+/// A Ready row: a second finalize must not delete its object.
+#[tokio::test]
+async fn finalize_on_a_ready_row_is_a_no_op() {
+    use rustango::media::{MediaStatus, UploadIntent};
+    let (mgr, disk, _) = bucket_manager().await;
+    let t = mgr
+        .begin_upload(UploadIntent::new("default", "image/png", "a.png", 10))
+        .await
+        .expect("begin");
+    disk.put(&t.storage_key, b"0123456789", "image/png");
+    let m = mgr.finalize_upload(t.media_id).await.expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Ready));
+    // A Change-only caller swaps in a mismatched body and re-finalizes.
+    disk.put(&t.storage_key, b"too long for the row", "image/png");
+    let again = mgr.finalize_upload(t.media_id).await.expect("refinalize");
+    assert_eq!(again.status_enum(), Some(MediaStatus::Ready));
+    let stored = mgr.get(t.media_id).await.unwrap().unwrap();
+    assert_eq!(stored.status_enum(), Some(MediaStatus::Ready));
+    assert!(disk.has(&t.storage_key), "a Ready row lost its object");
+}
+
+/// A Failed row stays Failed, even once a matching object lands.
+#[tokio::test]
+async fn finalize_on_a_failed_row_stays_failed() {
+    use rustango::media::{MediaStatus, UploadIntent};
+    let (mgr, disk, _) = bucket_manager().await;
+    let t = mgr
+        .begin_upload(UploadIntent::new("default", "image/png", "a.png", 10))
+        .await
+        .expect("begin");
+    let m = mgr.finalize_upload(t.media_id).await.expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Failed), "no object yet");
+    disk.put(&t.storage_key, b"0123456789", "image/png");
+    let again = mgr.finalize_upload(t.media_id).await.expect("refinalize");
+    assert_eq!(again.status_enum(), Some(MediaStatus::Failed));
+    let stored = mgr.get(t.media_id).await.unwrap().unwrap();
+    assert_eq!(stored.status_enum(), Some(MediaStatus::Failed));
+}
+
+/// Purging Pending and Failed rows takes their objects too; a missing
+/// key is fine, and a Ready row is kept.
+#[tokio::test]
+async fn purge_pending_deletes_unconfirmed_objects() {
+    use rustango::media::{MediaStatus, UploadIntent};
+    let (mgr, disk, _) = bucket_manager().await;
+    let begin = |name: &'static str| {
+        let mgr = &mgr;
+        async move {
+            mgr.begin_upload(UploadIntent::new("default", "image/png", name, 10))
+                .await
+                .expect("begin")
+        }
+    };
+    let (pending, failed, empty, ready) = (
+        begin("p.png").await,
+        begin("f.png").await,
+        begin("e.png").await,
+        begin("r.png").await,
+    );
+    disk.put(&pending.storage_key, b"0123456789", "image/png");
+    let f = mgr
+        .finalize_upload(failed.media_id)
+        .await
+        .expect("finalize");
+    assert_eq!(f.status_enum(), Some(MediaStatus::Failed));
+    // The PUT lands after finalize already gave up.
+    disk.put(&failed.storage_key, b"0123456789", "image/png");
+    disk.put(&ready.storage_key, b"0123456789", "image/png");
+    mgr.finalize_upload(ready.media_id).await.expect("finalize");
+    mgr.tag(pending.media_id, &["t"]).await.expect("tag");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let purged = mgr
+        .purge_pending(std::time::Duration::ZERO)
+        .await
+        .expect("purge");
+    assert_eq!(purged, 3);
+    for t in [&pending, &failed, &empty] {
+        assert!(mgr.get(t.media_id).await.unwrap().is_none(), "row kept");
+        assert!(!disk.has(&t.storage_key), "object left: {}", t.storage_key);
+    }
+    assert!(mgr.tags_for(pending.media_id).await.unwrap().is_empty());
+    assert!(mgr.get(ready.media_id).await.unwrap().is_some());
+    assert!(disk.has(&ready.storage_key), "a Ready object was purged");
+}
+
+/// A declared size over the cap is refused before anything is signed.
+#[tokio::test]
+async fn begin_upload_refuses_a_size_over_the_cap() {
+    use rustango::media::{UploadIntent, DEFAULT_MAX_UPLOAD_BYTES};
+    let (mgr, disk, _) = bucket_manager().await;
+    let over = i64::try_from(DEFAULT_MAX_UPLOAD_BYTES + 1).unwrap();
+    let big = UploadIntent::new("default", "image/png", "a.png", over);
+    assert!(
+        mgr.begin_upload(big).await.is_err(),
+        "default cap not applied"
+    );
+    let mgr = mgr.with_max_upload_bytes(10);
+    let ok = UploadIntent::new("default", "image/png", "a.png", 10);
+    mgr.begin_upload(ok).await.expect("at the cap");
+    let over = UploadIntent::new("default", "image/png", "a.png", 11);
+    assert!(mgr.begin_upload(over).await.is_err(), "over the cap signed");
+    assert_eq!(
+        disk.signed.lock().unwrap().len(),
+        1,
+        "an over-cap PUT was signed"
+    );
+}

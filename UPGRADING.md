@@ -150,6 +150,25 @@ untouched.
 
 ## Unreleased
 
+### Direct media uploads
+
+**Breaking:** `Storage::presigned_put_url` takes a `content_length: Option<u64>`, and a backend that presigns PUTs
+must implement the new `Storage::metadata`, or `finalize_upload` errors. `UploadTicket` gains `content_type`;
+the browser must send that header and exactly `size_bytes` bytes.
+
+**Breaking:** `Storage::presigned_put_url` takes `&PutConditions` instead of the type and length. Direct-upload PUTs
+must also send `If-None-Match: *` (all of `UploadTicket.headers`); allow that header in the bucket's CORS rule.
+
+`purge_pending` now also deletes old `Failed` rows, and the storage object of every row it purges.
+
+`begin_upload` refuses a declared size over 100 MiB; raise it with `MediaManager::with_max_upload_bytes`.
+
+Storage keys with an empty or `.` segment (`a//b`, `./a`, `a/`) are now `InvalidPath`.
+
+### `save_uploads` keeps nothing on error
+
+Any error now deletes the files the request already saved, not only `TooManyFiles`. Random key prefixes are UUIDs, not nanos.
+
 ## 0.59.17
 
 ### Number filters round halves up (#1896)

@@ -263,3 +263,50 @@ async fn tags_for_many_batches_correctly_on_mysql() {
         assert_eq!(batched.get(id), Some(&one), "batched != per-row for {id}");
     }
 }
+
+/// Seed a Ready row, then put it back to `pending`, since
+/// `InMemoryStorage` cannot presign.
+async fn seed_pending(mgr: &MediaManager, pool: &Pool) -> i64 {
+    use rustango::core::Column as _;
+    use rustango::media::Media;
+    use rustango::sql::UpdaterPool as _;
+    let id = seed(mgr).await;
+    Media::objects()
+        .where_(Media::id.eq(id))
+        .update()
+        .set("status", "pending")
+        .execute_pool(pool)
+        .await
+        .expect("set pending");
+    id
+}
+
+#[tokio::test]
+async fn finalize_and_purge_pending_respect_the_status_on_mysql() {
+    use rustango::media::MediaStatus;
+    let _g = live_lock().lock().await;
+    let Some((mgr, pool)) = manager_or_skip().await else {
+        eprintln!("skipping — set MYSQL_TEST_URL");
+        return;
+    };
+    let kept = seed_pending(&mgr, &pool).await;
+    let m = mgr.finalize_upload(kept).await.expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Ready));
+    let again = mgr.finalize_upload(kept).await.expect("refinalize");
+    assert_eq!(again.status_enum(), Some(MediaStatus::Ready));
+
+    let gone = seed_pending(&mgr, &pool).await;
+    let row = mgr.get(gone).await.unwrap().unwrap();
+    mgr.tag(gone, &["t"]).await.expect("tag");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let purged = mgr
+        .purge_pending(std::time::Duration::ZERO)
+        .await
+        .expect("purge");
+    assert_eq!(purged, 1);
+    assert!(mgr.get(gone).await.unwrap().is_none());
+    assert!(mgr.load_bytes(&row).await.is_err(), "pending object left");
+    assert!(mgr.tags_for(gone).await.unwrap().is_empty());
+    let ready = mgr.get(kept).await.unwrap().unwrap();
+    assert!(mgr.load_bytes(&ready).await.is_ok(), "Ready object purged");
+}

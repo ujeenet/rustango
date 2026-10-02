@@ -4,6 +4,56 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — direct uploads are checked against the bucket, not the client (#1851)
+
+The presigned PUT signs the declared size, and `finalize_upload` reads the object's real size and type with
+`Storage::metadata`; a mismatch is deleted and the row marked `Failed`.
+
+### Security — direct uploads never store an active MIME (#2057)
+
+`begin_upload` signs `text/html`, SVG, XML and script types as `application/octet-stream`; `UploadTicket.content_type` says what to send.
+
+### Fixed — storage keys may contain `..` inside a name (#1903)
+
+`validate_key` rejects `..` only as a whole path segment, so `report..final.pdf` uploads again.
+
+### Fixed — no orphan or torn upload files (#1905)
+
+`save_bytes` deletes the object when the row insert fails; `LocalStorage` writes via temp file + rename;
+`save_uploads` removes earlier files on any error; random key prefixes are UUIDs.
+
+### Fixed — S3 presigning derives the SigV4 key once per date (#1570)
+
+### Fixed — `purge` deletes links and row in one transaction; `MediaPerms::from_manager` (#1573)
+
+### Security — `finalize_upload` only changes a `Pending` row
+
+A second finalize no longer deletes a `Ready` row's object or flips `Failed` back; the update is `WHERE status = 'pending'`.
+
+### Security — direct-upload URLs are create-only
+
+`begin_upload` signs `If-None-Match: *`, so a replayed URL cannot swap a finalized object; `UploadTicket.headers` lists what to send.
+
+### Fixed — `purge_pending` deletes the storage objects, and sweeps `Failed` rows too
+
+Each row is deleted on its read status with its tag links, and its object inside the same transaction.
+
+### Fixed — a cancelled `LocalStorage::save` leaves no temp file
+
+A drop guard removes the temp file unless the rename ran; it is opened with `create_new`.
+
+### Fixed — `finalize_upload` compares only `type/subtype`
+
+A backend that rewrites the type's parameters no longer fails a good upload.
+
+### Fixed — `begin_upload` caps the declared size
+
+`MediaManager::with_max_upload_bytes` sets it; the default is 100 MiB (`DEFAULT_MAX_UPLOAD_BYTES`).
+
+### Fixed — `validate_key` rejects empty and `.` segments
+
+`a//b`, `./a` and `a/` named a different file on disk than on S3.
+
 ## [0.59.17] — 2026-10-01
 
 ### Fixed — humanize and number rounding (#1896)

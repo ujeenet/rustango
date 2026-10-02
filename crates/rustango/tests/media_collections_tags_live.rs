@@ -625,7 +625,7 @@ async fn router_begin_then_finalize_upload_via_axum() {
                         "key_prefix": "collections-live/router",
                         "mime": "image/png",
                         "original_filename": "router.png",
-                        "size_bytes": 100,
+                        "size_bytes": 16,
                         "ttl_secs": 60
                     }))
                     .unwrap(),
@@ -641,11 +641,16 @@ async fn router_begin_then_finalize_upload_via_axum() {
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let media_id = v["media_id"].as_i64().unwrap();
     let upload_url = v["upload_url"].as_str().unwrap().to_owned();
+    assert_eq!(v["content_type"], "image/png");
 
     // 2. Browser PUTs to the presigned URL.
     let put = reqwest::Client::new()
         .put(&upload_url)
         .header("Content-Type", "image/png")
+        .header(
+            "If-None-Match",
+            v["headers"]["if-none-match"].as_str().unwrap(),
+        )
         .body(b"-router-payload-".to_vec())
         .send()
         .await
