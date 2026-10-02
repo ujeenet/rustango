@@ -544,5 +544,73 @@ async fn protect_with_csrf_guards_an_app_gated_admin() {
         ))
         .await
         .unwrap();
-    assert_ne!(ok.status(), StatusCode::FORBIDDEN);
+    assert_eq!(ok.status(), StatusCode::SEE_OTHER, "created");
+}
+
+/// #1703 — the signed-in admin pages run under a strict CSP.
+#[tokio::test]
+async fn signed_in_admin_pages_pass_a_strict_csp() {
+    let (app, cookie, token) = signed_in().await;
+    let app = rustango::testkit::with_strict_csp(app);
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/csrf_post")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::from(format!("title=one&_csrf={token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::SEE_OTHER);
+    let mut pages = vec![
+        "/",
+        "/csrf_post",
+        "/csrf_post/new",
+        "/csrf_post/1",
+        "/csrf_post/1/edit",
+        "/__audit",
+        "/account/password",
+    ];
+    if cfg!(feature = "totp") {
+        pages.push("/account/totp");
+    }
+    for uri in pages {
+        let req = Request::builder()
+            .uri(uri)
+            .header(header::COOKIE, cookie.clone())
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        rustango::testkit::assert_strict_csp_page(resp, uri).await;
+    }
+}
+
+/// #2131 — `protect_with_csrf` around a session admin still sets one
+/// token, the one its form renders.
+#[tokio::test]
+async fn nested_csrf_layers_keep_one_token() {
+    let app = rustango::admin::protect_with_csrf(app_with_session_auth(pool().await));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookies = csrf_cookies(&resp);
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    let html = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains(&format!(r#"value="{}""#, cookies[0])),
+        "{html}"
+    );
 }

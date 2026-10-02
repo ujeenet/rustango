@@ -76,8 +76,9 @@ let app = router.security_headers(SecurityHeadersLayer::strict());
 ```rust
 let csp = CspBuilder::new()
     .default_src(&["'self'"])
-    .script_src(&["'self'", "https://cdn.example.com"])
-    .style_src(&["'self'", "'unsafe-inline'"])    // for inline <style>
+    // The placeholder becomes a per-request nonce; the bundled admin uses it.
+    .script_src(&["'self'", "'nonce-__RUSTANGO_NONCE__'", "https://cdn.example.com"])
+    .style_src(&["'self'", "'nonce-__RUSTANGO_NONCE__'"])
     .img_src(&["'self'", "data:", "https:"])
     .font_src(&["'self'", "data:"])
     .connect_src(&["'self'", "wss://realtime.example.com"])

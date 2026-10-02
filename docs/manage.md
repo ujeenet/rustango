@@ -863,7 +863,7 @@ cargo run -- init-tenancy   # does nothing now; kept so old scripts don't break
 
 Older versions wrote `0001_rustango_*_initial.json` here; that hardcoded
 flow is gone. **To provision, just run `cargo run -- migrate`.** A custom
-user model (`.user_model::<AppUser>()`) flows through the same generated
+user model declared on `rustango_users` flows through the same generated
 `system/migrations/` — see
 [Custom user model](#custom-user-model-extra-columns-on-rustango_users).
 

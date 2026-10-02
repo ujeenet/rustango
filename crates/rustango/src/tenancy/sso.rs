@@ -223,6 +223,7 @@ pub(super) async fn tenant_sso_begin(
     tenant_pool: &Pool,
     registry_pool: &Pool,
     routes: &RouteConfig,
+    cookie_path: &str,
     parts: &Parts,
 ) -> Response {
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
@@ -246,7 +247,7 @@ pub(super) async fn tenant_sso_begin(
     let (url, flow) = provider.begin();
     let sealed = seal_flow(&flow, secret.key());
     let flow_cookie = format!(
-        "{SSO_FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{}",
+        "{SSO_FLOW_COOKIE}={sealed}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=600{}",
         secure_suffix()
     );
     let mut resp = Redirect::to(&url).into_response();
@@ -353,7 +354,7 @@ pub(super) async fn tenant_sso_callback(
         secure_suffix()
     );
     let clear_flow = format!(
-        "{SSO_FLOW_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
+        "{SSO_FLOW_COOKIE}=; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=0{}",
         secure_suffix()
     );
     let mut resp = Redirect::to(routes.admin_url.as_str()).into_response();

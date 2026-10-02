@@ -258,6 +258,86 @@ pub fn admin_user() -> crate::admin::AdminUser {
     }
 }
 
+/// `router` behind a CSP with no `'unsafe-inline'`: scripts and styles
+/// run only with the per-request nonce (#1703).
+#[cfg(feature = "admin")]
+#[must_use]
+pub fn with_strict_csp(router: axum::Router) -> axum::Router {
+    use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _, CSP_NONCE_PLACEHOLDER};
+    use crate::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt as _};
+    let csp = format!(
+        "default-src 'self'; script-src {CSP_NONCE_PLACEHOLDER}; style-src {CSP_NONCE_PLACEHOLDER}"
+    );
+    router
+        .security_headers(SecurityHeadersLayer::strict().csp(csp))
+        .csp_nonce(CspNonceLayer::default())
+}
+
+/// Assert a 200 page under [`with_strict_csp`] runs as rendered: every
+/// inline `<script>`/`<style>` carries the header's nonce, and no inline
+/// `on*` handler or `style` attribute is left. Returns the body.
+///
+/// # Panics
+/// On any of those, naming `what`.
+#[cfg(feature = "admin")]
+pub async fn assert_strict_csp_page(resp: axum::response::Response, what: &str) -> String {
+    assert_eq!(resp.status(), axum::http::StatusCode::OK, "{what}");
+    let csp = resp.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let nonce = csp
+        .split("'nonce-")
+        .nth(1)
+        .and_then(|s| s.split('\'').next())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        !nonce.is_empty() && !nonce.contains("RUSTANGO"),
+        "{what}: no nonce in {csp}"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body).into_owned();
+    assert_strict_csp_html(&html, &nonce, what);
+    html
+}
+
+/// The body half of [`assert_strict_csp_page`].
+///
+/// # Panics
+/// When `html` has an un-nonced inline tag, an `on*` handler or a `style` attribute.
+#[cfg(feature = "admin")]
+pub fn assert_strict_csp_html(html: &str, nonce: &str, what: &str) {
+    assert!(
+        html.contains("<script") || html.contains("<style"),
+        "{what}: nothing to check"
+    );
+    for tag in ["<script", "<style"] {
+        for (i, _) in html.match_indices(tag) {
+            let open = &html[i..i + html[i..].find('>').unwrap_or(0)];
+            if open.contains("application/json") {
+                continue;
+            }
+            assert!(
+                open.contains(&format!(r#"nonce="{nonce}""#)),
+                "{what}: {open}"
+            );
+        }
+    }
+    for bad in [
+        " onclick=",
+        " onsubmit=",
+        " onchange=",
+        " oninput=",
+        " onload=",
+        " style=\"",
+    ] {
+        assert!(!html.contains(bad), "{what}: {bad} survives a strict CSP");
+    }
+}
+
 /// Forget this process's cached host-table fingerprint.
 ///
 /// `RegisteredHostResolver` polls a fingerprint of `rustango_org_hosts` so

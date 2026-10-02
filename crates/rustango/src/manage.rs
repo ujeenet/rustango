@@ -694,11 +694,10 @@ impl Cli {
     /// ```
     #[cfg(feature = "tenancy")]
     #[must_use]
-    pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
+    pub fn user_model<U: crate::tenancy::TenantUserModel>(self) -> Self {
         if let Err(e) = crate::tenancy::validate_tenant_user_schema(U::SCHEMA) {
             panic!("Cli::user_model: {e}");
         }
-        self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
         self
     }
 
@@ -2717,6 +2716,35 @@ mod assemble_app_tests {
             .to_str()
             .unwrap()
             .starts_with("text/plain"));
+    }
+
+    /// #1703 — `[security] csp` runs the nonce layer: the header's
+    /// placeholder becomes the nonce a handler renders.
+    #[cfg(all(feature = "config", feature = "admin"))]
+    #[tokio::test]
+    async fn security_csp_fills_the_nonce_a_page_renders() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.csp = Some(format!(
+            "script-src {}",
+            crate::csp_nonce::CSP_NONCE_PLACEHOLDER
+        ));
+        let app = Cli::new()
+            .with_settings(&s)
+            .api(Router::new().route(
+                "/page",
+                axum::routing::get(|| async {
+                    let n = crate::csp_nonce::current().unwrap_or_default();
+                    axum::response::Html(format!(r#"<script nonce="{n}"></script>"#))
+                }),
+            ))
+            .assemble_app(pool);
+        let req = Request::builder().uri("/page").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.expect("request");
+        crate::testkit::assert_strict_csp_page(resp, "/page").await;
     }
 }
 

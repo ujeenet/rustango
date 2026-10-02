@@ -156,7 +156,15 @@ untouched.
 
 ### Strict CSP and the bundled admin
 
-Add `CSP_NONCE_PLACEHOLDER` to `script-src` and `style-src` to run the admin without `'unsafe-inline'`. The `csp_nonce` module now also builds with `admin` (#1703).
+Put `'nonce-__RUSTANGO_NONCE__'` in `script-src` and `style-src` of `[security] csp` to run the admin without `'unsafe-inline'`. The `csp_nonce` module now also builds with `admin` (#1703).
+
+### Basic-auth admins check CSRF
+
+`protect_with_basic_auth` now refuses a POST without the `rustango_csrf` cookie and a matching `_csrf` field or `X-CSRF-Token` header. Scripts that post to it get 403 (#2131).
+
+### Path-prefix tenant cookies use the prefix path
+
+Tenant session, member session and SSO flow cookies set under a path prefix now carry `Path=/<prefix>`, not `Path=/` (#2098).
 
 ### `api::create_tenant` refuses what the CLI refuses
 

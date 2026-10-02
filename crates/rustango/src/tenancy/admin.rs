@@ -368,21 +368,15 @@ where
     };
 
     // A path-prefix tenant's admin lives under its prefix (#2059).
-    let under_prefix = org
-        .path_prefix
-        .as_deref()
-        .filter(|p| super::routes::path_is_under(parts.uri.path(), p));
+    // Cookies are scoped the same way, so they keep apart too (#2098).
+    let cookie_path = super::routes::cookie_path(&org, parts.uri.path());
     let prefixed;
-    let routes = match under_prefix {
-        Some(p) => {
-            prefixed = routes.under_prefix(p);
-            &prefixed
-        }
-        None => routes,
+    let routes = if cookie_path == "/" {
+        routes
+    } else {
+        prefixed = routes.under_prefix(cookie_path);
+        &prefixed
     };
-    // Scope the session to the prefix, or prefix tenants on one host
-    // overwrite each other's cookie (#2098).
-    let cookie_path = under_prefix.map_or("/", |p| p.trim_end_matches('/'));
 
     // A schema-mode PG tenant gets a short-lived pool with
     // `search_path` already set; a database-mode tenant gets a cheap
@@ -469,6 +463,7 @@ where
                         &pool,
                         &registry_pool,
                         routes,
+                        cookie_path,
                         &parts,
                     )
                     .await;
@@ -582,7 +577,7 @@ where
         if (path == end_imp_full || path == "/__end-impersonation")
             && method == axum::http::Method::POST
         {
-            return end_impersonation_response(routes, cookie_path);
+            return end_impersonation_response(cookie_path);
         }
 
         // Private surface — require a valid session cookie.
@@ -1357,16 +1352,27 @@ fn extract_token_param(query: &str) -> Option<String> {
 /// The apex URL comes from `RUSTANGO_APEX_DOMAIN`,
 /// `RUSTANGO_TENANT_SCHEME` and `RUSTANGO_TENANT_PORT`. With none of
 /// them set it falls back to `/`, which still clears the cookie.
-fn end_impersonation_response(_routes: &super::routes::RouteConfig, cookie_path: &str) -> Response {
-    let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
-        .path(cookie_path.to_owned())
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        // Match the Secure flag used when setting it, or the browser
-        // may not clear it.
-        .secure(crate::session::secure_cookies())
-        .max_age(CookieDuration::seconds(0))
-        .build();
+fn end_impersonation_response(cookie_path: &str) -> Response {
+    // Also the legacy `Path=/` one: impersonation has no server-side revoke.
+    let mut paths = vec![cookie_path];
+    if cookie_path != "/" {
+        paths.push("/");
+    }
+    let clears: Vec<String> = paths
+        .into_iter()
+        .map(|path| {
+            Cookie::build((tenant_console::COOKIE_NAME, ""))
+                .path(path.to_owned())
+                .http_only(true)
+                .same_site(SameSite::Lax)
+                // Match the Secure flag used when setting it, or the browser
+                // may not clear it.
+                .secure(crate::session::secure_cookies())
+                .max_age(CookieDuration::seconds(0))
+                .build()
+                .to_string()
+        })
+        .collect();
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
     let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
     let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
@@ -1376,10 +1382,12 @@ fn end_impersonation_response(_routes: &super::routes::RouteConfig, cookie_path:
         .unwrap_or_default();
     let target = format!("{scheme}://{apex}{port_suffix}/orgs");
     let mut resp = Redirect::to(&target).into_response();
-    resp.headers_mut().append(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&clear.to_string()).expect("cookie is ascii"),
-    );
+    for clear in clears {
+        resp.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&clear).expect("cookie is ascii"),
+        );
+    }
     resp
 }
 

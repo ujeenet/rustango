@@ -858,7 +858,7 @@ pub mod security_headers;
 /// `<script nonce="...">` tags pass a strict CSP. See
 /// [`csp_nonce::CspNonceLayer`]. Built with `admin` too: `[security]`
 /// mounts it so the bundled admin pages pass a strict CSP (#1703).
-#[cfg(any(feature = "csp-nonce", feature = "admin"))]
+#[cfg(feature = "admin")]
 pub mod csp_nonce;
 
 /// Signed URL helpers — HMAC-SHA256 with optional expiry.

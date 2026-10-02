@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
 
-It reads the user row like `require_bearer`, so a logout, password change or deactivation ends the token. It now takes the `Tenant`.
+It reads the user row like `require_bearer`, so a logout, password change or deactivation ends the token. It now takes the `Tenant`, and its future is `Send`.
 
 ### Security — admin CSRF without session auth (#2131)
 
@@ -14,11 +14,11 @@ It reads the user row like `require_bearer`, so a logout, password change or dea
 
 ### Security — path-prefix tenants keep separate sessions (#2098)
 
-The tenant session cookie is scoped to the tenant's path prefix, so signing in to one prefix tenant no longer replaces another's session on the same host.
+Tenant session, member session and SSO flow cookies are scoped to the tenant's path prefix, so signing in to one prefix tenant no longer replaces another's session on the same host. End-impersonation also clears an old `Path=/` cookie.
 
 ### Fixed — admin, console and tenant login work under a strict CSP (#1703)
 
-`[security]` headers now run the CSP nonce layer. Bundled pages nonce their inline `<script>`/`<style>` and drop inline `on*` handlers and `style` attributes.
+`[security]` headers now run the CSP nonce layer. Bundled pages nonce their inline `<script>`/`<style>` and drop inline `on*` handlers and `style` attributes. New `csp_nonce::current()` gives a template the request's nonce.
 
 ### Fixed — `api::create_tenant` validates and clash-checks the host (#2097)
 
@@ -26,7 +26,7 @@ It runs the provisioner's checks: slug, host pattern, path prefix, port, and tha
 
 ### Security — a custom `redact` list keeps `?token=` hidden (#1818)
 
-`token` is always redacted in access and trace logs. `register_action` documents that custom actions are gated like edits.
+`token`, `signature` and `code` are always redacted in access and trace logs. `register_action` documents that custom actions are gated like edits.
 
 ### Fixed — docs: a new password hash ends sessions (#1736)
 

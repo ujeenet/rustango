@@ -757,7 +757,7 @@ cargo run -- init-tenancy   # does nothing now; kept so old scripts don't break
 Las versiones más antiguas escribían aquí `0001_rustango_*_initial.json`; ese
 flujo codificado a mano ya no existe. **Para aprovisionar, simplemente ejecuta
 `cargo run -- migrate`.** Un modelo de usuario personalizado
-(`.user_model::<AppUser>()`) fluye por las mismas `system/migrations/` generadas
+(declarado sobre `rustango_users`) fluye por las mismas `system/migrations/` generadas
 — consulta [Modelo de usuario personalizado](#modelo-de-usuario-personalizado-columnas-extra-en-rustango_users).
 
 ### `migrate-registry`

@@ -126,3 +126,20 @@ async fn autocomplete_endpoint_empty_query_returns_all_capped() {
     // All 3 seeded authors come back when q is empty.
     assert_eq!(results.len(), 3);
 }
+
+/// #1703 — the typeahead's inline script carries the CSP nonce.
+#[tokio::test]
+async fn typeahead_script_passes_a_strict_csp() {
+    let app = rustango::testkit::with_strict_csp(build_app(build_pool().await));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ac_post/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = rustango::testkit::assert_strict_csp_page(resp, "/ac_post/new").await;
+    assert!(html.contains("__autocomplete"), "the script is on the page");
+}

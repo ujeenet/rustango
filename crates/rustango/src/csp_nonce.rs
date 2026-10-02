@@ -131,6 +131,15 @@ pub fn current() -> Option<String> {
     CURRENT_NONCE.try_with(|n| n.value().to_owned()).ok()
 }
 
+/// Run `f` as if under the layer with `nonce`, for render tests.
+#[cfg(test)]
+pub(crate) async fn scoped<F: std::future::Future>(nonce: &str, f: F) -> F::Output {
+    let nonce = Nonce {
+        value: Arc::new(nonce.to_owned()),
+    };
+    CURRENT_NONCE.scope(nonce, f).await
+}
+
 /// ` nonce="…"` for an inline tag built in Rust; empty outside the layer.
 /// The nonce is base64url, so it needs no escaping.
 #[must_use]
@@ -250,6 +259,35 @@ mod tests {
         let body = std::str::from_utf8(&bytes).unwrap();
         // Each call generates a fresh 22-char token.
         assert_eq!(body.len(), 22);
+    }
+
+    /// #1703 — nested layers keep one nonce: header, extension and task-local agree.
+    #[tokio::test]
+    async fn nested_layers_share_the_outer_nonce() {
+        async fn h(Extension(nonce): Extension<Nonce>) -> impl axum::response::IntoResponse {
+            assert_eq!(current().as_deref(), Some(nonce.value()));
+            (
+                [("content-security-policy", CSP_NONCE_PLACEHOLDER)],
+                nonce.value().to_owned(),
+            )
+        }
+        let app = Router::new()
+            .route("/", get(h))
+            .csp_nonce(CspNonceLayer::default())
+            .csp_nonce(CspNonceLayer::default());
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let header = resp.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(header, format!("'nonce-{body}'"));
     }
 
     #[tokio::test]

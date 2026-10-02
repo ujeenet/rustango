@@ -420,11 +420,10 @@ impl<DB: Database> Builder<DB> {
     /// Check a custom tenant user model at startup. Same as
     /// [`crate::manage::Cli::user_model`].
     #[must_use]
-    pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
+    pub fn user_model<U: crate::tenancy::TenantUserModel>(self) -> Self {
         if let Err(e) = crate::tenancy::validate_tenant_user_schema(U::SCHEMA) {
             panic!("Builder::user_model: {e}");
         }
-        self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
         self
     }
 

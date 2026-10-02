@@ -338,21 +338,34 @@ impl JwtAuth {
     /// without that claim is refused, and so is an MCP agent token. The
     /// user row is read from `tenant`'s pool, so a logout or password
     /// change ends the token at once (#2118).
-    pub async fn verify_for_tenant<DB: Database>(
+    /// Takes what it needs from `tenant` up front, so the future is `Send`
+    /// for any `DB`, as in #1778.
+    pub fn verify_for_tenant<DB: Database>(
         &self,
         bearer: &str,
         tenant: &Tenant<DB>,
-    ) -> Result<i64, &'static str> {
-        const REFUSED: &str = "invalid or expired token";
-        match session_user_in(self, bearer, &tenant.org.slug, tenant.pool()).await {
-            Ok(Some(u)) if u.active => u.id.get().copied().ok_or(REFUSED),
-            Ok(_) | Err(SessionLookup::Refused) => Err(REFUSED),
-            Err(SessionLookup::Db(e)) => {
-                tracing::error!(target: "rustango::tenancy", error = %e, "verify_for_tenant: user lookup");
-                Err("user lookup failed")
+    ) -> impl std::future::Future<Output = Result<i64, &'static str>> + Send + 'static {
+        let (auth, bearer) = (self.clone(), bearer.to_owned());
+        let (slug, pool) = (tenant.org.slug.clone(), tenant.pool().clone());
+        async move {
+            const REFUSED: &str = "invalid or expired token";
+            match session_user_in(&auth, &bearer, &slug, &pool).await {
+                Ok(Some(u)) if u.active => u.id.get().copied().ok_or(REFUSED),
+                Ok(_) | Err(SessionLookup::Refused) => Err(REFUSED),
+                Err(SessionLookup::Db(e)) => {
+                    tracing::error!(target: "rustango::tenancy", error = %e, "verify_for_tenant: user lookup");
+                    Err("user lookup failed")
+                }
             }
         }
     }
+}
+
+/// Compile-time: `verify_for_tenant` is `Send` for a generic `DB` (#1778).
+#[allow(dead_code)]
+fn verify_for_tenant_is_send<DB: Database>(auth: &JwtAuth, t: &Tenant<DB>) {
+    fn send<T: Send>(_: T) {}
+    send(auth.verify_for_tenant("", t));
 }
 
 /// Claims for a freshly issued login pair: the app's hook first, then
@@ -1222,6 +1235,22 @@ mod tests {
             .await
             .unwrap();
         assert!(auth.verify_for_tenant(&token, &t).await.is_err(), "logout");
+    }
+
+    /// #2118 review — a deactivated user's token is refused.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn verify_for_tenant_refuses_an_inactive_user() {
+        let (auth, pool, mut user) = verify_env("jwt_verify_inactive_2118").await;
+        let t = sqlite_tenant(&pool).await;
+        let token = login_access(&auth, &user);
+        assert!(auth.verify_for_tenant(&token, &t).await.is_ok());
+        user.active = false;
+        user.save_pool(&pool).await.unwrap();
+        assert_eq!(
+            auth.verify_for_tenant(&token, &t).await,
+            Err("invalid or expired token")
+        );
     }
 
     /// A tenant pool with one user, and a `JwtAuth` capped at `cap` seconds.
