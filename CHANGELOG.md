@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — concurrent migrates on one small pool no longer deadlock (#2027)
+
+A migrate waiting for the lock polls a try-lock and holds no pool connection, so the holder can borrow one.
+The wait logs once, jitters its retries, and can be bounded with `migrate::with_lock_timeout`; a MySQL `GET_LOCK` NULL is an error.
+
+### Fixed — `sqlmigrate` and `migrate --dry-run` render for the pool's backend (#2025)
+
+The preview used PostgreSQL SQL; it now uses the target dialect and the previous snapshot, so MySQL shows the FK drop.
+
+### Fixed — a regenerated system chain restores missing indexes (#2016)
+
+Converge adds a framework table's missing indexes too, and warns about leftover columns it will not drop.
+It also warns when an index's name is taken by one on another table or other columns.
+
+### Fixed — schema-mode tenant FKs no longer bind to `public` (#1718)
+
+FK targets are qualified with the tenant schema; a registry model's table stays unqualified.
+
 ### Fixed — `DatabaseCache` keeps a racing write; `InMemoryCache` evicts to a low-water mark; purge is batched (#1906)
 
 An expired read deletes only a still-expired row. Eviction stops at 90% of each budget, so the next sets skip the scan. `purge_expired` deletes 1000 rows per statement over a new `expires` index; a role that cannot create the index gets a warning, not an error. A long table name gets a hashed index name under 63 bytes.

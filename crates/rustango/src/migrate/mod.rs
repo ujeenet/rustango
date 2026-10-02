@@ -70,7 +70,8 @@ pub(crate) use runner::{LockHeld, Signals};
 pub use runner::{
     applied_set_pool, apply_all_pool, downgrade_pool, drop_all_pool, ensure_ledger_pool,
     migrate_dry_run_pool, migrate_embedded_pool, migrate_pool, migrate_to_pool, registered_models,
-    sqlmigrate_one, unapply_force_pool, unapply_pool, Builder, MigrationPreview, LEDGER_TABLE,
+    sqlmigrate_one, unapply_force_pool, unapply_pool, with_lock_timeout, Builder, MigrationPreview,
+    LEDGER_TABLE,
 };
 // PG-typed back-compat, only when the `postgres` feature is on.
 // SQLite and MySQL apps use the `_pool` variants above.
