@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL atomic-migration warning says what the transaction covers (#1660)
+
+Only data ops before the first DDL are in it; each DDL commits and later ops run in autocommit. The warning no longer mentions RunPython.
+
 ### Fixed — MySQL's migrate lock is per database (#1991)
 
 The `GET_LOCK` name carries a hash of `DATABASE()`, so tenant databases on one server no longer wait on each other's migrations.
