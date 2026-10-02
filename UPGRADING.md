@@ -162,6 +162,10 @@ An admin edit of a model with `audit(...)` writes its audit row in the UPDATE's 
 
 `allow_private_targets` no longer reaches `100.100.100.200`, any `169.254.0.0/16` address or `fd00:ec2::/32` (#1821).
 
+### `CreateView` on MySQL fails closed for some audited models
+
+An audited model whose PK the database generates and is not an integer (a UUID default, say) cannot report the new PK on MySQL, so `CreateView` now fails instead of saving it unaudited (#1821).
+
 ## 0.59.17
 
 ### Number filters round halves up (#1896)
