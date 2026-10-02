@@ -133,8 +133,12 @@ _base64       = ["dep:base64"]
 _signing      = ["_base64", "dep:hmac", "dep:sha2"]
 # The request middleware (`cors`, `body_limit`, `security_headers`, …): `manage`
 # mounts them from `[server]`/`[security]` settings without `admin` (#1739),
-# and the request span, request id and access log with them (#1514).
-_http_layers  = ["_axum", "_tower", "_base64", "_rand", "dep:http-body-util"]
+# and the request span, request id and access log with them (#1514), and
+# `static_files` for `Cli::with_static` (#2042), streamed off the runtime (#1531).
+_http_layers  = [
+    "_axum", "_tower", "_base64", "_rand", "dep:http-body", "dep:http-body-util",
+    "dep:tokio-util", "tokio/fs", "tokio/io-util",
+]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
@@ -414,10 +418,6 @@ admin = [
     "dep:http-body",
     "dep:http-body-util",
     "dep:serde_urlencoded",
-    # #1531 — `static_files` streams files off the async runtime.
-    "dep:tokio-util",
-    "tokio/fs",
-    "tokio/io-util",
 ]
 
 # SSO for the admin login (`rustango::admin::sso`) — sign in with an
@@ -511,7 +511,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.59.18", path = "../rustango-macros" }
+rustango-macros = { version = "0.59.19", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

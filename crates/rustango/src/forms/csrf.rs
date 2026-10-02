@@ -363,6 +363,24 @@ fn wildcard_matches(authority: &str, wild: &str) -> bool {
         .is_some_and(|rest| rest.ends_with('.'))
 }
 
+/// The outermost CSRF layer on this request, in its extensions; `checked`
+/// once it verified the token, so an inner layer need not (#1722).
+#[derive(Clone)]
+pub(crate) struct ActiveCsrf {
+    cfg: Arc<CsrfConfig>,
+    checked: bool,
+}
+
+/// The cookie name the CSRF layer on this request checks; the default
+/// when there is none.
+#[cfg(feature = "template_views")]
+#[must_use]
+pub(crate) fn active_cookie_name(extensions: &axum::http::Extensions) -> &str {
+    extensions
+        .get::<ActiveCsrf>()
+        .map_or(CSRF_COOKIE, |a| a.cfg.cookie_name.as_str())
+}
+
 /// The [`tower::Layer`] implementation. Wraps inner services with
 /// [`CsrfService`].
 #[derive(Clone)]
@@ -415,13 +433,31 @@ where
         let cfg = Arc::clone(&self.cfg);
         let mut inner = self.inner.clone();
         Box::pin(async move {
+            let mut req = req;
+            // An outer layer's names win (#1722). If it verified the token,
+            // defer; if it skipped an exempt path, check here without them.
+            let active = req.extensions().get::<ActiveCsrf>().cloned();
+            let cfg = match active {
+                Some(a) if a.checked => return inner.call(req).await,
+                Some(a) => Arc::new(CsrfConfig {
+                    exempt_prefixes: Vec::new(),
+                    ..CsrfConfig::clone(&a.cfg)
+                }),
+                None => {
+                    req.extensions_mut().insert(ActiveCsrf {
+                        cfg: Arc::clone(&cfg),
+                        checked: false,
+                    });
+                    cfg
+                }
+            };
             let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
 
             // Enforce on unsafe methods — unless the path is exempt
             // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
-            let req = if !method_is_csrf_exempt(req.method(), &cfg)
-                && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
-            {
+            let enforced = !method_is_csrf_exempt(req.method(), &cfg)
+                && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes);
+            let mut req = if enforced {
                 // Origin-header defense-in-depth. Always runs; an empty
                 // `trusted_origins` means same-host only (#1529).
                 if !origin_allowed(&req, &cfg.trusted_origins) {
@@ -465,6 +501,12 @@ where
             } else {
                 req
             };
+            if enforced {
+                req.extensions_mut().insert(ActiveCsrf {
+                    cfg: Arc::clone(&cfg),
+                    checked: true,
+                });
+            }
 
             // Pass to inner. After the response comes back, ensure
             // the CSRF cookie is set so the next safe-method GET
@@ -751,7 +793,8 @@ use crate::text::html_escape as html_escape_attr;
 ///
 /// Public counterpart of the private helper used by [`crate::template_views`]
 /// — promoted so users with hand-rolled handlers don't re-implement
-/// the cookie-mint dance.
+/// the cookie-mint dance. Uses [`CSRF_COOKIE`]; with a custom
+/// [`CsrfConfig::cookie_name`] call [`stamp_named_into_context`].
 ///
 /// ```ignore
 /// async fn contact_form(headers: HeaderMap) -> Response {
@@ -784,7 +827,19 @@ pub fn stamp_into_context(
     headers: &axum::http::HeaderMap,
     ctx: &mut tera::Context,
 ) -> Option<String> {
-    let (token, set_cookie) = ensure_token(headers, CSRF_COOKIE);
+    stamp_named_into_context(headers, CSRF_COOKIE, ctx)
+}
+
+/// [`stamp_into_context`] for the cookie `cookie_name`, e.g. the
+/// [`CsrfConfig::cookie_name`] of your CSRF layer.
+#[cfg(feature = "template_views")]
+#[must_use]
+pub fn stamp_named_into_context(
+    headers: &axum::http::HeaderMap,
+    cookie_name: &str,
+    ctx: &mut tera::Context,
+) -> Option<String> {
+    let (token, set_cookie) = ensure_token(headers, cookie_name);
     let html = csrf_input_html(&token);
     ctx.insert("csrf_token", &token);
     ctx.insert("csrf_input", &html);

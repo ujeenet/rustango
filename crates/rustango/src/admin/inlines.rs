@@ -383,6 +383,8 @@ pub(crate) async fn render_for_parent_in(
                 let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
                 serde_json::json!({
                     "pk": pk_text,
+                    // The View link's path segment; a raw `/` or `?` would break it (#2079).
+                    "pk_path": crate::url_codec::url_encode(&pk_text),
                     "cells": cells,
                 })
             })
@@ -527,6 +529,8 @@ pub(crate) async fn render_generic_for_parent_in(
                 let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
                 serde_json::json!({
                     "pk": pk_text,
+                    // The View link's path segment; a raw `/` or `?` would break it (#2079).
+                    "pk_path": crate::url_codec::url_encode(&pk_text),
                     "cells": cells,
                 })
             })

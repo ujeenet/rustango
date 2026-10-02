@@ -102,6 +102,7 @@ fn signed(body: &str) -> String {
         SECRET,
         body.as_bytes(),
     )
+    .expect("non-empty key")
 }
 
 fn post(body: String, signature: Option<&str>) -> Request<Body> {

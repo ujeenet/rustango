@@ -170,6 +170,19 @@ async fn string_pk_rows_stay_per_source(pool: &Pool) {
     assert_eq!(PostTag::objects().count(pool).await.expect("count"), 1);
 }
 
+/// A key too long for the junction column is an error, not a silent
+/// MySQL truncation under `INSERT IGNORE` (#1966). SQLite has no length limit.
+async fn too_long_key_is_an_error(pool: &Pool) {
+    let long = post(&"x".repeat(100));
+    let res = long.tags_m2m().add(1, pool).await;
+    if pool.dialect().name() == "sqlite" {
+        res.expect("sqlite stores it");
+    } else {
+        assert!(res.is_err(), "too-long key was accepted");
+        assert_eq!(PostTag::objects().count(pool).await.expect("count"), 0);
+    }
+}
+
 async fn uuid_pk_rows_stay_per_source(pool: &Pool) {
     let a = Doc {
         id: uuid::Uuid::new_v4(),
@@ -296,6 +309,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         string_pk_rows_stay_per_source,
+        too_long_key_is_an_error,
         uuid_pk_rows_stay_per_source,
         unsaved_source_is_refused,
         string_destination_keys_round_trip,

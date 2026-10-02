@@ -108,6 +108,14 @@ fn max_length_validator_fires() {
     );
 }
 
+/// Lengths count chars, as the model and serializer do: 64 `é` is 128 bytes (#1937).
+#[test]
+fn max_length_counts_chars_not_bytes() {
+    let name = "é".repeat(64);
+    let form = payload(&[("name", name.as_str()), ("age", "10")]);
+    assert_eq!(CreateItemForm::parse(&form).unwrap().name, name);
+}
+
 #[test]
 fn max_int_validator_fires() {
     let form = payload(&[("name", "x"), ("age", "999")]);
