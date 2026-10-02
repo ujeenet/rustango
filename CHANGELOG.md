@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `assert_num_queries` counts the PG `_on` reads (#1561)
+
+`fetch_on`, `count_on`, `fetch_paginated_on`, `explain_on`, `select_rows_on`, `fetch_aggregate_on`, `annotate_count_children_on` and `fetch_with_prefetch` were counted as 0.
+
 ### Fixed — MySQL refuses a DB-default integer PK it cannot read (#1986)
 
 A non-`Auto` integer PK left to its DB default is refused before the INSERT, instead of reading `LAST_INSERT_ID()` = 0.

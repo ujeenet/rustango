@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `assert_num_queries` sees the PG `_on` reads
+
+A block using `fetch_on`, `count_on` or another `_on` read now counts its queries (#1561); an expectation of 0 written around one fails.
+
 ### MySQL refuses a DB-default integer PK
 
 An insert that leaves a non-`Auto` integer PK to its DB default fails with `GeneratedPkUnreadable` on MySQL (#1986). Set the PK or use `Auto<i64>`.
