@@ -162,6 +162,10 @@ Add `CSP_NONCE_PLACEHOLDER` to `script-src` and `style-src` to run the admin wit
 
 A bad slug or host, or a host, prefix or port another tenant uses, is now a `Validation` error (#2097).
 
+### `user_model` validates the model
+
+**Breaking:** `Cli::user_model` / `Builder::user_model` panic if the model lacks a required column. Add `password_changed_at` and `sessions_revoked_at` (`Option<DateTime<Utc>>`) to a custom user model (#1203).
+
 ## 0.59.19
 
 ### Bearer tokens need a login session

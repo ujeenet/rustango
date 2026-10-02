@@ -32,6 +32,10 @@ It runs the provisioner's checks: slug, host pattern, path prefix, port, and tha
 
 The reset docs no longer say `password_changed_at` ends sessions; `_into` notes that app-written session checks must compare the hash.
 
+### Fixed — `Cli::user_model` checks the model at startup (#1203)
+
+It panics when the model lacks a required column. `REQUIRED_USER_COLUMNS` adds `password_changed_at` and `sessions_revoked_at`; the docs say declaring the model is what selects it.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)

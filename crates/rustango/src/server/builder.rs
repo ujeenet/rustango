@@ -417,10 +417,13 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
-    /// Swap the tenant user model used by [`Builder::migrate`]. Same
-    /// semantics as [`crate::manage::Cli::user_model`].
+    /// Check a custom tenant user model at startup. Same as
+    /// [`crate::manage::Cli::user_model`].
     #[must_use]
     pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
+        if let Err(e) = crate::tenancy::validate_tenant_user_schema(U::SCHEMA) {
+            panic!("Builder::user_model: {e}");
+        }
         self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
         self
     }
@@ -841,15 +844,15 @@ impl<DB: Database> Builder<DB> {
         #[cfg(feature = "admin")]
         let app = match self.security_headers {
             Some(layer) => {
-                use crate::security_headers::SecurityHeadersRouterExt as _;
-                app.security_headers(layer)
-            }
                 use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
-            None => app,
+                use crate::security_headers::SecurityHeadersRouterExt as _;
                 // Outside the headers, so it fills their nonce placeholder;
                 // the bundled pages nonce their inline tags (#1703).
-        };
+                app.security_headers(layer)
                     .csp_nonce(CspNonceLayer::default())
+            }
+            None => app,
+        };
         // Same order as the single-tenant router: the Host allowlist is
         // outermost, so a bad Host is refused, never redirected to.
         #[cfg(feature = "admin")]

@@ -680,15 +680,10 @@ impl Cli {
         self
     }
 
-    /// Swap the tenant user model used by the `init-tenancy` verb.
-    /// Implement [`crate::tenancy::TenantUserModel`] on a model that
-    /// declares extra columns on `rustango_users` (display name,
-    /// timezone, …) and pass it here — the materialized bootstrap
-    /// migration will then `CREATE TABLE` with those extras included.
-    ///
-    /// Only meaningful in tenancy mode and only on the very first
-    /// `init-tenancy`: subsequent invocations are idempotent and
-    /// won't rewrite the migration JSON.
+    /// Check a custom tenant user model at startup. Declaring the model on
+    /// `rustango_users` is what selects it; this call panics if it lacks a
+    /// [`REQUIRED_USER_COLUMNS`](crate::tenancy::REQUIRED_USER_COLUMNS)
+    /// column, instead of the first login failing (#1203).
     ///
     /// ```ignore
     /// rustango::manage::Cli::new()
@@ -700,6 +695,9 @@ impl Cli {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
+        if let Err(e) = crate::tenancy::validate_tenant_user_schema(U::SCHEMA) {
+            panic!("Cli::user_model: {e}");
+        }
         self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
         self
     }
@@ -1697,14 +1695,14 @@ impl OuterLayers {
     fn apply(self, mut app: Router) -> Router {
         use crate::host_validation::AllowedHostsRouterExt as _;
         use crate::security_headers::SecurityHeadersRouterExt as _;
+        use crate::ssl_redirect::SslRedirectRouterExt as _;
+        app = app.security_headers(self.headers);
         // Fills the CSP nonce placeholder; the bundled admin nonces its tags (#1703).
         #[cfg(feature = "admin")]
         {
             use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
             app = app.csp_nonce(CspNonceLayer::default());
         }
-        use crate::ssl_redirect::SslRedirectRouterExt as _;
-        app = app.security_headers(self.headers);
         if let Some(l) = self.ssl_redirect {
             app = app.ssl_redirect(l);
         }
