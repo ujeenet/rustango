@@ -572,6 +572,44 @@ async fn jwt_routes_serve_a_non_default_backend() {
     );
 }
 
+/// A logout elsewhere stamps `sessions_revoked_at`: the access token
+/// stops working at once, not at its expiry (#2086).
+#[tokio::test]
+async fn a_logout_elsewhere_ends_the_access_token() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("rv");
+    let id = env.user(&name).await;
+    let r = env.jwt_login(&next_ip(), &name, PASS).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let access = json_body(r).await["access"].as_str().unwrap().to_owned();
+    let get = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let r = send(&env.api, &next_ip(), get("/bearer")).await;
+    assert_eq!(r.status(), StatusCode::OK, "control");
+
+    let mut user = User::objects()
+        .where_(User::id.eq(id))
+        .fetch(&env.tenant)
+        .await
+        .unwrap()
+        .remove(0);
+    user.sessions_revoked_at = Some(chrono::Utc::now());
+    user.save_pool(&env.tenant)
+        .await
+        .expect("log out everywhere");
+
+    let r = send(&env.api, &next_ip(), get("/bearer")).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "require_bearer_for");
+    let r = send(&env.api, &next_ip(), get("/api/auth/me")).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "me");
+}
+
 async fn json_body(r: axum::response::Response) -> serde_json::Value {
     let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
     serde_json::from_slice(&b).unwrap()
