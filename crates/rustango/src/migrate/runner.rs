@@ -3603,6 +3603,10 @@ async fn unapply_atomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic, _pool)");
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
     let schema = super::ensure::creation_schema(pool).await?;
     match pool {
         #[cfg(feature = "postgres")]
