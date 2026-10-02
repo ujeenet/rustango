@@ -152,7 +152,7 @@ untouched.
 
 ### `with_rollback` hands the closure an `AtomicTx`
 
-**Breaking:** write `insert_tx(&mut *tx.lock().await?, &q)` where you passed `tx` (#1761). A nested `atomic()` on the same pool is now a savepoint.
+**Breaking:** write `insert_tx(&mut *tx.lock().await?, &q)` where you passed `tx` (#1761). A nested `atomic()` on the same pool is now a savepoint; drop the guard before it or a `bulk_insert_pool`, or they fail with `NestedAtomic`.
 
 ### Admin edits need the audit table
 
