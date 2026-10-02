@@ -622,6 +622,40 @@ mod admin_views {
         assert!(stamp(pool, pks[0]).await.is_none());
     }
 
+    /// POST a form to the admin; the status and the page body.
+    async fn post_page(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
+        let app = rustango::admin::Builder::new(pool.clone())
+            .admin_prefix("")
+            .build();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+            .body(Body::from(format!("_csrf={CSRF}&{form}")))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Insert one row titled "a" through `schema`'s table; its PK.
+    async fn seed_one(pool: &Pool, schema: &'static rustango::core::ModelSchema) -> i64 {
+        let q = rustango::core::InsertQuery::new(schema, vec!["title"], vec!["a".into()]);
+        rustango::sql::insert_pool(pool, &q).await.expect("seed");
+        let rows = rustango::sql::select_rows_as_json(
+            pool,
+            &rustango::core::SelectQuery::new(schema),
+            &schema.scalar_fields().collect::<Vec<_>>(),
+        )
+        .await
+        .expect("read seed");
+        rows[0]["id"].as_i64().expect("pk")
+    }
+
     /// An edit whose audit row cannot be written is not saved (#2060).
     #[cfg(feature = "sqlite")]
     #[tokio::test]
@@ -629,22 +663,49 @@ mod admin_views {
         // No audit table here, so the emit fails.
         let pool = rustango::testkit::matrix::sqlite_file_pool().await;
         rustango::testkit::matrix::fresh_table::<AdminDoc>(&pool).await;
-        let seed =
-            rustango::core::InsertQuery::new(AdminDoc::SCHEMA, vec!["title"], vec!["a".into()]);
-        rustango::sql::insert_pool(&pool, &seed)
-            .await
-            .expect("seed");
-        let pk = AdminDoc::objects().fetch(&pool).await.unwrap()[0]
-            .id
-            .get()
-            .copied()
-            .unwrap();
-        post(&pool, &format!("/{TABLE}/{pk}"), "title=z".into()).await;
-        let docs = AdminDoc::objects().fetch(&pool).await.unwrap();
+        let pk = seed_one(&pool, AdminDoc::SCHEMA).await;
+        let uri = format!("/{TABLE}/{pk}");
+        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("audit table missing — run `manage migrate`"),
+            "{body}"
+        );
+        let title = || async {
+            AdminDoc::objects().fetch(&pool).await.unwrap()[0]
+                .title
+                .clone()
+        };
         assert_eq!(
-            docs[0].title, "a",
+            title().await,
+            "a",
             "the edit committed without its audit row"
         );
+    }
+
+    /// No `audit(...)`: the admin still logs edits, best-effort.
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "audit2060_plain_doc", app = "audit1794")]
+    #[allow(dead_code)]
+    pub struct PlainDoc {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 64)]
+        pub title: String,
+    }
+
+    /// A model without `audit(...)` is edited even with no audit table.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn unaudited_admin_edit_saves_without_the_audit_table() {
+        let pool = rustango::testkit::matrix::sqlite_file_pool().await;
+        rustango::testkit::matrix::fresh_table::<PlainDoc>(&pool).await;
+        let pk = seed_one(&pool, PlainDoc::SCHEMA).await;
+        let uri = format!("/audit2060_plain_doc/{pk}");
+        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        assert!(status.is_redirection(), "{status} {body}");
+        let docs = PlainDoc::objects().fetch(&pool).await.unwrap();
+        assert_eq!(docs[0].title, "z");
     }
 
     tri_dialect_test! {

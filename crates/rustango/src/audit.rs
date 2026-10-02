@@ -242,6 +242,10 @@ async fn emit_chunk_pg(
     Ok(())
 }
 
+/// The audit log's table.
+#[cfg(feature = "admin")]
+pub(crate) const AUDIT_TABLE: &str = "rustango_audit_log";
+
 /// Columns of an audit INSERT, in bind order.
 const AUDIT_COLUMNS: [&str; 6] = [
     "entity_table",

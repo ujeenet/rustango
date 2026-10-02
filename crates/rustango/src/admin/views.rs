@@ -2139,8 +2139,14 @@ pub(crate) async fn update_submit(
     })
     .await;
     // "Before" is the locked row, "after" the form. The per-request
-    // `with_source(User { id })` gives a "who changed what" trail. The
-    // entry commits with the UPDATE, so an edit is never left unaudited (#2060).
+    // `with_source(User { id })` gives a "who changed what" trail. An
+    // `audit(...)` model's entry commits with the UPDATE (#2060); others
+    // keep the best-effort emit after it.
+    let emit = if model.audit_track.is_some() {
+        crate::audit::DiffEmit::InTx
+    } else {
+        crate::audit::DiffEmit::AfterCommit
+    };
     let written = crate::audit::update_one_with_row_diff(
         &state.pool,
         &query,
@@ -2150,16 +2156,26 @@ pub(crate) async fn update_submit(
             let row = mask_secrets(model, &admin_cfg, row);
             super::audit::admin_audit_diff_entry(model, &pk_raw, &row, &audit_form)
         },
-        crate::audit::DiffEmit::InTx,
+        emit,
     )
     .await;
     match written {
-        Ok(crate::audit::RowDiffWrite::Written { .. }) => {}
+        Ok(crate::audit::RowDiffWrite::Written { deferred }) => {
+            if let Some(entry) = deferred {
+                super::audit::emit_best_effort(&state, &entry).await;
+            }
+        }
         Ok(crate::audit::RowDiffWrite::Gone) => {
             return Err(AdminError::RowNotFound { table, pk: pk_raw })
         }
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
+            let msg = match super::errors::missing_table(&e) {
+                Some(t) if t == crate::audit::AUDIT_TABLE => {
+                    "audit table missing — run `manage migrate`".to_owned()
+                }
+                _ => e.to_string(),
+            };
+            let html = render_form(&state, model, Some(&form), true, Some(&msg));
             return Ok(Html(html).into_response());
         }
     }

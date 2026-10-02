@@ -421,13 +421,17 @@ pub(crate) async fn emit_admin_audit(
     op: crate::audit::AuditOp,
     form: &HashMap<String, String>,
 ) {
-    let entry = admin_audit_entry(model, pk_str, op, form);
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
+    emit_best_effort(state, &admin_audit_entry(model, pk_str, op, form)).await;
+}
+
+/// Write `entry` after its data write committed; a failure only warns.
+pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::PendingEntry) {
+    if let Err(e) = crate::audit::emit_one_pool(&state.pool, entry).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,
-            entity_table = %model.table,
-            entity_pk = %pk_str,
+            entity_table = %entry.entity_table,
+            entity_pk = %entry.entity_pk,
             "admin audit emit failed (data write already committed)",
         );
     }

@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The diff entry is written in the UPDATE's transaction; if it fails, the edit is not saved.
 Its "before" side is read under lock in that transaction, so a stale form that undoes a concurrent edit is audited.
+Only models with `audit(...)` fail without the audit table ("run `manage migrate`"); others still log best-effort.
 
 ### Fixed — test assertions that passed when they should fail (#1960)
 

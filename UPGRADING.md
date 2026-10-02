@@ -156,7 +156,7 @@ untouched.
 
 ### Admin edits need the audit table
 
-An admin edit writes its audit row in the UPDATE's transaction, so a missing `rustango_audit_log` table now fails the edit (#2060). `manage migrate` creates it.
+An admin edit of a model with `audit(...)` writes its audit row in the UPDATE's transaction, so a missing `rustango_audit_log` table now fails the edit (#2060). `manage migrate` creates it. Other models still log best-effort.
 
 ### Webhooks with private targets still refuse cloud metadata
 
