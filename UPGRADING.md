@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL refuses a DB-default integer PK
+
+An insert that leaves a non-`Auto` integer PK to its DB default fails with `GeneratedPkUnreadable` on MySQL (#1986). Set the PK or use `Auto<i64>`.
+
 ## 0.59.18
 
 ### `with_rollback` hands the closure an `AtomicTx`

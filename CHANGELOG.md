@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL refuses a DB-default integer PK it cannot read (#1986)
+
+A non-`Auto` integer PK left to its DB default is refused before the INSERT, instead of reading `LAST_INSERT_ID()` = 0.
+
 ### Fixed — PG `bulk_update` sets an all-NULL vector column (#1970)
 
 The NULL is cast `::vector`, not left as text.

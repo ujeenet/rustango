@@ -1109,17 +1109,12 @@ where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
     // The OK packet only carries an AUTO_INCREMENT id: refuse before the
-    // write, or the row lands and its PK is lost (#1978). Only the PK:
-    // other RETURNING columns (e.g. `generated_as`) stay unread here.
+    // write, or the row lands and its PK is lost (#1978, #1986). Only the
+    // PK: other RETURNING columns (e.g. `generated_as`) stay unread here.
     if let Some(pk) = query.model.primary_key().filter(|pk| {
         query.returning.contains(&pk.column)
             && !query.columns.contains(&pk.column)
-            && !matches!(
-                pk.ty,
-                crate::core::FieldType::I16
-                    | crate::core::FieldType::I32
-                    | crate::core::FieldType::I64
-            )
+            && !pk.is_serial()
     }) {
         return Err(ExecError::GeneratedPkUnreadable {
             table: query.model.table,
